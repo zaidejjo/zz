@@ -1,0 +1,8 @@
+[package]
+name = "zz_frontend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+codespan-reporting = "0.11"
