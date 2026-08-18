@@ -7,6 +7,7 @@
 //!   token (the statement terminator). This gives newline-significant syntax
 //!   with optional semicolons, while multi-line expressions inside parens
 //!   just work.
+//! - A newline after an operator or `=` is dropped (Go-style continuation).
 //! - Block comments nest.
 
 use crate::diag::{error_at, RawDiag};
@@ -25,7 +26,6 @@ pub fn lex(source: &str) -> Lexed {
 struct Lexer<'a> {
     src: &'a str,
     pos: usize,
-    depth: u32,
     prev_sig: Option<TokenKind>,
     pending: Vec<Trivia>,
     tokens: Vec<Token>,
@@ -37,7 +37,6 @@ impl<'a> Lexer<'a> {
         Lexer {
             src,
             pos: 0,
-            depth: 0,
             prev_sig: None,
             pending: Vec::new(),
             tokens: Vec::new(),
@@ -51,11 +50,13 @@ impl<'a> Lexer<'a> {
             match c {
                 ' ' | '\t' | '\r' => self.push_trivia(TriviaKind::Whitespace),
                 '\n' => {
-                    if self.depth == 0 && !self.line_continues() {
+                    if !self.line_continues() {
+                        // A newline terminates a statement unless the previous
+                        // token implies the expression continues (Go-style).
+                        // This applies inside braces too, which is what makes
+                        // match arms and block statements parse.
                         self.emit_significant(TokenKind::StmtEnd, self.pos, self.pos + 1);
                     } else {
-                        // Either inside brackets or continuing an expression:
-                        // the newline is trivia, not a statement terminator.
                         self.push_trivia(TriviaKind::Newline);
                     }
                 }
@@ -63,19 +64,48 @@ impl<'a> Lexer<'a> {
                 '/' if self.peek_char_at(1) == Some('/') => self.lex_line_comment(),
                 '/' if self.peek_char_at(1) == Some('*') => self.lex_block_comment(),
                 '/' => self.emit_significant(TokenKind::Slash, self.pos, self.pos + 1),
-                '(' => {
-                    self.depth += 1;
-                    self.emit_significant(TokenKind::LParen, self.pos, self.pos + 1);
-                }
-                ')' => {
-                    self.depth = self.depth.saturating_sub(1);
-                    self.emit_significant(TokenKind::RParen, self.pos, self.pos + 1);
-                }
+                '(' => self.emit_significant(TokenKind::LParen, self.pos, self.pos + 1),
+                ')' => self.emit_significant(TokenKind::RParen, self.pos, self.pos + 1),
+                '{' => self.emit_significant(TokenKind::LBrace, self.pos, self.pos + 1),
+                '}' => self.emit_significant(TokenKind::RBrace, self.pos, self.pos + 1),
                 '+' => self.emit_significant(TokenKind::Plus, self.pos, self.pos + 1),
+                '-' if self.peek_char_at(1) == Some('>') => {
+                    self.emit_significant(TokenKind::Arrow, self.pos, self.pos + 2)
+                }
                 '-' => self.emit_significant(TokenKind::Minus, self.pos, self.pos + 1),
                 '*' => self.emit_significant(TokenKind::Star, self.pos, self.pos + 1),
                 '%' => self.emit_significant(TokenKind::Percent, self.pos, self.pos + 1),
+                '=' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::Eq, self.pos, self.pos + 2)
+                }
+                '=' if self.peek_char_at(1) == Some('>') => {
+                    self.emit_significant(TokenKind::Arrow, self.pos, self.pos + 2)
+                }
                 '=' => self.emit_significant(TokenKind::Assign, self.pos, self.pos + 1),
+                '!' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::Ne, self.pos, self.pos + 2)
+                }
+                '!' => self.emit_significant(TokenKind::Bang, self.pos, self.pos + 1),
+                '<' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::Le, self.pos, self.pos + 2)
+                }
+                '<' => self.emit_significant(TokenKind::Lt, self.pos, self.pos + 1),
+                '>' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::Ge, self.pos, self.pos + 2)
+                }
+                '>' => self.emit_significant(TokenKind::Gt, self.pos, self.pos + 1),
+                '&' if self.peek_char_at(1) == Some('&') => {
+                    self.emit_significant(TokenKind::AndAnd, self.pos, self.pos + 2)
+                }
+                '|' if self.peek_char_at(1) == Some('|') => {
+                    self.emit_significant(TokenKind::OrOr, self.pos, self.pos + 2)
+                }
+                '|' => self.emit_significant(TokenKind::Pipe, self.pos, self.pos + 1),
+                '?' => self.emit_significant(TokenKind::Question, self.pos, self.pos + 1),
+                ':' => self.emit_significant(TokenKind::Colon, self.pos, self.pos + 1),
+                ',' => self.emit_significant(TokenKind::Comma, self.pos, self.pos + 1),
+                '.' => self.emit_significant(TokenKind::Dot, self.pos, self.pos + 1),
+                '"' => self.lex_string(),
                 c if c.is_ascii_digit() => self.lex_number(),
                 c if is_ident_start(c) => self.lex_ident(),
                 _ => {
@@ -87,8 +117,6 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        // Trailing trivia before EOF is dropped from the token stream but the
-        // program span still covers the full buffer, so round-trips stay exact.
         self.tokens.push(Token {
             kind: TokenKind::Eof,
             text: String::new(),
@@ -181,6 +209,21 @@ impl<'a> Lexer<'a> {
                     | TokenKind::Slash
                     | TokenKind::Percent
                     | TokenKind::Assign
+                    | TokenKind::Eq
+                    | TokenKind::Ne
+                    | TokenKind::Lt
+                    | TokenKind::Gt
+                    | TokenKind::Le
+                    | TokenKind::Ge
+                    | TokenKind::AndAnd
+                    | TokenKind::OrOr
+                    | TokenKind::Bang
+                    | TokenKind::Question
+                    | TokenKind::Colon
+                    | TokenKind::Comma
+                    | TokenKind::Dot
+                    | TokenKind::Pipe
+                    | TokenKind::Arrow
                     | TokenKind::LParen
             )
         )
@@ -216,6 +259,14 @@ impl<'a> Lexer<'a> {
         let text = self.src[span.to_range()].to_string();
         let kind = match text.as_str() {
             "let" => TokenKind::Let,
+            "func" => TokenKind::Func,
+            "return" => TokenKind::Return,
+            "if" => TokenKind::If,
+            "else" => TokenKind::Else,
+            "while" => TokenKind::While,
+            "match" => TokenKind::Match,
+            "true" => TokenKind::True,
+            "false" => TokenKind::False,
             _ => TokenKind::Ident,
         };
         self.push_token(kind, span, text);
@@ -269,6 +320,67 @@ impl<'a> Lexer<'a> {
             TokenKind::Int
         };
         self.push_token(kind, span, text);
+    }
+
+    fn lex_string(&mut self) {
+        let start = self.pos;
+        self.bump_char(); // opening quote
+        let mut value = String::new();
+        loop {
+            match self.peek_char() {
+                Some('"') => {
+                    self.bump_char();
+                    break;
+                }
+                Some('\\') => {
+                    self.bump_char();
+                    match self.peek_char() {
+                        Some('n') => {
+                            value.push('\n');
+                            self.bump_char();
+                        }
+                        Some('t') => {
+                            value.push('\t');
+                            self.bump_char();
+                        }
+                        Some('r') => {
+                            value.push('\r');
+                            self.bump_char();
+                        }
+                        Some('\\') => {
+                            value.push('\\');
+                            self.bump_char();
+                        }
+                        Some('"') => {
+                            value.push('"');
+                            self.bump_char();
+                        }
+                        Some(other) => {
+                            let span = Span::new(
+                                (self.pos - 1) as u32,
+                                (self.pos + other.len_utf8()) as u32,
+                            );
+                            self.errors
+                                .push(error_at(format!("unknown escape `\\{other}`"), span));
+                            self.bump_char();
+                        }
+                        None => break,
+                    }
+                }
+                Some(c) => {
+                    value.push(c);
+                    self.bump_char();
+                }
+                None => {
+                    let span = Span::new(start as u32, self.src.len() as u32);
+                    self.errors
+                        .push(error_at("unterminated string literal", span));
+                    return;
+                }
+            }
+        }
+        let span = Span::new(start as u32, self.pos as u32);
+        self.push_token(TokenKind::Str, span, value);
     }
 
     // --- char helpers -----------------------------------------------------
@@ -336,6 +448,14 @@ mod tests {
     }
 
     #[test]
+    fn newline_inside_parens_is_trivia() {
+        assert_eq!(
+            kinds("(1 +\n2)"),
+            vec![K::LParen, K::Int, K::Plus, K::Int, K::RParen, K::Eof]
+        );
+    }
+
+    #[test]
     fn semicolon_is_stmt_end() {
         assert_eq!(kinds("1;2"), vec![K::Int, K::StmtEnd, K::Int, K::Eof]);
     }
@@ -393,5 +513,85 @@ mod tests {
     fn unexpected_character_errors() {
         let lexed = lex("1 @ 2");
         assert_eq!(lexed.errors.len(), 1);
+    }
+
+    #[test]
+    fn keywords() {
+        assert_eq!(
+            kinds("func return if else while match true false"),
+            vec![
+                K::Func,
+                K::Return,
+                K::If,
+                K::Else,
+                K::While,
+                K::Match,
+                K::True,
+                K::False,
+                K::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_char_operators() {
+        assert_eq!(
+            kinds("a == b != c <= d >= e && f || g -> h"),
+            vec![
+                K::Ident,
+                K::Eq,
+                K::Ident,
+                K::Ne,
+                K::Ident,
+                K::Le,
+                K::Ident,
+                K::Ge,
+                K::Ident,
+                K::AndAnd,
+                K::Ident,
+                K::OrOr,
+                K::Ident,
+                K::Arrow,
+                K::Ident,
+                K::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn string_literals() {
+        let lexed = lex(r#""hello\nworld""#);
+        assert!(lexed.errors.is_empty(), "errors: {:?}", lexed.errors);
+        assert_eq!(lexed.tokens[0].kind, K::Str);
+        assert_eq!(lexed.tokens[0].text, "hello\nworld");
+    }
+
+    #[test]
+    fn unterminated_string_errors() {
+        let lexed = lex("\"oops");
+        assert_eq!(lexed.errors.len(), 1);
+    }
+
+    #[test]
+    fn unknown_escape_errors() {
+        let lexed = lex(r#""\q""#);
+        assert_eq!(lexed.errors.len(), 1);
+    }
+
+    #[test]
+    fn braces_and_pipe() {
+        assert_eq!(
+            kinds("|x| x + 1"),
+            vec![
+                K::Pipe,
+                K::Ident,
+                K::Pipe,
+                K::Ident,
+                K::Plus,
+                K::Int,
+                K::Eof
+            ]
+        );
+        assert_eq!(kinds("a || b"), vec![K::Ident, K::OrOr, K::Ident, K::Eof]);
     }
 }

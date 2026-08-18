@@ -1,0 +1,8 @@
+[package]
+name = "zz_checker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zz_frontend = { path = "../zz_frontend" }

@@ -108,4 +108,74 @@ mod tests {
     fn round_trip_floats_and_unary() {
         round_trips("let x = -1.5 + 2.0\n");
     }
+
+    #[test]
+    fn round_trip_func() {
+        round_trips("func add(a: int, b: int) -> int {\n    return a + b\n}\n");
+    }
+
+    #[test]
+    fn round_trip_generic_func() {
+        round_trips("func id<T>(x: T) -> T {\n    return x\n}\n");
+    }
+
+    #[test]
+    fn round_trip_match() {
+        round_trips("match x {\n    .ok(v) => v\n    .err(e) => 0\n}\n");
+    }
+
+    #[test]
+    fn round_trip_match_single_line() {
+        round_trips("match x { .ok(v) => v, .err(e) => 0 }\n");
+    }
+
+    #[test]
+    fn round_trip_if_else() {
+        round_trips("if x > 5 {\n    1\n} else {\n    2\n}\n");
+    }
+
+    #[test]
+    fn round_trip_if_let() {
+        round_trips("if let .some(x) = opt {\n    x\n} else {\n    0\n}\n");
+    }
+
+    #[test]
+    fn round_trip_while() {
+        round_trips("while x < 10 {\n    f(x)\n}\n");
+    }
+
+    #[test]
+    fn round_trip_closure() {
+        round_trips("let f = |x: int| x + 1\n");
+    }
+
+    #[test]
+    fn round_trip_block_expr() {
+        round_trips("let x = {\n    let y = 1\n    y + 1\n}\n");
+    }
+
+    #[test]
+    fn round_trip_try_and_variants() {
+        round_trips("let a = .ok(1)\nlet b = .none\nlet c = f()?\n");
+    }
+
+    #[test]
+    fn round_trip_strings_and_bools() {
+        round_trips("let s = \"hi\\n\"\nlet b = true && !false\n");
+    }
+
+    #[test]
+    fn round_trip_annotated_types() {
+        round_trips("let a: Option<int> = .none\nlet b: Result<int, str> = .ok(1)\n");
+    }
+
+    #[test]
+    fn round_trip_multiline_call() {
+        round_trips("f(\n    a,\n    b\n)\n");
+    }
+
+    #[test]
+    fn round_trip_else_if_chain() {
+        round_trips("if a {\n    1\n} else if b {\n    2\n} else {\n    3\n}\n");
+    }
 }

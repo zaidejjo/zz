@@ -52,10 +52,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_checker"
+version = "0.0.1"
+dependencies = [
+ "zz_frontend",
+]
+
+[[package]]
 name = "zz_cli"
 version = "0.0.1"
 dependencies = [
  "codespan-reporting",
+ "zz_checker",
  "zz_frontend",
  "zz_runtime",
 ]

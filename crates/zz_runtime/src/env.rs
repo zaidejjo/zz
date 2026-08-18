@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::value::Value;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Env {
     vars: HashMap<String, Value>,
     parent: Option<Box<Env>>,
@@ -35,14 +35,10 @@ impl Env {
             self.parent.as_deref().and_then(|p| p.get(name))
         }
     }
-}
 
-impl Clone for Env {
-    fn clone(&self) -> Self {
-        Env {
-            vars: self.vars.clone(),
-            parent: self.parent.clone(),
-        }
+    /// Mutable access to a binding in this scope (no parent fallthrough).
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut Value> {
+        self.vars.get_mut(name)
     }
 }
 

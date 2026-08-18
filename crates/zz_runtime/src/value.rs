@@ -1,12 +1,33 @@
-//! Runtime values for the Phase 0 tree-walker.
+//! Runtime values for the Phase 1 tree-walker.
 
 use std::fmt;
+
+use zz_frontend::ast::{Expr, Param};
+
+use crate::env::Env;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Int(i64),
     Float(f64),
+    Str(String),
+    Bool(bool),
     Unit,
+    /// `.some(v)` / `.none`.
+    Option(Option<Box<Value>>),
+    /// `.ok(v)` / `.err(e)`.
+    Result(Result<Box<Value>, Box<Value>>),
+    /// A closure or named function, with its captured environment.
+    Func(FuncValue),
+}
+
+/// A callable value: parameter list, body expression, and the environment
+/// captured at definition time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FuncValue {
+    pub params: Vec<Param>,
+    pub body: Expr,
+    pub env: Env,
 }
 
 impl Value {
@@ -15,8 +36,12 @@ impl Value {
         match self {
             Value::Int(i) => Some(*i as f64),
             Value::Float(f) => Some(*f),
-            Value::Unit => None,
+            _ => None,
         }
+    }
+
+    pub fn is_truthy(&self) -> bool {
+        matches!(self, Value::Bool(true))
     }
 }
 
@@ -32,7 +57,14 @@ impl fmt::Display for Value {
                     write!(f, "{x}")
                 }
             }
+            Value::Str(s) => write!(f, "{s}"),
+            Value::Bool(b) => write!(f, "{b}"),
             Value::Unit => write!(f, ""),
+            Value::Option(Some(v)) => write!(f, ".some({v})"),
+            Value::Option(None) => write!(f, ".none"),
+            Value::Result(Ok(v)) => write!(f, ".ok({v})"),
+            Value::Result(Err(e)) => write!(f, ".err({e})"),
+            Value::Func(_) => write!(f, "<func>"),
         }
     }
 }
@@ -55,5 +87,22 @@ mod tests {
     #[test]
     fn unit_displays_empty() {
         assert_eq!(Value::Unit.to_string(), "");
+    }
+
+    #[test]
+    fn variants_display() {
+        assert_eq!(
+            Value::Option(Some(Box::new(Value::Int(1)))).to_string(),
+            ".some(1)"
+        );
+        assert_eq!(Value::Option(None).to_string(), ".none");
+        assert_eq!(
+            Value::Result(Ok(Box::new(Value::Int(1)))).to_string(),
+            ".ok(1)"
+        );
+        assert_eq!(
+            Value::Result(Err(Box::new(Value::Str("x".into())))).to_string(),
+            ".err(x)"
+        );
     }
 }

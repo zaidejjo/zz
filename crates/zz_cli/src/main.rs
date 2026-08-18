@@ -1,8 +1,9 @@
 //! ZZ CLI entry point.
 //!
-//! Phase 0:
+//! Phase 1:
 //! - `zz`            → interactive REPL
 //! - `zz eval <src>` → evaluate source once and print the result
+//! - `zz run <file>` → type-check and run a `.zz` file
 //! - `zz --help`     → usage
 
 use std::process::ExitCode;
@@ -20,12 +21,14 @@ zz — the ZZ programming language
 USAGE:
     zz                    start the interactive REPL
     zz eval <source>      evaluate source and print the result
+    zz run <file.zz>      type-check and run a file
     zz --help             show this help
     zz --version          show version
 
 EXAMPLES:
     zz eval 'let x = 1 + 2'
     zz eval '1 + 2 * 3'
+    zz run hello.zz
 ";
 
 fn main() -> ExitCode {
@@ -51,6 +54,13 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
+        Some("run") => match run_file(args.get(1)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
         Some("--help") | Some("-h") => {
             print!("{USAGE}");
             ExitCode::SUCCESS
@@ -64,5 +74,21 @@ fn main() -> ExitCode {
             eprint!("{USAGE}");
             ExitCode::from(2)
         }
+    }
+}
+
+fn run_file(path: Option<&String>) -> Result<(), String> {
+    let path =
+        path.ok_or_else(|| "missing file argument\n\nusage: zz run <file.zz>".to_string())?;
+    let src = std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path}`: {e}"))?;
+    let mut session = Session::new(path);
+    let output = session.eval_to_console(&src);
+    if !output.is_empty() {
+        println!("{output}");
+    }
+    if session.last_eval_had_errors() {
+        Err("program failed".to_string())
+    } else {
+        Ok(())
     }
 }
