@@ -19,6 +19,10 @@ pub enum Value {
     Result(Result<Box<Value>, Box<Value>>),
     /// A closure or named function, with its captured environment.
     Func(FuncValue),
+    /// `[v1, v2, ...]`.
+    Array(Vec<Value>),
+    /// `{k1: v1, k2: v2, ...}` — insertion-ordered key/value pairs.
+    Dict(Vec<(Value, Value)>),
 }
 
 /// A callable value: parameter list, body expression, and the environment
@@ -65,6 +69,26 @@ impl fmt::Display for Value {
             Value::Result(Ok(v)) => write!(f, ".ok({v})"),
             Value::Result(Err(e)) => write!(f, ".err({e})"),
             Value::Func(_) => write!(f, "<func>"),
+            Value::Array(vs) => {
+                write!(f, "[")?;
+                for (i, v) in vs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{v}")?;
+                }
+                write!(f, "]")
+            }
+            Value::Dict(entries) => {
+                write!(f, "{{")?;
+                for (i, (k, v)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{k}: {v}")?;
+                }
+                write!(f, "}}")
+            }
         }
     }
 }
@@ -87,6 +111,26 @@ mod tests {
     #[test]
     fn unit_displays_empty() {
         assert_eq!(Value::Unit.to_string(), "");
+    }
+
+    #[test]
+    fn array_displays() {
+        assert_eq!(
+            Value::Array(vec![Value::Int(1), Value::Int(2)]).to_string(),
+            "[1, 2]"
+        );
+    }
+
+    #[test]
+    fn dict_displays() {
+        assert_eq!(
+            Value::Dict(vec![
+                (Value::Str("a".into()), Value::Int(1)),
+                (Value::Str("b".into()), Value::Int(2)),
+            ])
+            .to_string(),
+            "{a: 1, b: 2}"
+        );
     }
 
     #[test]

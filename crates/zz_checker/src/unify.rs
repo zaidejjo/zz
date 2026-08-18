@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::type_::Type;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Unifier {
     vars: HashMap<u32, Type>,
     next_var: u32,
@@ -72,6 +72,12 @@ impl Unifier {
                 ps.iter().map(|x| self.resolve_deep(x)).collect(),
                 Box::new(self.resolve_deep(&r)),
             ),
+            Type::Array(t) => Type::Array(Box::new(self.resolve_deep(&t))),
+            Type::Dict(k, v) => Type::Dict(
+                Box::new(self.resolve_deep(&k)),
+                Box::new(self.resolve_deep(&v)),
+            ),
+            Type::Union(ts) => Type::Union(ts.iter().map(|x| self.resolve_deep(x)).collect()),
             other => other,
         }
     }
@@ -155,6 +161,41 @@ impl Unifier {
                 }
                 self.unify(&r1, &r2)
             }
+            (Type::Array(x), Type::Array(y)) => self.unify(&x, &y),
+            (Type::Dict(k1, v1), Type::Dict(k2, v2)) => {
+                self.unify(&k1, &k2)?;
+                self.unify(&v1, &v2)
+            }
+            (Type::Union(ms), Type::Union(ns)) => {
+                for m in ms {
+                    self.unify(&m, &Type::Union(ns.clone()))?;
+                }
+                Ok(())
+            }
+            (Type::Union(ms), t) | (t, Type::Union(ms)) => {
+                // A value matches a union if it matches any member. Try each
+                // member on a cloned unifier and commit the first success.
+                let mut last_err = None;
+                for m in &ms {
+                    let mut trial = self.clone();
+                    match trial.unify(m, &t) {
+                        Ok(()) => {
+                            *self = trial;
+                            return Ok(());
+                        }
+                        Err(e) => last_err = Some(e),
+                    }
+                }
+                Err(last_err.unwrap_or_else(|| UnifyError {
+                    left: t.to_string(),
+                    right: ms
+                        .iter()
+                        .map(|m| m.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" | "),
+                    message: "type mismatch".into(),
+                }))
+            }
             (a, b) => Err(UnifyError {
                 left: a.to_string(),
                 right: b.to_string(),
@@ -170,6 +211,9 @@ impl Unifier {
             Type::Option(x) => self.occurs(id, &x),
             Type::Result(a, b) => self.occurs(id, &a) || self.occurs(id, &b),
             Type::Func(ps, r) => ps.iter().any(|x| self.occurs(id, x)) || self.occurs(id, &r),
+            Type::Array(x) => self.occurs(id, &x),
+            Type::Dict(k, v) => self.occurs(id, &k) || self.occurs(id, &v),
+            Type::Union(ts) => ts.iter().any(|x| self.occurs(id, x)),
             _ => false,
         }
     }

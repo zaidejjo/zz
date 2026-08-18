@@ -17,6 +17,12 @@ pub enum Type {
     Option(Box<Type>),
     Result(Box<Type>, Box<Type>),
     Func(Vec<Type>, Box<Type>),
+    /// `[T]` — array type.
+    Array(Box<Type>),
+    /// `{K: V}` — dictionary type.
+    Dict(Box<Type>, Box<Type>),
+    /// `A | B` — union type.
+    Union(Vec<Type>),
     /// Inference variable.
     Var(u32),
     /// Named type: a generic parameter (e.g. `T` in `func id<T>`).
@@ -59,6 +65,17 @@ impl fmt::Display for Type {
                     write!(f, "{p}")?;
                 }
                 write!(f, ") -> {r}")
+            }
+            Type::Array(t) => write!(f, "[{t}]"),
+            Type::Dict(k, v) => write!(f, "{{{k}: {v}}}"),
+            Type::Union(ts) => {
+                for (i, t) in ts.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " | ")?;
+                    }
+                    write!(f, "{t}")?;
+                }
+                Ok(())
             }
             Type::Var(_) => write!(f, "_"),
             Type::Named(n) => write!(f, "{n}"),

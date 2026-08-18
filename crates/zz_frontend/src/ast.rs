@@ -16,10 +16,17 @@ pub struct Program {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    Let {
-        name: Ident,
+    /// A variable declaration. `ty == None` is the short form (`x := 10`);
+    /// `ty == Some(t)` is the explicit form (`int x = 10`).
+    Decl {
         ty: Option<Ty>,
+        name: Ident,
         value: Expr,
+        span: Span,
+    },
+    /// `import std.io` — a dotted path of identifiers.
+    Import {
+        path: Vec<String>,
         span: Span,
     },
     Func {
@@ -141,6 +148,17 @@ pub enum Expr {
         arg: Option<Box<Expr>>,
         span: Span,
     },
+    /// Array literal: `[10, 20, 30]`.
+    Array {
+        elems: Vec<Expr>,
+        span: Span,
+    },
+    /// Dictionary literal: `{"name": "Zaid", "age": 20}`. Entries are
+    /// `(key, value)` pairs.
+    Dict {
+        entries: Vec<(Expr, Expr)>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -249,6 +267,12 @@ pub enum TyKind {
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
     Func(Vec<Ty>, Box<Ty>),
+    /// `[T]` — array type.
+    Array(Box<Ty>),
+    /// `{K: V}` — dictionary type.
+    Dict(Box<Ty>, Box<Ty>),
+    /// `A | B` — union type.
+    Union(Vec<Ty>),
     /// Named type: a generic parameter or a future struct/alias.
     Named(String, Vec<Ty>),
 }
@@ -271,7 +295,9 @@ impl Expr {
             | Expr::Match { span, .. }
             | Expr::IfLet { span, .. }
             | Expr::Try { span, .. }
-            | Expr::Variant { span, .. } => *span,
+            | Expr::Variant { span, .. }
+            | Expr::Array { span, .. }
+            | Expr::Dict { span, .. } => *span,
             Expr::Block(b) => b.span,
         }
     }
@@ -280,7 +306,10 @@ impl Expr {
 impl Stmt {
     pub fn span(&self) -> Span {
         match self {
-            Stmt::Let { span, .. } | Stmt::Func { span, .. } | Stmt::Return { span, .. } => *span,
+            Stmt::Decl { span, .. }
+            | Stmt::Func { span, .. }
+            | Stmt::Return { span, .. }
+            | Stmt::Import { span, .. } => *span,
             Stmt::Expr(e) => e.span(),
         }
     }

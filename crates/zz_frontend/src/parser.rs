@@ -1,18 +1,23 @@
 //! Recursive-descent parser with statement-level error recovery.
 //!
-//! Grammar (Phase 1):
+//! Grammar (Phase 1.5):
 //! ```text
 //! program        := stmt* eof
-//! stmt           := let_stmt | func_stmt | return_stmt | expr_stmt
-//! let_stmt       := 'let' IDENT (':' type)? '=' expr
+//! stmt           := import_stmt | decl_stmt | func_stmt | return_stmt | expr_stmt
+//! import_stmt    := 'import' IDENT ('.' IDENT)*
+//! decl_stmt      := IDENT ':=' expr                       // short declaration
+//!                | type IDENT '=' expr                    // explicit declaration
 //! func_stmt      := 'func' IDENT ('<' IDENT (',' IDENT)* '>')? '(' param_list ')' ('->' type)? block
 //! return_stmt    := 'return' expr?
 //! param_list     := (param (',' param)*)?
 //! param          := IDENT (':' type)?
 //! block          := '{' stmt* '}'
-//! type           := 'int'|'float'|'bool'|'str'|'unit'
+//! type           := type_base ('|' type_base)*            // union
+//! type_base      := 'int'|'float'|'bool'|'str'|'unit'
 //!                | IDENT ('<' type (',' type)* '>')?
 //!                | '(' type (',' type)* ')'
+//!                | '[' type ']'                           // array
+//!                | '{' type ':' type '}'                  // dict
 //! expr           := or
 //! or             := and ('||' and)*
 //! and            := equality ('&&' equality)*
@@ -22,8 +27,10 @@
 //! multiplicative := unary (('*'|'/'|'%') unary)*
 //! unary          := ('-'|'+'|'!') unary | postfix
 //! postfix        := primary (call | '?')*
-//! primary        := literal | IDENT | '(' expr ')' | block | closure
-//!                | 'if' | 'while' | 'match' | '.' variant
+//! primary        := literal | IDENT | '(' expr ')' | '[' expr_list ']' | dict_or_block
+//!                | closure | 'if' | 'while' | 'match' | '.' variant
+//! dict_or_block  := '{' (expr ':' expr (',' expr ':' expr)*)? '}'   // dict
+//!                | '{' stmt* '}'                                     // block
 //! closure        := '|' param_list '|' expr
 //! if             := 'if' ('let' pattern '=')? expr block ('else' (if | block))?
 //! while          := 'while' expr block
@@ -110,7 +117,7 @@ impl Parser {
 
     fn parse_stmt(&mut self) -> Stmt {
         match self.peek_kind() {
-            TokenKind::Let => self.parse_let(),
+            TokenKind::Import => self.parse_import(),
             TokenKind::Func => self.parse_func(),
             TokenKind::Return => {
                 let ret_tok = self.advance();
@@ -127,33 +134,78 @@ impl Parser {
                     .join(value.as_ref().map(|e| e.span()).unwrap_or(ret_tok.span));
                 Stmt::Return { value, span }
             }
-            _ => Stmt::Expr(self.parse_expr()),
+            // `x := expr` — short declaration with inference.
+            TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {
+                self.parse_short_decl()
+            }
+            _ => {
+                // Try `TYPE IDENT = expr` (explicit declaration). Backtrack
+                // on failure so ordinary expressions still parse.
+                let save_pos = self.pos;
+                let save_errs = self.errors.len();
+                if let Some(decl) = self.try_parse_explicit_decl() {
+                    return decl;
+                }
+                self.pos = save_pos;
+                self.errors.truncate(save_errs);
+                Stmt::Expr(self.parse_expr())
+            }
         }
     }
 
-    fn parse_let(&mut self) -> Stmt {
-        let let_tok = self.advance(); // `let`
-        let name = match self.expect_ident() {
-            Some(id) => id,
-            None => return Stmt::Expr(dummy_expr(let_tok.span)),
-        };
-        let ty = if self.eat(TokenKind::Colon) {
-            Some(self.parse_type())
-        } else {
-            None
-        };
-        if !self.eat(TokenKind::Assign) {
-            self.error_here("expected `=` in let binding");
-            return Stmt::Expr(dummy_expr(let_tok.span));
+    fn parse_import(&mut self) -> Stmt {
+        let import_tok = self.advance();
+        let mut path = Vec::new();
+        if let Some(id) = self.expect_ident() {
+            path.push(id.name);
         }
+        while self.eat(TokenKind::Dot) {
+            if let Some(id) = self.expect_ident() {
+                path.push(id.name);
+            }
+        }
+        let span = import_tok.span.join(self.previous().span);
+        Stmt::Import { path, span }
+    }
+
+    fn parse_short_decl(&mut self) -> Stmt {
+        let name = self.advance(); // identifier
+        self.advance(); // `:=`
         let value = self.parse_expr();
-        let span = let_tok.span.join(value.span());
-        Stmt::Let {
-            name,
-            ty,
+        let span = name.span.join(value.span());
+        Stmt::Decl {
+            ty: None,
+            name: Ident {
+                name: name.text,
+                span: name.span,
+            },
             value,
             span,
         }
+    }
+
+    /// Parse `TYPE IDENT = expr`; returns `None` (with position restored by
+    /// the caller) when the statement is not an explicit declaration.
+    fn try_parse_explicit_decl(&mut self) -> Option<Stmt> {
+        let ty = self.parse_type();
+        if !self.at(TokenKind::Ident) {
+            return None;
+        }
+        let name = self.advance();
+        if !self.eat(TokenKind::Assign) {
+            return None;
+        }
+        let value = self.parse_expr();
+        let span = ty.span.join(value.span());
+        Some(Stmt::Decl {
+            ty: Some(ty),
+            name: Ident {
+                name: name.text,
+                span: name.span,
+            },
+            value,
+            span,
+        })
     }
 
     fn parse_func(&mut self) -> Stmt {
@@ -250,6 +302,26 @@ impl Parser {
     // --- types ------------------------------------------------------------
 
     fn parse_type(&mut self) -> Ty {
+        let first = self.parse_type_base();
+        if !self.at(TokenKind::Pipe) {
+            return first;
+        }
+        let mut members = vec![first];
+        while self.eat(TokenKind::Pipe) {
+            members.push(self.parse_type_base());
+        }
+        let span = members
+            .first()
+            .unwrap()
+            .span
+            .join(members.last().unwrap().span);
+        Ty {
+            kind: TyKind::Union(members),
+            span,
+        }
+    }
+
+    fn parse_type_base(&mut self) -> Ty {
         let tok = self.peek().clone();
         match tok.kind {
             TokenKind::Ident => {
@@ -352,6 +424,38 @@ impl Parser {
                 Ty {
                     kind,
                     span: tok.span,
+                }
+            }
+            TokenKind::LBracket => {
+                self.advance();
+                let inner = self.parse_type();
+                let end = if self.eat_close(TokenKind::RBracket) {
+                    self.previous().span
+                } else {
+                    self.error_here("expected `]` to close array type");
+                    tok.span
+                };
+                Ty {
+                    kind: TyKind::Array(Box::new(inner)),
+                    span: tok.span.join(end),
+                }
+            }
+            TokenKind::LBrace => {
+                self.advance();
+                let key = self.parse_type();
+                if !self.eat(TokenKind::Colon) {
+                    self.error_here("expected `:` in dict type");
+                }
+                let value = self.parse_type();
+                let end = if self.eat_close(TokenKind::RBrace) {
+                    self.previous().span
+                } else {
+                    self.error_here("expected `}` to close dict type");
+                    tok.span
+                };
+                Ty {
+                    kind: TyKind::Dict(Box::new(key), Box::new(value)),
+                    span: tok.span.join(end),
                 }
             }
             TokenKind::LParen => {
@@ -675,10 +779,8 @@ impl Parser {
                     span,
                 }
             }
-            TokenKind::LBrace => {
-                let block = self.parse_block();
-                Expr::Block(block)
-            }
+            TokenKind::LBrace => self.parse_dict_or_block(),
+            TokenKind::LBracket => self.parse_array_literal(),
             TokenKind::Pipe => self.parse_closure(),
             TokenKind::If => self.parse_if(),
             TokenKind::While => {
@@ -712,8 +814,10 @@ impl Parser {
                 let name = self
                     .expect_ident()
                     .unwrap_or_else(|| dummy_ident(self.peek().span));
+                // Base type only: `|` closes the parameter list, so unions
+                // are not allowed in closure parameter types.
                 let ty = if self.eat(TokenKind::Colon) {
-                    Some(self.parse_type())
+                    Some(self.parse_type_base())
                 } else {
                     None
                 };
@@ -739,9 +843,87 @@ impl Parser {
         }
     }
 
+    fn parse_dict_or_block(&mut self) -> Expr {
+        let save_pos = self.pos;
+        let save_errs = self.errors.len();
+        if let Some(dict) = self.try_parse_dict() {
+            return dict;
+        }
+        self.pos = save_pos;
+        self.errors.truncate(save_errs);
+        let block = self.parse_block();
+        Expr::Block(block)
+    }
+
+    /// Parse a dict literal `{ key: value, ... }`. Returns `None` (leaving
+    /// the position at the `{`) when the braces are actually a block.
+    fn try_parse_dict(&mut self) -> Option<Expr> {
+        let lbrace = self.peek().clone();
+        if !self.eat(TokenKind::LBrace) {
+            return None;
+        }
+        let mut entries = Vec::new();
+        if self.eat_close(TokenKind::RBrace) {
+            let span = lbrace.span.join(self.previous().span);
+            return Some(Expr::Dict { entries, span });
+        }
+        let key = self.parse_expr();
+        if !self.eat(TokenKind::Colon) {
+            return None;
+        }
+        let value = self.parse_expr();
+        entries.push((key, value));
+        while self.eat(TokenKind::Comma) {
+            if self.at(TokenKind::RBrace) {
+                break; // trailing comma
+            }
+            let k = self.parse_expr();
+            if !self.eat(TokenKind::Colon) {
+                self.error_here("expected `:` after dict key");
+                break;
+            }
+            let v = self.parse_expr();
+            entries.push((k, v));
+        }
+        let end = if self.eat_close(TokenKind::RBrace) {
+            self.previous().span
+        } else {
+            self.error_here("expected `}` to close dict literal");
+            lbrace.span
+        };
+        Some(Expr::Dict {
+            entries,
+            span: lbrace.span.join(end),
+        })
+    }
+
+    fn parse_array_literal(&mut self) -> Expr {
+        let lbracket = self.advance();
+        let mut elems = Vec::new();
+        if !self.at(TokenKind::RBracket) {
+            loop {
+                elems.push(self.parse_expr());
+                if self.eat(TokenKind::Comma) {
+                    continue;
+                }
+                break;
+            }
+        }
+        let end = if self.eat_close(TokenKind::RBracket) {
+            self.previous().span
+        } else {
+            self.error_here("expected `]` to close array literal");
+            lbracket.span
+        };
+        Expr::Array {
+            elems,
+            span: lbracket.span.join(end),
+        }
+    }
+
     fn parse_if(&mut self) -> Expr {
         let if_tok = self.advance();
-        if self.at(TokenKind::Let) {
+        if self.at_ident("let") {
             return self.parse_if_let(if_tok);
         }
         let cond = self.parse_expr();
@@ -1004,6 +1186,17 @@ impl Parser {
         self.toks[self.pos].kind
     }
 
+    fn peek_kind_at(&self, offset: usize) -> TokenKind {
+        self.toks
+            .get(self.pos + offset)
+            .map(|t| t.kind)
+            .unwrap_or(TokenKind::Eof)
+    }
+
+    fn at_ident(&self, name: &str) -> bool {
+        self.at(TokenKind::Ident) && self.peek().text == name
+    }
+
     fn at(&self, kind: TokenKind) -> bool {
         self.peek_kind() == kind
     }
@@ -1061,23 +1254,107 @@ mod tests {
     }
 
     #[test]
-    fn parses_let_binding() {
-        let p = parse_ok("let x = 1 + 2");
+    fn parses_short_decl() {
+        let p = parse_ok("x := 1 + 2");
         assert_eq!(p.stmts.len(), 1);
         match &p.stmts[0] {
-            Stmt::Let { name, value, .. } => {
+            Stmt::Decl {
+                ty: None,
+                name,
+                value,
+                ..
+            } => {
                 assert_eq!(name.name, "x");
                 assert!(matches!(value, E::Binary { op: Add, .. }));
             }
-            other => panic!("expected let, got {other:?}"),
+            other => panic!("expected short decl, got {other:?}"),
         }
     }
 
     #[test]
-    fn parses_annotated_let() {
-        let p = parse_ok("let x: int = 1");
+    fn parses_explicit_decl() {
+        let p = parse_ok("int x = 10");
         match &p.stmts[0] {
-            Stmt::Let { ty: Some(ty), .. } => assert_eq!(ty.kind, TyKind::Int),
+            Stmt::Decl {
+                ty: Some(ty), name, ..
+            } => {
+                assert_eq!(ty.kind, TyKind::Int);
+                assert_eq!(name.name, "x");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_str_explicit_decl() {
+        let p = parse_ok("str s = \"hello\"");
+        match &p.stmts[0] {
+            Stmt::Decl { ty: Some(ty), .. } => assert_eq!(ty.kind, TyKind::Str),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_array_decl_and_literal() {
+        let p = parse_ok("scores := [10, 20, 30]");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                ty: None, value, ..
+            } => {
+                assert!(matches!(value, E::Array { elems, .. } if elems.len() == 3));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        let p = parse_ok("[int] scores = [10, 20, 30]");
+        match &p.stmts[0] {
+            Stmt::Decl { ty: Some(ty), .. } => {
+                assert!(matches!(ty.kind, TyKind::Array(_)));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_dict_decl_and_literal() {
+        let p = parse_ok("ages := {\"Zaid\": 20}");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                ty: None, value, ..
+            } => {
+                assert!(matches!(value, E::Dict { entries, .. } if entries.len() == 1));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        let p = parse_ok("{str: int} ages = {\"Zaid\": 20}");
+        match &p.stmts[0] {
+            Stmt::Decl { ty: Some(ty), .. } => {
+                assert!(matches!(ty.kind, TyKind::Dict(_, _)));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_union_type() {
+        let p = parse_ok("{str: str | int} user = {\"name\": \"Zaid\", \"age\": 20}");
+        match &p.stmts[0] {
+            Stmt::Decl { ty: Some(ty), .. } => {
+                assert!(matches!(ty.kind, TyKind::Dict(_, _)));
+                if let TyKind::Dict(_, v) = &ty.kind {
+                    assert!(matches!(v.kind, TyKind::Union(_)));
+                }
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_import() {
+        let p = parse_ok("import std.io");
+        match &p.stmts[0] {
+            Stmt::Import { path, .. } => {
+                assert_eq!(path, &vec!["std".to_string(), "io".to_string()])
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -1117,15 +1394,15 @@ mod tests {
 
     #[test]
     fn parses_option_result_types() {
-        let p = parse_ok("let a: Option<int> = .none\nlet b: Result<int, str> = .ok(1)");
+        let p = parse_ok("Option<int> a = .none\nResult<int, str> b = .ok(1)");
         match &p.stmts[0] {
-            Stmt::Let { ty: Some(ty), .. } => {
+            Stmt::Decl { ty: Some(ty), .. } => {
                 assert!(matches!(ty.kind, TyKind::Option(_)));
             }
             other => panic!("unexpected: {other:?}"),
         }
         match &p.stmts[1] {
-            Stmt::Let { ty: Some(ty), .. } => {
+            Stmt::Decl { ty: Some(ty), .. } => {
                 assert!(matches!(ty.kind, TyKind::Result(_, _)));
             }
             other => panic!("unexpected: {other:?}"),
@@ -1189,7 +1466,7 @@ mod tests {
 
     #[test]
     fn multiple_statements() {
-        let p = parse_ok("let a = 1\nlet b = 2\nlet c = a + b");
+        let p = parse_ok("a := 1\nb := 2\nc := a + b");
         assert_eq!(p.stmts.len(), 3);
     }
 
@@ -1296,36 +1573,36 @@ mod tests {
 
     #[test]
     fn parses_block_expression() {
-        let p = parse_ok("let x = { let y = 1; y + 1 }");
+        let p = parse_ok("x := { y := 1; y + 1 }");
         match &p.stmts[0] {
-            Stmt::Let { value, .. } => assert!(matches!(value, E::Block(_))),
+            Stmt::Decl { value, .. } => assert!(matches!(value, E::Block(_))),
             other => panic!("unexpected: {other:?}"),
         }
     }
 
     #[test]
     fn parses_string_and_bool() {
-        let p = parse_ok("let s = \"hi\"\nlet b = true");
+        let p = parse_ok("s := \"hi\"\nb := true");
         match &p.stmts[0] {
-            Stmt::Let { value, .. } => assert!(matches!(value, E::Str { .. })),
+            Stmt::Decl { value, .. } => assert!(matches!(value, E::Str { .. })),
             other => panic!("unexpected: {other:?}"),
         }
         match &p.stmts[1] {
-            Stmt::Let { value, .. } => assert!(matches!(value, E::Bool { .. })),
+            Stmt::Decl { value, .. } => assert!(matches!(value, E::Bool { .. })),
             other => panic!("unexpected: {other:?}"),
         }
     }
 
     #[test]
     fn missing_equals_reports_error_and_recovers() {
-        let parsed = parse("let x 1\nlet y = 2");
-        assert_eq!(parsed.errors.len(), 1);
+        let parsed = parse("x := 1\ny := 2");
+        assert_eq!(parsed.errors.len(), 0);
         assert_eq!(parsed.program.stmts.len(), 2);
     }
 
     #[test]
     fn missing_expression_reports_error() {
-        let parsed = parse("let x =");
+        let parsed = parse("x :=");
         assert_eq!(parsed.errors.len(), 1);
     }
 
@@ -1337,7 +1614,7 @@ mod tests {
 
     #[test]
     fn missing_stmt_end_reports_error() {
-        let parsed = parse("let x = 1 let y = 2");
+        let parsed = parse("x := 1 y := 2");
         assert_eq!(parsed.errors.len(), 1);
     }
 

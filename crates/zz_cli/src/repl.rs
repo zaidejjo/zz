@@ -77,8 +77,9 @@ fn needs_more_input(src: &str) -> bool {
                 | TokenKind::Slash
                 | TokenKind::Percent
                 | TokenKind::Assign
+                | TokenKind::ColonEq
                 | TokenKind::LParen
-                | TokenKind::Let
+                | TokenKind::LBracket
         )
     )
 }
@@ -89,7 +90,7 @@ mod tests {
 
     #[test]
     fn continuation_on_trailing_operator() {
-        assert!(needs_more_input("let x = 1 +\n"));
+        assert!(needs_more_input("x := 1 +\n"));
     }
 
     #[test]

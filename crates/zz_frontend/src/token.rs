@@ -34,7 +34,7 @@ pub struct Token {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
     // Keywords
-    Let,
+    Import,
     Func,
     Return,
     If,
@@ -66,6 +66,7 @@ pub enum TokenKind {
     Bang,
     Question,
     Colon,
+    ColonEq,
     Comma,
     Dot,
     Pipe,
@@ -75,6 +76,8 @@ pub enum TokenKind {
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
     // Statement terminator: `;` or a newline at bracket depth 0
     StmtEnd,
     Eof,
@@ -83,7 +86,7 @@ pub enum TokenKind {
 impl TokenKind {
     pub fn describe(self) -> &'static str {
         match self {
-            TokenKind::Let => "`let`",
+            TokenKind::Import => "`import`",
             TokenKind::Func => "`func`",
             TokenKind::Return => "`return`",
             TokenKind::If => "`if`",
@@ -113,6 +116,7 @@ impl TokenKind {
             TokenKind::Bang => "`!`",
             TokenKind::Question => "`?`",
             TokenKind::Colon => "`:`",
+            TokenKind::ColonEq => "`:=`",
             TokenKind::Comma => "`,`",
             TokenKind::Dot => "`.`",
             TokenKind::Pipe => "`|`",
@@ -121,6 +125,8 @@ impl TokenKind {
             TokenKind::RParen => "`)`",
             TokenKind::LBrace => "`{`",
             TokenKind::RBrace => "`}`",
+            TokenKind::LBracket => "`[`",
+            TokenKind::RBracket => "`]`",
             TokenKind::StmtEnd => "end of statement",
             TokenKind::Eof => "end of input",
         }

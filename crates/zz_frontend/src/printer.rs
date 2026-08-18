@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn round_trip_closure() {
-        round_trips("let f = |x: int| x + 1\n");
+        round_trips("f := |x: int| x + 1\n");
     }
 
     #[test]
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn round_trip_annotated_types() {
-        round_trips("let a: Option<int> = .none\nlet b: Result<int, str> = .ok(1)\n");
+        round_trips("Option<int> a = .none\nResult<int, str> b = .ok(1)\n");
     }
 
     #[test]
@@ -177,5 +177,35 @@ mod tests {
     #[test]
     fn round_trip_else_if_chain() {
         round_trips("if a {\n    1\n} else if b {\n    2\n} else {\n    3\n}\n");
+    }
+
+    #[test]
+    fn round_trip_short_decl() {
+        round_trips("x := 10\ns := \"hello\"\n");
+    }
+
+    #[test]
+    fn round_trip_explicit_decl() {
+        round_trips("int x = 10\nstr s = \"hello\"\n");
+    }
+
+    #[test]
+    fn round_trip_arrays() {
+        round_trips("scores := [10, 20, 30]\n[int] names = [1, 2]\n");
+    }
+
+    #[test]
+    fn round_trip_dicts() {
+        round_trips("ages := {\"Zaid\": 20}\n{str: int} ages2 = {\"a\": 1}\n");
+    }
+
+    #[test]
+    fn round_trip_union_dict() {
+        round_trips("{str: str | int} user = {\"name\": \"Zaid\", \"age\": 20}\n");
+    }
+
+    #[test]
+    fn round_trip_import() {
+        round_trips("import std.io\n");
     }
 }

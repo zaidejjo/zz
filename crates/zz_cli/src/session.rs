@@ -125,9 +125,9 @@ mod tests {
 
     #[test]
     fn acceptance_gate_let_binding() {
-        // Phase 0 gate: `let x = 1 + 2` evaluates to 3.
+        // Phase 0 gate: `x := 1 + 2` evaluates to 3.
         let mut s = Session::new("<test>");
-        let out = s.eval("let x = 1 + 2");
+        let out = s.eval("x := 1 + 2");
         assert!(out.errors.is_none(), "unexpected errors: {:?}", out.errors);
         assert_eq!(out.output, "3");
     }
@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn session_accumulates_bindings() {
         let mut s = Session::new("<test>");
-        s.eval("let a = 10");
+        s.eval("a := 10");
         let out = s.eval("a + 5");
         assert_eq!(out.output, "15");
     }
@@ -143,9 +143,9 @@ mod tests {
     #[test]
     fn parse_error_renders() {
         let mut s = Session::new("<test>");
-        let out = s.eval("let = 3");
+        let out = s.eval("= 3");
         let errs = out.errors.expect("expected parse errors");
-        assert!(errs.contains("expected identifier"), "errors: {errs}");
+        assert!(errs.contains("expected expression"), "errors: {errs}");
     }
 
     #[test]
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn type_error_blocks_run() {
         let mut s = Session::new("<test>");
-        let out = s.eval("let x = 1 + \"a\"");
+        let out = s.eval("x := 1 + \"a\"");
         let errs = out.errors.expect("expected type errors");
         assert!(
             errs.contains("cannot apply `+` to `int` and `str`"),
@@ -200,8 +200,35 @@ mod tests {
     #[test]
     fn match_and_variants_run() {
         let mut s = Session::new("<test>");
-        let out = s.eval("let v = .some(1)\nmatch v { .some(n) => n, .none => 0 }");
+        let out = s.eval("v := .some(1)\nmatch v { .some(n) => n, .none => 0 }");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "1");
+    }
+
+    #[test]
+    fn explicit_decl_runs() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("int x = 10\nx");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "10");
+    }
+
+    #[test]
+    fn array_and_dict_run() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("scores := [10, 20, 30]\nscores");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "[10, 20, 30]");
+        let out2 = s.eval("{str: int} ages = {\"a\": 1}\nages");
+        assert!(out2.errors.is_none(), "errors: {:?}", out2.errors);
+        assert_eq!(out2.output, "{a: 1}");
+    }
+
+    #[test]
+    fn import_accepted() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.io\n1 + 1");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "2");
     }
 }

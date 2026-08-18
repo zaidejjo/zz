@@ -95,6 +95,9 @@ fn contains_var(t: &Type) -> bool {
         Type::Option(x) => contains_var(x),
         Type::Result(a, b) => contains_var(a) || contains_var(b),
         Type::Func(ps, r) => ps.iter().any(contains_var) || contains_var(r),
+        Type::Array(x) => contains_var(x),
+        Type::Dict(k, v) => contains_var(k) || contains_var(v),
+        Type::Union(ts) => ts.iter().any(contains_var),
         _ => false,
     }
 }
@@ -167,7 +170,7 @@ impl Checker {
 
     fn check_stmt(&mut self, stmt: &Stmt) -> Type {
         match stmt {
-            Stmt::Let {
+            Stmt::Decl {
                 name,
                 ty,
                 value,
@@ -196,6 +199,11 @@ impl Checker {
                 }
                 self.define(&name.name, rt.clone());
                 rt
+            }
+            Stmt::Import { .. } => {
+                // Imports are resolved in a later phase; type-checking treats
+                // them as a no-op.
+                Type::Unit
             }
             Stmt::Func { .. } => {
                 // Signature registered in pass 1; check the body against it.
@@ -301,6 +309,28 @@ impl Checker {
 
     // --- expressions ------------------------------------------------------
 
+    /// Merge element types into a single type: identical types collapse to
+    /// one; differing types form a union.
+    fn merge_types(&mut self, types: Vec<Type>) -> Type {
+        if types.is_empty() {
+            return self.unifier.fresh_var();
+        }
+        let mut distinct: Vec<Type> = Vec::new();
+        for t in types {
+            let rt = self.unifier.resolve(&t);
+            if let Some(existing) = distinct.iter().find(|d| self.unifier.resolve(d) == rt) {
+                let _ = self.unifier.unify(existing, &t);
+            } else {
+                distinct.push(t);
+            }
+        }
+        if distinct.len() == 1 {
+            distinct.pop().unwrap()
+        } else {
+            Type::Union(distinct)
+        }
+    }
+
     fn check_expr(&mut self, e: &Expr) -> Type {
         match e {
             Expr::Int { .. } => Type::Int,
@@ -382,6 +412,22 @@ impl Checker {
             }
             Expr::Try { expr, span } => self.check_try(expr, *span),
             Expr::Block(b) => self.check_block(b),
+            Expr::Array { elems, span: _ } => {
+                let types: Vec<Type> = elems.iter().map(|e| self.check_expr(e)).collect();
+                let elem_t = self.merge_types(types);
+                Type::Array(Box::new(elem_t))
+            }
+            Expr::Dict { entries, span: _ } => {
+                let mut key_types = Vec::new();
+                let mut val_types = Vec::new();
+                for (k, v) in entries {
+                    key_types.push(self.check_expr(k));
+                    val_types.push(self.check_expr(v));
+                }
+                let key_t = self.merge_types(key_types);
+                let val_t = self.merge_types(val_types);
+                Type::Dict(Box::new(key_t), Box::new(val_t))
+            }
             Expr::Variant { name, arg, span } => {
                 let arg_t = arg.as_ref().map(|a| self.check_expr(a));
                 match (name.as_str(), arg_t) {
@@ -838,6 +884,16 @@ impl Checker {
                     .collect(),
                 Box::new(self.ast_to_type_inner(r, generics)),
             ),
+            TyKind::Array(t) => Type::Array(Box::new(self.ast_to_type_inner(t, generics))),
+            TyKind::Dict(k, v) => Type::Dict(
+                Box::new(self.ast_to_type_inner(k, generics)),
+                Box::new(self.ast_to_type_inner(v, generics)),
+            ),
+            TyKind::Union(ts) => Type::Union(
+                ts.iter()
+                    .map(|t| self.ast_to_type_inner(t, generics))
+                    .collect(),
+            ),
             TyKind::Named(name, args) => {
                 if generics.iter().any(|g| g == name) {
                     if !args.is_empty() {
@@ -944,28 +1000,28 @@ mod tests {
 
     #[test]
     fn infers_int_from_literal() {
-        let r = check_src("let x = 1");
+        let r = check_src("x := 1");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
     #[test]
     fn infers_float_from_promotion() {
-        let r = check_src("let x = 1 + 2.5");
+        let r = check_src("x := 1 + 2.5");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Float);
     }
 
     #[test]
     fn annotation_unifies() {
-        let r = check_src("let x: float = 1 + 2.5");
+        let r = check_src("float x = 1 + 2.5");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Float);
     }
 
     #[test]
     fn annotation_mismatch_errors() {
-        errors_contain("let x: str = 1 + 2", "type mismatch");
+        errors_contain("str x = 1 + 2", "type mismatch");
     }
 
     #[test]
@@ -990,14 +1046,14 @@ mod tests {
 
     #[test]
     fn func_signature_and_body() {
-        let r = check_src("func add(a: int, b: int) -> int { return a + b }\nlet z = add(1, 2)");
+        let r = check_src("func add(a: int, b: int) -> int { return a + b }\nz := add(1, 2)");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["z"], Type::Int);
     }
 
     #[test]
     fn func_return_type_inferred() {
-        let r = check_src("func five() { return 5 }\nlet z = five()");
+        let r = check_src("func five() { return 5 }\nz := five()");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["z"], Type::Int);
     }
@@ -1022,7 +1078,7 @@ mod tests {
 
     #[test]
     fn generic_func_instantiates() {
-        let r = check_src("func id<T>(x: T) -> T { return x }\nlet a = id(1)\nlet b = id(\"s\")");
+        let r = check_src("func id<T>(x: T) -> T { return x }\na := id(1)\nb := id(\"s\")");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["a"], Type::Int);
         assert_eq!(r.bindings["b"], Type::Str);
@@ -1031,7 +1087,7 @@ mod tests {
     #[test]
     fn generic_func_monomorphic_fail() {
         errors_contain(
-            "func id<T>(x: T) -> T { x }\nlet f = id",
+            "func id<T>(x: T) -> T { x }\nf := id",
             "cannot use generic function `id` as a value",
         );
     }
@@ -1044,7 +1100,7 @@ mod tests {
 
     #[test]
     fn closure_inference() {
-        let r = check_src("let f = |x: int| x + 1");
+        let r = check_src("f := |x: int| x + 1");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(
             r.bindings["f"],
@@ -1054,38 +1110,34 @@ mod tests {
 
     #[test]
     fn closure_ambiguous_errors() {
-        errors_contain("let f = |x| x", "cannot infer the type of `f`");
+        errors_contain("f := |x| x", "cannot infer the type of `f`");
     }
 
     #[test]
     fn calling_closure() {
-        let r = check_src("let f = |x: int| x + 1\nlet y = f(5)");
+        let r = check_src("f := |x: int| x + 1\ny := f(5)");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["y"], Type::Int);
     }
 
     #[test]
     fn match_option() {
-        let r = check_src("let v = .some(1)\nlet x = match v { .some(n) => n, .none => 0 }");
+        let r = check_src("v := .some(1)\nx := match v { .some(n) => n, .none => 0 }");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
     #[test]
     fn match_result() {
-        let r = check_src(
-            "let v: Result<int, str> = .ok(1)\nlet x = match v { .ok(n) => n, .err(_) => 0 }",
-        );
+        let r =
+            check_src("Result<int, str> v = .ok(1)\nx := match v { .ok(n) => n, .err(_) => 0 }");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
     #[test]
     fn match_nonexhaustive_errors() {
-        errors_contain(
-            "let v = .some(1)\nmatch v { .some(n) => n }",
-            "non-exhaustive",
-        );
+        errors_contain("v := .some(1)\nmatch v { .some(n) => n }", "non-exhaustive");
     }
 
     #[test]
@@ -1096,14 +1148,14 @@ mod tests {
     #[test]
     fn match_arm_type_mismatch_errors() {
         errors_contain(
-            "let v = .some(1)\nmatch v { .some(n) => n, .none => \"x\" }",
+            "v := .some(1)\nmatch v { .some(n) => n, .none => \"x\" }",
             "type mismatch",
         );
     }
 
     #[test]
     fn if_let_binds() {
-        let r = check_src("let v = .some(5)\nlet x = if let .some(n) = v { n } else { 0 }");
+        let r = check_src("v := .some(5)\nx := if let .some(n) = v { n } else { 0 }");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
@@ -1111,14 +1163,14 @@ mod tests {
     #[test]
     fn try_propagates_result() {
         let r = check_src(
-            "func div(a: int, b: int) -> Result<int, str> { if b == 0 { .err(\"z\") } else { .ok(a / b) } }\nfunc f(a: int, b: int) -> Result<int, str> { let q = div(a, b)?; .ok(q) }",
+            "func div(a: int, b: int) -> Result<int, str> { if b == 0 { .err(\"z\") } else { .ok(a / b) } }\nfunc f(a: int, b: int) -> Result<int, str> { q := div(a, b)?; .ok(q) }",
         );
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
     }
 
     #[test]
     fn try_on_option() {
-        let r = check_src("func f() -> Option<int> { let x = .some(1)?; .some(x) }");
+        let r = check_src("func f() -> Option<int> { x := .some(1)?; .some(x) }");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
     }
 
@@ -1130,7 +1182,7 @@ mod tests {
     #[test]
     fn try_on_plain_int_errors() {
         errors_contain(
-            "func f() -> Result<int, str> { let x = 5?; .ok(x) }",
+            "func f() -> Result<int, str> { x := 5?; .ok(x) }",
             "cannot use `?` on a value of type `int`",
         );
     }
@@ -1138,17 +1190,17 @@ mod tests {
     #[test]
     fn try_error_type_mismatch() {
         errors_contain(
-            "func a() -> Result<int, str> { .ok(1) }\nfunc b() -> Result<int, int> { let x = a()?; .ok(x) }",
+            "func a() -> Result<int, str> { .ok(1) }\nfunc b() -> Result<int, int> { x := a()?; .ok(x) }",
             "type mismatch",
         );
     }
 
     #[test]
     fn variant_type_inference() {
-        let r = check_src("let a = .ok(1)\nlet b = .none");
+        let r = check_src("a := .ok(1)\nb := .none");
         // `.none` alone is ambiguous → error
         let _ = r;
-        errors_contain("let b = .none", "cannot infer the type of `b`");
+        errors_contain("b := .none", "cannot infer the type of `b`");
     }
 
     #[test]
@@ -1158,14 +1210,14 @@ mod tests {
 
     #[test]
     fn if_else_type_unify() {
-        let r = check_src("let x = if true { 1 } else { 2 }");
+        let r = check_src("x := if true { 1 } else { 2 }");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
     #[test]
     fn if_else_mismatch_errors() {
-        errors_contain("let x = if true { 1 } else { \"a\" }", "type mismatch");
+        errors_contain("x := if true { 1 } else { \"a\" }", "type mismatch");
     }
 
     #[test]
@@ -1180,19 +1232,19 @@ mod tests {
 
     #[test]
     fn str_concat() {
-        let r = check_src("let s = \"a\" + \"b\"");
+        let r = check_src("s := \"a\" + \"b\"");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["s"], Type::Str);
     }
 
     #[test]
     fn str_plus_int_errors() {
-        errors_contain("let s = \"a\" + 1", "cannot apply `+`");
+        errors_contain("s := \"a\" + 1", "cannot apply `+`");
     }
 
     #[test]
     fn shadowing_allowed() {
-        let r = check_src("let x = 1\nlet x = x + 1");
+        let r = check_src("x := 1\nx := x + 1");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
@@ -1200,5 +1252,118 @@ mod tests {
     #[test]
     fn duplicate_func_errors() {
         errors_contain("func f() { 1 }\nfunc f() { 2 }", "duplicate definition");
+    }
+
+    #[test]
+    fn array_literal_infers() {
+        let r = check_src("scores := [10, 20, 30]");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["scores"], Type::Array(Box::new(Type::Int)));
+    }
+
+    #[test]
+    fn array_explicit_decl() {
+        let r = check_src("[int] scores = [10, 20, 30]");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["scores"], Type::Array(Box::new(Type::Int)));
+    }
+
+    #[test]
+    fn array_mixed_types_form_union() {
+        let r = check_src("v := [1, \"a\"]");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(
+            r.bindings["v"],
+            Type::Array(Box::new(Type::Union(vec![Type::Int, Type::Str])))
+        );
+    }
+
+    #[test]
+    fn array_annotation_unifies_with_union() {
+        let r = check_src("[int] v = [1, 2]");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["v"], Type::Array(Box::new(Type::Int)));
+    }
+
+    #[test]
+    fn array_type_mismatch_errors() {
+        errors_contain("[int] v = [\"a\"]", "type mismatch");
+    }
+
+    #[test]
+    fn array_union_member_accepted() {
+        // Union semantics: a value matches a declared type if any member
+        // matches. `[1, "a"]` has element type `int | str`, which contains
+        // `int`, so the annotation is accepted.
+        let r = check_src("[int] v = [1, \"a\"]");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+    }
+
+    #[test]
+    fn empty_array_ambiguous() {
+        errors_contain("v := []", "cannot infer the type of `v`");
+    }
+
+    #[test]
+    fn dict_literal_infers() {
+        let r = check_src("ages := {\"Zaid\": 20}");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(
+            r.bindings["ages"],
+            Type::Dict(Box::new(Type::Str), Box::new(Type::Int))
+        );
+    }
+
+    #[test]
+    fn dict_explicit_decl() {
+        let r = check_src("{str: int} ages = {\"a\": 1}");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(
+            r.bindings["ages"],
+            Type::Dict(Box::new(Type::Str), Box::new(Type::Int))
+        );
+    }
+
+    #[test]
+    fn dict_union_value_type() {
+        let r = check_src("{str: str | int} user = {\"name\": \"Zaid\", \"age\": 20}");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(
+            r.bindings["user"],
+            Type::Dict(
+                Box::new(Type::Str),
+                Box::new(Type::Union(vec![Type::Str, Type::Int]))
+            )
+        );
+    }
+
+    #[test]
+    fn dict_key_mismatch_errors() {
+        errors_contain("{str: int} m = {1: 2}", "type mismatch");
+    }
+
+    #[test]
+    fn empty_dict_ambiguous() {
+        errors_contain("m := {}", "cannot infer the type of `m`");
+    }
+
+    #[test]
+    fn import_is_noop() {
+        let r = check_src("import std.io\nx := 1");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["x"], Type::Int);
+    }
+
+    #[test]
+    fn union_annotation_accepts_member() {
+        let r = check_src("str | int v = 5");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        // Binding stores the value type (int), which unifies with the union.
+        assert_eq!(r.bindings["v"], Type::Int);
+    }
+
+    #[test]
+    fn union_mismatch_errors() {
+        errors_contain("str | int v = true", "type mismatch");
     }
 }

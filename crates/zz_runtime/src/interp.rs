@@ -78,13 +78,17 @@ impl Interp {
 
     pub(crate) fn run_stmt(&mut self, stmt: &Stmt) -> Result<Flow, EvalError> {
         match stmt {
-            Stmt::Let { name, value, .. } => match self.eval(value)? {
+            Stmt::Decl { name, value, .. } => match self.eval(value)? {
                 Flow::Value(v) => {
                     self.env.define(&name.name, v.clone());
                     Ok(Flow::Value(v))
                 }
                 Flow::Return(v) => Ok(Flow::Return(v)),
             },
+            Stmt::Import { .. } => {
+                // Imports are resolved in a later phase; no runtime effect.
+                Ok(Flow::Value(Value::Unit))
+            }
             Stmt::Func {
                 name, params, body, ..
             } => {
@@ -265,6 +269,22 @@ impl Interp {
                 }
             }
             Expr::Block(b) => self.eval_block(b),
+            Expr::Array { elems, .. } => {
+                let mut vs = Vec::with_capacity(elems.len());
+                for e in elems {
+                    vs.push(self.eval(e)?.into_value()?);
+                }
+                Ok(Flow::Value(Value::Array(vs)))
+            }
+            Expr::Dict { entries, .. } => {
+                let mut pairs = Vec::with_capacity(entries.len());
+                for (k, v) in entries {
+                    let kv = self.eval(k)?.into_value()?;
+                    let vv = self.eval(v)?.into_value()?;
+                    pairs.push((kv, vv));
+                }
+                Ok(Flow::Value(Value::Dict(pairs)))
+            }
             Expr::Variant { name, arg, span } => {
                 let av = match arg {
                     Some(a) => Some(self.eval(a)?.into_value()?),
@@ -641,7 +661,7 @@ mod tests {
     #[test]
     fn try_propagates_none() {
         assert_eq!(
-            eval_src("func f() -> Option<int> { let x = .none?; .some(x) }\nf()").unwrap(),
+            eval_src("func f() -> Option<int> { x := .none?; .some(x) }\nf()").unwrap(),
             Value::Option(None)
         );
     }
@@ -649,8 +669,7 @@ mod tests {
     #[test]
     fn try_propagates_err() {
         assert_eq!(
-            eval_src("func f() -> Result<int, str> { let x = .err(\"boom\")?; .ok(x) }\nf()")
-                .unwrap(),
+            eval_src("func f() -> Result<int, str> { x := .err(\"boom\")?; .ok(x) }\nf()").unwrap(),
             Value::Result(Err(Box::new(Value::Str("boom".into()))))
         );
     }
@@ -662,5 +681,53 @@ mod tests {
             Value::Result(Ok(Box::new(Value::Int(1))))
         );
         assert_eq!(eval_src(".none").unwrap(), Value::Option(None));
+    }
+
+    #[test]
+    fn array_literal() {
+        assert_eq!(
+            eval_src("scores := [10, 20, 30]\nscores").unwrap(),
+            Value::Array(vec![Value::Int(10), Value::Int(20), Value::Int(30)])
+        );
+    }
+
+    #[test]
+    fn array_explicit_decl() {
+        assert_eq!(
+            eval_src("[int] scores = [1, 2]\nscores").unwrap(),
+            Value::Array(vec![Value::Int(1), Value::Int(2)])
+        );
+    }
+
+    #[test]
+    fn dict_literal() {
+        assert_eq!(
+            eval_src("ages := {\"Zaid\": 20}\nages").unwrap(),
+            Value::Dict(vec![(Value::Str("Zaid".into()), Value::Int(20))])
+        );
+    }
+
+    #[test]
+    fn dict_explicit_decl() {
+        assert_eq!(
+            eval_src("{str: int} ages = {\"a\": 1}\nages").unwrap(),
+            Value::Dict(vec![(Value::Str("a".into()), Value::Int(1))])
+        );
+    }
+
+    #[test]
+    fn dict_union_value_type() {
+        assert_eq!(
+            eval_src("{str: str | int} user = {\"name\": \"Zaid\", \"age\": 20}\nuser").unwrap(),
+            Value::Dict(vec![
+                (Value::Str("name".into()), Value::Str("Zaid".into())),
+                (Value::Str("age".into()), Value::Int(20)),
+            ])
+        );
+    }
+
+    #[test]
+    fn import_is_noop() {
+        assert_eq!(eval_src("import std.io\nx := 1\nx").unwrap(), Value::Int(1));
     }
 }

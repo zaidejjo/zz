@@ -68,6 +68,8 @@ impl<'a> Lexer<'a> {
                 ')' => self.emit_significant(TokenKind::RParen, self.pos, self.pos + 1),
                 '{' => self.emit_significant(TokenKind::LBrace, self.pos, self.pos + 1),
                 '}' => self.emit_significant(TokenKind::RBrace, self.pos, self.pos + 1),
+                '[' => self.emit_significant(TokenKind::LBracket, self.pos, self.pos + 1),
+                ']' => self.emit_significant(TokenKind::RBracket, self.pos, self.pos + 1),
                 '+' => self.emit_significant(TokenKind::Plus, self.pos, self.pos + 1),
                 '-' if self.peek_char_at(1) == Some('>') => {
                     self.emit_significant(TokenKind::Arrow, self.pos, self.pos + 2)
@@ -102,6 +104,9 @@ impl<'a> Lexer<'a> {
                 }
                 '|' => self.emit_significant(TokenKind::Pipe, self.pos, self.pos + 1),
                 '?' => self.emit_significant(TokenKind::Question, self.pos, self.pos + 1),
+                ':' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::ColonEq, self.pos, self.pos + 2)
+                }
                 ':' => self.emit_significant(TokenKind::Colon, self.pos, self.pos + 1),
                 ',' => self.emit_significant(TokenKind::Comma, self.pos, self.pos + 1),
                 '.' => self.emit_significant(TokenKind::Dot, self.pos, self.pos + 1),
@@ -224,7 +229,10 @@ impl<'a> Lexer<'a> {
                     | TokenKind::Dot
                     | TokenKind::Pipe
                     | TokenKind::Arrow
+                    | TokenKind::ColonEq
                     | TokenKind::LParen
+                    | TokenKind::LBrace
+                    | TokenKind::LBracket
             )
         )
     }
@@ -258,7 +266,7 @@ impl<'a> Lexer<'a> {
         let span = Span::new(start as u32, self.pos as u32);
         let text = self.src[span.to_range()].to_string();
         let kind = match text.as_str() {
-            "let" => TokenKind::Let,
+            "import" => TokenKind::Import,
             "func" => TokenKind::Func,
             "return" => TokenKind::Return,
             "if" => TokenKind::If,
@@ -424,8 +432,8 @@ mod tests {
     #[test]
     fn basic_expression() {
         assert_eq!(
-            kinds("let x = 1 + 2"),
-            vec![K::Let, K::Ident, K::Assign, K::Int, K::Plus, K::Int, K::Eof]
+            kinds("x := 1 + 2"),
+            vec![K::Ident, K::ColonEq, K::Int, K::Plus, K::Int, K::Eof]
         );
     }
 
@@ -441,10 +449,7 @@ mod tests {
 
     #[test]
     fn newline_after_assign_is_trivia() {
-        assert_eq!(
-            kinds("let x =\n1"),
-            vec![K::Let, K::Ident, K::Assign, K::Int, K::Eof]
-        );
+        assert_eq!(kinds("x :=\n1"), vec![K::Ident, K::ColonEq, K::Int, K::Eof]);
     }
 
     #[test]
@@ -518,8 +523,9 @@ mod tests {
     #[test]
     fn keywords() {
         assert_eq!(
-            kinds("func return if else while match true false"),
+            kinds("import func return if else while match true false"),
             vec![
+                K::Import,
                 K::Func,
                 K::Return,
                 K::If,
@@ -593,5 +599,14 @@ mod tests {
             ]
         );
         assert_eq!(kinds("a || b"), vec![K::Ident, K::OrOr, K::Ident, K::Eof]);
+    }
+
+    #[test]
+    fn brackets_and_colon_eq() {
+        assert_eq!(
+            kinds("[1, 2]"),
+            vec![K::LBracket, K::Int, K::Comma, K::Int, K::RBracket, K::Eof]
+        );
+        assert_eq!(kinds("x := 1"), vec![K::Ident, K::ColonEq, K::Int, K::Eof]);
     }
 }
