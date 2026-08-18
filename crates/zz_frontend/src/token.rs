@@ -35,6 +35,7 @@ pub struct Token {
 pub enum TokenKind {
     // Keywords
     Import,
+    As,
     Func,
     Return,
     If,
@@ -87,6 +88,7 @@ impl TokenKind {
     pub fn describe(self) -> &'static str {
         match self {
             TokenKind::Import => "`import`",
+            TokenKind::As => "`as`",
             TokenKind::Func => "`func`",
             TokenKind::Return => "`return`",
             TokenKind::If => "`if`",

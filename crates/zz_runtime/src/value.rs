@@ -25,6 +25,19 @@ pub enum Value {
     Dict(Vec<(Value, Value)>),
     /// A native (Rust-backed) function from the standard library.
     Native(NativeFunc),
+    /// A parsed JSON value (opaque to the type system).
+    Json(JsonValue),
+    /// An HTTP server handle with its registered routes.
+    HttpServer(HttpServer),
+}
+
+/// A JSON value (see [`crate::json`]).
+pub use crate::json::JsonValue;
+
+/// An HTTP server: registered (method, path, handler) routes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HttpServer {
+    pub routes: Vec<(String, String, Value)>,
 }
 
 /// A native function reference: name + arity. The implementation lives in
@@ -100,6 +113,8 @@ impl fmt::Display for Value {
                 write!(f, "}}")
             }
             Value::Native(nf) => write!(f, "<native {}>", nf.name),
+            Value::Json(j) => write!(f, "{j}"),
+            Value::HttpServer(_) => write!(f, "<http server>"),
         }
     }
 }

@@ -83,6 +83,84 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
 
+    // std.json
+    let json_t = Type::Json;
+    let t = Type::Named("T".to_string());
+    m.insert(
+        "std.json.parse".into(),
+        sig(vec![("s", Type::Str)], json_t.clone()),
+    );
+    m.insert(
+        "std.json.stringify".into(),
+        sig_t(vec![("v", t.clone())], Type::Str),
+    );
+    m.insert(
+        "std.json.get".into(),
+        sig(
+            vec![("j", json_t.clone()), ("key", Type::Str)],
+            json_t.clone(),
+        ),
+    );
+    m.insert(
+        "std.json.as_str".into(),
+        sig(vec![("j", json_t.clone())], Type::Str),
+    );
+    m.insert(
+        "std.json.as_int".into(),
+        sig(vec![("j", json_t.clone())], Type::Int),
+    );
+    m.insert(
+        "std.json.as_float".into(),
+        sig(vec![("j", json_t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.json.as_bool".into(),
+        sig(vec![("j", json_t)], Type::Bool),
+    );
+
+    // std.http
+    let server_t = Type::HttpServer;
+    let handler_t = Type::Func(vec![Type::Str], Box::new(Type::Str));
+    m.insert("std.http.server".into(), sig(vec![], server_t.clone()));
+    m.insert(
+        "std.http.get".into(),
+        sig(
+            vec![
+                ("server", server_t.clone()),
+                ("path", Type::Str),
+                ("handler", handler_t.clone()),
+            ],
+            server_t.clone(),
+        ),
+    );
+    m.insert(
+        "std.http.post".into(),
+        sig(
+            vec![
+                ("server", server_t.clone()),
+                ("path", Type::Str),
+                ("handler", handler_t.clone()),
+            ],
+            server_t.clone(),
+        ),
+    );
+    m.insert(
+        "std.http.handle".into(),
+        sig(
+            vec![
+                ("server", server_t.clone()),
+                ("method", Type::Str),
+                ("path", Type::Str),
+                ("body", Type::Str),
+            ],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "std.http.listen".into(),
+        sig(vec![("server", server_t), ("port", Type::Int)], Type::Unit),
+    );
+
     m
 }
 
@@ -96,7 +174,12 @@ mod tests {
         assert!(funcs.contains_key("std.io.println"));
         assert!(funcs.contains_key("std.str.length"));
         assert!(funcs.contains_key("std.vec.push"));
-        assert_eq!(funcs.len(), 9);
+        assert!(funcs.contains_key("std.json.parse"));
+        assert!(funcs.contains_key("std.json.stringify"));
+        assert!(funcs.contains_key("std.http.server"));
+        assert!(funcs.contains_key("std.http.handle"));
+        assert!(funcs.contains_key("std.http.listen"));
+        assert_eq!(funcs.len(), 21);
     }
 
     #[test]

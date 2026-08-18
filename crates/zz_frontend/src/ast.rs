@@ -24,9 +24,11 @@ pub enum Stmt {
         value: Expr,
         span: Span,
     },
-    /// `import std.io` — a dotted path of identifiers.
+    /// `import std.io` — a dotted path of identifiers, optionally aliased
+    /// (`import std.io as console`).
     Import {
         path: Vec<String>,
+        alias: Option<String>,
         span: Span,
     },
     Func {
@@ -89,6 +91,12 @@ pub enum Expr {
     /// Dotted path: `std.io.println`. Resolved as a single qualified name.
     Path {
         parts: Vec<String>,
+        span: Span,
+    },
+    /// Interpolated string: `"Hello {name}"`. Parts alternate between
+    /// literal text and embedded expressions.
+    Fmt {
+        parts: Vec<FmtPart>,
         span: Span,
     },
     /// Parenthesized expression. Kept in the AST so the printer preserves the
@@ -254,6 +262,15 @@ impl UnOp {
     }
 }
 
+/// One piece of an interpolated string.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FmtPart {
+    /// Literal text (escapes already processed).
+    Text(String),
+    /// An embedded expression, rendered via its Display form.
+    Expr(Box<Expr>),
+}
+
 /// A type annotation as written in source.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ty {
@@ -291,6 +308,7 @@ impl Expr {
             | Expr::Bool { span, .. }
             | Expr::Ident { span, .. }
             | Expr::Path { span, .. }
+            | Expr::Fmt { span, .. }
             | Expr::Paren { span, .. }
             | Expr::Unary { span, .. }
             | Expr::Binary { span, .. }

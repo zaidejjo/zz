@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use zz_frontend::ast::{BinOp, Block, Expr, Lit, Pattern, Program, Stmt, UnOp};
+use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Lit, Pattern, Program, Stmt, UnOp};
 use zz_frontend::span::Span;
 
 use crate::env::Env;
@@ -46,10 +46,11 @@ impl Flow {
     }
 }
 
-/// A native function implementation. Takes `&mut Vec<Value>` (not a slice)
-/// because `std.vec.push` must grow the argument vector.
+/// A native function implementation. Receives the interpreter (so natives
+/// can call back into ZZ, e.g. HTTP route handlers) and the argument vector
+/// (a `Vec`, not a slice, because `std.vec.push` must grow it).
 #[allow(clippy::ptr_arg)]
-pub type NativeFn = fn(&mut Vec<Value>) -> Result<Value, EvalError>;
+pub type NativeFn = fn(&mut Interp, &mut Vec<Value>) -> Result<Value, EvalError>;
 
 /// A registered native function: its arity and Rust implementation.
 #[derive(Debug, Clone, Copy)]
@@ -154,8 +155,24 @@ impl Interp {
                     *span,
                 ))
             }
+            Expr::Fmt { parts, .. } => {
+                let mut out = String::new();
+                for part in parts {
+                    match part {
+                        FmtPart::Text(t) => out.push_str(t),
+                        FmtPart::Expr(e) => {
+                            let v = self.eval(e)?.into_value()?;
+                            out.push_str(&v.to_string());
+                        }
+                    }
+                }
+                Ok(Flow::Value(Value::Str(out)))
+            }
             Expr::Path { parts, span } => {
                 let name = parts.join(".");
+                if let Some(v) = self.env.get(&name) {
+                    return Ok(Flow::Value(v));
+                }
                 if let Some(fv) = self.funcs.get(&name) {
                     return Ok(Flow::Value(Value::Func(fv.clone())));
                 }
@@ -389,7 +406,7 @@ impl Interp {
         }
     }
 
-    fn call(&mut self, f: Value, mut args: Vec<Value>, span: Span) -> Result<Value, EvalError> {
+    pub fn call(&mut self, f: Value, mut args: Vec<Value>, span: Span) -> Result<Value, EvalError> {
         match f {
             Value::Native(nf) => {
                 if args.len() != nf.arity {
@@ -399,7 +416,7 @@ impl Interp {
                     ));
                 }
                 match self.natives.get(&nf.name) {
-                    Some(entry) => (entry.f)(&mut args),
+                    Some(entry) => (entry.f)(self, &mut args),
                     None => Err(EvalError::new(
                         format!("unknown native function `{}`", nf.name),
                         span,
@@ -795,7 +812,7 @@ mod tests {
     #[test]
     fn native_function_dispatches() {
         #[allow(clippy::ptr_arg)]
-        fn double(args: &mut Vec<Value>) -> Result<Value, EvalError> {
+        fn double(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
             let n = match args.first() {
                 Some(Value::Int(n)) => *n,
                 _ => return Err(EvalError::new("expected int", Span::new(0, 0))),
@@ -819,7 +836,7 @@ mod tests {
 
     #[test]
     fn native_wrong_arity_errors() {
-        fn noop(_: &mut Vec<Value>) -> Result<Value, EvalError> {
+        fn noop(_interp: &mut Interp, _: &mut Vec<Value>) -> Result<Value, EvalError> {
             Ok(Value::Unit)
         }
         let mut natives = HashMap::new();

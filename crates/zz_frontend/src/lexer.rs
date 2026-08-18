@@ -23,6 +23,26 @@ pub fn lex(source: &str) -> Lexed {
     Lexer::new(source).run()
 }
 
+/// Lexer state for interpolated strings.
+///
+/// A string literal stays "open" across interpolations: the stack holds a
+/// `Str` context while consuming text, an `Interp` context inside each
+/// `{ expr }` (nested braces push more), and any strings inside the
+/// expression (which may themselves be interpolated) push their own `Str`.
+#[derive(Debug)]
+enum LexContext {
+    Str {
+        /// Byte offset of the opening quote, for token spans.
+        start: usize,
+        /// Text accumulated so far, across interpolation segments.
+        value: String,
+    },
+    /// Inside an interpolation `{ expr }`. `depth` counts nested braces
+    /// beyond the interpolation's own opening brace (dicts, blocks, ...).
+    /// The interpolation closes when the depth drops to zero.
+    Interp { depth: u32 },
+}
+
 struct Lexer<'a> {
     src: &'a str,
     pos: usize,
@@ -30,6 +50,10 @@ struct Lexer<'a> {
     pending: Vec<Trivia>,
     tokens: Vec<Token>,
     errors: Vec<RawDiag>,
+    contexts: Vec<LexContext>,
+    /// True when the previous string segment ended right before an
+    /// interpolation `{`; the next `{` opens the interpolation context.
+    pending_interp: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -41,12 +65,22 @@ impl<'a> Lexer<'a> {
             pending: Vec::new(),
             tokens: Vec::new(),
             errors: Vec::new(),
+            contexts: Vec::new(),
+            pending_interp: false,
         }
     }
 
     fn run(mut self) -> Lexed {
         while self.pos < self.src.len() {
             let c = self.peek_char().unwrap();
+            // Inside a string literal (including a continuation segment after
+            // an interpolation), consume characters as string content. When an
+            // interpolation start is pending, the `{` must be dispatched below.
+            if matches!(self.contexts.last(), Some(LexContext::Str { .. })) && !self.pending_interp
+            {
+                self.lex_string_cont();
+                continue;
+            }
             match c {
                 ' ' | '\t' | '\r' => self.push_trivia(TriviaKind::Whitespace),
                 '\n' => {
@@ -66,8 +100,30 @@ impl<'a> Lexer<'a> {
                 '/' => self.emit_significant(TokenKind::Slash, self.pos, self.pos + 1),
                 '(' => self.emit_significant(TokenKind::LParen, self.pos, self.pos + 1),
                 ')' => self.emit_significant(TokenKind::RParen, self.pos, self.pos + 1),
-                '{' => self.emit_significant(TokenKind::LBrace, self.pos, self.pos + 1),
-                '}' => self.emit_significant(TokenKind::RBrace, self.pos, self.pos + 1),
+                '{' => {
+                    if self.pending_interp {
+                        // This is the interpolation's own opening brace; no
+                        // nested braces have been seen yet.
+                        self.pending_interp = false;
+                        self.contexts.push(LexContext::Interp { depth: 0 });
+                    } else if let Some(LexContext::Interp { depth }) = self.contexts.last_mut() {
+                        // A nested brace inside the interpolation (dict
+                        // literal, block, closure, ...).
+                        *depth += 1;
+                    }
+                    self.emit_significant(TokenKind::LBrace, self.pos, self.pos + 1);
+                }
+                '}' => {
+                    if let Some(LexContext::Interp { depth }) = self.contexts.last_mut() {
+                        if *depth == 0 {
+                            // Closing the interpolation: resume string mode.
+                            self.contexts.pop();
+                        } else {
+                            *depth -= 1;
+                        }
+                    }
+                    self.emit_significant(TokenKind::RBrace, self.pos, self.pos + 1);
+                }
                 '[' => self.emit_significant(TokenKind::LBracket, self.pos, self.pos + 1),
                 ']' => self.emit_significant(TokenKind::RBracket, self.pos, self.pos + 1),
                 '+' => self.emit_significant(TokenKind::Plus, self.pos, self.pos + 1),
@@ -121,6 +177,12 @@ impl<'a> Lexer<'a> {
                         .push(error_at(format!("unexpected character `{c}`"), span));
                 }
             }
+        }
+        if !self.contexts.is_empty() {
+            // A string (or interpolation) was left open at end of input.
+            let span = Span::new(self.pos as u32, self.src.len() as u32);
+            self.errors
+                .push(error_at("unterminated string literal", span));
         }
         self.tokens.push(Token {
             kind: TokenKind::Eof,
@@ -267,6 +329,7 @@ impl<'a> Lexer<'a> {
         let text = self.src[span.to_range()].to_string();
         let kind = match text.as_str() {
             "import" => TokenKind::Import,
+            "as" => TokenKind::As,
             "func" => TokenKind::Func,
             "return" => TokenKind::Return,
             "if" => TokenKind::If,
@@ -330,65 +393,102 @@ impl<'a> Lexer<'a> {
         self.push_token(kind, span, text);
     }
 
+    /// Begin a fresh string literal: consume the opening quote and enter
+    /// string mode. The main loop then feeds characters through
+    /// [`Lexer::lex_string_cont`].
     fn lex_string(&mut self) {
         let start = self.pos;
         self.bump_char(); // opening quote
-        let mut value = String::new();
-        loop {
-            match self.peek_char() {
-                Some('"') => {
-                    self.bump_char();
-                    break;
-                }
-                Some('\\') => {
-                    self.bump_char();
-                    match self.peek_char() {
-                        Some('n') => {
-                            value.push('\n');
-                            self.bump_char();
-                        }
-                        Some('t') => {
-                            value.push('\t');
-                            self.bump_char();
-                        }
-                        Some('r') => {
-                            value.push('\r');
-                            self.bump_char();
-                        }
-                        Some('\\') => {
-                            value.push('\\');
-                            self.bump_char();
-                        }
-                        Some('"') => {
-                            value.push('"');
-                            self.bump_char();
-                        }
-                        Some(other) => {
-                            let span = Span::new(
-                                (self.pos - 1) as u32,
-                                (self.pos + other.len_utf8()) as u32,
-                            );
-                            self.errors
-                                .push(error_at(format!("unknown escape `\\{other}`"), span));
-                            self.bump_char();
-                        }
-                        None => break,
+        self.contexts.push(LexContext::Str {
+            start,
+            value: String::new(),
+        });
+    }
+
+    /// Consume one unit of string content (a quote, an escape, an
+    /// interpolation start, or a plain character).
+    fn lex_string_cont(&mut self) {
+        // Pop the current string context; continuation arms re-push it with
+        // the updated value.
+        let (start, value) = match self.contexts.pop() {
+            Some(LexContext::Str { start, value }) => (start, value),
+            _ => unreachable!("lex_string_cont called outside string mode"),
+        };
+        match self.peek_char() {
+            Some('"') => {
+                // End of the string (or of this continuation segment). The
+                // string context was already popped above.
+                let end = self.pos + '"'.len_utf8();
+                self.bump_char();
+                let span = Span::new(start as u32, end as u32);
+                self.push_token(TokenKind::Str, span, value);
+            }
+            // String interpolation: `{ident...` starts an embedded expression.
+            // Emit the accumulated text as a Str token and enter interpolation
+            // mode (leaving the string context underneath); the main loop
+            // lexes `{` as LBrace, the expression, and `}` as RBrace, popping
+            // back into string mode for the continuation.
+            Some('{') if self.peek_char_at(1).is_some_and(is_ident_start) => {
+                let span = Span::new(start as u32, self.pos as u32);
+                self.push_token(TokenKind::Str, span, value);
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value: String::new(),
+                });
+                self.pending_interp = true;
+            }
+            Some('\\') => {
+                self.bump_char();
+                let mut value = value;
+                match self.peek_char() {
+                    Some('n') => {
+                        value.push('\n');
+                        self.bump_char();
+                    }
+                    Some('t') => {
+                        value.push('\t');
+                        self.bump_char();
+                    }
+                    Some('r') => {
+                        value.push('\r');
+                        self.bump_char();
+                    }
+                    Some('\\') => {
+                        value.push('\\');
+                        self.bump_char();
+                    }
+                    Some('"') => {
+                        value.push('"');
+                        self.bump_char();
+                    }
+                    Some(other) => {
+                        let span =
+                            Span::new((self.pos - 1) as u32, (self.pos + other.len_utf8()) as u32);
+                        self.errors
+                            .push(error_at(format!("unknown escape `\\{other}`"), span));
+                        self.bump_char();
+                    }
+                    None => {
+                        let span = Span::new(start as u32, self.src.len() as u32);
+                        self.errors
+                            .push(error_at("unterminated string literal", span));
+                        return;
                     }
                 }
-                Some(c) => {
-                    value.push(c);
-                    self.bump_char();
-                }
-                None => {
-                    let span = Span::new(start as u32, self.src.len() as u32);
-                    self.errors
-                        .push(error_at("unterminated string literal", span));
-                    return;
-                }
+                self.contexts.push(LexContext::Str { start, value });
+            }
+            Some(c) => {
+                let mut value = value;
+                value.push(c);
+                self.bump_char();
+                self.contexts.push(LexContext::Str { start, value });
+            }
+            None => {
+                let span = Span::new(start as u32, self.src.len() as u32);
+                self.errors
+                    .push(error_at("unterminated string literal", span));
             }
         }
-        let span = Span::new(start as u32, self.pos as u32);
-        self.push_token(TokenKind::Str, span, value);
     }
 
     // --- char helpers -----------------------------------------------------

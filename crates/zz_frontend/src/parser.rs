@@ -42,7 +42,8 @@
 //! the next `StmtEnd`, so one bad line never hides the rest of the program.
 
 use crate::ast::{
-    BinOp, Block, Expr, Ident, Lit, MatchArm, Param, Pattern, Program, Stmt, Ty, TyKind, UnOp,
+    BinOp, Block, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, Program, Stmt, Ty, TyKind,
+    UnOp,
 };
 use crate::diag::{error_at, RawDiag};
 use crate::lexer::lex;
@@ -164,8 +165,13 @@ impl Parser {
                 path.push(id.name);
             }
         }
+        let alias = if self.eat(TokenKind::As) {
+            self.expect_ident().map(|id| id.name)
+        } else {
+            None
+        };
         let span = import_tok.span.join(self.previous().span);
-        Stmt::Import { path, span }
+        Stmt::Import { path, alias, span }
     }
 
     fn parse_short_decl(&mut self) -> Stmt {
@@ -700,6 +706,39 @@ impl Parser {
         args
     }
 
+    /// Assemble an interpolated string from the token sequence produced by
+    /// the lexer: `Str (LBrace expr RBrace Str)*`.
+    fn parse_fmt_string(&mut self, first: Token) -> Expr {
+        let mut parts = vec![FmtPart::Text(first.text)];
+        let mut end = first.span;
+        loop {
+            if !self.at(TokenKind::LBrace) {
+                break;
+            }
+            self.advance();
+            let expr = self.parse_expr();
+            if !self.eat(TokenKind::RBrace) {
+                self.error_here("expected `}` to close interpolation");
+            }
+            parts.push(FmtPart::Expr(Box::new(expr)));
+            match self.peek_kind() {
+                TokenKind::Str => {
+                    let t = self.advance();
+                    parts.push(FmtPart::Text(t.text));
+                    end = t.span;
+                }
+                _ => {
+                    self.error_here("expected string continuation after interpolation");
+                    break;
+                }
+            }
+        }
+        Expr::Fmt {
+            parts,
+            span: first.span.join(end),
+        }
+    }
+
     fn parse_primary(&mut self) -> Expr {
         let tok = self.peek().clone();
         match tok.kind {
@@ -732,9 +771,15 @@ impl Parser {
             }
             TokenKind::Str => {
                 self.advance();
-                Expr::Str {
-                    value: tok.text,
-                    span: tok.span,
+                // A string followed by `{` is an interpolated string:
+                // `"Hello {name}"` lexes as Str, LBrace, expr, RBrace, Str...
+                if self.at(TokenKind::LBrace) {
+                    self.parse_fmt_string(tok)
+                } else {
+                    Expr::Str {
+                        value: tok.text,
+                        span: tok.span,
+                    }
                 }
             }
             TokenKind::True => {

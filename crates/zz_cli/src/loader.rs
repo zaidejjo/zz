@@ -1,4 +1,4 @@
-//! Import resolution and program loading (Phase 2).
+//! Import resolution and program loading (Phase 2, extended in Phase 2.5).
 //!
 //! Resolves `import` statements to files, parses and type-checks every
 //! module in dependency order, and detects circular imports.
@@ -7,18 +7,23 @@
 //! - `import std.*` → standard library (no file; signatures are seeded).
 //! - `import a.b`   → `<dir of importing file>/a/b.zz`.
 //!
-//! Imported modules are merged into the importing scope (include-style):
-//! their top-level functions and bindings become visible to the importer.
+//! Namespacing (Phase 2.5): every module is bound to a namespace — the last
+//! path component of its file stem, or an explicit alias
+//! (`import math.utils as m`). The module's top-level functions and bindings
+//! are registered under `ns.name`, and references to them inside the module
+//! are rewritten to qualified paths. Imported modules are referenced by their
+//! namespace: `utils.double(6)`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use zz_checker::{check_program, FuncSig, Type};
-use zz_frontend::ast::{Program, Stmt};
+use zz_frontend::ast::{Block, Expr, FmtPart, Pattern, Program, Stmt};
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
 use zz_frontend::span::Span;
-use zz_stdlib::{stdlib_funcs, STDLIB_MODULES};
+use zz_runtime::NativeEntry;
+use zz_stdlib::{register_module_namespace, stdlib_funcs, stdlib_natives, STDLIB_MODULES};
 
 /// A file that failed to parse or type-check.
 #[derive(Debug)]
@@ -44,6 +49,9 @@ pub struct LoadResult {
     /// Top-level bindings from all modules.
     #[allow(dead_code)]
     pub bindings: HashMap<String, Type>,
+    /// Native implementations (stdlib + namespaced copies), for the
+    /// interpreter.
+    pub natives: HashMap<String, NativeEntry>,
     pub errors: Vec<LoadError>,
 }
 
@@ -56,6 +64,12 @@ struct Loader {
     errors: Vec<LoadError>,
     funcs: HashMap<String, FuncSig>,
     bindings: HashMap<String, Type>,
+    natives: HashMap<String, NativeEntry>,
+    /// Namespace → canonical path of the module (or `std:<module>` for the
+    /// standard library) that owns it.
+    namespaces: HashMap<String, PathBuf>,
+    /// Canonical path → namespace it was registered under.
+    ns_of: HashMap<PathBuf, String>,
 }
 
 /// Load an entry file and all of its imports.
@@ -69,15 +83,27 @@ pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
         errors: Vec::new(),
         funcs: stdlib_funcs(),
         bindings: HashMap::new(),
+        natives: stdlib_natives(),
+        namespaces: HashMap::new(),
+        ns_of: HashMap::new(),
     };
-    loader.load_file(main_path)?;
+    loader.load_file(main_path, None)?;
     Ok(loader.finish())
+}
+
+/// The namespace a module is bound to: its alias, or its file stem.
+fn module_ns(alias: Option<&str>, path: &Path) -> String {
+    alias.map(str::to_string).unwrap_or_else(|| {
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    })
 }
 
 impl Loader {
     /// Parse a file and recursively load its imports (DFS post-order, so
     /// dependencies land in `order` before their dependents).
-    fn load_file(&mut self, path: &Path) -> Result<(), String> {
+    fn load_file(&mut self, path: &Path, alias: Option<&str>) -> Result<(), String> {
         let canon = path
             .canonicalize()
             .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
@@ -114,30 +140,42 @@ impl Loader {
 
         self.visiting.insert(canon.clone());
 
-        let imports: Vec<Vec<String>> = parsed
+        let imports: Vec<(Vec<String>, Option<String>)> = parsed
             .program
             .stmts
             .iter()
             .filter_map(|s| match s {
-                Stmt::Import { path, .. } => Some(path.clone()),
+                Stmt::Import { path, alias, .. } => Some((path.clone(), alias.clone())),
                 _ => None,
             })
             .collect();
 
-        for imp in imports {
+        for (imp, imp_alias) in imports {
             if imp.first().map(String::as_str) == Some("std") {
-                if let Some(module) = imp.get(1) {
-                    if !STDLIB_MODULES.contains(&module.as_str()) {
-                        self.errors.push(LoadError {
-                            name: path.display().to_string(),
-                            source: source.clone(),
-                            diags: vec![error_at(
-                                format!("unknown standard library module `std.{module}`"),
-                                Span::new(0, 0),
-                            )],
-                        });
-                    }
+                let Some(module) = imp.get(1) else { continue };
+                if !STDLIB_MODULES.contains(&module.as_str()) {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source: source.clone(),
+                        diags: vec![error_at(
+                            format!("unknown standard library module `std.{module}`"),
+                            Span::new(0, 0),
+                        )],
+                    });
+                    continue;
                 }
+                let ns = imp_alias.unwrap_or_else(|| module.clone());
+                if let Err(msg) =
+                    register_module_namespace(module, &ns, &mut self.funcs, &mut self.natives)
+                {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source: source.clone(),
+                        diags: vec![error_at(msg, Span::new(0, 0))],
+                    });
+                    continue;
+                }
+                self.register_ns(&ns, &PathBuf::from(format!("std:{module}")), path, &source);
                 continue;
             }
             let rel = canon
@@ -162,16 +200,86 @@ impl Loader {
                     });
                     continue;
                 }
+                // A module already loaded under a different namespace cannot
+                // be re-imported under another one.
+                if let Some(existing) = self.ns_of.get(&rel_canon) {
+                    let want = module_ns(imp_alias.as_deref(), &rel);
+                    if existing != &want {
+                        self.errors.push(LoadError {
+                            name: path.display().to_string(),
+                            source: source.clone(),
+                            diags: vec![error_at(
+                                format!(
+                                    "`{}` is imported under two namespaces: `{existing}` and `{want}`",
+                                    rel.display()
+                                ),
+                                Span::new(0, 0),
+                            )],
+                        });
+                        continue;
+                    }
+                }
             }
-            self.load_file(&rel)?;
+            self.load_file(&rel, imp_alias.as_deref())?;
         }
 
         self.visiting.remove(&canon);
         self.done.insert(canon.clone());
         self.sources.insert(canon.clone(), source);
-        self.programs.insert(canon.clone(), parsed.program);
-        self.order.push(canon);
+
+        let ns = module_ns(alias, &canon);
+        let src = self.sources[&canon].clone();
+        if self.register_ns(&ns, &canon, path, &src) {
+            let mut program = parsed.program;
+            namespace_program(&mut program, &ns);
+            self.programs.insert(canon.clone(), program);
+            self.order.push(canon);
+        }
         Ok(())
+    }
+
+    /// Register a namespace → module mapping, detecting collisions. Returns
+    /// false (and records an error) when two different modules claim the same
+    /// namespace, or one module is claimed by two namespaces.
+    fn register_ns(&mut self, ns: &str, canon: &Path, display: &Path, source: &str) -> bool {
+        if let Some(existing) = self.ns_of.get(canon) {
+            if existing != ns {
+                self.errors.push(LoadError {
+                    name: display.display().to_string(),
+                    source: source.to_string(),
+                    diags: vec![error_at(
+                        format!(
+                            "module `{}` is imported under two namespaces: `{existing}` and `{ns}`",
+                            display.display()
+                        ),
+                        Span::new(0, 0),
+                    )],
+                });
+                return false;
+            }
+            return true;
+        }
+        if let Some(existing) = self.namespaces.get(ns) {
+            if existing != canon {
+                self.errors.push(LoadError {
+                    name: display.display().to_string(),
+                    source: source.to_string(),
+                    diags: vec![error_at(
+                        format!(
+                            "namespace `{ns}` is claimed by both `{}` and `{}`",
+                            existing.display(),
+                            display.display()
+                        ),
+                        Span::new(0, 0),
+                    )],
+                });
+                return false;
+            }
+            return true;
+        }
+        self.namespaces.insert(ns.to_string(), canon.to_path_buf());
+        self.ns_of.insert(canon.to_path_buf(), ns.to_string());
+        true
     }
 
     /// Type-check every module in dependency order, accumulating the checker
@@ -205,7 +313,212 @@ impl Loader {
             files,
             funcs: self.funcs,
             bindings: self.bindings,
+            natives: self.natives,
             errors: self.errors,
+        }
+    }
+}
+
+/// Rewrite a module's AST so its top-level definitions are namespaced:
+/// - top-level `func foo` becomes `func ns.foo`,
+/// - top-level `x := ...` becomes `x := ...` with binding name `ns.x`,
+/// - references to those names (`Expr::Ident`) become `Expr::Path([ns, name])`
+///   unless shadowed by a local binding.
+fn namespace_program(program: &mut Program, ns: &str) {
+    let mut top = HashSet::new();
+    for stmt in &program.stmts {
+        match stmt {
+            Stmt::Func { name, .. } | Stmt::Decl { name, .. } => {
+                top.insert(name.name.clone());
+            }
+            _ => {}
+        }
+    }
+    let mut rw = Rewriter {
+        ns,
+        top: &top,
+        scopes: vec![HashSet::new()],
+    };
+    for stmt in &mut program.stmts {
+        rw.rewrite_stmt(stmt);
+    }
+}
+
+struct Rewriter<'a> {
+    ns: &'a str,
+    top: &'a HashSet<String>,
+    /// Stack of shadowing scopes; each holds names declared so far.
+    scopes: Vec<HashSet<String>>,
+}
+
+impl Rewriter<'_> {
+    fn is_shadowed(&self, name: &str) -> bool {
+        self.scopes.iter().any(|s| s.contains(name))
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(HashSet::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    fn declare(&mut self, name: &str) {
+        if let Some(s) = self.scopes.last_mut() {
+            s.insert(name.to_string());
+        }
+    }
+
+    fn rewrite_stmt(&mut self, stmt: &mut Stmt) {
+        match stmt {
+            Stmt::Decl { name, value, .. } => {
+                if self.top.contains(&name.name) {
+                    name.name = format!("{}.{}", self.ns, name.name);
+                }
+                self.rewrite_expr(value);
+                self.declare(&name.name);
+            }
+            Stmt::Func {
+                name, params, body, ..
+            } => {
+                let is_top = self.top.contains(&name.name);
+                if is_top {
+                    name.name = format!("{}.{}", self.ns, name.name);
+                }
+                self.push_scope();
+                if !is_top {
+                    // A nested func shadows its own name within its body.
+                    self.declare(&name.name);
+                }
+                for p in params {
+                    self.declare(&p.name.name);
+                }
+                self.rewrite_block(body);
+                self.pop_scope();
+            }
+            Stmt::Return { value, .. } => {
+                if let Some(v) = value {
+                    self.rewrite_expr(v);
+                }
+            }
+            Stmt::Expr(e) => self.rewrite_expr(e),
+            Stmt::Import { .. } => {}
+        }
+    }
+
+    fn rewrite_block(&mut self, block: &mut Block) {
+        self.push_scope();
+        for stmt in &mut block.stmts {
+            self.rewrite_stmt(stmt);
+        }
+        self.pop_scope();
+    }
+
+    fn rewrite_expr(&mut self, expr: &mut Expr) {
+        match expr {
+            Expr::Ident { name, span } => {
+                if self.top.contains(name) && !self.is_shadowed(name) {
+                    *expr = Expr::Path {
+                        parts: vec![self.ns.to_string(), name.clone()],
+                        span: *span,
+                    };
+                }
+            }
+            Expr::Paren { expr: inner, .. } => self.rewrite_expr(inner),
+            Expr::Unary { expr: inner, .. } => self.rewrite_expr(inner),
+            Expr::Binary { left, right, .. } => {
+                self.rewrite_expr(left);
+                self.rewrite_expr(right);
+            }
+            Expr::Call { callee, args, .. } => {
+                self.rewrite_expr(callee);
+                for a in args {
+                    self.rewrite_expr(a);
+                }
+            }
+            Expr::Closure { params, body, .. } => {
+                self.push_scope();
+                for p in params {
+                    self.declare(&p.name.name);
+                }
+                self.rewrite_expr(body);
+                self.pop_scope();
+            }
+            Expr::If {
+                cond, then, els, ..
+            } => {
+                self.rewrite_expr(cond);
+                self.rewrite_block(then);
+                if let Some(e) = els {
+                    self.rewrite_expr(e);
+                }
+            }
+            Expr::While { cond, body, .. } => {
+                self.rewrite_expr(cond);
+                self.rewrite_block(body);
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.rewrite_expr(scrutinee);
+                for arm in arms {
+                    self.push_scope();
+                    if let Pattern::Binding { name } = &arm.pat {
+                        self.declare(&name.name);
+                    }
+                    self.rewrite_expr(&mut arm.body);
+                    self.pop_scope();
+                }
+            }
+            Expr::IfLet {
+                pat,
+                value,
+                then,
+                els,
+                ..
+            } => {
+                self.rewrite_expr(value);
+                self.push_scope();
+                if let Pattern::Binding { name } = pat {
+                    self.declare(&name.name);
+                }
+                self.rewrite_block(then);
+                if let Some(e) = els {
+                    self.rewrite_expr(e);
+                }
+                self.pop_scope();
+            }
+            Expr::Try { expr: inner, .. } => self.rewrite_expr(inner),
+            Expr::Block(b) => self.rewrite_block(b),
+            Expr::Variant { arg, .. } => {
+                if let Some(a) = arg {
+                    self.rewrite_expr(a);
+                }
+            }
+            Expr::Array { elems, .. } => {
+                for e in elems {
+                    self.rewrite_expr(e);
+                }
+            }
+            Expr::Dict { entries, .. } => {
+                for (k, v) in entries {
+                    self.rewrite_expr(k);
+                    self.rewrite_expr(v);
+                }
+            }
+            Expr::Fmt { parts, .. } => {
+                for part in parts {
+                    if let FmtPart::Expr(e) = part {
+                        self.rewrite_expr(e);
+                    }
+                }
+            }
+            Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::Str { .. }
+            | Expr::Bool { .. }
+            | Expr::Path { .. } => {}
         }
     }
 }
@@ -234,24 +547,101 @@ mod tests {
     #[test]
     fn loads_relative_import() {
         let dir = temp_project(&[
-            ("main.zz", "import math.utils\nx := double(21)"),
+            ("main.zz", "import math.utils\nx := utils.double(21)"),
             ("math/utils.zz", "func double(n: int) -> int { n * 2 }"),
         ]);
         let result = load_program(&dir.join("main.zz")).unwrap();
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert_eq!(result.programs.len(), 2);
-        assert_eq!(result.bindings["x"], Type::Int);
+        assert_eq!(result.bindings["main.x"], Type::Int);
     }
 
     #[test]
     fn imported_bindings_visible() {
         let dir = temp_project(&[
-            ("main.zz", "import config\nx := base + 1"),
+            ("main.zz", "import config\nx := config.base + 1"),
             ("config.zz", "base := 41"),
         ]);
         let result = load_program(&dir.join("main.zz")).unwrap();
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        assert_eq!(result.bindings["x"], Type::Int);
+        assert_eq!(result.bindings["main.x"], Type::Int);
+    }
+
+    #[test]
+    fn import_alias_works() {
+        let dir = temp_project(&[
+            ("main.zz", "import math.utils as m\nx := m.double(21)"),
+            ("math/utils.zz", "func double(n: int) -> int { n * 2 }"),
+        ]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.bindings["main.x"], Type::Int);
+    }
+
+    #[test]
+    fn module_internal_calls_rewritten() {
+        // `double` calls `twice` internally; both are top-level in utils.zz.
+        let dir = temp_project(&[
+            ("main.zz", "import math.utils\nx := utils.double(21)"),
+            (
+                "math/utils.zz",
+                "func twice(n: int) -> int { n * 2 }\nfunc double(n: int) -> int { twice(n) }",
+            ),
+        ]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.bindings["main.x"], Type::Int);
+    }
+
+    #[test]
+    fn shadowing_respected() {
+        // Local `n` shadows the top-level `n` inside the func body.
+        let dir = temp_project(&[
+            ("main.zz", "import math.utils\nx := utils.double(21)"),
+            (
+                "math/utils.zz",
+                "n := 100\nfunc double(n: int) -> int { n * 2 }",
+            ),
+        ]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.bindings["main.x"], Type::Int);
+    }
+
+    #[test]
+    fn namespace_collision_detected() {
+        // Two modules with the same stem claim the same namespace.
+        let dir = temp_project(&[
+            ("main.zz", "import a.utils\nimport b.utils\n1"),
+            ("a/utils.zz", "func f() -> int { 1 }"),
+            ("b/utils.zz", "func g() -> int { 2 }"),
+        ]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(
+            result.errors.iter().any(|e| e
+                .diags
+                .iter()
+                .any(|d| d.message.contains("claimed by both"))),
+            "expected namespace collision error, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn two_namespaces_for_one_module_detected() {
+        let dir = temp_project(&[
+            ("main.zz", "import utils\nimport utils as u\n1"),
+            ("utils.zz", "func f() -> int { 1 }"),
+        ]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.diags.iter().any(|d| d.message.contains("two namespaces"))),
+            "expected two-namespace error, got: {:?}",
+            result.errors
+        );
     }
 
     #[test]
@@ -353,23 +743,22 @@ mod tests {
     #[test]
     fn full_program_runs_with_imports() {
         use zz_runtime::{Interp, Value};
-        use zz_stdlib::stdlib_natives;
 
         let dir = temp_project(&[
-            ("main.zz", "import std.io\nimport std.str\nimport math.utils\nn := double(6)\nstd.str.length(\"abc\")"),
+            ("main.zz", "import std.io\nimport std.str\nimport math.utils\nn := utils.double(6)\nstr.length(\"abc\")"),
             ("math/utils.zz", "func double(n: int) -> int { n * 2 }"),
         ]);
         let result = load_program(&dir.join("main.zz")).unwrap();
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
-        let mut interp = Interp::with_natives(stdlib_natives());
+        let mut interp = Interp::with_natives(result.natives.clone());
         let mut last = Value::Unit;
         for p in &result.programs {
             last = interp.run(p).unwrap();
         }
         assert_eq!(last, Value::Int(3));
         // The imported function ran: main's `n` binding must hold.
-        assert_eq!(result.bindings["n"], zz_checker::Type::Int);
+        assert_eq!(result.bindings["main.n"], zz_checker::Type::Int);
     }
 
     #[test]
@@ -379,5 +768,8 @@ mod tests {
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert_eq!(result.programs.len(), 1);
         assert!(result.funcs.contains_key("std.io.println"));
+        // Namespaced copies are registered too.
+        assert!(result.funcs.contains_key("io.println"));
+        assert!(result.natives.contains_key("io.println"));
     }
 }

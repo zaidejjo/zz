@@ -5,6 +5,7 @@
 
 pub mod env;
 pub mod interp;
+pub mod json;
 pub mod value;
 
 pub use env::Env;

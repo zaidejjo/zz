@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use zz_frontend::ast::{
-    BinOp, Block, Expr, Lit, MatchArm, Param, Pattern, Program, Stmt, Ty, TyKind, UnOp,
+    BinOp, Block, Expr, FmtPart, Lit, MatchArm, Param, Pattern, Program, Stmt, Ty, TyKind, UnOp,
 };
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::span::Span;
@@ -339,6 +339,16 @@ impl Checker {
             Expr::Bool { .. } => Type::Bool,
             Expr::Ident { name, span } => self.lookup(name, *span),
             Expr::Path { parts, span } => self.lookup(&parts.join("."), *span),
+            Expr::Fmt { parts, .. } => {
+                // Interpolated strings are `str`; embedded expressions are
+                // checked for validity (their Display form is used at runtime).
+                for part in parts {
+                    if let FmtPart::Expr(e) = part {
+                        let _ = self.check_expr(e);
+                    }
+                }
+                Type::Str
+            }
             Expr::Paren { expr, .. } => self.check_expr(expr),
             Expr::Unary { op, expr, span } => self.check_unary(*op, expr, *span),
             Expr::Binary {

@@ -13,7 +13,7 @@ use zz_checker::{check_program, FuncSig, Type};
 use zz_frontend::diag::{error_at, render_to_string, Files, RawDiag};
 use zz_frontend::parse;
 use zz_runtime::{EvalError, Interp, Value};
-use zz_stdlib::{stdlib_funcs, stdlib_natives};
+use zz_stdlib::{register_module_namespace, stdlib_funcs, stdlib_natives, STDLIB_MODULES};
 
 /// Result of evaluating one source snippet.
 pub struct EvalOutput {
@@ -69,6 +69,60 @@ impl Session {
                 output: String::new(),
                 errors: Some(render_to_string(&self.files, self.file_id, &parsed.errors)),
             };
+        }
+
+        // Process imports: register `std.*` modules under their namespace
+        // (or alias) in both the checker seed and the interpreter. Relative
+        // imports need a file context and are rejected in the REPL.
+        for stmt in &parsed.program.stmts {
+            if let zz_frontend::ast::Stmt::Import { path, alias, span } = stmt {
+                if path.first().map(String::as_str) != Some("std") {
+                    self.last_had_errors = true;
+                    return EvalOutput {
+                        output: String::new(),
+                        errors: Some(render_to_string(
+                            &self.files,
+                            self.file_id,
+                            &[error_at(
+                                "relative imports require a file context (`zz run`)",
+                                *span,
+                            )],
+                        )),
+                    };
+                }
+                let Some(module) = path.get(1) else { continue };
+                if !STDLIB_MODULES.contains(&module.as_str()) {
+                    self.last_had_errors = true;
+                    return EvalOutput {
+                        output: String::new(),
+                        errors: Some(render_to_string(
+                            &self.files,
+                            self.file_id,
+                            &[error_at(
+                                format!("unknown standard library module `std.{module}`"),
+                                *span,
+                            )],
+                        )),
+                    };
+                }
+                let ns = alias.clone().unwrap_or_else(|| module.clone());
+                if let Err(msg) = register_module_namespace(
+                    module,
+                    &ns,
+                    &mut self.funcs,
+                    &mut self.interp.natives,
+                ) {
+                    self.last_had_errors = true;
+                    return EvalOutput {
+                        output: String::new(),
+                        errors: Some(render_to_string(
+                            &self.files,
+                            self.file_id,
+                            &[error_at(msg, *span)],
+                        )),
+                    };
+                }
+            }
         }
 
         let checked = check_program(&parsed.program, self.bindings.clone(), self.funcs.clone());
@@ -236,7 +290,7 @@ mod tests {
     #[test]
     fn stdlib_callable_in_snippet() {
         let mut s = Session::new("<test>");
-        let out = s.eval("import std.str\nstd.str.length(\"abc\")");
+        let out = s.eval("import std.str\nstr.length(\"abc\")");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "3");
     }
@@ -244,7 +298,7 @@ mod tests {
     #[test]
     fn stdlib_generic_vec_call() {
         let mut s = Session::new("<test>");
-        let out = s.eval("v := [1, 2, 3]\np := std.vec.push(v, 4)\nstd.vec.len(p)");
+        let out = s.eval("import std.vec\nv := [1, 2, 3]\np := vec.push(v, 4)\nvec.len(p)");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "4");
     }
@@ -252,7 +306,7 @@ mod tests {
     #[test]
     fn stdlib_print_any_value() {
         let mut s = Session::new("<test>");
-        let out = s.eval("std.io.println(42)");
+        let out = s.eval("import std.io\nio.println(42)");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "");
     }
@@ -260,7 +314,7 @@ mod tests {
     #[test]
     fn stdlib_wrong_arg_type_blocks() {
         let mut s = Session::new("<test>");
-        let out = s.eval("std.str.length(5)");
+        let out = s.eval("import std.str\nstr.length(5)");
         assert!(out.errors.is_some(), "expected type error");
         // Must not pollute the session.
         let out2 = s.eval("1");
@@ -270,7 +324,151 @@ mod tests {
     #[test]
     fn stdlib_unknown_func_errors() {
         let mut s = Session::new("<test>");
-        let out = s.eval("std.io.nope(1)");
+        let out = s.eval("import std.io\nio.nope(1)");
+        assert!(out.errors.is_some(), "expected error");
+    }
+
+    #[test]
+    fn stdlib_import_alias() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.str as s\ns.length(\"abc\")");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "3");
+    }
+
+    #[test]
+    fn relative_import_rejected_in_repl() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import config");
+        let errs = out.errors.expect("expected error");
+        assert!(errs.contains("require a file context"), "errors: {errs}");
+    }
+
+    #[test]
+    fn unknown_stdlib_module_rejected_in_repl() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.nope");
+        let errs = out.errors.expect("expected error");
+        assert!(
+            errs.contains("unknown standard library module"),
+            "errors: {errs}"
+        );
+    }
+
+    // --- string interpolation ---------------------------------------------
+
+    #[test]
+    fn fstring_binding() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("name := \"World\"\n\"Hello {name}\"");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "Hello World");
+    }
+
+    #[test]
+    fn fstring_expression() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("x := 1 + 2\n\"sum: {x}\"");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "sum: 3");
+    }
+
+    #[test]
+    fn fstring_function_call() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("func dbl(n: int) -> int { n * 2 }\n\"double: {dbl(4)}\"");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "double: 8");
+    }
+
+    #[test]
+    fn fstring_multi_part() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("a := 1\nb := 2\n\"{a} + {b} = {a + b}\"");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "1 + 2 = 3");
+    }
+
+    #[test]
+    fn fstring_literal_brace_not_interpolated() {
+        // `%` is not an identifier start, so `{` stays literal.
+        let mut s = Session::new("<test>");
+        let out = s.eval("\"100% sure\"");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "100% sure");
+    }
+
+    // --- std.json ----------------------------------------------------------
+
+    #[test]
+    fn json_parse_and_get() {
+        let mut s = Session::new("<test>");
+        let out =
+            s.eval("import std.json\nj := json.parse(\"{\\\"a\\\": [1, 2]}\")\njson.get(j, \"a\")");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "[1,2]");
+    }
+
+    #[test]
+    fn json_as_int() {
+        let mut s = Session::new("<test>");
+        let out = s.eval(
+            "import std.json\nj := json.parse(\"{\\\"n\\\": 42}\")\njson.as_int(json.get(j, \"n\"))",
+        );
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "42");
+    }
+
+    #[test]
+    fn json_stringify_array() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.json\njson.stringify([1, 2, 3])");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "[1,2,3]");
+    }
+
+    #[test]
+    fn json_stringify_dict() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.json\njson.stringify({\"name\": \"zaid\"})");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, r#"{"name":"zaid"}"#);
+    }
+
+    #[test]
+    fn json_wrong_access_errors() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.json\nj := json.parse(\"[1, 2]\")\njson.as_int(j)");
+        assert!(out.errors.is_some(), "expected error");
+    }
+
+    // --- std.http ----------------------------------------------------------
+
+    #[test]
+    fn http_get_route() {
+        let mut s = Session::new("<test>");
+        let out = s.eval(
+            "import std.http\ns := http.server()\ns2 := http.get(s, \"/hi\", |path: str| \"hello\")\nhttp.handle(s2, \"GET\", \"/hi\", \"\")",
+        );
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "hello");
+    }
+
+    #[test]
+    fn http_post_body_passthrough() {
+        let mut s = Session::new("<test>");
+        let out = s.eval(
+            "import std.http\ns := http.server()\ns2 := http.post(s, \"/echo\", |body: str| body)\nhttp.handle(s2, \"POST\", \"/echo\", \"ping\")",
+        );
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "ping");
+    }
+
+    #[test]
+    fn http_no_route_errors() {
+        let mut s = Session::new("<test>");
+        let out =
+            s.eval("import std.http\ns := http.server()\nhttp.handle(s, \"GET\", \"/nope\", \"\")");
         assert!(out.errors.is_some(), "expected error");
     }
 }

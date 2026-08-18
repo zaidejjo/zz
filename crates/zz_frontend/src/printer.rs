@@ -60,6 +60,18 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_fstring() {
+        round_trips("name := \"World\"\nmsg := \"Hello {name}!\"");
+        round_trips("\"a {x} b {y} c\"");
+        round_trips("\"nested {f(\"x {y}\")} z\"");
+    }
+
+    #[test]
+    fn round_trip_import_alias() {
+        round_trips("import std.io as console\nconsole.println(1)");
+    }
+
+    #[test]
     fn round_trip_multiple_statements() {
         round_trips("let a = 1\nlet b = 2\nlet c = a + b\n");
     }

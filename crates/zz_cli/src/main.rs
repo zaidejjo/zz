@@ -95,7 +95,7 @@ fn run_file(path: Option<&String>) -> Result<(), String> {
         return Err("program failed".to_string());
     }
 
-    let mut interp = Interp::with_natives(zz_stdlib::stdlib_natives());
+    let mut interp = Interp::with_natives(loaded.natives.clone());
     let mut last = Value::Unit;
     for (i, program) in loaded.programs.iter().enumerate() {
         match interp.run(program) {

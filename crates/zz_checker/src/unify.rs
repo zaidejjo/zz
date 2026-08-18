@@ -106,6 +106,7 @@ impl Unifier {
             | (Type::Str, Type::Str)
             | (Type::Unit, Type::Unit) => Ok(()),
             (Type::Named(a), Type::Named(b)) if a == b => Ok(()),
+            (Type::Json, Type::Json) | (Type::HttpServer, Type::HttpServer) => Ok(()),
             (Type::Tuple(xs), Type::Tuple(ys)) => {
                 if xs.len() != ys.len() {
                     return Err(UnifyError {

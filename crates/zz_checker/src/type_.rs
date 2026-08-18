@@ -23,6 +23,10 @@ pub enum Type {
     Dict(Box<Type>, Box<Type>),
     /// `A | B` — union type.
     Union(Vec<Type>),
+    /// Opaque JSON value (produced by `std.json.parse`).
+    Json,
+    /// Opaque HTTP server handle (produced by `std.http.server`).
+    HttpServer,
     /// Inference variable.
     Var(u32),
     /// Named type: a generic parameter (e.g. `T` in `func id<T>`).
@@ -77,6 +81,8 @@ impl fmt::Display for Type {
                 }
                 Ok(())
             }
+            Type::Json => write!(f, "json"),
+            Type::HttpServer => write!(f, "http.server"),
             Type::Var(_) => write!(f, "_"),
             Type::Named(n) => write!(f, "{n}"),
         }
