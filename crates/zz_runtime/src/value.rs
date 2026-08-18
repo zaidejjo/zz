@@ -23,6 +23,16 @@ pub enum Value {
     Array(Vec<Value>),
     /// `{k1: v1, k2: v2, ...}` — insertion-ordered key/value pairs.
     Dict(Vec<(Value, Value)>),
+    /// A native (Rust-backed) function from the standard library.
+    Native(NativeFunc),
+}
+
+/// A native function reference: name + arity. The implementation lives in
+/// the interpreter's native registry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeFunc {
+    pub name: String,
+    pub arity: usize,
 }
 
 /// A callable value: parameter list, body expression, and the environment
@@ -89,6 +99,7 @@ impl fmt::Display for Value {
                 }
                 write!(f, "}}")
             }
+            Value::Native(nf) => write!(f, "<native {}>", nf.name),
         }
     }
 }

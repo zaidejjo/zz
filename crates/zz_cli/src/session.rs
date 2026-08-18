@@ -13,6 +13,7 @@ use zz_checker::{check_program, FuncSig, Type};
 use zz_frontend::diag::{error_at, render_to_string, Files, RawDiag};
 use zz_frontend::parse;
 use zz_runtime::{EvalError, Interp, Value};
+use zz_stdlib::{stdlib_funcs, stdlib_natives};
 
 /// Result of evaluating one source snippet.
 pub struct EvalOutput {
@@ -40,9 +41,9 @@ impl Session {
         let mut files = Files::new();
         let file_id = files.add(name.clone(), String::new());
         Session {
-            interp: Interp::new(),
+            interp: Interp::with_natives(stdlib_natives()),
             bindings: HashMap::new(),
-            funcs: HashMap::new(),
+            funcs: stdlib_funcs(),
             files,
             file_id,
             name,
@@ -230,5 +231,46 @@ mod tests {
         let out = s.eval("import std.io\n1 + 1");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "2");
+    }
+
+    #[test]
+    fn stdlib_callable_in_snippet() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.str\nstd.str.length(\"abc\")");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "3");
+    }
+
+    #[test]
+    fn stdlib_generic_vec_call() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("v := [1, 2, 3]\np := std.vec.push(v, 4)\nstd.vec.len(p)");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "4");
+    }
+
+    #[test]
+    fn stdlib_print_any_value() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("std.io.println(42)");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "");
+    }
+
+    #[test]
+    fn stdlib_wrong_arg_type_blocks() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("std.str.length(5)");
+        assert!(out.errors.is_some(), "expected type error");
+        // Must not pollute the session.
+        let out2 = s.eval("1");
+        assert!(out2.errors.is_none());
+    }
+
+    #[test]
+    fn stdlib_unknown_func_errors() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("std.io.nope(1)");
+        assert!(out.errors.is_some(), "expected error");
     }
 }

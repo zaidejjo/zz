@@ -8,5 +8,6 @@ pub mod interp;
 pub mod value;
 
 pub use env::Env;
-pub use interp::{EvalError, Interp};
-pub use value::Value;
+pub use interp::{EvalError, Interp, NativeEntry, NativeFn};
+pub use value::{NativeFunc, Value};
+pub use zz_frontend::span::Span;

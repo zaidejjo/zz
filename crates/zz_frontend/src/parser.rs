@@ -759,9 +759,26 @@ impl Parser {
             }
             TokenKind::Ident => {
                 self.advance();
-                Expr::Ident {
-                    name: tok.text,
-                    span: tok.span,
+                let mut parts = vec![tok.text];
+                let mut end = tok.span;
+                // Member access: `a.b.c` becomes a dotted path. Only chains
+                // of identifiers are supported (no arbitrary member access).
+                while self.at(TokenKind::Dot) && self.peek_kind_at(1) == TokenKind::Ident {
+                    self.advance(); // `.`
+                    let member = self.advance(); // identifier
+                    parts.push(member.text);
+                    end = member.span;
+                }
+                if parts.len() == 1 {
+                    Expr::Ident {
+                        name: parts.pop().unwrap(),
+                        span: tok.span,
+                    }
+                } else {
+                    Expr::Path {
+                        parts,
+                        span: tok.span.join(end),
+                    }
                 }
             }
             TokenKind::LParen => {
@@ -1590,6 +1607,37 @@ mod tests {
         match &p.stmts[1] {
             Stmt::Decl { value, .. } => assert!(matches!(value, E::Bool { .. })),
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_dotted_path() {
+        let prog = parse("r := std.io.println(1)\n");
+        assert!(prog.errors.is_empty(), "errors: {:?}", prog.errors);
+        match &prog.program.stmts[0] {
+            Stmt::Decl {
+                value: Expr::Call { callee, .. },
+                ..
+            } => match callee.as_ref() {
+                Expr::Path { parts, .. } => {
+                    assert_eq!(parts, &["std", "io", "println"]);
+                }
+                other => panic!("expected Path callee, got {other:?}"),
+            },
+            other => panic!("expected Decl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_ident_is_not_path() {
+        let prog = parse("x := 1\n");
+        assert!(prog.errors.is_empty());
+        match &prog.program.stmts[0] {
+            Stmt::Decl {
+                value: Expr::Int { .. },
+                ..
+            } => {}
+            other => panic!("expected plain decl, got {other:?}"),
         }
     }
 

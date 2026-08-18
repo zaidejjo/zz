@@ -9,7 +9,7 @@ use zz_frontend::ast::{BinOp, Block, Expr, Lit, Pattern, Program, Stmt, UnOp};
 use zz_frontend::span::Span;
 
 use crate::env::Env;
-use crate::value::{FuncValue, Value};
+use crate::value::{FuncValue, NativeFunc, Value};
 
 #[derive(Debug)]
 pub struct EvalError {
@@ -18,7 +18,7 @@ pub struct EvalError {
 }
 
 impl EvalError {
-    fn new(message: impl Into<String>, span: Span) -> Self {
+    pub fn new(message: impl Into<String>, span: Span) -> Self {
         EvalError {
             message: message.into(),
             span,
@@ -46,11 +46,25 @@ impl Flow {
     }
 }
 
+/// A native function implementation. Takes `&mut Vec<Value>` (not a slice)
+/// because `std.vec.push` must grow the argument vector.
+#[allow(clippy::ptr_arg)]
+pub type NativeFn = fn(&mut Vec<Value>) -> Result<Value, EvalError>;
+
+/// A registered native function: its arity and Rust implementation.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeEntry {
+    pub arity: usize,
+    pub f: NativeFn,
+}
+
 pub struct Interp {
     pub env: Env,
     /// Named functions, kept separate from the environment so recursive
     /// bodies can resolve their own name without circular captured envs.
     pub funcs: HashMap<String, FuncValue>,
+    /// Native (Rust-backed) functions, e.g. the standard library.
+    pub natives: HashMap<String, NativeEntry>,
 }
 
 impl Default for Interp {
@@ -64,6 +78,16 @@ impl Interp {
         Interp {
             env: Env::new(),
             funcs: HashMap::new(),
+            natives: HashMap::new(),
+        }
+    }
+
+    /// Create an interpreter with a native function registry.
+    pub fn with_natives(natives: HashMap<String, NativeEntry>) -> Self {
+        Interp {
+            env: Env::new(),
+            funcs: HashMap::new(),
+            natives,
         }
     }
 
@@ -127,6 +151,22 @@ impl Interp {
                 }
                 Err(EvalError::new(
                     format!("undefined variable `{name}`"),
+                    *span,
+                ))
+            }
+            Expr::Path { parts, span } => {
+                let name = parts.join(".");
+                if let Some(fv) = self.funcs.get(&name) {
+                    return Ok(Flow::Value(Value::Func(fv.clone())));
+                }
+                if let Some(entry) = self.natives.get(&name) {
+                    return Ok(Flow::Value(Value::Native(NativeFunc {
+                        name,
+                        arity: entry.arity,
+                    })));
+                }
+                Err(EvalError::new(
+                    format!("undefined function `{name}`"),
                     *span,
                 ))
             }
@@ -349,16 +389,37 @@ impl Interp {
         }
     }
 
-    fn call(&mut self, f: Value, args: Vec<Value>, span: Span) -> Result<Value, EvalError> {
-        let fv = match f {
-            Value::Func(fv) => fv,
-            other => {
-                return Err(EvalError::new(
-                    format!("cannot call a value of type `{other}`"),
-                    span,
-                ))
+    fn call(&mut self, f: Value, mut args: Vec<Value>, span: Span) -> Result<Value, EvalError> {
+        match f {
+            Value::Native(nf) => {
+                if args.len() != nf.arity {
+                    return Err(EvalError::new(
+                        format!("expected {} arguments, found {}", nf.arity, args.len()),
+                        span,
+                    ));
+                }
+                match self.natives.get(&nf.name) {
+                    Some(entry) => (entry.f)(&mut args),
+                    None => Err(EvalError::new(
+                        format!("unknown native function `{}`", nf.name),
+                        span,
+                    )),
+                }
             }
-        };
+            Value::Func(fv) => self.call_func(fv, args, span),
+            other => Err(EvalError::new(
+                format!("cannot call a value of type `{other}`"),
+                span,
+            )),
+        }
+    }
+
+    fn call_func(
+        &mut self,
+        fv: FuncValue,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, EvalError> {
         if args.len() != fv.params.len() {
             return Err(EvalError::new(
                 format!(
@@ -729,5 +790,58 @@ mod tests {
     #[test]
     fn import_is_noop() {
         assert_eq!(eval_src("import std.io\nx := 1\nx").unwrap(), Value::Int(1));
+    }
+
+    #[test]
+    fn native_function_dispatches() {
+        #[allow(clippy::ptr_arg)]
+        fn double(args: &mut Vec<Value>) -> Result<Value, EvalError> {
+            let n = match args.first() {
+                Some(Value::Int(n)) => *n,
+                _ => return Err(EvalError::new("expected int", Span::new(0, 0))),
+            };
+            Ok(Value::Int(n * 2))
+        }
+        let mut natives = HashMap::new();
+        natives.insert(
+            "test.double".into(),
+            NativeEntry {
+                arity: 1,
+                f: double,
+            },
+        );
+        let mut interp = Interp::with_natives(natives);
+        let parsed = parse("test.double(21)\n");
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let v = interp.run(&parsed.program).unwrap();
+        assert_eq!(v, Value::Int(42));
+    }
+
+    #[test]
+    fn native_wrong_arity_errors() {
+        fn noop(_: &mut Vec<Value>) -> Result<Value, EvalError> {
+            Ok(Value::Unit)
+        }
+        let mut natives = HashMap::new();
+        natives.insert("test.noop".into(), NativeEntry { arity: 1, f: noop });
+        let mut interp = Interp::with_natives(natives);
+        let parsed = parse("test.noop()\n");
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let err = interp.run(&parsed.program).unwrap_err();
+        assert!(
+            err.message.contains("expected 1 arguments"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn unknown_path_errors() {
+        let err = eval_src("foo.bar.baz(1)").unwrap_err();
+        assert!(
+            err.message.contains("undefined function `foo.bar.baz`"),
+            "{}",
+            err.message
+        );
     }
 }

@@ -86,6 +86,11 @@ pub enum Expr {
         name: String,
         span: Span,
     },
+    /// Dotted path: `std.io.println`. Resolved as a single qualified name.
+    Path {
+        parts: Vec<String>,
+        span: Span,
+    },
     /// Parenthesized expression. Kept in the AST so the printer preserves the
     /// parens (round-trip fidelity); the checker/interpreter just unwrap it.
     Paren {
@@ -285,6 +290,7 @@ impl Expr {
             | Expr::Str { span, .. }
             | Expr::Bool { span, .. }
             | Expr::Ident { span, .. }
+            | Expr::Path { span, .. }
             | Expr::Paren { span, .. }
             | Expr::Unary { span, .. }
             | Expr::Binary { span, .. }

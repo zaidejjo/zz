@@ -66,6 +66,7 @@ dependencies = [
  "zz_checker",
  "zz_frontend",
  "zz_runtime",
+ "zz_stdlib",
 ]
 
 [[package]]
@@ -81,4 +82,12 @@ version = "0.0.1"
 dependencies = [
  "codespan-reporting",
  "zz_frontend",
+]
+
+[[package]]
+name = "zz_stdlib"
+version = "0.0.1"
+dependencies = [
+ "zz_checker",
+ "zz_runtime",
 ]

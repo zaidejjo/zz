@@ -8,8 +8,12 @@
 
 use std::process::ExitCode;
 
+mod loader;
 mod repl;
 mod session;
+
+use zz_frontend::diag::{error_at, render_to_string, Files};
+use zz_runtime::{Interp, Value};
 
 use session::Session;
 
@@ -80,15 +84,38 @@ fn main() -> ExitCode {
 fn run_file(path: Option<&String>) -> Result<(), String> {
     let path =
         path.ok_or_else(|| "missing file argument\n\nusage: zz run <file.zz>".to_string())?;
-    let src = std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path}`: {e}"))?;
-    let mut session = Session::new(path);
-    let output = session.eval_to_console(&src);
-    if !output.is_empty() {
-        println!("{output}");
+
+    let loaded = loader::load_program(std::path::Path::new(path))?;
+    if !loaded.errors.is_empty() {
+        for e in &loaded.errors {
+            let mut files = Files::new();
+            let id = files.add(e.name.clone(), e.source.clone());
+            eprint!("{}", render_to_string(&files, id, &e.diags));
+        }
+        return Err("program failed".to_string());
     }
-    if session.last_eval_had_errors() {
-        Err("program failed".to_string())
-    } else {
-        Ok(())
+
+    let mut interp = Interp::with_natives(zz_stdlib::stdlib_natives());
+    let mut last = Value::Unit;
+    for (i, program) in loaded.programs.iter().enumerate() {
+        match interp.run(program) {
+            Ok(v) => last = v,
+            Err(e) => {
+                let (name, source) = loaded
+                    .files
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| (path.clone(), String::new()));
+                let mut files = Files::new();
+                let id = files.add(name, source);
+                let diags = vec![error_at(e.message.clone(), e.span)];
+                eprint!("{}", render_to_string(&files, id, &diags));
+                return Err("program failed".to_string());
+            }
+        }
     }
+    if last != Value::Unit {
+        println!("{last}");
+    }
+    Ok(())
 }

@@ -338,6 +338,7 @@ impl Checker {
             Expr::Str { .. } => Type::Str,
             Expr::Bool { .. } => Type::Bool,
             Expr::Ident { name, span } => self.lookup(name, *span),
+            Expr::Path { parts, span } => self.lookup(&parts.join("."), *span),
             Expr::Paren { expr, .. } => self.check_expr(expr),
             Expr::Unary { op, expr, span } => self.check_unary(*op, expr, *span),
             Expr::Binary {
@@ -562,7 +563,12 @@ impl Checker {
     fn check_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Type {
         // Direct call of a named function: bypass `lookup` so generic
         // functions are instantiated here rather than rejected as values.
-        if let Expr::Ident { name, .. } = callee {
+        let direct_name = match callee {
+            Expr::Ident { name, .. } => Some(name.clone()),
+            Expr::Path { parts, .. } => Some(parts.join(".")),
+            _ => None,
+        };
+        if let Some(name) = &direct_name {
             if let Some(sig) = self.funcs.get(name).cloned() {
                 let (ps, ret) = self.instantiate(&sig);
                 self.check_args_against(ps, args, span);
@@ -963,6 +969,9 @@ fn subst(t: &Type, subs: &HashMap<String, Type>) -> Type {
             ps.iter().map(|x| subst(x, subs)).collect(),
             Box::new(subst(r, subs)),
         ),
+        Type::Array(x) => Type::Array(Box::new(subst(x, subs))),
+        Type::Dict(k, v) => Type::Dict(Box::new(subst(k, subs)), Box::new(subst(v, subs))),
+        Type::Union(ts) => Type::Union(ts.iter().map(|x| subst(x, subs)).collect()),
         other => other.clone(),
     }
 }
