@@ -139,6 +139,16 @@ impl Parser {
             TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {
                 self.parse_short_decl()
             }
+            TokenKind::Struct => self.parse_struct(),
+            TokenKind::For => self.parse_for(),
+            TokenKind::Break => {
+                let tok = self.advance();
+                Stmt::Break { span: tok.span }
+            }
+            TokenKind::Continue => {
+                let tok = self.advance();
+                Stmt::Continue { span: tok.span }
+            }
             _ => {
                 // Try `TYPE IDENT = expr` (explicit declaration). Backtrack
                 // on failure so ordinary expressions still parse.
@@ -149,8 +159,79 @@ impl Parser {
                 }
                 self.pos = save_pos;
                 self.errors.truncate(save_errs);
-                Stmt::Expr(self.parse_expr())
+                let expr = self.parse_expr();
+                // `expr = expr` — assignment statement.
+                if self.at(TokenKind::Assign) {
+                    self.advance();
+                    let value = self.parse_expr();
+                    let span = expr.span().join(value.span());
+                    return Stmt::Assign {
+                        target: expr,
+                        value,
+                        span,
+                    };
+                }
+                Stmt::Expr(expr)
             }
+        }
+    }
+
+    fn parse_struct(&mut self) -> Stmt {
+        let struct_tok = self.advance();
+        let name = self
+            .expect_ident()
+            .unwrap_or_else(|| dummy_ident(struct_tok.span));
+        if !self.eat(TokenKind::LBrace) {
+            self.error_here("expected `{` to start struct body");
+        }
+        let mut fields = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            self.skip_stmt_ends();
+            if self.at(TokenKind::RBrace) {
+                break;
+            }
+            let fname = self
+                .expect_ident()
+                .unwrap_or_else(|| dummy_ident(self.peek().span));
+            if !self.eat(TokenKind::Colon) {
+                self.error_here("expected `:` after field name");
+            }
+            let fty = self.parse_type();
+            fields.push((fname, fty));
+            if self.eat(TokenKind::Comma) {
+                continue;
+            }
+            self.skip_stmt_ends();
+            if !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                self.error_here("expected `,` or `}` after field");
+            }
+        }
+        let end = if self.eat(TokenKind::RBrace) {
+            self.previous().span
+        } else {
+            self.error_here("expected `}` to close struct body");
+            self.peek().span
+        };
+        let span = struct_tok.span.join(end);
+        Stmt::Struct { name, fields, span }
+    }
+
+    fn parse_for(&mut self) -> Stmt {
+        let for_tok = self.advance();
+        let var = self
+            .expect_ident()
+            .unwrap_or_else(|| dummy_ident(for_tok.span));
+        if !self.eat(TokenKind::In) {
+            self.error_here("expected `in` after loop variable");
+        }
+        let iter = self.parse_expr();
+        let body = self.parse_block();
+        let span = for_tok.span.join(body.span);
+        Stmt::For {
+            var,
+            iter: Box::new(iter),
+            body,
+            span,
         }
     }
 
@@ -518,7 +599,24 @@ impl Parser {
     // --- expressions ------------------------------------------------------
 
     fn parse_expr(&mut self) -> Expr {
-        self.parse_or()
+        self.parse_range()
+    }
+
+    /// `a..b` — integer range. Lowest precedence so `for i in 0..n` parses
+    /// the bounds as full expressions.
+    fn parse_range(&mut self) -> Expr {
+        let start = self.parse_or();
+        if !self.at(TokenKind::DotDot) {
+            return start;
+        }
+        self.advance();
+        let end = self.parse_or();
+        let span = start.span().join(end.span());
+        Expr::Range {
+            start: Box::new(start),
+            end: Box::new(end),
+            span,
+        }
     }
 
     fn parse_or(&mut self) -> Expr {
@@ -685,6 +783,18 @@ impl Parser {
                         span,
                     };
                 }
+                // Field access on a non-trivial base: `makePoint().x`. Pure
+                // identifier chains are consumed as `Path` in `parse_primary`.
+                TokenKind::Dot if self.peek_kind_at(1) == TokenKind::Ident => {
+                    self.advance(); // `.`
+                    let member = self.advance(); // identifier
+                    let span = expr.span().join(member.span);
+                    expr = Expr::Field {
+                        obj: Box::new(expr),
+                        name: member.text,
+                        span,
+                    };
+                }
                 _ => break,
             }
         }
@@ -814,6 +924,12 @@ impl Parser {
                     parts.push(member.text);
                     end = member.span;
                 }
+                // `Point{ x: 1 }` — struct construction. The `{` must be
+                // immediately adjacent (no leading trivia): `v { n }` after
+                // an if-let value is a block, not a struct literal.
+                if self.at(TokenKind::LBrace) && self.peek().leading.is_empty() {
+                    return self.parse_struct_init(parts, tok.span.join(end));
+                }
                 if parts.len() == 1 {
                     Expr::Ident {
                         name: parts.pop().unwrap(),
@@ -865,6 +981,43 @@ impl Parser {
                 ));
                 dummy_expr(tok.span)
             }
+        }
+    }
+
+    fn parse_struct_init(&mut self, parts: Vec<String>, start: Span) -> Expr {
+        self.advance(); // `{`
+        let mut fields = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            self.skip_stmt_ends();
+            if self.at(TokenKind::RBrace) {
+                break;
+            }
+            let fname = self
+                .expect_ident()
+                .unwrap_or_else(|| dummy_ident(self.peek().span));
+            if !self.eat(TokenKind::Colon) {
+                self.error_here("expected `:` after field name");
+            }
+            let value = self.parse_expr();
+            fields.push((fname.name, value));
+            if self.eat(TokenKind::Comma) {
+                continue;
+            }
+            self.skip_stmt_ends();
+            if !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                self.error_here("expected `,` or `}` after field");
+            }
+        }
+        let end = if self.eat(TokenKind::RBrace) {
+            self.previous().span
+        } else {
+            self.error_here("expected `}` to close struct literal");
+            self.peek().span
+        };
+        Expr::StructInit {
+            name: parts.join("."),
+            fields,
+            span: start.join(end),
         }
     }
 

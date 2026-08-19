@@ -29,6 +29,13 @@ pub enum Value {
     Json(JsonValue),
     /// An HTTP server handle with its registered routes.
     HttpServer(HttpServer),
+    /// A struct instance: its type name and insertion-ordered fields.
+    Object {
+        name: String,
+        fields: Vec<(String, Value)>,
+    },
+    /// `a..b` — an integer range (used by `for` loops).
+    Range(i64, i64),
 }
 
 /// A JSON value (see [`crate::json`]).
@@ -49,12 +56,12 @@ pub struct NativeFunc {
 }
 
 /// A callable value: parameter list, body expression, and the environment
-/// captured at definition time.
+/// captured at definition time (shared by reference).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FuncValue {
     pub params: Vec<Param>,
     pub body: Expr,
-    pub env: Env,
+    pub env: std::rc::Rc<std::cell::RefCell<Env>>,
 }
 
 impl Value {
@@ -115,6 +122,17 @@ impl fmt::Display for Value {
             Value::Native(nf) => write!(f, "<native {}>", nf.name),
             Value::Json(j) => write!(f, "{j}"),
             Value::HttpServer(_) => write!(f, "<http server>"),
+            Value::Object { name, fields } => {
+                write!(f, "{name}{{")?;
+                for (i, (k, v)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{k}: {v}")?;
+                }
+                write!(f, "}}")
+            }
+            Value::Range(a, b) => write!(f, "{a}..{b}"),
         }
     }
 }

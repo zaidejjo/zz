@@ -72,6 +72,41 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_struct() {
+        round_trips("struct Point { x: int, y: int }");
+        round_trips("struct Empty {}");
+        round_trips("struct Nested { p: Point, z: int }");
+    }
+
+    #[test]
+    fn round_trip_struct_init() {
+        round_trips("p := Point{ x: 1, y: 2 }");
+        round_trips("p := Point{ x: 1, y: 2, }");
+        round_trips("n := Nested{ p: Point{ x: 1, y: 2 }, z: 3 }");
+    }
+
+    #[test]
+    fn round_trip_field_access_and_assign() {
+        round_trips("p.x");
+        round_trips("p.x = 10");
+        round_trips("makePoint().x");
+        round_trips("p.x.y = 5");
+    }
+
+    #[test]
+    fn round_trip_for_loop() {
+        round_trips("for i in 0..10 { io.println(i) }");
+        round_trips("for x in xs { total = total + x }");
+        round_trips("for i in 0..10 { if i == 3 { break } }");
+        round_trips("for i in 0..10 { if i == 3 { continue } }");
+    }
+
+    #[test]
+    fn round_trip_range() {
+        round_trips("r := 0..5");
+    }
+
+    #[test]
     fn round_trip_multiple_statements() {
         round_trips("let a = 1\nlet b = 2\nlet c = a + b\n");
     }

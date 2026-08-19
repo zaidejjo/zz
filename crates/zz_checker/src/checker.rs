@@ -29,25 +29,53 @@ pub struct FuncSig {
     pub ret: Type,
 }
 
+/// A registered struct definition: field names and their types.
+#[derive(Debug, Clone)]
+pub struct StructSig {
+    pub fields: Vec<(String, Type)>,
+}
+
 pub struct CheckResult {
     pub errors: Vec<RawDiag>,
     /// Top-level `let` bindings and their types (fully resolved).
     pub bindings: HashMap<String, Type>,
     /// Top-level function signatures.
     pub funcs: HashMap<String, FuncSig>,
+    /// Top-level struct definitions.
+    pub structs: HashMap<String, StructSig>,
 }
 
-/// Type-check a whole program, seeded with bindings/funcs from prior REPL
-/// evals. Errors are collected (not fatal); the program should not run if
-/// any are present.
+/// Type-check a whole program, seeded with bindings/funcs/structs from prior
+/// REPL evals. Errors are collected (not fatal); the program should not run
+/// if any are present.
 pub fn check_program(
     program: &Program,
     initial_bindings: HashMap<String, Type>,
     initial_funcs: HashMap<String, FuncSig>,
+    initial_structs: HashMap<String, StructSig>,
 ) -> CheckResult {
-    let mut checker = Checker::new(initial_bindings, initial_funcs);
+    let mut checker = Checker::new(initial_bindings, initial_funcs, initial_structs);
 
-    // Pass 1: register all function signatures so recursion and mutual
+    // Pass 1: register struct definitions (fields are resolved against the
+    // struct registry, so structs may reference earlier structs). Structs
+    // must be registered before functions so `func f(p: Point)` resolves.
+    let mut seen_structs = HashMap::new();
+    for stmt in &program.stmts {
+        if let Stmt::Struct { name, .. } = stmt {
+            if let Some(prev) = seen_structs.insert(name.name.clone(), name.span) {
+                checker.errors.push(error_at(
+                    format!("duplicate definition of struct `{}`", name.name),
+                    name.span,
+                ));
+                checker
+                    .errors
+                    .push(error_at("previous definition here", prev));
+            }
+            checker.collect_struct(stmt);
+        }
+    }
+
+    // Pass 1b: register all function signatures so recursion and mutual
     // recursion resolve.
     let mut seen = HashMap::new();
     for stmt in &program.stmts {
@@ -85,6 +113,7 @@ pub fn check_program(
         errors: checker.errors,
         bindings,
         funcs: checker.funcs,
+        structs: checker.structs,
     }
 }
 
@@ -98,6 +127,7 @@ fn contains_var(t: &Type) -> bool {
         Type::Array(x) => contains_var(x),
         Type::Dict(k, v) => contains_var(k) || contains_var(v),
         Type::Union(ts) => ts.iter().any(contains_var),
+        Type::Range(x) => contains_var(x),
         _ => false,
     }
 }
@@ -106,24 +136,33 @@ struct Checker {
     unifier: Unifier,
     errors: Vec<RawDiag>,
     funcs: HashMap<String, FuncSig>,
+    structs: HashMap<String, StructSig>,
     env: Vec<HashMap<String, Type>>,
     /// Top-level let bindings discovered this run: name → (type, span).
     new_bindings: HashMap<String, Type>,
     current_ret: Option<Type>,
     current_generics: Vec<String>,
+    /// Nesting depth of `for`/`while` loops (for `break`/`continue`).
+    loop_depth: usize,
 }
 
 impl Checker {
-    fn new(initial_bindings: HashMap<String, Type>, funcs: HashMap<String, FuncSig>) -> Self {
+    fn new(
+        initial_bindings: HashMap<String, Type>,
+        funcs: HashMap<String, FuncSig>,
+        structs: HashMap<String, StructSig>,
+    ) -> Self {
         let env = vec![initial_bindings];
         Checker {
             unifier: Unifier::new(),
             errors: Vec::new(),
             funcs,
+            structs,
             env,
             new_bindings: HashMap::new(),
             current_ret: None,
             current_generics: Vec::new(),
+            loop_depth: 0,
         }
     }
 
@@ -142,28 +181,88 @@ impl Checker {
     }
 
     fn lookup(&mut self, name: &str, span: Span) -> Type {
+        match self.lookup_opt(name) {
+            Some(t) => t,
+            None => {
+                if let Some(sig) = self.funcs.get(name) {
+                    if !sig.generics.is_empty() {
+                        self.errors.push(error_at(
+                            format!(
+                                "cannot use generic function `{name}` as a value; call it with arguments"
+                            ),
+                            span,
+                        ));
+                        return Type::Unit;
+                    }
+                }
+                self.errors
+                    .push(error_at(format!("undefined variable `{name}`"), span));
+                Type::Unit
+            }
+        }
+    }
+
+    /// Like [`Checker::lookup`] but without the error: returns `None` when
+    /// the name is not bound anywhere.
+    fn lookup_opt(&mut self, name: &str) -> Option<Type> {
         for scope in self.env.iter().rev() {
             if let Some(t) = scope.get(name) {
-                return t.clone();
+                return Some(t.clone());
             }
         }
         if let Some(sig) = self.funcs.get(name) {
             if !sig.generics.is_empty() {
-                self.errors.push(error_at(
-                    format!(
-                        "cannot use generic function `{name}` as a value; call it with arguments"
-                    ),
-                    span,
-                ));
-                return Type::Unit;
+                return None;
             }
             // Function used as a value: give its (uninstantiated) type. Call
             // sites handle generic instantiation via the Named path below.
-            return Type::Named(name.to_string());
+            return Some(Type::Named(name.to_string()));
         }
-        self.errors
-            .push(error_at(format!("undefined variable `{name}`"), span));
-        Type::Unit
+        None
+    }
+
+    /// Resolve a dotted path: first as a single qualified name (module
+    /// bindings/functions), then as a struct-field walk from the first part.
+    fn lookup_path(&mut self, parts: &[String], span: Span) -> Type {
+        let joined = parts.join(".");
+        if let Some(t) = self.lookup_opt(&joined) {
+            return t;
+        }
+        let Some(root) = self.lookup_opt(&parts[0]) else {
+            self.errors
+                .push(error_at(format!("undefined variable `{joined}`"), span));
+            return Type::Unit;
+        };
+        let mut ty = root;
+        for field in &parts[1..] {
+            match self.unifier.resolve(&ty) {
+                Type::Struct(name) => match self.structs.get(&name) {
+                    Some(sig) => match sig.fields.iter().find(|(n, _)| n == field) {
+                        Some((_, ft)) => ty = ft.clone(),
+                        None => {
+                            self.errors.push(error_at(
+                                format!("struct `{name}` has no field `{field}`"),
+                                span,
+                            ));
+                            return Type::Unit;
+                        }
+                    },
+                    None => {
+                        self.errors
+                            .push(error_at(format!("unknown struct `{name}`"), span));
+                        return Type::Unit;
+                    }
+                },
+                other => {
+                    self.errors.push(error_at(
+                        format!("cannot access field `{field}` on a value of type `{other}`"),
+                        span,
+                    ));
+                    return Type::Unit;
+                }
+            }
+        }
+        ty
     }
 
     // --- statements -------------------------------------------------------
@@ -237,6 +336,116 @@ impl Checker {
                 }
             }
             Stmt::Expr(e) => self.check_expr(e),
+            Stmt::Struct { .. } => {
+                // Registered in pass 1b; nothing to check in the body.
+                Type::Unit
+            }
+            Stmt::For {
+                var,
+                iter,
+                body,
+                span,
+            } => {
+                let it = self.check_expr(iter);
+                let it = self.unifier.resolve(&it);
+                let elem = match it {
+                    Type::Array(elem) => *elem,
+                    Type::Range(elem) => *elem,
+                    Type::Var(_) => {
+                        self.errors.push(error_at(
+                            "cannot iterate a value whose type could not be inferred",
+                            *span,
+                        ));
+                        Type::Unit
+                    }
+                    other => {
+                        self.errors.push(error_at(
+                            format!("cannot iterate a value of type `{other}`"),
+                            *span,
+                        ));
+                        Type::Unit
+                    }
+                };
+                self.push_scope();
+                self.define(&var.name, elem);
+                self.loop_depth += 1;
+                self.check_block(body);
+                self.loop_depth -= 1;
+                self.pop_scope();
+                Type::Unit
+            }
+            Stmt::Break { span } => {
+                if self.loop_depth == 0 {
+                    self.errors
+                        .push(error_at("`break` outside of a loop", *span));
+                }
+                Type::Unit
+            }
+            Stmt::Continue { span } => {
+                if self.loop_depth == 0 {
+                    self.errors
+                        .push(error_at("`continue` outside of a loop", *span));
+                }
+                Type::Unit
+            }
+            Stmt::Assign {
+                target,
+                value,
+                span,
+            } => {
+                let tt = self.check_assign_target(target);
+                let vt = self.check_expr(value);
+                if let Err(e) = self.unifier.unify(&vt, &tt) {
+                    self.report_mismatch(e, *span);
+                }
+                Type::Unit
+            }
+        }
+    }
+
+    /// Type of an assignment target: a variable, a qualified name, or a
+    /// struct field path.
+    fn check_assign_target(&mut self, target: &Expr) -> Type {
+        match target {
+            Expr::Ident { name, span } => self.lookup(name, *span),
+            Expr::Path { parts, span } => self.lookup_path(parts, *span),
+            Expr::Field { obj, name, span } => {
+                let ot = self.check_expr(obj);
+                let ot = self.unifier.resolve(&ot);
+                match ot {
+                    Type::Struct(sname) => match self.structs.get(&sname) {
+                        Some(sig) => match sig.fields.iter().find(|(n, _)| n == name) {
+                            Some((_, ft)) => ft.clone(),
+                            None => {
+                                self.errors.push(error_at(
+                                    format!("struct `{sname}` has no field `{name}`"),
+                                    *span,
+                                ));
+                                Type::Unit
+                            }
+                        },
+                        None => {
+                            self.errors
+                                .push(error_at(format!("unknown struct `{sname}`"), *span));
+                            Type::Unit
+                        }
+                    },
+                    other => {
+                        self.errors.push(error_at(
+                            format!("cannot assign to field `{name}` of a value of type `{other}`"),
+                            *span,
+                        ));
+                        Type::Unit
+                    }
+                }
+            }
+            other => {
+                self.errors.push(error_at(
+                    "cannot assign to this expression".to_string(),
+                    other.span(),
+                ));
+                Type::Unit
+            }
         }
     }
 
@@ -269,6 +478,20 @@ impl Checker {
         }
         self.pop_scope();
         result
+    }
+
+    fn collect_struct(&mut self, stmt: &Stmt) {
+        let (name, fields) = match stmt {
+            Stmt::Struct { name, fields, .. } => (name, fields),
+            _ => unreachable!(),
+        };
+        let gens = self.current_generics.clone();
+        let sig_fields = fields
+            .iter()
+            .map(|(fname, fty)| (fname.name.clone(), self.ast_to_type(fty, &gens)))
+            .collect();
+        self.structs
+            .insert(name.name.clone(), StructSig { fields: sig_fields });
     }
 
     fn collect_func(&mut self, stmt: &Stmt) {
@@ -338,7 +561,77 @@ impl Checker {
             Expr::Str { .. } => Type::Str,
             Expr::Bool { .. } => Type::Bool,
             Expr::Ident { name, span } => self.lookup(name, *span),
-            Expr::Path { parts, span } => self.lookup(&parts.join("."), *span),
+            Expr::Path { parts, span } => self.lookup_path(parts, *span),
+            Expr::Field { obj, name, span } => {
+                let ot = self.check_expr(obj);
+                let ot = self.unifier.resolve(&ot);
+                match ot {
+                    Type::Struct(sname) => match self.structs.get(&sname) {
+                        Some(sig) => match sig.fields.iter().find(|(n, _)| n == name) {
+                            Some((_, ft)) => ft.clone(),
+                            None => {
+                                self.errors.push(error_at(
+                                    format!("struct `{sname}` has no field `{name}`"),
+                                    *span,
+                                ));
+                                Type::Unit
+                            }
+                        },
+                        None => {
+                            self.errors
+                                .push(error_at(format!("unknown struct `{sname}`"), *span));
+                            Type::Unit
+                        }
+                    },
+                    other => {
+                        self.errors.push(error_at(
+                            format!("cannot access field `{name}` on a value of type `{other}`"),
+                            *span,
+                        ));
+                        Type::Unit
+                    }
+                }
+            }
+            Expr::Range { start, end, .. } => {
+                let st = self.check_expr(start);
+                let et = self.check_expr(end);
+                for (t, s) in [(st, start.span()), (et, end.span())] {
+                    match self.unifier.resolve(&t) {
+                        Type::Int => {}
+                        Type::Var(id) => {
+                            self.unifier.bind(id, Type::Int);
+                        }
+                        other => {
+                            self.errors.push(error_at(
+                                format!("range bounds must be `int`, found `{other}`"),
+                                s,
+                            ));
+                        }
+                    }
+                }
+                Type::Range(Box::new(Type::Int))
+            }
+            Expr::StructInit { name, fields, span } => {
+                let Some(sig) = self.structs.get(name).cloned() else {
+                    self.errors
+                        .push(error_at(format!("unknown struct `{name}`"), *span));
+                    return Type::Unit;
+                };
+                for (fname, fval) in fields {
+                    let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == fname) else {
+                        self.errors.push(error_at(
+                            format!("struct `{name}` has no field `{fname}`"),
+                            fval.span(),
+                        ));
+                        continue;
+                    };
+                    let vt = self.check_expr(fval);
+                    if let Err(e) = self.unifier.unify(&vt, ft) {
+                        self.report_mismatch(e, fval.span());
+                    }
+                }
+                Type::Struct(name.clone())
+            }
             Expr::Fmt { parts, .. } => {
                 // Interpolated strings are `str`; embedded expressions are
                 // checked for validity (their Display form is used at runtime).
@@ -386,7 +679,9 @@ impl Checker {
             Expr::While { cond, body, .. } => {
                 let ct = self.check_expr(cond);
                 self.ensure_bool(ct, cond.span());
+                self.loop_depth += 1;
                 self.check_block(body);
+                self.loop_depth -= 1;
                 Type::Unit
             }
             Expr::Match {
@@ -919,6 +1214,14 @@ impl Checker {
                         ));
                     }
                     Type::Named(name.clone())
+                } else if self.structs.contains_key(name) {
+                    if !args.is_empty() {
+                        self.errors.push(error_at(
+                            format!("struct `{name}` does not take type arguments"),
+                            ty.span,
+                        ));
+                    }
+                    Type::Struct(name.clone())
                 } else {
                     self.errors
                         .push(error_at(format!("unknown type `{name}`"), ty.span));
@@ -982,6 +1285,7 @@ fn subst(t: &Type, subs: &HashMap<String, Type>) -> Type {
         Type::Array(x) => Type::Array(Box::new(subst(x, subs))),
         Type::Dict(k, v) => Type::Dict(Box::new(subst(k, subs)), Box::new(subst(v, subs))),
         Type::Union(ts) => Type::Union(ts.iter().map(|x| subst(x, subs)).collect()),
+        Type::Range(x) => Type::Range(Box::new(subst(x, subs))),
         other => other.clone(),
     }
 }
@@ -998,7 +1302,12 @@ mod tests {
             "parse errors: {:?}",
             parsed.errors
         );
-        check_program(&parsed.program, HashMap::new(), HashMap::new())
+        check_program(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
     }
 
     fn errors_of(src: &str) -> Vec<String> {
@@ -1115,6 +1424,157 @@ mod tests {
     fn recursion_works() {
         let r = check_src("func fact(n: int) -> int { if n <= 1 { 1 } else { n * fact(n - 1) } }");
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+    }
+
+    // --- structs -----------------------------------------------------------
+
+    #[test]
+    fn struct_def_and_init() {
+        let r = check_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["p"], Type::Struct("Point".into()));
+        assert_eq!(r.structs["Point"].fields.len(), 2);
+    }
+
+    #[test]
+    fn struct_field_access() {
+        let r = check_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\nz := p.x");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["z"], Type::Int);
+    }
+
+    #[test]
+    fn struct_field_mutation() {
+        let r = check_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.x = 10");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+    }
+
+    #[test]
+    fn struct_field_mutation_type_mismatch_errors() {
+        errors_contain(
+            "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.x = \"a\"",
+            "type mismatch",
+        );
+    }
+
+    #[test]
+    fn struct_unknown_field_errors() {
+        errors_contain(
+            "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.z",
+            "has no field `z`",
+        );
+    }
+
+    #[test]
+    fn struct_unknown_field_in_init_errors() {
+        errors_contain(
+            "struct Point { x: int, y: int }\np := Point{ x: 1, z: 2 }",
+            "has no field `z`",
+        );
+    }
+
+    #[test]
+    fn struct_unknown_type_errors() {
+        errors_contain("p := Nope{ x: 1 }", "unknown struct `Nope`");
+    }
+
+    #[test]
+    fn struct_in_func_signature() {
+        let r = check_src(
+            "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\nz := dist(Point{ x: 1, y: 2 })",
+        );
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["z"], Type::Int);
+    }
+
+    #[test]
+    fn struct_wrong_arg_type_errors() {
+        errors_contain(
+            "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x }\ndist(5)",
+            "type mismatch",
+        );
+    }
+
+    #[test]
+    fn struct_field_on_non_struct_errors() {
+        errors_contain("x := 5\nx.y", "cannot access field `y`");
+    }
+
+    #[test]
+    fn struct_duplicate_definition_errors() {
+        errors_contain(
+            "struct A { x: int }\nstruct A { y: int }",
+            "duplicate definition of struct `A`",
+        );
+    }
+
+    #[test]
+    fn struct_type_annotation_resolves() {
+        let r = check_src("struct Point { x: int, y: int }\nPoint p = Point{ x: 1, y: 2 }");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["p"], Type::Struct("Point".into()));
+    }
+
+    // --- for loops ---------------------------------------------------------
+
+    #[test]
+    fn for_over_range() {
+        let r = check_src("sum := 0\nfor i in 0..5 { sum = sum + i }");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+    }
+
+    #[test]
+    fn for_over_array() {
+        let r = check_src("total := 0\nfor n in [10, 20, 30] { total = total + n }");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+    }
+
+    #[test]
+    fn for_loop_var_typed() {
+        let r = check_src("for i in 0..5 { i }");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+    }
+
+    #[test]
+    fn for_over_non_iterable_errors() {
+        errors_contain("for i in 5 { i }", "cannot iterate a value of type `int`");
+    }
+
+    #[test]
+    fn for_loop_var_scope_does_not_leak() {
+        errors_contain("for i in 0..5 { i }\ni", "undefined variable `i`");
+    }
+
+    #[test]
+    fn break_outside_loop_errors() {
+        errors_contain("break", "`break` outside of a loop");
+    }
+
+    #[test]
+    fn continue_outside_loop_errors() {
+        errors_contain("continue", "`continue` outside of a loop");
+    }
+
+    #[test]
+    fn break_inside_loop_ok() {
+        let r = check_src("for i in 0..5 { if i == 2 { break } }");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+    }
+
+    #[test]
+    fn break_inside_while_ok() {
+        let r = check_src("x := 0\nwhile x < 5 { x = x + 1; break }");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+    }
+
+    #[test]
+    fn range_bounds_must_be_int() {
+        errors_contain("for i in 0.5..2.5 { i }", "range bounds must be `int`");
+    }
+
+    #[test]
+    fn assignment_to_undefined_errors() {
+        errors_contain("nope = 5", "undefined variable `nope`");
     }
 
     #[test]

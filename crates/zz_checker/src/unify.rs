@@ -78,6 +78,7 @@ impl Unifier {
                 Box::new(self.resolve_deep(&v)),
             ),
             Type::Union(ts) => Type::Union(ts.iter().map(|x| self.resolve_deep(x)).collect()),
+            Type::Range(t) => Type::Range(Box::new(self.resolve_deep(&t))),
             other => other,
         }
     }
@@ -106,6 +107,8 @@ impl Unifier {
             | (Type::Str, Type::Str)
             | (Type::Unit, Type::Unit) => Ok(()),
             (Type::Named(a), Type::Named(b)) if a == b => Ok(()),
+            (Type::Struct(a), Type::Struct(b)) if a == b => Ok(()),
+            (Type::Range(x), Type::Range(y)) => self.unify(&x, &y),
             (Type::Json, Type::Json) | (Type::HttpServer, Type::HttpServer) => Ok(()),
             (Type::Tuple(xs), Type::Tuple(ys)) => {
                 if xs.len() != ys.len() {
@@ -215,6 +218,7 @@ impl Unifier {
             Type::Array(x) => self.occurs(id, &x),
             Type::Dict(k, v) => self.occurs(id, &k) || self.occurs(id, &v),
             Type::Union(ts) => ts.iter().any(|x| self.occurs(id, x)),
+            Type::Range(x) => self.occurs(id, &x),
             _ => false,
         }
     }

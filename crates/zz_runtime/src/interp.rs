@@ -3,7 +3,9 @@
 //! Evaluates the AST directly. Slow by design — this exists to bootstrap the
 //! frontend and power the REPL until the bytecode VM lands.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Lit, Pattern, Program, Stmt, UnOp};
 use zz_frontend::span::Span;
@@ -27,11 +29,14 @@ impl EvalError {
 }
 
 /// Result of evaluating an expression or statement. `Return` unwinds the
-/// call stack until the enclosing function call catches it.
+/// call stack until the enclosing function call catches it; `Break` and
+/// `Continue` unwind to the enclosing loop.
 #[derive(Debug)]
 pub(crate) enum Flow {
     Value(Value),
     Return(Value),
+    Break,
+    Continue,
 }
 
 impl Flow {
@@ -40,6 +45,11 @@ impl Flow {
             Flow::Value(v) => Ok(v),
             Flow::Return(_) => Err(EvalError::new(
                 "`return` outside of a function",
+                Span::new(0, 0),
+            )),
+            Flow::Break => Err(EvalError::new("`break` outside of a loop", Span::new(0, 0))),
+            Flow::Continue => Err(EvalError::new(
+                "`continue` outside of a loop",
                 Span::new(0, 0),
             )),
         }
@@ -60,12 +70,14 @@ pub struct NativeEntry {
 }
 
 pub struct Interp {
-    pub env: Env,
+    pub env: Rc<RefCell<Env>>,
     /// Named functions, kept separate from the environment so recursive
     /// bodies can resolve their own name without circular captured envs.
     pub funcs: HashMap<String, FuncValue>,
     /// Native (Rust-backed) functions, e.g. the standard library.
     pub natives: HashMap<String, NativeEntry>,
+    /// Struct definitions: name → ordered field names.
+    pub structs: HashMap<String, Vec<String>>,
 }
 
 impl Default for Interp {
@@ -77,18 +89,20 @@ impl Default for Interp {
 impl Interp {
     pub fn new() -> Self {
         Interp {
-            env: Env::new(),
+            env: Rc::new(RefCell::new(Env::new())),
             funcs: HashMap::new(),
             natives: HashMap::new(),
+            structs: HashMap::new(),
         }
     }
 
     /// Create an interpreter with a native function registry.
     pub fn with_natives(natives: HashMap<String, NativeEntry>) -> Self {
         Interp {
-            env: Env::new(),
+            env: Rc::new(RefCell::new(Env::new())),
             funcs: HashMap::new(),
             natives,
+            structs: HashMap::new(),
         }
     }
 
@@ -105,10 +119,12 @@ impl Interp {
         match stmt {
             Stmt::Decl { name, value, .. } => match self.eval(value)? {
                 Flow::Value(v) => {
-                    self.env.define(&name.name, v.clone());
+                    self.env.borrow_mut().define(&name.name, v.clone());
                     Ok(Flow::Value(v))
                 }
                 Flow::Return(v) => Ok(Flow::Return(v)),
+                Flow::Break => Ok(Flow::Break),
+                Flow::Continue => Ok(Flow::Continue),
             },
             Stmt::Import { .. } => {
                 // Imports are resolved in a later phase; no runtime effect.
@@ -120,20 +136,133 @@ impl Interp {
                 let fv = FuncValue {
                     params: params.clone(),
                     body: Expr::Block(body.clone()),
-                    env: self.env.clone(),
+                    env: Rc::clone(&self.env),
                 };
                 self.funcs.insert(name.name.clone(), fv.clone());
-                self.env.define(&name.name, Value::Func(fv));
+                self.env.borrow_mut().define(&name.name, Value::Func(fv));
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Return { value, .. } => match value {
                 Some(e) => match self.eval(e)? {
                     Flow::Value(v) => Ok(Flow::Return(v)),
                     Flow::Return(v) => Ok(Flow::Return(v)),
+                    Flow::Break => Ok(Flow::Break),
+                    Flow::Continue => Ok(Flow::Continue),
                 },
                 None => Ok(Flow::Return(Value::Unit)),
             },
+            Stmt::Struct { name, fields, .. } => {
+                self.structs.insert(
+                    name.name.clone(),
+                    fields.iter().map(|(n, _)| n.name.clone()).collect(),
+                );
+                Ok(Flow::Value(Value::Unit))
+            }
+            Stmt::For {
+                var, iter, body, ..
+            } => {
+                let it = self.eval(iter)?.into_value()?;
+                match it {
+                    Value::Array(items) => {
+                        let mut result = Value::Unit;
+                        for item in items {
+                            let scope = Env::with_parent(&self.env);
+                            scope.borrow_mut().define(&var.name, item);
+                            let prev = std::mem::replace(&mut self.env, scope);
+                            let flow = self.eval_block(body);
+                            self.env = prev;
+                            match flow? {
+                                Flow::Value(v) => result = v,
+                                Flow::Return(v) => return Ok(Flow::Return(v)),
+                                Flow::Break => break,
+                                Flow::Continue => continue,
+                            }
+                        }
+                        Ok(Flow::Value(result))
+                    }
+                    Value::Range(start, end) => {
+                        let mut result = Value::Unit;
+                        let mut i = start;
+                        while i < end {
+                            let scope = Env::with_parent(&self.env);
+                            scope.borrow_mut().define(&var.name, Value::Int(i));
+                            let prev = std::mem::replace(&mut self.env, scope);
+                            let flow = self.eval_block(body);
+                            self.env = prev;
+                            match flow? {
+                                Flow::Value(v) => result = v,
+                                Flow::Return(v) => return Ok(Flow::Return(v)),
+                                Flow::Break => break,
+                                Flow::Continue => {}
+                            }
+                            i += 1;
+                        }
+                        Ok(Flow::Value(result))
+                    }
+                    other => Err(EvalError::new(
+                        format!("cannot iterate a value of type `{other}`"),
+                        iter.span(),
+                    )),
+                }
+            }
+            Stmt::Break { .. } => Ok(Flow::Break),
+            Stmt::Continue { .. } => Ok(Flow::Continue),
+            Stmt::Assign { target, value, .. } => {
+                let v = self.eval(value)?.into_value()?;
+                self.assign_target(target, v)?;
+                Ok(Flow::Value(Value::Unit))
+            }
             Stmt::Expr(e) => self.eval(e),
+        }
+    }
+
+    /// Assign a value to an assignment target: a variable, a qualified name,
+    /// or a struct field path.
+    fn assign_target(&mut self, target: &Expr, value: Value) -> Result<(), EvalError> {
+        match target {
+            Expr::Ident { name, span } => {
+                if !self.env.borrow_mut().assign(name, value) {
+                    return Err(EvalError::new(
+                        format!("undefined variable `{name}`"),
+                        *span,
+                    ));
+                }
+                Ok(())
+            }
+            Expr::Path { parts, span } => {
+                let joined = parts.join(".");
+                if self.env.borrow().get(&joined).is_some() {
+                    self.env.borrow_mut().assign(&joined, value);
+                    return Ok(());
+                }
+                // Struct field walk: `p.x = v` mutates the object bound to
+                // `p` and writes it back.
+                let root = &parts[0];
+                let mut obj = self.env.borrow().get(root).ok_or_else(|| {
+                    EvalError::new(format!("undefined variable `{joined}`"), *span)
+                })?;
+                for field in &parts[1..parts.len() - 1] {
+                    obj = Self::object_field(&obj, field, *span)?;
+                }
+                let last = parts.last().unwrap();
+                Self::set_object_field(&mut obj, last, value, *span)?;
+                self.env.borrow_mut().assign(root, obj);
+                Ok(())
+            }
+            Expr::Field { obj, name, span } => {
+                let mut objv = self.eval(obj)?.into_value()?;
+                Self::set_object_field(&mut objv, name, value, *span)?;
+                // If the base is a plain variable, write the mutated object
+                // back; otherwise the mutation is discarded (temporary).
+                if let Expr::Ident { name, .. } = &**obj {
+                    self.env.borrow_mut().assign(name, objv);
+                }
+                Ok(())
+            }
+            other => Err(EvalError::new(
+                "cannot assign to this expression".to_string(),
+                other.span(),
+            )),
         }
     }
 
@@ -144,7 +273,7 @@ impl Interp {
             Expr::Str { value, .. } => Ok(Flow::Value(Value::Str(value.clone()))),
             Expr::Bool { value, .. } => Ok(Flow::Value(Value::Bool(*value))),
             Expr::Ident { name, span } => {
-                if let Some(v) = self.env.get(name) {
+                if let Some(v) = self.env.borrow().get(name) {
                     return Ok(Flow::Value(v));
                 }
                 if let Some(fv) = self.funcs.get(name) {
@@ -170,7 +299,7 @@ impl Interp {
             }
             Expr::Path { parts, span } => {
                 let name = parts.join(".");
-                if let Some(v) = self.env.get(&name) {
+                if let Some(v) = self.env.borrow().get(&name) {
                     return Ok(Flow::Value(v));
                 }
                 if let Some(fv) = self.funcs.get(&name) {
@@ -182,8 +311,15 @@ impl Interp {
                         arity: entry.arity,
                     })));
                 }
+                // Struct field walk: `p.x` where `p` is a struct instance.
+                if let Some(mut v) = self.env.borrow().get(&parts[0]) {
+                    for field in &parts[1..] {
+                        v = Self::object_field(&v, field, *span)?;
+                    }
+                    return Ok(Flow::Value(v));
+                }
                 Err(EvalError::new(
-                    format!("undefined function `{name}`"),
+                    format!("undefined variable `{name}`"),
                     *span,
                 ))
             }
@@ -233,7 +369,7 @@ impl Interp {
             Expr::Closure { params, body, .. } => Ok(Flow::Value(Value::Func(FuncValue {
                 params: params.clone(),
                 body: (**body).clone(),
-                env: self.env.clone(),
+                env: Rc::clone(&self.env),
             }))),
             Expr::If {
                 cond,
@@ -267,6 +403,8 @@ impl Interp {
                     match self.eval_block(body)? {
                         Flow::Value(v) => result = v,
                         Flow::Return(v) => return Ok(Flow::Return(v)),
+                        Flow::Break => break,
+                        Flow::Continue => {}
                     }
                 }
                 Ok(Flow::Value(result))
@@ -278,8 +416,8 @@ impl Interp {
             } => {
                 let sv = self.eval(scrutinee)?.into_value()?;
                 for arm in arms {
-                    let mut scope = self.env.child();
-                    if self.match_pattern(&arm.pat, &sv, &mut scope) {
+                    let scope = Env::with_parent(&self.env);
+                    if self.match_pattern(&arm.pat, &sv, &scope) {
                         let prev = std::mem::replace(&mut self.env, scope);
                         let result = self.eval(&arm.body);
                         self.env = prev;
@@ -299,8 +437,8 @@ impl Interp {
                 span: _,
             } => {
                 let v = self.eval(value)?.into_value()?;
-                let mut scope = self.env.child();
-                if self.match_pattern(pat, &v, &mut scope) {
+                let scope = Env::with_parent(&self.env);
+                if self.match_pattern(pat, &v, &scope) {
                     let prev = std::mem::replace(&mut self.env, scope);
                     let result = self.eval_block(then);
                     self.env = prev;
@@ -362,17 +500,49 @@ impl Interp {
                     )),
                 }
             }
+            Expr::Field { obj, name, span } => {
+                let v = self.eval(obj)?.into_value()?;
+                Self::object_field(&v, name, *span).map(Flow::Value)
+            }
+            Expr::Range { start, end, span } => {
+                let s = self.eval(start)?.into_value()?;
+                let e = self.eval(end)?.into_value()?;
+                match (s, e) {
+                    (Value::Int(a), Value::Int(b)) => Ok(Flow::Value(Value::Range(a, b))),
+                    _ => Err(EvalError::new("range bounds must be integers", *span)),
+                }
+            }
+            Expr::StructInit { name, fields, span } => {
+                let Some(field_names) = self.structs.get(name).cloned() else {
+                    return Err(EvalError::new(format!("unknown struct `{name}`"), *span));
+                };
+                let mut out = Vec::with_capacity(field_names.len());
+                for fname in &field_names {
+                    let Some(fexpr) = fields.iter().find(|(n, _)| n == fname) else {
+                        return Err(EvalError::new(
+                            format!("missing field `{fname}` in struct literal"),
+                            *span,
+                        ));
+                    };
+                    let v = self.eval(&fexpr.1)?.into_value()?;
+                    out.push((fname.clone(), v));
+                }
+                Ok(Flow::Value(Value::Object {
+                    name: name.clone(),
+                    fields: out,
+                }))
+            }
         }
     }
 
     /// Evaluate a block. Returns `Flow::Return` if a `return` unwound.
     fn eval_block(&mut self, block: &Block) -> Result<Flow, EvalError> {
-        let scope = self.env.child();
+        let scope = Env::with_parent(&self.env);
         let prev = std::mem::replace(&mut self.env, scope);
         let mut result = Flow::Value(Value::Unit);
         for stmt in &block.stmts {
             result = self.run_stmt(stmt)?;
-            if matches!(result, Flow::Return(_)) {
+            if matches!(result, Flow::Return(_) | Flow::Break | Flow::Continue) {
                 break;
             }
         }
@@ -381,11 +551,11 @@ impl Interp {
     }
 
     /// Bind a pattern against a value in `scope`. Returns whether it matched.
-    fn match_pattern(&self, pat: &Pattern, value: &Value, scope: &mut Env) -> bool {
+    fn match_pattern(&self, pat: &Pattern, value: &Value, scope: &Rc<RefCell<Env>>) -> bool {
         match pat {
             Pattern::Wildcard { .. } => true,
             Pattern::Binding { name } => {
-                scope.define(&name.name, value.clone());
+                scope.borrow_mut().define(&name.name, value.clone());
                 true
             }
             Pattern::Literal { value: lit, .. } => value_matches_lit(value, lit),
@@ -447,9 +617,9 @@ impl Interp {
                 span,
             ));
         }
-        let mut scope = fv.env.child();
+        let scope = Env::with_parent(&fv.env);
         for (p, v) in fv.params.iter().zip(args) {
-            scope.define(&p.name.name, v);
+            scope.borrow_mut().define(&p.name.name, v);
         }
         let prev = std::mem::replace(&mut self.env, scope);
         let result = self.eval(&fv.body);
@@ -457,6 +627,60 @@ impl Interp {
         match result? {
             Flow::Value(v) => Ok(v),
             Flow::Return(v) => Ok(v),
+            Flow::Break => Err(EvalError::new("`break` outside of a loop", Span::new(0, 0))),
+            Flow::Continue => Err(EvalError::new(
+                "`continue` outside of a loop",
+                Span::new(0, 0),
+            )),
+        }
+    }
+
+    /// Read a field from a struct instance.
+    fn object_field(obj: &Value, name: &str, span: Span) -> Result<Value, EvalError> {
+        match obj {
+            Value::Object {
+                name: tname,
+                fields,
+            } => fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+                .ok_or_else(|| {
+                    EvalError::new(format!("struct `{tname}` has no field `{name}`"), span)
+                }),
+            other => Err(EvalError::new(
+                format!("cannot access field `{name}` on a value of type `{other}`"),
+                span,
+            )),
+        }
+    }
+
+    /// Write a field into a struct instance (in place).
+    fn set_object_field(
+        obj: &mut Value,
+        name: &str,
+        value: Value,
+        span: Span,
+    ) -> Result<(), EvalError> {
+        match obj {
+            Value::Object {
+                name: tname,
+                fields,
+            } => {
+                if let Some((_, slot)) = fields.iter_mut().find(|(n, _)| n == name) {
+                    *slot = value;
+                    Ok(())
+                } else {
+                    Err(EvalError::new(
+                        format!("struct `{tname}` has no field `{name}`"),
+                        span,
+                    ))
+                }
+            }
+            other => Err(EvalError::new(
+                format!("cannot assign to field `{name}` of a value of type `{other}`"),
+                span,
+            )),
         }
     }
 
@@ -856,9 +1080,190 @@ mod tests {
     fn unknown_path_errors() {
         let err = eval_src("foo.bar.baz(1)").unwrap_err();
         assert!(
-            err.message.contains("undefined function `foo.bar.baz`"),
+            err.message.contains("undefined variable `foo.bar.baz`"),
             "{}",
             err.message
         );
+    }
+
+    // --- structs -----------------------------------------------------------
+
+    #[test]
+    fn struct_init_and_field_access() {
+        let v = eval_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.x").unwrap();
+        assert_eq!(v, Value::Int(1));
+    }
+
+    #[test]
+    fn struct_displays_with_name() {
+        let v = eval_src("struct Point { x: int, y: int }\nPoint{ x: 1, y: 2 }").unwrap();
+        assert_eq!(v.to_string(), "Point{x: 1, y: 2}");
+    }
+
+    #[test]
+    fn struct_field_mutation() {
+        let v =
+            eval_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.x = 10\np.x")
+                .unwrap();
+        assert_eq!(v, Value::Int(10));
+    }
+
+    #[test]
+    fn struct_field_mutation_visible_in_object() {
+        let v = eval_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.x = 10\np")
+            .unwrap();
+        assert_eq!(
+            v,
+            Value::Object {
+                name: "Point".into(),
+                fields: vec![("x".into(), Value::Int(10)), ("y".into(), Value::Int(2)),],
+            }
+        );
+    }
+
+    #[test]
+    fn struct_nested_field_access() {
+        let v = eval_src(
+            "struct Point { x: int, y: int }\nstruct Nested { p: Point, z: int }\nn := Nested{ p: Point{ x: 1, y: 2 }, z: 3 }\nn.p.y",
+        )
+        .unwrap();
+        assert_eq!(v, Value::Int(2));
+    }
+
+    #[test]
+    fn struct_passed_to_func() {
+        let v = eval_src(
+            "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\ndist(Point{ x: 3, y: 4 })",
+        )
+        .unwrap();
+        assert_eq!(v, Value::Int(7));
+    }
+
+    #[test]
+    fn struct_missing_field_errors() {
+        let err = eval_src("struct Point { x: int, y: int }\nPoint{ x: 1 }").unwrap_err();
+        assert!(err.message.contains("missing field `y`"), "{}", err.message);
+    }
+
+    #[test]
+    fn struct_unknown_field_errors() {
+        let err =
+            eval_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.z").unwrap_err();
+        assert!(err.message.contains("has no field `z`"), "{}", err.message);
+    }
+
+    #[test]
+    fn struct_field_on_non_struct_errors() {
+        let err = eval_src("x := 5\nx.y").unwrap_err();
+        assert!(
+            err.message.contains("cannot access field `y`"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn struct_unknown_type_errors() {
+        let err = eval_src("Nope{ x: 1 }").unwrap_err();
+        assert!(
+            err.message.contains("unknown struct `Nope`"),
+            "{}",
+            err.message
+        );
+    }
+
+    // --- for loops ---------------------------------------------------------
+
+    #[test]
+    fn for_over_range_sums() {
+        let v = eval_src("sum := 0\nfor i in 0..5 { sum = sum + i }\nsum").unwrap();
+        assert_eq!(v, Value::Int(10));
+    }
+
+    #[test]
+    fn for_over_array_sums() {
+        let v = eval_src("total := 0\nfor n in [10, 20, 30] { total = total + n }\ntotal").unwrap();
+        assert_eq!(v, Value::Int(60));
+    }
+
+    #[test]
+    fn for_break_stops_loop() {
+        let v = eval_src("found := 0\nfor i in 0..10 { if i == 3 { found = i; break } }\nfound")
+            .unwrap();
+        assert_eq!(v, Value::Int(3));
+    }
+
+    #[test]
+    fn for_continue_skips_iteration() {
+        let v = eval_src(
+            "count := 0\nfor i in 0..5 { if i == 2 { continue }; count = count + 1 }\ncount",
+        )
+        .unwrap();
+        assert_eq!(v, Value::Int(4));
+    }
+
+    #[test]
+    fn for_loop_var_does_not_leak() {
+        let err = eval_src("for i in 0..5 { i }\ni").unwrap_err();
+        assert!(
+            err.message.contains("undefined variable `i`"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn for_over_non_iterable_errors() {
+        let err = eval_src("for i in 5 { i }").unwrap_err();
+        assert!(err.message.contains("cannot iterate"), "{}", err.message);
+    }
+
+    #[test]
+    fn break_outside_loop_errors() {
+        let err = eval_src("break").unwrap_err();
+        assert!(
+            err.message.contains("`break` outside of a loop"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn continue_outside_loop_errors() {
+        let err = eval_src("continue").unwrap_err();
+        assert!(
+            err.message.contains("`continue` outside of a loop"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn while_loop_with_break() {
+        let v = eval_src("x := 0\nwhile x < 10 { x = x + 1; if x == 3 { break } }\nx").unwrap();
+        assert_eq!(v, Value::Int(3));
+    }
+
+    #[test]
+    fn range_value_displays() {
+        let v = eval_src("0..5").unwrap();
+        assert_eq!(v.to_string(), "0..5");
+    }
+
+    #[test]
+    fn assignment_to_undefined_errors() {
+        let err = eval_src("nope = 5").unwrap_err();
+        assert!(
+            err.message.contains("undefined variable `nope`"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn closure_mutation_propagates() {
+        // Shared scopes: a closure can mutate a captured variable.
+        let v = eval_src("x := 0\nf := |n: int| { x = x + n }\nf(5)\nf(3)\nx").unwrap();
+        assert_eq!(v, Value::Int(8));
     }
 }

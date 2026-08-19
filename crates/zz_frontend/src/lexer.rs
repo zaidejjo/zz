@@ -165,6 +165,9 @@ impl<'a> Lexer<'a> {
                 }
                 ':' => self.emit_significant(TokenKind::Colon, self.pos, self.pos + 1),
                 ',' => self.emit_significant(TokenKind::Comma, self.pos, self.pos + 1),
+                '.' if self.peek_char_at(1) == Some('.') => {
+                    self.emit_significant(TokenKind::DotDot, self.pos, self.pos + 2)
+                }
                 '.' => self.emit_significant(TokenKind::Dot, self.pos, self.pos + 1),
                 '"' => self.lex_string(),
                 c if c.is_ascii_digit() => self.lex_number(),
@@ -289,6 +292,7 @@ impl<'a> Lexer<'a> {
                     | TokenKind::Colon
                     | TokenKind::Comma
                     | TokenKind::Dot
+                    | TokenKind::DotDot
                     | TokenKind::Pipe
                     | TokenKind::Arrow
                     | TokenKind::ColonEq
@@ -338,6 +342,11 @@ impl<'a> Lexer<'a> {
             "match" => TokenKind::Match,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
+            "struct" => TokenKind::Struct,
+            "for" => TokenKind::For,
+            "in" => TokenKind::In,
+            "break" => TokenKind::Break,
+            "continue" => TokenKind::Continue,
             _ => TokenKind::Ident,
         };
         self.push_token(kind, span, text);
@@ -364,8 +373,9 @@ impl<'a> Lexer<'a> {
                     break;
                 }
             }
-        } else if self.peek_char() == Some('.') {
-            // `1.` — a dot with no digits after it is not a float.
+        } else if self.peek_char() == Some('.') && self.peek_char_at(1) != Some('.') {
+            // `1.` — a dot with no digits after it is not a float (and not a
+            // range start, which would be `1..`).
             let span = Span::new(start as u32, (self.pos + '.'.len_utf8()) as u32);
             self.errors
                 .push(error_at("expected digit after decimal point", span));
@@ -623,7 +633,7 @@ mod tests {
     #[test]
     fn keywords() {
         assert_eq!(
-            kinds("import func return if else while match true false"),
+            kinds("import func return if else while match true false struct for in break continue"),
             vec![
                 K::Import,
                 K::Func,
@@ -634,6 +644,11 @@ mod tests {
                 K::Match,
                 K::True,
                 K::False,
+                K::Struct,
+                K::For,
+                K::In,
+                K::Break,
+                K::Continue,
                 K::Eof
             ]
         );

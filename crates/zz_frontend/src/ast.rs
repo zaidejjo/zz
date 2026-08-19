@@ -43,6 +43,31 @@ pub enum Stmt {
         value: Option<Expr>,
         span: Span,
     },
+    /// `struct Point { x: int, y: int }` — a named record type.
+    Struct {
+        name: Ident,
+        fields: Vec<(Ident, Ty)>,
+        span: Span,
+    },
+    /// `for x in xs { ... }` — iterate an array or a range.
+    For {
+        var: Ident,
+        iter: Box<Expr>,
+        body: Block,
+        span: Span,
+    },
+    Break {
+        span: Span,
+    },
+    Continue {
+        span: Span,
+    },
+    /// `target = value` — assignment to a variable or struct field.
+    Assign {
+        target: Expr,
+        value: Expr,
+        span: Span,
+    },
     Expr(Expr),
 }
 
@@ -170,6 +195,25 @@ pub enum Expr {
     /// `(key, value)` pairs.
     Dict {
         entries: Vec<(Expr, Expr)>,
+        span: Span,
+    },
+    /// Field access on a non-trivial base: `makePoint().x`. Pure identifier
+    /// chains (`p.x`) parse as [`Expr::Path`] instead.
+    Field {
+        obj: Box<Expr>,
+        name: String,
+        span: Span,
+    },
+    /// `a..b` — an integer range (used by `for` loops).
+    Range {
+        start: Box<Expr>,
+        end: Box<Expr>,
+        span: Span,
+    },
+    /// `Point{ x: 1, y: 2 }` — struct construction with named fields.
+    StructInit {
+        name: String,
+        fields: Vec<(String, Expr)>,
         span: Span,
     },
 }
@@ -321,7 +365,10 @@ impl Expr {
             | Expr::Try { span, .. }
             | Expr::Variant { span, .. }
             | Expr::Array { span, .. }
-            | Expr::Dict { span, .. } => *span,
+            | Expr::Dict { span, .. }
+            | Expr::Field { span, .. }
+            | Expr::Range { span, .. }
+            | Expr::StructInit { span, .. } => *span,
             Expr::Block(b) => b.span,
         }
     }
@@ -333,7 +380,12 @@ impl Stmt {
             Stmt::Decl { span, .. }
             | Stmt::Func { span, .. }
             | Stmt::Return { span, .. }
-            | Stmt::Import { span, .. } => *span,
+            | Stmt::Import { span, .. }
+            | Stmt::Struct { span, .. }
+            | Stmt::For { span, .. }
+            | Stmt::Break { span }
+            | Stmt::Continue { span }
+            | Stmt::Assign { span, .. } => *span,
             Stmt::Expr(e) => e.span(),
         }
     }

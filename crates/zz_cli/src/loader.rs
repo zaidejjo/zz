@@ -17,8 +17,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use zz_checker::{check_program, FuncSig, Type};
-use zz_frontend::ast::{Block, Expr, FmtPart, Pattern, Program, Stmt};
+use zz_checker::{check_program, FuncSig, StructSig, Type};
+use zz_frontend::ast::{Block, Expr, FmtPart, Pattern, Program, Stmt, Ty, TyKind};
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
 use zz_frontend::span::Span;
@@ -49,6 +49,9 @@ pub struct LoadResult {
     /// Top-level bindings from all modules.
     #[allow(dead_code)]
     pub bindings: HashMap<String, Type>,
+    /// Struct definitions from all modules.
+    #[allow(dead_code)]
+    pub structs: HashMap<String, StructSig>,
     /// Native implementations (stdlib + namespaced copies), for the
     /// interpreter.
     pub natives: HashMap<String, NativeEntry>,
@@ -64,6 +67,7 @@ struct Loader {
     errors: Vec<LoadError>,
     funcs: HashMap<String, FuncSig>,
     bindings: HashMap<String, Type>,
+    structs: HashMap<String, StructSig>,
     natives: HashMap<String, NativeEntry>,
     /// Namespace → canonical path of the module (or `std:<module>` for the
     /// standard library) that owns it.
@@ -83,6 +87,7 @@ pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
         errors: Vec::new(),
         funcs: stdlib_funcs(),
         bindings: HashMap::new(),
+        structs: HashMap::new(),
         natives: stdlib_natives(),
         namespaces: HashMap::new(),
         ns_of: HashMap::new(),
@@ -294,7 +299,12 @@ impl Loader {
             files.push((name.clone(), source.clone()));
 
             let program = self.programs.remove(path).unwrap();
-            let checked = check_program(&program, self.bindings.clone(), self.funcs.clone());
+            let checked = check_program(
+                &program,
+                self.bindings.clone(),
+                self.funcs.clone(),
+                self.structs.clone(),
+            );
             if !checked.errors.is_empty() {
                 self.errors.push(LoadError {
                     name,
@@ -304,6 +314,7 @@ impl Loader {
             } else {
                 self.bindings.extend(checked.bindings);
                 self.funcs.extend(checked.funcs);
+                self.structs.extend(checked.structs);
             }
             programs.push(program);
         }
@@ -313,6 +324,7 @@ impl Loader {
             files,
             funcs: self.funcs,
             bindings: self.bindings,
+            structs: self.structs,
             natives: self.natives,
             errors: self.errors,
         }
@@ -328,7 +340,7 @@ fn namespace_program(program: &mut Program, ns: &str) {
     let mut top = HashSet::new();
     for stmt in &program.stmts {
         match stmt {
-            Stmt::Func { name, .. } | Stmt::Decl { name, .. } => {
+            Stmt::Func { name, .. } | Stmt::Decl { name, .. } | Stmt::Struct { name, .. } => {
                 top.insert(name.name.clone());
             }
             _ => {}
@@ -372,15 +384,25 @@ impl Rewriter<'_> {
 
     fn rewrite_stmt(&mut self, stmt: &mut Stmt) {
         match stmt {
-            Stmt::Decl { name, value, .. } => {
+            Stmt::Decl {
+                name, ty, value, ..
+            } => {
                 if self.top.contains(&name.name) {
                     name.name = format!("{}.{}", self.ns, name.name);
+                }
+                if let Some(t) = ty {
+                    self.rewrite_ty(t);
                 }
                 self.rewrite_expr(value);
                 self.declare(&name.name);
             }
             Stmt::Func {
-                name, params, body, ..
+                name,
+                generics,
+                params,
+                ret,
+                body,
+                ..
             } => {
                 let is_top = self.top.contains(&name.name);
                 if is_top {
@@ -391,8 +413,17 @@ impl Rewriter<'_> {
                     // A nested func shadows its own name within its body.
                     self.declare(&name.name);
                 }
+                for g in generics {
+                    self.declare(&g.name);
+                }
                 for p in params {
                     self.declare(&p.name.name);
+                    if let Some(t) = &mut p.ty {
+                        self.rewrite_ty(t);
+                    }
+                }
+                if let Some(t) = ret {
+                    self.rewrite_ty(t);
                 }
                 self.rewrite_block(body);
                 self.pop_scope();
@@ -401,6 +432,28 @@ impl Rewriter<'_> {
                 if let Some(v) = value {
                     self.rewrite_expr(v);
                 }
+            }
+            Stmt::Struct { name, fields, .. } => {
+                if self.top.contains(&name.name) {
+                    name.name = format!("{}.{}", self.ns, name.name);
+                }
+                for (_, fty) in fields {
+                    self.rewrite_ty(fty);
+                }
+            }
+            Stmt::For {
+                var, iter, body, ..
+            } => {
+                self.rewrite_expr(iter);
+                self.push_scope();
+                self.declare(&var.name);
+                self.rewrite_block(body);
+                self.pop_scope();
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::Assign { target, value, .. } => {
+                self.rewrite_expr(target);
+                self.rewrite_expr(value);
             }
             Stmt::Expr(e) => self.rewrite_expr(e),
             Stmt::Import { .. } => {}
@@ -413,6 +466,47 @@ impl Rewriter<'_> {
             self.rewrite_stmt(stmt);
         }
         self.pop_scope();
+    }
+
+    /// Rewrite type annotations: struct names defined in this module become
+    /// namespaced (`Point` → `shapes.Point`).
+    fn rewrite_ty(&mut self, ty: &mut Ty) {
+        match &mut ty.kind {
+            TyKind::Named(name, args) => {
+                if self.top.contains(name) && !self.is_shadowed(name) {
+                    *name = format!("{}.{}", self.ns, name);
+                }
+                for a in args {
+                    self.rewrite_ty(a);
+                }
+            }
+            TyKind::Tuple(ts) => {
+                for t in ts {
+                    self.rewrite_ty(t);
+                }
+            }
+            TyKind::Option(t) | TyKind::Array(t) => self.rewrite_ty(t),
+            TyKind::Result(a, b) => {
+                self.rewrite_ty(a);
+                self.rewrite_ty(b);
+            }
+            TyKind::Func(ps, r) => {
+                for p in ps {
+                    self.rewrite_ty(p);
+                }
+                self.rewrite_ty(r);
+            }
+            TyKind::Dict(k, v) => {
+                self.rewrite_ty(k);
+                self.rewrite_ty(v);
+            }
+            TyKind::Union(ts) => {
+                for t in ts {
+                    self.rewrite_ty(t);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn rewrite_expr(&mut self, expr: &mut Expr) {
@@ -441,6 +535,9 @@ impl Rewriter<'_> {
                 self.push_scope();
                 for p in params {
                     self.declare(&p.name.name);
+                    if let Some(t) = &mut p.ty {
+                        self.rewrite_ty(t);
+                    }
                 }
                 self.rewrite_expr(body);
                 self.pop_scope();
@@ -514,11 +611,31 @@ impl Rewriter<'_> {
                     }
                 }
             }
-            Expr::Int { .. }
-            | Expr::Float { .. }
-            | Expr::Str { .. }
-            | Expr::Bool { .. }
-            | Expr::Path { .. } => {}
+            Expr::Field { obj, .. } => self.rewrite_expr(obj),
+            Expr::Range { start, end, .. } => {
+                self.rewrite_expr(start);
+                self.rewrite_expr(end);
+            }
+            Expr::StructInit { name, fields, .. } => {
+                // A struct defined in this module is referenced by its
+                // namespaced name; imported structs are already qualified.
+                if self.top.contains(name) && !self.is_shadowed(name) {
+                    *name = format!("{}.{}", self.ns, name);
+                }
+                for (_, v) in fields {
+                    self.rewrite_expr(v);
+                }
+            }
+            Expr::Path { parts, .. } => {
+                // `p.x` on a top-level binding: qualify the root so the
+                // struct-field walk finds `ns.p`.
+                if let Some(first) = parts.first_mut() {
+                    if self.top.contains(first) && !self.is_shadowed(first) {
+                        *first = format!("{}.{}", self.ns, first);
+                    }
+                }
+            }
+            Expr::Int { .. } | Expr::Float { .. } | Expr::Str { .. } | Expr::Bool { .. } => {}
         }
     }
 }
@@ -771,5 +888,48 @@ mod tests {
         // Namespaced copies are registered too.
         assert!(result.funcs.contains_key("io.println"));
         assert!(result.natives.contains_key("io.println"));
+    }
+
+    #[test]
+    fn struct_in_module_namespaced() {
+        let dir = temp_project(&[
+            (
+                "main.zz",
+                "import shapes\np := shapes.Point{ x: 1, y: 2 }\nz := shapes.dist(p)",
+            ),
+            (
+                "shapes.zz",
+                "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }",
+            ),
+        ]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.bindings["main.z"], Type::Int);
+        assert!(result.structs.contains_key("shapes.Point"));
+    }
+
+    #[test]
+    fn struct_field_access_in_module() {
+        use zz_runtime::{Interp, Value};
+
+        // `p.x` inside the module must resolve through the namespaced
+        // binding `shapes.p`.
+        let dir = temp_project(&[
+            ("main.zz", "import shapes\nz := shapes.get_x()"),
+            (
+                "shapes.zz",
+                "struct Point { x: int, y: int }\np := Point{ x: 42, y: 0 }\nfunc get_x() -> int { p.x }",
+            ),
+        ]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.bindings["main.z"], Type::Int);
+
+        let mut interp = Interp::with_natives(result.natives.clone());
+        let mut last = Value::Unit;
+        for p in &result.programs {
+            last = interp.run(p).unwrap();
+        }
+        assert_eq!(last, Value::Int(42));
     }
 }

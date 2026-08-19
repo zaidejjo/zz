@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use zz_checker::{check_program, FuncSig, Type};
+use zz_checker::{check_program, FuncSig, StructSig, Type};
 use zz_frontend::diag::{error_at, render_to_string, Files, RawDiag};
 use zz_frontend::parse;
 use zz_runtime::{EvalError, Interp, Value};
@@ -29,6 +29,8 @@ pub struct Session {
     bindings: HashMap<String, Type>,
     /// Signatures of functions from previous snippets (checker seed).
     funcs: HashMap<String, FuncSig>,
+    /// Struct definitions from previous snippets (checker seed).
+    structs: HashMap<String, StructSig>,
     files: Files,
     file_id: usize,
     name: String,
@@ -44,6 +46,7 @@ impl Session {
             interp: Interp::with_natives(stdlib_natives()),
             bindings: HashMap::new(),
             funcs: stdlib_funcs(),
+            structs: HashMap::new(),
             files,
             file_id,
             name,
@@ -125,7 +128,12 @@ impl Session {
             }
         }
 
-        let checked = check_program(&parsed.program, self.bindings.clone(), self.funcs.clone());
+        let checked = check_program(
+            &parsed.program,
+            self.bindings.clone(),
+            self.funcs.clone(),
+            self.structs.clone(),
+        );
         if !checked.errors.is_empty() {
             self.last_had_errors = true;
             return EvalOutput {
@@ -140,6 +148,7 @@ impl Session {
                 // Seed the checker with this snippet's new top-level types.
                 self.bindings.extend(checked.bindings);
                 self.funcs.extend(checked.funcs);
+                self.structs.extend(checked.structs);
                 EvalOutput {
                     output: display_value(&v),
                     errors: None,
@@ -469,6 +478,82 @@ mod tests {
         let mut s = Session::new("<test>");
         let out =
             s.eval("import std.http\ns := http.server()\nhttp.handle(s, \"GET\", \"/nope\", \"\")");
+        assert!(out.errors.is_some(), "expected error");
+    }
+
+    // --- structs -----------------------------------------------------------
+
+    #[test]
+    fn struct_defined_in_one_snippet_used_in_next() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("struct Point { x: int, y: int }");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        let out2 = s.eval("p := Point{ x: 1, y: 2 }\np.x");
+        assert!(out2.errors.is_none(), "errors: {:?}", out2.errors);
+        assert_eq!(out2.output, "1");
+    }
+
+    #[test]
+    fn struct_field_mutation_in_session() {
+        let mut s = Session::new("<test>");
+        s.eval("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }");
+        let out = s.eval("p.x = 10\np");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "Point{x: 10, y: 2}");
+    }
+
+    #[test]
+    fn struct_func_cross_snippet() {
+        let mut s = Session::new("<test>");
+        s.eval("struct Point { x: int, y: int }");
+        let out = s.eval("func dist(p: Point) -> int { p.x + p.y }\ndist(Point{ x: 3, y: 4 })");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "7");
+    }
+
+    #[test]
+    fn struct_type_error_blocks_run() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("struct Point { x: int, y: int }\np := Point{ x: \"a\" }");
+        assert!(out.errors.is_some(), "expected type error");
+        let out2 = s.eval("p");
+        assert!(out2.errors.is_some(), "p should not be bound");
+    }
+
+    // --- for loops ---------------------------------------------------------
+
+    #[test]
+    fn for_loop_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("sum := 0\nfor i in 0..5 { sum = sum + i }\nsum");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "10");
+    }
+
+    #[test]
+    fn for_loop_over_array_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("total := 0\nfor n in [10, 20, 30] { total = total + n }\ntotal");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "60");
+    }
+
+    #[test]
+    fn break_and_continue_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("found := 0\nfor i in 0..10 { if i == 3 { found = i; break } }\nfound");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "3");
+        let out2 = s
+            .eval("count := 0\nfor i in 0..5 { if i == 2 { continue }; count = count + 1 }\ncount");
+        assert!(out2.errors.is_none(), "errors: {:?}", out2.errors);
+        assert_eq!(out2.output, "4");
+    }
+
+    #[test]
+    fn break_outside_loop_rejected() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("break");
         assert!(out.errors.is_some(), "expected error");
     }
 }

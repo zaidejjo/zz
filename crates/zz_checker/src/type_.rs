@@ -27,6 +27,10 @@ pub enum Type {
     Json,
     /// Opaque HTTP server handle (produced by `std.http.server`).
     HttpServer,
+    /// A named struct type: `Point` from `struct Point { ... }`.
+    Struct(String),
+    /// `a..b` — an integer range (used by `for` loops).
+    Range(Box<Type>),
     /// Inference variable.
     Var(u32),
     /// Named type: a generic parameter (e.g. `T` in `func id<T>`).
@@ -83,6 +87,8 @@ impl fmt::Display for Type {
             }
             Type::Json => write!(f, "json"),
             Type::HttpServer => write!(f, "http.server"),
+            Type::Struct(n) => write!(f, "{n}"),
+            Type::Range(t) => write!(f, "{t}.."),
             Type::Var(_) => write!(f, "_"),
             Type::Named(n) => write!(f, "{n}"),
         }

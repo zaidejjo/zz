@@ -428,6 +428,8 @@ fn value_to_json(v: &Value) -> Result<JsonValue, EvalError> {
         Value::Func(_) | Value::Native(_) => Err(err("a function")),
         Value::Json(j) => Ok(j.clone()),
         Value::HttpServer(_) => Err(err("an http server")),
+        Value::Object { .. } => Err(err("a struct instance")),
+        Value::Range(..) => Err(err("a range")),
     }
 }
 
