@@ -185,9 +185,13 @@ impl Parser {
             .unwrap_or_else(|| dummy_ident(struct_tok.span));
         if !self.eat(TokenKind::LBrace) {
             self.error_here("expected `{` to start struct body");
+            // Recovery: skip to the closing brace so the field loop below
+            // terminates instead of spinning on an unconsumable token.
+            self.skip_to_rbrace();
         }
         let mut fields = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            let start_pos = self.pos;
             self.skip_stmt_ends();
             if self.at(TokenKind::RBrace) {
                 break;
@@ -206,6 +210,11 @@ impl Parser {
             self.skip_stmt_ends();
             if !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                 self.error_here("expected `,` or `}` after field");
+            }
+            // Progress guard: if an error path failed to consume anything,
+            // force-advance so recovery always terminates.
+            if self.pos == start_pos {
+                self.advance();
             }
         }
         let end = if self.eat(TokenKind::RBrace) {
@@ -1014,10 +1023,16 @@ impl Parser {
                     parts.push(member.text);
                     end = member.span;
                 }
-                // `Point{ x: 1 }` — struct construction. The `{` must be
-                // immediately adjacent (no leading trivia): `v { n }` after
-                // an if-let value is a block, not a struct literal.
-                if self.at(TokenKind::LBrace) && self.peek().leading.is_empty() {
+                // Struct construction: `Point{ x: 1 }` or `Point { x: 1 }`.
+                // A `{` is treated as a struct literal when it is adjacent
+                // (no leading trivia) or when its contents look like fields
+                // (`ident : ...`). Otherwise the `{` belongs to an enclosing
+                // block (`if x { ... }`, `while x { ... }`, if-let values).
+                if self.at(TokenKind::LBrace)
+                    && (self.peek().leading.is_empty()
+                        || (self.peek_kind_at(1) == TokenKind::Ident
+                            && self.peek_kind_at(2) == TokenKind::Colon))
+                {
                     return self.parse_struct_init(parts, tok.span.join(end));
                 }
                 if parts.len() == 1 {
@@ -1078,6 +1093,7 @@ impl Parser {
         self.advance(); // `{`
         let mut fields = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            let start_pos = self.pos;
             self.skip_stmt_ends();
             if self.at(TokenKind::RBrace) {
                 break;
@@ -1096,6 +1112,11 @@ impl Parser {
             self.skip_stmt_ends();
             if !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                 self.error_here("expected `,` or `}` after field");
+            }
+            // Progress guard: if an error path failed to consume anything,
+            // force-advance so recovery always terminates.
+            if self.pos == start_pos {
+                self.advance();
             }
         }
         let end = if self.eat(TokenKind::RBrace) {
@@ -2165,6 +2186,134 @@ mod tests {
             } => {
                 assert!(matches!(&args[0], E::Binary { .. }));
             }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    // --- struct init with space --------------------------------------------
+
+    #[test]
+    fn struct_init_with_space() {
+        let p = parse_ok("p := Point { x: 1, y: 2 }");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                value: E::StructInit { name, fields, .. },
+                ..
+            } => {
+                assert_eq!(name, "Point");
+                assert_eq!(fields.len(), 2);
+            }
+            other => panic!("expected StructInit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn struct_init_no_space_still_works() {
+        let p = parse_ok("p := Point{ x: 1 }");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                value: E::StructInit { name, .. },
+                ..
+            } => assert_eq!(name, "Point"),
+            other => panic!("expected StructInit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn if_block_not_struct_init() {
+        // `if x { ... }` must stay a block, not become `x{...}`.
+        let p = parse_ok("if x { y := 1 }");
+        match &p.stmts[0] {
+            Stmt::Expr(E::If { cond, then, .. }) => {
+                assert!(matches!(cond.as_ref(), E::Ident { name, .. } if name == "x"));
+                assert_eq!(then.stmts.len(), 1);
+            }
+            other => panic!("expected If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn while_block_not_struct_init() {
+        let p = parse_ok("while x { y := 1 }");
+        match &p.stmts[0] {
+            Stmt::Expr(E::While { cond, .. }) => {
+                assert!(matches!(cond.as_ref(), E::Ident { name, .. } if name == "x"));
+            }
+            other => panic!("expected While, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn if_let_value_block_not_struct_init() {
+        // `if let .some(v) = x { ... }` — the `{` after the value is the
+        // then-block, not a struct literal.
+        let p = parse_ok("if let .some(v) = x { v }");
+        match &p.stmts[0] {
+            Stmt::Expr(E::IfLet { value, then, .. }) => {
+                assert!(matches!(value.as_ref(), E::Ident { name, .. } if name == "x"));
+                assert_eq!(then.stmts.len(), 1);
+            }
+            other => panic!("expected IfLet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn struct_init_in_if_cond() {
+        // Struct literal directly in a condition still parses.
+        let p = parse_ok("if Point { x: 1 } == p { y := 1 }");
+        match &p.stmts[0] {
+            Stmt::Expr(E::If { cond, .. }) => {
+                assert!(matches!(cond.as_ref(), E::Binary { .. }));
+            }
+            other => panic!("expected If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_struct_recovers_without_hanging() {
+        // A dotted struct name (invalid) must not spin the parser into an
+        // infinite recovery loop; it reports errors and terminates.
+        let parsed = parse("struct shapes.Point { x: int }\nz := 1");
+        assert!(!parsed.errors.is_empty(), "expected parse errors");
+        assert_eq!(parsed.program.stmts.len(), 2);
+    }
+
+    #[test]
+    fn malformed_struct_init_recovers_without_hanging() {
+        // Garbage inside a struct literal must not spin the parser.
+        let parsed = parse("p := Point{ 123 }\nz := 1");
+        assert!(!parsed.errors.is_empty(), "expected parse errors");
+        assert_eq!(parsed.program.stmts.len(), 2);
+    }
+
+    // --- method calls -------------------------------------------------------
+
+    #[test]
+    fn method_call_parses_as_path_callee() {
+        let p = parse_ok("z := p.dist()");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                value: E::Call { callee, args, .. },
+                ..
+            } => {
+                assert!(matches!(
+                    callee.as_ref(),
+                    E::Path { parts, .. } if parts == &["p", "dist"]
+                ));
+                assert!(args.is_empty());
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn method_call_with_args() {
+        let p = parse_ok("z := p.move(1, 2)");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                value: E::Call { args, .. },
+                ..
+            } => assert_eq!(args.len(), 2),
             other => panic!("expected Call, got {other:?}"),
         }
     }

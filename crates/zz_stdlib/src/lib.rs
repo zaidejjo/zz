@@ -17,9 +17,10 @@ pub mod natives;
 pub use funcs::stdlib_funcs;
 pub use natives::stdlib_natives;
 
-
 /// The set of known `std.*` module names (second path component).
-pub const STDLIB_MODULES: &[&str] = &["io", "str", "vec", "json", "http", "fs", "env"];
+pub const STDLIB_MODULES: &[&str] = &[
+    "io", "str", "vec", "json", "http", "fs", "env", "math", "time",
+];
 
 /// Register a `std.*` module under a namespace name by copying its entries
 /// from the `std.<module>.*` keys to `<ns>.*` keys in both registries.
@@ -52,7 +53,6 @@ pub fn register_module_namespace(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -73,7 +73,7 @@ mod tests {
 
         let mut funcs = stdlib_funcs();
         let mut natives = stdlib_natives();
-        for module in ["io", "str", "vec", "json", "fs", "env"] {
+        for module in ["io", "str", "vec", "json", "fs", "env", "math", "time"] {
             register_module_namespace(module, module, &mut funcs, &mut natives)
                 .expect("known module");
         }
@@ -221,6 +221,146 @@ mod tests {
                 Value::Str("one".to_string()),
                 Value::Str("two".to_string())
             ])
+        );
+    }
+
+    // --- conversions --------------------------------------------------------
+
+    #[test]
+    fn conv_str() {
+        assert_eq!(run("str(42)").unwrap(), Value::Str("42".to_string()));
+        assert_eq!(run("str(3.5)").unwrap(), Value::Str("3.5".to_string()));
+        assert_eq!(run("str(true)").unwrap(), Value::Str("true".to_string()));
+        assert_eq!(
+            run("str([1, 2])").unwrap(),
+            Value::Str("[1, 2]".to_string())
+        );
+        assert_eq!(
+            run("str({\"a\": 1})").unwrap(),
+            Value::Str("{a: 1}".to_string())
+        );
+    }
+
+    #[test]
+    fn conv_int() {
+        assert_eq!(
+            run("int(\"42\")").unwrap(),
+            Value::Option(Some(Box::new(Value::Int(42))))
+        );
+        assert_eq!(
+            run("int(\" 7 \")").unwrap(),
+            Value::Option(Some(Box::new(Value::Int(7))))
+        );
+        assert_eq!(run("int(\"abc\")").unwrap(), Value::Option(None));
+        assert_eq!(
+            run("int(3.7)").unwrap(),
+            Value::Option(Some(Box::new(Value::Int(3))))
+        );
+        assert_eq!(
+            run("int(5)").unwrap(),
+            Value::Option(Some(Box::new(Value::Int(5))))
+        );
+        assert_eq!(run("int(true)").unwrap(), Value::Option(None));
+    }
+
+    #[test]
+    fn conv_float() {
+        assert_eq!(
+            run("float(\"2.5\")").unwrap(),
+            Value::Option(Some(Box::new(Value::Float(2.5))))
+        );
+        assert_eq!(run("float(\"x\")").unwrap(), Value::Option(None));
+        assert_eq!(
+            run("float(3)").unwrap(),
+            Value::Option(Some(Box::new(Value::Float(3.0))))
+        );
+        assert_eq!(
+            run("float(1.5)").unwrap(),
+            Value::Option(Some(Box::new(Value::Float(1.5))))
+        );
+    }
+
+    // --- std.math -----------------------------------------------------------
+
+    #[test]
+    fn math_abs() {
+        assert_eq!(run("import std.math\nmath.abs(-5)").unwrap(), Value::Int(5));
+        assert_eq!(
+            run("import std.math\nmath.abs(-5.5)").unwrap(),
+            Value::Float(5.5)
+        );
+        assert_eq!(run("import std.math\nmath.abs(3)").unwrap(), Value::Int(3));
+    }
+
+    #[test]
+    fn math_floor_ceil() {
+        assert_eq!(
+            run("import std.math\nmath.floor(3.7)").unwrap(),
+            Value::Int(3)
+        );
+        assert_eq!(
+            run("import std.math\nmath.floor(-3.2)").unwrap(),
+            Value::Int(-4)
+        );
+        assert_eq!(
+            run("import std.math\nmath.ceil(3.2)").unwrap(),
+            Value::Int(4)
+        );
+        assert_eq!(
+            run("import std.math\nmath.ceil(-3.7)").unwrap(),
+            Value::Int(-3)
+        );
+    }
+
+    #[test]
+    fn math_sqrt_pow() {
+        assert_eq!(
+            run("import std.math\nmath.sqrt(9)").unwrap(),
+            Value::Float(3.0)
+        );
+        assert_eq!(
+            run("import std.math\nmath.sqrt(2.25)").unwrap(),
+            Value::Float(1.5)
+        );
+        assert_eq!(
+            run("import std.math\nmath.pow(2, 10)").unwrap(),
+            Value::Float(1024.0)
+        );
+        assert_eq!(
+            run("import std.math\nmath.pow(2.0, 3.0)").unwrap(),
+            Value::Float(8.0)
+        );
+    }
+
+    #[test]
+    fn math_random_in_range() {
+        let v = run("import std.math\nmath.random()").unwrap();
+        match v {
+            Value::Float(f) => assert!((0.0..1.0).contains(&f), "random out of range: {f}"),
+            other => panic!("expected float, got {other}"),
+        }
+    }
+
+    // --- std.time -----------------------------------------------------------
+
+    #[test]
+    fn time_now_ms() {
+        let v = run("import std.time\ntime.now_ms()").unwrap();
+        match v {
+            Value::Int(ms) => assert!(ms > 0, "now_ms should be positive: {ms}"),
+            other => panic!("expected int, got {other}"),
+        }
+    }
+
+    #[test]
+    fn time_sleep_ms() {
+        let start = std::time::Instant::now();
+        let v = run("import std.time\ntime.sleep_ms(20)").unwrap();
+        assert_eq!(v, Value::Unit);
+        assert!(
+            start.elapsed().as_millis() >= 15,
+            "sleep returned too early: {:?}",
+            start.elapsed()
         );
     }
 }

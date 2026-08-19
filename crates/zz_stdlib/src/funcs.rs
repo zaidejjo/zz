@@ -193,7 +193,53 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
 
     // Built-in: `typeof(v)` — accepts any value, returns its type name.
     let t = Type::Named("T".to_string());
-    m.insert("typeof".into(), sig_t(vec![("v", t)], Type::Str));
+    m.insert("typeof".into(), sig_t(vec![("v", t.clone())], Type::Str));
+
+    // Built-in conversions.
+    // `str(v)` — stringify any value (total).
+    m.insert("str".into(), sig_t(vec![("v", t.clone())], Type::Str));
+    // `int(v)` — parse a string, truncate a float, or pass through an int.
+    // Invalid parses yield `.none`.
+    m.insert(
+        "int".into(),
+        sig_t(vec![("v", t.clone())], Type::Option(Box::new(Type::Int))),
+    );
+    // `float(v)` — parse a string or widen an int. Invalid parses yield
+    // `.none`.
+    m.insert(
+        "float".into(),
+        sig_t(vec![("v", t.clone())], Type::Option(Box::new(Type::Float))),
+    );
+
+    // std.math
+    m.insert(
+        "std.math.abs".into(),
+        sig_t(vec![("v", t.clone())], t.clone()),
+    );
+    m.insert(
+        "std.math.floor".into(),
+        sig(vec![("v", Type::Float)], Type::Int),
+    );
+    m.insert(
+        "std.math.ceil".into(),
+        sig(vec![("v", Type::Float)], Type::Int),
+    );
+    m.insert(
+        "std.math.sqrt".into(),
+        sig_t(vec![("v", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.pow".into(),
+        sig_t(vec![("base", t.clone()), ("exp", t.clone())], Type::Float),
+    );
+    m.insert("std.math.random".into(), sig(vec![], Type::Float));
+
+    // std.time
+    m.insert("std.time.now_ms".into(), sig(vec![], Type::Int));
+    m.insert(
+        "std.time.sleep_ms".into(),
+        sig(vec![("ms", Type::Int)], Type::Unit),
+    );
 
     m
 }
@@ -215,8 +261,14 @@ mod tests {
         assert!(funcs.contains_key("std.http.listen"));
         assert!(funcs.contains_key("std.fs.read_file"));
         assert!(funcs.contains_key("std.env.get_var"));
+        assert!(funcs.contains_key("std.math.abs"));
+        assert!(funcs.contains_key("std.math.random"));
+        assert!(funcs.contains_key("std.time.now_ms"));
         assert!(funcs.contains_key("typeof"));
-        assert_eq!(funcs.len(), 27);
+        assert!(funcs.contains_key("str"));
+        assert!(funcs.contains_key("int"));
+        assert!(funcs.contains_key("float"));
+        assert_eq!(funcs.len(), 38);
     }
 
     #[test]

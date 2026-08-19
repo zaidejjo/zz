@@ -277,6 +277,66 @@ impl Interp {
         }
     }
 
+    /// Resolve a dotted path to a value: direct binding, function, native,
+    /// or a struct-field walk (`p.x.y`).
+    fn resolve_path_value(&self, parts: &[String], span: Span) -> Result<Value, EvalError> {
+        let name = parts.join(".");
+        if let Some(v) = self.env.borrow().get(&name) {
+            return Ok(v);
+        }
+        if let Some(fv) = self.funcs.get(&name) {
+            return Ok(Value::Func(fv.clone()));
+        }
+        if let Some(entry) = self.natives.get(&name) {
+            return Ok(Value::Native(NativeFunc {
+                name,
+                arity: entry.arity,
+            }));
+        }
+        // Struct field walk: `p.x` where `p` is a struct instance.
+        if let Some(mut v) = self.env.borrow().get(&parts[0]) {
+            for field in &parts[1..] {
+                v = Self::object_field(&v, field, span)?;
+            }
+            return Ok(v);
+        }
+        Err(EvalError::new(format!("undefined variable `{name}`"), span))
+    }
+
+    /// Look up a callable (function, native, or bound value) by name.
+    fn lookup_callable(&self, name: &str, span: Span) -> Result<Value, EvalError> {
+        if let Some(v) = self.env.borrow().get(name) {
+            return Ok(v);
+        }
+        if let Some(fv) = self.funcs.get(name) {
+            return Ok(Value::Func(fv.clone()));
+        }
+        if let Some(entry) = self.natives.get(name) {
+            return Ok(Value::Native(NativeFunc {
+                name: name.to_string(),
+                arity: entry.arity,
+            }));
+        }
+        Err(EvalError::new(format!("undefined method `{name}`"), span))
+    }
+
+    /// Resolve a method on a receiver: try the bare name, then the
+    /// namespace implied by the receiver's struct type (`shapes.Point` →
+    /// `shapes.dist`).
+    fn lookup_method(&self, recv: &Value, method: &str, span: Span) -> Result<Value, EvalError> {
+        match self.lookup_callable(method, span) {
+            Ok(f) => Ok(f),
+            Err(_) => {
+                if let Value::Object { name, .. } = recv {
+                    if let Some((ns, _)) = name.rsplit_once('.') {
+                        return self.lookup_callable(&format!("{ns}.{method}"), span);
+                    }
+                }
+                Err(EvalError::new(format!("undefined method `{method}`"), span))
+            }
+        }
+    }
+
     /// Write a mutated container back to the variable it came from. Handles
     /// plain variables, qualified names, and struct-field paths; temporary
     /// bases (e.g. `makePoint()`) discard the mutation.
@@ -355,32 +415,7 @@ impl Interp {
                 }
                 Ok(Flow::Value(Value::Str(out)))
             }
-            Expr::Path { parts, span } => {
-                let name = parts.join(".");
-                if let Some(v) = self.env.borrow().get(&name) {
-                    return Ok(Flow::Value(v));
-                }
-                if let Some(fv) = self.funcs.get(&name) {
-                    return Ok(Flow::Value(Value::Func(fv.clone())));
-                }
-                if let Some(entry) = self.natives.get(&name) {
-                    return Ok(Flow::Value(Value::Native(NativeFunc {
-                        name,
-                        arity: entry.arity,
-                    })));
-                }
-                // Struct field walk: `p.x` where `p` is a struct instance.
-                if let Some(mut v) = self.env.borrow().get(&parts[0]) {
-                    for field in &parts[1..] {
-                        v = Self::object_field(&v, field, *span)?;
-                    }
-                    return Ok(Flow::Value(v));
-                }
-                Err(EvalError::new(
-                    format!("undefined variable `{name}`"),
-                    *span,
-                ))
-            }
+            Expr::Path { parts, span } => self.resolve_path_value(parts, *span).map(Flow::Value),
             Expr::Paren { expr, .. } => self.eval(expr),
             Expr::Unary { op, expr, span } => {
                 let v = self.eval(expr)?.into_value()?;
@@ -417,6 +452,31 @@ impl Interp {
                 self.eval_binary(*op, l, r, *span).map(Flow::Value)
             }
             Expr::Call { callee, args, span } => {
+                // Method call: `p.dist()` — when the full path isn't a direct
+                // function or field, resolve the last component as a method
+                // on the receiver (the path minus its last component).
+                if let Expr::Path { parts, span: pspan } = callee.as_ref() {
+                    if parts.len() >= 2 {
+                        let joined = parts.join(".");
+                        let is_direct = self.env.borrow().get(&joined).is_some()
+                            || self.funcs.contains_key(&joined)
+                            || self.natives.contains_key(&joined);
+                        if !is_direct {
+                            // A func-valued struct field is a direct call.
+                            if self.resolve_path_value(parts, *pspan).is_err() {
+                                let method = parts.last().unwrap();
+                                let recv =
+                                    self.resolve_path_value(&parts[..parts.len() - 1], *pspan)?;
+                                let f = self.lookup_method(&recv, method, *pspan)?;
+                                let mut arg_vals = vec![recv];
+                                for a in args {
+                                    arg_vals.push(self.eval(a)?.into_value()?);
+                                }
+                                return self.call(f, arg_vals, *span).map(Flow::Value);
+                            }
+                        }
+                    }
+                }
                 let f = self.eval(callee)?.into_value()?;
                 let mut arg_vals = Vec::with_capacity(args.len());
                 for a in args {
@@ -1291,7 +1351,7 @@ mod tests {
     fn unknown_path_errors() {
         let err = eval_src("foo.bar.baz(1)").unwrap_err();
         assert!(
-            err.message.contains("undefined variable `foo.bar.baz`"),
+            err.message.contains("undefined variable `foo.bar`"),
             "{}",
             err.message
         );
@@ -1638,6 +1698,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(v, Value::Int(99));
+    }
+
+    // --- method calls -------------------------------------------------------
+
+    #[test]
+    fn method_call() {
+        let v = eval_src(
+            "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\np := Point { x: 3, y: 4 }\np.dist()",
+        )
+        .unwrap();
+        assert_eq!(v, Value::Int(7));
+    }
+
+    #[test]
+    fn method_call_with_args() {
+        let v = eval_src(
+            "struct Point { x: int }\nfunc scale(p: Point, f: int) -> int { p.x * f }\np := Point { x: 3 }\np.scale(4)",
+        )
+        .unwrap();
+        assert_eq!(v, Value::Int(12));
+    }
+
+    #[test]
+    fn method_call_undefined_errors() {
+        let err = eval_src("struct Point { x: int }\np := Point { x: 1 }\np.nope()").unwrap_err();
+        assert!(
+            err.message.contains("undefined method `nope`"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn method_call_on_field() {
+        // `a.b.dist()` — receiver is a struct field.
+        let v = eval_src(
+            "struct Point { x: int }\nstruct Holder { p: Point }\nfunc dist(p: Point) -> int { p.x }\nh := Holder{ p: Point { x: 9 } }\nh.p.dist()",
+        )
+        .unwrap();
+        assert_eq!(v, Value::Int(9));
+    }
+
+    #[test]
+    fn struct_init_with_space_runtime() {
+        let v = eval_src("struct Point { x: int, y: int }\np := Point { x: 1, y: 2 }\np.x + p.y")
+            .unwrap();
+        assert_eq!(v, Value::Int(3));
     }
 
     // --- pipeline -----------------------------------------------------------

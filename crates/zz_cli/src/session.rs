@@ -619,4 +619,43 @@ mod tests {
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, ".none");
     }
+
+    // --- Phase 5: methods, space fix, conversions --------------------------
+
+    #[test]
+    fn method_call_in_session() {
+        let mut s = Session::new("<test>");
+        s.eval("struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }");
+        let out = s.eval("p := Point { x: 3, y: 4 }\np.dist()");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "7");
+    }
+
+    #[test]
+    fn struct_init_with_space_in_session() {
+        let mut s = Session::new("<test>");
+        s.eval("struct Point { x: int }");
+        let out = s.eval("p := Point { x: 5 }\np.x");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "5");
+    }
+
+    #[test]
+    fn conversion_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("int(\"42\")");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, ".some(42)");
+        let out2 = s.eval("str(3.5)");
+        assert!(out2.errors.is_none(), "errors: {:?}", out2.errors);
+        assert_eq!(out2.output, "3.5");
+    }
+
+    #[test]
+    fn std_math_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.math\nmath.abs(-7)");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "7");
+    }
 }

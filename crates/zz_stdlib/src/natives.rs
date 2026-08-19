@@ -212,12 +212,95 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
+    // std.math
+    m.insert(
+        "std.math.abs".into(),
+        NativeEntry {
+            arity: 1,
+            f: math_abs,
+        },
+    );
+    m.insert(
+        "std.math.floor".into(),
+        NativeEntry {
+            arity: 1,
+            f: math_floor,
+        },
+    );
+    m.insert(
+        "std.math.ceil".into(),
+        NativeEntry {
+            arity: 1,
+            f: math_ceil,
+        },
+    );
+    m.insert(
+        "std.math.sqrt".into(),
+        NativeEntry {
+            arity: 1,
+            f: math_sqrt,
+        },
+    );
+    m.insert(
+        "std.math.pow".into(),
+        NativeEntry {
+            arity: 2,
+            f: math_pow,
+        },
+    );
+    m.insert(
+        "std.math.random".into(),
+        NativeEntry {
+            arity: 0,
+            f: math_random,
+        },
+    );
+
+    // std.time
+    m.insert(
+        "std.time.now_ms".into(),
+        NativeEntry {
+            arity: 0,
+            f: time_now_ms,
+        },
+    );
+    m.insert(
+        "std.time.sleep_ms".into(),
+        NativeEntry {
+            arity: 1,
+            f: time_sleep_ms,
+        },
+    );
+
     // Built-in: `typeof(v)` — the runtime type name of any value.
     m.insert(
         "typeof".into(),
         NativeEntry {
             arity: 1,
             f: typeof_fn,
+        },
+    );
+
+    // Built-in conversions.
+    m.insert(
+        "str".into(),
+        NativeEntry {
+            arity: 1,
+            f: conv_str,
+        },
+    );
+    m.insert(
+        "int".into(),
+        NativeEntry {
+            arity: 1,
+            f: conv_int,
+        },
+    );
+    m.insert(
+        "float".into(),
+        NativeEntry {
+            arity: 1,
+            f: conv_float,
         },
     );
 
@@ -710,6 +793,189 @@ fn typeof_fn(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalE
         EvalError::new("missing argument for typeof", zz_runtime::Span::new(0, 0))
     })?;
     Ok(Value::Str(v.type_name()))
+}
+
+// --- conversions ------------------------------------------------------------
+
+fn conv_str(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for str", zz_runtime::Span::new(0, 0)))?;
+    Ok(Value::Str(v.to_string()))
+}
+
+fn conv_int(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for int", zz_runtime::Span::new(0, 0)))?;
+    let result = match &v {
+        Value::Int(i) => Some(*i),
+        Value::Float(f) => Some(*f as i64),
+        Value::Str(s) => s.trim().parse::<i64>().ok(),
+        _ => None,
+    };
+    Ok(Value::Option(result.map(|i| Box::new(Value::Int(i)))))
+}
+
+fn conv_float(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for float", zz_runtime::Span::new(0, 0)))?;
+    let result = match &v {
+        Value::Int(i) => Some(*i as f64),
+        Value::Float(f) => Some(*f),
+        Value::Str(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    };
+    Ok(Value::Option(result.map(|f| Box::new(Value::Float(f)))))
+}
+
+// --- std.math ---------------------------------------------------------------
+
+fn math_abs(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for abs", zz_runtime::Span::new(0, 0)))?;
+    match v {
+        Value::Int(i) => Ok(Value::Int(i.abs())),
+        Value::Float(f) => Ok(Value::Float(f.abs())),
+        other => Err(EvalError::new(
+            format!(
+                "abs expects `int` or `float`, found `{}`",
+                other.type_name()
+            ),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+fn math_floor(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for floor", zz_runtime::Span::new(0, 0)))?;
+    match v {
+        Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
+        Value::Int(i) => Ok(Value::Int(i)),
+        other => Err(EvalError::new(
+            format!("floor expects `float`, found `{}`", other.type_name()),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+fn math_ceil(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for ceil", zz_runtime::Span::new(0, 0)))?;
+    match v {
+        Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
+        Value::Int(i) => Ok(Value::Int(i)),
+        other => Err(EvalError::new(
+            format!("ceil expects `float`, found `{}`", other.type_name()),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+fn math_sqrt(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for sqrt", zz_runtime::Span::new(0, 0)))?;
+    match v {
+        Value::Int(i) => Ok(Value::Float((i as f64).sqrt())),
+        Value::Float(f) => Ok(Value::Float(f.sqrt())),
+        other => Err(EvalError::new(
+            format!(
+                "sqrt expects `int` or `float`, found `{}`",
+                other.type_name()
+            ),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+fn math_pow(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let base = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for pow", zz_runtime::Span::new(0, 0)))?;
+    let exp = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for pow", zz_runtime::Span::new(0, 0)))?;
+    let to_f = |v: &Value| -> Option<f64> {
+        match v {
+            Value::Int(i) => Some(*i as f64),
+            Value::Float(f) => Some(*f),
+            _ => None,
+        }
+    };
+    let (b, e) = match (to_f(&base), to_f(&exp)) {
+        (Some(b), Some(e)) => (b, e),
+        _ => {
+            return Err(EvalError::new(
+                format!(
+                    "pow expects `int` or `float` arguments, found `{}` and `{}`",
+                    base.type_name(),
+                    exp.type_name()
+                ),
+                zz_runtime::Span::new(0, 0),
+            ))
+        }
+    };
+    Ok(Value::Float(b.powf(e)))
+}
+
+fn math_random(_interp: &mut Interp, _args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    // Simple LCG seeded from the clock — no external RNG dependency.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut state = (nanos as u64) | 1;
+    state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    let unit = (state >> 33) as f64 / (1u64 << 31) as f64;
+    Ok(Value::Float(unit))
+}
+
+// --- std.time ---------------------------------------------------------------
+
+fn time_now_ms(_interp: &mut Interp, _args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Ok(Value::Int(ms))
+}
+
+fn time_sleep_ms(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let ms = match args.first() {
+        Some(Value::Int(ms)) => *ms,
+        other => {
+            return Err(EvalError::new(
+                format!(
+                    "sleep_ms expects `int`, found `{}`",
+                    other
+                        .map(|v| v.type_name())
+                        .unwrap_or_else(|| "nothing".to_string())
+                ),
+                zz_runtime::Span::new(0, 0),
+            ))
+        }
+    };
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    }
+    Ok(Value::Unit)
 }
 
 #[cfg(test)]

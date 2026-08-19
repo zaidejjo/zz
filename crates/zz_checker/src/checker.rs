@@ -988,6 +988,40 @@ impl Checker {
                 return ret;
             }
         }
+        // Method call: `p.dist()` resolves to `dist(p, ...)` when the full
+        // path isn't a known function. The receiver is the path minus its
+        // last component; the method is looked up by name — first bare, then
+        // namespaced by the receiver's struct type (`shapes.Point` → tries
+        // `shapes.dist`).
+        if let Expr::Path { parts, span: pspan } = callee {
+            if parts.len() >= 2 {
+                let method = parts.last().unwrap();
+                let recv_t = self.lookup_path(&parts[..parts.len() - 1], *pspan);
+                let mut sig = self.funcs.get(method).cloned();
+                if sig.is_none() {
+                    if let Type::Struct(sname) = self.unifier.resolve(&recv_t) {
+                        if let Some((ns, _)) = sname.rsplit_once('.') {
+                            sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                        }
+                    }
+                }
+                if let Some(sig) = sig {
+                    let (ps, ret) = self.instantiate(&sig);
+                    if ps.is_empty() {
+                        self.errors.push(error_at(
+                            format!("method `{method}` takes no arguments"),
+                            span,
+                        ));
+                        return Type::Unit;
+                    }
+                    if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
+                        self.report_mismatch(e, *pspan);
+                    }
+                    self.check_args_against(ps[1..].to_vec(), args, span);
+                    return ret;
+                }
+            }
+        }
         let callee_t = self.check_expr(callee);
 
         let callee_t = self.unifier.resolve(&callee_t);
@@ -1458,6 +1492,22 @@ mod tests {
             parsed.errors
         );
         check_program(&parsed.program, HashMap::new(), funcs, HashMap::new())
+    }
+
+    /// Check with seeded functions and structs (e.g. a namespaced struct
+    /// that only exists through module registration).
+    fn check_src_with_funcs_and_structs(
+        src: &str,
+        funcs: HashMap<String, FuncSig>,
+        structs: HashMap<String, StructSig>,
+    ) -> CheckResult {
+        let parsed = parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        check_program(&parsed.program, HashMap::new(), funcs, structs)
     }
 
     #[test]
@@ -2114,6 +2164,154 @@ mod tests {
             let r = check_src_with_funcs(src, funcs.clone());
             assert!(r.errors.is_empty(), "errors for `{src}`: {:?}", r.errors);
             assert_eq!(r.bindings["x"], Type::Str, "for `{src}`");
+        }
+    }
+
+    // --- method calls -------------------------------------------------------
+
+    fn method_funcs() -> HashMap<String, FuncSig> {
+        let mut funcs = HashMap::new();
+        funcs.insert(
+            "dist".to_string(),
+            FuncSig {
+                generics: Vec::new(),
+                params: vec![
+                    ("p".to_string(), Type::Struct("Point".to_string())),
+                    ("scale".to_string(), Type::Int),
+                ],
+                ret: Type::Int,
+            },
+        );
+        funcs
+    }
+
+    #[test]
+    fn method_call_type_checks() {
+        let r = check_src_with_funcs(
+            "struct Point { x: int }\np := Point{ x: 3 }\nz := p.dist(2)",
+            method_funcs(),
+        );
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["z"], Type::Int);
+    }
+
+    #[test]
+    fn method_call_receiver_mismatch_errors() {
+        let r = check_src_with_funcs(
+            "struct Point { x: int }\nstruct Line { a: int }\nl := Line{ a: 1 }\nz := l.dist(2)",
+            method_funcs(),
+        );
+        assert!(
+            r.errors.iter().any(|e| e.message.contains("type mismatch")),
+            "errors: {:?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn method_call_arg_mismatch_errors() {
+        let r = check_src_with_funcs(
+            "struct Point { x: int }\np := Point{ x: 3 }\nz := p.dist(\"s\")",
+            method_funcs(),
+        );
+        assert!(
+            r.errors.iter().any(|e| e.message.contains("type mismatch")),
+            "errors: {:?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn method_call_unknown_method_errors() {
+        let r = check_src_with_funcs(
+            "struct Point { x: int }\np := Point{ x: 3 }\nz := p.nope()",
+            method_funcs(),
+        );
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.message.contains("no field `nope`")),
+            "errors: {:?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn method_call_namespaced_by_struct_type() {
+        // `shapes.Point` receiver resolves `dist` → `shapes.dist`. The
+        // namespaced struct exists only through module registration, so it
+        // is seeded rather than defined in source.
+        let mut funcs = HashMap::new();
+        funcs.insert(
+            "shapes.dist".to_string(),
+            FuncSig {
+                generics: Vec::new(),
+                params: vec![("p".to_string(), Type::Struct("shapes.Point".to_string()))],
+                ret: Type::Int,
+            },
+        );
+        let mut structs = HashMap::new();
+        structs.insert(
+            "shapes.Point".to_string(),
+            StructSig {
+                fields: vec![("x".to_string(), Type::Int)],
+            },
+        );
+        let r = check_src_with_funcs_and_structs(
+            "p := shapes.Point{ x: 3 }\nz := p.dist()",
+            funcs,
+            structs,
+        );
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["z"], Type::Int);
+    }
+
+    // --- conversions --------------------------------------------------------
+
+    fn conv_funcs() -> HashMap<String, FuncSig> {
+        let t = Type::Named("T".to_string());
+        let mut funcs = HashMap::new();
+        funcs.insert(
+            "str".to_string(),
+            FuncSig {
+                generics: vec!["T".to_string()],
+                params: vec![("v".to_string(), t.clone())],
+                ret: Type::Str,
+            },
+        );
+        funcs.insert(
+            "int".to_string(),
+            FuncSig {
+                generics: vec!["T".to_string()],
+                params: vec![("v".to_string(), t.clone())],
+                ret: Type::Option(Box::new(Type::Int)),
+            },
+        );
+        funcs.insert(
+            "float".to_string(),
+            FuncSig {
+                generics: vec!["T".to_string()],
+                params: vec![("v".to_string(), t.clone())],
+                ret: Type::Option(Box::new(Type::Float)),
+            },
+        );
+        funcs
+    }
+
+    #[test]
+    fn conversion_sigs() {
+        let r = check_src_with_funcs("a := str(1)\nb := int(\"42\")\nc := float(3)", conv_funcs());
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["a"], Type::Str);
+        assert_eq!(r.bindings["b"], Type::Option(Box::new(Type::Int)));
+        assert_eq!(r.bindings["c"], Type::Option(Box::new(Type::Float)));
+    }
+
+    #[test]
+    fn conversion_any_value() {
+        for src in ["a := str([1, 2])", "a := int(3.7)", "a := float(\"2.5\")"] {
+            let r = check_src_with_funcs(src, conv_funcs());
+            assert!(r.errors.is_empty(), "errors for `{src}`: {:?}", r.errors);
         }
     }
 }

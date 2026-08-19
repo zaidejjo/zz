@@ -526,6 +526,18 @@ impl Rewriter<'_> {
                 self.rewrite_expr(right);
             }
             Expr::Call { callee, args, .. } => {
+                // Method call: `p.dist()` — the method name is the last path
+                // component; qualify it like a bare function reference so the
+                // checker/runtime can resolve `ns.dist`.
+                if let Expr::Path { parts, .. } = callee.as_mut() {
+                    if parts.len() >= 2 {
+                        if let Some(last) = parts.last_mut() {
+                            if self.top.contains(last) && !self.is_shadowed(last) {
+                                *last = format!("{}.{}", self.ns, last);
+                            }
+                        }
+                    }
+                }
                 self.rewrite_expr(callee);
                 for a in args {
                     self.rewrite_expr(a);
@@ -995,5 +1007,57 @@ mod tests {
             last = interp.run(p).unwrap();
         }
         assert_eq!(last, Value::Int(6));
+    }
+
+    #[test]
+    fn method_call_in_module() {
+        use zz_runtime::{Interp, Value};
+
+        // `p.dist()` inside the defining module: the method name is
+        // qualified to `shapes.dist`.
+        let dir = temp_project(&[
+            ("main.zz", "import shapes\nz := shapes.apply()"),
+            (
+                "shapes.zz",
+                "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\nfunc apply() -> int { p := Point { x: 3, y: 4 }\np.dist() }",
+            ),
+        ]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        let mut interp = Interp::with_natives(result.natives.clone());
+        let mut last = Value::Unit;
+        for p in &result.programs {
+            last = interp.run(p).unwrap();
+        }
+        assert_eq!(last, Value::Int(7));
+    }
+
+    #[test]
+    fn method_call_cross_module() {
+        use zz_runtime::{Interp, Value};
+
+        // `p.dist()` from another module: the method resolves through the
+        // receiver's struct type (`shapes.Point` → `shapes.dist`).
+        let dir = temp_project(&[
+            (
+                "main.zz",
+                "import shapes\np := shapes.Point { x: 3, y: 4 }\nz := p.dist()",
+            ),
+            (
+                "shapes.zz",
+                "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }",
+            ),
+        ]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.bindings["main.z"], Type::Int);
+
+        let mut interp = Interp::with_natives(result.natives.clone());
+        let mut last = Value::Unit;
+        for p in &result.programs {
+            last = interp.run(p).unwrap();
+        }
+        assert_eq!(last, Value::Int(7));
     }
 }
