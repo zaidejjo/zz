@@ -158,6 +158,9 @@ impl<'a> Lexer<'a> {
                 '|' if self.peek_char_at(1) == Some('|') => {
                     self.emit_significant(TokenKind::OrOr, self.pos, self.pos + 2)
                 }
+                '|' if self.peek_char_at(1) == Some('>') => {
+                    self.emit_significant(TokenKind::PipeGt, self.pos, self.pos + 2)
+                }
                 '|' => self.emit_significant(TokenKind::Pipe, self.pos, self.pos + 1),
                 '?' => self.emit_significant(TokenKind::Question, self.pos, self.pos + 1),
                 ':' if self.peek_char_at(1) == Some('=') => {
@@ -294,6 +297,7 @@ impl<'a> Lexer<'a> {
                     | TokenKind::Dot
                     | TokenKind::DotDot
                     | TokenKind::Pipe
+                    | TokenKind::PipeGt
                     | TokenKind::Arrow
                     | TokenKind::ColonEq
                     | TokenKind::LParen
@@ -723,5 +727,27 @@ mod tests {
             vec![K::LBracket, K::Int, K::Comma, K::Int, K::RBracket, K::Eof]
         );
         assert_eq!(kinds("x := 1"), vec![K::Ident, K::ColonEq, K::Int, K::Eof]);
+    }
+
+    #[test]
+    fn pipeline_operator() {
+        assert_eq!(
+            kinds("a |> f(b)"),
+            vec![
+                K::Ident,
+                K::PipeGt,
+                K::Ident,
+                K::LParen,
+                K::Ident,
+                K::RParen,
+                K::Eof
+            ]
+        );
+        // `|>` must not swallow closure pipes or `||`.
+        assert_eq!(
+            kinds("|x| x"),
+            vec![K::Pipe, K::Ident, K::Pipe, K::Ident, K::Eof]
+        );
+        assert_eq!(kinds("a || b"), vec![K::Ident, K::OrOr, K::Ident, K::Eof]);
     }
 }

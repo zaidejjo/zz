@@ -616,6 +616,21 @@ impl Rewriter<'_> {
                 self.rewrite_expr(start);
                 self.rewrite_expr(end);
             }
+            Expr::Index { obj, index, .. } => {
+                self.rewrite_expr(obj);
+                self.rewrite_expr(index);
+            }
+            Expr::Slice {
+                obj, start, end, ..
+            } => {
+                self.rewrite_expr(obj);
+                if let Some(s) = start {
+                    self.rewrite_expr(s);
+                }
+                if let Some(e) = end {
+                    self.rewrite_expr(e);
+                }
+            }
             Expr::StructInit { name, fields, .. } => {
                 // A struct defined in this module is referenced by its
                 // namespaced name; imported structs are already qualified.
@@ -931,5 +946,54 @@ mod tests {
             last = interp.run(p).unwrap();
         }
         assert_eq!(last, Value::Int(42));
+    }
+
+    #[test]
+    fn indexing_and_slicing_in_module() {
+        use zz_runtime::{Interp, Value};
+
+        // Index/slice expressions inside a module must be rewritten too
+        // (they reference a namespaced binding as their object).
+        let dir = temp_project(&[
+            ("main.zz", "import stats\nz := stats.first()\nw := stats.mid()"),
+            (
+                "stats.zz",
+                "scores := [10, 20, 30]\nfunc first() -> int { scores[0] }\nfunc mid() -> [int] { scores[1:3] }",
+            ),
+        ]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.bindings["main.z"], Type::Int);
+        assert_eq!(result.bindings["main.w"], Type::Array(Box::new(Type::Int)));
+
+        let mut interp = Interp::with_natives(result.natives.clone());
+        let mut last = Value::Unit;
+        for p in &result.programs {
+            last = interp.run(p).unwrap();
+        }
+        assert_eq!(last, Value::Array(vec![Value::Int(20), Value::Int(30)]));
+    }
+
+    #[test]
+    fn pipeline_in_module() {
+        use zz_runtime::{Interp, Value};
+
+        // Piped calls in a module rewrite the callee path correctly.
+        let dir = temp_project(&[
+            ("main.zz", "import math\nz := math.apply()"),
+            (
+                "math.zz",
+                "func inc(n: int) -> int { n + 1 }\nfunc apply() -> int { 5 |> inc }",
+            ),
+        ]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        let mut interp = Interp::with_natives(result.natives.clone());
+        let mut last = Value::Unit;
+        for p in &result.programs {
+            last = interp.run(p).unwrap();
+        }
+        assert_eq!(last, Value::Int(6));
     }
 }

@@ -77,6 +77,28 @@ impl Value {
     pub fn is_truthy(&self) -> bool {
         matches!(self, Value::Bool(true))
     }
+
+    /// The runtime type name of this value (used by `typeof` and error
+    /// messages). Struct instances report their type name.
+    pub fn type_name(&self) -> String {
+        match self {
+            Value::Int(_) => "int".to_string(),
+            Value::Float(_) => "float".to_string(),
+            Value::Str(_) => "str".to_string(),
+            Value::Bool(_) => "bool".to_string(),
+            Value::Unit => "unit".to_string(),
+            Value::Option(_) => "option".to_string(),
+            Value::Result(_) => "result".to_string(),
+            Value::Func(_) => "func".to_string(),
+            Value::Array(_) => "array".to_string(),
+            Value::Dict(_) => "dict".to_string(),
+            Value::Native(_) => "native".to_string(),
+            Value::Json(_) => "json".to_string(),
+            Value::HttpServer(_) => "http.server".to_string(),
+            Value::Object { name, .. } => name.clone(),
+            Value::Range(..) => "range".to_string(),
+        }
+    }
 }
 
 impl fmt::Display for Value {

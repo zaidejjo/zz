@@ -78,6 +78,9 @@ pub struct Interp {
     pub natives: HashMap<String, NativeEntry>,
     /// Struct definitions: name → ordered field names.
     pub structs: HashMap<String, Vec<String>>,
+    /// Command-line arguments passed to the running script (empty in the
+    /// REPL). Exposed to scripts via `std.env.args`.
+    pub args: Vec<String>,
 }
 
 impl Default for Interp {
@@ -93,6 +96,7 @@ impl Interp {
             funcs: HashMap::new(),
             natives: HashMap::new(),
             structs: HashMap::new(),
+            args: Vec::new(),
         }
     }
 
@@ -103,6 +107,7 @@ impl Interp {
             funcs: HashMap::new(),
             natives,
             structs: HashMap::new(),
+            args: Vec::new(),
         }
     }
 
@@ -217,7 +222,7 @@ impl Interp {
     }
 
     /// Assign a value to an assignment target: a variable, a qualified name,
-    /// or a struct field path.
+    /// a struct field path, or an index.
     fn assign_target(&mut self, target: &Expr, value: Value) -> Result<(), EvalError> {
         match target {
             Expr::Ident { name, span } => {
@@ -259,10 +264,57 @@ impl Interp {
                 }
                 Ok(())
             }
+            Expr::Index { obj, index, span } => {
+                let iv = self.eval(index)?.into_value()?;
+                let mut objv = self.eval(obj)?.into_value()?;
+                Self::set_index(&mut objv, &iv, value, *span)?;
+                self.write_back(obj, objv)
+            }
             other => Err(EvalError::new(
                 "cannot assign to this expression".to_string(),
                 other.span(),
             )),
+        }
+    }
+
+    /// Write a mutated container back to the variable it came from. Handles
+    /// plain variables, qualified names, and struct-field paths; temporary
+    /// bases (e.g. `makePoint()`) discard the mutation.
+    fn write_back(&mut self, target: &Expr, new_value: Value) -> Result<(), EvalError> {
+        match target {
+            Expr::Ident { name, span } => {
+                if !self.env.borrow_mut().assign(name, new_value) {
+                    return Err(EvalError::new(
+                        format!("undefined variable `{name}`"),
+                        *span,
+                    ));
+                }
+                Ok(())
+            }
+            Expr::Path { parts, span } => {
+                let joined = parts.join(".");
+                if self.env.borrow().get(&joined).is_some() {
+                    self.env.borrow_mut().assign(&joined, new_value);
+                    return Ok(());
+                }
+                let root = &parts[0];
+                let mut obj = self.env.borrow().get(root).ok_or_else(|| {
+                    EvalError::new(format!("undefined variable `{joined}`"), *span)
+                })?;
+                for field in &parts[1..parts.len() - 1] {
+                    obj = Self::object_field(&obj, field, *span)?;
+                }
+                let last = parts.last().unwrap();
+                Self::set_object_field(&mut obj, last, new_value, *span)?;
+                self.env.borrow_mut().assign(root, obj);
+                Ok(())
+            }
+            Expr::Field { obj, name, span } => {
+                let mut objv = self.eval(obj)?.into_value()?;
+                Self::set_object_field(&mut objv, name, new_value, *span)?;
+                self.write_back(obj, objv)
+            }
+            _ => Ok(()),
         }
     }
 
@@ -278,6 +330,12 @@ impl Interp {
                 }
                 if let Some(fv) = self.funcs.get(name) {
                     return Ok(Flow::Value(Value::Func(fv.clone())));
+                }
+                if let Some(entry) = self.natives.get(name) {
+                    return Ok(Flow::Value(Value::Native(NativeFunc {
+                        name: name.clone(),
+                        arity: entry.arity,
+                    })));
                 }
                 Err(EvalError::new(
                     format!("undefined variable `{name}`"),
@@ -532,6 +590,44 @@ impl Interp {
                     fields: out,
                 }))
             }
+            Expr::Index { obj, index, span } => {
+                let ov = self.eval(obj)?.into_value()?;
+                let iv = self.eval(index)?.into_value()?;
+                Self::get_index(&ov, &iv, *span).map(Flow::Value)
+            }
+            Expr::Slice {
+                obj,
+                start,
+                end,
+                span,
+            } => {
+                let ov = self.eval(obj)?.into_value()?;
+                let s = match start {
+                    Some(e) => match self.eval(e)?.into_value()? {
+                        Value::Int(i) => Some(i),
+                        other => {
+                            return Err(EvalError::new(
+                                format!("slice bound must be `int`, found `{other}`"),
+                                e.span(),
+                            ))
+                        }
+                    },
+                    None => None,
+                };
+                let e = match end {
+                    Some(e) => match self.eval(e)?.into_value()? {
+                        Value::Int(i) => Some(i),
+                        other => {
+                            return Err(EvalError::new(
+                                format!("slice bound must be `int`, found `{other}`"),
+                                e.span(),
+                            ))
+                        }
+                    },
+                    None => None,
+                };
+                Self::slice_value(&ov, s, e, *span).map(Flow::Value)
+            }
         }
     }
 
@@ -681,6 +777,121 @@ impl Interp {
                 format!("cannot assign to field `{name}` of a value of type `{other}`"),
                 span,
             )),
+        }
+    }
+
+    /// Read an element: `arr[i]`, `dict[key]`, `str[i]`. Negative indices
+    /// count from the end.
+    fn get_index(obj: &Value, index: &Value, span: Span) -> Result<Value, EvalError> {
+        match (obj, index) {
+            (Value::Array(items), Value::Int(i)) => {
+                let idx = Self::normalize_index(*i, items.len(), span)?;
+                Ok(items[idx].clone())
+            }
+            (Value::Dict(entries), key) => entries
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+                .ok_or_else(|| EvalError::new(format!("key `{key}` not found in dict"), span)),
+            (Value::Str(s), Value::Int(i)) => {
+                let chars: Vec<char> = s.chars().collect();
+                let idx = Self::normalize_index(*i, chars.len(), span)?;
+                Ok(Value::Str(chars[idx].to_string()))
+            }
+            (other, _) => Err(EvalError::new(
+                format!("cannot index a value of type `{}`", other.type_name()),
+                span,
+            )),
+        }
+    }
+
+    /// Write an element: `arr[i] = v`, `dict[key] = v`. Missing dict keys
+    /// are appended; strings are immutable.
+    fn set_index(
+        obj: &mut Value,
+        index: &Value,
+        value: Value,
+        span: Span,
+    ) -> Result<(), EvalError> {
+        match (obj, index) {
+            (Value::Array(items), Value::Int(i)) => {
+                let idx = Self::normalize_index(*i, items.len(), span)?;
+                items[idx] = value;
+                Ok(())
+            }
+            (Value::Dict(entries), key) => {
+                if let Some((_, slot)) = entries.iter_mut().find(|(k, _)| k == key) {
+                    *slot = value;
+                } else {
+                    entries.push((key.clone(), value));
+                }
+                Ok(())
+            }
+            (Value::Str(_), _) => Err(EvalError::new(
+                "cannot assign to an index of a string",
+                span,
+            )),
+            (other, _) => Err(EvalError::new(
+                format!(
+                    "cannot assign to an index of a value of type `{}`",
+                    other.type_name()
+                ),
+                span,
+            )),
+        }
+    }
+
+    /// Slice an array or string: `s[1:3]`, `s[:2]`, `s[1:]`, `s[:]`.
+    /// Bounds are clamped; negative bounds count from the end.
+    fn slice_value(
+        obj: &Value,
+        start: Option<i64>,
+        end: Option<i64>,
+        span: Span,
+    ) -> Result<Value, EvalError> {
+        match obj {
+            Value::Array(items) => {
+                let (a, b) = Self::slice_bounds(start, end, items.len());
+                Ok(Value::Array(items[a..b].to_vec()))
+            }
+            Value::Str(s) => {
+                let chars: Vec<char> = s.chars().collect();
+                let (a, b) = Self::slice_bounds(start, end, chars.len());
+                Ok(Value::Str(chars[a..b].iter().collect()))
+            }
+            other => Err(EvalError::new(
+                format!("cannot slice a value of type `{}`", other.type_name()),
+                span,
+            )),
+        }
+    }
+
+    /// Normalize an index (negative counts from the end) and bounds-check it.
+    fn normalize_index(i: i64, len: usize, span: Span) -> Result<usize, EvalError> {
+        let len_i = len as i64;
+        let idx = if i < 0 { len_i + i } else { i };
+        if idx < 0 || idx >= len_i {
+            return Err(EvalError::new(
+                format!("index {i} out of bounds for length {len}"),
+                span,
+            ));
+        }
+        Ok(idx as usize)
+    }
+
+    /// Normalize slice bounds to a clamped `[a, b)` range.
+    fn slice_bounds(start: Option<i64>, end: Option<i64>, len: usize) -> (usize, usize) {
+        let len_i = len as i64;
+        let norm = |i: i64| {
+            let v = if i < 0 { len_i + i } else { i };
+            v.clamp(0, len_i)
+        };
+        let a = norm(start.unwrap_or(0));
+        let b = norm(end.unwrap_or(len_i));
+        if a > b {
+            (0, 0)
+        } else {
+            (a as usize, b as usize)
         }
     }
 
@@ -1265,5 +1476,190 @@ mod tests {
         // Shared scopes: a closure can mutate a captured variable.
         let v = eval_src("x := 0\nf := |n: int| { x = x + n }\nf(5)\nf(3)\nx").unwrap();
         assert_eq!(v, Value::Int(8));
+    }
+
+    // --- indexing & slicing -------------------------------------------------
+
+    #[test]
+    fn array_index() {
+        let v = eval_src("scores := [10, 20, 30]\nscores[1]").unwrap();
+        assert_eq!(v, Value::Int(20));
+    }
+
+    #[test]
+    fn array_negative_index() {
+        let v = eval_src("scores := [10, 20, 30]\nscores[-1]").unwrap();
+        assert_eq!(v, Value::Int(30));
+    }
+
+    #[test]
+    fn array_index_out_of_bounds_errors() {
+        let err = eval_src("scores := [1, 2]\nscores[5]").unwrap_err();
+        assert!(
+            err.message.contains("index 5 out of bounds for length 2"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn array_negative_index_out_of_bounds_errors() {
+        let err = eval_src("scores := [1, 2]\nscores[-3]").unwrap_err();
+        assert!(
+            err.message.contains("index -3 out of bounds for length 2"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn dict_index() {
+        let v = eval_src("ages := {\"a\": 1, \"b\": 2}\nages[\"b\"]").unwrap();
+        assert_eq!(v, Value::Int(2));
+    }
+
+    #[test]
+    fn dict_missing_key_errors() {
+        let err = eval_src("ages := {\"a\": 1}\nages[\"zz\"]").unwrap_err();
+        assert!(
+            err.message.contains("key `zz` not found in dict"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn str_index() {
+        let v = eval_src("\"hello\"[1]").unwrap();
+        assert_eq!(v, Value::Str("e".to_string()));
+    }
+
+    #[test]
+    fn index_non_indexable_errors() {
+        let err = eval_src("x := 5\nx[0]").unwrap_err();
+        assert!(
+            err.message.contains("cannot index a value of type `int`"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn array_slice() {
+        let v = eval_src("scores := [10, 20, 30, 40]\nscores[1:3]").unwrap();
+        assert_eq!(v, Value::Array(vec![Value::Int(20), Value::Int(30)]));
+    }
+
+    #[test]
+    fn slice_open_bounds() {
+        assert_eq!(
+            eval_src("scores := [10, 20, 30]\nscores[:2]").unwrap(),
+            Value::Array(vec![Value::Int(10), Value::Int(20)])
+        );
+        assert_eq!(
+            eval_src("scores := [10, 20, 30]\nscores[1:]").unwrap(),
+            Value::Array(vec![Value::Int(20), Value::Int(30)])
+        );
+        assert_eq!(
+            eval_src("scores := [10, 20, 30]\nscores[:]").unwrap(),
+            Value::Array(vec![Value::Int(10), Value::Int(20), Value::Int(30)])
+        );
+    }
+
+    #[test]
+    fn slice_negative_bounds() {
+        let v = eval_src("\"hello\"[-2:]").unwrap();
+        assert_eq!(v, Value::Str("lo".to_string()));
+    }
+
+    #[test]
+    fn slice_clamps_bounds() {
+        // Out-of-range bounds clamp instead of erroring.
+        let v = eval_src("scores := [10, 20, 30]\nscores[1:99]").unwrap();
+        assert_eq!(v, Value::Array(vec![Value::Int(20), Value::Int(30)]));
+    }
+
+    #[test]
+    fn str_slice() {
+        let v = eval_src("\"hello\"[1:3]").unwrap();
+        assert_eq!(v, Value::Str("el".to_string()));
+    }
+
+    #[test]
+    fn slice_non_sliceable_errors() {
+        let err = eval_src("x := 5\nx[1:2]").unwrap_err();
+        assert!(
+            err.message.contains("cannot slice a value of type `int`"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn array_index_assign() {
+        let v = eval_src("scores := [10, 20, 30]\nscores[0] = 99\nscores[0]").unwrap();
+        assert_eq!(v, Value::Int(99));
+    }
+
+    #[test]
+    fn array_index_assign_negative() {
+        let v = eval_src("scores := [10, 20, 30]\nscores[-1] = 99\nscores[2]").unwrap();
+        assert_eq!(v, Value::Int(99));
+    }
+
+    #[test]
+    fn dict_index_assign_existing() {
+        let v = eval_src("ages := {\"a\": 1}\nages[\"a\"] = 5\nages[\"a\"]").unwrap();
+        assert_eq!(v, Value::Int(5));
+    }
+
+    #[test]
+    fn dict_index_assign_new_key() {
+        let v = eval_src("ages := {\"a\": 1}\nages[\"b\"] = 2\nages[\"b\"]").unwrap();
+        assert_eq!(v, Value::Int(2));
+    }
+
+    #[test]
+    fn str_index_assign_errors() {
+        let err = eval_src("s := \"abc\"\ns[0] = \"x\"").unwrap_err();
+        assert!(
+            err.message
+                .contains("cannot assign to an index of a string"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn index_assign_through_field() {
+        // `obj.field[i] = v` writes back through the struct field.
+        let v = eval_src(
+            "struct Box { items: [int] }\nb := Box{ items: [1, 2, 3] }\nb.items[1] = 99\nb.items[1]",
+        )
+        .unwrap();
+        assert_eq!(v, Value::Int(99));
+    }
+
+    // --- pipeline -----------------------------------------------------------
+
+    #[test]
+    fn pipe_inserts_lhs_as_first_arg() {
+        let v = eval_src("func dbl(a: int, b: int) -> int { a * b }\n5 |> dbl(3)").unwrap();
+        assert_eq!(v, Value::Int(15));
+    }
+
+    #[test]
+    fn pipe_bare_name() {
+        let v = eval_src("func inc(n: int) -> int { n + 1 }\n5 |> inc").unwrap();
+        assert_eq!(v, Value::Int(6));
+    }
+
+    #[test]
+    fn pipe_chain() {
+        let v = eval_src(
+            "func inc(n: int) -> int { n + 1 }\nfunc dbl(n: int) -> int { n * 2 }\n5 |> inc |> dbl",
+        )
+        .unwrap();
+        assert_eq!(v, Value::Int(12));
     }
 }

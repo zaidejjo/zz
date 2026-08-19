@@ -173,6 +173,54 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
+    // std.fs
+    m.insert(
+        "std.fs.read_file".into(),
+        NativeEntry {
+            arity: 1,
+            f: fs_read_file,
+        },
+    );
+    m.insert(
+        "std.fs.write_file".into(),
+        NativeEntry {
+            arity: 2,
+            f: fs_write_file,
+        },
+    );
+    m.insert(
+        "std.fs.exists".into(),
+        NativeEntry {
+            arity: 1,
+            f: fs_exists,
+        },
+    );
+
+    // std.env
+    m.insert(
+        "std.env.get_var".into(),
+        NativeEntry {
+            arity: 1,
+            f: env_get_var,
+        },
+    );
+    m.insert(
+        "std.env.args".into(),
+        NativeEntry {
+            arity: 0,
+            f: env_args,
+        },
+    );
+
+    // Built-in: `typeof(v)` — the runtime type name of any value.
+    m.insert(
+        "typeof".into(),
+        NativeEntry {
+            arity: 1,
+            f: typeof_fn,
+        },
+    );
+
     m
 }
 
@@ -613,6 +661,55 @@ fn http_response(status: u16, body: &str) -> String {
         "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
+}
+
+// --- std.fs ------------------------------------------------------------------
+
+fn fs_read_file(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let path = expect_str(args, 0, "std.fs.read_file")?;
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(Value::Result(Ok(Box::new(Value::Str(contents))))),
+        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!("{e}")))))),
+    }
+}
+
+fn fs_write_file(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let path = expect_str(args, 0, "std.fs.write_file")?;
+    let contents = expect_str(args, 1, "std.fs.write_file")?;
+    match std::fs::write(&path, contents) {
+        Ok(()) => Ok(Value::Result(Ok(Box::new(Value::Unit)))),
+        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!("{e}")))))),
+    }
+}
+
+fn fs_exists(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let path = expect_str(args, 0, "std.fs.exists")?;
+    Ok(Value::Bool(std::path::Path::new(&path).exists()))
+}
+
+// --- std.env -----------------------------------------------------------------
+
+fn env_get_var(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let name = expect_str(args, 0, "std.env.get_var")?;
+    match std::env::var(&name) {
+        Ok(v) => Ok(Value::Option(Some(Box::new(Value::Str(v))))),
+        Err(_) => Ok(Value::Option(None)),
+    }
+}
+
+fn env_args(interp: &mut Interp, _args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    Ok(Value::Array(
+        interp.args.iter().map(|s| Value::Str(s.clone())).collect(),
+    ))
+}
+
+// --- typeof ------------------------------------------------------------------
+
+fn typeof_fn(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let v = args.first().cloned().ok_or_else(|| {
+        EvalError::new("missing argument for typeof", zz_runtime::Span::new(0, 0))
+    })?;
+    Ok(Value::Str(v.type_name()))
 }
 
 #[cfg(test)]

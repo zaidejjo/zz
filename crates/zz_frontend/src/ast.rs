@@ -216,6 +216,19 @@ pub enum Expr {
         fields: Vec<(String, Expr)>,
         span: Span,
     },
+    /// `arr[0]`, `dict["key"]`, `str[0]` — element access.
+    Index {
+        obj: Box<Expr>,
+        index: Box<Expr>,
+        span: Span,
+    },
+    /// `s[1:3]`, `s[:2]`, `s[1:]` — array/string slicing.
+    Slice {
+        obj: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -368,7 +381,9 @@ impl Expr {
             | Expr::Dict { span, .. }
             | Expr::Field { span, .. }
             | Expr::Range { span, .. }
-            | Expr::StructInit { span, .. } => *span,
+            | Expr::StructInit { span, .. }
+            | Expr::Index { span, .. }
+            | Expr::Slice { span, .. } => *span,
             Expr::Block(b) => b.span,
         }
     }

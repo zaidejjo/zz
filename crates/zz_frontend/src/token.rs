@@ -77,6 +77,7 @@ pub enum TokenKind {
     Dot,
     DotDot,
     Pipe,
+    PipeGt,
     Arrow,
     // Delimiters
     LParen,
@@ -134,6 +135,7 @@ impl TokenKind {
             TokenKind::Dot => "`.`",
             TokenKind::DotDot => "`..`",
             TokenKind::Pipe => "`|`",
+            TokenKind::PipeGt => "`|>`",
             TokenKind::Arrow => "`->`",
             TokenKind::LParen => "`(`",
             TokenKind::RParen => "`)`",

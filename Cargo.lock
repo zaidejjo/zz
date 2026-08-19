@@ -89,5 +89,6 @@ name = "zz_stdlib"
 version = "0.0.1"
 dependencies = [
  "zz_checker",
+ "zz_frontend",
  "zz_runtime",
 ]

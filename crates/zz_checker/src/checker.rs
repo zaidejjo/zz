@@ -393,10 +393,16 @@ impl Checker {
                 value,
                 span,
             } => {
+                let errors_before = self.errors.len();
                 let tt = self.check_assign_target(target);
                 let vt = self.check_expr(value);
-                if let Err(e) = self.unifier.unify(&vt, &tt) {
-                    self.report_mismatch(e, *span);
+                // Skip the unify when the target itself was rejected — the
+                // target error is the real diagnosis; don't pile on a type
+                // mismatch against the placeholder `unit`.
+                if self.errors.len() == errors_before {
+                    if let Err(e) = self.unifier.unify(&vt, &tt) {
+                        self.report_mismatch(e, *span);
+                    }
                 }
                 Type::Unit
             }
@@ -433,6 +439,42 @@ impl Checker {
                     other => {
                         self.errors.push(error_at(
                             format!("cannot assign to field `{name}` of a value of type `{other}`"),
+                            *span,
+                        ));
+                        Type::Unit
+                    }
+                }
+            }
+            Expr::Index { obj, index, span } => {
+                let ot = self.check_expr(obj);
+                let ot = self.unifier.resolve(&ot);
+                let it = self.check_expr(index);
+                match ot {
+                    Type::Array(elem) => {
+                        self.ensure_int(it, index.span());
+                        *elem
+                    }
+                    Type::Dict(k, v) => {
+                        if let Err(e) = self.unifier.unify(&it, &k) {
+                            self.report_mismatch(e, index.span());
+                        }
+                        *v
+                    }
+                    Type::Str => {
+                        self.errors
+                            .push(error_at("cannot assign to an index of a string", *span));
+                        Type::Unit
+                    }
+                    Type::Var(_) => {
+                        self.errors.push(error_at(
+                            "cannot assign to an index of a value whose type could not be inferred",
+                            *span,
+                        ));
+                        Type::Unit
+                    }
+                    other => {
+                        self.errors.push(error_at(
+                            format!("cannot assign to an index of a value of type `{other}`"),
                             *span,
                         ));
                         Type::Unit
@@ -631,6 +673,72 @@ impl Checker {
                     }
                 }
                 Type::Struct(name.clone())
+            }
+            Expr::Index { obj, index, span } => {
+                let ot = self.check_expr(obj);
+                let ot = self.unifier.resolve(&ot);
+                let it = self.check_expr(index);
+                match ot {
+                    Type::Array(elem) => {
+                        self.ensure_int(it, index.span());
+                        *elem
+                    }
+                    Type::Dict(k, v) => {
+                        if let Err(e) = self.unifier.unify(&it, &k) {
+                            self.report_mismatch(e, index.span());
+                        }
+                        *v
+                    }
+                    Type::Str => {
+                        self.ensure_int(it, index.span());
+                        Type::Str
+                    }
+                    Type::Var(_) => {
+                        self.errors.push(error_at(
+                            "cannot index a value whose type could not be inferred",
+                            *span,
+                        ));
+                        Type::Unit
+                    }
+                    other => {
+                        self.errors.push(error_at(
+                            format!("cannot index a value of type `{other}`"),
+                            *span,
+                        ));
+                        Type::Unit
+                    }
+                }
+            }
+            Expr::Slice {
+                obj,
+                start,
+                end,
+                span,
+            } => {
+                let ot = self.check_expr(obj);
+                let ot = self.unifier.resolve(&ot);
+                for bound in [start.as_deref(), end.as_deref()].into_iter().flatten() {
+                    let bt = self.check_expr(bound);
+                    self.ensure_int(bt, bound.span());
+                }
+                match ot {
+                    Type::Array(elem) => Type::Array(elem),
+                    Type::Str => Type::Str,
+                    Type::Var(_) => {
+                        self.errors.push(error_at(
+                            "cannot slice a value whose type could not be inferred",
+                            *span,
+                        ));
+                        Type::Unit
+                    }
+                    other => {
+                        self.errors.push(error_at(
+                            format!("cannot slice a value of type `{other}`"),
+                            *span,
+                        ));
+                        Type::Unit
+                    }
+                }
             }
             Expr::Fmt { parts, .. } => {
                 // Interpolated strings are `str`; embedded expressions are
@@ -1260,6 +1368,21 @@ impl Checker {
             }
         }
     }
+
+    fn ensure_int(&mut self, t: Type, span: Span) {
+        match self.unifier.resolve(&t) {
+            Type::Int => {}
+            Type::Var(id) => {
+                self.unifier.bind(id, Type::Int);
+            }
+            other => {
+                self.errors.push(error_at(
+                    format!("index must be `int`, found `{other}`"),
+                    span,
+                ));
+            }
+        }
+    }
 }
 
 fn func_name(stmt: &Stmt) -> String {
@@ -1324,6 +1447,17 @@ mod tests {
             errs.iter().any(|e| e.contains(needle)),
             "expected error containing `{needle}`, got: {errs:?}"
         );
+    }
+
+    /// Check with a seeded function map (e.g. a generic builtin like `typeof`).
+    fn check_src_with_funcs(src: &str, funcs: HashMap<String, FuncSig>) -> CheckResult {
+        let parsed = parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        check_program(&parsed.program, HashMap::new(), funcs, HashMap::new())
     }
 
     #[test]
@@ -1844,5 +1978,142 @@ mod tests {
     #[test]
     fn union_mismatch_errors() {
         errors_contain("str | int v = true", "type mismatch");
+    }
+
+    // --- indexing & slicing -------------------------------------------------
+
+    #[test]
+    fn array_index_type() {
+        let r = check_src("scores := [10, 20]\nx := scores[0]");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["x"], Type::Int);
+    }
+
+    #[test]
+    fn dict_index_type() {
+        let r = check_src("ages := {\"a\": 1}\nx := ages[\"a\"]");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["x"], Type::Int);
+    }
+
+    #[test]
+    fn str_index_type() {
+        let r = check_src("x := \"hello\"[1]");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["x"], Type::Str);
+    }
+
+    #[test]
+    fn array_slice_type() {
+        let r = check_src("scores := [10, 20, 30]\nx := scores[1:3]");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["x"], Type::Array(Box::new(Type::Int)));
+    }
+
+    #[test]
+    fn str_slice_type() {
+        let r = check_src("x := \"hello\"[1:3]");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["x"], Type::Str);
+    }
+
+    #[test]
+    fn index_non_indexable_errors() {
+        errors_contain("x := 5\nx[0]", "cannot index a value of type `int`");
+    }
+
+    #[test]
+    fn index_non_int_errors() {
+        errors_contain("scores := [1, 2]\nscores[\"a\"]", "index must be `int`");
+    }
+
+    #[test]
+    fn slice_non_sliceable_errors() {
+        errors_contain("x := 5\nx[1:2]", "cannot slice a value of type `int`");
+    }
+
+    #[test]
+    fn index_assign_type_checked() {
+        let r = check_src("scores := [1, 2]\nscores[0] = 5");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+    }
+
+    #[test]
+    fn index_assign_wrong_type_errors() {
+        errors_contain("scores := [1, 2]\nscores[0] = \"x\"", "type mismatch");
+    }
+
+    #[test]
+    fn str_index_assign_errors() {
+        errors_contain(
+            "s := \"abc\"\ns[0] = \"x\"",
+            "cannot assign to an index of a string",
+        );
+    }
+
+    #[test]
+    fn dict_index_assign_ok() {
+        let r = check_src("ages := {\"a\": 1}\nages[\"b\"] = 2");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+    }
+
+    // --- pipeline -----------------------------------------------------------
+
+    #[test]
+    fn pipe_type_checks() {
+        let r = check_src("func dbl(a: int, b: int) -> int { a * b }\nx := 5 |> dbl(3)");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["x"], Type::Int);
+    }
+
+    #[test]
+    fn pipe_bare_name_type_checks() {
+        let r = check_src("func inc(n: int) -> int { n + 1 }\nx := 5 |> inc");
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["x"], Type::Int);
+    }
+
+    #[test]
+    fn pipe_type_mismatch_errors() {
+        errors_contain(
+            "func dbl(a: int, b: int) -> int { a * b }\nx := \"s\" |> dbl(3)",
+            "type mismatch",
+        );
+    }
+
+    #[test]
+    fn pipe_chain_type_checks() {
+        let r = check_src(
+            "func inc(n: int) -> int { n + 1 }\nfunc dbl(n: int) -> int { n * 2 }\nx := 5 |> inc |> dbl",
+        );
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.bindings["x"], Type::Int);
+    }
+
+    // --- typeof -------------------------------------------------------------
+
+    #[test]
+    fn typeof_any_value() {
+        // `typeof` is a generic builtin: `typeof(v: T) -> str`.
+        let mut funcs = HashMap::new();
+        funcs.insert(
+            "typeof".to_string(),
+            FuncSig {
+                generics: vec!["T".to_string()],
+                params: vec![("v".to_string(), Type::Named("T".to_string()))],
+                ret: Type::Str,
+            },
+        );
+        for src in [
+            "x := typeof(1)",
+            "x := typeof(\"s\")",
+            "x := typeof([1, 2])",
+            "x := typeof({\"a\": 1})",
+            "x := typeof(.some(1))",
+        ] {
+            let r = check_src_with_funcs(src, funcs.clone());
+            assert!(r.errors.is_empty(), "errors for `{src}`: {:?}", r.errors);
+            assert_eq!(r.bindings["x"], Type::Str, "for `{src}`");
+        }
     }
 }

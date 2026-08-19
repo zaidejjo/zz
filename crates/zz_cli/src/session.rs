@@ -556,4 +556,67 @@ mod tests {
         let out = s.eval("break");
         assert!(out.errors.is_some(), "expected error");
     }
+
+    // --- indexing & slicing -------------------------------------------------
+
+    #[test]
+    fn index_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("scores := [10, 20, 30]\nscores[1]");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "20");
+    }
+
+    #[test]
+    fn dict_index_assign_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("ages := {\"a\": 1}\nages[\"b\"] = 2\nages[\"b\"]");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "2");
+    }
+
+    #[test]
+    fn slice_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("s := \"hello\"\ns[1:3]");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "el");
+    }
+
+    // --- pipeline -----------------------------------------------------------
+
+    #[test]
+    fn pipe_in_session() {
+        let mut s = Session::new("<test>");
+        s.eval("func inc(n: int) -> int { n + 1 }");
+        let out = s.eval("5 |> inc");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "6");
+    }
+
+    // --- typeof & stdlib ----------------------------------------------------
+
+    #[test]
+    fn typeof_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("typeof(1)");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "int");
+    }
+
+    #[test]
+    fn std_fs_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.fs\nfs.exists(\"/tmp/zz_no_such_file_zz\")");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "false");
+    }
+
+    #[test]
+    fn std_env_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.env\nenv.get_var(\"ZZ_NO_SUCH_VAR_12345\")");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, ".none");
+    }
 }

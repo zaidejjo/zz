@@ -161,6 +161,40 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("server", server_t), ("port", Type::Int)], Type::Unit),
     );
 
+    // std.fs
+    m.insert(
+        "std.fs.read_file".into(),
+        sig(
+            vec![("path", Type::Str)],
+            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.fs.write_file".into(),
+        sig(
+            vec![("path", Type::Str), ("contents", Type::Str)],
+            Type::Result(Box::new(Type::Unit), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.fs.exists".into(),
+        sig(vec![("path", Type::Str)], Type::Bool),
+    );
+
+    // std.env
+    m.insert(
+        "std.env.get_var".into(),
+        sig(vec![("name", Type::Str)], Type::Option(Box::new(Type::Str))),
+    );
+    m.insert(
+        "std.env.args".into(),
+        sig(vec![], Type::Array(Box::new(Type::Str))),
+    );
+
+    // Built-in: `typeof(v)` — accepts any value, returns its type name.
+    let t = Type::Named("T".to_string());
+    m.insert("typeof".into(), sig_t(vec![("v", t)], Type::Str));
+
     m
 }
 
@@ -179,7 +213,10 @@ mod tests {
         assert!(funcs.contains_key("std.http.server"));
         assert!(funcs.contains_key("std.http.handle"));
         assert!(funcs.contains_key("std.http.listen"));
-        assert_eq!(funcs.len(), 21);
+        assert!(funcs.contains_key("std.fs.read_file"));
+        assert!(funcs.contains_key("std.env.get_var"));
+        assert!(funcs.contains_key("typeof"));
+        assert_eq!(funcs.len(), 27);
     }
 
     #[test]

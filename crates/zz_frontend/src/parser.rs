@@ -18,7 +18,9 @@
 //!                | '(' type (',' type)* ')'
 //!                | '[' type ']'                           // array
 //!                | '{' type ':' type '}'                  // dict
-//! expr           := or
+//! expr           := pipe
+//! pipe           := range ('|>' range)*                    // pipeline
+//! range          := or ('..' or)?                          // integer range
 //! or             := and ('||' and)*
 //! and            := equality ('&&' equality)*
 //! equality       := relational (('=='|'!=') relational)*
@@ -26,7 +28,7 @@
 //! additive       := multiplicative (('+'|'-') multiplicative)*
 //! multiplicative := unary (('*'|'/'|'%') unary)*
 //! unary          := ('-'|'+'|'!') unary | postfix
-//! postfix        := primary (call | '?')*
+//! postfix        := primary (call | '?' | '.' IDENT | '[' expr (':' expr)? ']')*
 //! primary        := literal | IDENT | '(' expr ')' | '[' expr_list ']' | dict_or_block
 //!                | closure | 'if' | 'while' | 'match' | '.' variant
 //! dict_or_block  := '{' (expr ':' expr (',' expr ':' expr)*)? '}'   // dict
@@ -599,7 +601,46 @@ impl Parser {
     // --- expressions ------------------------------------------------------
 
     fn parse_expr(&mut self) -> Expr {
-        self.parse_range()
+        self.parse_pipe()
+    }
+
+    /// `a |> f(b)` — pipeline. Lowest precedence. The right side must be a
+    /// function call or name; it receives the left side as its first
+    /// argument (`a |> f(b)` desugars to `f(a, b)`).
+    fn parse_pipe(&mut self) -> Expr {
+        let mut left = self.parse_range();
+        while self.at(TokenKind::PipeGt) {
+            self.advance();
+            let rhs = self.parse_range();
+            left = self.desugar_pipe(left, rhs);
+        }
+        left
+    }
+
+    fn desugar_pipe(&mut self, lhs: Expr, rhs: Expr) -> Expr {
+        let span = lhs.span().join(rhs.span());
+        match rhs {
+            Expr::Call {
+                callee, mut args, ..
+            } => {
+                args.insert(0, lhs);
+                Expr::Call { callee, args, span }
+            }
+            Expr::Ident { name, span } => Expr::Call {
+                callee: Box::new(Expr::Ident { name, span }),
+                args: vec![lhs],
+                span,
+            },
+            Expr::Path { parts, span } => Expr::Call {
+                callee: Box::new(Expr::Path { parts, span }),
+                args: vec![lhs],
+                span,
+            },
+            other => {
+                self.error_here("right side of `|>` must be a function call or name");
+                other
+            }
+        }
     }
 
     /// `a..b` — integer range. Lowest precedence so `for i in 0..n` parses
@@ -793,6 +834,55 @@ impl Parser {
                         obj: Box::new(expr),
                         name: member.text,
                         span,
+                    };
+                }
+                // Indexing and slicing: `arr[0]`, `dict["k"]`, `s[1:3]`.
+                TokenKind::LBracket => {
+                    self.advance(); // `[`
+                    let mut start = None;
+                    let mut end = None;
+                    let mut index = None;
+                    let mut is_slice = false;
+                    if self.at(TokenKind::Colon) {
+                        // `[:end]` — start omitted.
+                        is_slice = true;
+                        self.advance();
+                        if !self.at(TokenKind::RBracket) {
+                            end = Some(Box::new(self.parse_expr()));
+                        }
+                    } else {
+                        let first = self.parse_expr();
+                        if self.eat(TokenKind::Colon) {
+                            // `[start:end]` or `[start:]`.
+                            is_slice = true;
+                            start = Some(Box::new(first));
+                            if !self.at(TokenKind::RBracket) {
+                                end = Some(Box::new(self.parse_expr()));
+                            }
+                        } else {
+                            index = Some(first);
+                        }
+                    }
+                    let close = if self.eat_close(TokenKind::RBracket) {
+                        self.previous().span
+                    } else {
+                        self.error_here("expected `]` to close index");
+                        expr.span()
+                    };
+                    let span = expr.span().join(close);
+                    expr = if is_slice {
+                        Expr::Slice {
+                            obj: Box::new(expr),
+                            start,
+                            end,
+                            span,
+                        }
+                    } else {
+                        Expr::Index {
+                            obj: Box::new(expr),
+                            index: Box::new(index.unwrap()),
+                            span,
+                        }
                     };
                 }
                 _ => break,
@@ -1868,5 +1958,214 @@ mod tests {
     fn empty_program_ok() {
         let p = parse_ok("");
         assert!(p.stmts.is_empty());
+    }
+
+    // --- indexing & slicing -------------------------------------------------
+
+    #[test]
+    fn parses_index() {
+        let p = parse_ok("x := arr[0]");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                value: E::Index { obj, index, .. },
+                ..
+            } => {
+                assert!(matches!(obj.as_ref(), E::Ident { name, .. } if name == "arr"));
+                assert!(matches!(index.as_ref(), E::Int { value: 0, .. }));
+            }
+            other => panic!("expected Index, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_dict_index() {
+        let p = parse_ok("x := ages[\"key\"]");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                value: E::Index { index, .. },
+                ..
+            } => assert!(matches!(index.as_ref(), E::Str { value, .. } if value == "key")),
+            other => panic!("expected Index, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_slice_variants() {
+        for (src, start, end) in [
+            ("x := s[1:3]", Some(1), Some(3)),
+            ("x := s[:3]", None, Some(3)),
+            ("x := s[1:]", Some(1), None),
+            ("x := s[:]", None, None),
+        ] {
+            let p = parse_ok(src);
+            match &p.stmts[0] {
+                Stmt::Decl {
+                    value:
+                        E::Slice {
+                            start: st, end: en, ..
+                        },
+                    ..
+                } => {
+                    let st_v = st.as_ref().map(|e| match e.as_ref() {
+                        E::Int { value, .. } => *value,
+                        other => panic!("expected int start, got {other:?}"),
+                    });
+                    let en_v = en.as_ref().map(|e| match e.as_ref() {
+                        E::Int { value, .. } => *value,
+                        other => panic!("expected int end, got {other:?}"),
+                    });
+                    assert_eq!(st_v, start, "start of `{src}`");
+                    assert_eq!(en_v, end, "end of `{src}`");
+                }
+                other => panic!("expected Slice for `{src}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parses_index_on_path_and_call() {
+        let p = parse_ok("x := ns.arr[0]");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                value: E::Index { obj, .. },
+                ..
+            } => assert!(matches!(obj.as_ref(), E::Path { parts, .. } if parts == &["ns", "arr"])),
+            other => panic!("expected Index, got {other:?}"),
+        }
+        let p = parse_ok("x := make()[0]");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                value: E::Index { obj, .. },
+                ..
+            } => assert!(matches!(obj.as_ref(), E::Call { .. })),
+            other => panic!("expected Index, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_index_assign() {
+        let p = parse_ok("arr[0] = 5");
+        match &p.stmts[0] {
+            Stmt::Assign { target, value, .. } => {
+                assert!(matches!(target, E::Index { .. }));
+                assert!(matches!(value, E::Int { value: 5, .. }));
+            }
+            other => panic!("expected Assign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_close_bracket_reports_error() {
+        let parsed = parse("x := arr[0");
+        assert_eq!(parsed.errors.len(), 1);
+    }
+
+    // --- pipeline -----------------------------------------------------------
+
+    #[test]
+    fn pipe_desugars_to_call_with_lhs_first() {
+        let p = parse_ok("x := a |> f(b)");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                value: E::Call { callee, args, .. },
+                ..
+            } => {
+                assert!(matches!(callee.as_ref(), E::Ident { name, .. } if name == "f"));
+                assert_eq!(args.len(), 2);
+                assert!(matches!(&args[0], E::Ident { name, .. } if name == "a"));
+                assert!(matches!(&args[1], E::Ident { name, .. } if name == "b"));
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipe_bare_name_becomes_call() {
+        let p = parse_ok("x := a |> f");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                value: E::Call { callee, args, .. },
+                ..
+            } => {
+                assert!(matches!(callee.as_ref(), E::Ident { name, .. } if name == "f"));
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipe_empty_call_becomes_call() {
+        let p = parse_ok("x := a |> f()");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                value: E::Call { callee, args, .. },
+                ..
+            } => {
+                assert!(matches!(callee.as_ref(), E::Ident { name, .. } if name == "f"));
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipe_chains_left_assoc() {
+        let p = parse_ok("x := a |> f(b) |> g(c)");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                value: E::Call { callee, args, .. },
+                ..
+            } => {
+                assert!(matches!(callee.as_ref(), E::Ident { name, .. } if name == "g"));
+                assert_eq!(args.len(), 2);
+                // First arg is the previous pipe result: f(a, b).
+                match &args[0] {
+                    E::Call { callee, args, .. } => {
+                        assert!(matches!(callee.as_ref(), E::Ident { name, .. } if name == "f"));
+                        assert_eq!(args.len(), 2);
+                    }
+                    other => panic!("expected nested Call, got {other:?}"),
+                }
+                assert!(matches!(&args[1], E::Ident { name, .. } if name == "c"));
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipe_path_callee() {
+        let p = parse_ok("x := a |> ns.f(b)");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                value: E::Call { callee, args, .. },
+                ..
+            } => {
+                assert!(matches!(callee.as_ref(), E::Path { parts, .. } if parts == &["ns", "f"]));
+                assert_eq!(args.len(), 2);
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipe_non_call_rhs_errors() {
+        let parsed = parse("x := a |> 5");
+        assert_eq!(parsed.errors.len(), 1);
+    }
+
+    #[test]
+    fn pipe_lowest_precedence() {
+        // `a + b |> f` pipes the whole sum.
+        let p = parse_ok("x := a + b |> f");
+        match &p.stmts[0] {
+            Stmt::Decl {
+                value: E::Call { args, .. },
+                ..
+            } => {
+                assert!(matches!(&args[0], E::Binary { .. }));
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
     }
 }
