@@ -75,6 +75,10 @@ pub enum Op {
     /// Pop a value and assign it to a dotted path (direct binding or
     /// struct-field walk with write-back).
     StorePath(Vec<String>, Span),
+    /// Push the value of a compile-time-resolved local slot.
+    LoadSlot(u16),
+    /// Pop a value and write it to a compile-time-resolved local slot.
+    StoreSlot(u16),
 
     // ---- functions & structs ----
     /// Create a named function value from a pre-compiled body chunk, register
@@ -114,9 +118,13 @@ pub enum Op {
         span: Span,
     },
     /// Advance a `for` loop: pop the index, push `index + 1` and the current
-    /// item (bound to `var` in a fresh iteration scope), or exit when the
-    /// iterable is exhausted.
-    ForNext { var: String, exit: usize },
+    /// item (bound to `var` in a fresh iteration scope when `in_env`, or left
+    /// on the stack as a local slot), or exit when the iterable is exhausted.
+    ForNext {
+        var: String,
+        exit: usize,
+        in_env: bool,
+    },
     /// Push a `while` loop frame. `exit`/`header` are patched by the
     /// compiler.
     WhileSetup { exit: usize, header: usize },
@@ -175,15 +183,25 @@ pub enum Op {
     },
 
     // ---- pattern matching ----
-    /// Pop the scrutinee; try `pat` in a fresh scope. On a match, run the
-    /// body in that scope; otherwise push the scrutinee back and jump to
-    /// `next` (the following arm or the non-exhaustive error).
-    MatchArm { pat: Pattern, next: usize },
+    /// Pop the scrutinee; try `pat` in a fresh scope (when `has_env`, i.e.
+    /// the pattern binds names). On a match, run the body in that scope;
+    /// otherwise push the scrutinee back and jump to `next` (the following
+    /// arm or the non-exhaustive error).
+    MatchArm {
+        pat: Pattern,
+        next: usize,
+        has_env: bool,
+    },
     /// Error: no match arm matched.
     MatchError(Span),
-    /// Pop the value; try `pat` in a fresh scope. On a match, run the `then`
-    /// block in that scope; otherwise push the value back and jump to `els`.
-    IfLetMatch { pat: Pattern, els: usize },
+    /// Pop the value; try `pat` in a fresh scope (when `has_env`). On a
+    /// match, run the `then` block in that scope; otherwise push the value
+    /// back and jump to `els`.
+    IfLetMatch {
+        pat: Pattern,
+        els: usize,
+        has_env: bool,
+    },
     /// Pop a value; unwrap Option/Result or `return` the None/Err variant.
     TryOp(Span),
 
@@ -199,20 +217,61 @@ pub enum Op {
         pspan: Span,
     },
 
+    /// Call the last path component as a field or method on a receiver that
+    /// was loaded from a local slot (`p.dist()` where `p` is a local).
+    /// Pops `argc` args, then the receiver.
+    CallMethod { name: String, argc: u16, span: Span },
+
     // ---- fmt ----
     /// Pop `n` values, concatenate their Display forms, push the string.
     Concat(u16),
 
     // ---- scopes ----
-    /// Enter a new child scope.
+    /// Enter a new child scope (only emitted when the scope declares
+    /// captured variables).
     EnterScope,
     /// Leave the current scope, restoring its parent.
     ExitScope,
+    /// Pop the top value, discard `n` values below it, and push the value
+    /// back: leaves a scope's result while dropping its local slots.
+    PopN(u16),
+}
+
+/// A compile-time-resolved local variable.
+struct Local {
+    name: String,
+    /// Stack slot index (relative to the frame base). Unused when `in_env`.
+    slot: usize,
+    /// Scope depth at which the local was declared.
+    /// The local lives in the environment (captured by a closure, or a
+    /// top-level global) instead of a stack slot.
+    in_env: bool,
+}
+
+/// How a variable reference resolves.
+enum Resolved {
+    /// A local stack slot.
+    Slot(usize),
+    /// The environment chain (global, captured-from-outer, func, or native).
+    Env,
 }
 
 /// Lowers an AST into a [`Chunk`].
 pub struct Compiler {
     chunk: Chunk,
+    /// Active locals, innermost last.
+    locals: Vec<Local>,
+    /// Current lexical scope depth (0 = function/top level).
+    scope_depth: usize,
+    /// Stack height relative to the frame base, tracked so declarations can
+    /// be assigned slot indices.
+    stack_height: usize,
+    /// Names referenced by nested closures but not defined within them.
+    /// Such names must live in the environment so closures can capture them.
+    captured: std::collections::HashSet<String>,
+    /// True for the top-level program chunk (depth-0 declarations are
+    /// globals, stored in the environment).
+    is_main: bool,
 }
 
 enum JumpKind {
@@ -232,6 +291,11 @@ impl Compiler {
     pub fn new() -> Self {
         Compiler {
             chunk: Chunk::new(),
+            locals: Vec::new(),
+            scope_depth: 0,
+            stack_height: 0,
+            captured: std::collections::HashSet::new(),
+            is_main: false,
         }
     }
 
@@ -239,9 +303,10 @@ impl Compiler {
     /// scope (no `EnterScope`), matching the tree-walker.
     pub fn compile_program(program: &Program) -> Chunk {
         let mut c = Compiler::new();
+        c.is_main = true;
         for (i, stmt) in program.stmts.iter().enumerate() {
-            c.compile_stmt(stmt);
-            if i < program.stmts.len() - 1 {
+            let v = c.compile_stmt(stmt);
+            if i < program.stmts.len() - 1 && matches!(v, StmtValue::Discard) {
                 c.emit(Op::Pop);
             }
         }
@@ -252,7 +317,136 @@ impl Compiler {
     }
 
     fn emit(&mut self, op: Op) {
+        self.stack_height = (self.stack_height as i64 + Self::stack_effect(&op)) as usize;
         self.chunk.code.push(op);
+    }
+
+    /// Net stack effect of an instruction (values pushed minus popped).
+    fn stack_effect(op: &Op) -> i64 {
+        match op {
+            Op::PushConst(_) => 1,
+            Op::Pop => -1,
+            Op::Truthy => 0,
+            Op::LoadVar(..) | Op::LoadPath(..) | Op::LoadSlot(_) => 1,
+            Op::DefineVar(_) => 0,
+            Op::StoreVar(..) | Op::StorePath(..) | Op::StoreSlot(_) => -1,
+            Op::MakeFunc { .. } | Op::RegisterStruct { .. } | Op::MakeClosure { .. } => 1,
+            Op::BinOp(..) | Op::UnOp(..) => -1,
+            Op::Jump(_) => 0,
+            Op::JumpIfFalse(_) | Op::JumpIfTrue(_) | Op::JumpIfFalseBool(..) => -1,
+            Op::Return => -1,
+            Op::ForSetup { .. } => 2,
+            Op::ForNext { .. } => 0,
+            Op::WhileSetup { .. } => 0,
+            Op::WhileCond { .. } => -1,
+            Op::Break | Op::Continue => 0,
+            Op::SetLoopResult => -1,
+            Op::MakeArray(n) => 1 - *n as i64,
+            Op::MakeDict(n) => 1 - 2 * *n as i64,
+            Op::IndexOp(_) => -1,
+            Op::StoreIndexOp(_) => -2,
+            Op::SliceOp(_) => -2,
+            Op::MakeRange(_) => -1,
+            Op::MakeStruct { field_names, .. } => 1 - field_names.len() as i64,
+            Op::GetField(..) => 0,
+            Op::SetField(..) => -1,
+            Op::MakeVariant { has_arg, .. } => {
+                if *has_arg {
+                    0
+                } else {
+                    1
+                }
+            }
+            Op::MatchArm { .. } => -1,
+            Op::MatchError(_) => 0,
+            Op::IfLetMatch { .. } => -1,
+            Op::TryOp(_) => 0,
+            Op::Call { argc, .. } | Op::CallPath { argc, .. } | Op::CallMethod { argc, .. } => {
+                -(*argc as i64)
+            }
+            Op::Concat(n) => 1 - *n as i64,
+            Op::EnterScope | Op::ExitScope => 0,
+            Op::PopN(n) => -(*n as i64),
+        }
+    }
+
+    /// Declare a local variable. The initializer value is already on top of
+    /// the stack. Captured names and top-level globals go to the environment;
+    /// everything else becomes a stack slot. Returns `true` if the value
+    /// stays on the stack as the slot's storage (caller must not pop it).
+    fn declare_local(&mut self, name: &str) -> bool {
+        if self.captured.contains(name) || (self.is_main && self.scope_depth == 0) {
+            self.emit(Op::DefineVar(name.to_string()));
+            self.locals.push(Local {
+                name: name.to_string(),
+                slot: 0,
+                in_env: true,
+            });
+            false
+        } else {
+            // The initializer value is the top of the stack.
+            let slot = self.stack_height - 1;
+            self.locals.push(Local {
+                name: name.to_string(),
+                slot,
+                in_env: false,
+            });
+            true
+        }
+    }
+
+    /// Resolve a variable reference to a slot or the environment.
+    fn resolve(&self, name: &str) -> Resolved {
+        for local in self.locals.iter().rev() {
+            if local.name == name {
+                return if local.in_env {
+                    Resolved::Env
+                } else {
+                    Resolved::Slot(local.slot)
+                };
+            }
+        }
+        Resolved::Env
+    }
+
+    /// Compile a dotted path load. If the root resolves to a local slot,
+    /// load the slot and walk the remaining fields; otherwise use the
+    /// environment-based `LoadPath`.
+    fn compile_path_load(&mut self, parts: &[String], span: Span) {
+        if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
+            self.emit(Op::LoadSlot(slot as u16));
+            for part in &parts[1..] {
+                self.emit(Op::GetField(part.clone(), span));
+            }
+        } else {
+            self.emit(Op::LoadPath(parts.to_vec(), span));
+        }
+    }
+
+    /// Compile a dotted path store (write-back). The value is on top of the
+    /// stack. For a slot root: load the object chain, set the last field,
+    /// and write the mutated object back to the root slot — mirroring the
+    /// tree-walker's `assign_path`/`write_back` semantics.
+    fn compile_path_store(&mut self, parts: &[String], span: Span) {
+        if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
+            self.emit(Op::LoadSlot(slot as u16));
+            for part in &parts[1..parts.len() - 1] {
+                self.emit(Op::GetField(part.clone(), span));
+            }
+            self.emit(Op::SetField(parts.last().unwrap().clone(), span));
+            self.emit(Op::StoreSlot(slot as u16));
+        } else {
+            self.emit(Op::StorePath(parts.to_vec(), span));
+        }
+    }
+
+    /// Whether a block's direct statements declare any captured variable
+    /// (which forces the scope to enter an environment).
+    fn scope_declares_captured(&self, block: &Block) -> bool {
+        block.stmts.iter().any(|s| match s {
+            Stmt::Decl { name, .. } => self.captured.contains(&name.name),
+            _ => false,
+        })
     }
 
     fn push_const(&mut self, v: Value) -> u32 {
@@ -285,17 +479,22 @@ impl Compiler {
             Op::JumpIfFalse(_) => Op::JumpIfFalse(target),
             Op::JumpIfTrue(_) => Op::JumpIfTrue(target),
             Op::JumpIfFalseBool(_, span) => Op::JumpIfFalseBool(target, span),
-            Op::ForNext { var, .. } => Op::ForNext { var, exit: target },
+            Op::ForNext { var, in_env, .. } => Op::ForNext {
+                var,
+                exit: target,
+                in_env,
+            },
             Op::WhileCond { span, .. } => Op::WhileCond { exit: target, span },
             other => panic!("patch_jump on non-jump op: {other:?}"),
         };
     }
 
-    fn emit_for_next(&mut self, var: &str) -> usize {
+    fn emit_for_next(&mut self, var: &str, in_env: bool) -> usize {
         let pos = self.chunk.code.len();
         self.emit(Op::ForNext {
             var: var.to_string(),
             exit: 0,
+            in_env,
         });
         pos
     }
@@ -310,8 +509,11 @@ impl Compiler {
     /// mutated array back into its variable / struct field chain.
     fn compile_write_back(&mut self, target: &Expr) {
         match target {
-            Expr::Ident { name, span } => self.emit(Op::StoreVar(name.clone(), *span)),
-            Expr::Path { parts, span } => self.emit(Op::StorePath(parts.clone(), *span)),
+            Expr::Ident { name, span } => match self.resolve(name) {
+                Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
+                Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+            },
+            Expr::Path { parts, span } => self.compile_path_store(parts, *span),
             Expr::Field { obj, name, span } => {
                 self.compile_expr(obj);
                 self.emit(Op::SetField(name.clone(), *span));
@@ -321,14 +523,19 @@ impl Compiler {
         }
     }
 
-    fn compile_stmt(&mut self, stmt: &Stmt) {
+    fn compile_stmt(&mut self, stmt: &Stmt) -> StmtValue {
         match stmt {
             Stmt::Decl { name, value, .. } => {
                 self.compile_expr(value);
-                self.emit(Op::DefineVar(name.name.clone()));
+                if self.declare_local(&name.name) {
+                    StmtValue::Keep
+                } else {
+                    StmtValue::Discard
+                }
             }
             Stmt::Import { .. } => {
                 // Imports are resolved by the loader/session; no runtime effect.
+                StmtValue::None
             }
             Stmt::Func {
                 name, params, body, ..
@@ -339,6 +546,7 @@ impl Compiler {
                     params: params.clone(),
                     chunk,
                 });
+                StmtValue::Discard
             }
             Stmt::Return { value, .. } => {
                 match value {
@@ -346,12 +554,14 @@ impl Compiler {
                     None => self.emit_const(Value::Unit),
                 }
                 self.emit(Op::Return);
+                StmtValue::None
             }
             Stmt::Struct { name, fields, .. } => {
                 self.emit(Op::RegisterStruct {
                     name: name.name.clone(),
                     fields: fields.iter().map(|(n, _)| n.name.clone()).collect(),
                 });
+                StmtValue::Discard
             }
             Stmt::For {
                 var,
@@ -362,6 +572,7 @@ impl Compiler {
                 // Result slot (last body value), then the iterable, then the
                 // index counter. The loop frame records the stack layout so
                 // `break`/`continue` can unwind precisely.
+                let pre = self.stack_height;
                 self.emit_const(Value::Unit);
                 self.compile_expr(iter);
                 let setup_pos = self.chunk.code.len();
@@ -371,8 +582,27 @@ impl Compiler {
                     span: *span,
                 });
                 let header = self.chunk.code.len();
-                let j = self.emit_for_next(&var.name);
+                let in_env = self.captured.contains(&var.name);
+                let j = self.emit_for_next(&var.name, in_env);
+                // The loop variable: a slot (item left on the stack by
+                // ForNext) or an environment binding (captured).
+                self.locals.push(Local {
+                    name: var.name.clone(),
+                    slot: self.stack_height - 1,
+                    in_env,
+                });
+                // The loop body runs in its own scope so its locals are
+                // popped every iteration.
+                let body_needs_env = self.scope_declares_captured(body);
+                if body_needs_env {
+                    self.emit(Op::EnterScope);
+                }
+                self.scope_depth += 1;
                 self.compile_block_body(body);
+                self.scope_depth -= 1;
+                if body_needs_env {
+                    self.emit(Op::ExitScope);
+                }
                 self.emit(Op::SetLoopResult);
                 self.emit(Op::Jump(header));
                 self.patch_jump(j);
@@ -382,19 +612,34 @@ impl Compiler {
                     header,
                     span: *span,
                 };
+                self.locals.pop();
+                // The loop leaves exactly one value: its result.
+                self.stack_height = pre + 1;
+                StmtValue::Discard
             }
-            Stmt::Break { .. } => self.emit(Op::Break),
-            Stmt::Continue { .. } => self.emit(Op::Continue),
+            Stmt::Break { .. } => {
+                self.emit(Op::Break);
+                StmtValue::None
+            }
+            Stmt::Continue { .. } => {
+                self.emit(Op::Continue);
+                StmtValue::None
+            }
             Stmt::Assign { target, value, .. } => match target {
                 Expr::Ident { name, span } => {
                     self.compile_expr(value);
-                    self.emit(Op::StoreVar(name.clone(), *span));
+                    match self.resolve(name) {
+                        Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
+                        Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+                    }
                     self.emit_const(Value::Unit);
+                    StmtValue::Discard
                 }
                 Expr::Path { parts, span } => {
                     self.compile_expr(value);
-                    self.emit(Op::StorePath(parts.clone(), *span));
+                    self.compile_path_store(parts, *span);
                     self.emit_const(Value::Unit);
+                    StmtValue::Discard
                 }
                 Expr::Index { obj, index, span } => {
                     self.compile_expr(value);
@@ -403,6 +648,7 @@ impl Compiler {
                     self.emit(Op::StoreIndexOp(*span));
                     self.compile_write_back(obj);
                     self.emit_const(Value::Unit);
+                    StmtValue::Discard
                 }
                 Expr::Field { obj, name, span } => {
                     self.compile_expr(value);
@@ -410,47 +656,98 @@ impl Compiler {
                     self.emit(Op::SetField(name.clone(), *span));
                     // The tree-walker writes a mutated object back only when
                     // the base is a plain variable.
-                    if let Expr::Ident { name, .. } = &**obj {
-                        self.emit(Op::StoreVar(name.clone(), *span));
-                    } else {
-                        self.emit(Op::Pop);
-                    }
+                    self.compile_write_back(obj);
                     self.emit_const(Value::Unit);
+                    StmtValue::Discard
                 }
                 _ => unreachable!("unhandled assignment target"),
             },
-            Stmt::Expr(e) => self.compile_expr(e),
+            Stmt::Expr(e) => {
+                self.compile_expr(e);
+                StmtValue::Discard
+            }
         }
     }
 
     /// Compile a block: child scope, statements (non-final values popped),
     /// final value left on the stack, scope exit.
     fn compile_block(&mut self, block: &Block) {
-        self.emit(Op::EnterScope);
+        let needs_env = self.scope_declares_captured(block);
+        if needs_env {
+            self.emit(Op::EnterScope);
+        }
+        self.scope_depth += 1;
         self.compile_block_body(block);
-        self.emit(Op::ExitScope);
+        self.scope_depth -= 1;
+        if needs_env {
+            self.emit(Op::ExitScope);
+        }
     }
 
-    /// Compile a block's statements without a surrounding scope. Used for
-    /// loop bodies, which already run in a fresh iteration scope.
+    /// Compile a block's statements within the current scope, popping the
+    /// scope's local slots at the end (keeping the block's value). Used for
+    /// loop bodies, function bodies, and closure bodies.
     fn compile_block_body(&mut self, block: &Block) {
+        let scope_base = self.locals.len();
+        let mut last = StmtValue::None;
         for (i, stmt) in block.stmts.iter().enumerate() {
-            self.compile_stmt(stmt);
-            if i < block.stmts.len() - 1 {
+            last = self.compile_stmt(stmt);
+            // Discard the value of non-final statements. `Keep` (a slot
+            // declaration) stays on the stack as the slot's storage.
+            if i < block.stmts.len() - 1 && matches!(last, StmtValue::Discard) {
                 self.emit(Op::Pop);
             }
         }
-        if block.stmts.is_empty() {
+        if block.stmts.is_empty() || matches!(last, StmtValue::None) {
             self.emit_const(Value::Unit);
         }
+        // Pop only slot locals; env locals' values were already discarded by
+        // their statement pops (or remain as the block value).
+        let n = self.locals[scope_base..]
+            .iter()
+            .filter(|l| !l.in_env)
+            .count();
+        if n > 0 {
+            self.emit(Op::PopN(n as u16));
+        }
+        self.locals.truncate(scope_base);
     }
 
     /// Compile a function body into its own chunk. The parameter list is
-    /// stored on the chunk so `call_func` can arity-check it.
+    /// stored on the chunk so `call_func` can arity-check it. Parameters
+    /// become stack slots; captured parameters are copied into the
+    /// environment at entry.
     fn compile_func_body(&mut self, block: &Block, params: &[Param]) -> Rc<Chunk> {
         let mut sub = Compiler::new();
         sub.chunk.params = params.to_vec();
-        sub.compile_block(block);
+        sub.captured = scan_block_captured(block, params);
+        let needs_env = params.iter().any(|p| sub.captured.contains(&p.name.name))
+            || sub.scope_declares_captured(block);
+        if needs_env {
+            sub.emit(Op::EnterScope);
+        }
+        for (i, p) in params.iter().enumerate() {
+            if sub.captured.contains(&p.name.name) {
+                sub.emit(Op::LoadSlot(i as u16));
+                sub.emit(Op::DefineVar(p.name.name.clone()));
+                sub.locals.push(Local {
+                    name: p.name.name.clone(),
+                    slot: i,
+                    in_env: true,
+                });
+            } else {
+                sub.locals.push(Local {
+                    name: p.name.name.clone(),
+                    slot: i,
+                    in_env: false,
+                });
+            }
+        }
+        sub.stack_height = params.len();
+        sub.compile_block_body(block);
+        if needs_env {
+            sub.emit(Op::ExitScope);
+        }
         Rc::new(sub.chunk)
     }
 
@@ -458,7 +755,33 @@ impl Compiler {
     fn compile_closure_body(&mut self, body: &Expr, params: &[Param]) -> Rc<Chunk> {
         let mut sub = Compiler::new();
         sub.chunk.params = params.to_vec();
+        sub.captured = scan_closure_captured(body, params);
+        let needs_env = params.iter().any(|p| sub.captured.contains(&p.name.name));
+        if needs_env {
+            sub.emit(Op::EnterScope);
+        }
+        for (i, p) in params.iter().enumerate() {
+            if sub.captured.contains(&p.name.name) {
+                sub.emit(Op::LoadSlot(i as u16));
+                sub.emit(Op::DefineVar(p.name.name.clone()));
+                sub.locals.push(Local {
+                    name: p.name.name.clone(),
+                    slot: i,
+                    in_env: true,
+                });
+            } else {
+                sub.locals.push(Local {
+                    name: p.name.name.clone(),
+                    slot: i,
+                    in_env: false,
+                });
+            }
+        }
+        sub.stack_height = params.len();
         sub.compile_expr(body);
+        if needs_env {
+            sub.emit(Op::ExitScope);
+        }
         Rc::new(sub.chunk)
     }
 
@@ -468,8 +791,11 @@ impl Compiler {
             Expr::Float { value, .. } => self.emit_const(Value::Float(*value)),
             Expr::Str { value, .. } => self.emit_const(Value::Str(value.clone())),
             Expr::Bool { value, .. } => self.emit_const(Value::Bool(*value)),
-            Expr::Ident { name, span } => self.emit(Op::LoadVar(name.clone(), *span)),
-            Expr::Path { parts, span } => self.emit(Op::LoadPath(parts.clone(), *span)),
+            Expr::Ident { name, span } => match self.resolve(name) {
+                Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
+                Resolved::Env => self.emit(Op::LoadVar(name.clone(), *span)),
+            },
+            Expr::Path { parts, span } => self.compile_path_load(parts, *span),
             Expr::Paren { expr, .. } => self.compile_expr(expr),
             Expr::Unary { op, expr, span } => {
                 self.compile_expr(expr);
@@ -512,12 +838,26 @@ impl Compiler {
                     for a in args {
                         self.compile_expr(a);
                     }
-                    self.emit(Op::CallPath {
-                        parts: parts.clone(),
-                        argc: args.len() as u16,
-                        span: *span,
-                        pspan: *pspan,
-                    });
+                    if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
+                        // Slot-based receiver: load the receiver chain, then
+                        // resolve the last component as a field or method.
+                        self.emit(Op::LoadSlot(slot as u16));
+                        for part in &parts[1..parts.len() - 1] {
+                            self.emit(Op::GetField(part.clone(), *pspan));
+                        }
+                        self.emit(Op::CallMethod {
+                            name: parts.last().unwrap().clone(),
+                            argc: args.len() as u16,
+                            span: *span,
+                        });
+                    } else {
+                        self.emit(Op::CallPath {
+                            parts: parts.clone(),
+                            argc: args.len() as u16,
+                            span: *span,
+                            pspan: *pspan,
+                        });
+                    }
                 }
                 _ => {
                     self.compile_expr(callee);
@@ -565,18 +905,30 @@ impl Compiler {
                 self.emit(Op::Concat(n));
             }
             Expr::While { cond, body, span } => {
+                let pre = self.stack_height;
                 let setup_pos = self.chunk.code.len();
                 self.emit(Op::WhileSetup { exit: 0, header: 0 });
                 self.emit_const(Value::Unit);
                 let header = self.chunk.code.len();
                 self.compile_expr(cond);
                 let j = self.emit_while_cond(*span);
+                let body_needs_env = self.scope_declares_captured(body);
+                if body_needs_env {
+                    self.emit(Op::EnterScope);
+                }
+                self.scope_depth += 1;
                 self.compile_block_body(body);
+                self.scope_depth -= 1;
+                if body_needs_env {
+                    self.emit(Op::ExitScope);
+                }
                 self.emit(Op::SetLoopResult);
                 self.emit(Op::Jump(header));
                 self.patch_jump(j);
                 let exit = self.chunk.code.len();
                 self.chunk.code[setup_pos] = Op::WhileSetup { exit, header };
+                // The loop leaves exactly one value: its result.
+                self.stack_height = pre + 1;
             }
             Expr::Array { elems, .. } => {
                 for e in elems {
@@ -649,12 +1001,16 @@ impl Compiler {
                 let mut body_jumps = Vec::with_capacity(arms.len());
                 for arm in arms {
                     let pos = self.chunk.code.len();
+                    let has_env = pattern_binds(&arm.pat);
                     self.emit(Op::MatchArm {
                         pat: arm.pat.clone(),
                         next: 0,
+                        has_env,
                     });
                     self.compile_expr(&arm.body);
-                    self.emit(Op::ExitScope);
+                    if has_env {
+                        self.emit(Op::ExitScope);
+                    }
                     let j = self.emit_jump(JumpKind::Always);
                     arm_positions.push(pos);
                     body_jumps.push(j);
@@ -670,6 +1026,7 @@ impl Compiler {
                     self.chunk.code[*pos] = Op::MatchArm {
                         pat: arms[i].pat.clone(),
                         next,
+                        has_env: pattern_binds(&arms[i].pat),
                     };
                 }
                 for j in body_jumps {
@@ -684,13 +1041,17 @@ impl Compiler {
                 span: _,
             } => {
                 self.compile_expr(value);
+                let has_env = pattern_binds(pat);
                 let pos = self.chunk.code.len();
                 self.emit(Op::IfLetMatch {
                     pat: pat.clone(),
                     els: 0,
+                    has_env,
                 });
                 self.compile_block(then);
-                self.emit(Op::ExitScope);
+                if has_env {
+                    self.emit(Op::ExitScope);
+                }
                 let j = self.emit_jump(JumpKind::Always);
                 let els_pos = self.chunk.code.len();
                 self.emit(Op::Pop);
@@ -701,6 +1062,7 @@ impl Compiler {
                 self.chunk.code[pos] = Op::IfLetMatch {
                     pat: pat.clone(),
                     els: els_pos,
+                    has_env,
                 };
                 self.patch_jump(j);
             }
@@ -719,6 +1081,244 @@ impl Compiler {
                 });
             }
         }
+    }
+}
+
+/// What a compiled statement leaves on the stack.
+#[derive(Clone, Copy, PartialEq)]
+enum StmtValue {
+    /// A slot declaration: the value stays as the slot's storage.
+    Keep,
+    /// A value that should be discarded by the caller.
+    Discard,
+    /// Nothing on the stack.
+    None,
+}
+
+/// Whether a pattern binds any names (forcing a scope environment).
+fn pattern_binds(pat: &Pattern) -> bool {
+    match pat {
+        Pattern::Binding { .. } => true,
+        Pattern::Variant { arg: Some(p), .. } => pattern_binds(p),
+        _ => false,
+    }
+}
+
+/// Collect the names referenced by nested closures but not defined within
+/// them. These must live in the environment so closures can capture them.
+fn scan_block_captured(block: &Block, params: &[Param]) -> std::collections::HashSet<String> {
+    let mut defined: std::collections::HashSet<String> =
+        params.iter().map(|p| p.name.name.clone()).collect();
+    let mut free = std::collections::HashSet::new();
+    for stmt in &block.stmts {
+        scan_stmt_captured(stmt, &mut defined, &mut free);
+    }
+    free
+}
+
+/// Like [`scan_block_captured`] but for a closure body (an expression).
+fn scan_closure_captured(body: &Expr, params: &[Param]) -> std::collections::HashSet<String> {
+    let mut defined: std::collections::HashSet<String> =
+        params.iter().map(|p| p.name.name.clone()).collect();
+    let mut free = std::collections::HashSet::new();
+    scan_expr_captured(body, &mut defined, &mut free);
+    free
+}
+
+fn scan_expr_captured(
+    expr: &Expr,
+    defined: &mut std::collections::HashSet<String>,
+    free: &mut std::collections::HashSet<String>,
+) {
+    match expr {
+        Expr::Ident { name, .. } => {
+            if !defined.contains(name) {
+                free.insert(name.clone());
+            }
+        }
+        // A closure's free variables are relative to the closure itself:
+        // its params and its own body locals. The enclosing function's
+        // locals are free from the closure's perspective.
+        Expr::Closure { params, body, .. } => {
+            let mut inner: std::collections::HashSet<String> =
+                params.iter().map(|p| p.name.name.clone()).collect();
+            scan_expr_captured(body, &mut inner, free);
+        }
+        Expr::Block(block) => {
+            let mut inner = defined.clone();
+            for stmt in &block.stmts {
+                scan_stmt_captured(stmt, &mut inner, free);
+            }
+        }
+        Expr::Paren { expr, .. } => scan_expr_captured(expr, defined, free),
+        Expr::Unary { expr, .. } => scan_expr_captured(expr, defined, free),
+        Expr::Binary { left, right, .. } => {
+            scan_expr_captured(left, defined, free);
+            scan_expr_captured(right, defined, free);
+        }
+        Expr::Call { callee, args, .. } => {
+            scan_expr_captured(callee, defined, free);
+            for a in args {
+                scan_expr_captured(a, defined, free);
+            }
+        }
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            scan_expr_captured(cond, defined, free);
+            let mut inner = defined.clone();
+            for stmt in &then.stmts {
+                scan_stmt_captured(stmt, &mut inner, free);
+            }
+            if let Some(e) = els {
+                scan_expr_captured(e, defined, free);
+            }
+        }
+        Expr::Fmt { parts, .. } => {
+            for part in parts {
+                if let FmtPart::Expr(e) = part {
+                    scan_expr_captured(e, defined, free);
+                }
+            }
+        }
+        Expr::While { cond, body, .. } => {
+            scan_expr_captured(cond, defined, free);
+            let mut inner = defined.clone();
+            for stmt in &body.stmts {
+                scan_stmt_captured(stmt, &mut inner, free);
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            scan_expr_captured(scrutinee, defined, free);
+            for arm in arms {
+                let mut inner = defined.clone();
+                collect_pattern_bindings(&arm.pat, &mut inner);
+                scan_expr_captured(&arm.body, &mut inner, free);
+            }
+        }
+        Expr::IfLet {
+            pat,
+            value,
+            then,
+            els,
+            ..
+        } => {
+            scan_expr_captured(value, defined, free);
+            let mut inner = defined.clone();
+            collect_pattern_bindings(pat, &mut inner);
+            for stmt in &then.stmts {
+                scan_stmt_captured(stmt, &mut inner, free);
+            }
+            if let Some(e) = els {
+                scan_expr_captured(e, defined, free);
+            }
+        }
+        Expr::Try { expr, .. } => scan_expr_captured(expr, defined, free),
+        Expr::Variant { arg, .. } => {
+            if let Some(a) = arg {
+                scan_expr_captured(a, defined, free);
+            }
+        }
+        Expr::Array { elems, .. } => {
+            for e in elems {
+                scan_expr_captured(e, defined, free);
+            }
+        }
+        Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                scan_expr_captured(k, defined, free);
+                scan_expr_captured(v, defined, free);
+            }
+        }
+        Expr::Field { obj, .. } => scan_expr_captured(obj, defined, free),
+        Expr::Range { start, end, .. } => {
+            scan_expr_captured(start, defined, free);
+            scan_expr_captured(end, defined, free);
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, v) in fields {
+                scan_expr_captured(v, defined, free);
+            }
+        }
+        Expr::Index { obj, index, .. } => {
+            scan_expr_captured(obj, defined, free);
+            scan_expr_captured(index, defined, free);
+        }
+        Expr::Slice {
+            obj, start, end, ..
+        } => {
+            scan_expr_captured(obj, defined, free);
+            if let Some(e) = start {
+                scan_expr_captured(e, defined, free);
+            }
+            if let Some(e) = end {
+                scan_expr_captured(e, defined, free);
+            }
+        }
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Str { .. }
+        | Expr::Bool { .. }
+        | Expr::Path { .. } => {}
+    }
+}
+
+fn scan_stmt_captured(
+    stmt: &Stmt,
+    defined: &mut std::collections::HashSet<String>,
+    free: &mut std::collections::HashSet<String>,
+) {
+    match stmt {
+        Stmt::Decl { name, value, .. } => {
+            scan_expr_captured(value, defined, free);
+            defined.insert(name.name.clone());
+        }
+        Stmt::Import { .. } => {}
+        Stmt::Func {
+            name, params, body, ..
+        } => {
+            let mut inner: std::collections::HashSet<String> =
+                params.iter().map(|p| p.name.name.clone()).collect();
+            for stmt in &body.stmts {
+                scan_stmt_captured(stmt, &mut inner, free);
+            }
+            defined.insert(name.name.clone());
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(e) = value {
+                scan_expr_captured(e, defined, free);
+            }
+        }
+        Stmt::Struct { .. } => {}
+        Stmt::For {
+            var, iter, body, ..
+        } => {
+            scan_expr_captured(iter, defined, free);
+            let mut inner = defined.clone();
+            inner.insert(var.name.clone());
+            for stmt in &body.stmts {
+                scan_stmt_captured(stmt, &mut inner, free);
+            }
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Assign { target, value, .. } => {
+            scan_expr_captured(value, defined, free);
+            scan_expr_captured(target, defined, free);
+        }
+        Stmt::Expr(e) => scan_expr_captured(e, defined, free),
+    }
+}
+
+/// Add a pattern's binding names to `defined`.
+fn collect_pattern_bindings(pat: &Pattern, defined: &mut std::collections::HashSet<String>) {
+    match pat {
+        Pattern::Binding { name } => {
+            defined.insert(name.name.clone());
+        }
+        Pattern::Variant { arg: Some(p), .. } => collect_pattern_bindings(p, defined),
+        _ => {}
     }
 }
 
@@ -884,6 +1484,16 @@ impl Vm {
                     let v = self.stack.pop().unwrap();
                     interp.assign_path(parts, v, *span)?;
                 }
+                Op::LoadSlot(slot) => {
+                    let base = self.frames.last().unwrap().stack_base;
+                    let v = self.stack[base + *slot as usize].clone();
+                    self.stack.push(v);
+                }
+                Op::StoreSlot(slot) => {
+                    let v = self.stack.pop().unwrap();
+                    let base = self.frames.last().unwrap().stack_base;
+                    self.stack[base + *slot as usize] = v;
+                }
                 Op::MakeFunc {
                     name,
                     params,
@@ -968,12 +1578,18 @@ impl Vm {
                         env: Rc::clone(&interp.env),
                         frame_idx: self.frames.len() - 1,
                         stack_base,
-                        slots: 2,
+                        slots: 3,
                     });
                     self.stack.push(iterable);
                     self.stack.push(idx);
+                    // Placeholder for the loop variable's slot; ForNext pops
+                    // it (or the previous item) before pushing the next one.
+                    self.stack.push(Value::Unit);
                 }
-                Op::ForNext { var, exit } => {
+                Op::ForNext { var, exit, in_env } => {
+                    // Pop the previous item (or the placeholder), then the
+                    // index counter.
+                    self.stack.pop().unwrap();
                     let idx = self.stack.pop().unwrap();
                     let iterable_idx = self.stack.len() - 1;
                     let (done, item) = match (&self.stack[iterable_idx], &idx) {
@@ -1006,12 +1622,15 @@ impl Vm {
                             _ => unreachable!(),
                         };
                         self.stack.push(next);
-                        let li = self.loops.last().unwrap();
-                        let loop_env = Rc::clone(&li.env);
-                        interp.env = loop_env;
-                        let scope = Env::with_parent(&interp.env);
-                        scope.borrow_mut().define(var, item);
-                        interp.env = scope;
+                        self.stack.push(item.clone());
+                        if *in_env {
+                            let li = self.loops.last().unwrap();
+                            let loop_env = Rc::clone(&li.env);
+                            interp.env = loop_env;
+                            let scope = Env::with_parent(&interp.env);
+                            scope.borrow_mut().define(var, item);
+                            interp.env = scope;
+                        }
                     }
                 }
                 Op::WhileSetup { exit, header } => {
@@ -1157,8 +1776,8 @@ impl Vm {
                     self.stack.push(v);
                 }
                 Op::SetField(name, span) => {
-                    let value = self.stack.pop().unwrap();
                     let mut ov = self.stack.pop().unwrap();
+                    let value = self.stack.pop().unwrap();
                     Interp::set_object_field(&mut ov, name, value, *span)?;
                     self.stack.push(ov);
                 }
@@ -1209,12 +1828,19 @@ impl Vm {
                         }
                     }
                 }
-                Op::MatchArm { pat, next } => {
+                Op::MatchArm { pat, next, has_env } => {
                     let sv = self.stack.pop().unwrap();
-                    let scope = Env::with_parent(&interp.env);
-                    if interp.match_pattern(pat, &sv, &scope) {
-                        interp.env = scope;
+                    let matched = if *has_env {
+                        let scope = Env::with_parent(&interp.env);
+                        let m = interp.match_pattern(pat, &sv, &scope);
+                        if m {
+                            interp.env = scope;
+                        }
+                        m
                     } else {
+                        interp.match_pattern(pat, &sv, &interp.env)
+                    };
+                    if !matched {
                         self.stack.push(sv);
                         self.frames.last_mut().unwrap().ip = *next;
                     }
@@ -1225,12 +1851,19 @@ impl Vm {
                         *span,
                     ));
                 }
-                Op::IfLetMatch { pat, els } => {
+                Op::IfLetMatch { pat, els, has_env } => {
                     let v = self.stack.pop().unwrap();
-                    let scope = Env::with_parent(&interp.env);
-                    if interp.match_pattern(pat, &v, &scope) {
-                        interp.env = scope;
+                    let matched = if *has_env {
+                        let scope = Env::with_parent(&interp.env);
+                        let m = interp.match_pattern(pat, &v, &scope);
+                        if m {
+                            interp.env = scope;
+                        }
+                        m
                     } else {
+                        interp.match_pattern(pat, &v, &interp.env)
+                    };
+                    if !matched {
                         self.stack.push(v);
                         self.frames.last_mut().unwrap().ip = *els;
                     }
@@ -1306,6 +1939,27 @@ impl Vm {
                     let callee = interp.resolve_path_value(parts, pspan)?;
                     self.call_value(callee, args, span, interp)?;
                 }
+                Op::CallMethod { name, argc, span } => {
+                    let argc = *argc;
+                    let span = *span;
+                    let mut args = Vec::with_capacity(argc as usize);
+                    for _ in 0..argc {
+                        args.push(self.stack.pop().unwrap());
+                    }
+                    args.reverse();
+                    let recv = self.stack.pop().unwrap();
+                    // A func-valued field is a direct call; otherwise the
+                    // last component is a method on the receiver.
+                    match Interp::object_field(&recv, name, span) {
+                        Ok(f) => self.call_value(f, args, span, interp)?,
+                        Err(_) => {
+                            let f = interp.lookup_method(&recv, name, span)?;
+                            let mut arg_vals = vec![recv];
+                            arg_vals.extend(args);
+                            self.call_value(f, arg_vals, span, interp)?;
+                        }
+                    }
+                }
                 Op::Concat(n) => {
                     let mut parts = Vec::with_capacity(*n as usize);
                     for _ in 0..*n {
@@ -1329,6 +1983,12 @@ impl Vm {
                         .parent_rc()
                         .expect("ExitScope at top level");
                     interp.env = parent;
+                }
+                Op::PopN(n) => {
+                    let len = self.stack.len();
+                    let result = self.stack.pop().unwrap();
+                    self.stack.truncate(len - 1 - *n as usize);
+                    self.stack.push(result);
                 }
             }
         }
@@ -1356,16 +2016,17 @@ impl Vm {
                         span,
                     ));
                 }
-                let scope = Env::with_parent(&fv.env);
-                for (p, v) in fv.params.iter().zip(args) {
-                    scope.borrow_mut().define(&p.name.name, v);
-                }
-                let prev_env = std::mem::replace(&mut interp.env, scope);
+                // Arguments stay on the stack as the callee's parameter
+                // slots. The callee runs in its captured environment; the
+                // body's own scope (if any) is entered by its first op.
+                let stack_base = self.stack.len();
+                self.stack.extend(args);
+                let prev_env = std::mem::replace(&mut interp.env, Rc::clone(&fv.env));
                 self.frames.push(Frame {
                     chunk: fv.chunk.unwrap(),
                     ip: 0,
                     prev_env,
-                    stack_base: self.stack.len(),
+                    stack_base,
                 });
                 Ok(())
             }
@@ -1449,6 +2110,46 @@ mod tests {
                 "VM and tree-walker disagree on error for: {src}"
             ),
             _ => panic!("VM and tree-walker disagree on: {src}\nVM: {vm:?}\ntree: {tree:?}"),
+        }
+    }
+
+    #[test]
+    fn vm_slot_locals_match_tree_walker() {
+        // Slot-based locals: shadowing, nested scopes, params, and locals
+        // inside match arms / if-let branches must agree with the
+        // environment-based tree-walker.
+        for src in [
+            // ---- shadowing and nested scopes ----
+            "x := 1\n{ let x = 2\nx }\nx",
+            "x := 1\n{ let y = 2\n{ let z = 3\nx + y + z } }",
+            "x := 1\n{ let x = 2\n{ let x = 3\nx } }",
+            "x := 1\nlet y = 2\n{ let y = 3\ny }\ny",
+            "func f() -> int { let a = 1\nlet b = 2\nlet c = a + b\nc }\nf()",
+            "func f(n: int) -> int { let m = n * 2\nm + n }\nf(5)",
+            "func f(n: int) -> int { let n = n + 1\nn }\nf(5)",
+            "func f() -> int { let x = 1\n{ let x = 2\nx }\nx }\nf()",
+            // ---- locals in match arms / if-let branches ----
+            "match 5 { n => { let m = n * 2\nm } }",
+            "match 5 { 1 => 10, n => { let m = n * 2\nm } }",
+            "x := .some(5)\nif let .some(n) = x { let m = n + 1\nm } else { 0 }",
+            "x := .none\nif let .some(n) = x { let m = n + 1\nm } else { 0 }",
+            "x := .some(5)\nif let .some(n) = x { let m = n + 1\nm }",
+            // ---- struct fields on slot params / receivers ----
+            "struct Point { x: int }\nfunc f(p: Point) -> int { p.x }\nf(Point{ x: 7 })",
+            "struct Point { x: int }\nfunc dist(p: Point) -> int { p.x }\np := Point{ x: 9 }\np.dist()",
+            "struct Point { x: int }\nstruct Holder { p: Point }\nfunc dist(p: Point) -> int { p.x }\nh := Holder{ p: Point{ x: 9 } }\nh.p.dist()",
+            "struct Point { x: int }\nfunc f(p: Point) -> int { p.x = 5\np.x }\nf(Point{ x: 1 })",
+            // ---- closures capturing locals ----
+            "func outer() { let x = 10\n|x| x + 1 }\ng := outer()\ng(5)",
+            "func outer() { let x = 10\nlet y = 20\n|x| x + y }\ng := outer()\ng(5)",
+            "func outer() { let x = 10\n{ let y = x + 1\ny } }\ng := outer()\ng(5)",
+            "func counter() { let n = 0\n|inc| { n = n + inc\nn } }\nc := counter()\nc(1)\nc(2)",
+            // ---- loop var does not leak ----
+            "x := 0\nfor x in 0..3 { x }\nx",
+            "x := 5\nfor i in 0..3 { let x = i\nx }\nx",
+            "sum := 0\nfor i in 0..3 { let j = i * 2\nsum = sum + j }\nsum",
+        ] {
+            assert_same(src);
         }
     }
 
