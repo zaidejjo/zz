@@ -48,6 +48,11 @@ impl Env {
         self.vars.get_mut(name)
     }
 
+    /// The parent scope, if any (used by the VM to leave a scope).
+    pub fn parent_rc(&self) -> Option<Rc<RefCell<Env>>> {
+        self.parent.clone()
+    }
+
     /// Assign to a binding, walking up the scope chain. Returns `false` when
     /// the name is not bound anywhere.
     pub fn assign(&mut self, name: &str, value: Value) -> bool {

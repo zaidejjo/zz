@@ -7,6 +7,7 @@ pub mod env;
 pub mod interp;
 pub mod json;
 pub mod value;
+pub mod vm;
 
 pub use env::Env;
 pub use interp::{EvalError, Interp, NativeEntry, NativeFn};

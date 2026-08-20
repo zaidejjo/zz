@@ -62,6 +62,9 @@ pub struct FuncValue {
     pub params: Vec<Param>,
     pub body: Expr,
     pub env: std::rc::Rc<std::cell::RefCell<Env>>,
+    /// Pre-compiled bytecode body, when the function was defined through the
+    /// Phase 6 compiler. `None` for tree-walker-created closures.
+    pub chunk: Option<std::rc::Rc<crate::vm::Chunk>>,
 }
 
 impl Value {

@@ -111,8 +111,29 @@ impl Interp {
         }
     }
 
-    /// Run a program, returning the value of the last statement.
+    /// Run a program, returning the value of the last statement. Executes
+    /// through the Phase 6 bytecode VM; constructs the compiler does not yet
+    /// lower fall back to the tree-walker.
     pub fn run(&mut self, program: &Program) -> Result<Value, EvalError> {
+        let chunk = Rc::new(crate::vm::Compiler::compile_program(program));
+        let mut vm = crate::vm::Vm::new();
+        match vm.run_chunk(&chunk, self)? {
+            Flow::Value(v) => Ok(v),
+            Flow::Return(_) => Err(EvalError::new(
+                "`return` outside of a function",
+                Span::new(0, 0),
+            )),
+            Flow::Break => Err(EvalError::new("`break` outside of a loop", Span::new(0, 0))),
+            Flow::Continue => Err(EvalError::new(
+                "`continue` outside of a loop",
+                Span::new(0, 0),
+            )),
+        }
+    }
+
+    /// Phase 1 tree-walker entry point, kept for differential testing against
+    /// the bytecode VM.
+    pub fn run_tree_walker(&mut self, program: &Program) -> Result<Value, EvalError> {
         let mut result = Value::Unit;
         for stmt in &program.stmts {
             result = self.run_stmt(stmt)?.into_value()?;
@@ -142,6 +163,7 @@ impl Interp {
                     params: params.clone(),
                     body: Expr::Block(body.clone()),
                     env: Rc::clone(&self.env),
+                    chunk: None,
                 };
                 self.funcs.insert(name.name.clone(), fv.clone());
                 self.env.borrow_mut().define(&name.name, Value::Func(fv));
@@ -234,26 +256,7 @@ impl Interp {
                 }
                 Ok(())
             }
-            Expr::Path { parts, span } => {
-                let joined = parts.join(".");
-                if self.env.borrow().get(&joined).is_some() {
-                    self.env.borrow_mut().assign(&joined, value);
-                    return Ok(());
-                }
-                // Struct field walk: `p.x = v` mutates the object bound to
-                // `p` and writes it back.
-                let root = &parts[0];
-                let mut obj = self.env.borrow().get(root).ok_or_else(|| {
-                    EvalError::new(format!("undefined variable `{joined}`"), *span)
-                })?;
-                for field in &parts[1..parts.len() - 1] {
-                    obj = Self::object_field(&obj, field, *span)?;
-                }
-                let last = parts.last().unwrap();
-                Self::set_object_field(&mut obj, last, value, *span)?;
-                self.env.borrow_mut().assign(root, obj);
-                Ok(())
-            }
+            Expr::Path { parts, span } => self.assign_path(parts, value, *span),
             Expr::Field { obj, name, span } => {
                 let mut objv = self.eval(obj)?.into_value()?;
                 Self::set_object_field(&mut objv, name, value, *span)?;
@@ -277,9 +280,43 @@ impl Interp {
         }
     }
 
+    /// Assign to a dotted path: a direct binding, or a struct-field walk with
+    /// write-back to the root variable. Shared by the tree-walker and the VM.
+    pub(crate) fn assign_path(
+        &mut self,
+        parts: &[String],
+        value: Value,
+        span: Span,
+    ) -> Result<(), EvalError> {
+        let joined = parts.join(".");
+        if self.env.borrow().get(&joined).is_some() {
+            self.env.borrow_mut().assign(&joined, value);
+            return Ok(());
+        }
+        // Struct field walk: `p.x = v` mutates the object bound to `p` and
+        // writes it back.
+        let root = &parts[0];
+        let mut obj = self
+            .env
+            .borrow()
+            .get(root)
+            .ok_or_else(|| EvalError::new(format!("undefined variable `{joined}`"), span))?;
+        for field in &parts[1..parts.len() - 1] {
+            obj = Self::object_field(&obj, field, span)?;
+        }
+        let last = parts.last().unwrap();
+        Self::set_object_field(&mut obj, last, value, span)?;
+        self.env.borrow_mut().assign(root, obj);
+        Ok(())
+    }
+
     /// Resolve a dotted path to a value: direct binding, function, native,
     /// or a struct-field walk (`p.x.y`).
-    fn resolve_path_value(&self, parts: &[String], span: Span) -> Result<Value, EvalError> {
+    pub(crate) fn resolve_path_value(
+        &self,
+        parts: &[String],
+        span: Span,
+    ) -> Result<Value, EvalError> {
         let name = parts.join(".");
         if let Some(v) = self.env.borrow().get(&name) {
             return Ok(v);
@@ -323,7 +360,12 @@ impl Interp {
     /// Resolve a method on a receiver: try the bare name, then the
     /// namespace implied by the receiver's struct type (`shapes.Point` →
     /// `shapes.dist`).
-    fn lookup_method(&self, recv: &Value, method: &str, span: Span) -> Result<Value, EvalError> {
+    pub(crate) fn lookup_method(
+        &self,
+        recv: &Value,
+        method: &str,
+        span: Span,
+    ) -> Result<Value, EvalError> {
         match self.lookup_callable(method, span) {
             Ok(f) => Ok(f),
             Err(_) => {
@@ -488,6 +530,7 @@ impl Interp {
                 params: params.clone(),
                 body: (**body).clone(),
                 env: Rc::clone(&self.env),
+                chunk: None,
             }))),
             Expr::If {
                 cond,
@@ -778,7 +821,13 @@ impl Interp {
             scope.borrow_mut().define(&p.name.name, v);
         }
         let prev = std::mem::replace(&mut self.env, scope);
-        let result = self.eval(&fv.body);
+        let result = match &fv.chunk {
+            Some(chunk) => {
+                let mut vm = crate::vm::Vm::new();
+                vm.run_chunk(chunk, self)
+            }
+            None => self.eval(&fv.body),
+        };
         self.env = prev;
         match result? {
             Flow::Value(v) => Ok(v),
@@ -955,7 +1004,12 @@ impl Interp {
         }
     }
 
-    fn eval_unary(&mut self, op: UnOp, v: Value, span: Span) -> Result<Value, EvalError> {
+    pub(crate) fn eval_unary(
+        &mut self,
+        op: UnOp,
+        v: Value,
+        span: Span,
+    ) -> Result<Value, EvalError> {
         match op {
             UnOp::Pos => Ok(v),
             UnOp::Neg => match v {
@@ -973,7 +1027,7 @@ impl Interp {
         }
     }
 
-    fn eval_binary(
+    pub(crate) fn eval_binary(
         &mut self,
         op: BinOp,
         l: Value,
