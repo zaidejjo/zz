@@ -141,7 +141,7 @@ impl Interp {
         Ok(result)
     }
 
-    pub(crate) fn run_stmt(&mut self, stmt: &Stmt) -> Result<Flow, EvalError> {
+    fn run_stmt(&mut self, stmt: &Stmt) -> Result<Flow, EvalError> {
         match stmt {
             Stmt::Decl { name, value, .. } => match self.eval(value)? {
                 Flow::Value(v) => {
@@ -420,7 +420,7 @@ impl Interp {
         }
     }
 
-    pub(crate) fn eval(&mut self, expr: &Expr) -> Result<Flow, EvalError> {
+    fn eval(&mut self, expr: &Expr) -> Result<Flow, EvalError> {
         match expr {
             Expr::Int { value, .. } => Ok(Flow::Value(Value::Int(*value))),
             Expr::Float { value, .. } => Ok(Flow::Value(Value::Float(*value))),
@@ -750,7 +750,12 @@ impl Interp {
     }
 
     /// Bind a pattern against a value in `scope`. Returns whether it matched.
-    fn match_pattern(&self, pat: &Pattern, value: &Value, scope: &Rc<RefCell<Env>>) -> bool {
+    pub(crate) fn match_pattern(
+        &self,
+        pat: &Pattern,
+        value: &Value,
+        scope: &Rc<RefCell<Env>>,
+    ) -> bool {
         match pat {
             Pattern::Wildcard { .. } => true,
             Pattern::Binding { name } => {

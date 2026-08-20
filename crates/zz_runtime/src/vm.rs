@@ -5,23 +5,20 @@
 //! with an explicit call-frame stack, so function calls do not recurse in
 //! Rust.
 //!
-//! Native bytecode covers: literals, variables, paths, arithmetic, logical
-//! operators, calls (incl. method resolution), `if`, blocks, fmt strings,
-//! declarations, assignments (incl. index/field write-back), `return`,
-//! functions, structs, `for`/`while` loops with `break`/`continue`, arrays,
-//! dicts, indexing, slicing, and ranges.
+//! Native bytecode covers the full language: literals, variables, paths,
+//! arithmetic, logical operators, calls (incl. method resolution), `if`,
+//! blocks, fmt strings, declarations, assignments (incl. index/field
+//! write-back), `return`, functions, structs, `for`/`while` loops with
+//! `break`/`continue`, arrays, dicts, indexing, slicing, ranges, closures,
+//! variants, `match`, `if let`, and `?`.
 //!
-//! Constructs the compiler does not yet lower are emitted as
-//! [`Op::EvalTree`] / [`Op::EvalTreeStmt`], which fall back to the Phase 1
-//! tree-walker (closures, `match`, `if let`, `?`, variants). The two engines
-//! interoperate freely: a compiled function body may call a tree-walked
-//! closure and vice versa, and control flow (`return`, `break`, `continue`)
-//! unwinds across the boundary correctly.
+//! The Phase 1 tree-walker survives only behind `Interp::run_tree_walker`,
+//! used by differential tests to cross-check the VM.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Param, Program, Stmt, UnOp};
+use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Param, Pattern, Program, Stmt, UnOp};
 use zz_frontend::span::Span;
 
 use crate::env::Env;
@@ -163,6 +160,33 @@ pub enum Op {
     /// mutated object back (for write-back).
     SetField(String, Span),
 
+    // ---- closures & variants ----
+    /// Create a closure value from a pre-compiled body chunk, capturing the
+    /// current environment.
+    MakeClosure {
+        params: Vec<Param>,
+        chunk: Rc<Chunk>,
+    },
+    /// Pop an optional argument and push an Option/Result variant.
+    MakeVariant {
+        name: String,
+        has_arg: bool,
+        span: Span,
+    },
+
+    // ---- pattern matching ----
+    /// Pop the scrutinee; try `pat` in a fresh scope. On a match, run the
+    /// body in that scope; otherwise push the scrutinee back and jump to
+    /// `next` (the following arm or the non-exhaustive error).
+    MatchArm { pat: Pattern, next: usize },
+    /// Error: no match arm matched.
+    MatchError(Span),
+    /// Pop the value; try `pat` in a fresh scope. On a match, run the `then`
+    /// block in that scope; otherwise push the value back and jump to `els`.
+    IfLetMatch { pat: Pattern, els: usize },
+    /// Pop a value; unwrap Option/Result or `return` the None/Err variant.
+    TryOp(Span),
+
     // ---- calls ----
     /// Pop `argc` arguments, pop the callee, call it, push the result.
     Call { argc: u16, span: Span },
@@ -184,12 +208,6 @@ pub enum Op {
     EnterScope,
     /// Leave the current scope, restoring its parent.
     ExitScope,
-
-    // ---- tree-walker fallback ----
-    /// Evaluate an expression with the tree-walker and push its value.
-    EvalTree(Expr),
-    /// Run a statement with the tree-walker and push its value.
-    EvalTreeStmt(Stmt),
 }
 
 /// Lowers an AST into a [`Chunk`].
@@ -399,7 +417,7 @@ impl Compiler {
                     }
                     self.emit_const(Value::Unit);
                 }
-                _ => self.emit(Op::EvalTreeStmt(stmt.clone())),
+                _ => unreachable!("unhandled assignment target"),
             },
             Stmt::Expr(e) => self.compile_expr(e),
         }
@@ -433,6 +451,14 @@ impl Compiler {
         let mut sub = Compiler::new();
         sub.chunk.params = params.to_vec();
         sub.compile_block(block);
+        Rc::new(sub.chunk)
+    }
+
+    /// Compile a closure body (an expression) into its own chunk.
+    fn compile_closure_body(&mut self, body: &Expr, params: &[Param]) -> Rc<Chunk> {
+        let mut sub = Compiler::new();
+        sub.chunk.params = params.to_vec();
+        sub.compile_expr(body);
         Rc::new(sub.chunk)
     }
 
@@ -606,8 +632,92 @@ impl Compiler {
                 }
                 self.emit(Op::SliceOp(*span));
             }
-            // Everything not yet lowered runs through the tree-walker.
-            other => self.emit(Op::EvalTree(other.clone())),
+            Expr::Closure { params, body, .. } => {
+                let chunk = self.compile_closure_body(body, params);
+                self.emit(Op::MakeClosure {
+                    params: params.clone(),
+                    chunk,
+                });
+            }
+            Expr::Match {
+                scrutinee,
+                arms,
+                span,
+            } => {
+                self.compile_expr(scrutinee);
+                let mut arm_positions = Vec::with_capacity(arms.len());
+                let mut body_jumps = Vec::with_capacity(arms.len());
+                for arm in arms {
+                    let pos = self.chunk.code.len();
+                    self.emit(Op::MatchArm {
+                        pat: arm.pat.clone(),
+                        next: 0,
+                    });
+                    self.compile_expr(&arm.body);
+                    self.emit(Op::ExitScope);
+                    let j = self.emit_jump(JumpKind::Always);
+                    arm_positions.push(pos);
+                    body_jumps.push(j);
+                }
+                let error_pos = self.chunk.code.len();
+                self.emit(Op::MatchError(*span));
+                for (i, pos) in arm_positions.iter().enumerate() {
+                    let next = if i + 1 < arms.len() {
+                        arm_positions[i + 1]
+                    } else {
+                        error_pos
+                    };
+                    self.chunk.code[*pos] = Op::MatchArm {
+                        pat: arms[i].pat.clone(),
+                        next,
+                    };
+                }
+                for j in body_jumps {
+                    self.patch_jump(j);
+                }
+            }
+            Expr::IfLet {
+                pat,
+                value,
+                then,
+                els,
+                span: _,
+            } => {
+                self.compile_expr(value);
+                let pos = self.chunk.code.len();
+                self.emit(Op::IfLetMatch {
+                    pat: pat.clone(),
+                    els: 0,
+                });
+                self.compile_block(then);
+                self.emit(Op::ExitScope);
+                let j = self.emit_jump(JumpKind::Always);
+                let els_pos = self.chunk.code.len();
+                self.emit(Op::Pop);
+                match els {
+                    Some(e) => self.compile_expr(e),
+                    None => self.emit_const(Value::Unit),
+                }
+                self.chunk.code[pos] = Op::IfLetMatch {
+                    pat: pat.clone(),
+                    els: els_pos,
+                };
+                self.patch_jump(j);
+            }
+            Expr::Try { expr, span } => {
+                self.compile_expr(expr);
+                self.emit(Op::TryOp(*span));
+            }
+            Expr::Variant { name, arg, span } => {
+                if let Some(a) = arg {
+                    self.compile_expr(a);
+                }
+                self.emit(Op::MakeVariant {
+                    name: name.clone(),
+                    has_arg: arg.is_some(),
+                    span: *span,
+                });
+            }
         }
     }
 }
@@ -1052,6 +1162,106 @@ impl Vm {
                     Interp::set_object_field(&mut ov, name, value, *span)?;
                     self.stack.push(ov);
                 }
+                Op::MakeClosure { params, chunk } => {
+                    let fv = FuncValue {
+                        params: params.clone(),
+                        body: Expr::Block(Block {
+                            stmts: Vec::new(),
+                            span: Span::new(0, 0),
+                        }),
+                        env: Rc::clone(&interp.env),
+                        chunk: Some(Rc::clone(chunk)),
+                    };
+                    self.stack.push(Value::Func(fv));
+                }
+                Op::MakeVariant {
+                    name,
+                    has_arg,
+                    span,
+                } => {
+                    let av = if *has_arg {
+                        Some(self.stack.pop().unwrap())
+                    } else {
+                        None
+                    };
+                    match (name.as_str(), av) {
+                        ("ok", Some(v)) => self.stack.push(Value::Result(Ok(Box::new(v)))),
+                        ("ok", None) => {
+                            return Err(EvalError::new("`.ok` requires an argument", *span))
+                        }
+                        ("err", Some(v)) => self.stack.push(Value::Result(Err(Box::new(v)))),
+                        ("err", None) => {
+                            return Err(EvalError::new("`.err` requires an argument", *span))
+                        }
+                        ("some", Some(v)) => self.stack.push(Value::Option(Some(Box::new(v)))),
+                        ("some", None) => {
+                            return Err(EvalError::new("`.some` requires an argument", *span))
+                        }
+                        ("none", None) => self.stack.push(Value::Option(None)),
+                        ("none", Some(_)) => {
+                            return Err(EvalError::new("`.none` takes no argument", *span))
+                        }
+                        (other, _) => {
+                            return Err(EvalError::new(
+                                format!("unknown variant constructor `.{other}`"),
+                                *span,
+                            ))
+                        }
+                    }
+                }
+                Op::MatchArm { pat, next } => {
+                    let sv = self.stack.pop().unwrap();
+                    let scope = Env::with_parent(&interp.env);
+                    if interp.match_pattern(pat, &sv, &scope) {
+                        interp.env = scope;
+                    } else {
+                        self.stack.push(sv);
+                        self.frames.last_mut().unwrap().ip = *next;
+                    }
+                }
+                Op::MatchError(span) => {
+                    return Err(EvalError::new(
+                        "non-exhaustive match: no arm matched",
+                        *span,
+                    ));
+                }
+                Op::IfLetMatch { pat, els } => {
+                    let v = self.stack.pop().unwrap();
+                    let scope = Env::with_parent(&interp.env);
+                    if interp.match_pattern(pat, &v, &scope) {
+                        interp.env = scope;
+                    } else {
+                        self.stack.push(v);
+                        self.frames.last_mut().unwrap().ip = *els;
+                    }
+                }
+                Op::TryOp(span) => {
+                    let v = self.stack.pop().unwrap();
+                    match v {
+                        Value::Option(Some(inner)) => self.stack.push(*inner),
+                        Value::Option(None) => {
+                            match self.unwind_frame(Flow::Return(Value::Option(None)), interp) {
+                                Unwind::Continue => {}
+                                Unwind::Escaped(flow) => return Ok(flow),
+                                Unwind::Error(e) => return Err(e),
+                            }
+                        }
+                        Value::Result(Ok(inner)) => self.stack.push(*inner),
+                        Value::Result(Err(e)) => {
+                            match self.unwind_frame(Flow::Return(Value::Result(Err(e))), interp) {
+                                Unwind::Continue => {}
+                                Unwind::Escaped(flow) => return Ok(flow),
+                                Unwind::Error(e) => return Err(e),
+                            }
+                        }
+                        other => {
+                            return Err(EvalError::new(
+                                format!("cannot use `?` on a value of type `{other}`"),
+                                *span,
+                            ))
+                        }
+                    }
+                }
                 Op::Call { argc, span } => {
                     let argc = *argc;
                     let span = *span;
@@ -1120,26 +1330,6 @@ impl Vm {
                         .expect("ExitScope at top level");
                     interp.env = parent;
                 }
-                Op::EvalTree(expr) => match interp.eval(expr)? {
-                    Flow::Value(v) => self.stack.push(v),
-                    flow @ (Flow::Return(_) | Flow::Break | Flow::Continue) => {
-                        match self.unwind_frame(flow, interp) {
-                            Unwind::Continue => {}
-                            Unwind::Escaped(flow) => return Ok(flow),
-                            Unwind::Error(e) => return Err(e),
-                        }
-                    }
-                },
-                Op::EvalTreeStmt(stmt) => match interp.run_stmt(stmt)? {
-                    Flow::Value(v) => self.stack.push(v),
-                    flow @ (Flow::Return(_) | Flow::Break | Flow::Continue) => {
-                        match self.unwind_frame(flow, interp) {
-                            Unwind::Continue => {}
-                            Unwind::Escaped(flow) => return Ok(flow),
-                            Unwind::Error(e) => return Err(e),
-                        }
-                    }
-                },
             }
         }
     }
@@ -1369,6 +1559,52 @@ mod tests {
             "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\ndist(Point{ x: 3, y: 4 })",
             "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\nfunc sum(p: Point) -> int { p.x + p.y }\nsum(p)",
             "struct Point { x: int, y: int }\nfunc mk() -> Point { Point{ x: 7, y: 8 } }\nmk().x",
+            // ---- native closures ----
+            "f := |x| x * 2\nf(5)",
+            "f := |x, y| x + y\nf(2, 3)",
+            "n := 10\nf := |x| x + n\nf(5)",
+            "f := |x| |y| x + y\nf(2)(3)",
+            "f := |x| { let y = x * 2\ny }\nf(5)",
+            "f := |n| if n < 2 { n } else { f(n - 1) + f(n - 2) }\nf(5)",
+            "func apply(f, x) { f(x) }\napply(|n| n + 1, 41)",
+            "func outer() { func inner(n: int) -> int { n * 3 }\ninner }\ng := outer()\ng(7)",
+            // ---- native variants ----
+            ".ok(5)",
+            ".err(\"boom\")",
+            ".some(1)",
+            ".none",
+            "x := .ok(5)\nmatch x { .ok(n) => n, .err(e) => e }",
+            "x := .err(\"boom\")\nmatch x { .ok(n) => n, .err(e) => e }",
+            "x := .some(1)\nmatch x { .some(n) => n, .none => 0 }",
+            "x := .none\nmatch x { .some(n) => n, .none => 0 }",
+            // ---- native match ----
+            "match 5 { 5 => \"five\", _ => \"other\" }",
+            "match 3 { 5 => \"five\", _ => \"other\" }",
+            "match 5 { n => n * 2 }",
+            "match 5 { 1 => 10, 2 => 20, n => n }",
+            "match true { true => 1, false => 0 }",
+            "match 1.5 { 1.5 => \"one five\", _ => \"other\" }",
+            "match .some(1) { .some(n) => n + 1, .none => 0 }",
+            "match .some(.ok(2)) { .some(.ok(n)) => n, _ => 0 }",
+            "match .none { .some(n) => n, .none => 0 }",
+            "match .err(9) { .ok(n) => n, .err(e) => e }",
+            "match 5 { n => { let m = n * 2\nm } }",
+            "match 5 { 1 => 10, _ => 20 }",
+            "match 5 { 5 => 1, 5 => 2, _ => 3 }",
+            // ---- native if-let ----
+            "x := .some(5)\nif let .some(n) = x { n } else { 0 }",
+            "x := .none\nif let .some(n) = x { n } else { 0 }",
+            "x := .ok(5)\nif let .ok(n) = x { n } else { 0 }",
+            "x := .err(7)\nif let .ok(n) = x { n } else { 0 }",
+            "x := .some(5)\nif let .some(n) = x { n }",
+            "x := .none\nif let .some(n) = x { n }",
+            "x := 42\nif let n = x { n } else { 0 }",
+            // ---- native try ----
+            "func f() -> result<int, str> { let x = .ok(5)\nx? }\nf()",
+            "func f() -> result<int, str> { let x = .err(\"no\")\nx? }\nf()",
+            "func f() -> option<int> { let x = .some(3)\nx? }\nf()",
+            "func f() -> option<int> { let x = .none\nx? }\nf()",
+            "func f() -> result<int, str> { let x = .ok(5)\nlet y = .ok(6)\nx? + y? }\nf()",
         ] {
             assert_same(src);
         }
