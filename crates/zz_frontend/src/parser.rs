@@ -982,7 +982,9 @@ impl Parser {
                 self.advance();
                 // A string followed by `{` is an interpolated string:
                 // `"Hello {name}"` lexes as Str, LBrace, expr, RBrace, Str...
-                if self.at(TokenKind::LBrace) {
+                // But if the `{` starts a match arm block (followed by patterns
+                // and `=>`), treat it as a plain string.
+                if self.at(TokenKind::LBrace) && !self.looks_like_match_arm_block() {
                     self.parse_fmt_string(tok)
                 } else {
                     Expr::Str {
@@ -1553,6 +1555,56 @@ impl Parser {
     fn eat_close(&mut self, kind: TokenKind) -> bool {
         self.skip_stmt_ends();
         self.eat(kind)
+    }
+
+    /// Peek ahead after a `{` to see if it starts a match arm block.
+    /// Returns true if the content looks like patterns followed by `=>`.
+    fn looks_like_match_arm_block(&self) -> bool {
+        let mut idx = self.pos + 1; // skip the LBrace token
+        while idx < self.toks.len() {
+            let tok = &self.toks[idx];
+            match tok.kind {
+                TokenKind::StmtEnd => {
+                    idx += 1;
+                    continue;
+                }
+                TokenKind::Ident if tok.text == "_" => return true, // wildcard pattern
+                TokenKind::Arrow => return true,                    // => directly
+                TokenKind::Str
+                | TokenKind::Int
+                | TokenKind::Float
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::Ident
+                | TokenKind::Dot
+                | TokenKind::LBrace => {
+                    // Could be a pattern; scan ahead for `=>`.
+                    let mut j = idx;
+                    while j < self.toks.len() {
+                        let t = &self.toks[j];
+                        match t.kind {
+                            TokenKind::StmtEnd => j += 1,
+                            TokenKind::Arrow => return true,
+                            TokenKind::Str
+                            | TokenKind::Int
+                            | TokenKind::Float
+                            | TokenKind::True
+                            | TokenKind::False
+                            | TokenKind::Ident
+                            | TokenKind::Dot
+                            | TokenKind::LBrace
+                            | TokenKind::RBrace
+                            | TokenKind::Pipe
+                            | TokenKind::Comma => j += 1,
+                            _ => break,
+                        }
+                    }
+                    return false;
+                }
+                _ => return false,
+            }
+        }
+        false
     }
 }
 

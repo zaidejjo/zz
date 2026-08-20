@@ -132,6 +132,36 @@ fn contains_var(t: &Type) -> bool {
     }
 }
 
+/// Replace unresolved type variables inside `Option`/`Result` with `unit`
+/// so `.none`/`.ok`/`.err` bindings type-check without annotations.
+fn default_variant_vars(t: &mut Type) {
+    match t {
+        Type::Option(inner) => {
+            if contains_var(inner) {
+                default_variant_vars(inner);
+                if contains_var(inner) {
+                    **inner = Type::Unit;
+                }
+            }
+        }
+        Type::Result(ok, err) => {
+            if contains_var(ok) {
+                default_variant_vars(ok);
+                if contains_var(ok) {
+                    **ok = Type::Unit;
+                }
+            }
+            if contains_var(err) {
+                default_variant_vars(err);
+                if contains_var(err) {
+                    **err = Type::Unit;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 struct Checker {
     unifier: Unifier,
     errors: Vec<RawDiag>,
@@ -284,17 +314,30 @@ impl Checker {
                     }
                 }
                 let rt = self.unifier.resolve_deep(&vt);
+                if contains_var(&rt) {
+                    // `.none`/`.ok`/`.err` bindings have an unconstrained
+                    // variant parameter; default it to `unit` so they can be
+                    // stored without an annotation.
+                    let mut d = rt.clone();
+                    default_variant_vars(&mut d);
+                    if contains_var(&d) {
+                        self.errors.push(error_at(
+                            format!(
+                                "cannot infer the type of `{}`; add a type annotation",
+                                name.name
+                            ),
+                            name.span,
+                        ));
+                    } else {
+                        self.define(&name.name, d.clone());
+                        if self.env.len() == 1 {
+                            self.new_bindings.insert(name.name.clone(), d.clone());
+                        }
+                        return d;
+                    }
+                }
                 if self.env.len() == 1 {
                     self.new_bindings.insert(name.name.clone(), vt.clone());
-                }
-                if contains_var(&rt) {
-                    self.errors.push(error_at(
-                        format!(
-                            "cannot infer the type of `{}`; add a type annotation",
-                            name.name
-                        ),
-                        name.span,
-                    ));
                 }
                 self.define(&name.name, rt.clone());
                 rt
@@ -1860,10 +1903,16 @@ mod tests {
 
     #[test]
     fn variant_type_inference() {
-        let r = check_src("a := .ok(1)\nb := .none");
-        // `.none` alone is ambiguous → error
-        let _ = r;
-        errors_contain("b := .none", "cannot infer the type of `b`");
+        // `.none`/`.ok`/`.err` default their unknown variant parameter to
+        // `unit`; `.some`/`.ok` with a concrete argument infer fully.
+        let r = check_src("a := .ok(1)\nb := .none\nc := .err(\"boom\")");
+        assert!(
+            r.errors.is_empty(),
+            "expected no errors, got {:?}",
+            r.errors
+        );
+        // A binding whose type still has a var after defaulting still errors.
+        errors_contain("f := |x| x", "cannot infer the type of `f`");
     }
 
     #[test]

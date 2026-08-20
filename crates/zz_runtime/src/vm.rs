@@ -424,9 +424,9 @@ impl Compiler {
     }
 
     /// Compile a dotted path store (write-back). The value is on top of the
-    /// stack. For a slot root: load the object chain, set the last field,
-    /// and write the mutated object back to the root slot — mirroring the
-    /// tree-walker's `assign_path`/`write_back` semantics.
+    /// stack. For a slot root: load the object chain, set the innermost
+    /// field, then walk back up writing each level into its parent so the
+    /// root keeps its shape — mirroring the tree-walker's `assign_path`.
     fn compile_path_store(&mut self, parts: &[String], span: Span) {
         if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
             self.emit(Op::LoadSlot(slot as u16));
@@ -434,6 +434,15 @@ impl Compiler {
                 self.emit(Op::GetField(part.clone(), span));
             }
             self.emit(Op::SetField(parts.last().unwrap().clone(), span));
+            // Write each intermediate level back into its parent: reload the
+            // root, walk up to (but not including) the level, set the field.
+            for i in (1..parts.len() - 1).rev() {
+                self.emit(Op::LoadSlot(slot as u16));
+                for part in &parts[1..i] {
+                    self.emit(Op::GetField(part.clone(), span));
+                }
+                self.emit(Op::SetField(parts[i].clone(), span));
+            }
             self.emit(Op::StoreSlot(slot as u16));
         } else {
             self.emit(Op::StorePath(parts.to_vec(), span));
@@ -2111,6 +2120,33 @@ mod tests {
             ),
             _ => panic!("VM and tree-walker disagree on: {src}\nVM: {vm:?}\ntree: {tree:?}"),
         }
+    }
+
+    #[test]
+    fn vm_nested_path_assignment_keeps_shape() {
+        // `r.p.x = 9` must mutate only the innermost field: `r` stays a
+        // `Rect`, its other fields are untouched.
+        for src in [
+            "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nr := Rect{ p: Point{ x: 1, y: 2 }, w: 3 }\nr.p.x = 9\nr.p.x",
+            "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nr := Rect{ p: Point{ x: 1, y: 2 }, w: 3 }\nr.p.x = 9\nr.w",
+            "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nr := Rect{ p: Point{ x: 1, y: 2 }, w: 3 }\nr.p.x = 9\nr.p.y",
+            "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nr := Rect{ p: Point{ x: 1, y: 2 }, w: 3 }\nr.p.x = r.p.x + 8\nr.p.x",
+            "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nfunc f(r: Rect) -> int { r.p.x = 9\nr.p.x + r.w }\nf(Rect{ p: Point{ x: 1, y: 2 }, w: 3 })",
+            "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nfunc f(r: Rect) -> int { r.p.x = 9\nr.p.x }\nf(Rect{ p: Point{ x: 1, y: 2 }, w: 3 })",
+            "struct A { b: B }\nstruct B { c: C }\nstruct C { v: int }\na := A{ b: B{ c: C{ v: 1 } } }\na.b.c.v = 42\na.b.c.v",
+            "struct A { b: B }\nstruct B { c: C }\nstruct C { v: int }\nfunc f(a: A) -> int { a.b.c.v = 42\na.b.c.v }\nf(A{ b: B{ c: C{ v: 1 } } })",
+            "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nr := Rect{ p: Point{ x: 1, y: 2 }, w: 3 }\nr.p.x = 9\nr.p.x + r.p.y + r.w",
+        ] {
+            assert_same(src);
+        }
+        // The root keeps its shape: `r` is still a `Rect` after mutation.
+        assert_eq!(
+            run_src(
+                "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nr := Rect{ p: Point{ x: 1, y: 2 }, w: 3 }\nr.p.x = 9\nr.w"
+            )
+            .unwrap(),
+            Value::Int(3)
+        );
     }
 
     #[test]

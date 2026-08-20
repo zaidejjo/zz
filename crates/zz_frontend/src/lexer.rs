@@ -102,10 +102,17 @@ impl<'a> Lexer<'a> {
                 ')' => self.emit_significant(TokenKind::RParen, self.pos, self.pos + 1),
                 '{' => {
                     if self.pending_interp {
-                        // This is the interpolation's own opening brace; no
-                        // nested braces have been seen yet.
-                        self.pending_interp = false;
-                        self.contexts.push(LexContext::Interp { depth: 0 });
+                        // Heuristic: if the `{` looks like it starts a match arm
+                        // block (followed by `_` or `=>`), treat it as a block
+                        // delimiter, not string interpolation.
+                        if self.looks_like_match_arm_after_brace() {
+                            self.pending_interp = false;
+                        } else {
+                            // This is the interpolation's own opening brace; no
+                            // nested braces have been seen yet.
+                            self.pending_interp = false;
+                            self.contexts.push(LexContext::Interp { depth: 0 });
+                        }
                     } else if let Some(LexContext::Interp { depth }) = self.contexts.last_mut() {
                         // A nested brace inside the interpolation (dict
                         // literal, block, closure, ...).
@@ -523,6 +530,53 @@ impl<'a> Lexer<'a> {
         let c = self.peek_char().expect("bump past end of input");
         self.pos += c.len_utf8();
         c
+    }
+
+    /// Peek ahead after a `{` to see if it starts a match arm block.
+    /// Returns true if the content looks like a pattern => body (e.g., `_ =>`,
+    /// `literal =>`, `ident =>`).
+    fn looks_like_match_arm_after_brace(&self) -> bool {
+        let mut idx = self.pos + 1; // skip the `{`
+                                    // Skip whitespace and newlines.
+        while idx < self.src.len() {
+            let Some(c) = self.src[idx..].chars().next() else {
+                break;
+            };
+            if c.is_whitespace() {
+                idx += c.len_utf8();
+                continue;
+            }
+            if c == '_' {
+                return true; // wildcard pattern
+            }
+            if c == '=' && self.src.get(idx + 1..idx + 2) == Some(">") {
+                return true; // =>
+            }
+            if c.is_ascii_digit() || c.is_ascii_alphabetic() || c == '"' {
+                // Could be a literal or ident pattern; scan for `=>` after it.
+                let mut j = idx;
+                while j < self.src.len() {
+                    let Some(c2) = self.src[j..].chars().next() else {
+                        break;
+                    };
+                    if c2.is_whitespace() {
+                        j += c2.len_utf8();
+                        continue;
+                    }
+                    if c2 == '=' && self.src.get(j + 1..j + 2) == Some(">") {
+                        return true;
+                    }
+                    if c2.is_ascii_alphanumeric() || c2 == '_' || c2 == '"' || c2 == '.' {
+                        j += c2.len_utf8();
+                        continue;
+                    }
+                    break;
+                }
+                return false;
+            }
+            return false;
+        }
+        false
     }
 }
 

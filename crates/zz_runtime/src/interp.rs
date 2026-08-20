@@ -281,7 +281,7 @@ impl Interp {
     }
 
     /// Assign to a dotted path: a direct binding, or a struct-field walk with
-    /// write-back to the root variable. Shared by the tree-walker and the VM.
+    /// write-back up the chain. Shared by the tree-walker and the VM.
     pub(crate) fn assign_path(
         &mut self,
         parts: &[String],
@@ -293,20 +293,26 @@ impl Interp {
             self.env.borrow_mut().assign(&joined, value);
             return Ok(());
         }
-        // Struct field walk: `p.x = v` mutates the object bound to `p` and
-        // writes it back.
+        // Struct field walk: `r.p.x = v` mutates the innermost object, then
+        // writes each level back into its parent so the root keeps its shape
+        // (`r` stays a `Rect`, only `r.p.x` changes).
         let root = &parts[0];
-        let mut obj = self
+        let mut chain = vec![self
             .env
             .borrow()
             .get(root)
-            .ok_or_else(|| EvalError::new(format!("undefined variable `{joined}`"), span))?;
+            .ok_or_else(|| EvalError::new(format!("undefined variable `{joined}`"), span))?];
         for field in &parts[1..parts.len() - 1] {
-            obj = Self::object_field(&obj, field, span)?;
+            let next = Self::object_field(chain.last().unwrap(), field, span)?;
+            chain.push(next);
         }
         let last = parts.last().unwrap();
-        Self::set_object_field(&mut obj, last, value, span)?;
-        self.env.borrow_mut().assign(root, obj);
+        Self::set_object_field(chain.last_mut().unwrap(), last, value, span)?;
+        for i in (1..chain.len()).rev() {
+            let child = chain[i].clone();
+            Self::set_object_field(&mut chain[i - 1], &parts[i], child, span)?;
+        }
+        self.env.borrow_mut().assign(root, chain[0].clone());
         Ok(())
     }
 
@@ -399,16 +405,23 @@ impl Interp {
                     self.env.borrow_mut().assign(&joined, new_value);
                     return Ok(());
                 }
+                // Struct field walk with write-back up the chain: the root
+                // keeps its shape, only the innermost field changes.
                 let root = &parts[0];
-                let mut obj = self.env.borrow().get(root).ok_or_else(|| {
+                let mut chain = vec![self.env.borrow().get(root).ok_or_else(|| {
                     EvalError::new(format!("undefined variable `{joined}`"), *span)
-                })?;
+                })?];
                 for field in &parts[1..parts.len() - 1] {
-                    obj = Self::object_field(&obj, field, *span)?;
+                    let next = Self::object_field(chain.last().unwrap(), field, *span)?;
+                    chain.push(next);
                 }
                 let last = parts.last().unwrap();
-                Self::set_object_field(&mut obj, last, new_value, *span)?;
-                self.env.borrow_mut().assign(root, obj);
+                Self::set_object_field(chain.last_mut().unwrap(), last, new_value, *span)?;
+                for i in (1..chain.len()).rev() {
+                    let child = chain[i].clone();
+                    Self::set_object_field(&mut chain[i - 1], &parts[i], child, *span)?;
+                }
+                self.env.borrow_mut().assign(root, chain[0].clone());
                 Ok(())
             }
             Expr::Field { obj, name, span } => {
