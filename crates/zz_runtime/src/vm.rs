@@ -5,11 +5,18 @@
 //! with an explicit call-frame stack, so function calls do not recurse in
 //! Rust.
 //!
+//! Native bytecode covers: literals, variables, paths, arithmetic, logical
+//! operators, calls (incl. method resolution), `if`, blocks, fmt strings,
+//! declarations, assignments (incl. index/field write-back), `return`,
+//! functions, structs, `for`/`while` loops with `break`/`continue`, arrays,
+//! dicts, indexing, slicing, and ranges.
+//!
 //! Constructs the compiler does not yet lower are emitted as
 //! [`Op::EvalTree`] / [`Op::EvalTreeStmt`], which fall back to the Phase 1
-//! tree-walker. The two engines interoperate freely: a compiled function
-//! body may call a tree-walked closure and vice versa, and control flow
-//! (`return`, `break`, `continue`) unwinds across the boundary correctly.
+//! tree-walker (closures, `match`, `if let`, `?`, variants). The two engines
+//! interoperate freely: a compiled function body may call a tree-walked
+//! closure and vice versa, and control flow (`return`, `break`, `continue`)
+//! unwinds across the boundary correctly.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -100,6 +107,61 @@ pub enum Op {
     JumpIfFalseBool(usize, Span),
     /// Pop a value and return it from the current function frame.
     Return,
+
+    // ---- loops ----
+    /// Pop an iterable (array or range), push it back plus an index counter,
+    /// and push a loop frame. `exit`/`header` are patched by the compiler.
+    ForSetup {
+        exit: usize,
+        header: usize,
+        span: Span,
+    },
+    /// Advance a `for` loop: pop the index, push `index + 1` and the current
+    /// item (bound to `var` in a fresh iteration scope), or exit when the
+    /// iterable is exhausted.
+    ForNext { var: String, exit: usize },
+    /// Push a `while` loop frame. `exit`/`header` are patched by the
+    /// compiler.
+    WhileSetup { exit: usize, header: usize },
+    /// Pop the condition; error unless it is a bool; exit the loop when
+    /// falsy.
+    WhileCond { exit: usize, span: Span },
+    /// Exit the innermost loop (restores the loop's environment).
+    Break,
+    /// Jump to the innermost loop's header (restores the loop's environment).
+    Continue,
+    /// Pop a value and store it as the innermost loop's result.
+    SetLoopResult,
+
+    // ---- collections ----
+    /// Pop `n` values and push an array.
+    MakeArray(u16),
+    /// Pop `2n` values (key, value pairs) and push a dict.
+    MakeDict(u16),
+    /// Pop an index, pop an object, push `object[index]`.
+    IndexOp(Span),
+    /// Pop a value, an index, and an object; write `object[index] = value`;
+    /// push the mutated object back (for write-back).
+    StoreIndexOp(Span),
+    /// Pop an end bound, a start bound (either `int` or `Unit` for absent),
+    /// and an object; push the slice.
+    SliceOp(Span),
+    /// Pop an end, pop a start, push a range (both must be ints).
+    MakeRange(Span),
+
+    // ---- structs ----
+    /// Pop `field_names.len()` values and build a struct instance, matching
+    /// them to the registered field order by name.
+    MakeStruct {
+        name: String,
+        field_names: Vec<String>,
+        span: Span,
+    },
+    /// Pop an object, push `object.field`.
+    GetField(String, Span),
+    /// Pop a value and an object; write `object.field = value`; push the
+    /// mutated object back (for write-back).
+    SetField(String, Span),
 
     // ---- calls ----
     /// Pop `argc` arguments, pop the callee, call it, push the result.
@@ -205,8 +267,40 @@ impl Compiler {
             Op::JumpIfFalse(_) => Op::JumpIfFalse(target),
             Op::JumpIfTrue(_) => Op::JumpIfTrue(target),
             Op::JumpIfFalseBool(_, span) => Op::JumpIfFalseBool(target, span),
+            Op::ForNext { var, .. } => Op::ForNext { var, exit: target },
+            Op::WhileCond { span, .. } => Op::WhileCond { exit: target, span },
             other => panic!("patch_jump on non-jump op: {other:?}"),
         };
+    }
+
+    fn emit_for_next(&mut self, var: &str) -> usize {
+        let pos = self.chunk.code.len();
+        self.emit(Op::ForNext {
+            var: var.to_string(),
+            exit: 0,
+        });
+        pos
+    }
+
+    fn emit_while_cond(&mut self, span: Span) -> usize {
+        let pos = self.chunk.code.len();
+        self.emit(Op::WhileCond { exit: 0, span });
+        pos
+    }
+
+    /// Emit the write-back for a mutated object: `arr[0] = v` stores the
+    /// mutated array back into its variable / struct field chain.
+    fn compile_write_back(&mut self, target: &Expr) {
+        match target {
+            Expr::Ident { name, span } => self.emit(Op::StoreVar(name.clone(), *span)),
+            Expr::Path { parts, span } => self.emit(Op::StorePath(parts.clone(), *span)),
+            Expr::Field { obj, name, span } => {
+                self.compile_expr(obj);
+                self.emit(Op::SetField(name.clone(), *span));
+                self.compile_write_back(obj);
+            }
+            _ => self.emit(Op::Pop),
+        }
     }
 
     fn compile_stmt(&mut self, stmt: &Stmt) {
@@ -241,9 +335,38 @@ impl Compiler {
                     fields: fields.iter().map(|(n, _)| n.name.clone()).collect(),
                 });
             }
-            Stmt::For { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {
-                self.emit(Op::EvalTreeStmt(stmt.clone()));
+            Stmt::For {
+                var,
+                iter,
+                body,
+                span,
+            } => {
+                // Result slot (last body value), then the iterable, then the
+                // index counter. The loop frame records the stack layout so
+                // `break`/`continue` can unwind precisely.
+                self.emit_const(Value::Unit);
+                self.compile_expr(iter);
+                let setup_pos = self.chunk.code.len();
+                self.emit(Op::ForSetup {
+                    exit: 0,
+                    header: 0,
+                    span: *span,
+                });
+                let header = self.chunk.code.len();
+                let j = self.emit_for_next(&var.name);
+                self.compile_block_body(body);
+                self.emit(Op::SetLoopResult);
+                self.emit(Op::Jump(header));
+                self.patch_jump(j);
+                let exit = self.chunk.code.len();
+                self.chunk.code[setup_pos] = Op::ForSetup {
+                    exit,
+                    header,
+                    span: *span,
+                };
             }
+            Stmt::Break { .. } => self.emit(Op::Break),
+            Stmt::Continue { .. } => self.emit(Op::Continue),
             Stmt::Assign { target, value, .. } => match target {
                 Expr::Ident { name, span } => {
                     self.compile_expr(value);
@@ -253,6 +376,27 @@ impl Compiler {
                 Expr::Path { parts, span } => {
                     self.compile_expr(value);
                     self.emit(Op::StorePath(parts.clone(), *span));
+                    self.emit_const(Value::Unit);
+                }
+                Expr::Index { obj, index, span } => {
+                    self.compile_expr(value);
+                    self.compile_expr(index);
+                    self.compile_expr(obj);
+                    self.emit(Op::StoreIndexOp(*span));
+                    self.compile_write_back(obj);
+                    self.emit_const(Value::Unit);
+                }
+                Expr::Field { obj, name, span } => {
+                    self.compile_expr(value);
+                    self.compile_expr(obj);
+                    self.emit(Op::SetField(name.clone(), *span));
+                    // The tree-walker writes a mutated object back only when
+                    // the base is a plain variable.
+                    if let Expr::Ident { name, .. } = &**obj {
+                        self.emit(Op::StoreVar(name.clone(), *span));
+                    } else {
+                        self.emit(Op::Pop);
+                    }
                     self.emit_const(Value::Unit);
                 }
                 _ => self.emit(Op::EvalTreeStmt(stmt.clone())),
@@ -265,6 +409,13 @@ impl Compiler {
     /// final value left on the stack, scope exit.
     fn compile_block(&mut self, block: &Block) {
         self.emit(Op::EnterScope);
+        self.compile_block_body(block);
+        self.emit(Op::ExitScope);
+    }
+
+    /// Compile a block's statements without a surrounding scope. Used for
+    /// loop bodies, which already run in a fresh iteration scope.
+    fn compile_block_body(&mut self, block: &Block) {
         for (i, stmt) in block.stmts.iter().enumerate() {
             self.compile_stmt(stmt);
             if i < block.stmts.len() - 1 {
@@ -274,7 +425,6 @@ impl Compiler {
         if block.stmts.is_empty() {
             self.emit_const(Value::Unit);
         }
-        self.emit(Op::ExitScope);
     }
 
     /// Compile a function body into its own chunk. The parameter list is
@@ -388,6 +538,74 @@ impl Compiler {
                 }
                 self.emit(Op::Concat(n));
             }
+            Expr::While { cond, body, span } => {
+                let setup_pos = self.chunk.code.len();
+                self.emit(Op::WhileSetup { exit: 0, header: 0 });
+                self.emit_const(Value::Unit);
+                let header = self.chunk.code.len();
+                self.compile_expr(cond);
+                let j = self.emit_while_cond(*span);
+                self.compile_block_body(body);
+                self.emit(Op::SetLoopResult);
+                self.emit(Op::Jump(header));
+                self.patch_jump(j);
+                let exit = self.chunk.code.len();
+                self.chunk.code[setup_pos] = Op::WhileSetup { exit, header };
+            }
+            Expr::Array { elems, .. } => {
+                for e in elems {
+                    self.compile_expr(e);
+                }
+                self.emit(Op::MakeArray(elems.len() as u16));
+            }
+            Expr::Dict { entries, .. } => {
+                for (k, v) in entries {
+                    self.compile_expr(k);
+                    self.compile_expr(v);
+                }
+                self.emit(Op::MakeDict(entries.len() as u16));
+            }
+            Expr::Field { obj, name, span } => {
+                self.compile_expr(obj);
+                self.emit(Op::GetField(name.clone(), *span));
+            }
+            Expr::Range { start, end, span } => {
+                self.compile_expr(start);
+                self.compile_expr(end);
+                self.emit(Op::MakeRange(*span));
+            }
+            Expr::StructInit { name, fields, span } => {
+                for (_, v) in fields {
+                    self.compile_expr(v);
+                }
+                self.emit(Op::MakeStruct {
+                    name: name.clone(),
+                    field_names: fields.iter().map(|(n, _)| n.clone()).collect(),
+                    span: *span,
+                });
+            }
+            Expr::Index { obj, index, span } => {
+                self.compile_expr(obj);
+                self.compile_expr(index);
+                self.emit(Op::IndexOp(*span));
+            }
+            Expr::Slice {
+                obj,
+                start,
+                end,
+                span,
+            } => {
+                self.compile_expr(obj);
+                match start {
+                    Some(e) => self.compile_expr(e),
+                    None => self.emit_const(Value::Unit),
+                }
+                match end {
+                    Some(e) => self.compile_expr(e),
+                    None => self.emit_const(Value::Unit),
+                }
+                self.emit(Op::SliceOp(*span));
+            }
             // Everything not yet lowered runs through the tree-walker.
             other => self.emit(Op::EvalTree(other.clone())),
         }
@@ -402,6 +620,24 @@ struct Frame {
     prev_env: Rc<RefCell<Env>>,
     /// Stack index where this frame's evaluation begins.
     stack_base: usize,
+}
+
+/// One active loop (native `for`/`while`). Used by `break`/`continue` to
+/// unwind the stack and restore the environment.
+struct LoopInfo {
+    /// Jump target for `break` / loop exit.
+    exit: usize,
+    /// Jump target for `continue` (the loop header).
+    header: usize,
+    /// Environment at loop start; iteration scopes are children of it.
+    env: Rc<RefCell<Env>>,
+    /// Frame index that pushed this loop, so `break` inside a function body
+    /// cannot capture a caller's loop.
+    frame_idx: usize,
+    /// Stack slot of the loop's result value.
+    stack_base: usize,
+    /// Extra slots pushed above the result (iterable + index for `for`).
+    slots: usize,
 }
 
 /// Result of unwinding a frame after a control-flow signal.
@@ -420,6 +656,7 @@ enum Unwind {
 pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<Frame>,
+    loops: Vec<LoopInfo>,
 }
 
 impl Default for Vm {
@@ -433,6 +670,7 @@ impl Vm {
         Vm {
             stack: Vec::new(),
             frames: Vec::new(),
+            loops: Vec::new(),
         }
     }
 
@@ -453,13 +691,17 @@ impl Vm {
 
         loop {
             // Fetch the current instruction without holding a borrow across
-            // the dispatch (arms may push/pop frames).
-            let (chunk, ip) = {
+            // the dispatch (arms may push/pop frames). The chunk is behind an
+            // `Rc` and never mutated after compilation, so a raw pointer into
+            // its code vector is sound and avoids an atomic refcount bump per
+            // instruction.
+            let (code, constants, ip) = {
                 let f = self.frames.last().unwrap();
-                (Rc::clone(&f.chunk), f.ip)
+                let chunk = unsafe { &*Rc::as_ptr(&f.chunk) };
+                (&chunk.code, &chunk.constants, f.ip)
             };
 
-            if ip >= chunk.code.len() {
+            if ip >= code.len() {
                 // Chunk ran off the end: implicit return of the block value.
                 let v = if self.stack.len() > self.frames.last().unwrap().stack_base {
                     self.stack.pop().unwrap()
@@ -476,12 +718,12 @@ impl Vm {
                 continue;
             }
 
-            let op = &chunk.code[ip];
+            let op = &code[ip];
             self.frames.last_mut().unwrap().ip = ip + 1;
 
             match op {
                 Op::PushConst(i) => {
-                    let v = chunk.constants[*i as usize].clone();
+                    let v = constants[*i as usize].clone();
                     self.stack.push(v);
                 }
                 Op::Pop => {
@@ -596,6 +838,219 @@ impl Vm {
                         Unwind::Escaped(flow) => return Ok(flow),
                         Unwind::Error(e) => return Err(e),
                     }
+                }
+                Op::ForSetup { exit, header, span } => {
+                    let it = self.stack.pop().unwrap();
+                    let (iterable, idx) = match it.clone() {
+                        Value::Array(_) => (it, Value::Int(0)),
+                        Value::Range(start, _) => (it, Value::Int(start)),
+                        other => {
+                            return Err(EvalError::new(
+                                format!("cannot iterate a value of type `{other}`"),
+                                *span,
+                            ))
+                        }
+                    };
+                    let stack_base = self.stack.len() - 1;
+                    self.loops.push(LoopInfo {
+                        exit: *exit,
+                        header: *header,
+                        env: Rc::clone(&interp.env),
+                        frame_idx: self.frames.len() - 1,
+                        stack_base,
+                        slots: 2,
+                    });
+                    self.stack.push(iterable);
+                    self.stack.push(idx);
+                }
+                Op::ForNext { var, exit } => {
+                    let idx = self.stack.pop().unwrap();
+                    let iterable_idx = self.stack.len() - 1;
+                    let (done, item) = match (&self.stack[iterable_idx], &idx) {
+                        (Value::Array(items), Value::Int(i)) => {
+                            let i = *i;
+                            if i >= items.len() as i64 {
+                                (true, Value::Unit)
+                            } else {
+                                (false, items[i as usize].clone())
+                            }
+                        }
+                        (Value::Range(_, end), Value::Int(i)) => {
+                            let i = *i;
+                            if i >= *end {
+                                (true, Value::Unit)
+                            } else {
+                                (false, Value::Int(i))
+                            }
+                        }
+                        _ => unreachable!("ForNext on non-iterable"),
+                    };
+                    if done {
+                        let li = self.loops.pop().unwrap();
+                        self.stack.truncate(li.stack_base + 1);
+                        interp.env = li.env;
+                        self.frames.last_mut().unwrap().ip = *exit;
+                    } else {
+                        let next = match idx {
+                            Value::Int(i) => Value::Int(i + 1),
+                            _ => unreachable!(),
+                        };
+                        self.stack.push(next);
+                        let li = self.loops.last().unwrap();
+                        let loop_env = Rc::clone(&li.env);
+                        interp.env = loop_env;
+                        let scope = Env::with_parent(&interp.env);
+                        scope.borrow_mut().define(var, item);
+                        interp.env = scope;
+                    }
+                }
+                Op::WhileSetup { exit, header } => {
+                    self.loops.push(LoopInfo {
+                        exit: *exit,
+                        header: *header,
+                        env: Rc::clone(&interp.env),
+                        frame_idx: self.frames.len() - 1,
+                        stack_base: self.stack.len(),
+                        slots: 0,
+                    });
+                }
+                Op::WhileCond { exit, span } => {
+                    let c = self.stack.pop().unwrap();
+                    if !matches!(c, Value::Bool(_)) {
+                        return Err(EvalError::new("`while` condition must be a bool", *span));
+                    }
+                    if !c.is_truthy() {
+                        let li = self.loops.pop().unwrap();
+                        self.stack.truncate(li.stack_base + 1);
+                        interp.env = li.env;
+                        self.frames.last_mut().unwrap().ip = *exit;
+                    }
+                }
+                Op::Break => {
+                    let Some(li) = self.loops.pop() else {
+                        return Err(EvalError::new("`break` outside of a loop", Span::new(0, 0)));
+                    };
+                    if li.frame_idx != self.frames.len() - 1 {
+                        return Err(EvalError::new("`break` outside of a loop", Span::new(0, 0)));
+                    }
+                    self.stack.truncate(li.stack_base + 1);
+                    interp.env = li.env;
+                    self.frames.last_mut().unwrap().ip = li.exit;
+                }
+                Op::Continue => {
+                    let Some(li) = self.loops.last() else {
+                        return Err(EvalError::new(
+                            "`continue` outside of a loop",
+                            Span::new(0, 0),
+                        ));
+                    };
+                    if li.frame_idx != self.frames.len() - 1 {
+                        return Err(EvalError::new(
+                            "`continue` outside of a loop",
+                            Span::new(0, 0),
+                        ));
+                    }
+                    self.stack.truncate(li.stack_base + 1 + li.slots);
+                    interp.env = Rc::clone(&li.env);
+                    self.frames.last_mut().unwrap().ip = li.header;
+                }
+                Op::SetLoopResult => {
+                    let v = self.stack.pop().unwrap();
+                    let li = self.loops.last().unwrap();
+                    self.stack[li.stack_base] = v;
+                }
+                Op::MakeArray(n) => {
+                    let mut items = Vec::with_capacity(*n as usize);
+                    for _ in 0..*n {
+                        items.push(self.stack.pop().unwrap());
+                    }
+                    items.reverse();
+                    self.stack.push(Value::Array(items));
+                }
+                Op::MakeDict(n) => {
+                    let mut pairs = Vec::with_capacity(*n as usize);
+                    for _ in 0..*n {
+                        let v = self.stack.pop().unwrap();
+                        let k = self.stack.pop().unwrap();
+                        pairs.push((k, v));
+                    }
+                    pairs.reverse();
+                    self.stack.push(Value::Dict(pairs));
+                }
+                Op::IndexOp(span) => {
+                    let iv = self.stack.pop().unwrap();
+                    let ov = self.stack.pop().unwrap();
+                    let v = Interp::get_index(&ov, &iv, *span)?;
+                    self.stack.push(v);
+                }
+                Op::StoreIndexOp(span) => {
+                    let mut ov = self.stack.pop().unwrap();
+                    let iv = self.stack.pop().unwrap();
+                    let value = self.stack.pop().unwrap();
+                    Interp::set_index(&mut ov, &iv, value, *span)?;
+                    self.stack.push(ov);
+                }
+                Op::SliceOp(span) => {
+                    let e = self.stack.pop().unwrap();
+                    let s = self.stack.pop().unwrap();
+                    let ov = self.stack.pop().unwrap();
+                    let bound = |v: Value| match v {
+                        Value::Int(i) => Ok(Some(i)),
+                        Value::Unit => Ok(None),
+                        other => Err(EvalError::new(
+                            format!("slice bound must be `int`, found `{other}`"),
+                            *span,
+                        )),
+                    };
+                    let v = Interp::slice_value(&ov, bound(s)?, bound(e)?, *span)?;
+                    self.stack.push(v);
+                }
+                Op::MakeRange(span) => {
+                    let e = self.stack.pop().unwrap();
+                    let s = self.stack.pop().unwrap();
+                    match (s, e) {
+                        (Value::Int(a), Value::Int(b)) => self.stack.push(Value::Range(a, b)),
+                        _ => return Err(EvalError::new("range bounds must be integers", *span)),
+                    }
+                }
+                Op::MakeStruct {
+                    name,
+                    field_names,
+                    span,
+                } => {
+                    let Some(registered) = interp.structs.get(name).cloned() else {
+                        return Err(EvalError::new(format!("unknown struct `{name}`"), *span));
+                    };
+                    let mut vals = Vec::with_capacity(field_names.len());
+                    for _ in 0..field_names.len() {
+                        vals.push(self.stack.pop().unwrap());
+                    }
+                    vals.reverse();
+                    let mut out = Vec::with_capacity(registered.len());
+                    for fname in &registered {
+                        let Some(idx) = field_names.iter().position(|n| n == fname) else {
+                            return Err(EvalError::new(
+                                format!("missing field `{fname}` in struct literal"),
+                                *span,
+                            ));
+                        };
+                        out.push((fname.clone(), vals[idx].clone()));
+                    }
+                    self.stack.push(Value::Object {
+                        name: name.clone(),
+                        fields: out,
+                    });
+                }
+                Op::GetField(name, span) => {
+                    let ov = self.stack.pop().unwrap();
+                    let v = Interp::object_field(&ov, name, *span)?;
+                    self.stack.push(v);
+                }
+                Op::SetField(name, span) => {
+                    let value = self.stack.pop().unwrap();
+                    let mut ov = self.stack.pop().unwrap();
+                    Interp::set_object_field(&mut ov, name, value, *span)?;
+                    self.stack.push(ov);
                 }
                 Op::Call { argc, span } => {
                     let argc = *argc;
@@ -742,6 +1197,7 @@ impl Vm {
             Flow::Value(_) => unreachable!("unwind_frame on a plain value"),
         };
         let f = self.frames.pop().unwrap();
+        self.loops.retain(|li| li.frame_idx < self.frames.len());
         self.stack.truncate(f.stack_base);
         interp.env = f.prev_env;
         if self.frames.is_empty() {
@@ -860,6 +1316,59 @@ mod tests {
             "func f() -> int { let x = .none\nx? }\nf()",
             "func f() -> result<int, str> { let x = .none\nx? }\nf()",
             "func f() -> result<int, str> { let x = .ok(5)\nx? }\nf()",
+            // ---- native loops ----
+            "sum := 0\nfor i in 0..5 { sum = sum + i }\nsum",
+            "total := 0\nfor n in [10, 20, 30] { total = total + n }\ntotal",
+            "found := 0\nfor i in 0..10 { if i == 3 { found = i; break } }\nfound",
+            "count := 0\nfor i in 0..5 { if i == 2 { continue }; count = count + 1 }\ncount",
+            "for i in 0..3 { i }",
+            "for i in 0..0 { i }",
+            "for i in [] { i }",
+            "sum := 0\nfor i in 0..5 { if i == 2 { continue }\nsum = sum + i }\nsum",
+            "sum := 0\nfor i in 0..5 { if i == 2 { break }\nsum = sum + i }\nsum",
+            "out := 0\nfor i in 0..3 { for j in 0..3 { out = out + 1 } }\nout",
+            "out := 0\nfor i in 0..3 { for j in 0..3 { if j == 1 { break }; out = out + 1 } }\nout",
+            "out := 0\nfor i in 0..3 { for j in 0..3 { if j == 1 { continue }; out = out + 1 } }\nout",
+            "func f() -> int { for i in 0..3 { if i == 1 { return 42 } }\n0 }\nf()",
+            "x := 0\nwhile x < 3 { x = x + 1 }\nx",
+            "x := 0\nwhile true { x = x + 1\nif x == 3 { break } }\nx",
+            "x := 0\nwhile x < 3 { x = x + 1\nif x == 2 { continue } }\nx",
+            "x := 0\nwhile x < 3 { if x == 1 { break }\nx = x + 1 }\nx",
+            "func f() -> int { while true { return 7 } }\nf()",
+            // ---- native collections ----
+            "[1, 2, 3][1]",
+            "[[1, 2], [3, 4]][1][0]",
+            "[1, 2, 3][-1]",
+            "{\"a\": 1, \"b\": 2}[\"b\"]",
+            "{1: \"one\", 2: \"two\"}[2]",
+            "m := {\"k\": 1}\nm[\"k\"] = 5\nm[\"k\"]",
+            "m := {}\nm[\"new\"] = 42\nm[\"new\"]",
+            "a := [1, 2, 3]\na[0] = 9\na[0]",
+            "a := [1, 2, 3]\na[1] = a[1] * 10\na[1]",
+            "[1, 2, 3, 4][1:3]",
+            "[1, 2, 3, 4][:2]",
+            "[1, 2, 3, 4][2:]",
+            "[1, 2, 3, 4][:]",
+            "[1, 2, 3, 4][-3:-1]",
+            "\"hello\"[1:3]",
+            "\"hello\"[:2]",
+            "\"hello\"[2:]",
+            "\"hello\"[-3:]",
+            "\"abc\"[0]",
+            "1..5",
+            "a := 2\nb := 5\na..b",
+            // ---- native structs ----
+            "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.x",
+            "struct Point { x: int, y: int }\nPoint{ x: 1, y: 2 }.y",
+            "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.x = 10\np.x",
+            "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.x = p.x + 1\np.x",
+            "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nr := Rect{ p: Point{ x: 1, y: 2 }, w: 3 }\nr.p.x",
+            "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nr := Rect{ p: Point{ x: 1, y: 2 }, w: 3 }\nr.p.x = 9\nr.p.x",
+            "struct Bag { items: [int] }\nb := Bag{ items: [1, 2, 3] }\nb.items[1]",
+            "struct Bag { items: [int] }\nb := Bag{ items: [1, 2, 3] }\nb.items[1] = 9\nb.items[1]",
+            "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\ndist(Point{ x: 3, y: 4 })",
+            "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\nfunc sum(p: Point) -> int { p.x + p.y }\nsum(p)",
+            "struct Point { x: int, y: int }\nfunc mk() -> Point { Point{ x: 7, y: 8 } }\nmk().x",
         ] {
             assert_same(src);
         }
@@ -986,6 +1495,30 @@ mod tests {
                 Op::BinOp(BinOp::Add, _),
             ]
         ));
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_loop_vm_vs_tree() {
+        let src = "sum := 0\nfor i in 0..100000 { sum = sum + i }\nsum";
+        let parsed = parse(src);
+        let start = std::time::Instant::now();
+        let mut interp = Interp::new();
+        let v = interp.run(&parsed.program).unwrap();
+        let vm_time = start.elapsed();
+        let tree_time = std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || {
+                let start = std::time::Instant::now();
+                let mut interp = Interp::new();
+                let t = interp.run_tree_walker(&parsed.program).unwrap();
+                (t.to_string(), start.elapsed())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(v.to_string(), tree_time.0);
+        println!("loop(100k) VM: {vm_time:?}  tree-walker: {:?}", tree_time.1);
     }
 
     #[test]

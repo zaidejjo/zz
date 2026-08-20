@@ -841,7 +841,7 @@ impl Interp {
     }
 
     /// Read a field from a struct instance.
-    fn object_field(obj: &Value, name: &str, span: Span) -> Result<Value, EvalError> {
+    pub(crate) fn object_field(obj: &Value, name: &str, span: Span) -> Result<Value, EvalError> {
         match obj {
             Value::Object {
                 name: tname,
@@ -861,7 +861,7 @@ impl Interp {
     }
 
     /// Write a field into a struct instance (in place).
-    fn set_object_field(
+    pub(crate) fn set_object_field(
         obj: &mut Value,
         name: &str,
         value: Value,
@@ -891,7 +891,7 @@ impl Interp {
 
     /// Read an element: `arr[i]`, `dict[key]`, `str[i]`. Negative indices
     /// count from the end.
-    fn get_index(obj: &Value, index: &Value, span: Span) -> Result<Value, EvalError> {
+    pub(crate) fn get_index(obj: &Value, index: &Value, span: Span) -> Result<Value, EvalError> {
         match (obj, index) {
             (Value::Array(items), Value::Int(i)) => {
                 let idx = Self::normalize_index(*i, items.len(), span)?;
@@ -916,7 +916,7 @@ impl Interp {
 
     /// Write an element: `arr[i] = v`, `dict[key] = v`. Missing dict keys
     /// are appended; strings are immutable.
-    fn set_index(
+    pub(crate) fn set_index(
         obj: &mut Value,
         index: &Value,
         value: Value,
@@ -952,7 +952,7 @@ impl Interp {
 
     /// Slice an array or string: `s[1:3]`, `s[:2]`, `s[1:]`, `s[:]`.
     /// Bounds are clamped; negative bounds count from the end.
-    fn slice_value(
+    pub(crate) fn slice_value(
         obj: &Value,
         start: Option<i64>,
         end: Option<i64>,
