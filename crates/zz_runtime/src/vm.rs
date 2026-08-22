@@ -551,7 +551,7 @@ impl Compiler {
             } => {
                 let chunk = self.compile_func_body(body, params);
                 self.emit(Op::MakeFunc {
-                    name: name.name.clone(),
+                    name: name.join("."),
                     params: params.clone(),
                     chunk,
                 });
@@ -567,7 +567,7 @@ impl Compiler {
             }
             Stmt::Struct { name, fields, .. } => {
                 self.emit(Op::RegisterStruct {
-                    name: name.name.clone(),
+                    name: name.join("."),
                     fields: fields.iter().map(|(n, _)| n.name.clone()).collect(),
                 });
                 StmtValue::Discard
@@ -1293,7 +1293,7 @@ fn scan_stmt_captured(
             for stmt in &body.stmts {
                 scan_stmt_captured(stmt, &mut inner, free);
             }
-            defined.insert(name.name.clone());
+            defined.insert(name.join("."));
         }
         Stmt::Return { value, .. } => {
             if let Some(e) = value {

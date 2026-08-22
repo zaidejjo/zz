@@ -61,11 +61,12 @@ pub fn check_program(
     // must be registered before functions so `func f(p: Point)` resolves.
     let mut seen_structs = HashMap::new();
     for stmt in &program.stmts {
-        if let Stmt::Struct { name, .. } = stmt {
-            if let Some(prev) = seen_structs.insert(name.name.clone(), name.span) {
+        if let Stmt::Struct { name, span, .. } = stmt {
+            let full_name = name.join(".");
+            if let Some(prev) = seen_structs.insert(full_name.clone(), *span) {
                 checker.errors.push(error_at(
-                    format!("duplicate definition of struct `{}`", name.name),
-                    name.span,
+                    format!("duplicate definition of struct `{}`", full_name),
+                    *span,
                 ));
                 checker
                     .errors
@@ -79,11 +80,12 @@ pub fn check_program(
     // recursion resolve.
     let mut seen = HashMap::new();
     for stmt in &program.stmts {
-        if let Stmt::Func { name, .. } = stmt {
-            if let Some(prev) = seen.insert(name.name.clone(), name.span) {
+        if let Stmt::Func { name, span, .. } = stmt {
+            let full_name = name.join(".");
+            if let Some(prev) = seen.insert(full_name.clone(), *span) {
                 checker.errors.push(error_at(
-                    format!("duplicate definition of function `{}`", name.name),
-                    name.span,
+                    format!("duplicate definition of function `{}`", full_name),
+                    *span,
                 ));
                 checker
                     .errors
@@ -575,8 +577,9 @@ impl Checker {
             .iter()
             .map(|(fname, fty)| (fname.name.clone(), self.ast_to_type(fty, &gens)))
             .collect();
+        let full_name = name.join(".");
         self.structs
-            .insert(name.name.clone(), StructSig { fields: sig_fields });
+            .insert(full_name, StructSig { fields: sig_fields });
     }
 
     fn collect_func(&mut self, stmt: &Stmt) {
@@ -605,8 +608,9 @@ impl Checker {
             Some(t) => self.ast_to_type(t, &gen_names),
             None => self.unifier.fresh_var(),
         };
+        let full_name = name.join(".");
         self.funcs.insert(
-            name.name.clone(),
+            full_name,
             FuncSig {
                 generics: gen_names,
                 params: sig_params,
@@ -1464,7 +1468,7 @@ impl Checker {
 
 fn func_name(stmt: &Stmt) -> String {
     match stmt {
-        Stmt::Func { name, .. } => name.name.clone(),
+        Stmt::Func { name, .. } => name.join("."),
         _ => unreachable!(),
     }
 }

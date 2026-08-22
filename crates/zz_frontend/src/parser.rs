@@ -180,9 +180,7 @@ impl Parser {
 
     fn parse_struct(&mut self) -> Stmt {
         let struct_tok = self.advance();
-        let name = self
-            .expect_ident()
-            .unwrap_or_else(|| dummy_ident(struct_tok.span));
+        let name = self.parse_dotted_ident();
         if !self.eat(TokenKind::LBrace) {
             self.error_here("expected `{` to start struct body");
             // Recovery: skip to the closing brace so the field loop below
@@ -308,9 +306,7 @@ impl Parser {
 
     fn parse_func(&mut self) -> Stmt {
         let func_tok = self.advance();
-        let name = self
-            .expect_ident()
-            .unwrap_or_else(|| dummy_ident(func_tok.span));
+        let name = self.parse_dotted_ident();
         let generics = if self.eat(TokenKind::Lt) {
             let mut gs = Vec::new();
             loop {
@@ -424,6 +420,18 @@ impl Parser {
         match tok.kind {
             TokenKind::Ident => {
                 self.advance();
+                // Consume dotted type names: `shapes.Point`, `a.b.c`, etc.
+                let mut full_name = tok.text.clone();
+                let mut end_span = tok.span;
+                while self.eat(TokenKind::Dot) {
+                    if let Some(id) = self.expect_ident() {
+                        full_name.push('.');
+                        full_name.push_str(&id.name);
+                        end_span = id.span;
+                    } else {
+                        break;
+                    }
+                }
                 let args = if self.eat(TokenKind::Lt) {
                     let mut ts = vec![self.parse_type()];
                     while self.eat(TokenKind::Comma) {
@@ -436,7 +444,7 @@ impl Parser {
                 } else {
                     Vec::new()
                 };
-                let kind = match tok.text.as_str() {
+                let kind = match full_name.as_str() {
                     "int" => {
                         if !args.is_empty() {
                             self.errors.push(error_at(
@@ -517,11 +525,11 @@ impl Parser {
                             }
                         }
                     }
-                    _ => TyKind::Named(tok.text, args),
+                    _ => TyKind::Named(full_name, args),
                 };
                 Ty {
                     kind,
-                    span: tok.span,
+                    span: tok.span.join(end_span),
                 }
             }
             TokenKind::LBracket => {
@@ -1482,6 +1490,22 @@ impl Parser {
         }
     }
 
+    /// Parse a dotted identifier: `a`, `a.b`, `a.b.c`, ...
+    /// Returns `Vec<String>` of parts.
+    fn parse_dotted_ident(&mut self) -> Vec<String> {
+        let first = self
+            .expect_ident()
+            .unwrap_or_else(|| dummy_ident(self.peek().span));
+        let mut parts = vec![first.name];
+        while self.eat(TokenKind::Dot) {
+            match self.expect_ident() {
+                Some(id) => parts.push(id.name),
+                None => break,
+            }
+        }
+        parts
+    }
+
     fn error_here(&mut self, msg: impl Into<String>) -> Span {
         let span = self.peek().span;
         self.errors.push(error_at(msg, span));
@@ -1744,7 +1768,7 @@ mod tests {
             Stmt::Func {
                 name, params, ret, ..
             } => {
-                assert_eq!(name.name, "add");
+                assert_eq!(name, &vec!["add".to_string()]);
                 assert_eq!(params.len(), 2);
                 assert_eq!(ret.as_ref().unwrap().kind, TyKind::Int);
             }
@@ -2323,10 +2347,14 @@ mod tests {
 
     #[test]
     fn malformed_struct_recovers_without_hanging() {
-        // A dotted struct name (invalid) must not spin the parser into an
-        // infinite recovery loop; it reports errors and terminates.
+        // A dotted struct name is now VALID (cross-module struct).
+        // The parser should accept it and not spin.
         let parsed = parse("struct shapes.Point { x: int }\nz := 1");
-        assert!(!parsed.errors.is_empty(), "expected parse errors");
+        assert!(
+            parsed.errors.is_empty(),
+            "dotted struct name should be valid: {:?}",
+            parsed.errors
+        );
         assert_eq!(parsed.program.stmts.len(), 2);
     }
 

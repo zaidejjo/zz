@@ -32,7 +32,7 @@ pub enum Stmt {
         span: Span,
     },
     Func {
-        name: Ident,
+        name: Vec<String>,
         generics: Vec<Ident>,
         params: Vec<Param>,
         ret: Option<Ty>,
@@ -44,8 +44,9 @@ pub enum Stmt {
         span: Span,
     },
     /// `struct Point { x: int, y: int }` — a named record type.
+    /// For cross-module: `struct shapes.Point { ... }` stores ["shapes", "Point"].
     Struct {
-        name: Ident,
+        name: Vec<String>,
         fields: Vec<(Ident, Ty)>,
         span: Span,
     },

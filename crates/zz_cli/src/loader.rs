@@ -340,7 +340,10 @@ fn namespace_program(program: &mut Program, ns: &str) {
     let mut top = HashSet::new();
     for stmt in &program.stmts {
         match stmt {
-            Stmt::Func { name, .. } | Stmt::Decl { name, .. } | Stmt::Struct { name, .. } => {
+            Stmt::Func { name, .. } | Stmt::Struct { name, .. } => {
+                top.insert(name.join("."));
+            }
+            Stmt::Decl { name, .. } => {
                 top.insert(name.name.clone());
             }
             _ => {}
@@ -404,14 +407,15 @@ impl Rewriter<'_> {
                 body,
                 ..
             } => {
-                let is_top = self.top.contains(&name.name);
-                if is_top {
-                    name.name = format!("{}.{}", self.ns, name.name);
+                let is_top = self.top.contains(&name.join("."));
+                if is_top && name[0] != self.ns {
+                    // Only prefix if first component doesn't already match namespace.
+                    name[0] = format!("{}.{}", self.ns, name[0]);
                 }
                 self.push_scope();
                 if !is_top {
                     // A nested func shadows its own name within its body.
-                    self.declare(&name.name);
+                    self.declare(&name.join("."));
                 }
                 for g in generics {
                     self.declare(&g.name);
@@ -434,8 +438,8 @@ impl Rewriter<'_> {
                 }
             }
             Stmt::Struct { name, fields, .. } => {
-                if self.top.contains(&name.name) {
-                    name.name = format!("{}.{}", self.ns, name.name);
+                if self.top.contains(&name.join(".")) && name[0] != self.ns {
+                    name[0] = format!("{}.{}", self.ns, name[0]);
                 }
                 for (_, fty) in fields {
                     self.rewrite_ty(fty);
@@ -473,7 +477,10 @@ impl Rewriter<'_> {
     fn rewrite_ty(&mut self, ty: &mut Ty) {
         match &mut ty.kind {
             TyKind::Named(name, args) => {
-                if self.top.contains(name) && !self.is_shadowed(name) {
+                if self.top.contains(name)
+                    && !self.is_shadowed(name)
+                    && !name.starts_with(&format!("{}.", self.ns))
+                {
                     *name = format!("{}.{}", self.ns, name);
                 }
                 for a in args {
@@ -646,7 +653,10 @@ impl Rewriter<'_> {
             Expr::StructInit { name, fields, .. } => {
                 // A struct defined in this module is referenced by its
                 // namespaced name; imported structs are already qualified.
-                if self.top.contains(name) && !self.is_shadowed(name) {
+                if self.top.contains(name)
+                    && !self.is_shadowed(name)
+                    && !name.starts_with(&format!("{}.", self.ns))
+                {
                     *name = format!("{}.{}", self.ns, name);
                 }
                 for (_, v) in fields {
@@ -657,7 +667,10 @@ impl Rewriter<'_> {
                 // `p.x` on a top-level binding: qualify the root so the
                 // struct-field walk finds `ns.p`.
                 if let Some(first) = parts.first_mut() {
-                    if self.top.contains(first) && !self.is_shadowed(first) {
+                    if self.top.contains(first)
+                        && !self.is_shadowed(first)
+                        && !first.starts_with(&format!("{}.", self.ns))
+                    {
                         *first = format!("{}.{}", self.ns, first);
                     }
                 }
@@ -1059,5 +1072,83 @@ mod tests {
             last = interp.run(p).unwrap();
         }
         assert_eq!(last, Value::Int(7));
+    }
+
+    #[test]
+    fn cross_module_struct_def() {
+        // `struct shapes.Point` in shapes.zz → main uses `shapes.Point`.
+        use zz_runtime::{Interp, Value};
+
+        let dir = temp_project(&[
+            (
+                "main.zz",
+                "import shapes\np := shapes.Point { x: 2, y: 3 }\nz := p.x",
+            ),
+            ("shapes.zz", "struct shapes.Point { x: int, y: int }"),
+        ]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.bindings["main.z"], Type::Int);
+
+        let mut interp = Interp::with_natives(result.natives.clone());
+        let mut last = Value::Unit;
+        for p in &result.programs {
+            last = interp.run(p).unwrap();
+        }
+        assert_eq!(last, Value::Int(2));
+    }
+
+    #[test]
+    fn cross_module_dotted_func_def() {
+        // `func shapes.mk_point(...)` → main calls `shapes.mk_point(1, 2)`.
+        use zz_runtime::{Interp, Value};
+
+        let dir = temp_project(&[
+            (
+                "main.zz",
+                "import shapes\np := shapes.mk_point(10, 20)\nz := p.x",
+            ),
+            (
+                "shapes.zz",
+                "struct shapes.Point { x: int, y: int }\nfunc shapes.mk_point(x: int, y: int) -> shapes.Point { shapes.Point { x: x, y: y } }",
+            ),
+        ]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.bindings["main.z"], Type::Int);
+
+        let mut interp = Interp::with_natives(result.natives.clone());
+        let mut last = Value::Unit;
+        for p in &result.programs {
+            last = interp.run(p).unwrap();
+        }
+        assert_eq!(last, Value::Int(10));
+    }
+
+    #[test]
+    fn import_alias_struct() {
+        // `import shapes as s` → use `s.Point` etc.
+        use zz_runtime::{Interp, Value};
+
+        let dir = temp_project(&[
+            (
+                "main.zz",
+                "import shapes as s\np := s.Point { x: 5, y: 12 }\nz := p.dist()",
+            ),
+            (
+                "shapes.zz",
+                "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }",
+            ),
+        ]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.bindings["main.z"], Type::Int);
+
+        let mut interp = Interp::with_natives(result.natives.clone());
+        let mut last = Value::Unit;
+        for p in &result.programs {
+            last = interp.run(p).unwrap();
+        }
+        assert_eq!(last, Value::Int(17));
     }
 }

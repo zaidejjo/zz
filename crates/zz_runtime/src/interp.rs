@@ -165,8 +165,10 @@ impl Interp {
                     env: Rc::clone(&self.env),
                     chunk: None,
                 };
-                self.funcs.insert(name.name.clone(), fv.clone());
-                self.env.borrow_mut().define(&name.name, Value::Func(fv));
+                self.funcs.insert(name.join("."), fv.clone());
+                self.env
+                    .borrow_mut()
+                    .define(&name.join("."), Value::Func(fv));
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Return { value, .. } => match value {
@@ -180,7 +182,7 @@ impl Interp {
             },
             Stmt::Struct { name, fields, .. } => {
                 self.structs.insert(
-                    name.name.clone(),
+                    name.join("."),
                     fields.iter().map(|(n, _)| n.name.clone()).collect(),
                 );
                 Ok(Flow::Value(Value::Unit))
