@@ -982,7 +982,7 @@ impl Checker {
                 }
                 Type::Bool
             }
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow => {
                 self.check_arith(op, left, right, span)
             }
         }

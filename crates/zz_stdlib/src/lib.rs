@@ -421,4 +421,36 @@ mod tests {
             Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3),])
         );
     }
+
+    // --- power operator ------------------------------------------------------
+
+    #[test]
+    fn pow_int_basic() {
+        assert_eq!(run("2 ** 3").unwrap(), Value::Int(8));
+    }
+
+    #[test]
+    fn pow_int_zero_exp() {
+        assert_eq!(run("5 ** 0").unwrap(), Value::Int(1));
+    }
+
+    #[test]
+    fn pow_int_large() {
+        assert_eq!(run("2 ** 10").unwrap(), Value::Int(1024));
+    }
+
+    #[test]
+    fn pow_float() {
+        let v = run("2.0 ** 0.5").unwrap();
+        match v {
+            Value::Float(f) => assert!((f - 1.4142135623730951).abs() < 1e-10),
+            other => panic!("expected float, got {other}"),
+        }
+    }
+
+    #[test]
+    fn pow_right_associative() {
+        // 2 ** 2 ** 3 == 2 ** (2 ** 3) == 2 ** 8 == 256
+        assert_eq!(run("2 ** 2 ** 3").unwrap(), Value::Int(256));
+    }
 }

@@ -1114,6 +1114,7 @@ impl Interp {
                     BinOp::Mul => a * b,
                     BinOp::Div => a / b,
                     BinOp::Rem => a % b,
+                    BinOp::Pow => a.powf(b),
                     _ => return Err(EvalError::new("arithmetic on non-numeric value", span)),
                 };
                 Ok(Value::Float(result))
@@ -1151,6 +1152,15 @@ impl Interp {
                     a.checked_rem(b)
                         .map(Value::Int)
                         .ok_or_else(|| EvalError::new("integer overflow in modulo", span))
+                }
+            }
+            BinOp::Pow => {
+                if b < 0 {
+                    Err(EvalError::new("negative exponent for integer power", span))
+                } else {
+                    a.checked_pow(b as u32)
+                        .map(Value::Int)
+                        .ok_or_else(|| EvalError::new("integer overflow in exponentiation", span))
                 }
             }
             BinOp::Eq => Ok(Value::Bool(a == b)),
