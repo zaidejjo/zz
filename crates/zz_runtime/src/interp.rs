@@ -209,22 +209,39 @@ impl Interp {
                         }
                         Ok(Flow::Value(result))
                     }
-                    Value::Range(start, end) => {
+                    Value::Range(start, end, step) => {
                         let mut result = Value::Unit;
                         let mut i = start;
-                        while i < end {
-                            let scope = Env::with_parent(&self.env);
-                            scope.borrow_mut().define(&var.name, Value::Int(i));
-                            let prev = std::mem::replace(&mut self.env, scope);
-                            let flow = self.eval_block(body);
-                            self.env = prev;
-                            match flow? {
-                                Flow::Value(v) => result = v,
-                                Flow::Return(v) => return Ok(Flow::Return(v)),
-                                Flow::Break => break,
-                                Flow::Continue => {}
+                        if step > 0 {
+                            while i < end {
+                                let scope = Env::with_parent(&self.env);
+                                scope.borrow_mut().define(&var.name, Value::Int(i));
+                                let prev = std::mem::replace(&mut self.env, scope);
+                                let flow = self.eval_block(body);
+                                self.env = prev;
+                                match flow? {
+                                    Flow::Value(v) => result = v,
+                                    Flow::Return(v) => return Ok(Flow::Return(v)),
+                                    Flow::Break => break,
+                                    Flow::Continue => {}
+                                }
+                                i += step;
                             }
-                            i += 1;
+                        } else {
+                            while i > end {
+                                let scope = Env::with_parent(&self.env);
+                                scope.borrow_mut().define(&var.name, Value::Int(i));
+                                let prev = std::mem::replace(&mut self.env, scope);
+                                let flow = self.eval_block(body);
+                                self.env = prev;
+                                match flow? {
+                                    Flow::Value(v) => result = v,
+                                    Flow::Return(v) => return Ok(Flow::Return(v)),
+                                    Flow::Break => break,
+                                    Flow::Continue => {}
+                                }
+                                i += step;
+                            }
                         }
                         Ok(Flow::Value(result))
                     }
@@ -684,7 +701,7 @@ impl Interp {
                 let s = self.eval(start)?.into_value()?;
                 let e = self.eval(end)?.into_value()?;
                 match (s, e) {
-                    (Value::Int(a), Value::Int(b)) => Ok(Flow::Value(Value::Range(a, b))),
+                    (Value::Int(a), Value::Int(b)) => Ok(Flow::Value(Value::Range(a, b, 1))),
                     _ => Err(EvalError::new("range bounds must be integers", *span)),
                 }
             }
@@ -843,8 +860,14 @@ impl Interp {
         let prev = std::mem::replace(&mut self.env, scope);
         let result = match &fv.chunk {
             Some(chunk) => {
+                // Compiled closures expect params on the VM stack at
+                // LoadSlot(0..n). Push them first, then use run_chunk_with_base
+                // with stack_base=0 so LoadSlot reads the right slots.
                 let mut vm = crate::vm::Vm::new();
-                vm.run_chunk(chunk, self)
+                for p in &fv.params {
+                    vm.push(self.env.borrow().get(&p.name.name).unwrap().clone());
+                }
+                vm.run_chunk_with_base(chunk, self, 0)
             }
             None => self.eval(&fv.body),
         };

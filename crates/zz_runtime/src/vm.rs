@@ -317,7 +317,11 @@ impl Compiler {
     }
 
     fn emit(&mut self, op: Op) {
-        self.stack_height = (self.stack_height as i64 + Self::stack_effect(&op)) as usize;
+        let effect = Self::stack_effect(&op);
+        // Use saturating arithmetic to prevent wrap-around on underflow.
+        // This can happen when stack_effect is negative and stack_height is 0,
+        // which indicates a compiler bug in stack tracking but shouldn't panic.
+        self.stack_height = self.stack_height.saturating_add_signed(effect as isize);
         self.chunk.code.push(op);
     }
 
@@ -848,9 +852,39 @@ impl Compiler {
                 Expr::Path { parts, span: pspan } => {
                     // Special case: `input()` with no args -> synthesize empty prompt
                     let is_input = parts.len() == 1 && parts[0] == "input" && args.is_empty();
-                    let argc = if is_input { 1 } else { args.len() };
-                    for a in args {
-                        self.compile_expr(a);
+                    // Special case: `range` with 1 or 2 args -> synthesize defaults (start=0, step=1)
+                    let is_range = parts.len() == 1 && parts[0] == "range" && args.len() < 3;
+                    let argc = if is_input {
+                        1
+                    } else if is_range {
+                        3
+                    } else {
+                        args.len()
+                    };
+                    if is_range {
+                        // Native expects (start, stop, step). User provides:
+                        // range(stop) -> (0, stop, 1)
+                        // range(start, stop) -> (start, stop, 1)
+                        // range(start, stop, step) -> (start, stop, step)
+                        if args.len() == 1 {
+                            // User gave stop; push start=0, stop, step=1
+                            self.emit_const(Value::Int(0));
+                            self.compile_expr(&args[0]);
+                            self.emit_const(Value::Int(1));
+                        } else if args.len() == 2 {
+                            // User gave start, stop; push start, stop, step=1
+                            self.compile_expr(&args[0]);
+                            self.compile_expr(&args[1]);
+                            self.emit_const(Value::Int(1));
+                        } else {
+                            for a in args {
+                                self.compile_expr(a);
+                            }
+                        }
+                    } else {
+                        for a in args {
+                            self.compile_expr(a);
+                        }
                     }
                     if is_input {
                         self.emit_const(Value::Str(String::new()));
@@ -864,13 +898,13 @@ impl Compiler {
                         }
                         self.emit(Op::CallMethod {
                             name: parts.last().unwrap().clone(),
-                            argc: args.len() as u16,
+                            argc: argc as u16,
                             span: *span,
                         });
                     } else {
                         self.emit(Op::CallPath {
                             parts: parts.clone(),
-                            argc: args.len() as u16,
+                            argc: argc as u16,
                             span: *span,
                             pspan: *pspan,
                         });
@@ -880,10 +914,35 @@ impl Compiler {
                     // Special case: `input()` with no args -> synthesize empty prompt
                     let is_input = matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "input")
                         && args.is_empty();
-                    let argc = if is_input { 1 } else { args.len() };
+                    // Special case: `range` with 1 or 2 args -> synthesize defaults
+                    let is_range = matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "range")
+                        && args.len() < 3;
+                    let argc = if is_input {
+                        1
+                    } else if is_range {
+                        3
+                    } else {
+                        args.len()
+                    };
                     self.compile_expr(callee);
-                    for a in args {
-                        self.compile_expr(a);
+                    if is_range {
+                        if args.len() == 1 {
+                            self.emit_const(Value::Int(0));
+                            self.compile_expr(&args[0]);
+                            self.emit_const(Value::Int(1));
+                        } else if args.len() == 2 {
+                            self.compile_expr(&args[0]);
+                            self.compile_expr(&args[1]);
+                            self.emit_const(Value::Int(1));
+                        } else {
+                            for a in args {
+                                self.compile_expr(a);
+                            }
+                        }
+                    } else {
+                        for a in args {
+                            self.compile_expr(a);
+                        }
                     }
                     if is_input {
                         self.emit_const(Value::Str(String::new()));
@@ -1417,6 +1476,12 @@ impl Vm {
         }
     }
 
+    /// Push a value onto the VM stack. Used by `Interp::call_func` to set up
+    /// compiled closure parameters before calling `run_chunk_with_base`.
+    pub(crate) fn push(&mut self, v: Value) {
+        self.stack.push(v);
+    }
+
     /// Run a chunk to completion. Returns the chunk's value, or a control
     /// flow signal (`Return`/`Break`/`Continue`) that escaped the program
     /// frame.
@@ -1425,11 +1490,23 @@ impl Vm {
         chunk: &Rc<Chunk>,
         interp: &mut Interp,
     ) -> Result<Flow, EvalError> {
+        self.run_chunk_with_base(chunk, interp, self.stack.len())
+    }
+
+    /// Like `run_chunk`, but allows the caller to specify `stack_base`
+    /// explicitly. Used by `Interp::call_func` to run compiled closures
+    /// where args are already on the stack at index 0..n.
+    pub(crate) fn run_chunk_with_base(
+        &mut self,
+        chunk: &Rc<Chunk>,
+        interp: &mut Interp,
+        stack_base: usize,
+    ) -> Result<Flow, EvalError> {
         self.frames.push(Frame {
             chunk: Rc::clone(chunk),
             ip: 0,
             prev_env: Rc::clone(&interp.env),
-            stack_base: self.stack.len(),
+            stack_base,
         });
 
         loop {
@@ -1596,7 +1673,7 @@ impl Vm {
                     let it = self.stack.pop().unwrap();
                     let (iterable, idx) = match it.clone() {
                         Value::Array(_) => (it, Value::Int(0)),
-                        Value::Range(start, _) => (it, Value::Int(start)),
+                        Value::Range(start, _, _) => (it, Value::Int(start)),
                         other => {
                             return Err(EvalError::new(
                                 format!("cannot iterate a value of type `{other}`"),
@@ -1634,12 +1711,21 @@ impl Vm {
                                 (false, items[i as usize].clone())
                             }
                         }
-                        (Value::Range(_, end), Value::Int(i)) => {
+                        (Value::Range(_, end, step), Value::Int(i)) => {
                             let i = *i;
-                            if i >= *end {
-                                (true, Value::Unit)
+                            let step = *step;
+                            if step > 0 {
+                                if i >= *end {
+                                    (true, Value::Unit)
+                                } else {
+                                    (false, Value::Int(i))
+                                }
                             } else {
-                                (false, Value::Int(i))
+                                if i <= *end {
+                                    (true, Value::Unit)
+                                } else {
+                                    (false, Value::Int(i))
+                                }
                             }
                         }
                         _ => unreachable!("ForNext on non-iterable"),
@@ -1650,8 +1736,9 @@ impl Vm {
                         interp.env = li.env;
                         self.frames.last_mut().unwrap().ip = *exit;
                     } else {
-                        let next = match idx {
-                            Value::Int(i) => Value::Int(i + 1),
+                        let next = match (&self.stack[iterable_idx], idx) {
+                            (Value::Range(_, _, step), Value::Int(i)) => Value::Int(i + step),
+                            (Value::Array(_), Value::Int(i)) => Value::Int(i + 1),
                             _ => unreachable!(),
                         };
                         self.stack.push(next);
@@ -1771,7 +1858,7 @@ impl Vm {
                     let e = self.stack.pop().unwrap();
                     let s = self.stack.pop().unwrap();
                     match (s, e) {
-                        (Value::Int(a), Value::Int(b)) => self.stack.push(Value::Range(a, b)),
+                        (Value::Int(a), Value::Int(b)) => self.stack.push(Value::Range(a, b, 1)),
                         _ => return Err(EvalError::new("range bounds must be integers", *span)),
                     }
                 }
