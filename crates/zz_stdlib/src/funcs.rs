@@ -28,6 +28,18 @@ fn sig_t(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
     }
 }
 
+/// Build a signature generic over `T, U`.
+fn sig_tu(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
+    FuncSig {
+        generics: vec!["T".to_string(), "U".to_string()],
+        params: params
+            .into_iter()
+            .map(|(n, t)| (n.to_string(), t))
+            .collect(),
+        ret,
+    }
+}
+
 /// All standard library function signatures, keyed by qualified name
 /// (e.g. `std.io.println`).
 pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
@@ -49,6 +61,60 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert("print".into(), sig_t(vec![("v", t.clone())], Type::Unit));
     m.insert("println".into(), sig_t(vec![("v", t.clone())], Type::Unit));
     m.insert("input".into(), sig(vec![], Type::Str));
+
+    // Range and iterator builtins
+    let range_t = Type::Range(Box::new(Type::Int));
+    // range(stop) | range(start, stop) | range(start, stop, step)
+    // Checker handles variable arg count; signature declares max 3 args.
+    m.insert(
+        "range".into(),
+        sig(
+            vec![
+                ("start", Type::Int),
+                ("stop", Type::Int),
+                ("step", Type::Int),
+            ],
+            range_t.clone(),
+        ),
+    );
+    m.insert("len".into(), sig_t(vec![("v", t.clone())], Type::Int));
+    m.insert(
+        "map".into(),
+        sig_t(
+            vec![
+                ("arr", Type::Array(Box::new(t.clone()))),
+                ("f", Type::Func(vec![t.clone()], Box::new(t.clone()))),
+            ],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "filter".into(),
+        sig_t(
+            vec![
+                ("arr", Type::Array(Box::new(t.clone()))),
+                ("f", Type::Func(vec![t.clone()], Box::new(Type::Bool))),
+            ],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "enumerate".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Array(Box::new(Type::Tuple(vec![Type::Int, t.clone()]))),
+        ),
+    );
+    m.insert("zip".into(), {
+        let t2 = Type::Named("U".to_string());
+        sig_tu(
+            vec![
+                ("a", Type::Array(Box::new(t.clone()))),
+                ("b", Type::Array(Box::new(t2.clone()))),
+            ],
+            Type::Array(Box::new(Type::Tuple(vec![t.clone(), t2.clone()]))),
+        )
+    });
 
     // std.str
     m.insert(
@@ -273,7 +339,7 @@ mod tests {
         assert!(funcs.contains_key("str"));
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
-        assert_eq!(funcs.len(), 41);
+        assert_eq!(funcs.len(), 47);
     }
 
     #[test]

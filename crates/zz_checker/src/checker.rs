@@ -1046,6 +1046,23 @@ impl Checker {
                     }
                     return ret;
                 }
+                // Special case: `range` accepts 1, 2, or 3 int arguments
+                if name == "range" {
+                    if args.is_empty() || args.len() > 3 {
+                        self.errors.push(error_at(
+                            format!("range expects 1, 2, or 3 arguments, found {}", args.len()),
+                            span,
+                        ));
+                    } else {
+                        for arg in args {
+                            let at = self.check_expr(arg);
+                            if let Err(e) = self.unifier.unify(&at, &Type::Int) {
+                                self.report_mismatch(e, arg.span());
+                            }
+                        }
+                    }
+                    return ret;
+                }
                 self.check_args_against(ps, args, span);
                 return ret;
             }

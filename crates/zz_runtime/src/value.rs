@@ -34,8 +34,10 @@ pub enum Value {
         name: String,
         fields: Vec<(String, Value)>,
     },
-    /// `a..b` — an integer range (used by `for` loops).
-    Range(i64, i64),
+    /// `a..b` or `a..b..step` — an integer range (used by `for` loops).
+    Range(i64, i64, i64),
+    /// `(v1, v2, ...)` — tuple value.
+    Tuple(Vec<Value>),
 }
 
 /// A JSON value (see [`crate::json`]).
@@ -100,6 +102,7 @@ impl Value {
             Value::HttpServer(_) => "http.server".to_string(),
             Value::Object { name, .. } => name.clone(),
             Value::Range(..) => "range".to_string(),
+            Value::Tuple(_) => "tuple".to_string(),
         }
     }
 }
@@ -157,7 +160,23 @@ impl fmt::Display for Value {
                 }
                 write!(f, "}}")
             }
-            Value::Range(a, b) => write!(f, "{a}..{b}"),
+            Value::Range(a, b, step) => {
+                if *step == 1 {
+                    write!(f, "{a}..{b}")
+                } else {
+                    write!(f, "{a}..{b}..{step}")
+                }
+            }
+            Value::Tuple(vs) => {
+                write!(f, "(")?;
+                for (i, v) in vs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{v}")?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }
