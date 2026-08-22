@@ -317,7 +317,11 @@ impl Compiler {
     }
 
     fn emit(&mut self, op: Op) {
-        self.stack_height = (self.stack_height as i64 + Self::stack_effect(&op)) as usize;
+        let effect = Self::stack_effect(&op);
+        // Use saturating arithmetic to prevent wrap-around on underflow.
+        // This can happen when stack_effect is negative and stack_height is 0,
+        // which indicates a compiler bug in stack tracking but shouldn't panic.
+        self.stack_height = self.stack_height.saturating_add_signed(effect as isize);
         self.chunk.code.push(op);
     }
 

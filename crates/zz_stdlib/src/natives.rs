@@ -562,11 +562,43 @@ fn len(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> 
     }
 }
 
+/// Convert an array or range Value into a Vec<Value>.
+fn value_to_items(v: &Value) -> Result<Vec<Value>, EvalError> {
+    match v {
+        Value::Array(vs) => Ok(vs.clone()),
+        Value::Range(start, stop, step) => {
+            let mut items = Vec::new();
+            let mut i = *start;
+            if *step > 0 {
+                while i < *stop {
+                    items.push(Value::Int(i));
+                    i += *step;
+                }
+            } else if *step < 0 {
+                while i > *stop {
+                    items.push(Value::Int(i));
+                    i += *step;
+                }
+            }
+            Ok(items)
+        }
+        other => Err(EvalError::new(
+            format!("expected array or range, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
 fn map(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
-    let arr = expect_array(args, 0, "map")?;
+    let items = value_to_items(args.first().ok_or_else(|| {
+        EvalError::new(
+            "missing first argument for map",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?)?;
     let f = expect_func(args, 1, "map")?;
-    let mut result = Vec::with_capacity(arr.len());
-    for item in arr {
+    let mut result = Vec::with_capacity(items.len());
+    for item in items {
         let call_args = vec![item];
         let res = _interp.call(f.clone(), call_args, zz_runtime::Span::new(0, 0))?;
         result.push(res);
@@ -575,10 +607,15 @@ fn map(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> 
 }
 
 fn filter(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
-    let arr = expect_array(args, 0, "filter")?;
+    let items = value_to_items(args.first().ok_or_else(|| {
+        EvalError::new(
+            "missing first argument for filter",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?)?;
     let f = expect_func(args, 1, "filter")?;
     let mut result = Vec::new();
-    for item in arr {
+    for item in items {
         let call_args = vec![item.clone()];
         let res = _interp.call(f.clone(), call_args, zz_runtime::Span::new(0, 0))?;
         if let Value::Bool(true) = res {
@@ -589,17 +626,32 @@ fn filter(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalErro
 }
 
 fn enumerate(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
-    let arr = expect_array(args, 0, "enumerate")?;
-    let mut result = Vec::with_capacity(arr.len());
-    for (i, item) in arr.into_iter().enumerate() {
+    let items = value_to_items(args.first().ok_or_else(|| {
+        EvalError::new(
+            "missing first argument for enumerate",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?)?;
+    let mut result = Vec::with_capacity(items.len());
+    for (i, item) in items.into_iter().enumerate() {
         result.push(Value::Tuple(vec![Value::Int(i as i64), item]));
     }
     Ok(Value::Array(result))
 }
 
 fn zip(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
-    let a = expect_array(args, 0, "zip")?;
-    let b = expect_array(args, 1, "zip")?;
+    let a = value_to_items(args.first().ok_or_else(|| {
+        EvalError::new(
+            "missing first argument for zip",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?)?;
+    let b = value_to_items(args.get(1).ok_or_else(|| {
+        EvalError::new(
+            "missing second argument for zip",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?)?;
     let len = a.len().min(b.len());
     let mut result = Vec::with_capacity(len);
     for i in 0..len {

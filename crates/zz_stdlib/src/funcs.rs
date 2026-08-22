@@ -78,21 +78,26 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
     m.insert("len".into(), sig_t(vec![("v", t.clone())], Type::Int));
-    m.insert(
-        "map".into(),
-        sig_t(
+    // Union of array-of-T and range-of-T so T stays as element type.
+    let iterable_t = Type::Union(vec![
+        Type::Array(Box::new(t.clone())),
+        Type::Range(Box::new(t.clone())),
+    ]);
+    m.insert("map".into(), {
+        let u = Type::Named("U".to_string());
+        sig_tu(
             vec![
-                ("arr", Type::Array(Box::new(t.clone()))),
-                ("f", Type::Func(vec![t.clone()], Box::new(t.clone()))),
+                ("arr", iterable_t.clone()),
+                ("f", Type::Func(vec![t.clone()], Box::new(u.clone()))),
             ],
-            Type::Array(Box::new(t.clone())),
-        ),
-    );
+            Type::Array(Box::new(u.clone())),
+        )
+    });
     m.insert(
         "filter".into(),
         sig_t(
             vec![
-                ("arr", Type::Array(Box::new(t.clone()))),
+                ("arr", iterable_t.clone()),
                 ("f", Type::Func(vec![t.clone()], Box::new(Type::Bool))),
             ],
             Type::Array(Box::new(t.clone())),
@@ -101,17 +106,18 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "enumerate".into(),
         sig_t(
-            vec![("arr", Type::Array(Box::new(t.clone())))],
+            vec![("arr", iterable_t.clone())],
             Type::Array(Box::new(Type::Tuple(vec![Type::Int, t.clone()]))),
         ),
     );
     m.insert("zip".into(), {
         let t2 = Type::Named("U".to_string());
+        let iterable_t2 = Type::Union(vec![
+            Type::Array(Box::new(t2.clone())),
+            Type::Range(Box::new(t2.clone())),
+        ]);
         sig_tu(
-            vec![
-                ("a", Type::Array(Box::new(t.clone()))),
-                ("b", Type::Array(Box::new(t2.clone()))),
-            ],
+            vec![("a", iterable_t.clone()), ("b", iterable_t2)],
             Type::Array(Box::new(Type::Tuple(vec![t.clone(), t2.clone()]))),
         )
     });
