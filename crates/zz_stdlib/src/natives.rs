@@ -249,6 +249,52 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
+    // option.* methods (for method dispatch: .some(1).unwrap_or(0))
+    m.insert(
+        "option.unwrap".into(),
+        NativeEntry {
+            arity: 1,
+            f: option_unwrap,
+        },
+    );
+    m.insert(
+        "option.unwrap_or".into(),
+        NativeEntry {
+            arity: 2,
+            f: option_unwrap_or,
+        },
+    );
+    m.insert(
+        "option.expect".into(),
+        NativeEntry {
+            arity: 2,
+            f: option_expect,
+        },
+    );
+
+    // result.* methods (for method dispatch: .ok(1).unwrap_or(0))
+    m.insert(
+        "result.unwrap".into(),
+        NativeEntry {
+            arity: 1,
+            f: result_unwrap,
+        },
+    );
+    m.insert(
+        "result.unwrap_or".into(),
+        NativeEntry {
+            arity: 2,
+            f: result_unwrap_or,
+        },
+    );
+    m.insert(
+        "result.expect".into(),
+        NativeEntry {
+            arity: 2,
+            f: result_expect,
+        },
+    );
+
     // std.json
     m.insert(
         "std.json.parse".into(),
@@ -732,6 +778,138 @@ fn vec_remove(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, Eval
     }
     vs.remove(idx as usize);
     Ok(Value::Array(vs))
+}
+
+// --- option.* methods --------------------------------------------------------
+
+fn option_unwrap(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let opt = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for option.unwrap",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    match opt {
+        Value::Option(Some(v)) => Ok(*v),
+        Value::Option(None) => Err(EvalError::new(
+            "called unwrap on .none",
+            zz_runtime::Span::new(0, 0),
+        )),
+        other => Err(EvalError::new(
+            format!("option.unwrap: expected an option, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+fn option_unwrap_or(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let opt = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for option.unwrap_or",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    let default = args.get(1).cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing `default` argument for option.unwrap_or",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    match opt {
+        Value::Option(Some(v)) => Ok(*v),
+        Value::Option(None) => Ok(default),
+        other => Err(EvalError::new(
+            format!("option.unwrap_or: expected an option, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+fn option_expect(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let opt = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for option.expect",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    let msg = expect_str(args, 1, "option.expect")?;
+    match opt {
+        Value::Option(Some(v)) => Ok(*v),
+        Value::Option(None) => Err(EvalError::new(
+            format!("option.expect: {msg}"),
+            zz_runtime::Span::new(0, 0),
+        )),
+        other => Err(EvalError::new(
+            format!("option.expect: expected an option, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+// --- result.* methods --------------------------------------------------------
+
+fn result_unwrap(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let res = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for result.unwrap",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    match res {
+        Value::Result(Ok(v)) => Ok(*v),
+        Value::Result(Err(e)) => Err(EvalError::new(
+            format!("result.unwrap: called unwrap on .err({e})"),
+            zz_runtime::Span::new(0, 0),
+        )),
+        other => Err(EvalError::new(
+            format!("result.unwrap: expected a result, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+fn result_unwrap_or(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let res = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for result.unwrap_or",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    let default = args.get(1).cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing `default` argument for result.unwrap_or",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    match res {
+        Value::Result(Ok(v)) => Ok(*v),
+        Value::Result(Err(_)) => Ok(default),
+        other => Err(EvalError::new(
+            format!("result.unwrap_or: expected a result, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+fn result_expect(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let res = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for result.expect",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    let msg = expect_str(args, 1, "result.expect")?;
+    match res {
+        Value::Result(Ok(v)) => Ok(*v),
+        Value::Result(Err(e)) => Err(EvalError::new(
+            format!("result.expect: {msg}: {e}"),
+            zz_runtime::Span::new(0, 0),
+        )),
+        other => Err(EvalError::new(
+            format!("result.expect: expected a result, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
 }
 
 // --- Range and iterator builtins --------------------------------------------

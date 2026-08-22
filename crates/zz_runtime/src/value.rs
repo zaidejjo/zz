@@ -113,6 +113,8 @@ impl Value {
         match self {
             Value::Str(_) => Some("str"),
             Value::Array(_) => Some("vec"),
+            Value::Option(_) => Some("option"),
+            Value::Result(_) => Some("result"),
             Value::Object { name, .. } => {
                 // Extract namespace from struct name (e.g., "shapes.Point" -> "shapes")
                 name.rsplit_once('.')

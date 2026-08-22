@@ -673,6 +673,28 @@ impl Checker {
                         }
                     },
                     other => {
+                        // Try method dispatch for non-struct types (Option,
+                        // Result, str, vec) — same lookup as check_call's
+                        // Expr::Field callee path.
+                        let method = name.clone();
+                        let ns = match &other {
+                            Type::Str => Some("str"),
+                            Type::Array(_) => Some("vec"),
+                            Type::Option(_) => Some("option"),
+                            Type::Result(_, _) => Some("result"),
+                            _ => None,
+                        };
+                        if let Some(ns) = ns {
+                            if let Some(sig) = self.funcs.get(&format!("{ns}.{method}")).cloned() {
+                                let (ps, ret) = self.instantiate(&sig);
+                                if !ps.is_empty() {
+                                    if let Err(e) = self.unifier.unify(&other, &ps[0]) {
+                                        self.report_mismatch(e, *span);
+                                    }
+                                }
+                                return ret;
+                            }
+                        }
                         self.errors.push(error_at(
                             format!("cannot access field `{name}` on a value of type `{other}`"),
                             *span,
@@ -1036,6 +1058,12 @@ impl Checker {
                     match &self.unifier.resolve(&recv_t) {
                         Type::Str => sig = self.funcs.get(&format!("str.{method}")).cloned(),
                         Type::Array(_) => sig = self.funcs.get(&format!("vec.{method}")).cloned(),
+                        Type::Option(_) => {
+                            sig = self.funcs.get(&format!("option.{method}")).cloned()
+                        }
+                        Type::Result(_, _) => {
+                            sig = self.funcs.get(&format!("result.{method}")).cloned()
+                        }
                         Type::Struct(sname) => {
                             if let Some((ns, _)) = sname.rsplit_once('.') {
                                 sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
@@ -1122,6 +1150,12 @@ impl Checker {
                         }
                         Type::Array(_) => {
                             sig = self.funcs.get(&format!("vec.{method}")).cloned();
+                        }
+                        Type::Option(_) => {
+                            sig = self.funcs.get(&format!("option.{method}")).cloned();
+                        }
+                        Type::Result(_, _) => {
+                            sig = self.funcs.get(&format!("result.{method}")).cloned();
                         }
                         Type::Struct(sname) => {
                             if let Some((ns, _)) = sname.rsplit_once('.') {

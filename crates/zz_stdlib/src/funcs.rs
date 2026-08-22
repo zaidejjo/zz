@@ -263,6 +263,68 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
 
+    // option.* methods (for method dispatch: .some(1).unwrap_or(0))
+    let t = Type::Named("T".to_string());
+    m.insert(
+        "option.unwrap".into(),
+        sig_t(vec![("opt", Type::Option(Box::new(t.clone())))], t.clone()),
+    );
+    m.insert(
+        "option.unwrap_or".into(),
+        sig_t(
+            vec![
+                ("opt", Type::Option(Box::new(t.clone()))),
+                ("default", t.clone()),
+            ],
+            t.clone(),
+        ),
+    );
+    m.insert(
+        "option.expect".into(),
+        sig_t(
+            vec![
+                ("opt", Type::Option(Box::new(t.clone()))),
+                ("msg", Type::Str),
+            ],
+            t.clone(),
+        ),
+    );
+
+    // result.* methods (for method dispatch: .ok(1).unwrap_or(0))
+    let t = Type::Named("T".to_string());
+    let e = Type::Named("E".to_string());
+    let result_t = Type::Result(Box::new(t.clone()), Box::new(e.clone()));
+    m.insert(
+        "result.unwrap".into(),
+        FuncSig {
+            generics: vec!["T".to_string(), "E".to_string()],
+            params: vec![("res".to_string(), result_t.clone())],
+            ret: t.clone(),
+        },
+    );
+    m.insert(
+        "result.unwrap_or".into(),
+        FuncSig {
+            generics: vec!["T".to_string(), "E".to_string()],
+            params: vec![
+                ("res".to_string(), result_t.clone()),
+                ("default".to_string(), t.clone()),
+            ],
+            ret: t.clone(),
+        },
+    );
+    m.insert(
+        "result.expect".into(),
+        FuncSig {
+            generics: vec!["T".to_string(), "E".to_string()],
+            params: vec![
+                ("res".to_string(), result_t),
+                ("msg".to_string(), Type::Str),
+            ],
+            ret: t,
+        },
+    );
+
     // std.json
     let json_t = Type::Json;
     let t = Type::Named("T".to_string());
@@ -448,7 +510,7 @@ mod tests {
         assert!(funcs.contains_key("str"));
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
-        assert_eq!(funcs.len(), 64);
+        assert_eq!(funcs.len(), 70);
     }
 
     #[test]
