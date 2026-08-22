@@ -1031,6 +1031,21 @@ impl Checker {
         if let Some(name) = &direct_name {
             if let Some(sig) = self.funcs.get(name).cloned() {
                 let (ps, ret) = self.instantiate(&sig);
+                // Special case: `input` accepts 0 or 1 string argument (optional prompt)
+                if name == "input" {
+                    if args.len() > 1 {
+                        self.errors.push(error_at(
+                            format!("expected 0 or 1 arguments, found {}", args.len()),
+                            span,
+                        ));
+                    } else if args.len() == 1 {
+                        let at = self.check_expr(&args[0]);
+                        if let Err(e) = self.unifier.unify(&at, &Type::Str) {
+                            self.report_mismatch(e, args[0].span());
+                        }
+                    }
+                    return ret;
+                }
                 self.check_args_against(ps, args, span);
                 return ret;
             }

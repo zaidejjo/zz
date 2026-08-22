@@ -361,9 +361,11 @@ impl Compiler {
             Op::MatchError(_) => 0,
             Op::IfLetMatch { .. } => -1,
             Op::TryOp(_) => 0,
-            Op::Call { argc, .. } | Op::CallPath { argc, .. } | Op::CallMethod { argc, .. } => {
-                -(*argc as i64)
-            }
+            // Call pops argc args + 1 callee (pushed by compiler), pushes 1 result: -argc
+            // CallPath pops argc args, resolves callee by name (no stack pop), pushes 1: 1-argc
+            // CallMethod pops argc args + 1 receiver (LoadSlot), pushes 1 result: -argc
+            Op::Call { argc, .. } | Op::CallMethod { argc, .. } => -(*argc as i64),
+            Op::CallPath { argc, .. } => 1 - (*argc as i64),
             Op::Concat(n) => 1 - *n as i64,
             Op::EnterScope | Op::ExitScope => 0,
             Op::PopN(n) => -(*n as i64),
@@ -844,8 +846,14 @@ impl Compiler {
             },
             Expr::Call { callee, args, span } => match callee.as_ref() {
                 Expr::Path { parts, span: pspan } => {
+                    // Special case: `input()` with no args -> synthesize empty prompt
+                    let is_input = parts.len() == 1 && parts[0] == "input" && args.is_empty();
+                    let argc = if is_input { 1 } else { args.len() };
                     for a in args {
                         self.compile_expr(a);
+                    }
+                    if is_input {
+                        self.emit_const(Value::Str(String::new()));
                     }
                     if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
                         // Slot-based receiver: load the receiver chain, then
@@ -869,12 +877,19 @@ impl Compiler {
                     }
                 }
                 _ => {
+                    // Special case: `input()` with no args -> synthesize empty prompt
+                    let is_input = matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "input")
+                        && args.is_empty();
+                    let argc = if is_input { 1 } else { args.len() };
                     self.compile_expr(callee);
                     for a in args {
                         self.compile_expr(a);
                     }
+                    if is_input {
+                        self.emit_const(Value::Str(String::new()));
+                    }
                     self.emit(Op::Call {
-                        argc: args.len() as u16,
+                        argc: argc as u16,
                         span: *span,
                     });
                 }
@@ -885,11 +900,16 @@ impl Compiler {
                 els,
                 span,
             } => {
+                let pre = self.stack_height;
                 self.compile_expr(cond);
                 let j = self.emit_jump(JumpKind::IfFalseBool(*span));
                 self.compile_block(then);
                 let j2 = self.emit_jump(JumpKind::Always);
                 self.patch_jump(j);
+                // Reset tracker: the else branch starts from the same stack
+                // state as the then branch (after the condition was consumed),
+                // not from the height left by the then branch.
+                self.stack_height = pre;
                 match els {
                     Some(e) => self.compile_expr(e),
                     None => self.emit_const(Value::Unit),
@@ -1049,6 +1069,7 @@ impl Compiler {
                 els,
                 span: _,
             } => {
+                let pre = self.stack_height;
                 self.compile_expr(value);
                 let has_env = pattern_binds(pat);
                 let pos = self.chunk.code.len();
@@ -1063,6 +1084,9 @@ impl Compiler {
                 }
                 let j = self.emit_jump(JumpKind::Always);
                 let els_pos = self.chunk.code.len();
+                // Reset tracker: else branch starts from same stack state
+                // as then branch (after the scrutinee was consumed).
+                self.stack_height = pre;
                 self.emit(Op::Pop);
                 match els {
                     Some(e) => self.compile_expr(e),

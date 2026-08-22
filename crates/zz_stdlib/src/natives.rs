@@ -39,6 +39,29 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
+    // Top-level builtins — available without import.
+    m.insert(
+        "print".into(),
+        NativeEntry {
+            arity: 1,
+            f: printz,
+        },
+    );
+    m.insert(
+        "println".into(),
+        NativeEntry {
+            arity: 1,
+            f: println,
+        },
+    );
+    m.insert(
+        "input".into(),
+        NativeEntry {
+            arity: 1,
+            f: read_line,
+        },
+    );
+
     // std.str
     m.insert(
         "std.str.length".into(),
@@ -362,7 +385,18 @@ fn println(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalErr
     Ok(Value::Unit)
 }
 
-fn read_line(_interp: &mut Interp, _args: &mut Vec<Value>) -> Result<Value, EvalError> {
+fn read_line(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    // Optional prompt argument
+    if !args.is_empty() {
+        let prompt = expect_str(args, 0, "input")?;
+        print!("{prompt}");
+        std::io::stdout().flush().map_err(|e| {
+            EvalError::new(
+                format!("failed to flush stdout: {e}"),
+                zz_runtime::Span::new(0, 0),
+            )
+        })?;
+    }
     let mut line = String::new();
     std::io::stdin().read_line(&mut line).map_err(|e| {
         EvalError::new(

@@ -45,6 +45,11 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert("std.io.read_line".into(), sig(vec![], Type::Str));
 
+    // Top-level builtins — available without import.
+    m.insert("print".into(), sig_t(vec![("v", t.clone())], Type::Unit));
+    m.insert("println".into(), sig_t(vec![("v", t.clone())], Type::Unit));
+    m.insert("input".into(), sig(vec![], Type::Str));
+
     // std.str
     m.insert(
         "std.str.length".into(),
@@ -268,7 +273,7 @@ mod tests {
         assert!(funcs.contains_key("str"));
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
-        assert_eq!(funcs.len(), 38);
+        assert_eq!(funcs.len(), 41);
     }
 
     #[test]

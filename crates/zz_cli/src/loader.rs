@@ -1151,4 +1151,46 @@ mod tests {
         }
         assert_eq!(last, Value::Int(17));
     }
+
+    #[test]
+    fn func_call_before_for_loop_no_corruption() {
+        // Regression: CallPath had wrong stack effect (-argc instead of 1-argc),
+        // causing stack underflow when a function call preceded a for loop.
+        use zz_runtime::{Interp, Value};
+
+        let dir = temp_project(&[(
+            "main.zz",
+            "func id(x: int) -> int { x }\nx := id(42)\nfor i in 0..3 { std.io.println(i) }\nx",
+        )]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        let mut interp = Interp::with_natives(result.natives.clone());
+        let mut last = Value::Unit;
+        for p in &result.programs {
+            last = interp.run(p).unwrap();
+        }
+        assert_eq!(last, Value::Int(42));
+    }
+
+    #[test]
+    fn struct_method_then_recursion_in_for_loop() {
+        // Regression: struct method call + recursive fib inside for loop
+        // triggered the CallPath stack effect bug.
+        use zz_runtime::{Interp, Value};
+
+        let dir = temp_project(&[(
+            "main.zz",
+            "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\nfunc fib(n: int) -> int { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\np := Point { x: 3, y: 4 }\nd := dist(p)\nfor i in 0..5 { std.io.println(fib(i)) }\nd",
+        )]);
+        let result = load_program(&dir.join("main.zz")).unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        let mut interp = Interp::with_natives(result.natives.clone());
+        let mut last = Value::Unit;
+        for p in &result.programs {
+            last = interp.run(p).unwrap();
+        }
+        assert_eq!(last, Value::Int(7));
+    }
 }
