@@ -774,8 +774,25 @@ impl Parser {
         left
     }
 
+    fn parse_power(&mut self) -> Expr {
+        let base = self.parse_unary();
+        if self.at(TokenKind::StarStar) {
+            self.advance();
+            let exp = self.parse_power(); // right-associative
+            let span = base.span().join(exp.span());
+            Expr::Binary {
+                op: BinOp::Pow,
+                left: Box::new(base),
+                right: Box::new(exp),
+                span,
+            }
+        } else {
+            base
+        }
+    }
+
     fn parse_multiplicative(&mut self) -> Expr {
-        let mut left = self.parse_unary();
+        let mut left = self.parse_power();
         loop {
             let op = match self.peek_kind() {
                 TokenKind::Star => BinOp::Mul,

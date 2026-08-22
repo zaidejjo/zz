@@ -861,40 +861,34 @@ impl Compiler {
                     } else {
                         args.len()
                     };
-                    if is_range {
-                        // Native expects (start, stop, step). User provides:
-                        // range(stop) -> (0, stop, 1)
-                        // range(start, stop) -> (start, stop, 1)
-                        // range(start, stop, step) -> (start, stop, step)
-                        if args.len() == 1 {
-                            // User gave stop; push start=0, stop, step=1
-                            self.emit_const(Value::Int(0));
-                            self.compile_expr(&args[0]);
-                            self.emit_const(Value::Int(1));
-                        } else if args.len() == 2 {
-                            // User gave start, stop; push start, stop, step=1
-                            self.compile_expr(&args[0]);
-                            self.compile_expr(&args[1]);
-                            self.emit_const(Value::Int(1));
+                    if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
+                        // Slot-based method dispatch: push receiver first, then
+                        // args. CallMethod pops argc args (on top) then pops recv.
+                        self.emit(Op::LoadSlot(slot as u16));
+                        for part in &parts[1..parts.len() - 1] {
+                            self.emit(Op::GetField(part.clone(), *pspan));
+                        }
+                        if is_range {
+                            if args.len() == 1 {
+                                self.emit_const(Value::Int(0));
+                                self.compile_expr(&args[0]);
+                                self.emit_const(Value::Int(1));
+                            } else if args.len() == 2 {
+                                self.compile_expr(&args[0]);
+                                self.compile_expr(&args[1]);
+                                self.emit_const(Value::Int(1));
+                            } else {
+                                for a in args {
+                                    self.compile_expr(a);
+                                }
+                            }
                         } else {
                             for a in args {
                                 self.compile_expr(a);
                             }
                         }
-                    } else {
-                        for a in args {
-                            self.compile_expr(a);
-                        }
-                    }
-                    if is_input {
-                        self.emit_const(Value::Str(String::new()));
-                    }
-                    if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
-                        // Slot-based receiver: load the receiver chain, then
-                        // resolve the last component as a field or method.
-                        self.emit(Op::LoadSlot(slot as u16));
-                        for part in &parts[1..parts.len() - 1] {
-                            self.emit(Op::GetField(part.clone(), *pspan));
+                        if is_input {
+                            self.emit_const(Value::Str(String::new()));
                         }
                         self.emit(Op::CallMethod {
                             name: parts.last().unwrap().clone(),
@@ -902,6 +896,29 @@ impl Compiler {
                             span: *span,
                         });
                     } else {
+                        // Path-based dispatch: args on stack, resolved at runtime.
+                        if is_range {
+                            if args.len() == 1 {
+                                self.emit_const(Value::Int(0));
+                                self.compile_expr(&args[0]);
+                                self.emit_const(Value::Int(1));
+                            } else if args.len() == 2 {
+                                self.compile_expr(&args[0]);
+                                self.compile_expr(&args[1]);
+                                self.emit_const(Value::Int(1));
+                            } else {
+                                for a in args {
+                                    self.compile_expr(a);
+                                }
+                            }
+                        } else {
+                            for a in args {
+                                self.compile_expr(a);
+                            }
+                        }
+                        if is_input {
+                            self.emit_const(Value::Str(String::new()));
+                        }
                         self.emit(Op::CallPath {
                             parts: parts.clone(),
                             argc: argc as u16,
@@ -909,6 +926,19 @@ impl Compiler {
                             pspan: *pspan,
                         });
                     }
+                }
+                // Method call on expression: `expr.method(args)` — push receiver
+                // first, then args. CallMethod pops argc args (on top) then pops recv.
+                Expr::Field { obj, name, span: _ } => {
+                    self.compile_expr(obj);
+                    for a in args {
+                        self.compile_expr(a);
+                    }
+                    self.emit(Op::CallMethod {
+                        name: name.clone(),
+                        argc: args.len() as u16,
+                        span: *span,
+                    });
                 }
                 _ => {
                     // Special case: `input()` with no args -> synthesize empty prompt

@@ -138,6 +138,9 @@ impl<'a> Lexer<'a> {
                     self.emit_significant(TokenKind::Arrow, self.pos, self.pos + 2)
                 }
                 '-' => self.emit_significant(TokenKind::Minus, self.pos, self.pos + 1),
+                '*' if self.peek_char_at(1) == Some('*') => {
+                    self.emit_significant(TokenKind::StarStar, self.pos, self.pos + 2)
+                }
                 '*' => self.emit_significant(TokenKind::Star, self.pos, self.pos + 1),
                 '%' => self.emit_significant(TokenKind::Percent, self.pos, self.pos + 1),
                 '=' if self.peek_char_at(1) == Some('=') => {
@@ -286,6 +289,7 @@ impl<'a> Lexer<'a> {
                 TokenKind::Plus
                     | TokenKind::Minus
                     | TokenKind::Star
+                    | TokenKind::StarStar
                     | TokenKind::Slash
                     | TokenKind::Percent
                     | TokenKind::Assign

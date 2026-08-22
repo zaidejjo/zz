@@ -363,4 +363,182 @@ mod tests {
             start.elapsed()
         );
     }
+
+    // --- literal method calls -----------------------------------------------
+
+    #[test]
+    fn literal_str_method_trim() {
+        assert_eq!(
+            run("\" hello \".trim()").unwrap(),
+            Value::Str("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn literal_str_method_to_upper() {
+        assert_eq!(
+            run("\"hello\".to_upper()").unwrap(),
+            Value::Str("HELLO".to_string())
+        );
+    }
+
+    #[test]
+    fn literal_str_method_to_lower() {
+        assert_eq!(
+            run("\"HELLO\".to_lower()").unwrap(),
+            Value::Str("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn literal_str_method_chaining() {
+        assert_eq!(
+            run("\" hello \".trim().to_upper()").unwrap(),
+            Value::Str("HELLO".to_string())
+        );
+    }
+
+    #[test]
+    fn literal_str_method_triple_chain() {
+        assert_eq!(
+            run("\"  world  \".trim().to_upper().to_lower()").unwrap(),
+            Value::Str("world".to_string())
+        );
+    }
+
+    #[test]
+    fn literal_array_method_reverse() {
+        assert_eq!(
+            run("[1, 2, 3].reverse()").unwrap(),
+            Value::Array(vec![Value::Int(3), Value::Int(2), Value::Int(1),])
+        );
+    }
+
+    #[test]
+    fn literal_array_method_sort() {
+        assert_eq!(
+            run("[3, 1, 2].sort()").unwrap(),
+            Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3),])
+        );
+    }
+
+    // --- power operator ------------------------------------------------------
+
+    #[test]
+    fn pow_int_basic() {
+        assert_eq!(run("2 ** 3").unwrap(), Value::Int(8));
+    }
+
+    #[test]
+    fn pow_int_zero_exp() {
+        assert_eq!(run("5 ** 0").unwrap(), Value::Int(1));
+    }
+
+    #[test]
+    fn pow_int_large() {
+        assert_eq!(run("2 ** 10").unwrap(), Value::Int(1024));
+    }
+
+    #[test]
+    fn pow_float() {
+        let v = run("2.0 ** 0.5").unwrap();
+        match v {
+            Value::Float(f) => assert!((f - 1.4142135623730951).abs() < 1e-10),
+            other => panic!("expected float, got {other}"),
+        }
+    }
+
+    #[test]
+    fn pow_right_associative() {
+        // 2 ** 2 ** 3 == 2 ** (2 ** 3) == 2 ** 8 == 256
+        assert_eq!(run("2 ** 2 ** 3").unwrap(), Value::Int(256));
+    }
+
+    // --- option.unwrap / unwrap_or / expect -----------------------------------
+
+    #[test]
+    fn option_unwrap_some() {
+        assert_eq!(run(".some(42).unwrap()").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn option_unwrap_or_some() {
+        assert_eq!(run(".some(42).unwrap_or(0)").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn option_unwrap_or_none() {
+        assert_eq!(run(".none.unwrap_or(99)").unwrap(), Value::Int(99));
+    }
+
+    #[test]
+    fn option_expect_some() {
+        assert_eq!(
+            run(".some(42).expect(\"should exist\")").unwrap(),
+            Value::Int(42)
+        );
+    }
+
+    #[test]
+    fn option_expect_none_errors() {
+        let err = run(".none.expect(\"missing!\")").unwrap_err();
+        assert!(err.contains("missing!"), "{}", err);
+    }
+
+    // --- result.unwrap / unwrap_or / expect -----------------------------------
+
+    #[test]
+    fn result_unwrap_ok() {
+        assert_eq!(run(".ok(42).unwrap()").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn result_unwrap_or_ok() {
+        assert_eq!(run(".ok(42).unwrap_or(0)").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn result_unwrap_or_err() {
+        assert_eq!(run(".err(\"boom\").unwrap_or(99)").unwrap(), Value::Int(99));
+    }
+
+    #[test]
+    fn result_expect_ok() {
+        assert_eq!(
+            run(".ok(42).expect(\"should work\")").unwrap(),
+            Value::Int(42)
+        );
+    }
+
+    #[test]
+    fn result_expect_err_errors() {
+        let err = run(".err(\"bad\").expect(\"nope\")").unwrap_err();
+        assert!(err.contains("nope"), "{}", err);
+        assert!(err.contains("bad"), "{}", err);
+    }
+
+    // --- option.unwrap via variable -------------------------------------------
+
+    #[test]
+    fn option_unwrap_via_int_parse() {
+        assert_eq!(run("x := int(\"42\")\nx.unwrap()").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn option_unwrap_or_via_int_parse() {
+        assert_eq!(
+            run("x := int(\"abc\")\nx.unwrap_or(-1)").unwrap(),
+            Value::Int(-1)
+        );
+    }
+
+    // --- result.unwrap via variable -------------------------------------------
+
+    #[test]
+    fn result_unwrap_via_fs() {
+        let v =
+            run("import std.fs\nfs.read_file(\"/tmp/zz_no_such_file_zz\").unwrap_or(\"default\")")
+                .unwrap();
+        assert_eq!(v, Value::Str("default".to_string()));
+    }
 }

@@ -673,6 +673,28 @@ impl Checker {
                         }
                     },
                     other => {
+                        // Try method dispatch for non-struct types (Option,
+                        // Result, str, vec) — same lookup as check_call's
+                        // Expr::Field callee path.
+                        let method = name.clone();
+                        let ns = match &other {
+                            Type::Str => Some("str"),
+                            Type::Array(_) => Some("vec"),
+                            Type::Option(_) => Some("option"),
+                            Type::Result(_, _) => Some("result"),
+                            _ => None,
+                        };
+                        if let Some(ns) = ns {
+                            if let Some(sig) = self.funcs.get(&format!("{ns}.{method}")).cloned() {
+                                let (ps, ret) = self.instantiate(&sig);
+                                if !ps.is_empty() {
+                                    if let Err(e) = self.unifier.unify(&other, &ps[0]) {
+                                        self.report_mismatch(e, *span);
+                                    }
+                                }
+                                return ret;
+                            }
+                        }
                         self.errors.push(error_at(
                             format!("cannot access field `{name}` on a value of type `{other}`"),
                             *span,
@@ -982,7 +1004,7 @@ impl Checker {
                 }
                 Type::Bool
             }
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow => {
                 self.check_arith(op, left, right, span)
             }
         }
@@ -1026,6 +1048,48 @@ impl Checker {
         let direct_name = match callee {
             Expr::Ident { name, .. } => Some(name.clone()),
             Expr::Path { parts, .. } => Some(parts.join(".")),
+            Expr::Field { obj, name, .. } => {
+                // Method call: `obj.method()` — resolve as method on obj's type
+                let recv_t = self.check_expr(obj);
+                let recv_t = self.unifier.resolve(&recv_t);
+                let method = name.clone();
+                let mut sig = self.funcs.get(&method).cloned();
+                if sig.is_none() {
+                    match &self.unifier.resolve(&recv_t) {
+                        Type::Str => sig = self.funcs.get(&format!("str.{method}")).cloned(),
+                        Type::Array(_) => sig = self.funcs.get(&format!("vec.{method}")).cloned(),
+                        Type::Option(_) => {
+                            sig = self.funcs.get(&format!("option.{method}")).cloned()
+                        }
+                        Type::Result(_, _) => {
+                            sig = self.funcs.get(&format!("result.{method}")).cloned()
+                        }
+                        Type::Struct(sname) => {
+                            if let Some((ns, _)) = sname.rsplit_once('.') {
+                                sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(sig) = sig {
+                    let (ps, ret) = self.instantiate(&sig);
+                    if ps.is_empty() {
+                        self.errors.push(error_at(
+                            format!("method `{method}` takes no arguments"),
+                            span,
+                        ));
+                        return Type::Unit;
+                    }
+                    if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
+                        self.report_mismatch(e, span);
+                    }
+                    self.check_args_against(ps[1..].to_vec(), args, span);
+                    return ret;
+                }
+                // Fall through to general call handling if no method found
+                None
+            }
             _ => None,
         };
         if let Some(name) = &direct_name {
@@ -1070,18 +1134,35 @@ impl Checker {
         // Method call: `p.dist()` resolves to `dist(p, ...)` when the full
         // path isn't a known function. The receiver is the path minus its
         // last component; the method is looked up by name — first bare, then
-        // namespaced by the receiver's struct type (`shapes.Point` → tries
-        // `shapes.dist`).
+        // namespaced by the receiver's type (`str.trim`, `vec.push`, or
+        // `shapes.Point` → tries `shapes.dist`).
         if let Expr::Path { parts, span: pspan } = callee {
             if parts.len() >= 2 {
                 let method = parts.last().unwrap();
                 let recv_t = self.lookup_path(&parts[..parts.len() - 1], *pspan);
                 let mut sig = self.funcs.get(method).cloned();
                 if sig.is_none() {
-                    if let Type::Struct(sname) = self.unifier.resolve(&recv_t) {
-                        if let Some((ns, _)) = sname.rsplit_once('.') {
-                            sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                    // Try type-specific namespace (str.trim, vec.push, etc.)
+                    let recv_t_resolved = self.unifier.resolve(&recv_t);
+                    match &recv_t_resolved {
+                        Type::Str => {
+                            sig = self.funcs.get(&format!("str.{method}")).cloned();
                         }
+                        Type::Array(_) => {
+                            sig = self.funcs.get(&format!("vec.{method}")).cloned();
+                        }
+                        Type::Option(_) => {
+                            sig = self.funcs.get(&format!("option.{method}")).cloned();
+                        }
+                        Type::Result(_, _) => {
+                            sig = self.funcs.get(&format!("result.{method}")).cloned();
+                        }
+                        Type::Struct(sname) => {
+                            if let Some((ns, _)) = sname.rsplit_once('.') {
+                                sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 if let Some(sig) = sig {

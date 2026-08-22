@@ -139,6 +139,43 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Bool),
     );
 
+    // str.* methods (for method dispatch: "hello".trim())
+    m.insert("str.trim".into(), sig(vec![("s", Type::Str)], Type::Str));
+    m.insert(
+        "str.to_upper".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "str.to_lower".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "str.split".into(),
+        sig(
+            vec![("s", Type::Str), ("sep", Type::Str)],
+            Type::Array(Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "str.contains".into(),
+        sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "str.replace".into(),
+        sig(
+            vec![("s", Type::Str), ("old", Type::Str), ("new", Type::Str)],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "str.starts_with".into(),
+        sig(vec![("s", Type::Str), ("prefix", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "str.ends_with".into(),
+        sig(vec![("s", Type::Str), ("suffix", Type::Str)], Type::Bool),
+    );
+
     // std.vec — generic over element type T.
     let t = Type::Named("T".to_string());
     m.insert(
@@ -156,8 +193,136 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.vec.pop".into(),
         sig_t(
             vec![("v", Type::Array(Box::new(t.clone())))],
-            Type::Array(Box::new(t)),
+            Type::Array(Box::new(t.clone())),
         ),
+    );
+
+    // vec.* methods (for method dispatch: [1,2].push(3))
+    m.insert(
+        "vec.len".into(),
+        sig_t(vec![("v", Type::Array(Box::new(t.clone())))], Type::Int),
+    );
+    m.insert(
+        "vec.push".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone()))), ("x", t.clone())],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "vec.pop".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone())))],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "vec.reverse".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone())))],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "vec.join".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone()))), ("sep", Type::Str)],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "vec.contains".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone()))), ("x", t.clone())],
+            Type::Bool,
+        ),
+    );
+    m.insert(
+        "vec.sort".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone())))],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "vec.insert".into(),
+        sig_t(
+            vec![
+                ("v", Type::Array(Box::new(t.clone()))),
+                ("idx", Type::Int),
+                ("x", t.clone()),
+            ],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "vec.remove".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone()))), ("idx", Type::Int)],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+
+    // option.* methods (for method dispatch: .some(1).unwrap_or(0))
+    let t = Type::Named("T".to_string());
+    m.insert(
+        "option.unwrap".into(),
+        sig_t(vec![("opt", Type::Option(Box::new(t.clone())))], t.clone()),
+    );
+    m.insert(
+        "option.unwrap_or".into(),
+        sig_t(
+            vec![
+                ("opt", Type::Option(Box::new(t.clone()))),
+                ("default", t.clone()),
+            ],
+            t.clone(),
+        ),
+    );
+    m.insert(
+        "option.expect".into(),
+        sig_t(
+            vec![
+                ("opt", Type::Option(Box::new(t.clone()))),
+                ("msg", Type::Str),
+            ],
+            t.clone(),
+        ),
+    );
+
+    // result.* methods (for method dispatch: .ok(1).unwrap_or(0))
+    let t = Type::Named("T".to_string());
+    let e = Type::Named("E".to_string());
+    let result_t = Type::Result(Box::new(t.clone()), Box::new(e.clone()));
+    m.insert(
+        "result.unwrap".into(),
+        FuncSig {
+            generics: vec!["T".to_string(), "E".to_string()],
+            params: vec![("res".to_string(), result_t.clone())],
+            ret: t.clone(),
+        },
+    );
+    m.insert(
+        "result.unwrap_or".into(),
+        FuncSig {
+            generics: vec!["T".to_string(), "E".to_string()],
+            params: vec![
+                ("res".to_string(), result_t.clone()),
+                ("default".to_string(), t.clone()),
+            ],
+            ret: t.clone(),
+        },
+    );
+    m.insert(
+        "result.expect".into(),
+        FuncSig {
+            generics: vec!["T".to_string(), "E".to_string()],
+            params: vec![
+                ("res".to_string(), result_t),
+                ("msg".to_string(), Type::Str),
+            ],
+            ret: t,
+        },
     );
 
     // std.json
@@ -345,7 +510,7 @@ mod tests {
         assert!(funcs.contains_key("str"));
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
-        assert_eq!(funcs.len(), 47);
+        assert_eq!(funcs.len(), 70);
     }
 
     #[test]

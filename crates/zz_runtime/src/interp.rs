@@ -383,25 +383,31 @@ impl Interp {
     }
 
     /// Resolve a method on a receiver: try the bare name, then the
-    /// namespace implied by the receiver's struct type (`shapes.Point` →
-    /// `shapes.dist`).
+    /// namespace implied by the receiver's type (`str.trim`, `vec.push`,
+    /// or `shapes.Point` → `shapes.dist`).
     pub(crate) fn lookup_method(
         &self,
         recv: &Value,
         method: &str,
         span: Span,
     ) -> Result<Value, EvalError> {
-        match self.lookup_callable(method, span) {
-            Ok(f) => Ok(f),
-            Err(_) => {
-                if let Value::Object { name, .. } = recv {
-                    if let Some((ns, _)) = name.rsplit_once('.') {
-                        return self.lookup_callable(&format!("{ns}.{method}"), span);
-                    }
-                }
-                Err(EvalError::new(format!("undefined method `{method}`"), span))
+        // First try bare name (for top-level functions)
+        if let Ok(f) = self.lookup_callable(method, span) {
+            return Ok(f);
+        }
+        // Try type-specific namespace (str.trim, vec.push, etc.)
+        if let Some(ns) = recv.method_namespace() {
+            if let Ok(f) = self.lookup_callable(&format!("{ns}.{method}"), span) {
+                return Ok(f);
             }
         }
+        // Fallback: struct namespace (for backward compatibility)
+        if let Value::Object { name, .. } = recv {
+            if let Some((ns, _)) = name.rsplit_once('.') {
+                return self.lookup_callable(&format!("{ns}.{method}"), span);
+            }
+        }
+        Err(EvalError::new(format!("undefined method `{method}`"), span))
     }
 
     /// Write a mutated container back to the variable it came from. Handles
@@ -550,6 +556,22 @@ impl Interp {
                             }
                         }
                     }
+                }
+                // Method call on expression: `expr.method(args)` — evaluates
+                // the receiver, looks up the method on its type, and calls it.
+                if let Expr::Field {
+                    obj,
+                    name,
+                    span: fspan,
+                } = callee.as_ref()
+                {
+                    let recv = self.eval(obj)?.into_value()?;
+                    let f = self.lookup_method(&recv, name, *fspan)?;
+                    let mut arg_vals = vec![recv];
+                    for a in args {
+                        arg_vals.push(self.eval(a)?.into_value()?);
+                    }
+                    return self.call(f, arg_vals, *span).map(Flow::Value);
                 }
                 let f = self.eval(callee)?.into_value()?;
                 let mut arg_vals = Vec::with_capacity(args.len());
@@ -1092,6 +1114,7 @@ impl Interp {
                     BinOp::Mul => a * b,
                     BinOp::Div => a / b,
                     BinOp::Rem => a % b,
+                    BinOp::Pow => a.powf(b),
                     _ => return Err(EvalError::new("arithmetic on non-numeric value", span)),
                 };
                 Ok(Value::Float(result))
@@ -1129,6 +1152,15 @@ impl Interp {
                     a.checked_rem(b)
                         .map(Value::Int)
                         .ok_or_else(|| EvalError::new("integer overflow in modulo", span))
+                }
+            }
+            BinOp::Pow => {
+                if b < 0 {
+                    Err(EvalError::new("negative exponent for integer power", span))
+                } else {
+                    a.checked_pow(b as u32)
+                        .map(Value::Int)
+                        .ok_or_else(|| EvalError::new("integer overflow in exponentiation", span))
                 }
             }
             BinOp::Eq => Ok(Value::Bool(a == b)),
