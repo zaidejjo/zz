@@ -104,6 +104,63 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
             f: str_contains,
         },
     );
+    // str.* methods (for method dispatch: "hello".trim())
+    m.insert(
+        "str.trim".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_trim,
+        },
+    );
+    m.insert(
+        "str.to_upper".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_to_upper,
+        },
+    );
+    m.insert(
+        "str.to_lower".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_to_lower,
+        },
+    );
+    m.insert(
+        "str.split".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_split,
+        },
+    );
+    m.insert(
+        "str.contains".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_contains,
+        },
+    );
+    m.insert(
+        "str.replace".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_replace,
+        },
+    );
+    m.insert(
+        "str.starts_with".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_starts_with,
+        },
+    );
+    m.insert(
+        "str.ends_with".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_ends_with,
+        },
+    );
 
     // std.vec
     m.insert(
@@ -125,6 +182,70 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: vec_pop,
+        },
+    );
+    // vec.* methods (for method dispatch: [1,2].push(3))
+    m.insert(
+        "vec.len".into(),
+        NativeEntry {
+            arity: 1,
+            f: vec_len,
+        },
+    );
+    m.insert(
+        "vec.push".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_push,
+        },
+    );
+    m.insert(
+        "vec.pop".into(),
+        NativeEntry {
+            arity: 1,
+            f: vec_pop,
+        },
+    );
+    m.insert(
+        "vec.reverse".into(),
+        NativeEntry {
+            arity: 1,
+            f: vec_reverse,
+        },
+    );
+    m.insert(
+        "vec.join".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_join,
+        },
+    );
+    m.insert(
+        "vec.contains".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_contains,
+        },
+    );
+    m.insert(
+        "vec.sort".into(),
+        NativeEntry {
+            arity: 1,
+            f: vec_sort,
+        },
+    );
+    m.insert(
+        "vec.insert".into(),
+        NativeEntry {
+            arity: 3,
+            f: vec_insert,
+        },
+    );
+    m.insert(
+        "vec.remove".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_remove,
         },
     );
 
@@ -469,18 +590,52 @@ fn str_contains(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, Ev
     Ok(Value::Bool(s.contains(&sub)))
 }
 
+fn str_trim(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "str.trim")?;
+    Ok(Value::Str(s.trim().to_string()))
+}
+
+fn str_to_upper(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "str.to_upper")?;
+    Ok(Value::Str(s.to_uppercase()))
+}
+
+fn str_to_lower(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "str.to_lower")?;
+    Ok(Value::Str(s.to_lowercase()))
+}
+
+fn str_replace(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "str.replace")?;
+    let old = expect_str(args, 1, "str.replace")?;
+    let new = expect_str(args, 2, "str.replace")?;
+    Ok(Value::Str(s.replace(&old, &new)))
+}
+
+fn str_starts_with(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "str.starts_with")?;
+    let prefix = expect_str(args, 1, "str.starts_with")?;
+    Ok(Value::Bool(s.starts_with(&prefix)))
+}
+
+fn str_ends_with(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "str.ends_with")?;
+    let suffix = expect_str(args, 1, "str.ends_with")?;
+    Ok(Value::Bool(s.ends_with(&suffix)))
+}
+
 // --- std.vec ----------------------------------------------------------------
 
 fn vec_len(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
-    let vs = expect_array(args, 0, "std.vec.len")?;
+    let vs = expect_array(args, 0, "vec.len")?;
     Ok(Value::Int(vs.len() as i64))
 }
 
 fn vec_push(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "std.vec.push")?;
+    let mut vs = expect_array(args, 0, "vec.push")?;
     let x = args.get(1).cloned().ok_or_else(|| {
         EvalError::new(
-            "missing argument `x` for std.vec.push",
+            "missing argument `x` for vec.push",
             zz_runtime::Span::new(0, 0),
         )
     })?;
@@ -489,14 +644,93 @@ fn vec_push(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalEr
 }
 
 fn vec_pop(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "std.vec.pop")?;
+    let mut vs = expect_array(args, 0, "vec.pop")?;
     if vs.is_empty() {
         return Err(EvalError::new(
-            "std.vec.pop: cannot pop from an empty array",
+            "vec.pop: cannot pop from an empty array",
             zz_runtime::Span::new(0, 0),
         ));
     }
     vs.pop();
+    Ok(Value::Array(vs))
+}
+
+fn vec_reverse(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let mut vs = expect_array(args, 0, "vec.reverse")?;
+    vs.reverse();
+    Ok(Value::Array(vs))
+}
+
+fn vec_join(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let vs = expect_array(args, 0, "vec.join")?;
+    let sep = expect_str(args, 1, "vec.join")?;
+    let parts: Vec<String> = vs.iter().map(|v| v.to_string()).collect();
+    Ok(Value::Str(parts.join(&sep)))
+}
+
+fn vec_contains(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let vs = expect_array(args, 0, "vec.contains")?;
+    let x = args.get(1).cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument `x` for vec.contains",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    Ok(Value::Bool(vs.contains(&x)))
+}
+
+fn vec_sort(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let mut vs = expect_array(args, 0, "vec.sort")?;
+    // Sort by type name first, then by value for same types
+    vs.sort_by(|a, b| {
+        let ta = a.type_name();
+        let tb = b.type_name();
+        ta.cmp(&tb).then_with(|| match (a, b) {
+            (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            (Value::Float(a), Value::Float(b)) => {
+                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Value::Str(a), Value::Str(b)) => a.cmp(b),
+            (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+            _ => std::cmp::Ordering::Equal,
+        })
+    });
+    Ok(Value::Array(vs))
+}
+
+fn vec_insert(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let mut vs = expect_array(args, 0, "vec.insert")?;
+    let idx = expect_int(args, 1, "vec.insert")?;
+    let x = args.get(2).cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument `x` for vec.insert",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    let len = vs.len() as i64;
+    let idx = if idx < 0 { len + idx } else { idx };
+    if idx < 0 || idx > len {
+        return Err(EvalError::new(
+            format!("vec.insert: index {idx} out of bounds for length {len}"),
+            zz_runtime::Span::new(0, 0),
+        ));
+    }
+    vs.insert(idx as usize, x);
+    Ok(Value::Array(vs))
+}
+
+fn vec_remove(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let mut vs = expect_array(args, 0, "vec.remove")?;
+    let idx = expect_int(args, 1, "vec.remove")?;
+    let len = vs.len() as i64;
+    let idx = if idx < 0 { len + idx } else { idx };
+    if idx < 0 || idx >= len {
+        return Err(EvalError::new(
+            format!("vec.remove: index {idx} out of bounds for length {len}"),
+            zz_runtime::Span::new(0, 0),
+        ));
+    }
+    vs.remove(idx as usize);
     Ok(Value::Array(vs))
 }
 

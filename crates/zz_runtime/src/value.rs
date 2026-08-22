@@ -105,6 +105,22 @@ impl Value {
             Value::Tuple(_) => "tuple".to_string(),
         }
     }
+
+    /// The method namespace for this value type, used for method dispatch.
+    /// Returns "str" for strings, "vec" for arrays, the struct namespace for
+    /// objects, and None for types without method support.
+    pub fn method_namespace(&self) -> Option<&'static str> {
+        match self {
+            Value::Str(_) => Some("str"),
+            Value::Array(_) => Some("vec"),
+            Value::Object { name, .. } => {
+                // Extract namespace from struct name (e.g., "shapes.Point" -> "shapes")
+                name.rsplit_once('.')
+                    .map(|(ns, _)| Box::leak(ns.to_string().into_boxed_str()) as &str)
+            }
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Value {
