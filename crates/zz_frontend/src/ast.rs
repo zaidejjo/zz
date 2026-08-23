@@ -230,6 +230,15 @@ pub enum Expr {
         end: Option<Box<Expr>>,
         span: Span,
     },
+    /// List comprehension: `[expr for x in iter]` or
+    /// `[expr for x in iter if cond]`.
+    ListComp {
+        body: Box<Expr>,
+        var: Ident,
+        iter: Box<Expr>,
+        filter: Option<Box<Expr>>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -386,7 +395,8 @@ impl Expr {
             | Expr::Range { span, .. }
             | Expr::StructInit { span, .. }
             | Expr::Index { span, .. }
-            | Expr::Slice { span, .. } => *span,
+            | Expr::Slice { span, .. }
+            | Expr::ListComp { span, .. } => *span,
             Expr::Block(b) => b.span,
         }
     }

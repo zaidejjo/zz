@@ -141,6 +141,8 @@ pub enum Op {
     // ---- collections ----
     /// Pop `n` values and push an array.
     MakeArray(u16),
+    /// Pop a value and an array; push the array with the value appended.
+    ArrayPush(Span),
     /// Pop `2n` values (key, value pairs) and push a dict.
     MakeDict(u16),
     /// Pop an index, pop an object, push `object[index]`.
@@ -346,6 +348,7 @@ impl Compiler {
             Op::Break | Op::Continue => 0,
             Op::SetLoopResult => -1,
             Op::MakeArray(n) => 1 - *n as i64,
+            Op::ArrayPush(_) => -1,
             Op::MakeDict(n) => 1 - 2 * *n as i64,
             Op::IndexOp(_) => -1,
             Op::StoreIndexOp(_) => -2,
@@ -1054,6 +1057,75 @@ impl Compiler {
                 }
                 self.emit(Op::MakeArray(elems.len() as u16));
             }
+            Expr::ListComp {
+                body,
+                var,
+                iter,
+                filter,
+                span,
+            } => {
+                // Reserve a slot for the result array.
+                let result_slot = self.stack_height;
+                self.emit_const(Value::Unit); // placeholder
+                                              // Create empty result array and store it in the reserved slot.
+                self.emit(Op::MakeArray(0));
+                self.emit(Op::StoreSlot(result_slot as u16));
+                // Compile the iterator (now at stack bottom).
+                self.compile_expr(iter);
+                // Set up the for loop. ForSetup pops the iterable, pushes
+                // iterable, idx, placeholder. Result array stays in its slot.
+                let setup_pos = self.chunk.code.len();
+                self.emit(Op::ForSetup {
+                    exit: 0,
+                    header: 0,
+                    span: *span,
+                });
+                let header = self.chunk.code.len();
+                let in_env = self.captured.contains(&var.name);
+                let j = self.emit_for_next(&var.name, in_env);
+                // The loop variable: a slot (item left on the stack by ForNext)
+                // or an environment binding (captured).
+                // IMPORTANT: Add the local BEFORE compiling filter/body so the
+                // variable resolves correctly in those expressions.
+                self.locals.push(Local {
+                    name: var.name.clone(),
+                    slot: self.stack_height - 1,
+                    in_env,
+                });
+                // Loop body: load result array from slot, compile body, append, store back.
+                if let Some(f) = filter {
+                    self.compile_expr(f);
+                    // If filter is false, jump to header (next iteration).
+                    self.emit(Op::JumpIfFalse(header));
+                    // Load result array, compile body, append, store back.
+                    self.emit(Op::LoadSlot(result_slot as u16));
+                    self.compile_expr(body);
+                    self.emit(Op::ArrayPush(*span));
+                    self.emit(Op::StoreSlot(result_slot as u16));
+                    // Jump back to loop header.
+                    self.emit(Op::Jump(header));
+                } else {
+                    // No filter: load result array, compile body, append, store back.
+                    self.emit(Op::LoadSlot(result_slot as u16));
+                    self.compile_expr(body);
+                    self.emit(Op::ArrayPush(*span));
+                    self.emit(Op::StoreSlot(result_slot as u16));
+                    self.emit(Op::Jump(header));
+                }
+                self.patch_jump(j);
+                let exit = self.chunk.code.len();
+                self.chunk.code[setup_pos] = Op::ForSetup {
+                    exit,
+                    header,
+                    span: *span,
+                };
+                self.locals.pop();
+                // After ForNext truncation, the result array is already the
+                // only value on the stack at position `result_slot`. No need
+                // to LoadSlot — doing so would push a duplicate that leaks
+                // into subsequent comprehensions, shifting slot offsets.
+                self.stack_height = result_slot + 1;
+            }
             Expr::Dict { entries, .. } => {
                 for (k, v) in entries {
                     self.compile_expr(k);
@@ -1347,6 +1419,21 @@ fn scan_expr_captured(
             for e in elems {
                 scan_expr_captured(e, defined, free);
             }
+        }
+        Expr::ListComp {
+            body,
+            var,
+            iter,
+            filter,
+            ..
+        } => {
+            scan_expr_captured(iter, defined, free);
+            let mut inner = defined.clone();
+            inner.insert(var.name.clone());
+            if let Some(f) = filter {
+                scan_expr_captured(f, &mut inner, free);
+            }
+            scan_expr_captured(body, &mut inner, free);
         }
         Expr::Dict { entries, .. } => {
             for (k, v) in entries {
@@ -1845,6 +1932,20 @@ impl Vm {
                     }
                     items.reverse();
                     self.stack.push(Value::Array(items));
+                }
+                Op::ArrayPush(span) => {
+                    let value = self.stack.pop().unwrap();
+                    let mut arr = match self.stack.pop().unwrap() {
+                        Value::Array(a) => a,
+                        other => {
+                            return Err(EvalError::new(
+                                format!("ArrayPush: expected array, found `{other}`"),
+                                *span,
+                            ));
+                        }
+                    };
+                    arr.push(value);
+                    self.stack.push(Value::Array(arr));
                 }
                 Op::MakeDict(n) => {
                     let mut pairs = Vec::with_capacity(*n as usize);

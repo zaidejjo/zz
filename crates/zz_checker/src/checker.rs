@@ -900,6 +900,46 @@ impl Checker {
                 let elem_t = self.merge_types(types);
                 Type::Array(Box::new(elem_t))
             }
+            Expr::ListComp {
+                body,
+                var,
+                iter,
+                filter,
+                span,
+            } => {
+                let it = self.check_expr(iter);
+                let it = self.unifier.resolve(&it);
+                let elem = match it {
+                    Type::Array(elem) => *elem,
+                    Type::Range(elem) => *elem,
+                    Type::Var(_) => {
+                        self.errors.push(error_at(
+                            "cannot iterate a value whose type could not be inferred",
+                            *span,
+                        ));
+                        Type::Unit
+                    }
+                    other => {
+                        self.errors.push(error_at(
+                            format!("cannot iterate a value of type `{other}`"),
+                            *span,
+                        ));
+                        Type::Unit
+                    }
+                };
+                self.push_scope();
+                self.define(&var.name, elem);
+                if let Some(f) = filter {
+                    let ft = self.check_expr(f);
+                    let ft = self.unifier.resolve(&ft);
+                    if let Err(e) = self.unifier.unify(&ft, &Type::Bool) {
+                        self.report_mismatch(e, f.span());
+                    }
+                }
+                let body_t = self.check_expr(body);
+                self.pop_scope();
+                Type::Array(Box::new(body_t))
+            }
             Expr::Dict { entries, span: _ } => {
                 let mut key_types = Vec::new();
                 let mut val_types = Vec::new();
