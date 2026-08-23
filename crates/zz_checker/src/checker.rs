@@ -26,6 +26,7 @@ use crate::unify::{Unifier, UnifyError};
 pub struct FuncSig {
     pub generics: Vec<String>,
     pub params: Vec<(String, Type)>,
+    pub has_default: Vec<bool>,
     pub ret: Type,
 }
 
@@ -594,7 +595,7 @@ impl Checker {
             _ => unreachable!(),
         };
         let gen_names: Vec<String> = generics.iter().map(|g| g.name.clone()).collect();
-        let sig_params = params
+        let sig_params: Vec<(String, Type)> = params
             .iter()
             .map(|p| {
                 let ty = match &p.ty {
@@ -604,6 +605,7 @@ impl Checker {
                 (p.name.name.clone(), ty)
             })
             .collect();
+        let has_default: Vec<bool> = params.iter().map(|p| p.default.is_some()).collect();
         let sig_ret = match ret {
             Some(t) => self.ast_to_type(t, &gen_names),
             None => self.unifier.fresh_var(),
@@ -614,6 +616,7 @@ impl Checker {
             FuncSig {
                 generics: gen_names,
                 params: sig_params,
+                has_default,
                 ret: sig_ret,
             },
         );
@@ -827,7 +830,12 @@ impl Checker {
                 right,
                 span,
             } => self.check_binary(*op, left, right, *span),
-            Expr::Call { callee, args, span } => self.check_call(callee, args, *span),
+            Expr::Call {
+                callee,
+                args,
+                named,
+                span,
+            } => self.check_call(callee, args, named, *span),
             Expr::Closure { params, body, span } => self.check_closure(params, body, *span),
             Expr::If {
                 cond,
@@ -1103,7 +1111,13 @@ impl Checker {
         result
     }
 
-    fn check_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Type {
+    fn check_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        named: &[(String, Expr)],
+        span: Span,
+    ) -> Type {
         // Direct call of a named function: bypass `lookup` so generic
         // functions are instantiated here rather than rejected as values.
         let direct_name = match callee {
@@ -1145,7 +1159,17 @@ impl Checker {
                     if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
                         self.report_mismatch(e, span);
                     }
-                    self.check_args_against(ps[1..].to_vec(), args, span);
+                    self.check_args_against(
+                        &sig.params[1..]
+                            .iter()
+                            .map(|(n, _)| n.clone())
+                            .collect::<Vec<_>>(),
+                        &ps[1..],
+                        &[],
+                        args,
+                        named,
+                        span,
+                    );
                     return ret;
                 }
                 // Fall through to general call handling if no method found
@@ -1158,24 +1182,33 @@ impl Checker {
                 let (ps, ret) = self.instantiate(&sig);
                 // Special case: `input` accepts 0 or 1 string argument (optional prompt)
                 if name == "input" {
-                    if args.len() > 1 {
+                    if args.len() + named.len() > 1 {
                         self.errors.push(error_at(
-                            format!("expected 0 or 1 arguments, found {}", args.len()),
+                            format!(
+                                "expected 0 or 1 arguments, found {}",
+                                args.len() + named.len()
+                            ),
                             span,
                         ));
-                    } else if args.len() == 1 {
-                        let at = self.check_expr(&args[0]);
+                    } else if args.len() + named.len() == 1 {
+                        let arg_expr = if !args.is_empty() {
+                            &args[0]
+                        } else {
+                            &named[0].1
+                        };
+                        let at = self.check_expr(arg_expr);
                         if let Err(e) = self.unifier.unify(&at, &Type::Str) {
-                            self.report_mismatch(e, args[0].span());
+                            self.report_mismatch(e, arg_expr.span());
                         }
                     }
                     return ret;
                 }
                 // Special case: `range` accepts 1, 2, or 3 int arguments
                 if name == "range" {
-                    if args.is_empty() || args.len() > 3 {
+                    let total = args.len() + named.len();
+                    if total == 0 || total > 3 {
                         self.errors.push(error_at(
-                            format!("range expects 1, 2, or 3 arguments, found {}", args.len()),
+                            format!("range expects 1, 2, or 3 arguments, found {total}"),
                             span,
                         ));
                     } else {
@@ -1185,25 +1218,28 @@ impl Checker {
                                 self.report_mismatch(e, arg.span());
                             }
                         }
+                        for (_, val) in named {
+                            let at = self.check_expr(val);
+                            if let Err(e) = self.unifier.unify(&at, &Type::Int) {
+                                self.report_mismatch(e, val.span());
+                            }
+                        }
                     }
                     return ret;
                 }
-                self.check_args_against(ps, args, span);
+                let pnames: Vec<String> = sig.params.iter().map(|(n, _)| n.clone()).collect();
+                self.check_args_against(&pnames, &ps, &sig.has_default, args, named, span);
                 return ret;
             }
         }
         // Method call: `p.dist()` resolves to `dist(p, ...)` when the full
-        // path isn't a known function. The receiver is the path minus its
-        // last component; the method is looked up by name — first bare, then
-        // namespaced by the receiver's type (`str.trim`, `vec.push`, or
-        // `shapes.Point` → tries `shapes.dist`).
+        // path isn't a known function.
         if let Expr::Path { parts, span: pspan } = callee {
             if parts.len() >= 2 {
                 let method = parts.last().unwrap();
                 let recv_t = self.lookup_path(&parts[..parts.len() - 1], *pspan);
                 let mut sig = self.funcs.get(method).cloned();
                 if sig.is_none() {
-                    // Try type-specific namespace (str.trim, vec.push, etc.)
                     let recv_t_resolved = self.unifier.resolve(&recv_t);
                     match &recv_t_resolved {
                         Type::Str => {
@@ -1238,7 +1274,17 @@ impl Checker {
                     if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
                         self.report_mismatch(e, *pspan);
                     }
-                    self.check_args_against(ps[1..].to_vec(), args, span);
+                    self.check_args_against(
+                        &sig.params[1..]
+                            .iter()
+                            .map(|(n, _)| n.clone())
+                            .collect::<Vec<_>>(),
+                        &ps[1..],
+                        &[],
+                        args,
+                        named,
+                        span,
+                    );
                     return ret;
                 }
             }
@@ -1248,13 +1294,17 @@ impl Checker {
         let callee_t = self.unifier.resolve(&callee_t);
         match callee_t {
             Type::Func(ps, ret) => {
-                self.check_args_against(ps, args, span);
+                // No param names for anonymous function types; positional-only.
+                let pnames: Vec<String> = (0..ps.len()).map(|i| format!("_{i}")).collect();
+                self.check_args_against(&pnames, &ps, &[], args, named, span);
                 *ret
             }
             Type::Named(name) => match self.funcs.get(&name).cloned() {
                 Some(sig) => {
                     let (ps, ret) = self.instantiate(&sig);
-                    self.check_args_against(ps, args, span);
+                    let param_names: Vec<String> =
+                        sig.params.iter().map(|(n, _)| n.clone()).collect();
+                    self.check_args_against(&param_names, &ps, &sig.has_default, args, named, span);
                     ret
                 }
                 None => {
@@ -1280,18 +1330,84 @@ impl Checker {
         }
     }
 
-    fn check_args_against(&mut self, ps: Vec<Type>, args: &[Expr], span: Span) {
-        if ps.len() != args.len() {
+    /// Check that the given positional and named arguments match the parameter
+    /// types.  `has_default` indicates which trailing parameters have defaults;
+    /// callers may omit those.
+    fn check_args_against(
+        &mut self,
+        param_names: &[String],
+        ps: &[Type],
+        has_default: &[bool],
+        args: &[Expr],
+        named: &[(String, Expr)],
+        span: Span,
+    ) {
+        let total_provided = args.len() + named.len();
+        let total_params = ps.len();
+        let allowed_min = total_params - has_default.iter().filter(|&&d| d).count();
+
+        if total_provided < allowed_min || total_provided > total_params {
             self.errors.push(error_at(
-                format!("expected {} arguments, found {}", ps.len(), args.len()),
+                format!(
+                    "expected {} to {} arguments, found {}",
+                    allowed_min, total_params, total_provided
+                ),
                 span,
             ));
             return;
         }
-        for (arg, p) in args.iter().zip(ps.iter()) {
-            let at = self.check_expr(arg);
-            if let Err(e) = self.unifier.unify(&at, p) {
-                self.report_mismatch(e, arg.span());
+
+        // Build a slot for each param: None = use default.
+        let mut slots: Vec<Option<&Expr>> = vec![None; total_params];
+
+        // Place positional args.
+        for (i, arg) in args.iter().enumerate() {
+            if i >= total_params {
+                self.errors.push(error_at(
+                    format!("too many positional arguments (max {})", total_params),
+                    arg.span(),
+                ));
+                return;
+            }
+            if slots[i].is_some() {
+                self.errors.push(error_at(
+                    format!("positional argument `{}` conflicts with named argument", i),
+                    arg.span(),
+                ));
+                return;
+            }
+            slots[i] = Some(arg);
+        }
+
+        // Place named args.
+        for (name, val) in named {
+            let pos = param_names.iter().position(|pn| pn == name);
+            match pos {
+                Some(i) => {
+                    if slots[i].is_some() {
+                        self.errors.push(error_at(
+                            format!("argument `{name}` already provided positionally"),
+                            val.span(),
+                        ));
+                        return;
+                    }
+                    slots[i] = Some(val);
+                }
+                None => {
+                    self.errors
+                        .push(error_at(format!("unknown parameter `{name}`"), val.span()));
+                    return;
+                }
+            }
+        }
+
+        // Type-check each provided argument.
+        for (i, slot) in slots.iter().enumerate() {
+            if let Some(arg) = slot {
+                let at = self.check_expr(arg);
+                if let Err(e) = self.unifier.unify(&at, &ps[i]) {
+                    self.report_mismatch(e, arg.span());
+                }
             }
         }
     }
@@ -1800,7 +1916,7 @@ mod tests {
     fn wrong_arg_count_errors() {
         errors_contain(
             "func f(a: int) -> int { a }\nf(1, 2)",
-            "expected 1 arguments, found 2",
+            "expected 1 to 1 arguments, found 2",
         );
     }
 
@@ -2378,6 +2494,7 @@ mod tests {
             FuncSig {
                 generics: vec!["T".to_string()],
                 params: vec![("v".to_string(), Type::Named("T".to_string()))],
+                has_default: vec![],
                 ret: Type::Str,
             },
         );
@@ -2406,6 +2523,7 @@ mod tests {
                     ("p".to_string(), Type::Struct("Point".to_string())),
                     ("scale".to_string(), Type::Int),
                 ],
+                has_default: vec![],
                 ret: Type::Int,
             },
         );
@@ -2474,6 +2592,7 @@ mod tests {
             FuncSig {
                 generics: Vec::new(),
                 params: vec![("p".to_string(), Type::Struct("shapes.Point".to_string()))],
+                has_default: vec![],
                 ret: Type::Int,
             },
         );
@@ -2503,6 +2622,7 @@ mod tests {
             FuncSig {
                 generics: vec!["T".to_string()],
                 params: vec![("v".to_string(), t.clone())],
+                has_default: vec![],
                 ret: Type::Str,
             },
         );
@@ -2511,6 +2631,7 @@ mod tests {
             FuncSig {
                 generics: vec!["T".to_string()],
                 params: vec![("v".to_string(), t.clone())],
+                has_default: vec![],
                 ret: Type::Option(Box::new(Type::Int)),
             },
         );
@@ -2519,6 +2640,7 @@ mod tests {
             FuncSig {
                 generics: vec!["T".to_string()],
                 params: vec![("v".to_string(), t.clone())],
+                has_default: vec![],
                 ret: Type::Option(Box::new(Type::Float)),
             },
         );

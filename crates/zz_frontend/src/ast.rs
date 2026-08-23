@@ -82,6 +82,7 @@ pub struct Ident {
 pub struct Param {
     pub name: Ident,
     pub ty: Option<Ty>,
+    pub default: Option<Box<Expr>>,
     pub span: Span,
 }
 
@@ -145,6 +146,7 @@ pub enum Expr {
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        named: Vec<(String, Expr)>,
         span: Span,
     },
     Closure {

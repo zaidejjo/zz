@@ -550,7 +550,12 @@ impl Interp {
                 let r = self.eval(right)?.into_value()?;
                 self.eval_binary(*op, l, r, *span).map(Flow::Value)
             }
-            Expr::Call { callee, args, span } => {
+            Expr::Call {
+                callee,
+                args,
+                named,
+                span,
+            } => {
                 // Method call: `p.dist()` — when the full path isn't a direct
                 // function or field, resolve the last component as a method
                 // on the receiver (the path minus its last component).
@@ -593,9 +598,35 @@ impl Interp {
                     return self.call(f, arg_vals, *span).map(Flow::Value);
                 }
                 let f = self.eval(callee)?.into_value()?;
-                let mut arg_vals = Vec::with_capacity(args.len());
+                // Evaluate positional args.
+                let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len() + named.len());
                 for a in args {
                     arg_vals.push(self.eval(a)?.into_value()?);
+                }
+                // Evaluate named args.
+                let mut named_vals: Vec<(String, Value)> = Vec::with_capacity(named.len());
+                for (n, v) in named {
+                    named_vals.push((n.clone(), self.eval(v)?.into_value()?));
+                }
+                // If there are named args, reorder to match parameter order.
+                if !named_vals.is_empty() {
+                    if let Value::Func(fv) = &f {
+                        let n = fv.params.len();
+                        let mut reordered: Vec<Value> = vec![Value::Unit; n];
+                        // Place positional args.
+                        for (i, v) in arg_vals.iter().enumerate() {
+                            if i < n {
+                                reordered[i] = v.clone();
+                            }
+                        }
+                        // Place named args.
+                        for (name, val) in &named_vals {
+                            if let Some(i) = fv.params.iter().position(|p| &p.name.name == name) {
+                                reordered[i] = val.clone();
+                            }
+                        }
+                        arg_vals = reordered;
+                    }
                 }
                 self.call(f, arg_vals, *span).map(Flow::Value)
             }

@@ -363,10 +363,24 @@ impl Parser {
             } else {
                 None
             };
-            let span = name
+            // Default parameter value: `param: type = expr` or `param = expr`.
+            let default = if self.eat(TokenKind::Assign) {
+                Some(Box::new(self.parse_expr()))
+            } else {
+                None
+            };
+            let mut span = name
                 .span
                 .join(ty.as_ref().map(|t| t.span).unwrap_or(name.span));
-            params.push(Param { name, ty, span });
+            if let Some(ref d) = default {
+                span = span.join(d.span());
+            }
+            params.push(Param {
+                name,
+                ty,
+                default,
+                span,
+            });
             if self.eat(TokenKind::Comma) {
                 continue;
             }
@@ -638,19 +652,29 @@ impl Parser {
         let span = lhs.span().join(rhs.span());
         match rhs {
             Expr::Call {
-                callee, mut args, ..
+                callee,
+                mut args,
+                named,
+                ..
             } => {
                 args.insert(0, lhs);
-                Expr::Call { callee, args, span }
+                Expr::Call {
+                    callee,
+                    args,
+                    named,
+                    span,
+                }
             }
             Expr::Ident { name, span } => Expr::Call {
                 callee: Box::new(Expr::Ident { name, span }),
                 args: vec![lhs],
+                named: vec![],
                 span,
             },
             Expr::Path { parts, span } => Expr::Call {
                 callee: Box::new(Expr::Path { parts, span }),
                 args: vec![lhs],
+                named: vec![],
                 span,
             },
             other => {
@@ -853,7 +877,7 @@ impl Parser {
             match self.peek_kind() {
                 TokenKind::LParen => {
                     self.advance();
-                    let args = self.parse_expr_list();
+                    let (args, named) = self.parse_call_args();
                     let end = if self.eat_close(TokenKind::RParen) {
                         self.previous().span
                     } else {
@@ -864,6 +888,7 @@ impl Parser {
                     expr = Expr::Call {
                         callee: Box::new(expr),
                         args,
+                        named,
                         span,
                     };
                 }
@@ -955,6 +980,33 @@ impl Parser {
             break;
         }
         args
+    }
+
+    /// Parse call arguments: `(pos1, pos2, name1: val1, name2: val2)`.
+    /// Returns `(positional_args, named_args)`.
+    fn parse_call_args(&mut self) -> (Vec<Expr>, Vec<(String, Expr)>) {
+        let mut args = Vec::new();
+        let mut named = Vec::new();
+        if self.at(TokenKind::RParen) {
+            return (args, named);
+        }
+        loop {
+            // Peek for `IDENT : expr` pattern (named argument).
+            // Only treat as named arg if current token is ident AND next is colon.
+            if self.at(TokenKind::Ident) && self.peek_kind_at(1) == TokenKind::Colon {
+                let name = self.advance().text;
+                self.advance(); // consume `:`
+                let value = self.parse_expr();
+                named.push((name, value));
+            } else {
+                args.push(self.parse_expr());
+            }
+            if self.eat(TokenKind::Comma) {
+                continue;
+            }
+            break;
+        }
+        (args, named)
     }
 
     /// Assemble an interpolated string from the token sequence produced by
@@ -1220,7 +1272,12 @@ impl Parser {
                 let span = name
                     .span
                     .join(ty.as_ref().map(|t| t.span).unwrap_or(name.span));
-                params.push(Param { name, ty, span });
+                params.push(Param {
+                    name,
+                    ty,
+                    default: None,
+                    span,
+                });
                 if self.eat(TokenKind::Comma) {
                     continue;
                 }
