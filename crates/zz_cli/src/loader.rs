@@ -455,6 +455,9 @@ impl Rewriter<'_> {
                 self.pop_scope();
             }
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::Defer { expr, .. } => {
+                self.rewrite_expr(expr);
+            }
             Stmt::Assign { target, value, .. } => {
                 self.rewrite_expr(target);
                 self.rewrite_expr(value);

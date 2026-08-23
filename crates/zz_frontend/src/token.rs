@@ -49,6 +49,7 @@ pub enum TokenKind {
     In,
     Break,
     Continue,
+    Defer,
     // Literals
     Int,
     Float,
@@ -111,6 +112,7 @@ impl TokenKind {
             TokenKind::In => "`in`",
             TokenKind::Break => "`break`",
             TokenKind::Continue => "`continue`",
+            TokenKind::Defer => "`defer`",
             TokenKind::Int => "integer literal",
             TokenKind::Float => "float literal",
             TokenKind::Str => "string literal",

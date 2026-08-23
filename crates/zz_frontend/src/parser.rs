@@ -151,6 +151,15 @@ impl Parser {
                 let tok = self.advance();
                 Stmt::Continue { span: tok.span }
             }
+            TokenKind::Defer => {
+                let tok = self.advance();
+                let expr = self.parse_expr();
+                let span = tok.span.join(expr.span());
+                Stmt::Defer {
+                    expr: Box::new(expr),
+                    span,
+                }
+            }
             _ => {
                 // Try `TYPE IDENT = expr` (explicit declaration). Backtrack
                 // on failure so ordinary expressions still parse.

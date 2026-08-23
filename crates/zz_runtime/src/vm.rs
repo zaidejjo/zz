@@ -247,6 +247,11 @@ pub enum Op {
     /// Pop the top value, discard `n` values below it, and push the value
     /// back: leaves a scope's result while dropping its local slots.
     PopN(u16),
+
+    // ---- defer ----
+    /// Record a deferred closure: pop a closure value, push onto the
+    /// frame's defer stack. Executed LIFO on scope exit.
+    DeferRecord,
 }
 
 /// A compile-time-resolved local variable.
@@ -415,6 +420,7 @@ impl Compiler {
             Op::FormatValue(_) => -1,
             Op::EnterScope | Op::ExitScope => 0,
             Op::PopN(n) => -(*n as i64),
+            Op::DeferRecord => -1,
         }
     }
 
@@ -680,6 +686,25 @@ impl Compiler {
             }
             Stmt::Continue { .. } => {
                 self.emit(Op::Continue);
+                StmtValue::None
+            }
+            Stmt::Defer { expr, .. } => {
+                // Compile the expression into a zero-param chunk and create a
+                // closure capturing the current environment. The closure is
+                // recorded on the frame's defer stack and executed LIFO when
+                // the scope exits.
+                let body = Block {
+                    stmts: vec![Stmt::Expr(expr.as_ref().clone())],
+                    span: expr.span(),
+                };
+                let chunk = self.compile_func_body(&body, &[]);
+                self.emit(Op::MakeClosure {
+                    params: vec![],
+                    chunk,
+                });
+                self.emit(Op::DeferRecord);
+                // Net stack effect is 0 (MakeClosure +1, DeferRecord -1).
+                // Return None so compile_block_body does NOT emit an extra Pop.
                 StmtValue::None
             }
             Stmt::Assign { target, value, .. } => match target {
@@ -1670,6 +1695,9 @@ fn scan_stmt_captured(
             }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Defer { expr, .. } => {
+            scan_expr_captured(expr, defined, free);
+        }
         Stmt::Assign { target, value, .. } => {
             scan_expr_captured(value, defined, free);
             scan_expr_captured(target, defined, free);
@@ -1697,6 +1725,9 @@ struct Frame {
     prev_env: Rc<RefCell<Env>>,
     /// Stack index where this frame's evaluation begins.
     stack_base: usize,
+    /// Deferred closures accumulated in this frame. Saved/restored across
+    /// nested calls so each frame only drains its own defers.
+    defer_stack: Vec<Value>,
 }
 
 /// One active loop (native `for`/`while`). Used by `break`/`continue` to
@@ -1734,6 +1765,27 @@ pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<Frame>,
     loops: Vec<LoopInfo>,
+    /// Deferred closures for the current frame. `DeferRecord` pushes here;
+    /// `Return` and frame-end pop and execute in LIFO order.
+    defer_stack: Vec<Value>,
+    /// When executing defers before a return, this holds the saved return
+    /// value and remaining deferred closures. `None` when not in a defer-
+    /// execution sequence.
+    defer_return: Option<DeferReturn>,
+}
+
+/// State saved during defer-before-return execution.
+struct DeferReturn {
+    return_value: Value,
+    remaining: Vec<Value>,
+    /// Parent frame's deferred closures, saved so they can be restored
+    /// after this frame's defers complete.
+    parent_defers: Vec<Value>,
+    /// True if this defer sequence was triggered by an explicit `Return`
+    /// (as opposed to chunk-end implicit return). When all defers finish,
+    /// a Return-origin defer must unwind the current frame rather than
+    /// just pushing the return value and continuing.
+    from_return: bool,
 }
 
 impl Default for Vm {
@@ -1748,6 +1800,8 @@ impl Vm {
             stack: Vec::new(),
             frames: Vec::new(),
             loops: Vec::new(),
+            defer_stack: Vec::new(),
+            defer_return: None,
         }
     }
 
@@ -1755,6 +1809,28 @@ impl Vm {
     /// compiled closure parameters before calling `run_chunk_with_base`.
     pub(crate) fn push(&mut self, v: Value) {
         self.stack.push(v);
+    }
+
+    /// Push a deferred closure's chunk as a new frame for inline execution.
+    fn push_defer_frame(&mut self, interp: &mut Interp) {
+        let state = self.defer_return.as_mut().unwrap();
+        let closure = state.remaining.pop().unwrap();
+        if let Value::Func(fv) = closure {
+            if let Some(chunk) = fv.chunk {
+                let stack_base = self.stack.len();
+                let prev_env = std::mem::replace(&mut interp.env, Rc::clone(&fv.env));
+                // Defer frames get their own empty defer stack.
+                let saved_defers = std::mem::take(&mut self.defer_stack);
+                self.frames.push(Frame {
+                    chunk,
+                    ip: 0,
+                    prev_env,
+                    stack_base,
+                    defer_stack: saved_defers,
+                });
+            }
+        }
+        // Non-chunk closure: ignore (shouldn't happen for defer)
     }
 
     /// Run a chunk to completion. Returns the chunk's value, or a control
@@ -1782,6 +1858,7 @@ impl Vm {
             ip: 0,
             prev_env: Rc::clone(&interp.env),
             stack_base,
+            defer_stack: Vec::new(),
         });
 
         loop {
@@ -1798,7 +1875,8 @@ impl Vm {
 
             if ip >= code.len() {
                 // Chunk ran off the end: implicit return of the block value.
-                let v = if self.stack.len() > self.frames.last().unwrap().stack_base {
+                let sb = self.frames.last().unwrap().stack_base;
+                let v = if self.stack.len() > sb {
                     self.stack.pop().unwrap()
                 } else {
                     Value::Unit
@@ -1806,6 +1884,59 @@ impl Vm {
                 let f = self.frames.pop().unwrap();
                 self.stack.truncate(f.stack_base);
                 interp.env = f.prev_env;
+                // f.defer_stack holds the parent frame's saved defers.
+                let parent_defers = f.defer_stack;
+
+                // If we're in a defer-execution sequence, check for more
+                // defers or finish the original return.
+                if let Some(ref mut state) = self.defer_return {
+                    if !state.remaining.is_empty() {
+                        // More defers to execute — push the next frame.
+                        self.push_defer_frame(interp);
+                        continue;
+                    } else {
+                        // All defers done — restore parent's defers and
+                        // complete the original return.
+                        let saved = std::mem::take(&mut self.defer_return).unwrap();
+                        self.defer_stack = saved.parent_defers;
+                        if saved.from_return {
+                            // The defers were triggered by an explicit
+                            // Return. Unwind the calling frame so we don't
+                            // continue executing past the Return.
+                            match self.unwind_frame(Flow::Return(saved.return_value), interp) {
+                                Unwind::Continue => {}
+                                Unwind::Escaped(flow) => return Ok(flow),
+                                Unwind::Error(e) => return Err(e),
+                            }
+                        } else {
+                            // Implicit chunk-end return. The frame was
+                            // already popped; just push the value.
+                            if self.frames.is_empty() {
+                                return Ok(Flow::Value(saved.return_value));
+                            }
+                            self.stack.push(saved.return_value);
+                        }
+                        continue;
+                    }
+                }
+
+                // Check for defers that need to execute on frame exit.
+                let defers: Vec<Value> = self.defer_stack.drain(..).collect();
+                if !defers.is_empty() {
+                    // Save the block value and execute defers inline.
+                    self.defer_return = Some(DeferReturn {
+                        return_value: v,
+                        remaining: defers,
+                        parent_defers,
+                        from_return: false,
+                    });
+                    self.push_defer_frame(interp);
+                    continue;
+                }
+
+                // No defers — restore parent's deferred closures and exit.
+                self.defer_stack = parent_defers;
+
                 if self.frames.is_empty() {
                     return Ok(Flow::Value(v));
                 }
@@ -1938,10 +2069,31 @@ impl Vm {
                 }
                 Op::Return => {
                     let v = self.stack.pop().unwrap();
-                    match self.unwind_frame(Flow::Return(v), interp) {
-                        Unwind::Continue => {}
-                        Unwind::Escaped(flow) => return Ok(flow),
-                        Unwind::Error(e) => return Err(e),
+                    // Execute defers in LIFO order before returning.
+                    // Push deferred frames inline (no sub-Vm) and save the
+                    // return value until all defers complete.
+                    let defers: Vec<Value> = self.defer_stack.drain(..).collect();
+                    if defers.is_empty() {
+                        match self.unwind_frame(Flow::Return(v), interp) {
+                            Unwind::Continue => {}
+                            Unwind::Escaped(flow) => return Ok(flow),
+                            Unwind::Error(e) => return Err(e),
+                        }
+                    } else {
+                        // Save the parent frame's defers before pushing the
+                        // defer frame (which will take self.defer_stack).
+                        let parent_defers = self
+                            .frames
+                            .last()
+                            .map(|f| f.defer_stack.clone())
+                            .unwrap_or_default();
+                        self.defer_return = Some(DeferReturn {
+                            return_value: v,
+                            remaining: defers,
+                            parent_defers,
+                            from_return: true,
+                        });
+                        self.push_defer_frame(interp);
                     }
                 }
                 Op::ForSetup { exit, header, span } => {
@@ -2447,6 +2599,10 @@ impl Vm {
                     self.stack.truncate(len - 1 - *n as usize);
                     self.stack.push(result);
                 }
+                Op::DeferRecord => {
+                    let closure = self.stack.pop().unwrap();
+                    self.defer_stack.push(closure);
+                }
             }
         }
     }
@@ -2479,11 +2635,16 @@ impl Vm {
                 let stack_base = self.stack.len();
                 self.stack.extend(args);
                 let prev_env = std::mem::replace(&mut interp.env, Rc::clone(&fv.env));
+                // Save the caller's defer stack and start fresh for the
+                // callee. This prevents nested function exits from draining
+                // defers that belong to an outer frame.
+                let saved_defers = std::mem::take(&mut self.defer_stack);
                 self.frames.push(Frame {
                     chunk: fv.chunk.unwrap(),
                     ip: 0,
                     prev_env,
                     stack_base,
+                    defer_stack: saved_defers,
                 });
                 Ok(())
             }
