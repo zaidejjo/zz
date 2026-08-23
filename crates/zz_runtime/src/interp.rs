@@ -686,6 +686,83 @@ impl Interp {
                 }
                 Ok(Flow::Value(Value::Array(vs)))
             }
+            Expr::ListComp {
+                body,
+                var,
+                iter,
+                filter,
+                ..
+            } => {
+                let it = self.eval(iter)?.into_value()?;
+                let mut results = Vec::new();
+                match it {
+                    Value::Array(items) => {
+                        for item in items {
+                            let scope = Env::with_parent(&self.env);
+                            scope.borrow_mut().define(&var.name, item);
+                            let prev = std::mem::replace(&mut self.env, scope);
+                            let dominated = if let Some(f) = filter {
+                                let cond = self.eval(f)?.into_value()?;
+                                matches!(cond, Value::Bool(true))
+                            } else {
+                                true
+                            };
+                            if dominated {
+                                let v = self.eval(body)?.into_value()?;
+                                results.push(v);
+                            }
+                            self.env = prev;
+                        }
+                    }
+                    Value::Range(start, end, step) => {
+                        let mut i = start;
+                        if step > 0 {
+                            while i < end {
+                                let scope = Env::with_parent(&self.env);
+                                scope.borrow_mut().define(&var.name, Value::Int(i));
+                                let prev = std::mem::replace(&mut self.env, scope);
+                                let dominated = if let Some(f) = filter {
+                                    let cond = self.eval(f)?.into_value()?;
+                                    matches!(cond, Value::Bool(true))
+                                } else {
+                                    true
+                                };
+                                if dominated {
+                                    let v = self.eval(body)?.into_value()?;
+                                    results.push(v);
+                                }
+                                self.env = prev;
+                                i += step;
+                            }
+                        } else if step < 0 {
+                            while i > end {
+                                let scope = Env::with_parent(&self.env);
+                                scope.borrow_mut().define(&var.name, Value::Int(i));
+                                let prev = std::mem::replace(&mut self.env, scope);
+                                let dominated = if let Some(f) = filter {
+                                    let cond = self.eval(f)?.into_value()?;
+                                    matches!(cond, Value::Bool(true))
+                                } else {
+                                    true
+                                };
+                                if dominated {
+                                    let v = self.eval(body)?.into_value()?;
+                                    results.push(v);
+                                }
+                                self.env = prev;
+                                i += step;
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(EvalError::new(
+                            format!("cannot iterate a value of type `{other}`"),
+                            iter.span(),
+                        ));
+                    }
+                }
+                Ok(Flow::Value(Value::Array(results)))
+            }
             Expr::Dict { entries, .. } => {
                 let mut pairs = Vec::with_capacity(entries.len());
                 for (k, v) in entries {

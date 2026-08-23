@@ -617,6 +617,19 @@ impl Rewriter<'_> {
                     self.rewrite_expr(e);
                 }
             }
+            Expr::ListComp {
+                body,
+                var: _,
+                iter,
+                filter,
+                ..
+            } => {
+                self.rewrite_expr(iter);
+                self.rewrite_expr(body);
+                if let Some(f) = filter {
+                    self.rewrite_expr(f);
+                }
+            }
             Expr::Dict { entries, .. } => {
                 for (k, v) in entries {
                     self.rewrite_expr(k);

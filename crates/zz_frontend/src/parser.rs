@@ -1252,15 +1252,27 @@ impl Parser {
 
     fn parse_array_literal(&mut self) -> Expr {
         let lbracket = self.advance();
-        let mut elems = Vec::new();
-        if !self.at(TokenKind::RBracket) {
-            loop {
-                elems.push(self.parse_expr());
-                if self.eat(TokenKind::Comma) {
-                    continue;
-                }
-                break;
+        // Empty array: `[]`.
+        if self.eat(TokenKind::RBracket) {
+            let span = lbracket.span.join(self.previous().span);
+            return Expr::Array {
+                elems: Vec::new(),
+                span,
+            };
+        }
+        // Parse first expression — could be a comprehension body or array element.
+        let first = self.parse_expr();
+        // List comprehension: `[expr for x in iter]` / `[expr for x in iter if cond]`.
+        if self.at(TokenKind::For) {
+            return self.parse_list_comp_body(lbracket, first);
+        }
+        // Normal array literal: `[a, b, c]`.
+        let mut elems = vec![first];
+        while self.eat(TokenKind::Comma) {
+            if self.at(TokenKind::RBracket) {
+                break; // trailing comma
             }
+            elems.push(self.parse_expr());
         }
         let end = if self.eat_close(TokenKind::RBracket) {
             self.previous().span
@@ -1270,6 +1282,38 @@ impl Parser {
         };
         Expr::Array {
             elems,
+            span: lbracket.span.join(end),
+        }
+    }
+
+    /// Parse the `for x in iter [if cond]` part of a list comprehension.
+    /// `first` is the already-parsed body expression.
+    fn parse_list_comp_body(&mut self, lbracket: Token, first: Expr) -> Expr {
+        self.advance(); // `for`
+        let var = self
+            .expect_ident()
+            .unwrap_or_else(|| dummy_ident(self.peek().span));
+        if !self.eat(TokenKind::In) {
+            self.error_here("expected `in` after loop variable");
+        }
+        let iter = self.parse_expr();
+        let filter = if self.at(TokenKind::If) {
+            self.advance();
+            Some(Box::new(self.parse_expr()))
+        } else {
+            None
+        };
+        let end = if self.eat_close(TokenKind::RBracket) {
+            self.previous().span
+        } else {
+            self.error_here("expected `]` to close list comprehension");
+            lbracket.span
+        };
+        Expr::ListComp {
+            body: Box::new(first),
+            var,
+            iter: Box::new(iter),
+            filter,
             span: lbracket.span.join(end),
         }
     }
