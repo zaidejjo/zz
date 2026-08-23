@@ -12,6 +12,7 @@ fn sig(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
             .into_iter()
             .map(|(n, t)| (n.to_string(), t))
             .collect(),
+        has_default: vec![],
         ret,
     }
 }
@@ -24,6 +25,7 @@ fn sig_t(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
             .into_iter()
             .map(|(n, t)| (n.to_string(), t))
             .collect(),
+        has_default: vec![],
         ret,
     }
 }
@@ -36,6 +38,7 @@ fn sig_tu(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
             .into_iter()
             .map(|(n, t)| (n.to_string(), t))
             .collect(),
+        has_default: vec![],
         ret,
     }
 }
@@ -299,6 +302,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         FuncSig {
             generics: vec!["T".to_string(), "E".to_string()],
             params: vec![("res".to_string(), result_t.clone())],
+            has_default: vec![],
             ret: t.clone(),
         },
     );
@@ -310,6 +314,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
                 ("res".to_string(), result_t.clone()),
                 ("default".to_string(), t.clone()),
             ],
+            has_default: vec![],
             ret: t.clone(),
         },
     );
@@ -321,6 +326,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
                 ("res".to_string(), result_t),
                 ("msg".to_string(), Type::Str),
             ],
+            has_default: vec![],
             ret: t,
         },
     );

@@ -268,6 +268,15 @@ enum Resolved {
     Env,
 }
 
+/// Compiled info for a known function, used to reorder named args
+/// and fill defaults at call sites.
+#[derive(Debug, Clone)]
+struct FuncInfo {
+    param_names: Vec<String>,
+    has_default: Vec<bool>,
+    defaults: Vec<Option<Box<zz_frontend::ast::Expr>>>,
+}
+
 /// Lowers an AST into a [`Chunk`].
 pub struct Compiler {
     chunk: Chunk,
@@ -284,6 +293,8 @@ pub struct Compiler {
     /// True for the top-level program chunk (depth-0 declarations are
     /// globals, stored in the environment).
     is_main: bool,
+    /// Known function signatures for named-arg reordering.
+    func_info: std::collections::HashMap<String, FuncInfo>,
 }
 
 enum JumpKind {
@@ -308,6 +319,7 @@ impl Compiler {
             stack_height: 0,
             captured: std::collections::HashSet::new(),
             is_main: false,
+            func_info: std::collections::HashMap::new(),
         }
     }
 
@@ -316,6 +328,20 @@ impl Compiler {
     pub fn compile_program(program: &Program) -> Chunk {
         let mut c = Compiler::new();
         c.is_main = true;
+        // Pre-scan: collect function signatures for named-arg reordering.
+        for stmt in &program.stmts {
+            if let Stmt::Func { name, params, .. } = stmt {
+                let full = name.join(".");
+                c.func_info.insert(
+                    full,
+                    FuncInfo {
+                        param_names: params.iter().map(|p| p.name.name.clone()).collect(),
+                        has_default: params.iter().map(|p| p.default.is_some()).collect(),
+                        defaults: params.iter().map(|p| p.default.clone()).collect(),
+                    },
+                );
+            }
+        }
         for (i, stmt) in program.stmts.iter().enumerate() {
             let v = c.compile_stmt(stmt);
             if i < program.stmts.len() - 1 && matches!(v, StmtValue::Discard) {
@@ -782,6 +808,57 @@ impl Compiler {
         Rc::new(sub.chunk)
     }
 
+    /// Compile call arguments reordered to match the parameter order of a
+    /// known function.  Positional args keep their slot; named args are
+    /// placed by name.  Missing args with defaults are compiled from the
+    /// stored AST.
+    fn compile_reordered_args(&mut self, func_name: &str, args: &[Expr], named: &[(String, Expr)]) {
+        let info = match self.func_info.get(func_name) {
+            Some(fi) => fi.clone(),
+            None => {
+                // Unknown function — just push positional then named.
+                for a in args {
+                    self.compile_expr(a);
+                }
+                for (_, val) in named {
+                    self.compile_expr(val);
+                }
+                return;
+            }
+        };
+        let n = info.param_names.len();
+        // Build a slot for each param: None = positional, Some(Expr) = named/default.
+        let mut slots: Vec<Option<Expr>> = vec![None; n];
+        // Place positional args.
+        for (i, arg) in args.iter().enumerate() {
+            if i < n {
+                slots[i] = Some(arg.clone());
+            }
+        }
+        // Place named args.
+        for (name, val) in named {
+            if let Some(i) = info.param_names.iter().position(|pn| pn == name) {
+                if slots[i].is_none() {
+                    slots[i] = Some(val.clone());
+                }
+            }
+        }
+        // Fill defaults for remaining slots.
+        for (i, slot) in slots.iter_mut().enumerate() {
+            if slot.is_none() {
+                if let Some(Some(default)) = info.defaults.get(i) {
+                    *slot = Some(default.as_ref().clone());
+                }
+            }
+        }
+        // Compile each slot.
+        for slot in &slots {
+            if let Some(expr) = slot {
+                self.compile_expr(expr);
+            }
+        }
+    }
+
     /// Compile a closure body (an expression) into its own chunk.
     fn compile_closure_body(&mut self, body: &Expr, params: &[Param]) -> Rc<Chunk> {
         let mut sub = Compiler::new();
@@ -870,19 +947,44 @@ impl Compiler {
                     self.emit(Op::BinOp(*op, *span));
                 }
             },
-            Expr::Call { callee, args, span } => match callee.as_ref() {
+            Expr::Call {
+                callee,
+                args,
+                named,
+                span,
+            } => match callee.as_ref() {
                 Expr::Path { parts, span: pspan } => {
+                    let func_name = parts.join(".");
                     // Special case: `input()` with no args -> synthesize empty prompt
-                    let is_input = parts.len() == 1 && parts[0] == "input" && args.is_empty();
+                    let is_input = parts.len() == 1
+                        && parts[0] == "input"
+                        && args.is_empty()
+                        && named.is_empty();
                     // Special case: `range` with 1 or 2 args -> synthesize defaults (start=0, step=1)
-                    let is_range = parts.len() == 1 && parts[0] == "range" && args.len() < 3;
+                    let is_range = parts.len() == 1
+                        && parts[0] == "range"
+                        && args.len() + named.len() < 3
+                        && named.is_empty();
+
+                    // For named args or defaults, reorder and fill at compile time.
+                    let has_named_or_defaults = !named.is_empty()
+                        || self
+                            .func_info
+                            .get(&func_name)
+                            .map_or(false, |fi| fi.has_default.iter().any(|&d| d));
+
                     let argc = if is_input {
                         1
                     } else if is_range {
                         3
+                    } else if has_named_or_defaults {
+                        self.func_info
+                            .get(&func_name)
+                            .map_or(args.len() + named.len(), |fi| fi.param_names.len())
                     } else {
-                        args.len()
+                        args.len() + named.len()
                     };
+
                     if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
                         // Slot-based method dispatch: push receiver first, then
                         // args. CallMethod pops argc args (on top) then pops recv.
@@ -904,6 +1006,8 @@ impl Compiler {
                                     self.compile_expr(a);
                                 }
                             }
+                        } else if has_named_or_defaults {
+                            self.compile_reordered_args(&func_name, args, named);
                         } else {
                             for a in args {
                                 self.compile_expr(a);
@@ -933,6 +1037,8 @@ impl Compiler {
                                     self.compile_expr(a);
                                 }
                             }
+                        } else if has_named_or_defaults {
+                            self.compile_reordered_args(&func_name, args, named);
                         } else {
                             for a in args {
                                 self.compile_expr(a);
@@ -956,26 +1062,51 @@ impl Compiler {
                     for a in args {
                         self.compile_expr(a);
                     }
+                    for (_, val) in named {
+                        self.compile_expr(val);
+                    }
                     self.emit(Op::CallMethod {
                         name: name.clone(),
-                        argc: args.len() as u16,
+                        argc: (args.len() + named.len()) as u16,
                         span: *span,
                     });
                 }
                 _ => {
                     // Special case: `input()` with no args -> synthesize empty prompt
                     let is_input = matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "input")
-                        && args.is_empty();
+                        && args.is_empty()
+                        && named.is_empty();
                     // Special case: `range` with 1 or 2 args -> synthesize defaults
                     let is_range = matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "range")
-                        && args.len() < 3;
+                        && args.len() + named.len() < 3
+                        && named.is_empty();
+
+                    // For Ident callees, look up func_info for defaults/named args.
+                    let callee_name = match callee.as_ref() {
+                        Expr::Ident { name, .. } => Some(name.as_str()),
+                        Expr::Path { parts, .. } => Some(parts[0].as_str()),
+                        _ => None,
+                    };
+                    let has_named_or_defaults = callee_name.map_or(false, |cn| {
+                        !named.is_empty()
+                            || self
+                                .func_info
+                                .get(cn)
+                                .map_or(false, |fi| fi.has_default.iter().any(|&d| d))
+                    });
+
                     let argc = if is_input {
                         1
                     } else if is_range {
                         3
+                    } else if has_named_or_defaults {
+                        callee_name
+                            .and_then(|cn| self.func_info.get(cn))
+                            .map_or(args.len() + named.len(), |fi| fi.param_names.len())
                     } else {
-                        args.len()
+                        args.len() + named.len()
                     };
+
                     self.compile_expr(callee);
                     if is_range {
                         if args.len() == 1 {
@@ -991,6 +1122,8 @@ impl Compiler {
                                 self.compile_expr(a);
                             }
                         }
+                    } else if has_named_or_defaults {
+                        self.compile_reordered_args(callee_name.unwrap(), args, named);
                     } else {
                         for a in args {
                             self.compile_expr(a);
@@ -2752,6 +2885,7 @@ mod tests {
                 span: Span::new(0, 0),
             },
             ty: None,
+            default: None,
             span: Span::new(0, 0),
         }];
         let fv = FuncValue {
