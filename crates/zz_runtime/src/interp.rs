@@ -81,6 +81,9 @@ pub struct Interp {
     /// Command-line arguments passed to the running script (empty in the
     /// REPL). Exposed to scripts via `std.env.args`.
     pub args: Vec<String>,
+    /// Deferred closures per function call level. `Stmt::Defer` pushes
+    /// here; `call_func` pops and executes in LIFO order on return.
+    pub defer_stacks: Vec<Vec<Value>>,
 }
 
 impl Default for Interp {
@@ -97,6 +100,7 @@ impl Interp {
             natives: HashMap::new(),
             structs: HashMap::new(),
             args: Vec::new(),
+            defer_stacks: Vec::new(),
         }
     }
 
@@ -108,6 +112,7 @@ impl Interp {
             natives,
             structs: HashMap::new(),
             args: Vec::new(),
+            defer_stacks: Vec::new(),
         }
     }
 
@@ -253,6 +258,21 @@ impl Interp {
             }
             Stmt::Break { .. } => Ok(Flow::Break),
             Stmt::Continue { .. } => Ok(Flow::Continue),
+            Stmt::Defer { expr, .. } => {
+                // Compile the expression into a closure capturing the current
+                // environment, and push onto the frame's defer stack.
+                let closure = FuncValue {
+                    params: vec![],
+                    body: expr.as_ref().clone(),
+                    env: Rc::clone(&self.env),
+                    chunk: None,
+                };
+                self.defer_stacks
+                    .last_mut()
+                    .unwrap()
+                    .push(Value::Func(closure));
+                Ok(Flow::Value(Value::Unit))
+            }
             Stmt::Assign { target, value, .. } => {
                 let v = self.eval(value)?.into_value()?;
                 self.assign_target(target, v)?;
@@ -1018,7 +1038,17 @@ impl Interp {
                 }
                 vm.run_chunk_with_base(chunk, self, 0)
             }
-            None => self.eval(&fv.body),
+            None => {
+                // Tree-walker path: push a defer stack for this call level.
+                self.defer_stacks.push(Vec::new());
+                let r = self.eval(&fv.body);
+                // Execute defers in LIFO order
+                let defers = self.defer_stacks.pop().unwrap();
+                for closure in defers.into_iter().rev() {
+                    let _ = self.call(closure, vec![], span)?;
+                }
+                r
+            }
         };
         self.env = prev;
         match result? {

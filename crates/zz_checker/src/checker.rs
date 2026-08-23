@@ -434,6 +434,14 @@ impl Checker {
                 }
                 Type::Unit
             }
+            Stmt::Defer { expr, span } => {
+                if self.current_ret.is_none() {
+                    self.errors
+                        .push(error_at("`defer` outside of a function", *span));
+                }
+                self.check_expr(expr);
+                Type::Unit
+            }
             Stmt::Assign {
                 target,
                 value,

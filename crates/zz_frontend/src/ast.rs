@@ -63,6 +63,11 @@ pub enum Stmt {
     Continue {
         span: Span,
     },
+    /// `defer expr` — schedule expr to run when the enclosing scope exits.
+    Defer {
+        expr: Box<Expr>,
+        span: Span,
+    },
     /// `target = value` — assignment to a variable or struct field.
     Assign {
         target: Expr,
@@ -418,6 +423,7 @@ impl Stmt {
             | Stmt::For { span, .. }
             | Stmt::Break { span }
             | Stmt::Continue { span }
+            | Stmt::Defer { span, .. }
             | Stmt::Assign { span, .. } => *span,
             Stmt::Expr(e) => e.span(),
         }

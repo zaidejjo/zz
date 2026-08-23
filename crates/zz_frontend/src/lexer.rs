@@ -367,6 +367,7 @@ impl<'a> Lexer<'a> {
             "in" => TokenKind::In,
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
+            "defer" => TokenKind::Defer,
             _ => TokenKind::Ident,
         };
         self.push_token(kind, span, text);
