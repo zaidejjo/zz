@@ -813,7 +813,7 @@ impl Checker {
                 // Interpolated strings are `str`; embedded expressions are
                 // checked for validity (their Display form is used at runtime).
                 for part in parts {
-                    if let FmtPart::Expr(e) = part {
+                    if let FmtPart::Expr(e, _) = part {
                         let _ = self.check_expr(e);
                     }
                 }
@@ -1035,6 +1035,27 @@ impl Checker {
                 let rt = self.check_expr(right);
                 self.ensure_bool(rt, right.span());
                 Type::Bool
+            }
+            BinOp::Elvis => {
+                let lt = self.check_expr(left);
+                let lt_resolved = self.unifier.resolve(&lt);
+                let rt = self.check_expr(right);
+                let rt_resolved = self.unifier.resolve(&rt);
+                match lt_resolved {
+                    Type::Option(inner) => {
+                        if let Err(e) = self.unifier.unify(&*inner, &rt_resolved) {
+                            self.report_mismatch(e, span);
+                        }
+                        *inner
+                    }
+                    _ => {
+                        // Non-Option left: pass through (allows chaining).
+                        if let Err(e) = self.unifier.unify(&lt, &rt) {
+                            self.report_mismatch(e, span);
+                        }
+                        lt
+                    }
+                }
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                 let lt = self.check_expr(left);

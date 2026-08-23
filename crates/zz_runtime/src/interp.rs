@@ -487,9 +487,12 @@ impl Interp {
                 for part in parts {
                     match part {
                         FmtPart::Text(t) => out.push_str(t),
-                        FmtPart::Expr(e) => {
+                        FmtPart::Expr(e, fmt) => {
                             let v = self.eval(e)?.into_value()?;
-                            out.push_str(&v.to_string());
+                            match fmt {
+                                Some(spec) => out.push_str(&format_value_with_spec(&v, spec)),
+                                None => out.push_str(&v.to_string()),
+                            }
                         }
                     }
                 }
@@ -507,7 +510,7 @@ impl Interp {
                 right,
                 span,
             } => {
-                // Short-circuit && and ||.
+                // Short-circuit &&, ||, and ??.
                 match op {
                     BinOp::And => {
                         let l = self.eval(left)?.into_value()?;
@@ -524,6 +527,22 @@ impl Interp {
                         }
                         let r = self.eval(right)?.into_value()?;
                         return Ok(Flow::Value(Value::Bool(r.is_truthy())));
+                    }
+                    BinOp::Elvis => {
+                        let l = self.eval(left)?.into_value()?;
+                        match l {
+                            Value::Option(Some(v)) => return Ok(Flow::Value(*v)),
+                            Value::Option(None) => {
+                                // Fall through to evaluate right side as fallback.
+                            }
+                            other => {
+                                // Non-Option left: pass through (allows chaining).
+                                return Ok(Flow::Value(other));
+                            }
+                        }
+                        // None case: evaluate right and return it.
+                        let r = self.eval(right)?.into_value()?;
+                        return Ok(Flow::Value(r));
                     }
                     _ => {}
                 }
@@ -1246,7 +1265,7 @@ impl Interp {
             BinOp::Gt => Ok(Value::Bool(a > b)),
             BinOp::Le => Ok(Value::Bool(a <= b)),
             BinOp::Ge => Ok(Value::Bool(a >= b)),
-            BinOp::And | BinOp::Or => unreachable!("short-circuited in eval"),
+            BinOp::And | BinOp::Or | BinOp::Elvis => unreachable!("short-circuited in eval"),
         }
     }
 }
@@ -1258,6 +1277,53 @@ fn value_matches_lit(value: &Value, lit: &Lit) -> bool {
         (Value::Str(a), Lit::Str(b)) => a == b,
         (Value::Bool(a), Lit::Bool(b)) => a == b,
         _ => false,
+    }
+}
+
+/// Apply a format spec to a value for string interpolation.
+///
+/// Supported specs:
+/// - `.Nf` — float with N decimal places (e.g. `.2f` → `3.14`)
+/// - `x` / `X` — hex integer (lowercase / uppercase)
+/// - `o` — octal integer
+/// - `b` — binary integer
+/// - `d` — decimal integer (default for ints)
+/// - `e` / `E` — scientific notation
+/// - `s` — string (default, no-op)
+pub(crate) fn format_value_with_spec(v: &crate::value::Value, spec: &str) -> String {
+    use crate::value::Value;
+    let spec = spec.trim();
+    match v {
+        Value::Int(n) => {
+            if spec == "x" {
+                format!("{n:x}")
+            } else if spec == "X" {
+                format!("{n:X}")
+            } else if spec == "o" {
+                format!("{n:o}")
+            } else if spec == "b" {
+                format!("{n:b}")
+            } else {
+                // "d", empty, or unrecognized specs all produce default decimal.
+                format!("{n}")
+            }
+        }
+        Value::Float(f) => {
+            if let Some(precision) = spec.strip_suffix('f') {
+                let precision: usize = precision.trim_start_matches('.').parse().unwrap_or(0);
+                format!("{f:.precision$}")
+            } else if spec == "e" {
+                format!("{f:e}")
+            } else if spec == "E" {
+                format!("{f:E}")
+            } else if spec == "x" || spec == "X" {
+                // Reinterpret the float bits as integer for hex display.
+                format!("{:?}", f)
+            } else {
+                format!("{f}")
+            }
+        }
+        other => other.to_string(),
     }
 }
 

@@ -663,18 +663,35 @@ impl Parser {
     /// `a..b` — integer range. Lowest precedence so `for i in 0..n` parses
     /// the bounds as full expressions.
     fn parse_range(&mut self) -> Expr {
-        let start = self.parse_or();
+        let start = self.parse_elvis();
         if !self.at(TokenKind::DotDot) {
             return start;
         }
         self.advance();
-        let end = self.parse_or();
+        let end = self.parse_elvis();
         let span = start.span().join(end.span());
         Expr::Range {
             start: Box::new(start),
             end: Box::new(end),
             span,
         }
+    }
+
+    /// `left ?? right` — Elvis operator. Unwraps Option or falls back.
+    fn parse_elvis(&mut self) -> Expr {
+        let mut left = self.parse_or();
+        while self.at(TokenKind::QuestionQuestion) {
+            self.advance();
+            let right = self.parse_or();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op: BinOp::Elvis,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
     }
 
     fn parse_or(&mut self) -> Expr {
@@ -941,7 +958,7 @@ impl Parser {
     }
 
     /// Assemble an interpolated string from the token sequence produced by
-    /// the lexer: `Str (LBrace expr RBrace Str)*`.
+    /// the lexer: `Str (LBrace expr [: fmt_spec] RBrace Str)*`.
     fn parse_fmt_string(&mut self, first: Token) -> Expr {
         let mut parts = vec![FmtPart::Text(first.text)];
         let mut end = first.span;
@@ -951,10 +968,36 @@ impl Parser {
             }
             self.advance();
             let expr = self.parse_expr();
+            // Optional format spec: `{val:.2f}`, `{val:x}`, etc.
+            let fmt_spec = if self.eat(TokenKind::Colon) {
+                // Consume everything up to `}` as the format spec.
+                // The spec is a simple identifier or dot-prefixed like `.2f`.
+                let mut spec = String::new();
+                if self.at(TokenKind::Dot) {
+                    spec.push('.');
+                    self.advance();
+                    // Consume digits after the dot.
+                    while self.at(TokenKind::Int) {
+                        let t = self.advance();
+                        spec.push_str(&t.text);
+                    }
+                    // Consume trailing letter like 'f', 'e', etc.
+                    if self.at(TokenKind::Ident) {
+                        let t = self.advance();
+                        spec.push_str(&t.text);
+                    }
+                } else if self.at(TokenKind::Ident) {
+                    let t = self.advance();
+                    spec.push_str(&t.text);
+                }
+                Some(spec)
+            } else {
+                None
+            };
             if !self.eat(TokenKind::RBrace) {
                 self.error_here("expected `}` to close interpolation");
             }
-            parts.push(FmtPart::Expr(Box::new(expr)));
+            parts.push(FmtPart::Expr(Box::new(expr), fmt_spec));
             match self.peek_kind() {
                 TokenKind::Str => {
                     let t = self.advance();
