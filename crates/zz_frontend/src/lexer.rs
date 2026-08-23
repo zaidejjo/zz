@@ -98,6 +98,7 @@ impl<'a> Lexer<'a> {
                 '/' if self.peek_char_at(1) == Some('/') => self.lex_line_comment(),
                 '/' if self.peek_char_at(1) == Some('*') => self.lex_block_comment(),
                 '/' => self.emit_significant(TokenKind::Slash, self.pos, self.pos + 1),
+                '#' => self.lex_line_comment(),
                 '(' => self.emit_significant(TokenKind::LParen, self.pos, self.pos + 1),
                 ')' => self.emit_significant(TokenKind::RParen, self.pos, self.pos + 1),
                 '{' => {
@@ -649,6 +650,20 @@ mod tests {
         assert_eq!(stmt_end.leading.len(), 2);
         assert_eq!(stmt_end.leading[0].kind, TriviaKind::Whitespace);
         assert_eq!(stmt_end.leading[1].kind, TriviaKind::Comment);
+    }
+
+    #[test]
+    fn hash_line_comment() {
+        let lexed = lex("1 # comment\n2");
+        assert_eq!(
+            lexed.tokens.iter().map(|t| t.kind).collect::<Vec<_>>(),
+            vec![K::Int, K::StmtEnd, K::Int, K::Eof]
+        );
+        let stmt_end = &lexed.tokens[1];
+        assert!(stmt_end
+            .leading
+            .iter()
+            .any(|t| t.kind == TriviaKind::Comment));
     }
 
     #[test]
