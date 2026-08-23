@@ -625,4 +625,60 @@ mod tests {
                 .unwrap();
         assert_eq!(v, Value::Str("default".to_string()));
     }
+
+    // --- elvis operator ?? ---------------------------------------------------
+
+    #[test]
+    fn elvis_some_unwraps() {
+        assert_eq!(run("x := .some(42)\nx ?? 0").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn elvis_none_fallback() {
+        assert_eq!(run("Option<int> x = .none\nx ?? 0").unwrap(), Value::Int(0));
+    }
+
+    #[test]
+    fn elvis_non_option_passes_through() {
+        assert_eq!(run("42 ?? 0").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn elvis_chain() {
+        // Chained ?? with non-Option intermediate: 42 is not Option, passes through.
+        assert_eq!(run("42 ?? 0 ?? -1").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn elvis_none_to_none_chain() {
+        // .some then fallback: first ?? unwraps, second sees plain int.
+        assert_eq!(
+            run(r#"
+                Option<int> a = .some(42)
+                a ?? 0 ?? -1
+            "#)
+            .unwrap(),
+            Value::Int(42)
+        );
+    }
+
+    #[test]
+    fn elvis_with_format_spec_hex() {
+        let v = run(r#"
+            n := 255
+            "{n:x}"
+        "#)
+        .unwrap();
+        assert_eq!(v, Value::Str("ff".to_string()));
+    }
+
+    #[test]
+    fn elvis_with_format_spec_float() {
+        let v = run(r#"
+            pi := 3.14159
+            "{pi:.2f}"
+        "#)
+        .unwrap();
+        assert_eq!(v, Value::Str("3.14".to_string()));
+    }
 }

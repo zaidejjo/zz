@@ -207,6 +207,14 @@ pub enum Op {
     /// Pop a value; unwrap Option/Result or `return` the None/Err variant.
     TryOp(Span),
 
+    // ---- elvis ----
+    /// Pop a value; if `.some(v)`, push `v` then `Bool(true)`.
+    /// If `.none`, push `Bool(false)`.
+    Elvis(Span),
+    /// Pop `Bool(success)`, pop right side, pop unwrapped left side.
+    /// If success: push unwrapped left. Otherwise: push right side.
+    ElvisResult,
+
     // ---- calls ----
     /// Pop `argc` arguments, pop the callee, call it, push the result.
     Call { argc: u16, span: Span },
@@ -227,6 +235,8 @@ pub enum Op {
     // ---- fmt ----
     /// Pop `n` values, concatenate their Display forms, push the string.
     Concat(u16),
+    /// Pop a format spec string, pop a value, push the formatted string.
+    FormatValue(Span),
 
     // ---- scopes ----
     /// Enter a new child scope (only emitted when the scope declares
@@ -368,12 +378,15 @@ impl Compiler {
             Op::MatchError(_) => 0,
             Op::IfLetMatch { .. } => -1,
             Op::TryOp(_) => 0,
+            Op::Elvis(_) => 1,
+            Op::ElvisResult => -2,
             // Call pops argc args + 1 callee (pushed by compiler), pushes 1 result: -argc
             // CallPath pops argc args, resolves callee by name (no stack pop), pushes 1: 1-argc
             // CallMethod pops argc args + 1 receiver (LoadSlot), pushes 1 result: -argc
             Op::Call { argc, .. } | Op::CallMethod { argc, .. } => -(*argc as i64),
             Op::CallPath { argc, .. } => 1 - (*argc as i64),
             Op::Concat(n) => 1 - *n as i64,
+            Op::FormatValue(_) => -1,
             Op::EnterScope | Op::ExitScope => 0,
             Op::PopN(n) => -(*n as i64),
         }
@@ -845,6 +858,12 @@ impl Compiler {
                     self.emit_const(Value::Bool(true));
                     self.patch_jump(j2);
                 }
+                BinOp::Elvis => {
+                    self.compile_expr(left);
+                    self.emit(Op::Elvis(*span));
+                    self.compile_expr(right);
+                    self.emit(Op::ElvisResult);
+                }
                 _ => {
                     self.compile_expr(left);
                     self.compile_expr(right);
@@ -1017,7 +1036,13 @@ impl Compiler {
                             self.emit_const(Value::Str(t.clone()));
                             n += 1;
                         }
-                        FmtPart::Expr(e) => {
+                        FmtPart::Expr(e, Some(spec)) => {
+                            self.compile_expr(e);
+                            self.emit_const(Value::Str(spec.clone()));
+                            self.emit(Op::FormatValue(e.span()));
+                            n += 1;
+                        }
+                        FmtPart::Expr(e, None) => {
                             self.compile_expr(e);
                             n += 1;
                         }
@@ -1370,7 +1395,7 @@ fn scan_expr_captured(
         }
         Expr::Fmt { parts, .. } => {
             for part in parts {
-                if let FmtPart::Expr(e) = part {
+                if let FmtPart::Expr(e, _) = part {
                     scan_expr_captured(e, defined, free);
                 }
             }
@@ -2146,6 +2171,39 @@ impl Vm {
                         }
                     }
                 }
+                Op::Elvis(_span) => {
+                    let v = self.stack.pop().unwrap();
+                    match v {
+                        Value::Option(Some(inner)) => {
+                            // Push: flag (deepest), unwrapped, then right is
+                            // compiled on top.  ElvisResult pops success, right,
+                            // left — so flag must be deepest of the three.
+                            self.stack.push(Value::Bool(true));
+                            self.stack.push(*inner);
+                        }
+                        Value::Option(None) => {
+                            // Flag false + Unit placeholder for the inner slot
+                            // so ElvisResult still pops 3 and pushes 1.
+                            self.stack.push(Value::Bool(false));
+                            self.stack.push(Value::Unit);
+                        }
+                        other => {
+                            // Non-Option left: pass through (allows chaining).
+                            self.stack.push(Value::Bool(true));
+                            self.stack.push(other);
+                        }
+                    }
+                }
+                Op::ElvisResult => {
+                    // Stack (bottom→top): flag, inner/placeholder, right.
+                    let right_val = self.stack.pop().unwrap();
+                    let inner_val = self.stack.pop().unwrap();
+                    let flag = self.stack.pop().unwrap();
+                    match flag {
+                        Value::Bool(true) => self.stack.push(inner_val),
+                        _ => self.stack.push(right_val),
+                    }
+                }
                 Op::Call { argc, span } => {
                     let argc = *argc;
                     let span = *span;
@@ -2222,6 +2280,21 @@ impl Vm {
                         out.push_str(&p.to_string());
                     }
                     self.stack.push(Value::Str(out));
+                }
+                Op::FormatValue(span) => {
+                    let spec = self.stack.pop().unwrap();
+                    let val = self.stack.pop().unwrap();
+                    let spec_str = match spec {
+                        Value::Str(s) => s,
+                        _ => {
+                            return Err(EvalError::new(
+                                "format spec must be a string".to_string(),
+                                *span,
+                            ))
+                        }
+                    };
+                    let formatted = crate::interp::format_value_with_spec(&val, &spec_str);
+                    self.stack.push(Value::Str(formatted));
                 }
                 Op::EnterScope => {
                     let scope = Env::with_parent(&interp.env);

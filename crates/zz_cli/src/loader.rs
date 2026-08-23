@@ -638,7 +638,7 @@ impl Rewriter<'_> {
             }
             Expr::Fmt { parts, .. } => {
                 for part in parts {
-                    if let FmtPart::Expr(e) = part {
+                    if let FmtPart::Expr(e, _) = part {
                         self.rewrite_expr(e);
                     }
                 }

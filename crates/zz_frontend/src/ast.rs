@@ -298,6 +298,7 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    Elvis,
 }
 
 impl BinOp {
@@ -317,6 +318,7 @@ impl BinOp {
             BinOp::Ge => ">=",
             BinOp::And => "&&",
             BinOp::Or => "||",
+            BinOp::Elvis => "??",
         }
     }
 }
@@ -337,7 +339,8 @@ pub enum FmtPart {
     /// Literal text (escapes already processed).
     Text(String),
     /// An embedded expression, rendered via its Display form.
-    Expr(Box<Expr>),
+    /// Optional format spec: `{val:.2f}`, `{val:x}`, etc.
+    Expr(Box<Expr>, Option<String>),
 }
 
 /// A type annotation as written in source.
