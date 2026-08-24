@@ -24,26 +24,27 @@ const USAGE: &str = "\
 zz — the ZZ programming language
 
 USAGE:
-    zz                          start the interactive REPL
-    zz eval <source>            evaluate source and print the result
-    zz run <file.zz>            type-check and run a file
-    zz check [path]             scan for errors/warnings (file or directory)
-    zz check [path] --fix       apply safe auto-fixes silently
-    zz check [path] --fix --hard  apply safe + destructive fixes (--hard = no prompts)
-    zz fix [path]               shortcut for `check --fix`
-    zz ifix [path]              shortcut for `check --fix --interactive`
-    zz --help                   show this help
-    zz --version                show version
+    zz                            start the interactive REPL
+    zz eval <source>              evaluate source and print the result
+    zz run <file.zz>              type-check and run a file
+    zz check [FLAGS] [PATH]       scan for errors/warnings (file or directory)
+    zz fix [FLAGS] [PATH]         apply auto-fixes (shortcut for check --fix)
+
+FLAGS:
+    --fix             apply safe auto-fixes (typo replacements, field corrections)
+    --hard            with --fix, apply all fixes non-interactively (no prompts)
+    --interactive     with --fix, prompt before each change (default for --fix)
+    --help            show this help
+    --version         show version
 
 PATH can be a single .zz file or a directory (recursively scans all .zz files).
+Defaults to `.` (current directory) if omitted.
 
 EXAMPLES:
-    zz eval '1 + 2 * 3'
-    zz run hello.zz
-    zz check .
-    zz check src/ --fix
-    zz fix hello.zz
-    zz ifix src/
+    zz check .                       scan current directory
+    zz check src/ --fix              fix all .zz files in src/
+    zz fix hello.zz                  fix a single file
+    zz check --fix --hard src/       fix all files, no prompts
 ";
 
 fn main() -> ExitCode {
@@ -87,29 +88,8 @@ fn main() -> ExitCode {
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
 
-            if has_fix {
-                let interactive = has_interactive && !has_hard;
-                match check_or_fix_path(&path, true, interactive) {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(msg) => {
-                        eprintln!("zz: {msg}");
-                        ExitCode::FAILURE
-                    }
-                }
-            } else {
-                match check_or_fix_path(&path, false, false) {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(msg) => {
-                        eprintln!("zz: {msg}");
-                        ExitCode::FAILURE
-                    }
-                }
-            }
-        }
-        Some("fix") => {
-            let (path, flags) = parse_path_and_flags(rest);
-            let has_hard = flags.contains(&"--hard".to_string());
-            match check_or_fix_path(&path, true, !has_hard) {
+            let interactive = has_fix && has_interactive && !has_hard;
+            match check_or_fix_path(&path, has_fix, interactive) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(msg) => {
                     eprintln!("zz: {msg}");
@@ -117,9 +97,13 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some("ifix") => {
-            let (path, _) = parse_path_and_flags(rest);
-            match check_or_fix_path(&path, true, true) {
+        Some("fix") => {
+            let (path, flags) = parse_path_and_flags(rest);
+            let has_hard = flags.contains(&"--hard".to_string());
+            let has_interactive = flags.contains(&"--interactive".to_string());
+            // Default to interactive when using `zz fix` (unless --hard).
+            let interactive = !has_hard && !has_interactive || has_interactive;
+            match check_or_fix_path(&path, true, interactive && !has_hard) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(msg) => {
                     eprintln!("zz: {msg}");
@@ -143,14 +127,16 @@ fn main() -> ExitCode {
     }
 }
 
-/// Split args into path (first non-flag) and flags (--flag items).
+/// Split args into flags (--flag items) and path (last non-flag arg).
+/// Flags must precede the path: `zz check --fix src/`.
 fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
     let mut path = None;
     let mut flags = Vec::new();
     for a in args {
         if a.starts_with("--") {
             flags.push(a.clone());
-        } else if path.is_none() {
+        } else {
+            // Last non-flag wins as path.
             path = Some(a.clone());
         }
     }
