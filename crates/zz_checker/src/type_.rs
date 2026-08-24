@@ -35,6 +35,9 @@ pub enum Type {
     Var(u32),
     /// Named type: a generic parameter (e.g. `T` in `func id<T>`).
     Named(String),
+    /// Sentinel type for undefined / erroneous expressions.
+    /// Suppresses cascading errors (e.g. "cannot apply `+` to error and int").
+    Error,
 }
 
 impl Type {
@@ -91,6 +94,7 @@ impl fmt::Display for Type {
             Type::Range(t) => write!(f, "{t}.."),
             Type::Var(_) => write!(f, "_"),
             Type::Named(n) => write!(f, "{n}"),
+            Type::Error => write!(f, "<error>"),
         }
     }
 }

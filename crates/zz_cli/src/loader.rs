@@ -316,6 +316,15 @@ impl Loader {
                     diags: checked.errors,
                 });
             } else {
+                // Propagate warnings (even if there are no hard errors)
+                // so they can be displayed to the user.
+                if !checked.errors.is_empty() {
+                    self.errors.push(LoadError {
+                        name,
+                        source,
+                        diags: checked.errors,
+                    });
+                }
                 self.bindings.extend(checked.bindings);
                 self.funcs.extend(checked.funcs);
                 self.structs.extend(checked.structs);

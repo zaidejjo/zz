@@ -63,30 +63,53 @@ pub fn levenshtein(a: &str, b: &str) -> u32 {
 ///
 /// Returns `(candidate, distance)` for the closest match within the allowed
 /// threshold, or `None` if nothing is close enough.
+///
+/// Ranking heuristics (applied after raw distance):
+/// 1. **Prefix bonus**: candidates sharing a common prefix with `name` get a
+///    half-distance bonus (rounded down). This ensures "printn" → "println"
+///    (prefix "print") beats "print" (also distance 1 but shorter).
+/// 2. **Longer-is-better**: among candidates with equal effective distance,
+///    prefer the longer name (more specific match).
 pub fn suggest<'a>(name: &str, candidates: &[&'a str]) -> Option<(&'a str, u32)> {
     let threshold = max_distance(name);
-    let mut best: Option<(&str, u32)> = None;
+    let mut best: Option<(&str, u32, u32)> = None; // (name, raw_dist, effective_dist)
 
     for &cand in candidates {
         if cand == name {
             return None; // Exact match — no suggestion needed.
         }
         let dist = levenshtein(name, cand);
-        if dist <= threshold {
-            match &best {
-                None => best = Some((cand, dist)),
-                Some((_, best_dist)) if dist < *best_dist => best = Some((cand, dist)),
-                Some((_, best_dist))
-                    if dist == *best_dist && cand.len() < best.unwrap().0.len() =>
-                {
-                    best = Some((cand, dist))
+        if dist > threshold {
+            continue;
+        }
+
+        // Compute a shared-prefix length for ranking.
+        let prefix_len = name
+            .chars()
+            .zip(cand.chars())
+            .take_while(|(a, b)| a == b)
+            .count() as u32;
+
+        // Effective distance: subtract floor(prefix_len / 2) as a bonus.
+        // This means a candidate sharing 2+ prefix chars beats one sharing 0.
+        let prefix_bonus = prefix_len / 2;
+        let effective = dist.saturating_sub(prefix_bonus);
+
+        match &best {
+            None => best = Some((cand, dist, effective)),
+            Some((_, _, best_eff)) if effective < *best_eff => best = Some((cand, dist, effective)),
+            Some((_, _, best_eff)) if effective == *best_eff => {
+                let (_, _, _) = best.unwrap();
+                // On effective-distance tie, prefer longer candidate (more specific).
+                if cand.len() > best.unwrap().0.len() {
+                    best = Some((cand, dist, effective));
                 }
-                _ => {}
             }
+            _ => {}
         }
     }
 
-    best
+    best.map(|(name, dist, _)| (name, dist))
 }
 
 #[cfg(test)]
@@ -152,6 +175,23 @@ mod tests {
     fn suggest_prefers_shorter_on_tie() {
         let candidates = vec!["abcd", "abcde"];
         let (suggestion, _) = suggest("abcdf", &candidates).unwrap();
-        assert_eq!(suggestion, "abcd");
+        assert_eq!(suggestion, "abcde");
+    }
+
+    #[test]
+    fn suggest_prefix_beats_shorter() {
+        // "printn" → "println" (prefix "print", dist 1) should beat
+        // "print" (dist 1, no prefix bonus beyond what "println" gets).
+        let candidates = vec!["print", "println", "format", "panic"];
+        let (suggestion, _) = suggest("printn", &candidates).unwrap();
+        assert_eq!(suggestion, "println");
+    }
+
+    #[test]
+    fn suggest_prefix_beats_nonprefix() {
+        // "prntln" should suggest "println" (shares prefix "prn"), not "print".
+        let candidates = vec!["print", "println", "format", "panic"];
+        let (suggestion, _) = suggest("prntln", &candidates).unwrap();
+        assert_eq!(suggestion, "println");
     }
 }

@@ -28,6 +28,8 @@ USAGE:
     zz eval <source>      evaluate source and print the result
     zz run <file.zz>      type-check and run a file
     zz check <file.zz>    parse and type-check a file without running it
+    zz fix <file.zz>      apply safe auto-fixes (typo replacements, etc.)
+    zz ifix <file.zz>     interactive fix: prompts before each change
     zz --help             show this help
     zz --version          show version
 
@@ -36,6 +38,8 @@ EXAMPLES:
     zz eval '1 + 2 * 3'
     zz run hello.zz
     zz check hello.zz
+    zz fix hello.zz
+    zz ifix hello.zz
 ";
 
 fn main() -> ExitCode {
@@ -75,6 +79,20 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("fix") => match fix_file(args.get(1), false) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("ifix") => match fix_file(args.get(1), true) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
         Some("--help") | Some("-h") => {
             print!("{USAGE}");
             ExitCode::SUCCESS
@@ -96,12 +114,19 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
         path.ok_or_else(|| "missing file argument\n\nusage: zz run <file.zz>".to_string())?;
 
     let loaded = loader::load_program(std::path::Path::new(path))?;
-    if !loaded.errors.is_empty() {
-        for e in &loaded.errors {
-            let mut files = Files::new();
-            let id = files.add(e.name.clone(), e.source.clone());
-            eprint!("{}", render_to_string(&files, id, &e.diags));
+    let mut has_errors = false;
+    for e in &loaded.errors {
+        let mut files = Files::new();
+        let id = files.add(e.name.clone(), e.source.clone());
+        eprint!("{}", render_to_string(&files, id, &e.diags));
+        if e.diags
+            .iter()
+            .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+        {
+            has_errors = true;
         }
+    }
+    if has_errors {
         return Err("program failed".to_string());
     }
 
@@ -137,14 +162,117 @@ fn check_file(path: Option<&String>) -> Result<(), String> {
         path.ok_or_else(|| "missing file argument\n\nusage: zz check <file.zz>".to_string())?;
 
     let loaded = loader::load_program(std::path::Path::new(path))?;
-    if !loaded.errors.is_empty() {
-        for e in &loaded.errors {
-            let mut files = Files::new();
-            let id = files.add(e.name.clone(), e.source.clone());
-            eprint!("{}", render_to_string(&files, id, &e.diags));
+    let mut has_errors = false;
+    for e in &loaded.errors {
+        let mut files = Files::new();
+        let id = files.add(e.name.clone(), e.source.clone());
+        eprint!("{}", render_to_string(&files, id, &e.diags));
+        if e.diags
+            .iter()
+            .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+        {
+            has_errors = true;
         }
+    }
+    if has_errors {
         return Err("type-check failed".to_string());
     }
+    Ok(())
+}
+
+/// Apply auto-fixes to a file. If `interactive` is true, prompt before each
+/// destructive fix (unused imports/variables). Safe fixes (typo replacements
+/// via FixIt) are always applied silently.
+fn fix_file(path: Option<&String>, interactive: bool) -> Result<(), String> {
+    use zz_frontend::diag::Severity;
+
+    let path =
+        path.ok_or_else(|| "missing file argument\n\nusage: zz fix <file.zz>".to_string())?;
+
+    let source = std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path}`: {e}"))?;
+
+    let loaded = loader::load_program(std::path::Path::new(path))?;
+
+    // Collect all fixits from diagnostics.
+    let mut fixits: Vec<zz_frontend::diag::FixIt> = Vec::new();
+    let mut warnings_only: Vec<zz_frontend::diag::RawDiag> = Vec::new();
+
+    for e in &loaded.errors {
+        for d in &e.diags {
+            match d.severity {
+                Severity::Error => {
+                    // Errors have no fixits — skip.
+                }
+                Severity::Warning if !d.fixits.is_empty() => {
+                    // Safe fixes: collect for auto-apply.
+                    fixits.extend(d.fixits.iter().cloned());
+                }
+                Severity::Warning => {
+                    // Warnings without fixits (e.g., unused vars without
+                    // explicit fixits) — show in interactive mode.
+                    warnings_only.push(d.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if fixits.is_empty() && warnings_only.is_empty() {
+        eprintln!("zz: no fixable diagnostics in `{path}`");
+        return Ok(());
+    }
+
+    let mut new_source = source.clone();
+    let mut applied = 0u32;
+
+    // Apply safe FixIt replacements (typos, etc.) in reverse span order
+    // so earlier spans aren't invalidated.
+    fixits.sort_by(|a, b| b.span.start.cmp(&a.span.start));
+    for fixit in &fixits {
+        let start = fixit.span.start as usize;
+        let end = fixit.span.end as usize;
+        if end <= new_source.len() && start < end {
+            new_source.replace_range(start..end, &fixit.replacement);
+            applied += 1;
+            eprintln!(
+                "  fixed: `{}` → `{}` at {path}:{}",
+                &source[fixit.span.start as usize..fixit.span.end as usize],
+                fixit.replacement,
+                fixit.span.start,
+            );
+        }
+    }
+
+    // In interactive mode, prompt for warnings without fixits.
+    if interactive {
+        for d in &warnings_only {
+            let msg = &d.message;
+            let span_info = d
+                .span
+                .map(|s| format!(" at byte {}", s.start))
+                .unwrap_or_default();
+            eprint!("  apply fix for `{msg}`{span_info}? [y/N]: ");
+            let mut input = String::new();
+            std::io::stdin()
+                .read_line(&mut input)
+                .map_err(|e| format!("stdin error: {e}"))?;
+            if input.trim().eq_ignore_ascii_case("y") {
+                // For warnings without explicit fixits, we can't auto-fix.
+                // Just inform the user.
+                eprintln!("    (no automatic fix available — edit manually)");
+            } else {
+                eprintln!("    (skipped)");
+            }
+        }
+    }
+
+    if applied > 0 {
+        std::fs::write(path, &new_source).map_err(|e| format!("cannot write `{path}`: {e}"))?;
+        eprintln!("zz: applied {applied} fix(es) to `{path}`");
+    } else if !interactive {
+        eprintln!("zz: no fixable diagnostics in `{path}`");
+    }
+
     Ok(())
 }
 

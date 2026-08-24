@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use zz_frontend::ast::{
     BinOp, Block, Expr, FmtPart, Lit, MatchArm, Param, Pattern, Program, Stmt, Ty, TyKind, UnOp,
 };
-use zz_frontend::diag::{error_at, warning_at, RawDiag};
+use zz_frontend::diag::{error_at, warning_at, FixIt, RawDiag};
 use zz_frontend::levenshtein::suggest;
 use zz_frontend::span::Span;
 
@@ -187,6 +187,12 @@ struct Checker {
     /// Names defined in the current scope with their spans — for unused
     /// variable warnings. Each scope level has its own map.
     defined_names: Vec<HashMap<String, Span>>,
+    /// Tracks whether the most recent `lookup()` produced an "undefined
+    /// variable" error.  Used by `check_call` to suppress the secondary
+    /// "cannot call a value of type unit" cascading error.
+    had_undefined_var: bool,
+    /// Imported namespaces: (alias, span). Used to detect unused imports.
+    imports: Vec<(String, Span)>,
 }
 
 impl Checker {
@@ -208,6 +214,8 @@ impl Checker {
             loop_depth: 0,
             used_names: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],
+            had_undefined_var: false,
+            imports: Vec::new(),
         }
     }
 
@@ -218,14 +226,26 @@ impl Checker {
         self.defined_names.push(HashMap::new());
     }
 
+    /// Strip the module prefix from a name for display.
+    /// `"diag-typo.area"` → `"area"`, `"area"` → `"area"`.
+    fn display_name(name: &str) -> &str {
+        match name.rfind('.') {
+            Some(pos) => &name[pos + 1..],
+            None => name,
+        }
+    }
+
     fn pop_scope(&mut self) {
         // Warn about unused variables in this scope (skip the global scope).
         if let Some(defined) = self.defined_names.pop() {
             for (name, span) in &defined {
-                if !self.used_names.contains(name) && !name.starts_with('_') {
+                let display = Self::display_name(name);
+                if !self.used_names.contains(name) && !display.starts_with('_') {
                     self.errors.push(
                         warning_at(
-                            format!("unused variable `{name}`, consider prefixing with `_{name}`"),
+                            format!(
+                                "unused variable `{display}`, consider prefixing with `_{display}`"
+                            ),
                             *span,
                         )
                         .with_note("variable is never read"),
@@ -250,22 +270,42 @@ impl Checker {
 
     /// Emit unused-variable warnings for the global scope (scope index 0).
     /// The global scope is never popped, so `pop_scope`'s check does not
-    /// fire for top-level definitions.
+    /// fire for top-level definitions. Also emits unused-import warnings.
     fn emit_global_unused_warnings(&mut self) {
+        // --- Unused variables ---
         if let Some(defined) = self.defined_names.first() {
             // Snapshot defined names to avoid borrow issues.
             let entries: Vec<(String, Span)> =
                 defined.iter().map(|(k, &v)| (k.clone(), v)).collect();
             for (name, span) in &entries {
-                if !self.used_names.contains(name) && !name.starts_with('_') {
+                let display = Self::display_name(name);
+                if !self.used_names.contains(name) && !display.starts_with('_') {
                     self.errors.push(
                         warning_at(
-                            format!("unused variable `{name}`, consider prefixing with `_{name}`"),
+                            format!(
+                                "unused variable `{display}`, consider prefixing with `_{display}`"
+                            ),
                             *span,
                         )
                         .with_note("variable is never read"),
                     );
                 }
+            }
+        }
+
+        // --- Unused imports ---
+        let imports: Vec<(String, Span)> = self.imports.clone();
+        for (alias, span) in &imports {
+            let prefix = format!("{alias}.");
+            let used = self
+                .used_names
+                .iter()
+                .any(|n| n == alias || n.starts_with(&prefix));
+            if !used {
+                self.errors.push(
+                    warning_at(format!("unused import `{alias}`"), *span)
+                        .with_note("remove this import or use it in the program"),
+                );
             }
         }
     }
@@ -285,7 +325,7 @@ impl Checker {
                             ),
                             span,
                         ));
-                        return Type::Unit;
+                        return Type::Error;
                     }
                 }
                 // Build candidate list for typo suggestions.
@@ -301,12 +341,32 @@ impl Checker {
                 for key in self.structs.keys() {
                     candidates.push(key);
                 }
+                // Also add bare-name versions for module-qualified candidates.
+                // e.g. "diag-typo.height" → also add "height" so Levenshtein
+                // can match "hieght" → "height".
+                let mut extras: Vec<String> = Vec::new();
+                for c in &candidates {
+                    if let Some(bare) = c.rsplit('.').next() {
+                        if bare != *c {
+                            extras.push(bare.to_string());
+                        }
+                    }
+                }
+                for e in &extras {
+                    candidates.push(e);
+                }
                 let mut diag = error_at(format!("undefined variable `{name}`"), span);
                 if let Some((suggestion, _dist)) = suggest(name, &candidates) {
                     diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    diag = diag.with_fixit(FixIt {
+                        span,
+                        replacement: suggestion.to_string(),
+                        message: "rename to".to_string(),
+                    });
                 }
                 self.errors.push(diag);
-                Type::Unit
+                self.had_undefined_var = true;
+                Type::Error
             }
         }
     }
@@ -358,7 +418,8 @@ impl Checker {
                 diag = diag.with_note(format!("did you mean `{suggestion}`?"));
             }
             self.errors.push(diag);
-            return Type::Unit;
+            self.had_undefined_var = true;
+            return Type::Error;
         };
         let mut ty = root;
         for field in &parts[1..] {
@@ -375,15 +436,20 @@ impl Checker {
                             if let Some((suggestion, _)) = suggest(field, &field_names) {
                                 diag =
                                     diag.with_note(format!("did you mean field `{suggestion}`?"));
+                                diag = diag.with_fixit(FixIt {
+                                    span,
+                                    replacement: suggestion.to_string(),
+                                    message: "rename to".to_string(),
+                                });
                             }
                             self.errors.push(diag);
-                            return Type::Unit;
+                            return Type::Error;
                         }
                     },
                     None => {
                         self.errors
                             .push(error_at(format!("unknown struct `{name}`"), span));
-                        return Type::Unit;
+                        return Type::Error;
                     }
                 },
                 other => {
@@ -391,7 +457,7 @@ impl Checker {
                         format!("cannot access field `{field}` on a value of type `{other}`"),
                         span,
                     ));
-                    return Type::Unit;
+                    return Type::Error;
                 }
             }
         }
@@ -401,6 +467,7 @@ impl Checker {
     // --- statements -------------------------------------------------------
 
     fn check_stmt(&mut self, stmt: &Stmt) -> Type {
+        self.had_undefined_var = false;
         match stmt {
             Stmt::Decl {
                 name,
@@ -445,9 +512,16 @@ impl Checker {
                 self.define_at(&name.name, rt.clone(), name.span);
                 rt
             }
-            Stmt::Import { .. } => {
-                // Imports are resolved in a later phase; type-checking treats
-                // them as a no-op.
+            Stmt::Import { path, alias, span } => {
+                // Track the import namespace for unused-import detection.
+                // The alias (if present) or the last segment of the path
+                // becomes the namespace prefix used in the program.
+                let ns = alias
+                    .as_ref()
+                    .cloned()
+                    .or_else(|| path.last().cloned())
+                    .unwrap_or_default();
+                self.imports.push((ns, *span));
                 Type::Unit
             }
             Stmt::Func { .. } => {
@@ -1209,11 +1283,13 @@ impl Checker {
                 t.clone()
             }
             (a, b) => {
-                self.errors.push(error_at(
-                    format!("cannot apply `{}` to `{}` and `{}`", op.symbol(), a, b),
-                    span,
-                ));
-                Type::Int
+                if !matches!((&a, &b), (Type::Error, _) | (_, Type::Error)) {
+                    self.errors.push(error_at(
+                        format!("cannot apply `{}` to `{}` and `{}`", op.symbol(), a, b),
+                        span,
+                    ));
+                }
+                Type::Error
             }
         };
         result
@@ -1422,18 +1498,27 @@ impl Checker {
                 }
             },
             Type::Var(_) => {
-                self.errors.push(error_at(
-                    "cannot call a value whose type could not be inferred",
-                    span,
-                ));
-                Type::Unit
+                // Suppress cascading error if the callee was already an
+                // undefined variable — the primary error is sufficient.
+                if !self.had_undefined_var {
+                    self.errors.push(error_at(
+                        "cannot call a value whose type could not be inferred",
+                        span,
+                    ));
+                }
+                Type::Error
             }
+            Type::Error => Type::Error,
             other => {
-                self.errors.push(error_at(
-                    format!("cannot call a value of type `{other}`"),
-                    span,
-                ));
-                Type::Unit
+                // Suppress cascading "cannot call unit" when the callee
+                // was already flagged as an undefined variable.
+                if !self.had_undefined_var {
+                    self.errors.push(error_at(
+                        format!("cannot call a value of type `{other}`"),
+                        span,
+                    ));
+                }
+                Type::Error
             }
         }
     }
