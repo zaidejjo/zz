@@ -112,6 +112,40 @@ pub fn suggest<'a>(name: &str, candidates: &[&'a str]) -> Option<(&'a str, u32)>
     best.map(|(name, dist, _)| (name, dist))
 }
 
+/// Find all candidates within the Levenshtein threshold, sorted by effective
+/// distance then length. Used for ambiguous-fix detection.
+///
+/// Returns `Vec<(candidate, distance)>` — empty if nothing is close enough.
+pub fn suggest_all<'a>(name: &str, candidates: &[&'a str]) -> Vec<(&'a str, u32)> {
+    let threshold = max_distance(name);
+    let mut results: Vec<(&str, u32, u32)> = Vec::new();
+
+    for &cand in candidates {
+        if cand == name {
+            continue;
+        }
+        let dist = levenshtein(name, cand);
+        if dist > threshold {
+            continue;
+        }
+        let prefix_len = name
+            .chars()
+            .zip(cand.chars())
+            .take_while(|(a, b)| a == b)
+            .count() as u32;
+        let prefix_bonus = prefix_len / 2;
+        let effective = dist.saturating_sub(prefix_bonus);
+        results.push((cand, dist, effective));
+    }
+
+    // Sort by effective distance, then by length descending.
+    results.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| b.0.len().cmp(&a.0.len())));
+    results
+        .into_iter()
+        .map(|(cand, dist, _)| (cand, dist))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +227,28 @@ mod tests {
         let candidates = vec!["print", "println", "format", "panic"];
         let (suggestion, _) = suggest("prntln", &candidates).unwrap();
         assert_eq!(suggestion, "println");
+    }
+
+    #[test]
+    fn suggest_all_returns_multiple_candidates() {
+        // "heigth" → both "heighth" (dist=1) and "height" (dist=2) qualify.
+        let candidates = vec!["height", "heighth", "weight", "width"];
+        let all = suggest_all("heigth", &candidates);
+        assert!(
+            all.len() >= 2,
+            "expected at least 2 candidates, got {}",
+            all.len()
+        );
+        // Both present.
+        let names: Vec<&str> = all.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"height"));
+        assert!(names.contains(&"heighth"));
+    }
+
+    #[test]
+    fn suggest_all_empty_when_no_match() {
+        let candidates = vec!["foo", "bar"];
+        let all = suggest_all("xyz", &candidates);
+        assert!(all.is_empty());
     }
 }

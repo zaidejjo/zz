@@ -16,7 +16,7 @@ use zz_frontend::ast::{
     BinOp, Block, Expr, FmtPart, Lit, MatchArm, Param, Pattern, Program, Stmt, Ty, TyKind, UnOp,
 };
 use zz_frontend::diag::{error_at, warning_at, FixIt, RawDiag};
-use zz_frontend::levenshtein::suggest;
+use zz_frontend::levenshtein::suggest_all;
 use zz_frontend::span::Span;
 
 use crate::type_::Type;
@@ -241,6 +241,7 @@ impl Checker {
             for (name, span) in &defined {
                 let display = Self::display_name(name);
                 if !self.used_names.contains(name) && !display.starts_with('_') {
+                    let fixit_name = format!("_{display}");
                     self.errors.push(
                         warning_at(
                             format!(
@@ -248,7 +249,12 @@ impl Checker {
                             ),
                             *span,
                         )
-                        .with_note("variable is never read"),
+                        .with_note("variable is never read")
+                        .with_fixit(FixIt::safe(
+                            *span,
+                            fixit_name,
+                            "rename to",
+                        )),
                     );
                 }
             }
@@ -280,6 +286,7 @@ impl Checker {
             for (name, span) in &entries {
                 let display = Self::display_name(name);
                 if !self.used_names.contains(name) && !display.starts_with('_') {
+                    let fixit_name = format!("_{display}");
                     self.errors.push(
                         warning_at(
                             format!(
@@ -287,7 +294,12 @@ impl Checker {
                             ),
                             *span,
                         )
-                        .with_note("variable is never read"),
+                        .with_note("variable is never read")
+                        .with_fixit(FixIt::safe(
+                            *span,
+                            fixit_name,
+                            "rename to",
+                        )),
                     );
                 }
             }
@@ -356,13 +368,16 @@ impl Checker {
                     candidates.push(e);
                 }
                 let mut diag = error_at(format!("undefined variable `{name}`"), span);
-                if let Some((suggestion, _dist)) = suggest(name, &candidates) {
+                let all = suggest_all(name, &candidates);
+                if let Some((suggestion, _dist)) = all.first() {
                     diag = diag.with_note(format!("did you mean `{suggestion}`?"));
-                    diag = diag.with_fixit(FixIt {
-                        span,
-                        replacement: suggestion.to_string(),
-                        message: "rename to".to_string(),
-                    });
+                    let fixit = if all.len() == 1 {
+                        FixIt::safe(span, suggestion.to_string(), "replace variable")
+                    } else {
+                        let alts: Vec<String> = all.iter().map(|(s, _)| s.to_string()).collect();
+                        FixIt::ambiguous(span, suggestion.to_string(), "replace variable", alts)
+                    };
+                    diag = diag.with_fixit(fixit);
                 }
                 self.errors.push(diag);
                 self.had_undefined_var = true;
@@ -414,8 +429,17 @@ impl Checker {
                 candidates.push(key);
             }
             let mut diag = error_at(format!("undefined variable `{joined}`"), span);
-            if let Some((suggestion, _)) = suggest(&parts[0], &candidates) {
+            let all = suggest_all(&parts[0], &candidates);
+            if let Some((suggestion, _)) = all.first() {
                 diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                let root_span = Span::new(span.start, span.start + parts[0].len() as u32);
+                let fixit = if all.len() == 1 {
+                    FixIt::safe(root_span, suggestion.to_string(), "replace variable")
+                } else {
+                    let alts: Vec<String> = all.iter().map(|(s, _)| s.to_string()).collect();
+                    FixIt::ambiguous(root_span, suggestion.to_string(), "replace variable", alts)
+                };
+                diag = diag.with_fixit(fixit);
             }
             self.errors.push(diag);
             self.had_undefined_var = true;
@@ -433,14 +457,24 @@ impl Checker {
                                 sig.fields.iter().map(|(n, _)| n.as_str()).collect();
                             let mut diag =
                                 error_at(format!("struct `{name}` has no field `{field}`"), span);
-                            if let Some((suggestion, _)) = suggest(field, &field_names) {
+                            let all = suggest_all(field, &field_names);
+                            if let Some((suggestion, _)) = all.first() {
                                 diag =
                                     diag.with_note(format!("did you mean field `{suggestion}`?"));
-                                diag = diag.with_fixit(FixIt {
-                                    span,
-                                    replacement: suggestion.to_string(),
-                                    message: "rename to".to_string(),
-                                });
+                                let field_span = Span::new(span.end - field.len() as u32, span.end);
+                                let fixit = if all.len() == 1 {
+                                    FixIt::safe(field_span, suggestion.to_string(), "replace field")
+                                } else {
+                                    let alts: Vec<String> =
+                                        all.iter().map(|(s, _)| s.to_string()).collect();
+                                    FixIt::ambiguous(
+                                        field_span,
+                                        suggestion.to_string(),
+                                        "replace field",
+                                        alts,
+                                    )
+                                };
+                                diag = diag.with_fixit(fixit);
                             }
                             self.errors.push(diag);
                             return Type::Error;
@@ -651,10 +685,37 @@ impl Checker {
                         Some(sig) => match sig.fields.iter().find(|(n, _)| n == name) {
                             Some((_, ft)) => ft.clone(),
                             None => {
-                                self.errors.push(error_at(
+                                let field_names: Vec<&str> =
+                                    sig.fields.iter().map(|(n, _)| n.as_str()).collect();
+                                let mut diag = error_at(
                                     format!("struct `{sname}` has no field `{name}`"),
                                     *span,
-                                ));
+                                );
+                                let all = suggest_all(name, &field_names);
+                                if let Some((suggestion, _)) = all.first() {
+                                    diag = diag
+                                        .with_note(format!("did you mean field `{suggestion}`?"));
+                                    let field_span =
+                                        Span::new(span.end - name.len() as u32, span.end);
+                                    let alts: Vec<String> =
+                                        all.iter().map(|(s, _)| s.to_string()).collect();
+                                    let fixit = if all.len() == 1 {
+                                        FixIt::safe(
+                                            field_span,
+                                            suggestion.to_string(),
+                                            "replace field",
+                                        )
+                                    } else {
+                                        FixIt::ambiguous(
+                                            field_span,
+                                            suggestion.to_string(),
+                                            "replace field",
+                                            alts,
+                                        )
+                                    };
+                                    diag = diag.with_fixit(fixit);
+                                }
+                                self.errors.push(diag);
                                 Type::Unit
                             }
                         },
@@ -844,10 +905,37 @@ impl Checker {
                         Some(sig) => match sig.fields.iter().find(|(n, _)| n == name) {
                             Some((_, ft)) => ft.clone(),
                             None => {
-                                self.errors.push(error_at(
+                                let field_names: Vec<&str> =
+                                    sig.fields.iter().map(|(n, _)| n.as_str()).collect();
+                                let mut diag = error_at(
                                     format!("struct `{sname}` has no field `{name}`"),
                                     *span,
-                                ));
+                                );
+                                let all = suggest_all(name, &field_names);
+                                if let Some((suggestion, _)) = all.first() {
+                                    diag = diag
+                                        .with_note(format!("did you mean field `{suggestion}`?"));
+                                    let field_span =
+                                        Span::new(span.end - name.len() as u32, span.end);
+                                    let alts: Vec<String> =
+                                        all.iter().map(|(s, _)| s.to_string()).collect();
+                                    let fixit = if all.len() == 1 {
+                                        FixIt::safe(
+                                            field_span,
+                                            suggestion.to_string(),
+                                            "replace field",
+                                        )
+                                    } else {
+                                        FixIt::ambiguous(
+                                            field_span,
+                                            suggestion.to_string(),
+                                            "replace field",
+                                            alts,
+                                        )
+                                    };
+                                    diag = diag.with_fixit(fixit);
+                                }
+                                self.errors.push(diag);
                                 Type::Unit
                             }
                         },
@@ -2981,11 +3069,7 @@ mod tests {
     #[test]
     fn fixit_structure_is_populated() {
         use zz_frontend::diag::FixIt;
-        let fixit = FixIt {
-            span: Span::new(0, 5),
-            replacement: "_x".to_string(),
-            message: "rename to".to_string(),
-        };
+        let fixit = FixIt::safe(Span::new(0, 5), "_x", "rename to");
         assert_eq!(fixit.replacement, "_x");
         assert_eq!(fixit.message, "rename to");
     }

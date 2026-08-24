@@ -23,6 +23,15 @@ pub enum Severity {
     Help,
 }
 
+/// Safety classification for auto-fix suggestions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FixSafety {
+    /// Single unambiguous candidate — safe to auto-apply.
+    Safe,
+    /// Multiple candidates — requires user choice or --hard.
+    Ambiguous,
+}
+
 /// A structured machine-readable suggestion for auto-fix / LSP integration.
 #[derive(Debug, Clone)]
 pub struct FixIt {
@@ -32,6 +41,41 @@ pub struct FixIt {
     pub replacement: String,
     /// Human-readable explanation of the fix.
     pub message: String,
+    /// Safety classification for tiered auto-fix.
+    pub safety: FixSafety,
+    /// All candidate replacements for ambiguous fixes (empty for safe fixes).
+    pub alternatives: Vec<String>,
+}
+
+impl FixIt {
+    /// Create a safe fix (single unambiguous candidate).
+    pub fn safe(span: Span, replacement: impl Into<String>, message: impl Into<String>) -> Self {
+        FixIt {
+            span,
+            replacement: replacement.into(),
+            message: message.into(),
+            safety: FixSafety::Safe,
+            alternatives: Vec::new(),
+        }
+    }
+
+    /// Create an ambiguous fix with multiple candidates.
+    /// `replacement` is the best/first candidate; `alternatives` is all candidates
+    /// (including the best one). The first alternative is pre-selected.
+    pub fn ambiguous(
+        span: Span,
+        replacement: impl Into<String>,
+        message: impl Into<String>,
+        alternatives: Vec<String>,
+    ) -> Self {
+        FixIt {
+            span,
+            replacement: replacement.into(),
+            message: message.into(),
+            safety: FixSafety::Ambiguous,
+            alternatives,
+        }
+    }
 }
 
 /// A frontend diagnostic, decoupled from any file store.
@@ -357,11 +401,7 @@ mod tests {
         let id = files.add("test.zz".to_string(), "x := 1\ny := 2\n".to_string());
         let diag = warning_at("unused variable `y`", Span::new(7, 8))
             .with_note("consider prefixing with `_`")
-            .with_fixit(FixIt {
-                span: Span::new(7, 8),
-                replacement: "_y".to_string(),
-                message: "rename to".to_string(),
-            });
+            .with_fixit(FixIt::safe(Span::new(7, 8), "_y", "rename to"));
         let out = render_to_string(&files, id, &[diag]);
         assert!(out.contains("warning"), "missing warning keyword: {out}");
         assert!(out.contains("unused variable"), "missing message: {out}");
@@ -401,5 +441,25 @@ mod tests {
         let out = render_to_string(&files, id, &[diag]);
         assert!(out.contains("3"), "missing line number: {out}");
         assert!(out.contains("bad"), "missing source text: {out}");
+    }
+
+    #[test]
+    fn fixit_safe_constructor() {
+        let fixit = FixIt::safe(Span::new(0, 3), "_x".to_string(), "prefix with _");
+        assert_eq!(fixit.replacement, "_x");
+        assert!(matches!(fixit.safety, FixSafety::Safe));
+    }
+
+    #[test]
+    fn fixit_ambiguous_constructor() {
+        let fixit = FixIt::ambiguous(
+            Span::new(5, 10),
+            "println",
+            "replace function",
+            vec!["println".to_string(), "println!".to_string()],
+        );
+        assert_eq!(fixit.replacement, "println");
+        assert_eq!(fixit.alternatives.len(), 2);
+        assert!(matches!(fixit.safety, FixSafety::Ambiguous));
     }
 }
