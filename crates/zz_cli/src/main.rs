@@ -31,20 +31,25 @@ USAGE:
     zz fix [FLAGS] [PATH]         apply auto-fixes (shortcut for check --fix)
 
 FLAGS:
-    --fix             apply safe auto-fixes (typo replacements, field corrections)
-    --hard            with --fix, apply all fixes non-interactively (no prompts)
-    --interactive     with --fix, prompt before each change (default for --fix)
-    --help            show this help
-    --version         show version
+    --fix, -f          apply safe auto-fixes (typo replacements, field corrections)
+    --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
+    --interactive, -i  with --fix, prompt for ambiguous fixes interactively
+    --help, -h         show this help
+    --version, -V      show version
+
+FIX SAFETY:
+    Safe fixes (single unambiguous match) are applied automatically with --fix.
+    Ambiguous fixes (multiple candidates) require --hard or --interactive (-i).
 
 PATH can be a single .zz file or a directory (recursively scans all .zz files).
 Defaults to `.` (current directory) if omitted.
 
 EXAMPLES:
     zz check .                       scan current directory
-    zz check src/ --fix              fix all .zz files in src/
+    zz check src/ --fix              fix all safe issues in src/
     zz fix hello.zz                  fix a single file
-    zz check --fix --hard src/       fix all files, no prompts
+    zz check --fix --hard src/       force-apply all fixes, no prompts
+    zz check --fix -i src/           interactive mode for ambiguous fixes
 ";
 
 fn main() -> ExitCode {
@@ -89,7 +94,7 @@ fn main() -> ExitCode {
             let has_interactive = flags.contains(&"--interactive".to_string());
 
             let interactive = has_fix && has_interactive && !has_hard;
-            match check_or_fix_path(&path, has_fix, interactive) {
+            match check_or_fix_path(&path, has_fix, interactive, has_hard) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(msg) => {
                     eprintln!("zz: {msg}");
@@ -101,9 +106,8 @@ fn main() -> ExitCode {
             let (path, flags) = parse_path_and_flags(rest);
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
-            // Default to interactive when using `zz fix` (unless --hard).
-            let interactive = !has_hard && !has_interactive || has_interactive;
-            match check_or_fix_path(&path, true, interactive && !has_hard) {
+            let interactive = has_interactive && !has_hard;
+            match check_or_fix_path(&path, true, interactive, has_hard) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(msg) => {
                     eprintln!("zz: {msg}");
@@ -129,11 +133,16 @@ fn main() -> ExitCode {
 
 /// Split args into flags (--flag items) and path (last non-flag arg).
 /// Flags must precede the path: `zz check --fix src/`.
+/// Short aliases are normalized: `-i` → `--interactive`, `-f` → `--fix`.
 fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
     let mut path = None;
     let mut flags = Vec::new();
     for a in args {
-        if a.starts_with("--") {
+        if a == "-i" {
+            flags.push("--interactive".to_string());
+        } else if a == "-f" {
+            flags.push("--fix".to_string());
+        } else if a.starts_with("--") {
             flags.push(a.clone());
         } else {
             // Last non-flag wins as path.
@@ -222,13 +231,14 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
     Ok(())
 }
 
-/// Parse and type-check a file (and its imports) without executing it.
+/// Parse, type-check, and optionally auto-fix files.
 fn check_or_fix_path(
     path_arg: &Option<String>,
     do_fix: bool,
     interactive: bool,
+    force: bool,
 ) -> Result<(), String> {
-    use zz_frontend::diag::Severity;
+    use zz_frontend::diag::{FixSafety, Severity};
 
     let raw = path_arg.as_deref().unwrap_or(".");
     let base = std::path::Path::new(raw);
@@ -240,9 +250,8 @@ fn check_or_fix_path(
 
     let mut total_errors = 0u32;
     let mut total_fixes = 0u32;
-    // Track whether any file had fixable diagnostics (for footer hints).
     let mut any_safe_fixits = false;
-    let mut any_hard_fixes = false;
+    let mut any_ambiguous = false;
 
     for path in &files {
         let path_str = path.display().to_string();
@@ -251,27 +260,24 @@ fn check_or_fix_path(
 
         let loaded = loader::load_program(path)?;
 
-        // Collect fixits and warnings-only diagnostics.
-        let mut fixits: Vec<zz_frontend::diag::FixIt> = Vec::new();
-        let mut warnings_only: Vec<zz_frontend::diag::RawDiag> = Vec::new();
+        // Classify fixits by safety.
+        let mut safe_fixits: Vec<zz_frontend::diag::FixIt> = Vec::new();
+        let mut ambiguous_fixits: Vec<zz_frontend::diag::FixIt> = Vec::new();
         let mut has_hard_errors = false;
 
         for e in &loaded.errors {
             for d in &e.diags {
                 match d.severity {
-                    Severity::Error => {
-                        if d.fixits.is_empty() {
-                            has_hard_errors = true;
-                        } else {
-                            // Error with FixIt (e.g., typo) — safe to auto-fix.
-                            fixits.extend(d.fixits.iter().cloned());
+                    Severity::Error | Severity::Warning => {
+                        for fixit in &d.fixits {
+                            match fixit.safety {
+                                FixSafety::Safe => safe_fixits.push(fixit.clone()),
+                                FixSafety::Ambiguous => ambiguous_fixits.push(fixit.clone()),
+                            }
                         }
-                    }
-                    Severity::Warning if !d.fixits.is_empty() => {
-                        fixits.extend(d.fixits.iter().cloned());
-                    }
-                    Severity::Warning => {
-                        warnings_only.push(d.clone());
+                        if d.severity == Severity::Error && d.fixits.is_empty() {
+                            has_hard_errors = true;
+                        }
                     }
                     _ => {}
                 }
@@ -279,17 +285,17 @@ fn check_or_fix_path(
         }
 
         if !do_fix {
-            // Check-only mode: print all diagnostics, fail on hard errors.
+            // Check-only mode: print diagnostics, track what's fixable.
             for e in &loaded.errors {
                 let mut files_ctx = Files::new();
                 let id = files_ctx.add(e.name.clone(), e.source.clone());
                 eprint!("{}", render_to_string(&files_ctx, id, &e.diags));
             }
-            if !fixits.is_empty() {
+            if !safe_fixits.is_empty() {
                 any_safe_fixits = true;
             }
-            if !warnings_only.is_empty() {
-                any_hard_fixes = true;
+            if !ambiguous_fixits.is_empty() {
+                any_ambiguous = true;
             }
             if has_hard_errors {
                 total_errors += 1;
@@ -297,17 +303,13 @@ fn check_or_fix_path(
             continue;
         }
 
-        // Fix mode: apply FixIts and optionally prompt for warnings.
-        if fixits.is_empty() && warnings_only.is_empty() {
-            continue;
-        }
-
+        // Fix mode.
         let mut new_source = source.clone();
         let mut applied = 0u32;
 
-        // Apply safe FixIt replacements in reverse span order.
-        fixits.sort_by(|a, b| b.span.start.cmp(&a.span.start));
-        for fixit in &fixits {
+        // Always apply safe fixes.
+        safe_fixits.sort_by(|a, b| b.span.start.cmp(&a.span.start));
+        for fixit in &safe_fixits {
             let start = fixit.span.start as usize;
             let end = fixit.span.end as usize;
             if end <= new_source.len() && start < end {
@@ -315,31 +317,61 @@ fn check_or_fix_path(
                 applied += 1;
                 eprintln!(
                     "  fixed: `{}` → `{}` at {path_str}:{}",
-                    &source[fixit.span.start as usize..fixit.span.end as usize],
+                    &source[start..end],
                     fixit.replacement,
                     fixit.span.start,
                 );
             }
         }
 
-        // Interactive mode: prompt for warnings without fixits.
-        if interactive {
-            for d in &warnings_only {
-                let msg = &d.message;
-                let span_info = d
-                    .span
-                    .map(|s| format!(" at byte {}", s.start))
-                    .unwrap_or_default();
-                eprint!("  apply fix for `{msg}`{span_info}? [y/N]: ");
-                let mut input = String::new();
-                std::io::stdin()
-                    .read_line(&mut input)
-                    .map_err(|e| format!("stdin error: {e}"))?;
-                if input.trim().eq_ignore_ascii_case("y") {
-                    eprintln!("    (no automatic fix available — edit manually)");
-                } else {
-                    eprintln!("    (skipped)");
+        // Handle ambiguous fixes based on mode.
+        if !ambiguous_fixits.is_empty() {
+            if force {
+                // --hard: auto-apply first candidate for ambiguous fixes.
+                ambiguous_fixits.sort_by(|a, b| b.span.start.cmp(&a.span.start));
+                for fixit in &ambiguous_fixits {
+                    let start = fixit.span.start as usize;
+                    let end = fixit.span.end as usize;
+                    if end <= new_source.len() && start < end {
+                        new_source.replace_range(start..end, &fixit.replacement);
+                        applied += 1;
+                        eprintln!(
+                            "  fixed (force): `{}` → `{}` at {path_str}:{}",
+                            &source[start..end],
+                            fixit.replacement,
+                            fixit.span.start,
+                        );
+                    }
                 }
+            } else if interactive {
+                // -i / --interactive: prompt user for each ambiguous fix.
+                for fixit in &ambiguous_fixits {
+                    let start = fixit.span.start as usize;
+                    let end = fixit.span.end as usize;
+                    if end > new_source.len() || start >= end {
+                        continue;
+                    }
+                    let original = &source[start..end];
+                    eprint!(
+                        "  ambiguous fix: `{original}` at {path_str}:{} — apply `{}`? [Y/n]: ",
+                        fixit.span.start, fixit.replacement,
+                    );
+                    let mut input = String::new();
+                    std::io::stdin()
+                        .read_line(&mut input)
+                        .map_err(|e| format!("stdin error: {e}"))?;
+                    let trimmed = input.trim();
+                    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("y") {
+                        new_source.replace_range(start..end, &fixit.replacement);
+                        applied += 1;
+                        eprintln!("    applied: `{original}` → `{}`", fixit.replacement);
+                    } else {
+                        eprintln!("    skipped");
+                    }
+                }
+            } else {
+                // Default --fix: skip ambiguous, hint user.
+                any_ambiguous = true;
             }
         }
 
@@ -359,12 +391,15 @@ fn check_or_fix_path(
     }
 
     // Footer hints in check-only mode.
-    if !do_fix && (any_safe_fixits || any_hard_fixes) {
+    if !do_fix && (any_safe_fixits || any_ambiguous) {
         if any_safe_fixits {
             eprintln!("help: run `zz check --fix {raw}` to automatically apply safe fixes");
         }
-        if any_hard_fixes {
-            eprintln!("help: run `zz check --fix --hard {raw}` to force-apply all fixes including code cleanup");
+        if any_ambiguous {
+            eprintln!(
+                "help: run `zz check --fix -i {raw}` to review ambiguous fixes interactively"
+            );
+            eprintln!("help: run `zz check --fix --hard {raw}` to force-apply all fixes");
         }
     }
 
@@ -394,7 +429,12 @@ mod tests {
     #[test]
     fn check_ok_on_valid_file() {
         let path = write_temp("x := 1 + 2\nimport std.io\nio.println(x)\n");
-        let result = check_or_fix_path(&Some(path.to_string_lossy().to_string()), false, false);
+        let result = check_or_fix_path(
+            &Some(path.to_string_lossy().to_string()),
+            false,
+            false,
+            false,
+        );
         assert!(result.is_ok(), "expected ok, got {result:?}");
         let _ = fs::remove_file(&path);
     }
@@ -404,7 +444,12 @@ mod tests {
         let path = write_temp(
             "scores := [10, 20, 30]\ny := scores[1]\nz := scores[1:3]\nfunc dbl(a: int, b: int) -> int { a * b }\nw := 5 |> dbl(3)\nt := typeof(w)\n",
         );
-        let result = check_or_fix_path(&Some(path.to_string_lossy().to_string()), false, false);
+        let result = check_or_fix_path(
+            &Some(path.to_string_lossy().to_string()),
+            false,
+            false,
+            false,
+        );
         assert!(result.is_ok(), "expected ok, got {result:?}");
         let _ = fs::remove_file(&path);
     }
@@ -412,7 +457,12 @@ mod tests {
     #[test]
     fn check_rejects_type_error() {
         let path = write_temp("x := 1 + \"a\"\n");
-        let result = check_or_fix_path(&Some(path.to_string_lossy().to_string()), false, false);
+        let result = check_or_fix_path(
+            &Some(path.to_string_lossy().to_string()),
+            false,
+            false,
+            false,
+        );
         assert!(result.is_err(), "expected type error");
         let _ = fs::remove_file(&path);
     }
@@ -420,7 +470,12 @@ mod tests {
     #[test]
     fn check_rejects_index_error() {
         let path = write_temp("x := 5\nx[0]\n");
-        let result = check_or_fix_path(&Some(path.to_string_lossy().to_string()), false, false);
+        let result = check_or_fix_path(
+            &Some(path.to_string_lossy().to_string()),
+            false,
+            false,
+            false,
+        );
         assert!(result.is_err(), "expected index type error");
         let _ = fs::remove_file(&path);
     }
@@ -431,6 +486,7 @@ mod tests {
             &Some("/tmp/zz_no_such_file_zz.zz".to_string()),
             false,
             false,
+            false,
         );
         assert!(result.is_err(), "expected error for missing file");
     }
@@ -438,7 +494,7 @@ mod tests {
     #[test]
     fn check_no_arg_errors() {
         // Default path "." should work (current dir).
-        let result = check_or_fix_path(&None, false, false);
+        let result = check_or_fix_path(&None, false, false, false);
         assert!(result.is_ok(), "default path should scan current dir");
     }
 }
