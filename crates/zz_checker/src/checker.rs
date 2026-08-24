@@ -241,6 +241,7 @@ impl Checker {
             for (name, span) in &defined {
                 let display = Self::display_name(name);
                 if !self.used_names.contains(name) && !display.starts_with('_') {
+                    let fixit_name = format!("_{display}");
                     self.errors.push(
                         warning_at(
                             format!(
@@ -248,7 +249,12 @@ impl Checker {
                             ),
                             *span,
                         )
-                        .with_note("variable is never read"),
+                        .with_note("variable is never read")
+                        .with_fixit(FixIt {
+                            span: *span,
+                            replacement: fixit_name,
+                            message: "rename to".to_string(),
+                        }),
                     );
                 }
             }
@@ -280,6 +286,7 @@ impl Checker {
             for (name, span) in &entries {
                 let display = Self::display_name(name);
                 if !self.used_names.contains(name) && !display.starts_with('_') {
+                    let fixit_name = format!("_{display}");
                     self.errors.push(
                         warning_at(
                             format!(
@@ -287,7 +294,12 @@ impl Checker {
                             ),
                             *span,
                         )
-                        .with_note("variable is never read"),
+                        .with_note("variable is never read")
+                        .with_fixit(FixIt {
+                            span: *span,
+                            replacement: fixit_name,
+                            message: "rename to".to_string(),
+                        }),
                     );
                 }
             }
