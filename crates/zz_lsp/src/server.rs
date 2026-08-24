@@ -124,9 +124,19 @@ impl LanguageServer for Backend {
         Ok(None)
     }
 
-    async fn code_action(&self, _params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
-        // Phase 2: quick-fixes from tiered FixIt.
-        Ok(None)
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = &params.text_document.uri;
+        let source = match self.state.documents.get(uri) {
+            Some(doc) => doc.source.clone(),
+            None => return Ok(None),
+        };
+
+        let actions = crate::code_action::code_actions_for_range(&params, &source, uri);
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
+        }
     }
 
     async fn shutdown(&self) -> Result<()> {

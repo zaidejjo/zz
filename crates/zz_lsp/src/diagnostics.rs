@@ -94,10 +94,16 @@ pub async fn recheck_and_publish(
 }
 
 /// Convert a single ZZ `RawDiag` to an LSP `Diagnostic`.
+///
+/// Stashes the full `RawDiag` as JSON in `Diagnostic.data` so that
+/// `textDocument/codeAction` can retrieve fixit info without re-checking.
 fn convert_diagnostic(source: &str, raw: &zz_frontend::diag::RawDiag) -> Diagnostic {
     let span = raw.span.unwrap();
     let range = span_to_range(source, span);
     let severity = severity_to_lsp(raw.severity);
+
+    // Serialize the entire RawDiag for code actions to extract later.
+    let data = serde_json::to_value(raw).ok();
 
     Diagnostic {
         range,
@@ -108,6 +114,6 @@ fn convert_diagnostic(source: &str, raw: &zz_frontend::diag::RawDiag) -> Diagnos
         message: raw.message.clone(),
         related_information: None,
         tags: None,
-        data: None,
+        data,
     }
 }

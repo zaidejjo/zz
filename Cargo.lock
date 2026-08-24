@@ -1256,6 +1256,7 @@ version = "0.0.1"
 dependencies = [
  "codespan-reporting",
  "colored",
+ "serde",
 ]
 
 [[package]]
@@ -1265,6 +1266,7 @@ dependencies = [
  "dashmap 6.2.1",
  "env_logger",
  "log",
+ "serde_json",
  "tokio",
  "tower-lsp",
  "zz_checker",
