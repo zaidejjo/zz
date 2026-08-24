@@ -1,0 +1,18 @@
+[package]
+name = "zz_lsp"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "zz-lsp"
+path = "src/main.rs"
+
+[dependencies]
+zz_frontend = { path = "../zz_frontend" }
+zz_checker  = { path = "../zz_checker" }
+zz_stdlib   = { path = "../zz_stdlib" }
+tower-lsp   = "0.20"
+tokio       = { version = "1", features = ["full"] }
+dashmap     = "6"
+log         = "0.4"
+env_logger  = "0.11"
