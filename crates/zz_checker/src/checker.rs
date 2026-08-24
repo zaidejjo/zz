@@ -416,6 +416,13 @@ impl Checker {
             let mut diag = error_at(format!("undefined variable `{joined}`"), span);
             if let Some((suggestion, _)) = suggest(&parts[0], &candidates) {
                 diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                // Replace only the root name, not the whole path.
+                let root_span = Span::new(span.start, span.start + parts[0].len() as u32);
+                diag = diag.with_fixit(FixIt {
+                    span: root_span,
+                    replacement: suggestion.to_string(),
+                    message: "replace variable".to_string(),
+                });
             }
             self.errors.push(diag);
             self.had_undefined_var = true;
@@ -436,10 +443,12 @@ impl Checker {
                             if let Some((suggestion, _)) = suggest(field, &field_names) {
                                 diag =
                                     diag.with_note(format!("did you mean field `{suggestion}`?"));
+                                // Span covers only the field name at the end of the path.
+                                let field_span = Span::new(span.end - field.len() as u32, span.end);
                                 diag = diag.with_fixit(FixIt {
-                                    span,
+                                    span: field_span,
                                     replacement: suggestion.to_string(),
-                                    message: "rename to".to_string(),
+                                    message: "replace field".to_string(),
                                 });
                             }
                             self.errors.push(diag);
@@ -651,10 +660,24 @@ impl Checker {
                         Some(sig) => match sig.fields.iter().find(|(n, _)| n == name) {
                             Some((_, ft)) => ft.clone(),
                             None => {
-                                self.errors.push(error_at(
+                                let field_names: Vec<&str> =
+                                    sig.fields.iter().map(|(n, _)| n.as_str()).collect();
+                                let mut diag = error_at(
                                     format!("struct `{sname}` has no field `{name}`"),
                                     *span,
-                                ));
+                                );
+                                if let Some((suggestion, _)) = suggest(name, &field_names) {
+                                    diag = diag
+                                        .with_note(format!("did you mean field `{suggestion}`?"));
+                                    let field_span =
+                                        Span::new(span.end - name.len() as u32, span.end);
+                                    diag = diag.with_fixit(FixIt {
+                                        span: field_span,
+                                        replacement: suggestion.to_string(),
+                                        message: "replace field".to_string(),
+                                    });
+                                }
+                                self.errors.push(diag);
                                 Type::Unit
                             }
                         },
@@ -844,10 +867,24 @@ impl Checker {
                         Some(sig) => match sig.fields.iter().find(|(n, _)| n == name) {
                             Some((_, ft)) => ft.clone(),
                             None => {
-                                self.errors.push(error_at(
+                                let field_names: Vec<&str> =
+                                    sig.fields.iter().map(|(n, _)| n.as_str()).collect();
+                                let mut diag = error_at(
                                     format!("struct `{sname}` has no field `{name}`"),
                                     *span,
-                                ));
+                                );
+                                if let Some((suggestion, _)) = suggest(name, &field_names) {
+                                    diag = diag
+                                        .with_note(format!("did you mean field `{suggestion}`?"));
+                                    let field_span =
+                                        Span::new(span.end - name.len() as u32, span.end);
+                                    diag = diag.with_fixit(FixIt {
+                                        span: field_span,
+                                        replacement: suggestion.to_string(),
+                                        message: "replace field".to_string(),
+                                    });
+                                }
+                                self.errors.push(diag);
                                 Type::Unit
                             }
                         },
