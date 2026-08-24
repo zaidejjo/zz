@@ -435,7 +435,6 @@ fn check_or_fix_path(
             eprintln!("help: run `zz check --fix --hard {raw}` to force-apply all fixes");
         }
     }
-
     Ok(())
 }
 
