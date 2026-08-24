@@ -304,51 +304,20 @@ fn check_or_fix_path(
         }
 
         // Fix mode.
-        let mut new_source = source.clone();
-        let mut applied = 0u32;
-
-        // Always apply safe fixes.
-        safe_fixits.sort_by(|a, b| b.span.start.cmp(&a.span.start));
-        for fixit in &safe_fixits {
-            let start = fixit.span.start as usize;
-            let end = fixit.span.end as usize;
-            if end <= new_source.len() && start < end {
-                new_source.replace_range(start..end, &fixit.replacement);
-                applied += 1;
-                eprintln!(
-                    "  fixed: `{}` → `{}` at {path_str}:{}",
-                    &source[start..end],
-                    fixit.replacement,
-                    fixit.span.start,
-                );
-            }
-        }
+        // Collect all approved fixits (safe + accepted ambiguous) into one list.
+        let mut approved: Vec<zz_frontend::diag::FixIt> = safe_fixits;
 
         // Handle ambiguous fixes based on mode.
         if !ambiguous_fixits.is_empty() {
             if force {
-                // --hard: auto-apply first candidate for ambiguous fixes.
-                ambiguous_fixits.sort_by(|a, b| b.span.start.cmp(&a.span.start));
-                for fixit in &ambiguous_fixits {
-                    let start = fixit.span.start as usize;
-                    let end = fixit.span.end as usize;
-                    if end <= new_source.len() && start < end {
-                        new_source.replace_range(start..end, &fixit.replacement);
-                        applied += 1;
-                        eprintln!(
-                            "  fixed (force): `{}` → `{}` at {path_str}:{}",
-                            &source[start..end],
-                            fixit.replacement,
-                            fixit.span.start,
-                        );
-                    }
-                }
+                // --hard: auto-apply all ambiguous fixes.
+                approved.extend(ambiguous_fixits);
             } else if interactive {
                 // -i / --interactive: prompt user for each ambiguous fix.
                 for fixit in &ambiguous_fixits {
                     let start = fixit.span.start as usize;
                     let end = fixit.span.end as usize;
-                    if end > new_source.len() || start >= end {
+                    if end > source.len() || start >= end {
                         continue;
                     }
                     let original = &source[start..end];
@@ -377,10 +346,13 @@ fn check_or_fix_path(
                         // Parse number.
                         match trimmed.parse::<usize>() {
                             Ok(n) if n >= 1 && n <= fixit.alternatives.len() => {
-                                let chosen = &fixit.alternatives[n - 1];
-                                new_source.replace_range(start..end, chosen);
-                                applied += 1;
-                                eprintln!("    applied: `{original}` → `{chosen}`");
+                                let mut chosen_fixit = fixit.clone();
+                                chosen_fixit.replacement = fixit.alternatives[n - 1].clone();
+                                approved.push(chosen_fixit);
+                                eprintln!(
+                                    "    applied: `{original}` → `{}`",
+                                    fixit.alternatives[n - 1]
+                                );
                             }
                             _ => {
                                 eprintln!("    invalid choice, skipped");
@@ -398,8 +370,7 @@ fn check_or_fix_path(
                             .map_err(|e| format!("stdin error: {e}"))?;
                         let trimmed = input.trim();
                         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("y") {
-                            new_source.replace_range(start..end, &fixit.replacement);
-                            applied += 1;
+                            approved.push(fixit.clone());
                             eprintln!("    applied: `{original}` → `{}`", fixit.replacement);
                         } else {
                             eprintln!("    skipped");
@@ -412,11 +383,36 @@ fn check_or_fix_path(
             }
         }
 
-        if applied > 0 {
-            std::fs::write(path, &new_source)
-                .map_err(|e| format!("cannot write `{path_str}`: {e}"))?;
-            eprintln!("zz: applied {applied} fix(es) to `{path_str}`");
-            total_fixes += applied;
+        // Apply all approved fixits in one pass, right-to-left to avoid offset shifts.
+        let mut applied = 0u32;
+        if !approved.is_empty() {
+            let mut new_source = source.clone();
+            approved.sort_by(|a, b| b.span.start.cmp(&a.span.start));
+            for fixit in &approved {
+                let start = fixit.span.start as usize;
+                let end = fixit.span.end as usize;
+                if end <= new_source.len() && start < end {
+                    let original = source[start..end].to_string();
+                    new_source.replace_range(start..end, &fixit.replacement);
+                    applied += 1;
+                    let label = if fixit.safety == zz_frontend::diag::FixSafety::Safe {
+                        "fixed"
+                    } else {
+                        "fixed (force)"
+                    };
+                    eprintln!(
+                        "  {label}: `{original}` → `{}` at {path_str}:{}",
+                        fixit.replacement, fixit.span.start,
+                    );
+                }
+            }
+
+            if applied > 0 {
+                std::fs::write(path, &new_source)
+                    .map_err(|e| format!("cannot write `{path_str}`: {e}"))?;
+                eprintln!("zz: applied {applied} fix(es) to `{path_str}`");
+                total_fixes += applied;
+            }
         }
     }
 
