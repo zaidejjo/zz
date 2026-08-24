@@ -79,7 +79,11 @@ mod tests {
         }
 
         let checked = check_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
-        if !checked.errors.is_empty() {
+        let has_errors = checked
+            .errors
+            .iter()
+            .any(|e| e.severity == zz_frontend::diag::Severity::Error);
+        if has_errors {
             return Err(format!("check errors: {:?}", checked.errors));
         }
 
@@ -206,11 +210,11 @@ mod tests {
         let mut natives = stdlib_natives();
         register_module_namespace("env", "env", &mut funcs, &mut natives).expect("known module");
         let checked = check_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
-        assert!(
-            checked.errors.is_empty(),
-            "check errors: {:?}",
-            checked.errors
-        );
+        let has_errors = checked
+            .errors
+            .iter()
+            .any(|e| e.severity == zz_frontend::diag::Severity::Error);
+        assert!(!has_errors, "check errors: {:?}", checked.errors);
 
         let mut interp = Interp::with_natives(natives);
         interp.args = vec!["one".to_string(), "two".to_string()];

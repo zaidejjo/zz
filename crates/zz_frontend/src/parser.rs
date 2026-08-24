@@ -63,6 +63,7 @@ pub fn parse(source: &str) -> Parsed {
         toks: lexed.tokens,
         pos: 0,
         errors: lexed.errors,
+        delim_stack: Vec::new(),
     };
     let program = parser.parse_program();
     Parsed {
@@ -71,21 +72,86 @@ pub fn parse(source: &str) -> Parsed {
     }
 }
 
+/// A tracked open delimiter for mismatched-delimiter diagnostics.
+#[derive(Debug, Clone)]
+struct DelimEntry {
+    open: TokenKind,
+    span: Span,
+}
+
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
     errors: Vec<RawDiag>,
+    /// Stack of open delimiters for mismatched-delimiter diagnostics.
+    delim_stack: Vec<DelimEntry>,
 }
 
 impl Parser {
     fn parse_program(&mut self) -> Program {
         let stmts = self.parse_stmt_list(TokenKind::Eof);
+        self.check_unclosed_delims();
         let span = Span::new(0, self.src_len());
         Program { stmts, span }
     }
 
     fn src_len(&self) -> u32 {
         self.toks.last().map(|t| t.span.start).unwrap_or(0)
+    }
+
+    // --- delimiter tracking ------------------------------------------------
+
+    fn push_delim(&mut self, open: TokenKind, span: Span) {
+        self.delim_stack.push(DelimEntry { open, span });
+    }
+
+    fn pop_delim(&mut self, close: TokenKind, close_span: Span) {
+        let expected = match close {
+            TokenKind::RParen => Some(TokenKind::LParen),
+            TokenKind::RBrace => Some(TokenKind::LBrace),
+            TokenKind::RBracket => Some(TokenKind::LBracket),
+            _ => None,
+        };
+        if expected.is_none() {
+            return;
+        }
+        let expected = expected.unwrap();
+
+        // Find matching opener, reporting any mismatches in between.
+        match self.delim_stack.iter().rposition(|e| e.open == expected) {
+            Some(idx) => {
+                // Pop everything above the match (mismatched delimiters).
+                for entry in self.delim_stack.drain(idx + 1..) {
+                    self.errors.push(error_at(
+                        format!("unclosed `{}` (opened here)", entry.open.describe()),
+                        entry.span,
+                    ));
+                }
+                self.delim_stack.pop(); // Remove the matching opener.
+            }
+            None => {
+                self.errors.push(error_at(
+                    format!(
+                        "unexpected `{}` with no matching opening `{}`",
+                        close.describe(),
+                        expected.describe()
+                    ),
+                    close_span,
+                ));
+            }
+        }
+    }
+
+    fn check_unclosed_delims(&mut self) {
+        for entry in self.delim_stack.drain(..) {
+            self.errors.push(error_at(
+                format!(
+                    "unclosed `{}` at end of file (opened here)",
+                    entry.open.describe()
+                ),
+                entry.span,
+            ));
+        }
     }
 
     // --- statements -------------------------------------------------------
@@ -336,10 +402,14 @@ impl Parser {
         };
         if !self.eat(TokenKind::LParen) {
             self.error_here("expected `(` after function name");
+        } else {
+            self.push_delim(TokenKind::LParen, self.previous().span);
         }
         let params = self.parse_param_list();
         if !self.eat(TokenKind::RParen) {
             self.error_here("expected `)` after parameters");
+        } else {
+            self.pop_delim(TokenKind::RParen, self.previous().span);
         }
         let ret = if self.eat(TokenKind::Arrow) {
             Some(self.parse_type())
@@ -403,10 +473,14 @@ impl Parser {
         self.skip_stmt_ends();
         if !self.eat(TokenKind::LBrace) {
             self.error_here("expected `{` to start block");
+        } else {
+            self.push_delim(TokenKind::LBrace, lbrace.span);
         }
         let stmts = self.parse_stmt_list(TokenKind::RBrace);
         let end = if self.eat(TokenKind::RBrace) {
-            self.previous().span
+            let rbrace = self.previous().span;
+            self.pop_delim(TokenKind::RBrace, rbrace);
+            rbrace
         } else {
             self.peek().span
         };
@@ -1179,10 +1253,13 @@ impl Parser {
                 }
             }
             TokenKind::LParen => {
-                self.advance();
+                let lparen = self.advance();
+                self.push_delim(TokenKind::LParen, lparen.span);
                 let inner = self.parse_expr();
                 let end = if self.eat_close(TokenKind::RParen) {
-                    self.previous().span
+                    let rparen = self.previous().span;
+                    self.pop_delim(TokenKind::RParen, rparen);
+                    rparen
                 } else {
                     self.error_here("expected `)` to close parenthesized expression");
                     inner.span()
@@ -1361,9 +1438,12 @@ impl Parser {
 
     fn parse_array_literal(&mut self) -> Expr {
         let lbracket = self.advance();
+        self.push_delim(TokenKind::LBracket, lbracket.span);
         // Empty array: `[]`.
         if self.eat(TokenKind::RBracket) {
-            let span = lbracket.span.join(self.previous().span);
+            let rbracket = self.previous().span;
+            self.pop_delim(TokenKind::RBracket, rbracket);
+            let span = lbracket.span.join(rbracket);
             return Expr::Array {
                 elems: Vec::new(),
                 span,
@@ -1384,7 +1464,9 @@ impl Parser {
             elems.push(self.parse_expr());
         }
         let end = if self.eat_close(TokenKind::RBracket) {
-            self.previous().span
+            let rbracket = self.previous().span;
+            self.pop_delim(TokenKind::RBracket, rbracket);
+            rbracket
         } else {
             self.error_here("expected `]` to close array literal");
             lbracket.span
@@ -1413,7 +1495,9 @@ impl Parser {
             None
         };
         let end = if self.eat_close(TokenKind::RBracket) {
-            self.previous().span
+            let rbracket = self.previous().span;
+            self.pop_delim(TokenKind::RBracket, rbracket);
+            rbracket
         } else {
             self.error_here("expected `]` to close list comprehension");
             lbracket.span
@@ -2212,7 +2296,17 @@ mod tests {
     #[test]
     fn missing_close_paren_reports_error() {
         let parsed = parse("(1 + 2");
-        assert_eq!(parsed.errors.len(), 1);
+        assert!(
+            parsed.errors.len() >= 1,
+            "expected at least 1 error for unclosed paren, got {}",
+            parsed.errors.len()
+        );
+        // The diagnostic message should mention the missing `)`.
+        let msgs: Vec<_> = parsed.errors.iter().map(|e| e.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains(')')),
+            "expected a message mentioning `)`, got: {msgs:?}"
+        );
     }
 
     #[test]

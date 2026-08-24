@@ -15,7 +15,8 @@ use std::collections::HashMap;
 use zz_frontend::ast::{
     BinOp, Block, Expr, FmtPart, Lit, MatchArm, Param, Pattern, Program, Stmt, Ty, TyKind, UnOp,
 };
-use zz_frontend::diag::{error_at, RawDiag};
+use zz_frontend::diag::{error_at, warning_at, RawDiag};
+use zz_frontend::levenshtein::suggest;
 use zz_frontend::span::Span;
 
 use crate::type_::Type;
@@ -105,12 +106,16 @@ pub fn check_program(
     // reported inline (see check_stmt `Let`); skip them so the session never
     // seeds an unresolved type.
     let mut bindings = HashMap::new();
-    for (name, ty) in checker.new_bindings {
-        let rt = checker.unifier.resolve_deep(&ty);
+    for (name, ty) in &checker.new_bindings {
+        let rt = checker.unifier.resolve_deep(ty);
         if !contains_var(&rt) {
-            bindings.insert(name, rt);
+            bindings.insert(name.clone(), rt.clone());
         }
     }
+
+    // Emit unused variable warnings for the global scope (the top scope
+    // is never popped, so pop_scope's check never fires for it).
+    checker.emit_global_unused_warnings();
 
     CheckResult {
         errors: checker.errors,
@@ -177,6 +182,11 @@ struct Checker {
     current_generics: Vec<String>,
     /// Nesting depth of `for`/`while` loops (for `break`/`continue`).
     loop_depth: usize,
+    /// Names that were used (looked up) — for unused-variable warnings.
+    used_names: std::collections::HashSet<String>,
+    /// Names defined in the current scope with their spans — for unused
+    /// variable warnings. Each scope level has its own map.
+    defined_names: Vec<HashMap<String, Span>>,
 }
 
 impl Checker {
@@ -196,6 +206,8 @@ impl Checker {
             current_ret: None,
             current_generics: Vec::new(),
             loop_depth: 0,
+            used_names: std::collections::HashSet::new(),
+            defined_names: vec![HashMap::new()],
         }
     }
 
@@ -203,19 +215,67 @@ impl Checker {
 
     fn push_scope(&mut self) {
         self.env.push(HashMap::new());
+        self.defined_names.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
+        // Warn about unused variables in this scope (skip the global scope).
+        if let Some(defined) = self.defined_names.pop() {
+            for (name, span) in &defined {
+                if !self.used_names.contains(name) && !name.starts_with('_') {
+                    self.errors.push(
+                        warning_at(
+                            format!("unused variable `{name}`, consider prefixing with `_{name}`"),
+                            *span,
+                        )
+                        .with_note("variable is never read"),
+                    );
+                }
+            }
+        }
         self.env.pop();
     }
 
     fn define(&mut self, name: &str, ty: Type) {
+        self.define_at(name, ty, Span::new(0, 0));
+    }
+
+    fn define_at(&mut self, name: &str, ty: Type, span: Span) {
         self.env.last_mut().unwrap().insert(name.to_string(), ty);
+        // Record the definition span for unused-variable warnings.
+        if let Some(scope) = self.defined_names.last_mut() {
+            scope.insert(name.to_string(), span);
+        }
+    }
+
+    /// Emit unused-variable warnings for the global scope (scope index 0).
+    /// The global scope is never popped, so `pop_scope`'s check does not
+    /// fire for top-level definitions.
+    fn emit_global_unused_warnings(&mut self) {
+        if let Some(defined) = self.defined_names.first() {
+            // Snapshot defined names to avoid borrow issues.
+            let entries: Vec<(String, Span)> =
+                defined.iter().map(|(k, &v)| (k.clone(), v)).collect();
+            for (name, span) in &entries {
+                if !self.used_names.contains(name) && !name.starts_with('_') {
+                    self.errors.push(
+                        warning_at(
+                            format!("unused variable `{name}`, consider prefixing with `_{name}`"),
+                            *span,
+                        )
+                        .with_note("variable is never read"),
+                    );
+                }
+            }
+        }
     }
 
     fn lookup(&mut self, name: &str, span: Span) -> Type {
         match self.lookup_opt(name) {
-            Some(t) => t,
+            Some(t) => {
+                self.used_names.insert(name.to_string());
+                t
+            }
             None => {
                 if let Some(sig) = self.funcs.get(name) {
                     if !sig.generics.is_empty() {
@@ -228,8 +288,24 @@ impl Checker {
                         return Type::Unit;
                     }
                 }
-                self.errors
-                    .push(error_at(format!("undefined variable `{name}`"), span));
+                // Build candidate list for typo suggestions.
+                let mut candidates: Vec<&str> = Vec::new();
+                for scope in self.env.iter().rev() {
+                    for key in scope.keys() {
+                        candidates.push(key);
+                    }
+                }
+                for key in self.funcs.keys() {
+                    candidates.push(key);
+                }
+                for key in self.structs.keys() {
+                    candidates.push(key);
+                }
+                let mut diag = error_at(format!("undefined variable `{name}`"), span);
+                if let Some((suggestion, _dist)) = suggest(name, &candidates) {
+                    diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                }
+                self.errors.push(diag);
                 Type::Unit
             }
         }
@@ -240,10 +316,12 @@ impl Checker {
     fn lookup_opt(&mut self, name: &str) -> Option<Type> {
         for scope in self.env.iter().rev() {
             if let Some(t) = scope.get(name) {
+                self.used_names.insert(name.to_string());
                 return Some(t.clone());
             }
         }
         if let Some(sig) = self.funcs.get(name) {
+            self.used_names.insert(name.to_string());
             if !sig.generics.is_empty() {
                 return None;
             }
@@ -262,8 +340,24 @@ impl Checker {
             return t;
         }
         let Some(root) = self.lookup_opt(&parts[0]) else {
-            self.errors
-                .push(error_at(format!("undefined variable `{joined}`"), span));
+            // Suggest typo corrections for the root name.
+            let mut candidates: Vec<&str> = Vec::new();
+            for scope in self.env.iter().rev() {
+                for key in scope.keys() {
+                    candidates.push(key);
+                }
+            }
+            for key in self.funcs.keys() {
+                candidates.push(key);
+            }
+            for key in self.structs.keys() {
+                candidates.push(key);
+            }
+            let mut diag = error_at(format!("undefined variable `{joined}`"), span);
+            if let Some((suggestion, _)) = suggest(&parts[0], &candidates) {
+                diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+            }
+            self.errors.push(diag);
             return Type::Unit;
         };
         let mut ty = root;
@@ -273,10 +367,16 @@ impl Checker {
                     Some(sig) => match sig.fields.iter().find(|(n, _)| n == field) {
                         Some((_, ft)) => ty = ft.clone(),
                         None => {
-                            self.errors.push(error_at(
-                                format!("struct `{name}` has no field `{field}`"),
-                                span,
-                            ));
+                            // Suggest closest field name.
+                            let field_names: Vec<&str> =
+                                sig.fields.iter().map(|(n, _)| n.as_str()).collect();
+                            let mut diag =
+                                error_at(format!("struct `{name}` has no field `{field}`"), span);
+                            if let Some((suggestion, _)) = suggest(field, &field_names) {
+                                diag =
+                                    diag.with_note(format!("did you mean field `{suggestion}`?"));
+                            }
+                            self.errors.push(diag);
                             return Type::Unit;
                         }
                     },
@@ -332,7 +432,7 @@ impl Checker {
                             name.span,
                         ));
                     } else {
-                        self.define(&name.name, d.clone());
+                        self.define_at(&name.name, d.clone(), name.span);
                         if self.env.len() == 1 {
                             self.new_bindings.insert(name.name.clone(), d.clone());
                         }
@@ -342,7 +442,7 @@ impl Checker {
                 if self.env.len() == 1 {
                     self.new_bindings.insert(name.name.clone(), vt.clone());
                 }
-                self.define(&name.name, rt.clone());
+                self.define_at(&name.name, rt.clone(), name.span);
                 rt
             }
             Stmt::Import { .. } => {
@@ -1816,6 +1916,7 @@ mod tests {
         check_src(src)
             .errors
             .iter()
+            .filter(|e| e.severity == zz_frontend::diag::Severity::Error)
             .map(|e| e.message.clone())
             .collect()
     }
@@ -1826,6 +1927,13 @@ mod tests {
             errs.iter().any(|e| e.contains(needle)),
             "expected error containing `{needle}`, got: {errs:?}"
         );
+    }
+
+    /// True if `CheckResult` has any errors (severity=Error), ignoring warnings.
+    fn has_errors(r: &CheckResult) -> bool {
+        r.errors
+            .iter()
+            .any(|e| e.severity == zz_frontend::diag::Severity::Error)
     }
 
     /// Check with a seeded function map (e.g. a generic builtin like `typeof`).
@@ -1858,21 +1966,21 @@ mod tests {
     #[test]
     fn infers_int_from_literal() {
         let r = check_src("x := 1");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
     #[test]
     fn infers_float_from_promotion() {
         let r = check_src("x := 1 + 2.5");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Float);
     }
 
     #[test]
     fn annotation_unifies() {
         let r = check_src("float x = 1 + 2.5");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Float);
     }
 
@@ -1904,14 +2012,14 @@ mod tests {
     #[test]
     fn func_signature_and_body() {
         let r = check_src("func add(a: int, b: int) -> int { return a + b }\nz := add(1, 2)");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["z"], Type::Int);
     }
 
     #[test]
     fn func_return_type_inferred() {
         let r = check_src("func five() { return 5 }\nz := five()");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["z"], Type::Int);
     }
 
@@ -1936,7 +2044,7 @@ mod tests {
     #[test]
     fn generic_func_instantiates() {
         let r = check_src("func id<T>(x: T) -> T { return x }\na := id(1)\nb := id(\"s\")");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["a"], Type::Int);
         assert_eq!(r.bindings["b"], Type::Str);
     }
@@ -1952,7 +2060,7 @@ mod tests {
     #[test]
     fn recursion_works() {
         let r = check_src("func fact(n: int) -> int { if n <= 1 { 1 } else { n * fact(n - 1) } }");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
     }
 
     // --- structs -----------------------------------------------------------
@@ -1960,7 +2068,7 @@ mod tests {
     #[test]
     fn struct_def_and_init() {
         let r = check_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["p"], Type::Struct("Point".into()));
         assert_eq!(r.structs["Point"].fields.len(), 2);
     }
@@ -1968,14 +2076,14 @@ mod tests {
     #[test]
     fn struct_field_access() {
         let r = check_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\nz := p.x");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["z"], Type::Int);
     }
 
     #[test]
     fn struct_field_mutation() {
         let r = check_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.x = 10");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
     }
 
     #[test]
@@ -2012,7 +2120,7 @@ mod tests {
         let r = check_src(
             "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\nz := dist(Point{ x: 1, y: 2 })",
         );
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["z"], Type::Int);
     }
 
@@ -2040,7 +2148,7 @@ mod tests {
     #[test]
     fn struct_type_annotation_resolves() {
         let r = check_src("struct Point { x: int, y: int }\nPoint p = Point{ x: 1, y: 2 }");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["p"], Type::Struct("Point".into()));
     }
 
@@ -2049,19 +2157,19 @@ mod tests {
     #[test]
     fn for_over_range() {
         let r = check_src("sum := 0\nfor i in 0..5 { sum = sum + i }");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
     }
 
     #[test]
     fn for_over_array() {
         let r = check_src("total := 0\nfor n in [10, 20, 30] { total = total + n }");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
     }
 
     #[test]
     fn for_loop_var_typed() {
         let r = check_src("for i in 0..5 { i }");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
     }
 
     #[test]
@@ -2087,13 +2195,13 @@ mod tests {
     #[test]
     fn break_inside_loop_ok() {
         let r = check_src("for i in 0..5 { if i == 2 { break } }");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
     }
 
     #[test]
     fn break_inside_while_ok() {
         let r = check_src("x := 0\nwhile x < 5 { x = x + 1; break }");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
     }
 
     #[test]
@@ -2109,7 +2217,7 @@ mod tests {
     #[test]
     fn closure_inference() {
         let r = check_src("f := |x: int| x + 1");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(
             r.bindings["f"],
             Type::Func(vec![Type::Int], Box::new(Type::Int))
@@ -2124,14 +2232,14 @@ mod tests {
     #[test]
     fn calling_closure() {
         let r = check_src("f := |x: int| x + 1\ny := f(5)");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["y"], Type::Int);
     }
 
     #[test]
     fn match_option() {
         let r = check_src("v := .some(1)\nx := match v { .some(n) => n, .none => 0 }");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
@@ -2139,7 +2247,7 @@ mod tests {
     fn match_result() {
         let r =
             check_src("Result<int, str> v = .ok(1)\nx := match v { .ok(n) => n, .err(_) => 0 }");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
@@ -2164,7 +2272,7 @@ mod tests {
     #[test]
     fn if_let_binds() {
         let r = check_src("v := .some(5)\nx := if let .some(n) = v { n } else { 0 }");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
@@ -2173,13 +2281,13 @@ mod tests {
         let r = check_src(
             "func div(a: int, b: int) -> Result<int, str> { if b == 0 { .err(\"z\") } else { .ok(a / b) } }\nfunc f(a: int, b: int) -> Result<int, str> { q := div(a, b)?; .ok(q) }",
         );
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
     }
 
     #[test]
     fn try_on_option() {
         let r = check_src("func f() -> Option<int> { x := .some(1)?; .some(x) }");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
     }
 
     #[test]
@@ -2208,11 +2316,7 @@ mod tests {
         // `.none`/`.ok`/`.err` default their unknown variant parameter to
         // `unit`; `.some`/`.ok` with a concrete argument infer fully.
         let r = check_src("a := .ok(1)\nb := .none\nc := .err(\"boom\")");
-        assert!(
-            r.errors.is_empty(),
-            "expected no errors, got {:?}",
-            r.errors
-        );
+        assert!(!has_errors(&r), "expected no errors, got {:?}", r.errors);
         // A binding whose type still has a var after defaulting still errors.
         errors_contain("f := |x| x", "cannot infer the type of `f`");
     }
@@ -2225,7 +2329,7 @@ mod tests {
     #[test]
     fn if_else_type_unify() {
         let r = check_src("x := if true { 1 } else { 2 }");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
@@ -2247,7 +2351,7 @@ mod tests {
     #[test]
     fn str_concat() {
         let r = check_src("s := \"a\" + \"b\"");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["s"], Type::Str);
     }
 
@@ -2259,7 +2363,7 @@ mod tests {
     #[test]
     fn shadowing_allowed() {
         let r = check_src("x := 1\nx := x + 1");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
@@ -2271,21 +2375,21 @@ mod tests {
     #[test]
     fn array_literal_infers() {
         let r = check_src("scores := [10, 20, 30]");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["scores"], Type::Array(Box::new(Type::Int)));
     }
 
     #[test]
     fn array_explicit_decl() {
         let r = check_src("[int] scores = [10, 20, 30]");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["scores"], Type::Array(Box::new(Type::Int)));
     }
 
     #[test]
     fn array_mixed_types_form_union() {
         let r = check_src("v := [1, \"a\"]");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(
             r.bindings["v"],
             Type::Array(Box::new(Type::Union(vec![Type::Int, Type::Str])))
@@ -2295,7 +2399,7 @@ mod tests {
     #[test]
     fn array_annotation_unifies_with_union() {
         let r = check_src("[int] v = [1, 2]");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["v"], Type::Array(Box::new(Type::Int)));
     }
 
@@ -2310,7 +2414,7 @@ mod tests {
         // matches. `[1, "a"]` has element type `int | str`, which contains
         // `int`, so the annotation is accepted.
         let r = check_src("[int] v = [1, \"a\"]");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
     }
 
     #[test]
@@ -2321,7 +2425,7 @@ mod tests {
     #[test]
     fn dict_literal_infers() {
         let r = check_src("ages := {\"Zaid\": 20}");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(
             r.bindings["ages"],
             Type::Dict(Box::new(Type::Str), Box::new(Type::Int))
@@ -2331,7 +2435,7 @@ mod tests {
     #[test]
     fn dict_explicit_decl() {
         let r = check_src("{str: int} ages = {\"a\": 1}");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(
             r.bindings["ages"],
             Type::Dict(Box::new(Type::Str), Box::new(Type::Int))
@@ -2341,7 +2445,7 @@ mod tests {
     #[test]
     fn dict_union_value_type() {
         let r = check_src("{str: str | int} user = {\"name\": \"Zaid\", \"age\": 20}");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(
             r.bindings["user"],
             Type::Dict(
@@ -2364,14 +2468,14 @@ mod tests {
     #[test]
     fn import_is_noop() {
         let r = check_src("import std.io\nx := 1");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
     #[test]
     fn union_annotation_accepts_member() {
         let r = check_src("str | int v = 5");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         // Binding stores the value type (int), which unifies with the union.
         assert_eq!(r.bindings["v"], Type::Int);
     }
@@ -2386,35 +2490,35 @@ mod tests {
     #[test]
     fn array_index_type() {
         let r = check_src("scores := [10, 20]\nx := scores[0]");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
     #[test]
     fn dict_index_type() {
         let r = check_src("ages := {\"a\": 1}\nx := ages[\"a\"]");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
     #[test]
     fn str_index_type() {
         let r = check_src("x := \"hello\"[1]");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Str);
     }
 
     #[test]
     fn array_slice_type() {
         let r = check_src("scores := [10, 20, 30]\nx := scores[1:3]");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Array(Box::new(Type::Int)));
     }
 
     #[test]
     fn str_slice_type() {
         let r = check_src("x := \"hello\"[1:3]");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Str);
     }
 
@@ -2436,7 +2540,7 @@ mod tests {
     #[test]
     fn index_assign_type_checked() {
         let r = check_src("scores := [1, 2]\nscores[0] = 5");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
     }
 
     #[test]
@@ -2455,7 +2559,7 @@ mod tests {
     #[test]
     fn dict_index_assign_ok() {
         let r = check_src("ages := {\"a\": 1}\nages[\"b\"] = 2");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
     }
 
     // --- pipeline -----------------------------------------------------------
@@ -2463,14 +2567,14 @@ mod tests {
     #[test]
     fn pipe_type_checks() {
         let r = check_src("func dbl(a: int, b: int) -> int { a * b }\nx := 5 |> dbl(3)");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
     #[test]
     fn pipe_bare_name_type_checks() {
         let r = check_src("func inc(n: int) -> int { n + 1 }\nx := 5 |> inc");
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
@@ -2487,7 +2591,7 @@ mod tests {
         let r = check_src(
             "func inc(n: int) -> int { n + 1 }\nfunc dbl(n: int) -> int { n * 2 }\nx := 5 |> inc |> dbl",
         );
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
 
@@ -2514,7 +2618,7 @@ mod tests {
             "x := typeof(.some(1))",
         ] {
             let r = check_src_with_funcs(src, funcs.clone());
-            assert!(r.errors.is_empty(), "errors for `{src}`: {:?}", r.errors);
+            assert!(!has_errors(&r), "errors for `{src}`: {:?}", r.errors);
             assert_eq!(r.bindings["x"], Type::Str, "for `{src}`");
         }
     }
@@ -2544,7 +2648,7 @@ mod tests {
             "struct Point { x: int }\np := Point{ x: 3 }\nz := p.dist(2)",
             method_funcs(),
         );
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["z"], Type::Int);
     }
 
@@ -2616,7 +2720,7 @@ mod tests {
             funcs,
             structs,
         );
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["z"], Type::Int);
     }
 
@@ -2658,7 +2762,7 @@ mod tests {
     #[test]
     fn conversion_sigs() {
         let r = check_src_with_funcs("a := str(1)\nb := int(\"42\")\nc := float(3)", conv_funcs());
-        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["a"], Type::Str);
         assert_eq!(r.bindings["b"], Type::Option(Box::new(Type::Int)));
         assert_eq!(r.bindings["c"], Type::Option(Box::new(Type::Float)));
@@ -2668,7 +2772,135 @@ mod tests {
     fn conversion_any_value() {
         for src in ["a := str([1, 2])", "a := int(3.7)", "a := float(\"2.5\")"] {
             let r = check_src_with_funcs(src, conv_funcs());
-            assert!(r.errors.is_empty(), "errors for `{src}`: {:?}", r.errors);
+            assert!(!has_errors(&r), "errors for `{src}`: {:?}", r.errors);
         }
+    }
+
+    // --- smart diagnostics tests -------------------------------------------
+
+    #[test]
+    fn unused_variable_warning() {
+        let r = check_src("x := 1");
+        let msgs: Vec<_> = r.errors.iter().map(|e| e.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("unused variable")),
+            "expected unused variable warning, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn underscore_prefixed_no_warning() {
+        let r = check_src("_x := 1");
+        assert!(
+            r.errors
+                .iter()
+                .all(|e| !e.message.contains("unused variable")),
+            "underscore-prefixed should not warn: {:?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn used_variable_no_warning() {
+        // x is used in y's expression, so no warning for x.
+        let r = check_src("x := 1\ny := x + 1");
+        let warns: Vec<String> = r
+            .errors
+            .iter()
+            .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+            .map(|e| e.message.clone())
+            .collect();
+        assert!(
+            !warns.iter().any(|m| m.contains("unused variable `x`")),
+            "x should not be unused: {warns:?}"
+        );
+    }
+
+    #[test]
+    fn typo_suggestion_variable() {
+        // Register a function "println" so the typo engine has a candidate.
+        let mut funcs = HashMap::new();
+        funcs.insert(
+            "println".to_string(),
+            FuncSig {
+                generics: vec![],
+                params: vec![("msg".to_string(), Type::Str)],
+                has_default: vec![false],
+                ret: Type::Unit,
+            },
+        );
+        let parsed = parse("prntlnn");
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let r = check_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
+        let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+        let msgs: Vec<_> = r.errors.iter().map(|e| e.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("undefined")),
+            "expected undefined variable error, got: {msgs:?}"
+        );
+        assert!(
+            notes.iter().any(|n| n.contains("did you mean")),
+            "expected typo suggestion, got: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn typo_suggestion_struct_field() {
+        let r = check_src_with_funcs_and_structs(
+            "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\nq := p.xz",
+            HashMap::new(),
+            {
+                let mut s = HashMap::new();
+                s.insert(
+                    "Point".to_string(),
+                    StructSig {
+                        fields: vec![("x".to_string(), Type::Int), ("y".to_string(), Type::Int)],
+                    },
+                );
+                s
+            },
+        );
+        let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+        assert!(
+            notes.iter().any(|n| n.contains("did you mean")),
+            "expected field suggestion, got: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn unclosed_paren_in_parser() {
+        let parsed = parse("func add(a: int, b: int) -> int {\n    a +\n");
+        assert!(
+            parsed.errors.iter().any(|e| e.message.contains("unclosed")),
+            "expected unclosed delimiter error, got: {:?}",
+            parsed.errors
+        );
+    }
+
+    #[test]
+    fn mismatched_delimiter_in_parser() {
+        let parsed = parse("(1 + 2]");
+        let msgs: Vec<_> = parsed.errors.iter().map(|e| e.message.as_str()).collect();
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("unexpected") || m.contains("unclosed")),
+            "expected mismatched delimiter error, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn fixit_structure_is_populated() {
+        use zz_frontend::diag::FixIt;
+        let fixit = FixIt {
+            span: Span::new(0, 5),
+            replacement: "_x".to_string(),
+            message: "rename to".to_string(),
+        };
+        assert_eq!(fixit.replacement, "_x");
+        assert_eq!(fixit.message, "rename to");
     }
 }

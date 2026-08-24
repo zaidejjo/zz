@@ -134,7 +134,11 @@ impl Session {
             self.funcs.clone(),
             self.structs.clone(),
         );
-        if !checked.errors.is_empty() {
+        let has_errors = checked
+            .errors
+            .iter()
+            .any(|e| e.severity == zz_frontend::diag::Severity::Error);
+        if has_errors {
             self.last_had_errors = true;
             return EvalOutput {
                 output: String::new(),
