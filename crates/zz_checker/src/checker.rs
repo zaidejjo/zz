@@ -1363,6 +1363,7 @@ impl Checker {
         };
         if let Some(name) = &direct_name {
             if let Some(sig) = self.funcs.get(name).cloned() {
+                self.used_names.insert(name.clone());
                 let (ps, ret) = self.instantiate(&sig);
                 // Special case: `input` accepts 0 or 1 string argument (optional prompt)
                 if name == "input" {
