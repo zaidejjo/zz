@@ -352,21 +352,58 @@ fn check_or_fix_path(
                         continue;
                     }
                     let original = &source[start..end];
-                    eprint!(
-                        "  ambiguous fix: `{original}` at {path_str}:{} — apply `{}`? [Y/n]: ",
-                        fixit.span.start, fixit.replacement,
-                    );
-                    let mut input = String::new();
-                    std::io::stdin()
-                        .read_line(&mut input)
-                        .map_err(|e| format!("stdin error: {e}"))?;
-                    let trimmed = input.trim();
-                    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("y") {
-                        new_source.replace_range(start..end, &fixit.replacement);
-                        applied += 1;
-                        eprintln!("    applied: `{original}` → `{}`", fixit.replacement);
+                    let line_num = source[..start].matches('\n').count() + 1;
+
+                    if fixit.alternatives.len() > 1 {
+                        // Multiple candidates: show numbered menu.
+                        eprintln!("  Ambiguous field `{original}` at {path_str}:{line_num}:");
+                        for (i, alt) in fixit.alternatives.iter().enumerate() {
+                            eprintln!("    [{}] {}", i + 1, alt);
+                        }
+                        eprintln!("    [s] Skip");
+                        eprint!("  Choice [1-{}]: ", fixit.alternatives.len());
+
+                        let mut input = String::new();
+                        std::io::stdin()
+                            .read_line(&mut input)
+                            .map_err(|e| format!("stdin error: {e}"))?;
+                        let trimmed = input.trim();
+
+                        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("s") {
+                            eprintln!("    skipped");
+                            continue;
+                        }
+
+                        // Parse number.
+                        match trimmed.parse::<usize>() {
+                            Ok(n) if n >= 1 && n <= fixit.alternatives.len() => {
+                                let chosen = &fixit.alternatives[n - 1];
+                                new_source.replace_range(start..end, chosen);
+                                applied += 1;
+                                eprintln!("    applied: `{original}` → `{chosen}`");
+                            }
+                            _ => {
+                                eprintln!("    invalid choice, skipped");
+                            }
+                        }
                     } else {
-                        eprintln!("    skipped");
+                        // Single candidate: simple Y/n prompt.
+                        eprint!(
+                            "  ambiguous fix: `{original}` at {path_str}:{} — apply `{}`? [Y/n]: ",
+                            fixit.span.start, fixit.replacement,
+                        );
+                        let mut input = String::new();
+                        std::io::stdin()
+                            .read_line(&mut input)
+                            .map_err(|e| format!("stdin error: {e}"))?;
+                        let trimmed = input.trim();
+                        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("y") {
+                            new_source.replace_range(start..end, &fixit.replacement);
+                            applied += 1;
+                            eprintln!("    applied: `{original}` → `{}`", fixit.replacement);
+                        } else {
+                            eprintln!("    skipped");
+                        }
                     }
                 }
             } else {

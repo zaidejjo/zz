@@ -43,6 +43,8 @@ pub struct FixIt {
     pub message: String,
     /// Safety classification for tiered auto-fix.
     pub safety: FixSafety,
+    /// All candidate replacements for ambiguous fixes (empty for safe fixes).
+    pub alternatives: Vec<String>,
 }
 
 impl FixIt {
@@ -53,20 +55,25 @@ impl FixIt {
             replacement: replacement.into(),
             message: message.into(),
             safety: FixSafety::Safe,
+            alternatives: Vec::new(),
         }
     }
 
-    /// Create an ambiguous fix (multiple candidates).
+    /// Create an ambiguous fix with multiple candidates.
+    /// `replacement` is the best/first candidate; `alternatives` is all candidates
+    /// (including the best one). The first alternative is pre-selected.
     pub fn ambiguous(
         span: Span,
         replacement: impl Into<String>,
         message: impl Into<String>,
+        alternatives: Vec<String>,
     ) -> Self {
         FixIt {
             span,
             replacement: replacement.into(),
             message: message.into(),
             safety: FixSafety::Ambiguous,
+            alternatives,
         }
     }
 }
@@ -394,12 +401,7 @@ mod tests {
         let id = files.add("test.zz".to_string(), "x := 1\ny := 2\n".to_string());
         let diag = warning_at("unused variable `y`", Span::new(7, 8))
             .with_note("consider prefixing with `_`")
-            .with_fixit(FixIt {
-                span: Span::new(7, 8),
-                replacement: "_y".to_string(),
-                message: "rename to".to_string(),
-                safety: FixSafety::Safe,
-            });
+            .with_fixit(FixIt::safe(Span::new(7, 8), "_y", "rename to"));
         let out = render_to_string(&files, id, &[diag]);
         assert!(out.contains("warning"), "missing warning keyword: {out}");
         assert!(out.contains("unused variable"), "missing message: {out}");
@@ -450,8 +452,14 @@ mod tests {
 
     #[test]
     fn fixit_ambiguous_constructor() {
-        let fixit = FixIt::ambiguous(Span::new(5, 10), "println".to_string(), "replace function");
+        let fixit = FixIt::ambiguous(
+            Span::new(5, 10),
+            "println",
+            "replace function",
+            vec!["println".to_string(), "println!".to_string()],
+        );
         assert_eq!(fixit.replacement, "println");
+        assert_eq!(fixit.alternatives.len(), 2);
         assert!(matches!(fixit.safety, FixSafety::Ambiguous));
     }
 }

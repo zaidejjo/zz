@@ -374,7 +374,8 @@ impl Checker {
                     let fixit = if all.len() == 1 {
                         FixIt::safe(span, suggestion.to_string(), "replace variable")
                     } else {
-                        FixIt::ambiguous(span, suggestion.to_string(), "replace variable")
+                        let alts: Vec<String> = all.iter().map(|(s, _)| s.to_string()).collect();
+                        FixIt::ambiguous(span, suggestion.to_string(), "replace variable", alts)
                     };
                     diag = diag.with_fixit(fixit);
                 }
@@ -435,7 +436,8 @@ impl Checker {
                 let fixit = if all.len() == 1 {
                     FixIt::safe(root_span, suggestion.to_string(), "replace variable")
                 } else {
-                    FixIt::ambiguous(root_span, suggestion.to_string(), "replace variable")
+                    let alts: Vec<String> = all.iter().map(|(s, _)| s.to_string()).collect();
+                    FixIt::ambiguous(root_span, suggestion.to_string(), "replace variable", alts)
                 };
                 diag = diag.with_fixit(fixit);
             }
@@ -463,10 +465,13 @@ impl Checker {
                                 let fixit = if all.len() == 1 {
                                     FixIt::safe(field_span, suggestion.to_string(), "replace field")
                                 } else {
+                                    let alts: Vec<String> =
+                                        all.iter().map(|(s, _)| s.to_string()).collect();
                                     FixIt::ambiguous(
                                         field_span,
                                         suggestion.to_string(),
                                         "replace field",
+                                        alts,
                                     )
                                 };
                                 diag = diag.with_fixit(fixit);
@@ -692,6 +697,8 @@ impl Checker {
                                         .with_note(format!("did you mean field `{suggestion}`?"));
                                     let field_span =
                                         Span::new(span.end - name.len() as u32, span.end);
+                                    let alts: Vec<String> =
+                                        all.iter().map(|(s, _)| s.to_string()).collect();
                                     let fixit = if all.len() == 1 {
                                         FixIt::safe(
                                             field_span,
@@ -703,6 +710,7 @@ impl Checker {
                                             field_span,
                                             suggestion.to_string(),
                                             "replace field",
+                                            alts,
                                         )
                                     };
                                     diag = diag.with_fixit(fixit);
@@ -909,6 +917,8 @@ impl Checker {
                                         .with_note(format!("did you mean field `{suggestion}`?"));
                                     let field_span =
                                         Span::new(span.end - name.len() as u32, span.end);
+                                    let alts: Vec<String> =
+                                        all.iter().map(|(s, _)| s.to_string()).collect();
                                     let fixit = if all.len() == 1 {
                                         FixIt::safe(
                                             field_span,
@@ -920,6 +930,7 @@ impl Checker {
                                             field_span,
                                             suggestion.to_string(),
                                             "replace field",
+                                            alts,
                                         )
                                     };
                                     diag = diag.with_fixit(fixit);
