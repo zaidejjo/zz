@@ -240,6 +240,9 @@ fn check_or_fix_path(
 
     let mut total_errors = 0u32;
     let mut total_fixes = 0u32;
+    // Track whether any file had fixable diagnostics (for footer hints).
+    let mut any_safe_fixits = false;
+    let mut any_hard_fixes = false;
 
     for path in &files {
         let path_str = path.display().to_string();
@@ -281,6 +284,12 @@ fn check_or_fix_path(
                 let mut files_ctx = Files::new();
                 let id = files_ctx.add(e.name.clone(), e.source.clone());
                 eprint!("{}", render_to_string(&files_ctx, id, &e.diags));
+            }
+            if !fixits.is_empty() {
+                any_safe_fixits = true;
+            }
+            if !warnings_only.is_empty() {
+                any_hard_fixes = true;
             }
             if has_hard_errors {
                 total_errors += 1;
@@ -348,6 +357,17 @@ fn check_or_fix_path(
     if do_fix && total_fixes == 0 {
         eprintln!("zz: no fixable diagnostics in `{raw}`");
     }
+
+    // Footer hints in check-only mode.
+    if !do_fix && (any_safe_fixits || any_hard_fixes) {
+        if any_safe_fixits {
+            eprintln!("help: run `zz check --fix {raw}` to automatically apply safe fixes");
+        }
+        if any_hard_fixes {
+            eprintln!("help: run `zz check --fix --hard {raw}` to force-apply all fixes including code cleanup");
+        }
+    }
+
     Ok(())
 }
 
