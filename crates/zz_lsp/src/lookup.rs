@@ -544,13 +544,11 @@ pub fn resolve_type_at(
     }) = node.expr
     {
         // Resolve the object type, then look up the field.
-        if let Some(obj_type) = resolve_type_of_expr(program, check_result, obj) {
-            if let Type::Struct(struct_name) = obj_type {
-                if let Some(sig) = check_result.structs.get(&struct_name) {
-                    for (fname, fty) in &sig.fields {
-                        if fname == field {
-                            return Some(fty.clone());
-                        }
+        if let Some(Type::Struct(struct_name)) = resolve_type_of_expr(program, check_result, obj) {
+            if let Some(sig) = check_result.structs.get(&struct_name) {
+                for (fname, fty) in &sig.fields {
+                    if fname == field {
+                        return Some(fty.clone());
                     }
                 }
             }
@@ -561,6 +559,7 @@ pub fn resolve_type_at(
 }
 
 /// Resolve the type of an arbitrary expression node.
+#[allow(clippy::only_used_in_recursion)]
 pub fn resolve_type_of_expr(
     program: &Program,
     check_result: &CheckResult,
@@ -875,6 +874,248 @@ fn collect_name_refs_in_expr(expr: &Expr, name: &str, refs: &mut Vec<Reference>)
     }
 }
 
+// ── Document highlights ──────────────────────────────────────────────────
+
+/// A single highlight occurrence with its read/write classification.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Highlight {
+    pub span: Span,
+    pub kind: HighlightKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HighlightKind {
+    Read,
+    Write,
+}
+
+/// Find all highlights for the symbol at `offset` in the program.
+pub fn find_highlights_in_program(program: &Program, source: &str, offset: u32) -> Vec<Highlight> {
+    let node = find_node_at(program, source, offset);
+    let name = match &node.name {
+        Some(n) => n.clone(),
+        None => return Vec::new(),
+    };
+
+    let mut highlights = Vec::new();
+    for stmt in &program.stmts {
+        collect_hl_stmt(stmt, &name, source, &mut highlights);
+    }
+    highlights
+}
+
+fn collect_hl_stmt(stmt: &Stmt, name: &str, source: &str, out: &mut Vec<Highlight>) {
+    match stmt {
+        Stmt::Func {
+            name: fname,
+            params,
+            body,
+            ..
+        } => {
+            let joined = fname.join(".");
+            if joined == name {
+                if let Some(span) = find_name_in_source(source, &joined) {
+                    out.push(Highlight {
+                        span,
+                        kind: HighlightKind::Write,
+                    });
+                }
+            }
+            for param in params {
+                if param.name.name == name {
+                    out.push(Highlight {
+                        span: param.name.span,
+                        kind: HighlightKind::Write,
+                    });
+                }
+            }
+            collect_hl_block(body, name, source, out);
+        }
+        Stmt::Struct { name: sname, .. } => {
+            let joined = sname.join(".");
+            if joined == name {
+                if let Some(span) = find_name_in_source(source, &joined) {
+                    out.push(Highlight {
+                        span,
+                        kind: HighlightKind::Write,
+                    });
+                }
+            }
+        }
+        Stmt::Decl {
+            name: ident, value, ..
+        } => {
+            if ident.name == name {
+                out.push(Highlight {
+                    span: ident.span,
+                    kind: HighlightKind::Write,
+                });
+            }
+            collect_hl_expr(value, name, out);
+        }
+        Stmt::For {
+            var, iter, body, ..
+        } => {
+            if var.name == name {
+                out.push(Highlight {
+                    span: var.span,
+                    kind: HighlightKind::Write,
+                });
+            }
+            collect_hl_expr(iter, name, out);
+            collect_hl_block(body, name, source, out);
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(expr) = value {
+                collect_hl_expr(expr, name, out);
+            }
+        }
+        Stmt::Assign { target, value, .. } => {
+            collect_hl_write(target, name, out);
+            collect_hl_expr(value, name, out);
+        }
+        Stmt::Defer { expr, .. } => collect_hl_expr(expr, name, out),
+        Stmt::Expr(e) => collect_hl_expr(e, name, out),
+        Stmt::Import { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+    }
+}
+
+fn collect_hl_block(block: &Block, name: &str, source: &str, out: &mut Vec<Highlight>) {
+    for stmt in &block.stmts {
+        collect_hl_stmt(stmt, name, source, out);
+    }
+}
+
+fn collect_hl_expr(expr: &Expr, name: &str, out: &mut Vec<Highlight>) {
+    match expr {
+        Expr::Ident { name: n, span } => {
+            if n == name {
+                out.push(Highlight {
+                    span: *span,
+                    kind: HighlightKind::Read,
+                });
+            }
+        }
+        Expr::Path { parts, span } => {
+            let joined = parts.join(".");
+            if joined == name || parts.last().map(|s| s.as_str()) == Some(name) {
+                out.push(Highlight {
+                    span: *span,
+                    kind: HighlightKind::Read,
+                });
+            }
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_hl_expr(callee, name, out);
+            for arg in args {
+                collect_hl_expr(arg, name, out);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_hl_expr(left, name, out);
+            collect_hl_expr(right, name, out);
+        }
+        Expr::Unary { expr, .. } => collect_hl_expr(expr, name, out),
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            collect_hl_expr(cond, name, out);
+            collect_hl_block(then, name, "", out);
+            if let Some(e) = els {
+                collect_hl_expr(e, name, out);
+            }
+        }
+        Expr::While { cond, body, .. } => {
+            collect_hl_expr(cond, name, out);
+            collect_hl_block(body, name, "", out);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_hl_expr(scrutinee, name, out);
+            for arm in arms {
+                collect_hl_expr(&arm.body, name, out);
+            }
+        }
+        Expr::IfLet {
+            value, then, els, ..
+        } => {
+            collect_hl_expr(value, name, out);
+            collect_hl_block(then, name, "", out);
+            if let Some(e) = els {
+                collect_hl_expr(e, name, out);
+            }
+        }
+        Expr::Try { expr, .. } => collect_hl_expr(expr, name, out),
+        Expr::Field { obj, .. } => collect_hl_expr(obj, name, out),
+        Expr::Index { obj, index, .. } => {
+            collect_hl_expr(obj, name, out);
+            collect_hl_expr(index, name, out);
+        }
+        Expr::Slice {
+            obj, start, end, ..
+        } => {
+            collect_hl_expr(obj, name, out);
+            if let Some(s) = start {
+                collect_hl_expr(s, name, out);
+            }
+            if let Some(e) = end {
+                collect_hl_expr(e, name, out);
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            collect_hl_expr(start, name, out);
+            collect_hl_expr(end, name, out);
+        }
+        Expr::ListComp {
+            body, iter, filter, ..
+        } => {
+            collect_hl_expr(body, name, out);
+            collect_hl_expr(iter, name, out);
+            if let Some(f) = filter {
+                collect_hl_expr(f, name, out);
+            }
+        }
+        Expr::Array { elems, .. } => {
+            for e in elems {
+                collect_hl_expr(e, name, out);
+            }
+        }
+        Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                collect_hl_expr(k, name, out);
+                collect_hl_expr(v, name, out);
+            }
+        }
+        Expr::Fmt { parts, .. } => {
+            for part in parts {
+                if let zz_frontend::ast::FmtPart::Expr(e, _) = part {
+                    collect_hl_expr(e, name, out);
+                }
+            }
+        }
+        Expr::Block(b) => collect_hl_block(b, name, "", out),
+        Expr::Closure { body, .. } => collect_hl_expr(body, name, out),
+        _ => {}
+    }
+}
+
+fn collect_hl_write(expr: &Expr, name: &str, out: &mut Vec<Highlight>) {
+    match expr {
+        Expr::Ident { name: n, span } => {
+            if n == name {
+                out.push(Highlight {
+                    span: *span,
+                    kind: HighlightKind::Write,
+                });
+            }
+        }
+        Expr::Field { obj, .. } => collect_hl_write(obj, name, out),
+        Expr::Index { obj, .. } => collect_hl_write(obj, name, out),
+        _ => {}
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1055,5 +1296,44 @@ mod tests {
             "prepare_rename: cursor on func name should work"
         );
         assert_eq!(node.name.as_deref(), Some("add"));
+    }
+
+    #[test]
+    fn highlights_read_and_write() {
+        let source = "let x = 10\nlet y = x\n";
+        let parsed = parse(source);
+        // Offset 4 is the `x` in the declaration (`let x`).
+        let hl = find_highlights_in_program(&parsed.program, source, 4);
+        assert!(!hl.is_empty(), "expected highlights for x");
+        // The declaration is a Write.
+        let writes: Vec<_> = hl
+            .iter()
+            .filter(|h| h.kind == HighlightKind::Write)
+            .collect();
+        assert_eq!(writes.len(), 1, "expected 1 write (the declaration)");
+        // The usage `= x` is a Read.
+        let reads: Vec<_> = hl
+            .iter()
+            .filter(|h| h.kind == HighlightKind::Read)
+            .collect();
+        assert_eq!(reads.len(), 1, "expected 1 read (the usage)");
+    }
+
+    #[test]
+    fn highlights_func_name_and_calls() {
+        let source = "func add(a: int, b: int) -> int {\n  return a + b\n}\nlet r = add(1, 2)\nlet s = add(3, 4)\n";
+        let parsed = parse(source);
+        // Offset 5 is inside the `add` function name definition.
+        let hl = find_highlights_in_program(&parsed.program, source, 5);
+        let writes: Vec<_> = hl
+            .iter()
+            .filter(|h| h.kind == HighlightKind::Write)
+            .collect();
+        let reads: Vec<_> = hl
+            .iter()
+            .filter(|h| h.kind == HighlightKind::Read)
+            .collect();
+        assert_eq!(writes.len(), 1, "expected 1 write (func def)");
+        assert!(reads.len() >= 2, "expected >=2 reads (call sites)");
     }
 }
