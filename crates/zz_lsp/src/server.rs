@@ -82,7 +82,11 @@ impl LanguageServer for Backend {
         let version = params.text_document.version;
         let text = params.text_document.text;
 
-        self.state.update_document(uri.clone(), version, text);
+        let (_, old_defs) = self.state.update_document(uri.clone(), version, text);
+        // Prune any symbols the previous version of this file contributed.
+        if let Some(defs) = &old_defs {
+            self.state.prune_defs(defs);
+        }
 
         recheck_and_publish(self.state.clone(), &self.client, uri).await;
     }
@@ -99,7 +103,11 @@ impl LanguageServer for Backend {
             .map(|c| c.text)
             .unwrap_or_default();
 
-        self.state.update_document(uri.clone(), version, text);
+        let (_, old_defs) = self.state.update_document(uri.clone(), version, text);
+        // Prune any symbols the previous version of this file contributed.
+        if let Some(defs) = &old_defs {
+            self.state.prune_defs(defs);
+        }
 
         recheck_and_publish(self.state.clone(), &self.client, uri).await;
     }
@@ -109,7 +117,10 @@ impl LanguageServer for Backend {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        self.state.remove_document(&params.text_document.uri);
+        // Remove document and prune its definitions from the global seed.
+        if let Some(defs) = self.state.remove_document(&params.text_document.uri) {
+            self.state.prune_defs(&defs);
+        }
         // Clear diagnostics for the closed file.
         self.client
             .publish_diagnostics(params.text_document.uri, vec![], None)

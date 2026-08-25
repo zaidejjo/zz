@@ -1,4 +1,9 @@
 //! In-memory document buffers and accumulated checker context.
+//!
+//! Each `DocumentState` tracks which top-level definitions (functions,
+//! structs, globals) it contributes to the global checker seed via
+//! `FileDefs`. When a file is updated or closed, removed symbols are
+//! pruned from the global seed to prevent stale type information.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,6 +17,35 @@ use zz_frontend::ast::Program;
 use zz_frontend::diag::RawDiag;
 use zz_stdlib::stdlib_funcs;
 
+// ── Per-file definition tracking ─────────────────────────────────────────
+
+/// Names of top-level definitions that a single file contributes to the
+/// global checker seed. Used to prune stale symbols on edit/close.
+#[derive(Debug, Clone, Default)]
+pub struct FileDefs {
+    pub bindings: Vec<String>,
+    pub funcs: Vec<String>,
+    pub structs: Vec<String>,
+}
+
+impl FileDefs {
+    /// Extract top-level definition names from a `CheckResult`.
+    pub fn from_check_result(cr: &CheckResult) -> Self {
+        Self {
+            bindings: cr.bindings.keys().cloned().collect(),
+            funcs: cr.funcs.keys().cloned().collect(),
+            structs: cr.structs.keys().cloned().collect(),
+        }
+    }
+
+    /// Is this empty (file defines nothing)?
+    pub fn is_empty(&self) -> bool {
+        self.bindings.is_empty() && self.funcs.is_empty() && self.structs.is_empty()
+    }
+}
+
+// ── Per-file state ───────────────────────────────────────────────────────
+
 /// Per-file state held in memory.
 #[derive(Clone)]
 pub struct DocumentState {
@@ -21,11 +55,14 @@ pub struct DocumentState {
     pub parse_errors: Vec<RawDiag>,
     pub program: Option<Program>,
     /// Checker output from the last successful type-check of this file.
-    /// Used by hover / go-to-definition to resolve types.
     pub check_result: Option<CheckResult>,
+    /// Top-level definitions this file contributes to the global seed.
+    pub file_defs: Option<FileDefs>,
     /// Precomputed line-start index for O(log n) position conversion.
     pub line_index: LineIndex,
 }
+
+// ── Global state ─────────────────────────────────────────────────────────
 
 /// Global LSP state shared across all request handlers.
 pub struct GlobalState {
@@ -72,8 +109,17 @@ impl GlobalState {
         self.sequence.load(Ordering::SeqCst)
     }
 
-    /// Open or update a document buffer. Returns the new change sequence.
-    pub fn update_document(&self, uri: Url, version: i32, text: String) -> u32 {
+    /// Open or update a document buffer.
+    ///
+    /// Returns the old `FileDefs` (if any) that should be pruned from the
+    /// global seed before the new check results are absorbed.
+    pub fn update_document(&self, uri: Url, version: i32, text: String) -> (u32, Option<FileDefs>) {
+        // Extract old defs before replacing the document.
+        let old_defs = self
+            .documents
+            .get(&uri)
+            .and_then(|doc| doc.file_defs.clone());
+
         let parsed = zz_frontend::parse(&text);
         let line_index = LineIndex::new(&text);
         let doc = DocumentState {
@@ -83,15 +129,20 @@ impl GlobalState {
             parse_errors: parsed.errors,
             program: Some(parsed.program),
             check_result: None,
+            file_defs: None,
             line_index,
         };
         self.documents.insert(uri, doc);
-        self.bump_sequence()
+        (self.bump_sequence(), old_defs)
     }
 
     /// Remove a document from the open buffers.
-    pub fn remove_document(&self, uri: &Url) {
-        self.documents.remove(uri);
+    ///
+    /// Returns the `FileDefs` that should be pruned from the global seed.
+    pub fn remove_document(&self, uri: &Url) -> Option<FileDefs> {
+        self.documents
+            .remove(uri)
+            .and_then(|(_, doc)| doc.file_defs)
     }
 
     /// Produce the checker seed from accumulated definitions.
@@ -109,8 +160,40 @@ impl GlobalState {
         )
     }
 
-    /// Merge checker results back into the accumulated seed.
-    pub fn absorb_result(&self, result: &CheckResult) {
+    /// Remove a file's definitions from the global seed.
+    pub fn prune_defs(&self, defs: &FileDefs) {
+        if !defs.bindings.is_empty() {
+            let mut bindings = self.bindings.write().unwrap();
+            for name in &defs.bindings {
+                bindings.remove(name);
+            }
+        }
+        if !defs.funcs.is_empty() {
+            let mut funcs = self.funcs.write().unwrap();
+            for name in &defs.funcs {
+                funcs.remove(name);
+            }
+        }
+        if !defs.structs.is_empty() {
+            let mut structs = self.structs.write().unwrap();
+            for name in &defs.structs {
+                structs.remove(name);
+            }
+        }
+    }
+
+    /// Merge checker results back into the accumulated seed and store
+    /// the file's contribution metadata for future pruning.
+    pub fn absorb_result(&self, uri: &Url, result: &CheckResult) {
+        // Store file_defs for future pruning.
+        let file_defs = FileDefs::from_check_result(result);
+        if !file_defs.is_empty() {
+            if let Some(mut doc) = self.documents.get_mut(uri) {
+                doc.file_defs = Some(file_defs);
+            }
+        }
+
+        // Merge into global seed.
         self.bindings
             .write()
             .unwrap()
@@ -122,5 +205,190 @@ impl GlobalState {
     /// Set the workspace root.
     pub fn set_root(&self, root: PathBuf) {
         *self.root.write().unwrap() = Some(root);
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zz_checker::check_program;
+    use zz_frontend::parse;
+
+    fn make_state() -> GlobalState {
+        GlobalState::new()
+    }
+
+    #[test]
+    fn file_defs_from_check_result() {
+        let source = "let x = 10\nfunc add(a: int, b: int) -> int { return a + b }\nstruct Point { x: int, y: int }\n";
+        let parsed = parse(source);
+        let cr = check_program(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let defs = FileDefs::from_check_result(&cr);
+        assert!(defs.bindings.contains(&"x".to_string()));
+        assert!(defs.funcs.contains(&"add".to_string()));
+        assert!(defs.structs.contains(&"Point".to_string()));
+    }
+
+    #[test]
+    fn prune_defs_removes_symbols() {
+        let state = make_state();
+        // Seed some symbols.
+        {
+            let mut bindings = state.bindings.write().unwrap();
+            bindings.insert("x".to_string(), Type::Int);
+            bindings.insert("y".to_string(), Type::Int);
+        }
+        {
+            let mut funcs = state.funcs.write().unwrap();
+            funcs.insert(
+                "add".to_string(),
+                FuncSig {
+                    generics: vec![],
+                    params: vec![],
+                    has_default: vec![],
+                    ret: Type::Unit,
+                },
+            );
+        }
+        // Prune x and add.
+        let defs = FileDefs {
+            bindings: vec!["x".to_string()],
+            funcs: vec!["add".to_string()],
+            structs: vec![],
+        };
+        state.prune_defs(&defs);
+        // x should be gone, y should remain.
+        assert!(!state.bindings.read().unwrap().contains_key("x"));
+        assert!(state.bindings.read().unwrap().contains_key("y"));
+        // add should be gone.
+        assert!(!state.funcs.read().unwrap().contains_key("add"));
+    }
+
+    #[test]
+    fn update_document_returns_old_defs() {
+        let state = make_state();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+
+        // First insert — no old defs.
+        let (_, old_defs) = state.update_document(uri.clone(), 1, "let x = 1\n".into());
+        assert!(old_defs.is_none(), "first insert should have no old defs");
+
+        // Simulate absorbing a check result so the doc gets file_defs.
+        let parsed = parse("let x = 1\nlet y = 2\n");
+        let cr = check_program(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        state.absorb_result(&uri, &cr);
+
+        // Update the document — should return old defs.
+        let (_, old_defs) = state.update_document(uri.clone(), 2, "let x = 3\n".into());
+        let old = old_defs.expect("second update should have old defs");
+        assert!(old.bindings.contains(&"x".to_string()));
+        assert!(old.bindings.contains(&"y".to_string()));
+    }
+
+    #[test]
+    fn remove_document_returns_defs() {
+        let state = make_state();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+
+        state.update_document(uri.clone(), 1, "let z = 5\n".into());
+        let parsed = parse("let z = 5\n");
+        let cr = check_program(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        state.absorb_result(&uri, &cr);
+
+        // Remove — should return file_defs.
+        let defs = state.remove_document(&uri).expect("should return defs");
+        assert!(defs.bindings.contains(&"z".to_string()));
+        // Document should be gone.
+        assert!(!state.documents.contains_key(&uri));
+    }
+
+    #[test]
+    fn absorb_result_stores_file_defs() {
+        let state = make_state();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+
+        state.update_document(uri.clone(), 1, "let a = 1\n".into());
+        let parsed = parse("let a = 1\n");
+        let cr = check_program(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        state.absorb_result(&uri, &cr);
+
+        let doc = state.documents.get(&uri).unwrap();
+        let fd = doc
+            .file_defs
+            .as_ref()
+            .expect("should have file_defs after absorb");
+        assert!(fd.bindings.contains(&"a".to_string()));
+    }
+
+    #[test]
+    fn prune_on_update_prevents_stale() {
+        let state = make_state();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+
+        // v1: defines x and y.
+        state.update_document(uri.clone(), 1, "let x = 1\nlet y = 2\n".into());
+        let parsed = parse("let x = 1\nlet y = 2\n");
+        let cr = check_program(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        state.absorb_result(&uri, &cr);
+        assert!(state.bindings.read().unwrap().contains_key("x"));
+        assert!(state.bindings.read().unwrap().contains_key("y"));
+
+        // v2: defines only x (y removed). Prune old defs first.
+        let (_, old_defs) = state.update_document(uri.clone(), 2, "let x = 3\n".into());
+        if let Some(old) = &old_defs {
+            state.prune_defs(old);
+        }
+        // After prune, y should be gone from global seed.
+        assert!(!state.bindings.read().unwrap().contains_key("y"));
+    }
+
+    #[test]
+    fn close_clears_defs() {
+        let state = make_state();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+
+        state.update_document(uri.clone(), 1, "let w = 99\n".into());
+        let parsed = parse("let w = 99\n");
+        let cr = check_program(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        state.absorb_result(&uri, &cr);
+        assert!(state.bindings.read().unwrap().contains_key("w"));
+
+        // Close → prune + remove.
+        let defs = state.remove_document(&uri).unwrap();
+        state.prune_defs(&defs);
+        assert!(!state.bindings.read().unwrap().contains_key("w"));
+        assert!(!state.documents.contains_key(&uri));
     }
 }

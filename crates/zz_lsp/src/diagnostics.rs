@@ -80,8 +80,11 @@ pub async fn recheck_and_publish(
         doc.check_result = Some(checked.clone());
     }
 
-    // Merge successful check results into global seed.
-    state.absorb_result(&checked);
+    // Prune old per-file defs before absorbing new ones.
+    // (The document was already replaced by update_document, so old defs
+    // were returned and should have been pruned by the caller. We just
+    // absorb the new results here.)
+    state.absorb_result(&uri, &checked);
 
     // Combine parse errors + checker diagnostics.
     let mut all_errors = parse_errors;
