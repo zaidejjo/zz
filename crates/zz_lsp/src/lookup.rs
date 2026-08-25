@@ -674,8 +674,7 @@ pub fn find_references_in_program(program: &Program, source: &str, offset: u32) 
 fn collect_name_refs_in_stmt(stmt: &Stmt, name: &str, refs: &mut Vec<Reference>) {
     match stmt {
         Stmt::Func { params, body, .. } => {
-            collect_name_refs_in_block(body, name, refs);
-            // Don't double-count the function name itself if it's in defs.
+            // Check params first, then walk the body once.
             for param in params {
                 if param.name.name == name {
                     let already = refs.iter().any(|r| r.span == param.name.span);
@@ -1017,5 +1016,44 @@ mod tests {
         for r in &refs {
             assert!(r.span.start < source.len() as u32);
         }
+    }
+
+    #[test]
+    fn prepare_rename_validates_symbol() {
+        let source = "let x = 10\nlet y = x\n";
+        let parsed = parse(source);
+        // Offset 4 is on the `x` identifier — valid rename target.
+        let node = find_node_at(&parsed.program, source, 4);
+        assert!(
+            node.name.is_some(),
+            "prepare_rename: cursor on x should have a name"
+        );
+        assert_eq!(node.name.as_deref(), Some("x"));
+        assert!(node.name_span.is_some());
+    }
+
+    #[test]
+    fn prepare_rename_rejects_no_symbol() {
+        let source = "let x = 10\n";
+        let parsed = parse(source);
+        // Offset 15 is after the newline — no symbol.
+        let node = find_node_at(&parsed.program, source, 15);
+        assert!(
+            node.name.is_none(),
+            "prepare_rename: cursor on no symbol should be None"
+        );
+    }
+
+    #[test]
+    fn prepare_rename_works_for_func() {
+        let source = "func add(a: int) -> int { return a }\nlet r = add(1)\n";
+        let parsed = parse(source);
+        // Offset 5 is inside the function name `add`.
+        let node = find_node_at(&parsed.program, source, 5);
+        assert!(
+            node.name.is_some(),
+            "prepare_rename: cursor on func name should work"
+        );
+        assert_eq!(node.name.as_deref(), Some("add"));
     }
 }

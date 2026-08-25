@@ -60,6 +60,7 @@ impl LanguageServer for Backend {
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -166,21 +167,19 @@ impl LanguageServer for Backend {
             contents.push_str("```\n");
         } else if let Some(ty) = check_result.bindings.get(&name) {
             contents.push_str(&format!("**let** `{name}: {ty}`\n"));
-        } else if let Some(Expr::Field { name: field, .. }) = node.expr {
+        } else if let Some(Expr::Field { name: field, obj, .. }) = node.expr {
             // Resolve struct field type.
-            if let Some(Expr::Field { obj, .. }) = node.expr {
-                if let Some(obj_type) =
-                    crate::lookup::resolve_type_of_expr(program, check_result, obj)
-                {
-                    if let zz_checker::Type::Struct(struct_name) = obj_type {
-                        if let Some(ssig) = check_result.structs.get(&struct_name) {
-                            if let Some((_, fty)) =
-                                ssig.fields.iter().find(|(n, _)| n == field)
-                            {
-                                contents.push_str(&format!(
-                                    "**{struct_name}.{field}: {fty}**\n"
-                                ));
-                            }
+            if let Some(obj_type) =
+                crate::lookup::resolve_type_of_expr(program, check_result, obj)
+            {
+                if let zz_checker::Type::Struct(struct_name) = obj_type {
+                    if let Some(ssig) = check_result.structs.get(&struct_name) {
+                        if let Some((_, fty)) =
+                            ssig.fields.iter().find(|(n, _)| n == field)
+                        {
+                            contents.push_str(&format!(
+                                "**{struct_name}.{field}: {fty}**\n"
+                            ));
                         }
                     }
                 }
@@ -365,10 +364,7 @@ impl LanguageServer for Backend {
         let offset = crate::convert::position_to_offset(&doc.source, pos);
         let refs = crate::lookup::find_references_in_program(program, &doc.source, offset);
 
-        if refs.is_empty() {
-            return Ok(None);
-        }
-
+        // LSP spec: return empty array, not null.
         let locations: Vec<Location> = refs
             .iter()
             .map(|r| Location {
@@ -378,6 +374,40 @@ impl LanguageServer for Backend {
             .collect();
 
         Ok(Some(locations))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = &params.text_document.uri;
+        let pos = params.position;
+
+        let doc = match self.state.documents.get(uri) {
+            Some(doc) => doc.clone(),
+            None => return Ok(None),
+        };
+        let program = match &doc.program {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let offset = crate::convert::position_to_offset(&doc.source, pos);
+        let node = crate::lookup::find_node_at(program, &doc.source, offset);
+
+        // Only allow rename if cursor is on a named symbol.
+        match &node.name {
+            Some(name) => {
+                let name_span = node.name_span.unwrap_or_else(|| {
+                    zz_frontend::span::Span::new(offset, offset + name.len() as u32)
+                });
+                Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+                    range: crate::convert::span_to_range(&doc.source, name_span),
+                    placeholder: name.clone(),
+                }))
+            }
+            None => Ok(None),
+        }
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
