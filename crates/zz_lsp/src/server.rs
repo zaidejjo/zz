@@ -58,6 +58,8 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -303,6 +305,48 @@ impl LanguageServer for Backend {
         } else {
             Ok(Some(actions))
         }
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = &params.text_document.uri;
+        let doc = match self.state.documents.get(uri) {
+            Some(doc) => doc.clone(),
+            None => return Ok(None),
+        };
+        let program = match &doc.program {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let symbols = crate::symbols::document_symbols(program, &doc.source);
+        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
+
+    async fn symbol(&self, params: WorkspaceSymbolParams) -> Result<Option<Vec<SymbolInformation>>> {
+        let query = &params.query;
+        let mut all_symbols = Vec::new();
+
+        // Collect symbols from all open documents.
+        for entry in self.state.documents.iter() {
+            let doc = entry.value();
+            let program = match &doc.program {
+                Some(p) => p,
+                None => continue,
+            };
+            let syms = crate::symbols::workspace_symbols(
+                program,
+                &doc.source,
+                &doc.uri,
+                None,
+            );
+            all_symbols.extend(syms);
+        }
+
+        let filtered = crate::symbols::filter_symbols(&all_symbols, query);
+        Ok(Some(filtered))
     }
 
     async fn shutdown(&self) -> Result<()> {
