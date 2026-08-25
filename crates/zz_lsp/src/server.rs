@@ -62,6 +62,11 @@ impl LanguageServer for Backend {
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
+                completion_provider: Some(CompletionOptions {
+                    resolve_provider: Some(true),
+                    trigger_characters: Some(vec![".".to_string()]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -487,6 +492,41 @@ impl LanguageServer for Backend {
             .collect();
 
         Ok(Some(result))
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+
+        let doc = match self.state.documents.get(uri) {
+            Some(doc) => doc.clone(),
+            None => return Ok(None),
+        };
+        let program = match &doc.program {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let offset = doc.line_index.position_to_offset(&doc.source, pos);
+        let resp = crate::completion::completions_for_position(
+            program,
+            &doc.source,
+            offset,
+            doc.check_result.as_ref(),
+        );
+        Ok(resp)
+    }
+
+    async fn completion_resolve(&self, mut item: CompletionItem) -> Result<CompletionItem> {
+        // Try to resolve rich detail from any open document's check result.
+        for entry in self.state.documents.iter() {
+            let doc = entry.value();
+            if doc.check_result.is_some() {
+                crate::completion::resolve_completion_detail(&mut item, doc.check_result.as_ref());
+                break;
+            }
+        }
+        Ok(item)
     }
 
     async fn shutdown(&self) -> Result<()> {
