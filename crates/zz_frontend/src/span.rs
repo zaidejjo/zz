@@ -8,7 +8,7 @@ use std::fmt;
 use std::ops::Range;
 
 /// A half-open byte range `[start, end)` into a source string.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     pub start: u32,
     pub end: u32,

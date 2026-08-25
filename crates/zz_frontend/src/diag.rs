@@ -16,7 +16,9 @@ use crate::span::Span;
 pub type FileId = usize;
 
 /// Diagnostic severity level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Severity {
     Error,
     Warning,
@@ -24,7 +26,9 @@ pub enum Severity {
 }
 
 /// Safety classification for auto-fix suggestions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum FixSafety {
     /// Single unambiguous candidate — safe to auto-apply.
     Safe,
@@ -33,7 +37,7 @@ pub enum FixSafety {
 }
 
 /// A structured machine-readable suggestion for auto-fix / LSP integration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FixIt {
     /// The exact byte span to replace in the source.
     pub span: Span,
@@ -79,7 +83,7 @@ impl FixIt {
 }
 
 /// A frontend diagnostic, decoupled from any file store.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawDiag {
     pub severity: Severity,
     pub message: String,

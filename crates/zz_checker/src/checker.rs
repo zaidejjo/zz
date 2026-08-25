@@ -37,6 +37,7 @@ pub struct StructSig {
     pub fields: Vec<(String, Type)>,
 }
 
+#[derive(Debug, Clone)]
 pub struct CheckResult {
     pub errors: Vec<RawDiag>,
     /// Top-level `let` bindings and their types (fully resolved).
