@@ -61,6 +61,7 @@ impl LanguageServer for Backend {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -169,18 +170,16 @@ impl LanguageServer for Backend {
             contents.push_str(&format!("**let** `{name}: {ty}`\n"));
         } else if let Some(Expr::Field { name: field, obj, .. }) = node.expr {
             // Resolve struct field type.
-            if let Some(obj_type) =
+            if let Some(zz_checker::Type::Struct(struct_name)) =
                 crate::lookup::resolve_type_of_expr(program, check_result, obj)
             {
-                if let zz_checker::Type::Struct(struct_name) = obj_type {
-                    if let Some(ssig) = check_result.structs.get(&struct_name) {
-                        if let Some((_, fty)) =
-                            ssig.fields.iter().find(|(n, _)| n == field)
-                        {
-                            contents.push_str(&format!(
-                                "**{struct_name}.{field}: {fty}**\n"
-                            ));
-                        }
+                if let Some(ssig) = check_result.structs.get(&struct_name) {
+                    if let Some((_, fty)) =
+                        ssig.fields.iter().find(|(n, _)| n == field)
+                    {
+                        contents.push_str(&format!(
+                            "**{struct_name}.{field}: {fty}**\n"
+                        ));
                     }
                 }
             }
@@ -231,38 +230,36 @@ impl LanguageServer for Backend {
             if let Some(Expr::Field { name: field, obj, .. }) = node.expr {
                 // Resolve the object type to find which struct it is.
                 if let Some(check_result) = &doc.check_result {
-                    if let Some(obj_type) =
+                    if let Some(zz_checker::Type::Struct(struct_name)) =
                         crate::lookup::resolve_type_of_expr(program, check_result, obj)
                     {
-                        if let zz_checker::Type::Struct(struct_name) = obj_type {
-                            // Find the struct definition and its field span.
-                            if let Some(ssig) = check_result.structs.get(&struct_name) {
-                                if let Some((fname, _)) =
-                                    ssig.fields.iter().find(|(n, _)| n == field)
-                                {
-                                    // Search for the field in the struct definition.
-                                    for stmt in &program.stmts {
-                                        if let zz_frontend::ast::Stmt::Struct {
-                                            name: sname,
-                                            fields,
-                                            ..
-                                        } = stmt
-                                        {
-                                            if sname.join(".") == struct_name {
-                                                for (fi_name, _) in fields {
-                                                    if fi_name.name == *fname {
-                                                        return Ok(Some(
-                                                            GotoDefinitionResponse::Scalar(
-                                                                Location {
-                                                                    uri: uri.clone(),
-                                                                    range: crate::convert::span_to_range(
-                                                                        &doc.source,
-                                                                        fi_name.span,
-                                                                    ),
-                                                                },
-                                                            ),
-                                                        ));
-                                                    }
+                        // Find the struct definition and its field span.
+                        if let Some(ssig) = check_result.structs.get(&struct_name) {
+                            if let Some((fname, _)) =
+                                ssig.fields.iter().find(|(n, _)| n == field)
+                            {
+                                // Search for the field in the struct definition.
+                                for stmt in &program.stmts {
+                                    if let zz_frontend::ast::Stmt::Struct {
+                                        name: sname,
+                                        fields,
+                                        ..
+                                    } = stmt
+                                    {
+                                        if sname.join(".") == struct_name {
+                                            for (fi_name, _) in fields {
+                                                if fi_name.name == *fname {
+                                                    return Ok(Some(
+                                                        GotoDefinitionResponse::Scalar(
+                                                            Location {
+                                                                uri: uri.clone(),
+                                                                range: crate::convert::span_to_range(
+                                                                    &doc.source,
+                                                                    fi_name.span,
+                                                                ),
+                                                            },
+                                                        ),
+                                                    ));
                                                 }
                                             }
                                         }
@@ -446,6 +443,39 @@ impl LanguageServer for Backend {
             changes: Some(changes),
             ..Default::default()
         }))
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let doc = match self.state.documents.get(uri) {
+            Some(doc) => doc.clone(),
+            None => return Ok(None),
+        };
+        let program = match &doc.program {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let offset = crate::convert::position_to_offset(&doc.source, pos);
+        let highlights = crate::lookup::find_highlights_in_program(program, &doc.source, offset);
+
+        let result: Vec<DocumentHighlight> = highlights
+            .iter()
+            .map(|h| DocumentHighlight {
+                range: crate::convert::span_to_range(&doc.source, h.span),
+                kind: Some(match h.kind {
+                    crate::lookup::HighlightKind::Read => DocumentHighlightKind::READ,
+                    crate::lookup::HighlightKind::Write => DocumentHighlightKind::WRITE,
+                }),
+            })
+            .collect();
+
+        Ok(Some(result))
     }
 
     async fn shutdown(&self) -> Result<()> {
