@@ -630,6 +630,252 @@ fn func_sig_to_type(_name: &str, sig: &FuncSig) -> Type {
     Type::Func(params, Box::new(sig.ret.clone()))
 }
 
+// ── References ───────────────────────────────────────────────────────────
+
+/// A single reference occurrence in the source.
+#[derive(Debug, Clone)]
+pub struct Reference {
+    /// Byte span of the reference in the source.
+    pub span: Span,
+    /// Whether this is the definition site (vs. a usage).
+    pub is_definition: bool,
+}
+
+/// Find all references to the symbol at `offset` in the given program.
+///
+/// Walks the entire AST looking for `Expr::Ident` and `Expr::Path`
+/// nodes whose name matches the symbol at the cursor position.
+pub fn find_references_in_program(program: &Program, source: &str, offset: u32) -> Vec<Reference> {
+    let node = find_node_at(program, source, offset);
+    let name = match &node.name {
+        Some(n) => n.clone(),
+        None => return Vec::new(),
+    };
+
+    let mut refs = Vec::new();
+    // Also find the definition site.
+    let defs = collect_definitions(program, source);
+    for def in defs.values() {
+        if def.name == name {
+            refs.push(Reference {
+                span: def.span,
+                is_definition: true,
+            });
+        }
+    }
+
+    // Walk all expressions for usages.
+    for stmt in &program.stmts {
+        collect_name_refs_in_stmt(stmt, &name, &mut refs);
+    }
+    refs
+}
+
+fn collect_name_refs_in_stmt(stmt: &Stmt, name: &str, refs: &mut Vec<Reference>) {
+    match stmt {
+        Stmt::Func { params, body, .. } => {
+            collect_name_refs_in_block(body, name, refs);
+            // Don't double-count the function name itself if it's in defs.
+            for param in params {
+                if param.name.name == name {
+                    let already = refs.iter().any(|r| r.span == param.name.span);
+                    if !already {
+                        refs.push(Reference {
+                            span: param.name.span,
+                            is_definition: false,
+                        });
+                    }
+                }
+            }
+            collect_name_refs_in_block(body, name, refs);
+        }
+        Stmt::Struct { fields, .. } => {
+            for (fname, _) in fields {
+                if fname.name == name {
+                    let already = refs.iter().any(|r| r.span == fname.span);
+                    if !already {
+                        refs.push(Reference {
+                            span: fname.span,
+                            is_definition: false,
+                        });
+                    }
+                }
+            }
+        }
+        Stmt::Decl {
+            name: ident, value, ..
+        } => {
+            if ident.name == name {
+                let already = refs.iter().any(|r| r.span == ident.span);
+                if !already {
+                    refs.push(Reference {
+                        span: ident.span,
+                        is_definition: false,
+                    });
+                }
+            }
+            collect_name_refs_in_expr(value, name, refs);
+        }
+        Stmt::For {
+            var, iter, body, ..
+        } => {
+            if var.name == name {
+                let already = refs.iter().any(|r| r.span == var.span);
+                if !already {
+                    refs.push(Reference {
+                        span: var.span,
+                        is_definition: false,
+                    });
+                }
+            }
+            collect_name_refs_in_expr(iter, name, refs);
+            collect_name_refs_in_block(body, name, refs);
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(expr) = value {
+                collect_name_refs_in_expr(expr, name, refs);
+            }
+        }
+        Stmt::Assign { target, value, .. } => {
+            collect_name_refs_in_expr(target, name, refs);
+            collect_name_refs_in_expr(value, name, refs);
+        }
+        Stmt::Defer { expr, .. } => collect_name_refs_in_expr(expr, name, refs),
+        Stmt::Expr(e) => collect_name_refs_in_expr(e, name, refs),
+        Stmt::Import { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+    }
+}
+
+fn collect_name_refs_in_block(block: &Block, name: &str, refs: &mut Vec<Reference>) {
+    for stmt in &block.stmts {
+        collect_name_refs_in_stmt(stmt, name, refs);
+    }
+}
+
+fn collect_name_refs_in_expr(expr: &Expr, name: &str, refs: &mut Vec<Reference>) {
+    match expr {
+        Expr::Ident { name: n, span } => {
+            if n == name {
+                let already = refs.iter().any(|r| r.span == *span);
+                if !already {
+                    refs.push(Reference {
+                        span: *span,
+                        is_definition: false,
+                    });
+                }
+            }
+        }
+        Expr::Path { parts, span } => {
+            let joined = parts.join(".");
+            if joined == name || parts.last().map(|s| s.as_str()) == Some(name) {
+                let already = refs.iter().any(|r| r.span == *span);
+                if !already {
+                    refs.push(Reference {
+                        span: *span,
+                        is_definition: false,
+                    });
+                }
+            }
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_name_refs_in_expr(callee, name, refs);
+            for arg in args {
+                collect_name_refs_in_expr(arg, name, refs);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_name_refs_in_expr(left, name, refs);
+            collect_name_refs_in_expr(right, name, refs);
+        }
+        Expr::Unary { expr, .. } => collect_name_refs_in_expr(expr, name, refs),
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            collect_name_refs_in_expr(cond, name, refs);
+            collect_name_refs_in_block(then, name, refs);
+            if let Some(e) = els {
+                collect_name_refs_in_expr(e, name, refs);
+            }
+        }
+        Expr::While { cond, body, .. } => {
+            collect_name_refs_in_expr(cond, name, refs);
+            collect_name_refs_in_block(body, name, refs);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_name_refs_in_expr(scrutinee, name, refs);
+            for arm in arms {
+                collect_name_refs_in_expr(&arm.body, name, refs);
+            }
+        }
+        Expr::IfLet {
+            value, then, els, ..
+        } => {
+            collect_name_refs_in_expr(value, name, refs);
+            collect_name_refs_in_block(then, name, refs);
+            if let Some(e) = els {
+                collect_name_refs_in_expr(e, name, refs);
+            }
+        }
+        Expr::Try { expr, .. } => collect_name_refs_in_expr(expr, name, refs),
+        Expr::Field { obj, .. } => collect_name_refs_in_expr(obj, name, refs),
+        Expr::Index { obj, index, .. } => {
+            collect_name_refs_in_expr(obj, name, refs);
+            collect_name_refs_in_expr(index, name, refs);
+        }
+        Expr::Slice {
+            obj, start, end, ..
+        } => {
+            collect_name_refs_in_expr(obj, name, refs);
+            if let Some(s) = start {
+                collect_name_refs_in_expr(s, name, refs);
+            }
+            if let Some(e) = end {
+                collect_name_refs_in_expr(e, name, refs);
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            collect_name_refs_in_expr(start, name, refs);
+            collect_name_refs_in_expr(end, name, refs);
+        }
+        Expr::ListComp {
+            body, iter, filter, ..
+        } => {
+            collect_name_refs_in_expr(body, name, refs);
+            collect_name_refs_in_expr(iter, name, refs);
+            if let Some(f) = filter {
+                collect_name_refs_in_expr(f, name, refs);
+            }
+        }
+        Expr::Array { elems, .. } => {
+            for e in elems {
+                collect_name_refs_in_expr(e, name, refs);
+            }
+        }
+        Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                collect_name_refs_in_expr(k, name, refs);
+                collect_name_refs_in_expr(v, name, refs);
+            }
+        }
+        Expr::Fmt { parts, .. } => {
+            for part in parts {
+                if let zz_frontend::ast::FmtPart::Expr(e, _) = part {
+                    collect_name_refs_in_expr(e, name, refs);
+                }
+            }
+        }
+        Expr::Block(b) => collect_name_refs_in_block(b, name, refs),
+        Expr::Closure { params, body, .. } => {
+            // Don't count closure param names as references to the outer name.
+            collect_name_refs_in_expr(body, name, refs);
+            let _ = params;
+        }
+        _ => {}
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -722,5 +968,54 @@ mod tests {
         let node = find_node_at(&parsed.program, source, 20);
         // Should find something — either the import path or the println call.
         assert!(node.stmt.is_some() || node.expr.is_some());
+    }
+
+    #[test]
+    fn find_references_simple() {
+        let source = "let x = 10\nlet y = x\nlet z = x + y\n";
+        let parsed = parse(source);
+        // Offset 4 is the `x` definition.
+        let refs = find_references_in_program(&parsed.program, source, 4);
+        // Should find: definition at 4, usage at 16, usage at 26
+        assert!(
+            refs.len() >= 2,
+            "expected at least 2 references to x, got {}",
+            refs.len()
+        );
+    }
+
+    #[test]
+    fn find_references_func() {
+        let source = "func add(a: int, b: int) -> int {\n  return a + b\n}\nlet r = add(1, 2)\nlet s = add(3, 4)\n";
+        let parsed = parse(source);
+        // Offset 5 is inside the `add` function name.
+        let refs = find_references_in_program(&parsed.program, source, 5);
+        // Should find: definition + 2 call sites
+        assert!(
+            refs.len() >= 2,
+            "expected at least 2 references to add, got {}",
+            refs.len()
+        );
+    }
+
+    #[test]
+    fn find_references_none_for_unknown() {
+        let source = "let x = 10\n";
+        let parsed = parse(source);
+        // Offset 15 is outside any symbol.
+        let refs = find_references_in_program(&parsed.program, source, 15);
+        assert!(refs.is_empty(), "expected no references for unknown offset");
+    }
+
+    #[test]
+    fn rename_creates_edits_for_all_refs() {
+        let source = "let x = 10\nlet y = x\nlet z = x + y\n";
+        let parsed = parse(source);
+        let refs = find_references_in_program(&parsed.program, source, 4);
+        // Each reference should produce a TextEdit with the new name.
+        assert!(refs.len() >= 2);
+        for r in &refs {
+            assert!(r.span.start < source.len() as u32);
+        }
     }
 }

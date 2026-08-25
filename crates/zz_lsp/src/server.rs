@@ -349,6 +349,75 @@ impl LanguageServer for Backend {
         Ok(Some(filtered))
     }
 
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+
+        let doc = match self.state.documents.get(uri) {
+            Some(doc) => doc.clone(),
+            None => return Ok(None),
+        };
+        let program = match &doc.program {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let offset = crate::convert::position_to_offset(&doc.source, pos);
+        let refs = crate::lookup::find_references_in_program(program, &doc.source, offset);
+
+        if refs.is_empty() {
+            return Ok(None);
+        }
+
+        let locations: Vec<Location> = refs
+            .iter()
+            .map(|r| Location {
+                uri: uri.clone(),
+                range: crate::convert::span_to_range(&doc.source, r.span),
+            })
+            .collect();
+
+        Ok(Some(locations))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let new_name = &params.new_name;
+
+        let doc = match self.state.documents.get(uri) {
+            Some(doc) => doc.clone(),
+            None => return Ok(None),
+        };
+        let program = match &doc.program {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let offset = crate::convert::position_to_offset(&doc.source, pos);
+        let refs = crate::lookup::find_references_in_program(program, &doc.source, offset);
+
+        if refs.is_empty() {
+            return Ok(None);
+        }
+
+        let edits: Vec<TextEdit> = refs
+            .iter()
+            .map(|r| TextEdit {
+                range: crate::convert::span_to_range(&doc.source, r.span),
+                new_text: new_name.clone(),
+            })
+            .collect();
+
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(uri.clone(), edits);
+
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }))
+    }
+
     async fn shutdown(&self) -> Result<()> {
         Ok(())
     }
