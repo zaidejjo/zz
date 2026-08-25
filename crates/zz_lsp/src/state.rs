@@ -19,6 +19,9 @@ pub struct DocumentState {
     pub source: String,
     pub parse_errors: Vec<RawDiag>,
     pub program: Option<Program>,
+    /// Checker output from the last successful type-check of this file.
+    /// Used by hover / go-to-definition to resolve types.
+    pub check_result: Option<CheckResult>,
 }
 
 /// Global LSP state shared across all request handlers.
@@ -75,6 +78,7 @@ impl GlobalState {
             source: text,
             parse_errors: parsed.errors,
             program: Some(parsed.program),
+            check_result: None,
         };
         self.documents.insert(uri, doc);
         self.bump_sequence()

@@ -8,6 +8,7 @@ use tower_lsp::{Client, LanguageServer};
 
 use crate::diagnostics::recheck_and_publish;
 use crate::state::GlobalState;
+use zz_frontend::ast::Expr;
 
 /// The ZZ language server backend.
 pub struct Backend {
@@ -111,17 +112,182 @@ impl LanguageServer for Backend {
             .await;
     }
 
-    async fn hover(&self, _params: HoverParams) -> Result<Option<Hover>> {
-        // Phase 4: type info on hover.
-        Ok(None)
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let doc = match self.state.documents.get(uri) {
+            Some(doc) => doc.clone(),
+            None => return Ok(None),
+        };
+        let program = match &doc.program {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let check_result = match &doc.check_result {
+            Some(cr) => cr,
+            None => return Ok(None),
+        };
+
+        let offset = crate::convert::position_to_offset(&doc.source, pos);
+        let node = crate::lookup::find_node_at(program, &doc.source, offset);
+        let name = match &node.name {
+            Some(n) => n.clone(),
+            None => return Ok(None),
+        };
+
+        // Build hover content from type info.
+        let mut contents = String::new();
+
+        // Check function signatures first.
+        if let Some(sig) = check_result.funcs.get(&name) {
+            contents.push_str(&format!("**func** `{name}`\n\n"));
+            contents.push_str("```zz\n");
+            contents.push_str(&format!("func {name}("));
+            for (i, (pname, pty)) in sig.params.iter().enumerate() {
+                if i > 0 {
+                    contents.push_str(", ");
+                }
+                contents.push_str(&format!("{pname}: {pty}"));
+            }
+            contents.push_str(&format!(") -> {}\n", sig.ret));
+            contents.push_str("```\n");
+        } else if let Some(sig) = check_result.structs.get(&name) {
+            // Struct definition.
+            contents.push_str(&format!("**struct** `{name}`\n\n"));
+            contents.push_str("```zz\n");
+            contents.push_str(&format!("struct {name} {{\n"));
+            for (fname, fty) in &sig.fields {
+                contents.push_str(&format!("  {fname}: {fty}\n"));
+            }
+            contents.push_str("}\n");
+            contents.push_str("```\n");
+        } else if let Some(ty) = check_result.bindings.get(&name) {
+            contents.push_str(&format!("**let** `{name}: {ty}`\n"));
+        } else if let Some(Expr::Field { name: field, .. }) = node.expr {
+            // Resolve struct field type.
+            if let Some(Expr::Field { obj, .. }) = node.expr {
+                if let Some(obj_type) =
+                    crate::lookup::resolve_type_of_expr(program, check_result, obj)
+                {
+                    if let zz_checker::Type::Struct(struct_name) = obj_type {
+                        if let Some(ssig) = check_result.structs.get(&struct_name) {
+                            if let Some((_, fty)) =
+                                ssig.fields.iter().find(|(n, _)| n == field)
+                            {
+                                contents.push_str(&format!(
+                                    "**{struct_name}.{field}: {fty}**\n"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if contents.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: contents,
+            }),
+            range: None,
+        }))
     }
 
     async fn goto_definition(
         &self,
-        _params: GotoDefinitionParams,
+        params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        // Phase 3: go-to-definition.
-        Ok(None)
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let doc = match self.state.documents.get(uri) {
+            Some(doc) => doc.clone(),
+            None => return Ok(None),
+        };
+        let program = match &doc.program {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let offset = crate::convert::position_to_offset(&doc.source, pos);
+        let node = crate::lookup::find_node_at(program, &doc.source, offset);
+        let name = match &node.name {
+            Some(n) => n.clone(),
+            None => return Ok(None),
+        };
+
+        // Collect all definitions and find the one matching this name.
+        let defs = crate::lookup::collect_definitions(program, &doc.source);
+        let def = defs.values().find(|d| d.name == name);
+
+        // For struct fields (`s.field`), resolve through the struct.
+        let def = if def.is_none() {
+            if let Some(Expr::Field { name: field, obj, .. }) = node.expr {
+                // Resolve the object type to find which struct it is.
+                if let Some(check_result) = &doc.check_result {
+                    if let Some(obj_type) =
+                        crate::lookup::resolve_type_of_expr(program, check_result, obj)
+                    {
+                        if let zz_checker::Type::Struct(struct_name) = obj_type {
+                            // Find the struct definition and its field span.
+                            if let Some(ssig) = check_result.structs.get(&struct_name) {
+                                if let Some((fname, _)) =
+                                    ssig.fields.iter().find(|(n, _)| n == field)
+                                {
+                                    // Search for the field in the struct definition.
+                                    for stmt in &program.stmts {
+                                        if let zz_frontend::ast::Stmt::Struct {
+                                            name: sname,
+                                            fields,
+                                            ..
+                                        } = stmt
+                                        {
+                                            if sname.join(".") == struct_name {
+                                                for (fi_name, _) in fields {
+                                                    if fi_name.name == *fname {
+                                                        return Ok(Some(
+                                                            GotoDefinitionResponse::Scalar(
+                                                                Location {
+                                                                    uri: uri.clone(),
+                                                                    range: crate::convert::span_to_range(
+                                                                        &doc.source,
+                                                                        fi_name.span,
+                                                                    ),
+                                                                },
+                                                            ),
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            } else {
+                None
+            }
+        } else {
+            def
+        };
+
+        let def = match def {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        Ok(Some(GotoDefinitionResponse::Scalar(Location {
+            uri: uri.clone(),
+            range: crate::convert::span_to_range(&doc.source, def.span),
+        })))
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {

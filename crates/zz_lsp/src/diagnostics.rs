@@ -75,6 +75,11 @@ pub async fn recheck_and_publish(
         return;
     };
 
+    // Persist the CheckResult in the document for hover / go-to-definition.
+    if let Some(mut doc) = state.documents.get_mut(&uri) {
+        doc.check_result = Some(checked.clone());
+    }
+
     // Merge successful check results into global seed.
     state.absorb_result(&checked);
 
