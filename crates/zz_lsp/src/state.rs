@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use crate::convert::LineIndex;
 use dashmap::DashMap;
 use tower_lsp::lsp_types::Url;
 use zz_checker::{CheckResult, FuncSig, StructSig, Type};
@@ -22,6 +23,8 @@ pub struct DocumentState {
     /// Checker output from the last successful type-check of this file.
     /// Used by hover / go-to-definition to resolve types.
     pub check_result: Option<CheckResult>,
+    /// Precomputed line-start index for O(log n) position conversion.
+    pub line_index: LineIndex,
 }
 
 /// Global LSP state shared across all request handlers.
@@ -72,6 +75,7 @@ impl GlobalState {
     /// Open or update a document buffer. Returns the new change sequence.
     pub fn update_document(&self, uri: Url, version: i32, text: String) -> u32 {
         let parsed = zz_frontend::parse(&text);
+        let line_index = LineIndex::new(&text);
         let doc = DocumentState {
             uri: uri.clone(),
             version,
@@ -79,6 +83,7 @@ impl GlobalState {
             parse_errors: parsed.errors,
             program: Some(parsed.program),
             check_result: None,
+            line_index,
         };
         self.documents.insert(uri, doc);
         self.bump_sequence()
