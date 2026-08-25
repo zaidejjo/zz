@@ -133,7 +133,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let offset = crate::convert::position_to_offset(&doc.source, pos);
+        let offset = doc.line_index.position_to_offset(&doc.source, pos);
         let node = crate::lookup::find_node_at(program, &doc.source, offset);
         let name = match &node.name {
             Some(n) => n.clone(),
@@ -214,7 +214,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let offset = crate::convert::position_to_offset(&doc.source, pos);
+        let offset = doc.line_index.position_to_offset(&doc.source, pos);
         let node = crate::lookup::find_node_at(program, &doc.source, offset);
         let name = match &node.name {
             Some(n) => n.clone(),
@@ -284,7 +284,7 @@ impl LanguageServer for Backend {
 
         Ok(Some(GotoDefinitionResponse::Scalar(Location {
             uri: uri.clone(),
-            range: crate::convert::span_to_range(&doc.source, def.span),
+            range: doc.line_index.span_to_range(&doc.source, def.span),
         })))
     }
 
@@ -358,7 +358,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let offset = crate::convert::position_to_offset(&doc.source, pos);
+        let offset = doc.line_index.position_to_offset(&doc.source, pos);
         let refs = crate::lookup::find_references_in_program(program, &doc.source, offset);
 
         // LSP spec: return empty array, not null.
@@ -366,7 +366,7 @@ impl LanguageServer for Backend {
             .iter()
             .map(|r| Location {
                 uri: uri.clone(),
-                range: crate::convert::span_to_range(&doc.source, r.span),
+                range: doc.line_index.span_to_range(&doc.source, r.span),
             })
             .collect();
 
@@ -389,7 +389,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let offset = crate::convert::position_to_offset(&doc.source, pos);
+        let offset = doc.line_index.position_to_offset(&doc.source, pos);
         let node = crate::lookup::find_node_at(program, &doc.source, offset);
 
         // Only allow rename if cursor is on a named symbol.
@@ -399,7 +399,7 @@ impl LanguageServer for Backend {
                     zz_frontend::span::Span::new(offset, offset + name.len() as u32)
                 });
                 Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
-                    range: crate::convert::span_to_range(&doc.source, name_span),
+                    range: doc.line_index.span_to_range(&doc.source, name_span),
                     placeholder: name.clone(),
                 }))
             }
@@ -421,7 +421,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let offset = crate::convert::position_to_offset(&doc.source, pos);
+        let offset = doc.line_index.position_to_offset(&doc.source, pos);
         let refs = crate::lookup::find_references_in_program(program, &doc.source, offset);
 
         if refs.is_empty() {
@@ -431,7 +431,7 @@ impl LanguageServer for Backend {
         let edits: Vec<TextEdit> = refs
             .iter()
             .map(|r| TextEdit {
-                range: crate::convert::span_to_range(&doc.source, r.span),
+                range: doc.line_index.span_to_range(&doc.source, r.span),
                 new_text: new_name.clone(),
             })
             .collect();
@@ -461,13 +461,13 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let offset = crate::convert::position_to_offset(&doc.source, pos);
+        let offset = doc.line_index.position_to_offset(&doc.source, pos);
         let highlights = crate::lookup::find_highlights_in_program(program, &doc.source, offset);
 
         let result: Vec<DocumentHighlight> = highlights
             .iter()
             .map(|h| DocumentHighlight {
-                range: crate::convert::span_to_range(&doc.source, h.span),
+                range: doc.line_index.span_to_range(&doc.source, h.span),
                 kind: Some(match h.kind {
                     crate::lookup::HighlightKind::Read => DocumentHighlightKind::READ,
                     crate::lookup::HighlightKind::Write => DocumentHighlightKind::WRITE,
