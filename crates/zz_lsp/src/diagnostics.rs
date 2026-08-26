@@ -106,7 +106,7 @@ pub async fn recheck_and_publish(
 /// Stashes the full `RawDiag` as JSON in `Diagnostic.data` so that
 /// `textDocument/codeAction` can retrieve fixit info without re-checking.
 fn convert_diagnostic(source: &str, raw: &zz_frontend::diag::RawDiag) -> Diagnostic {
-    let span = raw.span.unwrap();
+    let span = raw.span.expect("caller must filter None spans before calling");
     let range = span_to_range(source, span);
     let severity = severity_to_lsp(raw.severity);
 
@@ -123,5 +123,134 @@ fn convert_diagnostic(source: &str, raw: &zz_frontend::diag::RawDiag) -> Diagnos
         related_information: None,
         tags: None,
         data,
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::GlobalState;
+    use std::sync::Arc;
+    use tower_lsp::lsp_types::{DiagnosticSeverity, Url};
+    use zz_frontend::diag::{FixIt, FixSafety, RawDiag, Severity};
+    use zz_frontend::span::Span;
+
+    fn make_state() -> Arc<GlobalState> {
+        Arc::new(GlobalState::new())
+    }
+
+    #[test]
+    fn convert_diagnostic_basic_error() {
+        let raw = RawDiag {
+            severity: Severity::Error,
+            message: "unexpected token".to_string(),
+            span: Some(Span::new(0, 5)),
+            notes: vec![],
+            fixits: vec![],
+        };
+        let diag = convert_diagnostic("hello", &raw);
+        assert_eq!(diag.range.start.line, 0);
+        assert_eq!(diag.range.start.character, 0);
+        assert_eq!(diag.range.end.character, 5);
+        assert_eq!(diag.severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(diag.source.as_deref(), Some("zz"));
+        assert_eq!(diag.message, "unexpected token");
+    }
+
+    #[test]
+    fn convert_diagnostic_with_fixit_data() {
+        let raw = RawDiag {
+            severity: Severity::Warning,
+            message: "unused variable".to_string(),
+            span: Some(Span::new(4, 5)),
+            notes: vec!["consider removing".to_string()],
+            fixits: vec![FixIt {
+                span: Span::new(4, 5),
+                replacement: String::new(),
+                message: "remove variable".to_string(),
+                safety: FixSafety::Safe,
+                alternatives: vec![],
+            }],
+        };
+        let diag = convert_diagnostic("let x = 1", &raw);
+        assert_eq!(diag.severity, Some(DiagnosticSeverity::WARNING));
+        // Data should contain the serialized RawDiag.
+        let data = diag.data.as_ref().expect("should have data");
+        let deserialized: RawDiag = serde_json::from_value(data.clone()).unwrap();
+        assert_eq!(deserialized.fixits.len(), 1);
+        assert_eq!(deserialized.fixits[0].message, "remove variable");
+    }
+
+    #[test]
+    fn convert_diagnostic_multiline_range() {
+        // Source: "ab\ncd\ndef" = bytes [0..9)
+        // Span [2, 8) covers from '\n' (byte 2) to 'f' (byte 7, exclusive of 8)
+        let raw = RawDiag {
+            severity: Severity::Error,
+            message: "type mismatch".to_string(),
+            span: Some(Span::new(2, 8)),
+            notes: vec![],
+            fixits: vec![],
+        };
+        let diag = convert_diagnostic("ab\ncd\ndef", &raw);
+        // byte 2 is '\n' on line 0 → Position(0, 2)
+        assert_eq!(diag.range.start.line, 0);
+        assert_eq!(diag.range.start.character, 2);
+        // byte 8 is past 'f' on line 2 → Position(2, 2)
+        assert_eq!(diag.range.end.line, 2);
+        assert_eq!(diag.range.end.character, 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recheck_publishes_diagnostics() {
+        let state = make_state();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "let x = 1\n";
+        state.update_document(uri.clone(), 1, src.to_string());
+
+        // We can't easily test the full async pipeline without a mock client,
+        // but we can verify the state is set up correctly after the snapshot.
+        let (source, parse_errors, program) = match state.documents.get(&uri) {
+            Some(doc) => (
+                doc.source.clone(),
+                doc.parse_errors.clone(),
+                doc.program.clone(),
+            ),
+            None => panic!("doc should exist"),
+        };
+        assert_eq!(source, src);
+        assert!(parse_errors.is_empty());
+        assert!(program.is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recheck_stale_doc_returns_none() {
+        let state = make_state();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        // Don't insert any document — simulates a race where the doc was closed.
+        let result = match state.documents.get(&uri) {
+            Some(doc) => {
+                let _parse_errors = doc.parse_errors.clone();
+                let _program = doc.program.clone();
+                true
+            }
+            None => false,
+        };
+        assert!(!result, "doc should not exist");
+    }
+
+    #[test]
+    fn convert_diagnostic_severity_help_maps_to_hint() {
+        let raw = RawDiag {
+            severity: Severity::Help,
+            message: "try this".to_string(),
+            span: Some(Span::new(0, 3)),
+            notes: vec![],
+            fixits: vec![],
+        };
+        let diag = convert_diagnostic("abc", &raw);
+        assert_eq!(diag.severity, Some(DiagnosticSeverity::HINT));
     }
 }

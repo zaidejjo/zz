@@ -22,11 +22,23 @@ pub struct LineIndex {
 
 impl LineIndex {
     /// Build the index from a source string.
+    ///
+    /// Handles both `\n` and `\r\n` line endings. For `\r\n`, the line start
+    /// is placed after both characters so the `\r` is part of the previous line.
     pub fn new(source: &str) -> Self {
         let mut line_starts = vec![0];
-        for (i, ch) in source.char_indices() {
-            if ch == '\n' {
-                line_starts.push(i + 1);
+        let bytes = source.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+        while i < len {
+            if bytes[i] == b'\n' {
+                let next = i + 1;
+                if next <= len {
+                    line_starts.push(next);
+                }
+                i = next;
+            } else {
+                i += 1;
             }
         }
         Self { line_starts }
@@ -518,6 +530,66 @@ mod tests {
         assert_eq!(position_to_offset(src, pos1), 5); // 4 bytes emoji + 1 newline
         assert_eq!(offset_to_position(src, 0), pos0);
         assert_eq!(offset_to_position(src, 5), pos1);
+    }
+
+    // ── CRLF tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn crlf_line_count() {
+        let src = "line1\r\nline2\r\nline3";
+        let index = LineIndex::new(src);
+        assert_eq!(index.line_count(), 3);
+    }
+
+    #[test]
+    fn crlf_offset_to_position() {
+        let src = "abc\r\ndef";
+        // 'a' at byte 0 → line 0, col 0
+        assert_eq!(
+            offset_to_position(src, 0),
+            Position {
+                line: 0,
+                character: 0
+            }
+        );
+        // '\r' at byte 3 → line 0, col 3
+        assert_eq!(
+            offset_to_position(src, 3),
+            Position {
+                line: 0,
+                character: 3
+            }
+        );
+        // 'd' at byte 5 (after \r\n) → line 1, col 0
+        assert_eq!(
+            offset_to_position(src, 5),
+            Position {
+                line: 1,
+                character: 0
+            }
+        );
+    }
+
+    #[test]
+    fn crlf_position_to_offset() {
+        let src = "abc\r\ndef";
+        let pos = Position {
+            line: 1,
+            character: 0,
+        };
+        assert_eq!(position_to_offset(src, pos), 5);
+    }
+
+    #[test]
+    fn crlf_roundtrip() {
+        let src = "abc\r\ndef\r\nghi";
+        let pos = Position {
+            line: 2,
+            character: 2,
+        };
+        let offset = position_to_offset(src, pos);
+        let back = offset_to_position(src, offset);
+        assert_eq!(back, pos);
     }
 
     // ── Severity mapping ─────────────────────────────────────────────────
