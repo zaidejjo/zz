@@ -561,3 +561,780 @@ impl LanguageServer for Backend {
         Ok(())
     }
 }
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::GlobalState;
+    use tower_lsp::LspService;
+
+    /// Create a service + backend pair for testing.
+    fn setup() -> (tower_lsp::LspService<Backend>, std::sync::Arc<GlobalState>) {
+        let (service, _) = LspService::new(|client| Backend::new(client));
+        let state = Arc::clone(&service.inner().state);
+        (service, state)
+    }
+
+    /// Open a document in the global state and run a check so hover/go-to work.
+    fn open_and_check(state: &GlobalState, uri: &Url, source: &str) {
+        state.update_document(uri.clone(), 1, source.to_string());
+        let (ib, ifunc, is) = state.checker_seed();
+        // Use the program already stored in the document by update_document.
+        let cr = {
+            let doc = state.documents.get(uri).unwrap();
+            let program = doc.program.as_ref().unwrap().clone();
+            zz_checker::check_program(&program, ib, ifunc, is)
+        };
+        if let Some(mut doc) = state.documents.get_mut(uri) {
+            doc.check_result = Some(cr.clone());
+        }
+        state.absorb_result(uri, &cr);
+    }
+
+    // ── Initialize ───────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn initialize_returns_capabilities() {
+        let (service, _) = setup();
+        let result = service
+            .inner()
+            .initialize(InitializeParams::default())
+            .await
+            .unwrap();
+        let caps = result.capabilities;
+        assert!(caps.hover_provider.is_some());
+        assert!(caps.definition_provider.is_some());
+        assert!(caps.code_action_provider.is_some());
+        assert!(caps.document_symbol_provider.is_some());
+        assert!(caps.workspace_symbol_provider.is_some());
+        assert!(caps.rename_provider.is_some());
+        assert!(caps.document_highlight_provider.is_some());
+        assert!(caps.completion_provider.is_some());
+        assert!(caps.signature_help_provider.is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn initialize_sets_root_from_workspace_folders() {
+        let (service, state) = setup();
+        let params = InitializeParams {
+            workspace_folders: Some(vec![WorkspaceFolder {
+                uri: Url::from_file_path("/tmp/myproject").unwrap(),
+                name: "myproject".to_string(),
+            }]),
+            ..Default::default()
+        };
+        service.inner().initialize(params).await.unwrap();
+        let root = state.root.read().unwrap();
+        assert_eq!(*root, Some(std::path::PathBuf::from("/tmp/myproject")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn initialize_sets_root_from_root_uri() {
+        let (service, state) = setup();
+        let params = InitializeParams {
+            root_uri: Some(Url::from_file_path("/tmp/alt").unwrap()),
+            ..Default::default()
+        };
+        service.inner().initialize(params).await.unwrap();
+        let root = state.root.read().unwrap();
+        assert_eq!(*root, Some(std::path::PathBuf::from("/tmp/alt")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_info_has_version() {
+        let (service, _) = setup();
+        let result = service
+            .inner()
+            .initialize(InitializeParams::default())
+            .await
+            .unwrap();
+        let info = result.server_info.unwrap();
+        assert_eq!(info.name, "zz-lsp");
+        assert!(info.version.is_some());
+    }
+
+    // ── Shutdown ─────────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_succeeds() {
+        let (service, _) = setup();
+        let result = service.inner().shutdown().await;
+        assert!(result.is_ok());
+    }
+
+    // ── Hover ────────────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hover_function() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "func add(a: int, b: int) -> int { return a + b }\n";
+        open_and_check(&state, &uri, src);
+
+        let pos = Position {
+            line: 0,
+            character: 5, // on "add"
+        };
+        let hover = service
+            .inner()
+            .hover(HoverParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: pos,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+            .unwrap();
+        let hover = hover.expect("should have hover");
+        match hover.contents {
+            HoverContents::Markup(m) => {
+                assert!(m.value.contains("func"));
+                assert!(m.value.contains("add"));
+            }
+            _ => panic!("expected markup content"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hover_struct() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "struct Point { x: int, y: int }\n";
+        open_and_check(&state, &uri, src);
+
+        let pos = Position {
+            line: 0,
+            character: 7, // on "Point"
+        };
+        let hover = service
+            .inner()
+            .hover(HoverParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: pos,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+            .unwrap();
+        let hover = hover.expect("should have hover for struct");
+        match hover.contents {
+            HoverContents::Markup(m) => {
+                assert!(m.value.contains("struct"));
+                assert!(m.value.contains("Point"));
+            }
+            _ => panic!("expected markup content"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hover_let_binding() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "let x = 42\n";
+        open_and_check(&state, &uri, src);
+
+        let pos = Position {
+            line: 0,
+            character: 4, // on "x"
+        };
+        let hover = service
+            .inner()
+            .hover(HoverParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: pos,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+            .unwrap();
+        let hover = hover.expect("should have hover for let");
+        match hover.contents {
+            HoverContents::Markup(m) => {
+                assert!(m.value.contains("x"));
+            }
+            _ => panic!("expected markup content"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hover_missing_document_returns_none() {
+        let (service, _) = setup();
+        let uri: Url = "file:///nonexistent.zz".parse().unwrap();
+        let hover = service
+            .inner()
+            .hover(HoverParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: Position::default(),
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+            .unwrap();
+        assert!(hover.is_none());
+    }
+
+    // ── Go-to-definition ─────────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn goto_definition_function() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "func add(a: int, b: int) -> int { return a + b }\nlet x = add(1, 2)\n";
+        open_and_check(&state, &uri, src);
+
+        let pos = Position {
+            line: 1,
+            character: 8, // on "add" in call
+        };
+        let def = service
+            .inner()
+            .goto_definition(GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    position: pos,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+        let def = def.expect("should have definition");
+        match def {
+            GotoDefinitionResponse::Scalar(loc) => {
+                assert_eq!(loc.uri, uri);
+                assert!(loc.range.start.line == 0);
+            }
+            _ => panic!("expected scalar location"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn goto_definition_struct_field() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "struct Point { x: int, y: int }\nlet p = Point{ x: 1, y: 2 }\nlet v = p.x\n";
+        open_and_check(&state, &uri, src);
+
+        let pos = Position {
+            line: 2,
+            character: 8, // on "x" in p.x
+        };
+        let def = service
+            .inner()
+            .goto_definition(GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    position: pos,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+        // Should find the field definition in the struct.
+        assert!(def.is_some(), "should resolve struct field go-to-definition");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn goto_definition_missing_doc_returns_none() {
+        let (service, _) = setup();
+        let uri: Url = "file:///no.zz".parse().unwrap();
+        let def = service
+            .inner()
+            .goto_definition(GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: Position::default(),
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+        assert!(def.is_none());
+    }
+
+    // ── Document symbol ──────────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn document_symbol_lists_functions_and_structs() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "func add(a: int, b: int) -> int { return a + b }\nstruct Point { x: int, y: int }\nlet c = 1\n";
+        open_and_check(&state, &uri, src);
+
+        let syms = service
+            .inner()
+            .document_symbol(DocumentSymbolParams {
+                text_document: TextDocumentIdentifier { uri },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+        let syms = syms.expect("should have symbols");
+        match syms {
+            DocumentSymbolResponse::Nested(syms) => {
+                assert!(syms.len() >= 3, "should have add, Point, c");
+                let names: Vec<_> = syms.iter().map(|s| s.name.clone()).collect();
+                assert!(names.contains(&"add".to_string()));
+                assert!(names.contains(&"Point".to_string()));
+                assert!(names.contains(&"c".to_string()));
+            }
+            DocumentSymbolResponse::Flat(_) => panic!("expected nested symbols"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn document_symbol_missing_doc_returns_none() {
+        let (service, _) = setup();
+        let uri: Url = "file:///no.zz".parse().unwrap();
+        let syms = service
+            .inner()
+            .document_symbol(DocumentSymbolParams {
+                text_document: TextDocumentIdentifier { uri },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+        assert!(syms.is_none());
+    }
+
+    // ── Workspace symbol ─────────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_symbol_search() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "func add(a: int, b: int) -> int { return a + b }\nstruct Adder { val: int }\n";
+        open_and_check(&state, &uri, src);
+
+        let syms = service
+            .inner()
+            .symbol(WorkspaceSymbolParams {
+                query: "add".to_string(),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+        let syms = syms.expect("should have symbols");
+        assert!(syms.len() >= 2, "should find add and Adder");
+    }
+
+    // ── References ───────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn references_finds_usages() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "func id(x: int) -> int { return x }\nlet a = id(1)\nlet b = id(2)\n";
+        open_and_check(&state, &uri, src);
+
+        // Cursor on the `id` function definition.
+        let pos = Position {
+            line: 0,
+            character: 5,
+        };
+        let refs = service
+            .inner()
+            .references(ReferenceParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    position: pos,
+                },
+                context: ReferenceContext {
+                    include_declaration: true,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+        let refs = refs.expect("should have references");
+        assert!(refs.len() >= 3, "should find def + 2 call sites");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn references_missing_doc_returns_none() {
+        let (service, _) = setup();
+        let uri: Url = "file:///no.zz".parse().unwrap();
+        let refs = service
+            .inner()
+            .references(ReferenceParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: Position::default(),
+                },
+                context: ReferenceContext {
+                    include_declaration: true,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+        assert!(refs.is_none());
+    }
+
+    // ── Prepare rename ───────────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepare_rename_on_symbol() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "let myvar = 1\n";
+        open_and_check(&state, &uri, src);
+
+        let resp = service
+            .inner()
+            .prepare_rename(TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 0,
+                    character: 4,
+                },
+            })
+            .await
+            .unwrap();
+        assert!(resp.is_some(), "should allow rename on variable");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepare_rename_off_symbol_returns_none() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "let x = 1\n";
+        open_and_check(&state, &uri, src);
+
+        let resp = service
+            .inner()
+            .prepare_rename(TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 0,
+                    character: 0, // on "let" keyword
+                },
+            })
+            .await
+            .unwrap();
+        assert!(resp.is_none());
+    }
+
+    // ── Rename ───────────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rename_replaces_all_refs() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "let x = 1\nlet y = x + x\n";
+        open_and_check(&state, &uri, src);
+
+        let edit = service
+            .inner()
+            .rename(RenameParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    position: Position {
+                        line: 0,
+                        character: 4,
+                    },
+                },
+                new_name: "z".to_string(),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+            .unwrap();
+        let edit = edit.expect("should produce rename edit");
+        let changes = edit.changes.expect("should have changes");
+        let edits = changes.get(&uri).expect("should have edits for uri");
+        // Should replace `x` in let, and both `x` in `x + x`.
+        assert!(edits.len() >= 3, "should have at least 3 replacements");
+    }
+
+    // ── Document highlight ───────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn document_highlight_read_write() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "let x = 1\nlet y = x\n";
+        open_and_check(&state, &uri, src);
+
+        let highlights = service
+            .inner()
+            .document_highlight(DocumentHighlightParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: Position {
+                        line: 0,
+                        character: 4,
+                    },
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+        let highlights = highlights.expect("should have highlights");
+        // At least 2: the definition (Write) and usage (Read).
+        assert!(highlights.len() >= 2);
+        let kinds: Vec<_> = highlights.iter().filter_map(|h| h.kind).collect();
+        assert!(kinds.contains(&DocumentHighlightKind::WRITE));
+        assert!(kinds.contains(&DocumentHighlightKind::READ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn document_highlight_missing_doc_returns_none() {
+        let (service, _) = setup();
+        let uri: Url = "file:///no.zz".parse().unwrap();
+        let highlights = service
+            .inner()
+            .document_highlight(DocumentHighlightParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: Position::default(),
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+        assert!(highlights.is_none());
+    }
+
+    // ── Completion ───────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completion_scope_mode() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "func greet(n: str) -> str { return n }\nlet x = gr\n";
+        open_and_check(&state, &uri, src);
+
+        let resp = service
+            .inner()
+            .completion(CompletionParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: Position {
+                        line: 1,
+                        character: 9, // after "gr"
+                    },
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+                context: None,
+            })
+            .await
+            .unwrap();
+        let resp = resp.expect("should have completions");
+        match resp {
+            CompletionResponse::Array(items) => {
+                let labels: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
+                assert!(
+                    labels.contains(&"greet".to_string()),
+                    "should contain 'greet', got: {:?}",
+                    labels
+                );
+            }
+            CompletionResponse::List(_) => panic!("expected array"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completion_dot_access() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "struct Point { x: int, y: int }\nlet p = Point{ x: 1, y: 2 }\nlet v = p.\n";
+        open_and_check(&state, &uri, src);
+
+        let resp = service
+            .inner()
+            .completion(CompletionParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: Position {
+                        line: 2,
+                        character: 10, // after "p."
+                    },
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+                context: None,
+            })
+            .await
+            .unwrap();
+        let resp = resp.expect("should have completions");
+        match resp {
+            CompletionResponse::Array(items) => {
+                let labels: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
+                assert!(
+                    labels.contains(&"x".to_string()) && labels.contains(&"y".to_string()),
+                    "should contain fields x, y, got: {:?}",
+                    labels
+                );
+            }
+            CompletionResponse::List(_) => panic!("expected array"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completion_missing_doc_returns_none() {
+        let (service, _) = setup();
+        let uri: Url = "file:///no.zz".parse().unwrap();
+        let resp = service
+            .inner()
+            .completion(CompletionParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: Position::default(),
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+                context: None,
+            })
+            .await
+            .unwrap();
+        assert!(resp.is_none());
+    }
+
+    // ── Signature help ───────────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn signature_help_inside_call() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "func add(a: int, b: int) -> int { return a + b }\nlet x = add(";
+        open_and_check(&state, &uri, src);
+
+        let help = service
+            .inner()
+            .signature_help(SignatureHelpParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: Position {
+                        line: 1,
+                        character: 12, // right after "add("
+                    },
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                context: None,
+            })
+            .await
+            .unwrap();
+        let help = help.expect("should have signature help");
+        assert_eq!(help.signatures.len(), 1);
+        assert!(help.signatures[0].label.contains("add"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn signature_help_missing_doc_returns_none() {
+        let (service, _) = setup();
+        let uri: Url = "file:///no.zz".parse().unwrap();
+        let help = service
+            .inner()
+            .signature_help(SignatureHelpParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: Position::default(),
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                context: None,
+            })
+            .await
+            .unwrap();
+        assert!(help.is_none());
+    }
+
+    // ── Code action ──────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn code_action_missing_doc_returns_none() {
+        let (service, _) = setup();
+        let uri: Url = "file:///no.zz".parse().unwrap();
+        let actions = service
+            .inner()
+            .code_action(CodeActionParams {
+                text_document: TextDocumentIdentifier { uri },
+                range: Range::default(),
+                context: CodeActionContext::default(),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+        assert!(actions.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn code_action_empty_range_returns_none() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "let x = 1\n";
+        open_and_check(&state, &uri, src);
+
+        let actions = service
+            .inner()
+            .code_action(CodeActionParams {
+                text_document: TextDocumentIdentifier { uri },
+                range: Range::default(),
+                context: CodeActionContext {
+                    diagnostics: vec![],
+                    only: None,
+                    trigger_kind: None,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+        assert!(actions.is_none());
+    }
+
+    // ── Did close clears diagnostics ─────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn did_close_removes_document() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        state.update_document(uri.clone(), 1, "let x = 1\n".into());
+        assert!(state.documents.contains_key(&uri));
+
+        service
+            .inner()
+            .did_close(DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+            })
+            .await;
+
+        assert!(!state.documents.contains_key(&uri));
+    }
+
+    // ── Completion resolve ───────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completion_resolve_returns_item() {
+        let (service, state) = setup();
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        let src = "func add(a: int, b: int) -> int { return a + b }\n";
+        open_and_check(&state, &uri, src);
+
+        let item = service
+            .inner()
+            .completion_resolve(CompletionItem {
+                label: "add".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(item.label, "add");
+    }
+}
