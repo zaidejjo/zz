@@ -266,11 +266,10 @@ impl GlobalState {
         // Mark as scanned to prevent duplicate scans.
         self.workspace_scanned.store(true, Ordering::SeqCst);
 
-        // Do the actual scan synchronously — it's fast for small/medium projects
-        // and we need the results before serving cross-file requests.
-        // For very large projects, this could be made truly async with
-        // a background thread, but the tradeoff is complexity.
+        log::info!("scanning workspace...");
         self.scan_workspace_sync();
+        let count = self.module_index.read().unwrap().entries.len();
+        log::info!("workspace scan complete: {count} file(s) indexed");
     }
 
     /// Record that `dependent` imports from `dependency_uri`.

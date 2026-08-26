@@ -29,8 +29,10 @@ USAGE:
     zz run <file.zz>              type-check and run a file
     zz check [FLAGS] [PATH]       scan for errors/warnings (file or directory)
     zz fix [FLAGS] [PATH]         apply auto-fixes (shortcut for check --fix)
+    zz fmt [FLAGS] [PATH]         format ZZ source files in-place
 
 FLAGS:
+    --check, -c       check formatting without writing (exit 1 if changed)
     --fix, -f          apply safe auto-fixes (typo replacements, field corrections)
     --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
     --interactive, -i  with --fix, prompt for ambiguous fixes interactively
@@ -50,6 +52,8 @@ EXAMPLES:
     zz fix hello.zz                  fix a single file
     zz check --fix --hard src/       force-apply all fixes, no prompts
     zz check --fix -i src/           interactive mode for ambiguous fixes
+    zz fmt .                         format all .zz files in current directory
+    zz fmt -c src/                   check formatting without writing
 ";
 
 fn main() -> ExitCode {
@@ -109,6 +113,24 @@ fn main() -> ExitCode {
             let interactive = has_interactive && !has_hard;
             match check_or_fix_path(&path, true, interactive, has_hard) {
                 Ok(()) => ExitCode::SUCCESS,
+                Err(msg) => {
+                    eprintln!("zz: {msg}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("fmt") => {
+            let (path, flags) = parse_path_and_flags(rest);
+            let check_only =
+                flags.contains(&"--check".to_string()) || flags.contains(&"-c".to_string());
+            match fmt_path(&path, check_only) {
+                Ok(changed) => {
+                    if check_only && changed {
+                        ExitCode::FAILURE
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
                 Err(msg) => {
                     eprintln!("zz: {msg}");
                     ExitCode::FAILURE
@@ -229,6 +251,52 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
         println!("{last}");
     }
     Ok(())
+}
+
+/// Format all `.zz` files under a path.  Returns `Ok(true)` when at
+/// least one file was changed (useful for `--check` mode).
+fn fmt_path(path_arg: &Option<String>, check_only: bool) -> Result<bool, String> {
+    let raw = path_arg.as_deref().unwrap_or(".");
+    let base = std::path::Path::new(raw);
+    let files = collect_zz_files(base)?;
+
+    if files.is_empty() {
+        return Err(format!("no .zz files found in `{raw}`"));
+    }
+
+    let config = zz_frontend::FormatConfig::default();
+    let mut changed_any = false;
+
+    for path in &files {
+        let path_str = path.display().to_string();
+        let source =
+            std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path_str}`: {e}"))?;
+
+        let parsed = zz_frontend::parse(&source);
+        let formatted = zz_frontend::format_program(&parsed.program, &source, &config);
+
+        if formatted != source {
+            changed_any = true;
+            if check_only {
+                eprintln!("would reformat: {path_str}");
+            } else {
+                std::fs::write(path, &formatted)
+                    .map_err(|e| format!("cannot write `{path_str}`: {e}"))?;
+                eprintln!("reformatted: {path_str}");
+            }
+        }
+    }
+
+    if check_only && changed_any {
+        eprintln!(
+            "zz: {} file(s) need formatting (use `zz fmt` without --check to fix)",
+            files.len()
+        );
+    } else if !changed_any {
+        eprintln!("zz: all files already formatted");
+    }
+
+    Ok(changed_any)
 }
 
 /// Parse, type-check, and optionally auto-fix files.
