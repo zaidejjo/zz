@@ -76,6 +76,19 @@ impl LanguageServer for Backend {
                     retrigger_characters: None,
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                 }),
+                document_formatting_provider: Some(OneOf::Left(true)),
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+                semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+                    SemanticTokensOptions {
+                        legend: SemanticTokensLegend {
+                            token_types: crate::semantic_tokens::token_type_legend(),
+                            token_modifiers: vec![],
+                        },
+                        range: Some(true),
+                        full: Some(SemanticTokensFullOptions::Bool(true)),
+                        ..Default::default()
+                    },
+                )),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -701,6 +714,81 @@ impl LanguageServer for Backend {
             doc.check_result.as_ref(),
         );
         Ok(help)
+    }
+
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let uri = &params.text_document.uri;
+        let doc = match self.state.documents.get(uri) {
+            Some(doc) => doc.clone(),
+            None => return Ok(None),
+        };
+        let program = match &doc.program {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let config = crate::formatting::FormatConfig::default();
+        let edit = crate::formatting::format_as_edit(program, &doc.source, &config);
+        Ok(edit.map(|e| vec![e]))
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = &params.text_document.uri;
+        let range = params.range;
+
+        let doc = match self.state.documents.get(uri) {
+            Some(doc) => doc.clone(),
+            None => return Ok(None),
+        };
+        let program = match &doc.program {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let hints = crate::inlay_hints::inlay_hints(
+            program,
+            &doc.source,
+            doc.check_result.as_ref(),
+            Some(range),
+        );
+        Ok(Some(hints))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = &params.text_document.uri;
+        let doc = match self.state.documents.get(uri) {
+            Some(doc) => doc.clone(),
+            None => return Ok(None),
+        };
+        let program = match &doc.program {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let tokens = crate::semantic_tokens::collect_semantic_tokens(program, &doc.source);
+        let encoded = crate::semantic_tokens::encode_tokens(&tokens, &doc.source);
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: encoded,
+        })))
+    }
+
+    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
+        let uri = &params.text_document.uri;
+        let doc = match self.state.documents.get(uri) {
+            Some(doc) => doc.clone(),
+            None => return Ok(None),
+        };
+        let program = match &doc.program {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let ranges = crate::folding::folding_ranges(program, &doc.source);
+        Ok(Some(ranges))
     }
 
     async fn shutdown(&self) -> Result<()> {
