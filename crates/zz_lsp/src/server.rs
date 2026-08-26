@@ -6,9 +6,10 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
+use crate::convert::LineIndex;
 use crate::diagnostics::recheck_and_publish;
-use crate::state::GlobalState;
-use zz_frontend::ast::Expr;
+use crate::state::{DocumentState, GlobalState};
+use zz_frontend::ast::{Expr, Stmt};
 
 /// The ZZ language server backend.
 pub struct Backend {
@@ -44,6 +45,9 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "zz-lsp initialized")
             .await;
+
+        // Scan workspace for .zz files to build cross-file index.
+        self.state.scan_workspace();
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -84,6 +88,15 @@ impl LanguageServer for Backend {
     async fn initialized(&self, _: InitializedParams) {
         self.client
             .log_message(MessageType::INFO, "zz-lsp ready")
+            .await;
+    }
+
+    async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
+        // Re-scan workspace on folder changes.
+        let _ = params;
+        self.state.scan_workspace();
+        self.client
+            .log_message(MessageType::INFO, "workspace folders changed, rescan complete")
             .await;
     }
 
@@ -237,6 +250,45 @@ impl LanguageServer for Backend {
 
         let offset = doc.line_index.position_to_offset(&doc.source, pos);
         let node = crate::lookup::find_node_at(program, &doc.source, offset);
+
+        // Check if cursor is on an import statement — resolve cross-file.
+        if let Some(Stmt::Import { path, .. }) = node.stmt {
+            let root = self.state.root.read().unwrap().clone();
+            if let Some(root) = root {
+                let index = self.state.module_index.read().unwrap();
+                if let Some(target_uri) = index.resolve_import(path, &root) {
+                    // Navigate to first definition in the imported file,
+                    // or the first line of the file.
+                    let target_loc = if let Some(entry) = index.entries.get(&target_uri) {
+                        if let Some(def) = entry.definitions.first() {
+                            let target_doc = DocumentState {
+                                uri: target_uri.clone(),
+                                version: 0,
+                                source: entry.source.clone(),
+                                parse_errors: vec![],
+                                program: entry.program.clone(),
+                                check_result: None,
+                                file_defs: None,
+                                line_index: LineIndex::new(&entry.source),
+                            };
+                            Location {
+                                uri: target_uri,
+                                range: target_doc.line_index.span_to_range(&entry.source, def.span),
+                            }
+                        } else {
+                            Location {
+                                uri: target_uri,
+                                range: Range::default(),
+                            }
+                        }
+                    } else {
+                        return Ok(None);
+                    };
+                    return Ok(Some(GotoDefinitionResponse::Scalar(target_loc)));
+                }
+            }
+        }
+
         let name = match &node.name {
             Some(n) => n.clone(),
             None => return Ok(None),
@@ -362,6 +414,25 @@ impl LanguageServer for Backend {
             all_symbols.extend(syms);
         }
 
+        // Also collect symbols from indexed (non-open) workspace files.
+        {
+            let index = self.state.module_index.read().unwrap();
+            for (uri, entry) in &index.entries {
+                if self.state.documents.contains_key(uri) {
+                    continue; // Already collected above.
+                }
+                if let Some(program) = &entry.program {
+                    let syms = crate::symbols::workspace_symbols(
+                        program,
+                        &entry.source,
+                        uri,
+                        None,
+                    );
+                    all_symbols.extend(syms);
+                }
+            }
+        }
+
         let filtered = crate::symbols::filter_symbols(&all_symbols, query);
         Ok(Some(filtered))
     }
@@ -382,8 +453,7 @@ impl LanguageServer for Backend {
         let offset = doc.line_index.position_to_offset(&doc.source, pos);
         let refs = crate::lookup::find_references_in_program(program, &doc.source, offset);
 
-        // LSP spec: return empty array, not null.
-        let locations: Vec<Location> = refs
+        let mut locations: Vec<Location> = refs
             .iter()
             .map(|r| Location {
                 uri: uri.clone(),
@@ -391,6 +461,35 @@ impl LanguageServer for Backend {
             })
             .collect();
 
+        // Cross-file: find references in all other indexed files.
+        let name = crate::lookup::find_node_at(program, &doc.source, offset)
+            .name
+            .unwrap_or_default();
+        if !name.is_empty() {
+            let index = self.state.module_index.read().unwrap();
+            for (target_uri, entry) in &index.entries {
+                if target_uri == uri {
+                    continue; // Skip current file.
+                }
+                if let Some(target_program) = &entry.program {
+                    let target_source = &entry.source;
+                    let target_line_index = LineIndex::new(target_source);
+                    let target_refs = crate::lookup::find_references_to_name_in_program(
+                        target_program,
+                        target_source,
+                        &name,
+                    );
+                    for r in &target_refs {
+                        locations.push(Location {
+                            uri: target_uri.clone(),
+                            range: target_line_index.span_to_range(target_source, r.span),
+                        });
+                    }
+                }
+            }
+        }
+
+        // LSP spec: return empty array, not null.
         Ok(Some(locations))
     }
 
@@ -449,6 +548,10 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
+        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> =
+            std::collections::HashMap::new();
+
+        // Edits for the current file.
         let edits: Vec<TextEdit> = refs
             .iter()
             .map(|r| TextEdit {
@@ -456,9 +559,45 @@ impl LanguageServer for Backend {
                 new_text: new_name.clone(),
             })
             .collect();
+        if !edits.is_empty() {
+            changes.insert(uri.clone(), edits);
+        }
 
-        let mut changes = std::collections::HashMap::new();
-        changes.insert(uri.clone(), edits);
+        // Cross-file: find and rename references in all other indexed files.
+        let name = crate::lookup::find_node_at(program, &doc.source, offset)
+            .name
+            .unwrap_or_default();
+        if !name.is_empty() {
+            let index = self.state.module_index.read().unwrap();
+            for (target_uri, entry) in &index.entries {
+                if target_uri == uri {
+                    continue;
+                }
+                if let Some(target_program) = &entry.program {
+                    let target_source = &entry.source;
+                    let target_line_index = LineIndex::new(target_source);
+                    let target_refs = crate::lookup::find_references_to_name_in_program(
+                        target_program,
+                        target_source,
+                        &name,
+                    );
+                    let mut target_edits = Vec::new();
+                    for r in &target_refs {
+                        target_edits.push(TextEdit {
+                            range: target_line_index.span_to_range(target_source, r.span),
+                            new_text: new_name.clone(),
+                        });
+                    }
+                    if !target_edits.is_empty() {
+                        changes.insert(target_uri.clone(), target_edits);
+                    }
+                }
+            }
+        }
+
+        if changes.is_empty() {
+            return Ok(None);
+        }
 
         Ok(Some(WorkspaceEdit {
             changes: Some(changes),
@@ -1336,5 +1475,411 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(item.label, "add");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Cross-file tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Helper: populate the module index with a fake workspace so
+    /// cross-file navigation works without a real filesystem.
+    fn populate_module_index(
+        state: &GlobalState,
+        files: Vec<(Url, &str, &str)>,
+    ) {
+        let mut index = state.module_index.write().unwrap();
+        for (uri, module_path, source) in files {
+            let parsed = zz_frontend::parse(source);
+            let definitions = crate::lookup::collect_definitions(&parsed.program, source);
+            let defs: Vec<crate::lookup::Definition> = definitions.into_values().collect();
+            let entry = crate::cross_file::FileEntry {
+                uri: uri.clone(),
+                module_path: module_path.to_string(),
+                source: source.to_string(),
+                program: Some(parsed.program),
+                definitions: defs,
+            };
+            index.module_to_uri.insert(module_path.to_string(), uri.clone());
+            index.uri_to_module.insert(uri.clone(), module_path.to_string());
+            index.entries.insert(uri, entry);
+        }
+    }
+
+    // ── Go-to-definition across files ─────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn goto_definition_cross_file_import() {
+        let (service, state) = setup();
+
+        // Set up a workspace with two "files" in the module index.
+        let lib_uri: Url = "file:///workspace/utils.zz".parse().unwrap();
+        let main_uri: Url = "file:///workspace/main.zz".parse().unwrap();
+
+        let lib_src = "func greet(name: str) -> str { return name }\n";
+        let main_src = "import utils\ngreet(\"hi\")\n";
+
+        populate_module_index(
+            &state,
+            vec![
+                (lib_uri.clone(), "utils", lib_src),
+                (main_uri.clone(), "main", main_src),
+            ],
+        );
+
+        // Also open main so it has a program.
+        open_and_check(&state, &main_uri, main_src);
+
+        // Set workspace root (resolve_import checks module_to_uri first).
+        state.set_root(std::path::PathBuf::from("/workspace"));
+
+        // Cursor on the import path "utils" (line 0, char 7).
+        let def = service
+            .inner()
+            .goto_definition(GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: main_uri },
+                    position: Position {
+                        line: 0,
+                        character: 7,
+                    },
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+
+        let def = def.expect("should resolve import to cross-file definition");
+        match def {
+            GotoDefinitionResponse::Scalar(loc) => {
+                assert_eq!(loc.uri, lib_uri);
+                // Should point to the `greet` function definition.
+                assert!(loc.range.start.line == 0);
+            }
+            _ => panic!("expected scalar location"),
+        }
+    }
+
+    // ── References across files ───────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn references_cross_file() {
+        let (service, state) = setup();
+
+        let uri_a: Url = "file:///workspace/a.zz".parse().unwrap();
+        let uri_b: Url = "file:///workspace/b.zz".parse().unwrap();
+
+        let src_a = "let shared_val = 42\n";
+        let src_b = "let x = shared_val\n";
+
+        populate_module_index(
+            &state,
+            vec![
+                (uri_a.clone(), "a", src_a),
+                (uri_b.clone(), "b", src_b),
+            ],
+        );
+        open_and_check(&state, &uri_a, src_a);
+        open_and_check(&state, &uri_b, src_b);
+
+        // Cursor on `shared_val` definition in file a (line 0, char 4).
+        let refs = service
+            .inner()
+            .references(ReferenceParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri_a.clone() },
+                    position: Position {
+                        line: 0,
+                        character: 4,
+                    },
+                },
+                context: ReferenceContext {
+                    include_declaration: true,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+
+        let refs = refs.expect("should find cross-file references");
+        // Should find: definition in a.zz + usage in b.zz = at least 2.
+        assert!(
+            refs.len() >= 2,
+            "expected at least 2 cross-file references, got {}",
+            refs.len()
+        );
+
+        // At least one reference should be in file b.
+        let has_b = refs.iter().any(|r| r.uri == uri_b);
+        assert!(has_b, "should have a reference in file b.zz");
+    }
+
+    // ── Rename across files ───────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rename_cross_file() {
+        let (service, state) = setup();
+
+        let uri_a: Url = "file:///workspace/a.zz".parse().unwrap();
+        let uri_b: Url = "file:///workspace/b.zz".parse().unwrap();
+
+        let src_a = "let myvar = 1\n";
+        let src_b = "let y = myvar\n";
+
+        populate_module_index(
+            &state,
+            vec![
+                (uri_a.clone(), "a", src_a),
+                (uri_b.clone(), "b", src_b),
+            ],
+        );
+        open_and_check(&state, &uri_a, src_a);
+        open_and_check(&state, &uri_b, src_b);
+
+        // Rename `myvar` → `renamed` from file a.
+        let edit = service
+            .inner()
+            .rename(RenameParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri_a.clone() },
+                    position: Position {
+                        line: 0,
+                        character: 4,
+                    },
+                },
+                new_name: "renamed".to_string(),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+            .unwrap();
+
+        let edit = edit.expect("should produce cross-file rename edit");
+        let changes = edit.changes.expect("should have changes");
+
+        // Should have edits in both files.
+        assert!(
+            changes.contains_key(&uri_a),
+            "should have edits in file a"
+        );
+        assert!(
+            changes.contains_key(&uri_b),
+            "should have edits in file b"
+        );
+
+        // File a: rename declaration.
+        let edits_a = changes.get(&uri_a).unwrap();
+        assert_eq!(edits_a.len(), 1);
+        assert_eq!(edits_a[0].new_text, "renamed");
+
+        // File b: rename usage.
+        let edits_b = changes.get(&uri_b).unwrap();
+        assert_eq!(edits_b.len(), 1);
+        assert_eq!(edits_b[0].new_text, "renamed");
+    }
+
+    // ── Workspace symbol includes indexed files ───────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_symbol_includes_indexed_files() {
+        let (service, state) = setup();
+
+        let uri_open: Url = "file:///workspace/open.zz".parse().unwrap();
+        let uri_indexed: Url = "file:///workspace/indexed.zz".parse().unwrap();
+
+        let src_open = "func open_func() -> int { return 1 }\n";
+        let src_indexed = "func indexed_func() -> int { return 2 }\nstruct IndexedStruct { val: int }\n";
+
+        // Open one file normally.
+        open_and_check(&state, &uri_open, src_open);
+
+        // Put the other in the module index only.
+        populate_module_index(
+            &state,
+            vec![
+                (uri_indexed.clone(), "indexed", src_indexed),
+            ],
+        );
+
+        // Search for "indexed" — should find symbols from the indexed file.
+        let syms = service
+            .inner()
+            .symbol(WorkspaceSymbolParams {
+                query: "indexed".to_string(),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap();
+
+        let syms = syms.expect("should have symbols");
+        let names: Vec<_> = syms.iter().map(|s| s.name.clone()).collect();
+        assert!(
+            names.iter().any(|n| n.contains("indexed_func")),
+            "should find indexed_func from non-open file, got: {:?}",
+            names
+        );
+    }
+
+    // ── Scan workspace on initialize ──────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn initialize_scans_workspace() {
+        // Create a temp workspace with a .zz file.
+        let root = std::path::PathBuf::from("/tmp/test_ws_init");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("helper.zz"),
+            "func helper() -> int { return 42 }\n",
+        )
+        .unwrap();
+
+        let (service, state) = setup();
+        let params = InitializeParams {
+            workspace_folders: Some(vec![WorkspaceFolder {
+                uri: Url::from_file_path(&root).unwrap(),
+                name: "test_ws_init".to_string(),
+            }]),
+            ..Default::default()
+        };
+        service.inner().initialize(params).await.unwrap();
+
+        // The module index should have scanned helper.zz.
+        {
+            let index = state.module_index.read().unwrap();
+            assert!(
+                index.module_to_uri.contains_key("helper"),
+                "should have indexed helper module"
+            );
+        }
+
+        // Cleanup.
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ── didChangeWorkspaceFolders triggers rescan ─────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_folder_change_triggers_rescan() {
+        let root = std::path::PathBuf::from("/tmp/test_ws_folders");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.zz"), "let x = 1\n").unwrap();
+
+        let (service, state) = setup();
+        let params = InitializeParams {
+            workspace_folders: Some(vec![WorkspaceFolder {
+                uri: Url::from_file_path(&root).unwrap(),
+                name: "test_ws_folders".to_string(),
+            }]),
+            ..Default::default()
+        };
+        service.inner().initialize(params).await.unwrap();
+
+        // Verify a.zz was indexed.
+        {
+            let index = state.module_index.read().unwrap();
+            assert!(index.module_to_uri.contains_key("a"));
+        }
+
+        // Add another file and send workspace folder change.
+        std::fs::write(root.join("b.zz"), "let y = 2\n").unwrap();
+        service
+            .inner()
+            .did_change_workspace_folders(DidChangeWorkspaceFoldersParams {
+                event: WorkspaceFoldersChangeEvent {
+                    added: vec![WorkspaceFolder {
+                        uri: Url::from_file_path(&root).unwrap(),
+                        name: "test_ws_folders".to_string(),
+                    }],
+                    removed: vec![],
+                },
+            })
+            .await;
+
+        // After rescan, b.zz should be indexed too.
+        {
+            let index = state.module_index.read().unwrap();
+            assert!(
+                index.module_to_uri.contains_key("b"),
+                "should have indexed b.zz after folder change"
+            );
+        }
+
+        // Cleanup.
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ── Module index: find_definition_across_files ────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn module_index_find_definition() {
+        let (service, state) = setup();
+
+        let uri: Url = "file:///workspace/mod.zz".parse().unwrap();
+        let src = "func my_func() -> int { return 1 }\nstruct MyStruct { val: int }\n";
+
+        populate_module_index(&state, vec![(uri, "mod", src)]);
+
+        let index = state.module_index.read().unwrap();
+        let result = index.find_definition_across_files("my_func");
+        assert!(result.is_some(), "should find my_func across files");
+
+        let result = index.find_definition_across_files("MyStruct");
+        assert!(result.is_some(), "should find MyStruct across files");
+
+        let result = index.find_definition_across_files("nonexistent");
+        assert!(result.is_none());
+    }
+
+    // ── Module index: find_references_across_files ────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn module_index_find_references() {
+        let (service, state) = setup();
+
+        let uri_a: Url = "file:///workspace/a.zz".parse().unwrap();
+        let uri_b: Url = "file:///workspace/b.zz".parse().unwrap();
+
+        populate_module_index(
+            &state,
+            vec![
+                (uri_a.clone(), "a", "let x = 1\nlet y = 2\n"),
+                (uri_b.clone(), "b", "let x = 3\n"),
+            ],
+        );
+
+        let index = state.module_index.read().unwrap();
+        let refs = index.find_references_across_files("x");
+        assert_eq!(refs.len(), 2, "x is defined in both files");
+
+        let refs = index.find_references_across_files("y");
+        assert_eq!(refs.len(), 1, "y is only in file a");
+
+        let refs = index.find_references_across_files("z");
+        assert!(refs.is_empty(), "z doesn't exist");
+    }
+
+    // ── Module path resolution ────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn module_path_for_file_unit() {
+        use crate::cross_file::module_path_for_file;
+        let root = std::path::PathBuf::from("/workspace");
+        assert_eq!(
+            module_path_for_file(&std::path::PathBuf::from("/workspace/main.zz"), &root),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            module_path_for_file(&std::path::PathBuf::from("/workspace/utils/math.zz"), &root),
+            Some("utils.math".to_string())
+        );
+        assert_eq!(
+            module_path_for_file(&std::path::PathBuf::from("/workspace/utils/mod.zz"), &root),
+            Some("utils".to_string())
+        );
+        assert_eq!(
+            module_path_for_file(&std::path::PathBuf::from("/workspace/readme.md"), &root),
+            None,
+        );
     }
 }
