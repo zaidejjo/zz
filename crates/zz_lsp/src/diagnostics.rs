@@ -37,12 +37,12 @@ pub async fn recheck_and_publish(
     let state_clone = state.clone();
     let uri_clone = uri.clone();
 
-    // Run parse + check on the blocking threadpool.
+    // Run check on the blocking threadpool.
     let result = tokio::task::spawn_blocking(move || {
-        // Re-check that the sequence hasn't already moved on.
+        // Debounce: skip if a newer change arrived.
         let current = state_clone.current_sequence();
         if current != seq {
-            return None; // stale — a newer change is pending
+            return None;
         }
 
         let program = program?;
@@ -52,7 +52,7 @@ pub async fn recheck_and_publish(
     .await;
 
     let Ok(result) = result else {
-        return; // task panicked or was cancelled
+        return;
     };
 
     // Another debounce check after await.
@@ -80,10 +80,7 @@ pub async fn recheck_and_publish(
         doc.check_result = Some(checked.clone());
     }
 
-    // Prune old per-file defs before absorbing new ones.
-    // (The document was already replaced by update_document, so old defs
-    // were returned and should have been pruned by the caller. We just
-    // absorb the new results here.)
+    // Absorb new results into global seed.
     state.absorb_result(&uri, &checked);
 
     // Combine parse errors + checker diagnostics.

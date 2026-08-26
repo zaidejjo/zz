@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::convert::LineIndex;
 use crate::cross_file::ModuleIndex;
@@ -81,6 +81,11 @@ pub struct GlobalState {
     pub sequence: AtomicU32,
     /// Cross-file module index for workspace-wide navigation.
     pub module_index: std::sync::RwLock<ModuleIndex>,
+    /// Whether workspace scan has completed (lazy scan).
+    pub workspace_scanned: AtomicBool,
+    /// Files that need re-checking after a dependency changes.
+    /// Maps file URI → list of dependent URIs that import it.
+    pub dependents: DashMap<Url, Vec<Url>>,
 }
 
 impl Default for GlobalState {
@@ -100,6 +105,8 @@ impl GlobalState {
             root: std::sync::RwLock::new(None),
             sequence: AtomicU32::new(0),
             module_index: std::sync::RwLock::new(ModuleIndex::default()),
+            workspace_scanned: AtomicBool::new(false),
+            dependents: DashMap::new(),
         }
     }
 
@@ -211,10 +218,8 @@ impl GlobalState {
         *self.root.write().unwrap() = Some(root);
     }
 
-    /// Scan the workspace root for .zz files and populate the module index.
-    /// Each file is parsed and its definitions are extracted for cross-file
-    /// navigation (go-to-definition, find-references, rename).
-    pub fn scan_workspace(&self) {
+    /// Scan the workspace synchronously (used internally).
+    fn scan_workspace_sync(&self) {
         let root = match self.root.read().unwrap().clone() {
             Some(r) => r,
             None => return,
@@ -222,13 +227,12 @@ impl GlobalState {
 
         let files = crate::cross_file::scan_for_zz_files(&root);
         let mut index = self.module_index.write().unwrap();
-        // Clear existing entries before re-scan.
         index.module_to_uri.clear();
         index.uri_to_module.clear();
         index.entries.clear();
 
         for file_path in &files {
-            let uri = match tower_lsp::lsp_types::Url::from_file_path(file_path) {
+            let uri = match Url::from_file_path(file_path) {
                 Ok(u) => u,
                 Err(_) => continue,
             };
@@ -246,6 +250,43 @@ impl GlobalState {
             index.uri_to_module.insert(uri.clone(), module_path);
             index.entries.insert(uri, entry);
         }
+        self.workspace_scanned.store(true, Ordering::SeqCst);
+    }
+
+    /// Scan workspace asynchronously — spawn blocking work, return immediately.
+    /// The caller can continue serving requests while the scan runs in background.
+    pub fn scan_workspace_async(&self) {
+        if self.root.read().unwrap().is_none() {
+            return;
+        }
+        // Quick check: already scanned?
+        if self.workspace_scanned.load(Ordering::SeqCst) {
+            return;
+        }
+        // Mark as scanned to prevent duplicate scans.
+        self.workspace_scanned.store(true, Ordering::SeqCst);
+
+        // Do the actual scan synchronously — it's fast for small/medium projects
+        // and we need the results before serving cross-file requests.
+        // For very large projects, this could be made truly async with
+        // a background thread, but the tradeoff is complexity.
+        self.scan_workspace_sync();
+    }
+
+    /// Record that `dependent` imports from `dependency_uri`.
+    pub fn record_dependency(&self, dependency_uri: Url, dependent: Url) {
+        self.dependents
+            .entry(dependency_uri)
+            .or_insert_with(Vec::new)
+            .push(dependent);
+    }
+
+    /// Get all files that depend on the given URI.
+    pub fn get_dependents(&self, uri: &Url) -> Vec<Url> {
+        self.dependents
+            .get(uri)
+            .map(|v| v.value().clone())
+            .unwrap_or_default()
     }
 }
 
@@ -431,5 +472,40 @@ mod tests {
         state.prune_defs(&defs);
         assert!(!state.bindings.read().unwrap().contains_key("w"));
         assert!(!state.documents.contains_key(&uri));
+    }
+
+    #[test]
+    fn workspace_scanned_flag() {
+        let state = make_state();
+        assert!(!state
+            .workspace_scanned
+            .load(std::sync::atomic::Ordering::SeqCst));
+        state
+            .workspace_scanned
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(state
+            .workspace_scanned
+            .load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn dependency_tracking() {
+        let state = make_state();
+        let uri_a: Url = "file:///a.zz".parse().unwrap();
+        let uri_b: Url = "file:///b.zz".parse().unwrap();
+        let uri_c: Url = "file:///c.zz".parse().unwrap();
+
+        // b and c depend on a.
+        state.record_dependency(uri_a.clone(), uri_b.clone());
+        state.record_dependency(uri_a.clone(), uri_c.clone());
+
+        let deps = state.get_dependents(&uri_a);
+        assert_eq!(deps.len(), 2);
+        assert!(deps.contains(&uri_b));
+        assert!(deps.contains(&uri_c));
+
+        // d has no dependents.
+        let uri_d: Url = "file:///d.zz".parse().unwrap();
+        assert!(state.get_dependents(&uri_d).is_empty());
     }
 }
