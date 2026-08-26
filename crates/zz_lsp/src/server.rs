@@ -46,8 +46,8 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "zz-lsp initialized")
             .await;
 
-        // Scan workspace for .zz files to build cross-file index.
-        self.state.scan_workspace();
+        // Background workspace scan — non-blocking.
+        self.state.scan_workspace_async();
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -92,9 +92,10 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
-        // Re-scan workspace on folder changes.
         let _ = params;
-        self.state.scan_workspace();
+        // Reset scan flag and re-scan in background.
+        self.state.workspace_scanned.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.state.scan_workspace_async();
         self.client
             .log_message(MessageType::INFO, "workspace folders changed, rescan complete")
             .await;
@@ -131,6 +132,12 @@ impl LanguageServer for Backend {
         if let Some(defs) = &old_defs {
             self.state.prune_defs(defs);
         }
+
+        // Debounce: wait 150ms for rapid edits to settle.
+        // The sequence counter in recheck_and_publish handles stale detection,
+        // so if another did_change arrives before the sleep finishes,
+        // the old sequence will be stale and the check will be skipped.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
         recheck_and_publish(self.state.clone(), &self.client, uri).await;
     }

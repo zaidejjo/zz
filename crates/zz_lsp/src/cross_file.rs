@@ -354,4 +354,112 @@ mod tests {
         let refs = index.find_references_across_files("y");
         assert_eq!(refs.len(), 1);
     }
+
+    // ── Performance tests ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_file_entry_performance() {
+        // Verify that parsing a 1000-line file is fast.
+        let mut source = String::new();
+        for i in 0..1000 {
+            source.push_str(&format!("let x_{i} = {i}\n"));
+        }
+        let uri: Url = "file:///perf.zz".parse().unwrap();
+        let start = std::time::Instant::now();
+        let entry = parse_file_entry(uri, source, "perf".to_string());
+        let elapsed = start.elapsed();
+        // Should parse in under 50ms.
+        assert!(
+            elapsed.as_millis() < 50,
+            "parsing 1000-line file took {:?}",
+            elapsed
+        );
+        assert!(!entry.definitions.is_empty());
+    }
+
+    #[test]
+    fn collect_definitions_many_symbols() {
+        // Verify that collecting definitions from many symbols is fast.
+        let mut source = String::new();
+        for i in 0..500 {
+            source.push_str(&format!("let val_{i} = {i}\n"));
+        }
+        let parsed = zz_frontend::parse(&source);
+        let start = std::time::Instant::now();
+        let defs = crate::lookup::collect_definitions(&parsed.program, &source);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 2000,
+            "collecting 500 definitions took {:?}",
+            elapsed
+        );
+        assert_eq!(defs.len(), 500);
+    }
+
+    #[test]
+    fn module_index_many_files() {
+        // Verify that indexing many files is fast.
+        let mut index = ModuleIndex::default();
+        let start = std::time::Instant::now();
+        for i in 0..100 {
+            let uri: Url = format!("file:///file_{i}.zz").parse().unwrap();
+            let source = format!("func fn_{i}() -> int {{ return {i} }}\n");
+            let entry = parse_file_entry(uri.clone(), source, format!("file_{i}"));
+            index.module_to_uri.insert(format!("file_{i}"), uri.clone());
+            index.uri_to_module.insert(uri.clone(), format!("file_{i}"));
+            index.entries.insert(uri, entry);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 500,
+            "indexing 100 files took {:?}",
+            elapsed
+        );
+        assert_eq!(index.entries.len(), 100);
+    }
+
+    #[test]
+    fn scan_for_zz_files_performance() {
+        // Create a temp directory with many .zz files.
+        let root = PathBuf::from("/tmp/perf_ws");
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..50 {
+            std::fs::write(root.join(format!("file_{i}.zz")), "let x = 1\n").unwrap();
+        }
+        let start = std::time::Instant::now();
+        let files = scan_for_zz_files(&root);
+        let elapsed = start.elapsed();
+        assert_eq!(files.len(), 50);
+        assert!(
+            elapsed.as_millis() < 50,
+            "scanning 50 files took {:?}",
+            elapsed
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cross_file_references_large_scale() {
+        // Verify cross-file reference finding scales well.
+        let mut index = ModuleIndex::default();
+        let mut expected_refs = 0;
+        for i in 0..50 {
+            let uri: Url = format!("file:///f{i}.zz").parse().unwrap();
+            let source = format!("let shared = {i}\nlet local_{i} = shared\n");
+            let entry = parse_file_entry(uri.clone(), source, format!("f{i}"));
+            index.module_to_uri.insert(format!("f{i}"), uri.clone());
+            index.uri_to_module.insert(uri.clone(), format!("f{i}"));
+            index.entries.insert(uri, entry);
+            expected_refs += 1; // definition of shared
+        }
+        let start = std::time::Instant::now();
+        let refs = index.find_references_across_files("shared");
+        let elapsed = start.elapsed();
+        assert_eq!(refs.len(), expected_refs);
+        assert!(
+            elapsed.as_millis() < 10,
+            "finding refs across 50 files took {:?}",
+            elapsed
+        );
+    }
 }
