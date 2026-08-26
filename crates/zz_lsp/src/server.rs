@@ -67,6 +67,11 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".to_string()]),
                     ..Default::default()
                 }),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                    retrigger_characters: None,
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                }),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -527,6 +532,29 @@ impl LanguageServer for Backend {
             }
         }
         Ok(item)
+    }
+
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let doc = match self.state.documents.get(uri) {
+            Some(doc) => doc.clone(),
+            None => return Ok(None),
+        };
+        let program = match &doc.program {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let offset = doc.line_index.position_to_offset(&doc.source, pos);
+        let help = crate::signature_help::signature_help_for_position(
+            program,
+            &doc.source,
+            offset,
+            doc.check_result.as_ref(),
+        );
+        Ok(help)
     }
 
     async fn shutdown(&self) -> Result<()> {

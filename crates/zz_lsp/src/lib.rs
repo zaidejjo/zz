@@ -4,5 +4,6 @@ pub mod convert;
 pub mod diagnostics;
 pub mod lookup;
 pub mod server;
+pub mod signature_help;
 pub mod state;
 pub mod symbols;
