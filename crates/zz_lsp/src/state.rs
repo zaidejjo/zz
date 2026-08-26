@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::convert::LineIndex;
+use crate::cross_file::ModuleIndex;
 use dashmap::DashMap;
 use tower_lsp::lsp_types::Url;
 use zz_checker::{CheckResult, FuncSig, StructSig, Type};
@@ -78,6 +79,8 @@ pub struct GlobalState {
     pub root: std::sync::RwLock<Option<PathBuf>>,
     /// Change sequence counter for debounce.
     pub sequence: AtomicU32,
+    /// Cross-file module index for workspace-wide navigation.
+    pub module_index: std::sync::RwLock<ModuleIndex>,
 }
 
 impl Default for GlobalState {
@@ -96,6 +99,7 @@ impl GlobalState {
             structs: std::sync::RwLock::new(HashMap::new()),
             root: std::sync::RwLock::new(None),
             sequence: AtomicU32::new(0),
+            module_index: std::sync::RwLock::new(ModuleIndex::default()),
         }
     }
 
@@ -205,6 +209,43 @@ impl GlobalState {
     /// Set the workspace root.
     pub fn set_root(&self, root: PathBuf) {
         *self.root.write().unwrap() = Some(root);
+    }
+
+    /// Scan the workspace root for .zz files and populate the module index.
+    /// Each file is parsed and its definitions are extracted for cross-file
+    /// navigation (go-to-definition, find-references, rename).
+    pub fn scan_workspace(&self) {
+        let root = match self.root.read().unwrap().clone() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let files = crate::cross_file::scan_for_zz_files(&root);
+        let mut index = self.module_index.write().unwrap();
+        // Clear existing entries before re-scan.
+        index.module_to_uri.clear();
+        index.uri_to_module.clear();
+        index.entries.clear();
+
+        for file_path in &files {
+            let uri = match tower_lsp::lsp_types::Url::from_file_path(file_path) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            let module_path = match crate::cross_file::module_path_for_file(file_path, &root) {
+                Some(p) => p,
+                None => continue,
+            };
+            let source = match std::fs::read_to_string(file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let entry =
+                crate::cross_file::parse_file_entry(uri.clone(), source, module_path.clone());
+            index.module_to_uri.insert(module_path.clone(), uri.clone());
+            index.uri_to_module.insert(uri.clone(), module_path);
+            index.entries.insert(uri, entry);
+        }
     }
 }
 

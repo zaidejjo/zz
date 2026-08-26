@@ -1,6 +1,7 @@
 pub mod code_action;
 pub mod completion;
 pub mod convert;
+pub mod cross_file;
 pub mod diagnostics;
 pub mod lookup;
 pub mod server;

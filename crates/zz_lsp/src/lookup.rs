@@ -651,8 +651,20 @@ pub fn find_references_in_program(program: &Program, source: &str, offset: u32) 
         None => return Vec::new(),
     };
 
+    find_references_to_name_in_program(program, source, &name)
+}
+
+/// Find all references to a symbol by name in the given program.
+///
+/// This is useful for cross-file reference finding where we know the
+/// name but need to search a different file's AST.
+pub fn find_references_to_name_in_program(
+    program: &Program,
+    source: &str,
+    name: &str,
+) -> Vec<Reference> {
     let mut refs = Vec::new();
-    // Also find the definition site.
+    // Find definition sites.
     let defs = collect_definitions(program, source);
     for def in defs.values() {
         if def.name == name {
@@ -665,7 +677,7 @@ pub fn find_references_in_program(program: &Program, source: &str, offset: u32) 
 
     // Walk all expressions for usages.
     for stmt in &program.stmts {
-        collect_name_refs_in_stmt(stmt, &name, &mut refs);
+        collect_name_refs_in_stmt(stmt, name, &mut refs);
     }
     refs
 }
