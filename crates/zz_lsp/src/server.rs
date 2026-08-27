@@ -29,15 +29,18 @@ impl Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        log::info!("zz-lsp initializing");
         // Capture workspace root.
         if let Some(folders) = &params.workspace_folders {
             if let Some(folder) = folders.first() {
                 if let Ok(path) = folder.uri.to_file_path() {
+                    log::info!("workspace root: {}", path.display());
                     self.state.set_root(path);
                 }
             }
         } else if let Some(uri) = &params.root_uri {
             if let Ok(path) = uri.to_file_path() {
+                log::info!("workspace root: {}", path.display());
                 self.state.set_root(path);
             }
         }
@@ -131,6 +134,7 @@ impl LanguageServer for Backend {
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         let version = params.text_document.version;
+        log::debug!("did_change {} v{version}", uri.path());
 
         // FULL sync: single change with the entire new content.
         let text = params
@@ -792,6 +796,7 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<()> {
+        log::info!("zz-lsp shutting down");
         Ok(())
     }
 }
