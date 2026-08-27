@@ -62,6 +62,26 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
+    // Range and iterator builtins
+    m.insert("range".into(), NativeEntry { arity: 3, f: range });
+    m.insert("len".into(), NativeEntry { arity: 1, f: len });
+    m.insert("map".into(), NativeEntry { arity: 2, f: map });
+    m.insert(
+        "filter".into(),
+        NativeEntry {
+            arity: 2,
+            f: filter,
+        },
+    );
+    m.insert(
+        "enumerate".into(),
+        NativeEntry {
+            arity: 1,
+            f: enumerate,
+        },
+    );
+    m.insert("zip".into(), NativeEntry { arity: 2, f: zip });
+
     // std.str
     m.insert(
         "std.str.length".into(),
@@ -82,6 +102,63 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 2,
             f: str_contains,
+        },
+    );
+    // str.* methods (for method dispatch: "hello".trim())
+    m.insert(
+        "str.trim".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_trim,
+        },
+    );
+    m.insert(
+        "str.to_upper".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_to_upper,
+        },
+    );
+    m.insert(
+        "str.to_lower".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_to_lower,
+        },
+    );
+    m.insert(
+        "str.split".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_split,
+        },
+    );
+    m.insert(
+        "str.contains".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_contains,
+        },
+    );
+    m.insert(
+        "str.replace".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_replace,
+        },
+    );
+    m.insert(
+        "str.starts_with".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_starts_with,
+        },
+    );
+    m.insert(
+        "str.ends_with".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_ends_with,
         },
     );
 
@@ -105,6 +182,116 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: vec_pop,
+        },
+    );
+    // vec.* methods (for method dispatch: [1,2].push(3))
+    m.insert(
+        "vec.len".into(),
+        NativeEntry {
+            arity: 1,
+            f: vec_len,
+        },
+    );
+    m.insert(
+        "vec.push".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_push,
+        },
+    );
+    m.insert(
+        "vec.pop".into(),
+        NativeEntry {
+            arity: 1,
+            f: vec_pop,
+        },
+    );
+    m.insert(
+        "vec.reverse".into(),
+        NativeEntry {
+            arity: 1,
+            f: vec_reverse,
+        },
+    );
+    m.insert(
+        "vec.join".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_join,
+        },
+    );
+    m.insert(
+        "vec.contains".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_contains,
+        },
+    );
+    m.insert(
+        "vec.sort".into(),
+        NativeEntry {
+            arity: 1,
+            f: vec_sort,
+        },
+    );
+    m.insert(
+        "vec.insert".into(),
+        NativeEntry {
+            arity: 3,
+            f: vec_insert,
+        },
+    );
+    m.insert(
+        "vec.remove".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_remove,
+        },
+    );
+
+    // option.* methods (for method dispatch: .some(1).unwrap_or(0))
+    m.insert(
+        "option.unwrap".into(),
+        NativeEntry {
+            arity: 1,
+            f: option_unwrap,
+        },
+    );
+    m.insert(
+        "option.unwrap_or".into(),
+        NativeEntry {
+            arity: 2,
+            f: option_unwrap_or,
+        },
+    );
+    m.insert(
+        "option.expect".into(),
+        NativeEntry {
+            arity: 2,
+            f: option_expect,
+        },
+    );
+
+    // result.* methods (for method dispatch: .ok(1).unwrap_or(0))
+    m.insert(
+        "result.unwrap".into(),
+        NativeEntry {
+            arity: 1,
+            f: result_unwrap,
+        },
+    );
+    m.insert(
+        "result.unwrap_or".into(),
+        NativeEntry {
+            arity: 2,
+            f: result_unwrap_or,
+        },
+    );
+    m.insert(
+        "result.expect".into(),
+        NativeEntry {
+            arity: 2,
+            f: result_expect,
         },
     );
 
@@ -361,6 +548,27 @@ fn expect_array(args: &mut Vec<Value>, i: usize, name: &str) -> Result<Vec<Value
     }
 }
 
+fn expect_func(args: &mut Vec<Value>, i: usize, name: &str) -> Result<Value, EvalError> {
+    match arg(args, i, name)? {
+        Value::Func(f) => Ok(Value::Func(f.clone())),
+        Value::Native(n) => Ok(Value::Native(n.clone())),
+        other => Err(EvalError::new(
+            format!("`{name}` expects a function, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+fn expect_int(args: &mut Vec<Value>, i: usize, name: &str) -> Result<i64, EvalError> {
+    match arg(args, i, name)? {
+        Value::Int(n) => Ok(*n),
+        other => Err(EvalError::new(
+            format!("`{name}` expects an integer, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
 // --- std.io -----------------------------------------------------------------
 
 fn printz(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
@@ -428,18 +636,52 @@ fn str_contains(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, Ev
     Ok(Value::Bool(s.contains(&sub)))
 }
 
+fn str_trim(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "str.trim")?;
+    Ok(Value::Str(s.trim().to_string()))
+}
+
+fn str_to_upper(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "str.to_upper")?;
+    Ok(Value::Str(s.to_uppercase()))
+}
+
+fn str_to_lower(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "str.to_lower")?;
+    Ok(Value::Str(s.to_lowercase()))
+}
+
+fn str_replace(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "str.replace")?;
+    let old = expect_str(args, 1, "str.replace")?;
+    let new = expect_str(args, 2, "str.replace")?;
+    Ok(Value::Str(s.replace(&old, &new)))
+}
+
+fn str_starts_with(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "str.starts_with")?;
+    let prefix = expect_str(args, 1, "str.starts_with")?;
+    Ok(Value::Bool(s.starts_with(&prefix)))
+}
+
+fn str_ends_with(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "str.ends_with")?;
+    let suffix = expect_str(args, 1, "str.ends_with")?;
+    Ok(Value::Bool(s.ends_with(&suffix)))
+}
+
 // --- std.vec ----------------------------------------------------------------
 
 fn vec_len(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
-    let vs = expect_array(args, 0, "std.vec.len")?;
+    let vs = expect_array(args, 0, "vec.len")?;
     Ok(Value::Int(vs.len() as i64))
 }
 
 fn vec_push(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "std.vec.push")?;
+    let mut vs = expect_array(args, 0, "vec.push")?;
     let x = args.get(1).cloned().ok_or_else(|| {
         EvalError::new(
-            "missing argument `x` for std.vec.push",
+            "missing argument `x` for vec.push",
             zz_runtime::Span::new(0, 0),
         )
     })?;
@@ -448,15 +690,386 @@ fn vec_push(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalEr
 }
 
 fn vec_pop(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "std.vec.pop")?;
+    let mut vs = expect_array(args, 0, "vec.pop")?;
     if vs.is_empty() {
         return Err(EvalError::new(
-            "std.vec.pop: cannot pop from an empty array",
+            "vec.pop: cannot pop from an empty array",
             zz_runtime::Span::new(0, 0),
         ));
     }
     vs.pop();
     Ok(Value::Array(vs))
+}
+
+fn vec_reverse(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let mut vs = expect_array(args, 0, "vec.reverse")?;
+    vs.reverse();
+    Ok(Value::Array(vs))
+}
+
+fn vec_join(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let vs = expect_array(args, 0, "vec.join")?;
+    let sep = expect_str(args, 1, "vec.join")?;
+    let parts: Vec<String> = vs.iter().map(|v| v.to_string()).collect();
+    Ok(Value::Str(parts.join(&sep)))
+}
+
+fn vec_contains(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let vs = expect_array(args, 0, "vec.contains")?;
+    let x = args.get(1).cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument `x` for vec.contains",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    Ok(Value::Bool(vs.contains(&x)))
+}
+
+fn vec_sort(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let mut vs = expect_array(args, 0, "vec.sort")?;
+    // Sort by type name first, then by value for same types
+    vs.sort_by(|a, b| {
+        let ta = a.type_name();
+        let tb = b.type_name();
+        ta.cmp(&tb).then_with(|| match (a, b) {
+            (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            (Value::Float(a), Value::Float(b)) => {
+                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Value::Str(a), Value::Str(b)) => a.cmp(b),
+            (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+            _ => std::cmp::Ordering::Equal,
+        })
+    });
+    Ok(Value::Array(vs))
+}
+
+fn vec_insert(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let mut vs = expect_array(args, 0, "vec.insert")?;
+    let idx = expect_int(args, 1, "vec.insert")?;
+    let x = args.get(2).cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument `x` for vec.insert",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    let len = vs.len() as i64;
+    let idx = if idx < 0 { len + idx } else { idx };
+    if idx < 0 || idx > len {
+        return Err(EvalError::new(
+            format!("vec.insert: index {idx} out of bounds for length {len}"),
+            zz_runtime::Span::new(0, 0),
+        ));
+    }
+    vs.insert(idx as usize, x);
+    Ok(Value::Array(vs))
+}
+
+fn vec_remove(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let mut vs = expect_array(args, 0, "vec.remove")?;
+    let idx = expect_int(args, 1, "vec.remove")?;
+    let len = vs.len() as i64;
+    let idx = if idx < 0 { len + idx } else { idx };
+    if idx < 0 || idx >= len {
+        return Err(EvalError::new(
+            format!("vec.remove: index {idx} out of bounds for length {len}"),
+            zz_runtime::Span::new(0, 0),
+        ));
+    }
+    vs.remove(idx as usize);
+    Ok(Value::Array(vs))
+}
+
+// --- option.* methods --------------------------------------------------------
+
+fn option_unwrap(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let opt = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for option.unwrap",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    match opt {
+        Value::Option(Some(v)) => Ok(*v),
+        Value::Option(None) => Err(EvalError::new(
+            "called unwrap on .none",
+            zz_runtime::Span::new(0, 0),
+        )),
+        other => Err(EvalError::new(
+            format!("option.unwrap: expected an option, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+fn option_unwrap_or(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let opt = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for option.unwrap_or",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    let default = args.get(1).cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing `default` argument for option.unwrap_or",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    match opt {
+        Value::Option(Some(v)) => Ok(*v),
+        Value::Option(None) => Ok(default),
+        other => Err(EvalError::new(
+            format!("option.unwrap_or: expected an option, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+fn option_expect(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let opt = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for option.expect",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    let msg = expect_str(args, 1, "option.expect")?;
+    match opt {
+        Value::Option(Some(v)) => Ok(*v),
+        Value::Option(None) => Err(EvalError::new(
+            format!("option.expect: {msg}"),
+            zz_runtime::Span::new(0, 0),
+        )),
+        other => Err(EvalError::new(
+            format!("option.expect: expected an option, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+// --- result.* methods --------------------------------------------------------
+
+fn result_unwrap(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let res = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for result.unwrap",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    match res {
+        Value::Result(Ok(v)) => Ok(*v),
+        Value::Result(Err(e)) => Err(EvalError::new(
+            format!("result.unwrap: called unwrap on .err({e})"),
+            zz_runtime::Span::new(0, 0),
+        )),
+        other => Err(EvalError::new(
+            format!("result.unwrap: expected a result, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+fn result_unwrap_or(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let res = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for result.unwrap_or",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    let default = args.get(1).cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing `default` argument for result.unwrap_or",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    match res {
+        Value::Result(Ok(v)) => Ok(*v),
+        Value::Result(Err(_)) => Ok(default),
+        other => Err(EvalError::new(
+            format!("result.unwrap_or: expected a result, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+fn result_expect(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let res = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for result.expect",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    let msg = expect_str(args, 1, "result.expect")?;
+    match res {
+        Value::Result(Ok(v)) => Ok(*v),
+        Value::Result(Err(e)) => Err(EvalError::new(
+            format!("result.expect: {msg}: {e}"),
+            zz_runtime::Span::new(0, 0),
+        )),
+        other => Err(EvalError::new(
+            format!("result.expect: expected a result, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+// --- Range and iterator builtins --------------------------------------------
+
+fn range(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let (start, stop, step) = match args.len() {
+        1 => (0, expect_int(args, 0, "range")?, 1),
+        2 => (
+            expect_int(args, 0, "range")?,
+            expect_int(args, 1, "range")?,
+            1,
+        ),
+        3 => (
+            expect_int(args, 0, "range")?,
+            expect_int(args, 1, "range")?,
+            expect_int(args, 2, "range")?,
+        ),
+        _ => {
+            return Err(EvalError::new(
+                "range expects 1, 2, or 3 arguments",
+                zz_runtime::Span::new(0, 0),
+            ));
+        }
+    };
+    if step == 0 {
+        return Err(EvalError::new(
+            "range step cannot be zero",
+            zz_runtime::Span::new(0, 0),
+        ));
+    }
+    Ok(Value::Range(start, stop, step))
+}
+
+fn len(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    match args.first() {
+        Some(Value::Array(vs)) => Ok(Value::Int(vs.len() as i64)),
+        Some(Value::Str(s)) => Ok(Value::Int(s.chars().count() as i64)),
+        Some(Value::Dict(entries)) => Ok(Value::Int(entries.len() as i64)),
+        Some(Value::Range(start, stop, step)) => {
+            if *step == 0 {
+                Err(EvalError::new(
+                    "range step cannot be zero",
+                    zz_runtime::Span::new(0, 0),
+                ))
+            } else {
+                let len = if (*step > 0 && *start < *stop) || (*step < 0 && *start > *stop) {
+                    (*stop - *start + *step - if *step > 0 { 1 } else { -1 }) / *step
+                } else {
+                    0
+                };
+                Ok(Value::Int(len))
+            }
+        }
+        Some(other) => Err(EvalError::new(
+            format!("len expects array, string, dict, or range, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+        None => Err(EvalError::new(
+            "missing argument for len",
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+/// Convert an array or range Value into a Vec<Value>.
+fn value_to_items(v: &Value) -> Result<Vec<Value>, EvalError> {
+    match v {
+        Value::Array(vs) => Ok(vs.clone()),
+        Value::Range(start, stop, step) => {
+            let mut items = Vec::new();
+            let mut i = *start;
+            if *step > 0 {
+                while i < *stop {
+                    items.push(Value::Int(i));
+                    i += *step;
+                }
+            } else if *step < 0 {
+                while i > *stop {
+                    items.push(Value::Int(i));
+                    i += *step;
+                }
+            }
+            Ok(items)
+        }
+        other => Err(EvalError::new(
+            format!("expected array or range, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+fn map(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let items = value_to_items(args.first().ok_or_else(|| {
+        EvalError::new(
+            "missing first argument for map",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?)?;
+    let f = expect_func(args, 1, "map")?;
+    let mut result = Vec::with_capacity(items.len());
+    for item in items {
+        let call_args = vec![item];
+        let res = _interp.call(f.clone(), call_args, zz_runtime::Span::new(0, 0))?;
+        result.push(res);
+    }
+    Ok(Value::Array(result))
+}
+
+fn filter(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let items = value_to_items(args.first().ok_or_else(|| {
+        EvalError::new(
+            "missing first argument for filter",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?)?;
+    let f = expect_func(args, 1, "filter")?;
+    let mut result = Vec::new();
+    for item in items {
+        let call_args = vec![item.clone()];
+        let res = _interp.call(f.clone(), call_args, zz_runtime::Span::new(0, 0))?;
+        if let Value::Bool(true) = res {
+            result.push(item);
+        }
+    }
+    Ok(Value::Array(result))
+}
+
+fn enumerate(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let items = value_to_items(args.first().ok_or_else(|| {
+        EvalError::new(
+            "missing first argument for enumerate",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?)?;
+    let mut result = Vec::with_capacity(items.len());
+    for (i, item) in items.into_iter().enumerate() {
+        result.push(Value::Tuple(vec![Value::Int(i as i64), item]));
+    }
+    Ok(Value::Array(result))
+}
+
+fn zip(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    let a = value_to_items(args.first().ok_or_else(|| {
+        EvalError::new(
+            "missing first argument for zip",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?)?;
+    let b = value_to_items(args.get(1).ok_or_else(|| {
+        EvalError::new(
+            "missing second argument for zip",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?)?;
+    let len = a.len().min(b.len());
+    let mut result = Vec::with_capacity(len);
+    for i in 0..len {
+        result.push(Value::Tuple(vec![a[i].clone(), b[i].clone()]));
+    }
+    Ok(Value::Array(result))
 }
 
 // --- std.json ---------------------------------------------------------------
@@ -595,6 +1208,13 @@ fn value_to_json(v: &Value) -> Result<JsonValue, EvalError> {
         Value::HttpServer(_) => Err(err("an http server")),
         Value::Object { .. } => Err(err("a struct instance")),
         Value::Range(..) => Err(err("a range")),
+        Value::Tuple(vs) => {
+            let mut items = Vec::with_capacity(vs.len());
+            for x in vs {
+                items.push(value_to_json(x)?);
+            }
+            Ok(JsonValue::Arr(items))
+        }
     }
 }
 

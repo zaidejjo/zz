@@ -34,8 +34,10 @@ pub enum Value {
         name: String,
         fields: Vec<(String, Value)>,
     },
-    /// `a..b` — an integer range (used by `for` loops).
-    Range(i64, i64),
+    /// `a..b` or `a..b..step` — an integer range (used by `for` loops).
+    Range(i64, i64, i64),
+    /// `(v1, v2, ...)` — tuple value.
+    Tuple(Vec<Value>),
 }
 
 /// A JSON value (see [`crate::json`]).
@@ -100,6 +102,25 @@ impl Value {
             Value::HttpServer(_) => "http.server".to_string(),
             Value::Object { name, .. } => name.clone(),
             Value::Range(..) => "range".to_string(),
+            Value::Tuple(_) => "tuple".to_string(),
+        }
+    }
+
+    /// The method namespace for this value type, used for method dispatch.
+    /// Returns "str" for strings, "vec" for arrays, the struct namespace for
+    /// objects, and None for types without method support.
+    pub fn method_namespace(&self) -> Option<&'static str> {
+        match self {
+            Value::Str(_) => Some("str"),
+            Value::Array(_) => Some("vec"),
+            Value::Option(_) => Some("option"),
+            Value::Result(_) => Some("result"),
+            Value::Object { name, .. } => {
+                // Extract namespace from struct name (e.g., "shapes.Point" -> "shapes")
+                name.rsplit_once('.')
+                    .map(|(ns, _)| Box::leak(ns.to_string().into_boxed_str()) as &str)
+            }
+            _ => None,
         }
     }
 }
@@ -157,7 +178,23 @@ impl fmt::Display for Value {
                 }
                 write!(f, "}}")
             }
-            Value::Range(a, b) => write!(f, "{a}..{b}"),
+            Value::Range(a, b, step) => {
+                if *step == 1 {
+                    write!(f, "{a}..{b}")
+                } else {
+                    write!(f, "{a}..{b}..{step}")
+                }
+            }
+            Value::Tuple(vs) => {
+                write!(f, "(")?;
+                for (i, v) in vs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{v}")?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }

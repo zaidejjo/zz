@@ -63,6 +63,7 @@ pub fn parse(source: &str) -> Parsed {
         toks: lexed.tokens,
         pos: 0,
         errors: lexed.errors,
+        delim_stack: Vec::new(),
     };
     let program = parser.parse_program();
     Parsed {
@@ -71,21 +72,86 @@ pub fn parse(source: &str) -> Parsed {
     }
 }
 
+/// A tracked open delimiter for mismatched-delimiter diagnostics.
+#[derive(Debug, Clone)]
+struct DelimEntry {
+    open: TokenKind,
+    span: Span,
+}
+
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
     errors: Vec<RawDiag>,
+    /// Stack of open delimiters for mismatched-delimiter diagnostics.
+    delim_stack: Vec<DelimEntry>,
 }
 
 impl Parser {
     fn parse_program(&mut self) -> Program {
         let stmts = self.parse_stmt_list(TokenKind::Eof);
+        self.check_unclosed_delims();
         let span = Span::new(0, self.src_len());
         Program { stmts, span }
     }
 
     fn src_len(&self) -> u32 {
         self.toks.last().map(|t| t.span.start).unwrap_or(0)
+    }
+
+    // --- delimiter tracking ------------------------------------------------
+
+    fn push_delim(&mut self, open: TokenKind, span: Span) {
+        self.delim_stack.push(DelimEntry { open, span });
+    }
+
+    fn pop_delim(&mut self, close: TokenKind, close_span: Span) {
+        let expected = match close {
+            TokenKind::RParen => Some(TokenKind::LParen),
+            TokenKind::RBrace => Some(TokenKind::LBrace),
+            TokenKind::RBracket => Some(TokenKind::LBracket),
+            _ => None,
+        };
+        if expected.is_none() {
+            return;
+        }
+        let expected = expected.unwrap();
+
+        // Find matching opener, reporting any mismatches in between.
+        match self.delim_stack.iter().rposition(|e| e.open == expected) {
+            Some(idx) => {
+                // Pop everything above the match (mismatched delimiters).
+                for entry in self.delim_stack.drain(idx + 1..) {
+                    self.errors.push(error_at(
+                        format!("unclosed `{}` (opened here)", entry.open.describe()),
+                        entry.span,
+                    ));
+                }
+                self.delim_stack.pop(); // Remove the matching opener.
+            }
+            None => {
+                self.errors.push(error_at(
+                    format!(
+                        "unexpected `{}` with no matching opening `{}`",
+                        close.describe(),
+                        expected.describe()
+                    ),
+                    close_span,
+                ));
+            }
+        }
+    }
+
+    fn check_unclosed_delims(&mut self) {
+        for entry in self.delim_stack.drain(..) {
+            self.errors.push(error_at(
+                format!(
+                    "unclosed `{}` at end of file (opened here)",
+                    entry.open.describe()
+                ),
+                entry.span,
+            ));
+        }
     }
 
     // --- statements -------------------------------------------------------
@@ -151,8 +217,17 @@ impl Parser {
                 let tok = self.advance();
                 Stmt::Continue { span: tok.span }
             }
+            TokenKind::Defer => {
+                let tok = self.advance();
+                let expr = self.parse_expr();
+                let span = tok.span.join(expr.span());
+                Stmt::Defer {
+                    expr: Box::new(expr),
+                    span,
+                }
+            }
             _ => {
-                // Try `TYPE IDENT = expr` (explicit declaration). Backtrack
+                // Try `IDENT: TYPE = expr` (explicit declaration). Backtrack
                 // on failure so ordinary expressions still parse.
                 let save_pos = self.pos;
                 let save_errs = self.errors.len();
@@ -161,6 +236,47 @@ impl Parser {
                 }
                 self.pos = save_pos;
                 self.errors.truncate(save_errs);
+
+                // Recovery: `TYPE IDENT := expr` is the OLD syntax which is
+                // no longer valid (now `IDENT: TYPE = expr`). Detect the
+                // pattern and produce a usable Decl instead of degrading to
+                // `Stmt::Expr(Ident("int"))` which the formatter would garble.
+                if self.peek_kind_at(0) == TokenKind::Ident
+                    && !matches!(self.peek().text.as_str(), "true" | "false")
+                    && self.peek_kind_at(1) == TokenKind::Ident
+                    && self.peek_kind_at(2) == TokenKind::ColonEq
+                {
+                    let type_tok = self.peek().clone();
+                    let type_name = type_tok.text.clone();
+                    let is_type_kw = matches!(
+                        type_name.as_str(),
+                        "int" | "float" | "bool" | "str" | "Option" | "Result"
+                    );
+                    if is_type_kw {
+                        let ty = self.parse_type();
+                        let name = self.advance(); // identifier
+                        self.advance(); // `:=`
+                        let value = self.parse_expr();
+                        let span = ty.span.join(value.span());
+                        self.errors.push(error_at(
+                            format!(
+                                "invalid declaration: use `{}: {} = expr` (explicit type) or `{} := expr` (inferred type)",
+                                name.text, type_name, name.text,
+                            ),
+                            span,
+                        ));
+                        return Stmt::Decl {
+                            ty: Some(ty),
+                            name: Ident {
+                                name: name.text,
+                                span: name.span,
+                            },
+                            value,
+                            span,
+                        };
+                    }
+                }
+
                 let expr = self.parse_expr();
                 // `expr = expr` — assignment statement.
                 if self.at(TokenKind::Assign) {
@@ -280,19 +396,26 @@ impl Parser {
         }
     }
 
-    /// Parse `TYPE IDENT = expr`; returns `None` (with position restored by
+    /// Parse `IDENT: TYPE = expr`; returns `None` (with position restored by
     /// the caller) when the statement is not an explicit declaration.
     fn try_parse_explicit_decl(&mut self) -> Option<Stmt> {
-        let ty = self.parse_type();
+        // Must start with an identifier.
         if !self.at(TokenKind::Ident) {
             return None;
         }
         let name = self.advance();
+        // Then a colon.
+        if !self.eat(TokenKind::Colon) {
+            return None;
+        }
+        // Then a type.
+        let ty = self.parse_type();
+        // Then `=`.
         if !self.eat(TokenKind::Assign) {
             return None;
         }
         let value = self.parse_expr();
-        let span = ty.span.join(value.span());
+        let span = name.span.join(value.span());
         Some(Stmt::Decl {
             ty: Some(ty),
             name: Ident {
@@ -327,10 +450,14 @@ impl Parser {
         };
         if !self.eat(TokenKind::LParen) {
             self.error_here("expected `(` after function name");
+        } else {
+            self.push_delim(TokenKind::LParen, self.previous().span);
         }
         let params = self.parse_param_list();
         if !self.eat(TokenKind::RParen) {
             self.error_here("expected `)` after parameters");
+        } else {
+            self.pop_delim(TokenKind::RParen, self.previous().span);
         }
         let ret = if self.eat(TokenKind::Arrow) {
             Some(self.parse_type())
@@ -363,10 +490,24 @@ impl Parser {
             } else {
                 None
             };
-            let span = name
+            // Default parameter value: `param: type = expr` or `param = expr`.
+            let default = if self.eat(TokenKind::Assign) {
+                Some(Box::new(self.parse_expr()))
+            } else {
+                None
+            };
+            let mut span = name
                 .span
                 .join(ty.as_ref().map(|t| t.span).unwrap_or(name.span));
-            params.push(Param { name, ty, span });
+            if let Some(ref d) = default {
+                span = span.join(d.span());
+            }
+            params.push(Param {
+                name,
+                ty,
+                default,
+                span,
+            });
             if self.eat(TokenKind::Comma) {
                 continue;
             }
@@ -380,10 +521,14 @@ impl Parser {
         self.skip_stmt_ends();
         if !self.eat(TokenKind::LBrace) {
             self.error_here("expected `{` to start block");
+        } else {
+            self.push_delim(TokenKind::LBrace, lbrace.span);
         }
         let stmts = self.parse_stmt_list(TokenKind::RBrace);
         let end = if self.eat(TokenKind::RBrace) {
-            self.previous().span
+            let rbrace = self.previous().span;
+            self.pop_delim(TokenKind::RBrace, rbrace);
+            rbrace
         } else {
             self.peek().span
         };
@@ -638,19 +783,29 @@ impl Parser {
         let span = lhs.span().join(rhs.span());
         match rhs {
             Expr::Call {
-                callee, mut args, ..
+                callee,
+                mut args,
+                named,
+                ..
             } => {
                 args.insert(0, lhs);
-                Expr::Call { callee, args, span }
+                Expr::Call {
+                    callee,
+                    args,
+                    named,
+                    span,
+                }
             }
             Expr::Ident { name, span } => Expr::Call {
                 callee: Box::new(Expr::Ident { name, span }),
                 args: vec![lhs],
+                named: vec![],
                 span,
             },
             Expr::Path { parts, span } => Expr::Call {
                 callee: Box::new(Expr::Path { parts, span }),
                 args: vec![lhs],
+                named: vec![],
                 span,
             },
             other => {
@@ -663,18 +818,35 @@ impl Parser {
     /// `a..b` — integer range. Lowest precedence so `for i in 0..n` parses
     /// the bounds as full expressions.
     fn parse_range(&mut self) -> Expr {
-        let start = self.parse_or();
+        let start = self.parse_elvis();
         if !self.at(TokenKind::DotDot) {
             return start;
         }
         self.advance();
-        let end = self.parse_or();
+        let end = self.parse_elvis();
         let span = start.span().join(end.span());
         Expr::Range {
             start: Box::new(start),
             end: Box::new(end),
             span,
         }
+    }
+
+    /// `left ?? right` — Elvis operator. Unwraps Option or falls back.
+    fn parse_elvis(&mut self) -> Expr {
+        let mut left = self.parse_or();
+        while self.at(TokenKind::QuestionQuestion) {
+            self.advance();
+            let right = self.parse_or();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op: BinOp::Elvis,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
     }
 
     fn parse_or(&mut self) -> Expr {
@@ -774,8 +946,25 @@ impl Parser {
         left
     }
 
+    fn parse_power(&mut self) -> Expr {
+        let base = self.parse_unary();
+        if self.at(TokenKind::StarStar) {
+            self.advance();
+            let exp = self.parse_power(); // right-associative
+            let span = base.span().join(exp.span());
+            Expr::Binary {
+                op: BinOp::Pow,
+                left: Box::new(base),
+                right: Box::new(exp),
+                span,
+            }
+        } else {
+            base
+        }
+    }
+
     fn parse_multiplicative(&mut self) -> Expr {
-        let mut left = self.parse_unary();
+        let mut left = self.parse_power();
         loop {
             let op = match self.peek_kind() {
                 TokenKind::Star => BinOp::Mul,
@@ -819,7 +1008,7 @@ impl Parser {
             match self.peek_kind() {
                 TokenKind::LParen => {
                     self.advance();
-                    let args = self.parse_expr_list();
+                    let (args, named) = self.parse_call_args();
                     let end = if self.eat_close(TokenKind::RParen) {
                         self.previous().span
                     } else {
@@ -830,6 +1019,7 @@ impl Parser {
                     expr = Expr::Call {
                         callee: Box::new(expr),
                         args,
+                        named,
                         span,
                     };
                 }
@@ -923,8 +1113,35 @@ impl Parser {
         args
     }
 
+    /// Parse call arguments: `(pos1, pos2, name1: val1, name2: val2)`.
+    /// Returns `(positional_args, named_args)`.
+    fn parse_call_args(&mut self) -> (Vec<Expr>, Vec<(String, Expr)>) {
+        let mut args = Vec::new();
+        let mut named = Vec::new();
+        if self.at(TokenKind::RParen) {
+            return (args, named);
+        }
+        loop {
+            // Peek for `IDENT : expr` pattern (named argument).
+            // Only treat as named arg if current token is ident AND next is colon.
+            if self.at(TokenKind::Ident) && self.peek_kind_at(1) == TokenKind::Colon {
+                let name = self.advance().text;
+                self.advance(); // consume `:`
+                let value = self.parse_expr();
+                named.push((name, value));
+            } else {
+                args.push(self.parse_expr());
+            }
+            if self.eat(TokenKind::Comma) {
+                continue;
+            }
+            break;
+        }
+        (args, named)
+    }
+
     /// Assemble an interpolated string from the token sequence produced by
-    /// the lexer: `Str (LBrace expr RBrace Str)*`.
+    /// the lexer: `Str (LBrace expr [: fmt_spec] RBrace Str)*`.
     fn parse_fmt_string(&mut self, first: Token) -> Expr {
         let mut parts = vec![FmtPart::Text(first.text)];
         let mut end = first.span;
@@ -934,10 +1151,36 @@ impl Parser {
             }
             self.advance();
             let expr = self.parse_expr();
+            // Optional format spec: `{val:.2f}`, `{val:x}`, etc.
+            let fmt_spec = if self.eat(TokenKind::Colon) {
+                // Consume everything up to `}` as the format spec.
+                // The spec is a simple identifier or dot-prefixed like `.2f`.
+                let mut spec = String::new();
+                if self.at(TokenKind::Dot) {
+                    spec.push('.');
+                    self.advance();
+                    // Consume digits after the dot.
+                    while self.at(TokenKind::Int) {
+                        let t = self.advance();
+                        spec.push_str(&t.text);
+                    }
+                    // Consume trailing letter like 'f', 'e', etc.
+                    if self.at(TokenKind::Ident) {
+                        let t = self.advance();
+                        spec.push_str(&t.text);
+                    }
+                } else if self.at(TokenKind::Ident) {
+                    let t = self.advance();
+                    spec.push_str(&t.text);
+                }
+                Some(spec)
+            } else {
+                None
+            };
             if !self.eat(TokenKind::RBrace) {
                 self.error_here("expected `}` to close interpolation");
             }
-            parts.push(FmtPart::Expr(Box::new(expr)));
+            parts.push(FmtPart::Expr(Box::new(expr), fmt_spec));
             match self.peek_kind() {
                 TokenKind::Str => {
                     let t = self.advance();
@@ -1058,10 +1301,13 @@ impl Parser {
                 }
             }
             TokenKind::LParen => {
-                self.advance();
+                let lparen = self.advance();
+                self.push_delim(TokenKind::LParen, lparen.span);
                 let inner = self.parse_expr();
                 let end = if self.eat_close(TokenKind::RParen) {
-                    self.previous().span
+                    let rparen = self.previous().span;
+                    self.pop_delim(TokenKind::RParen, rparen);
+                    rparen
                 } else {
                     self.error_here("expected `)` to close parenthesized expression");
                     inner.span()
@@ -1160,7 +1406,12 @@ impl Parser {
                 let span = name
                     .span
                     .join(ty.as_ref().map(|t| t.span).unwrap_or(name.span));
-                params.push(Param { name, ty, span });
+                params.push(Param {
+                    name,
+                    ty,
+                    default: None,
+                    span,
+                });
                 if self.eat(TokenKind::Comma) {
                     continue;
                 }
@@ -1235,24 +1486,75 @@ impl Parser {
 
     fn parse_array_literal(&mut self) -> Expr {
         let lbracket = self.advance();
-        let mut elems = Vec::new();
-        if !self.at(TokenKind::RBracket) {
-            loop {
-                elems.push(self.parse_expr());
-                if self.eat(TokenKind::Comma) {
-                    continue;
-                }
-                break;
+        self.push_delim(TokenKind::LBracket, lbracket.span);
+        // Empty array: `[]`.
+        if self.eat(TokenKind::RBracket) {
+            let rbracket = self.previous().span;
+            self.pop_delim(TokenKind::RBracket, rbracket);
+            let span = lbracket.span.join(rbracket);
+            return Expr::Array {
+                elems: Vec::new(),
+                span,
+            };
+        }
+        // Parse first expression — could be a comprehension body or array element.
+        let first = self.parse_expr();
+        // List comprehension: `[expr for x in iter]` / `[expr for x in iter if cond]`.
+        if self.at(TokenKind::For) {
+            return self.parse_list_comp_body(lbracket, first);
+        }
+        // Normal array literal: `[a, b, c]`.
+        let mut elems = vec![first];
+        while self.eat(TokenKind::Comma) {
+            if self.at(TokenKind::RBracket) {
+                break; // trailing comma
             }
+            elems.push(self.parse_expr());
         }
         let end = if self.eat_close(TokenKind::RBracket) {
-            self.previous().span
+            let rbracket = self.previous().span;
+            self.pop_delim(TokenKind::RBracket, rbracket);
+            rbracket
         } else {
             self.error_here("expected `]` to close array literal");
             lbracket.span
         };
         Expr::Array {
             elems,
+            span: lbracket.span.join(end),
+        }
+    }
+
+    /// Parse the `for x in iter [if cond]` part of a list comprehension.
+    /// `first` is the already-parsed body expression.
+    fn parse_list_comp_body(&mut self, lbracket: Token, first: Expr) -> Expr {
+        self.advance(); // `for`
+        let var = self
+            .expect_ident()
+            .unwrap_or_else(|| dummy_ident(self.peek().span));
+        if !self.eat(TokenKind::In) {
+            self.error_here("expected `in` after loop variable");
+        }
+        let iter = self.parse_expr();
+        let filter = if self.at(TokenKind::If) {
+            self.advance();
+            Some(Box::new(self.parse_expr()))
+        } else {
+            None
+        };
+        let end = if self.eat_close(TokenKind::RBracket) {
+            let rbracket = self.previous().span;
+            self.pop_delim(TokenKind::RBracket, rbracket);
+            rbracket
+        } else {
+            self.error_here("expected `]` to close list comprehension");
+            lbracket.span
+        };
+        Expr::ListComp {
+            body: Box::new(first),
+            var,
+            iter: Box::new(iter),
+            filter,
             span: lbracket.span.join(end),
         }
     }
@@ -1675,7 +1977,7 @@ mod tests {
 
     #[test]
     fn parses_explicit_decl() {
-        let p = parse_ok("int x = 10");
+        let p = parse_ok("x: int = 10");
         match &p.stmts[0] {
             Stmt::Decl {
                 ty: Some(ty), name, ..
@@ -1689,7 +1991,7 @@ mod tests {
 
     #[test]
     fn parses_str_explicit_decl() {
-        let p = parse_ok("str s = \"hello\"");
+        let p = parse_ok("s: str = \"hello\"");
         match &p.stmts[0] {
             Stmt::Decl { ty: Some(ty), .. } => assert_eq!(ty.kind, TyKind::Str),
             other => panic!("unexpected: {other:?}"),
@@ -1707,7 +2009,7 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
-        let p = parse_ok("[int] scores = [10, 20, 30]");
+        let p = parse_ok("scores: [int] = [10, 20, 30]");
         match &p.stmts[0] {
             Stmt::Decl { ty: Some(ty), .. } => {
                 assert!(matches!(ty.kind, TyKind::Array(_)));
@@ -1727,7 +2029,7 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
-        let p = parse_ok("{str: int} ages = {\"Zaid\": 20}");
+        let p = parse_ok("ages: {str: int} = {\"Zaid\": 20}");
         match &p.stmts[0] {
             Stmt::Decl { ty: Some(ty), .. } => {
                 assert!(matches!(ty.kind, TyKind::Dict(_, _)));
@@ -1738,7 +2040,7 @@ mod tests {
 
     #[test]
     fn parses_union_type() {
-        let p = parse_ok("{str: str | int} user = {\"name\": \"Zaid\", \"age\": 20}");
+        let p = parse_ok("user: {str: str | int} = {\"name\": \"Zaid\", \"age\": 20}");
         match &p.stmts[0] {
             Stmt::Decl { ty: Some(ty), .. } => {
                 assert!(matches!(ty.kind, TyKind::Dict(_, _)));
@@ -1796,7 +2098,7 @@ mod tests {
 
     #[test]
     fn parses_option_result_types() {
-        let p = parse_ok("Option<int> a = .none\nResult<int, str> b = .ok(1)");
+        let p = parse_ok("a: Option<int> = .none\nb: Result<int, str> = .ok(1)");
         match &p.stmts[0] {
             Stmt::Decl { ty: Some(ty), .. } => {
                 assert!(matches!(ty.kind, TyKind::Option(_)));
@@ -2042,7 +2344,17 @@ mod tests {
     #[test]
     fn missing_close_paren_reports_error() {
         let parsed = parse("(1 + 2");
-        assert_eq!(parsed.errors.len(), 1);
+        assert!(
+            parsed.errors.len() >= 1,
+            "expected at least 1 error for unclosed paren, got {}",
+            parsed.errors.len()
+        );
+        // The diagnostic message should mention the missing `)`.
+        let msgs: Vec<_> = parsed.errors.iter().map(|e| e.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains(')')),
+            "expected a message mentioning `)`, got: {msgs:?}"
+        );
     }
 
     #[test]

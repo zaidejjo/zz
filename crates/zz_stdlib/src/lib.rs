@@ -79,7 +79,11 @@ mod tests {
         }
 
         let checked = check_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
-        if !checked.errors.is_empty() {
+        let has_errors = checked
+            .errors
+            .iter()
+            .any(|e| e.severity == zz_frontend::diag::Severity::Error);
+        if has_errors {
             return Err(format!("check errors: {:?}", checked.errors));
         }
 
@@ -206,11 +210,11 @@ mod tests {
         let mut natives = stdlib_natives();
         register_module_namespace("env", "env", &mut funcs, &mut natives).expect("known module");
         let checked = check_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
-        assert!(
-            checked.errors.is_empty(),
-            "check errors: {:?}",
-            checked.errors
-        );
+        let has_errors = checked
+            .errors
+            .iter()
+            .any(|e| e.severity == zz_frontend::diag::Severity::Error);
+        assert!(!has_errors, "check errors: {:?}", checked.errors);
 
         let mut interp = Interp::with_natives(natives);
         interp.args = vec!["one".to_string(), "two".to_string()];
@@ -361,6 +365,413 @@ mod tests {
             start.elapsed().as_millis() >= 15,
             "sleep returned too early: {:?}",
             start.elapsed()
+        );
+    }
+
+    // --- literal method calls -----------------------------------------------
+
+    #[test]
+    fn literal_str_method_trim() {
+        assert_eq!(
+            run("\" hello \".trim()").unwrap(),
+            Value::Str("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn literal_str_method_to_upper() {
+        assert_eq!(
+            run("\"hello\".to_upper()").unwrap(),
+            Value::Str("HELLO".to_string())
+        );
+    }
+
+    #[test]
+    fn literal_str_method_to_lower() {
+        assert_eq!(
+            run("\"HELLO\".to_lower()").unwrap(),
+            Value::Str("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn literal_str_method_chaining() {
+        assert_eq!(
+            run("\" hello \".trim().to_upper()").unwrap(),
+            Value::Str("HELLO".to_string())
+        );
+    }
+
+    #[test]
+    fn literal_str_method_triple_chain() {
+        assert_eq!(
+            run("\"  world  \".trim().to_upper().to_lower()").unwrap(),
+            Value::Str("world".to_string())
+        );
+    }
+
+    #[test]
+    fn literal_array_method_reverse() {
+        assert_eq!(
+            run("[1, 2, 3].reverse()").unwrap(),
+            Value::Array(vec![Value::Int(3), Value::Int(2), Value::Int(1),])
+        );
+    }
+
+    #[test]
+    fn literal_array_method_sort() {
+        assert_eq!(
+            run("[3, 1, 2].sort()").unwrap(),
+            Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3),])
+        );
+    }
+
+    // --- power operator ------------------------------------------------------
+
+    #[test]
+    fn pow_int_basic() {
+        assert_eq!(run("2 ** 3").unwrap(), Value::Int(8));
+    }
+
+    #[test]
+    fn pow_int_zero_exp() {
+        assert_eq!(run("5 ** 0").unwrap(), Value::Int(1));
+    }
+
+    #[test]
+    fn pow_int_large() {
+        assert_eq!(run("2 ** 10").unwrap(), Value::Int(1024));
+    }
+
+    #[test]
+    fn pow_float() {
+        let v = run("2.0 ** 0.5").unwrap();
+        match v {
+            Value::Float(f) => assert!((f - 1.4142135623730951).abs() < 1e-10),
+            other => panic!("expected float, got {other}"),
+        }
+    }
+
+    #[test]
+    fn pow_right_associative() {
+        // 2 ** 2 ** 3 == 2 ** (2 ** 3) == 2 ** 8 == 256
+        assert_eq!(run("2 ** 2 ** 3").unwrap(), Value::Int(256));
+    }
+
+    // --- option.unwrap / unwrap_or / expect -----------------------------------
+
+    #[test]
+    fn option_unwrap_some() {
+        assert_eq!(run(".some(42).unwrap()").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn option_unwrap_or_some() {
+        assert_eq!(run(".some(42).unwrap_or(0)").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn option_unwrap_or_none() {
+        assert_eq!(run(".none.unwrap_or(99)").unwrap(), Value::Int(99));
+    }
+
+    #[test]
+    fn option_expect_some() {
+        assert_eq!(
+            run(".some(42).expect(\"should exist\")").unwrap(),
+            Value::Int(42)
+        );
+    }
+
+    #[test]
+    fn option_expect_none_errors() {
+        let err = run(".none.expect(\"missing!\")").unwrap_err();
+        assert!(err.contains("missing!"), "{}", err);
+    }
+
+    // --- result.unwrap / unwrap_or / expect -----------------------------------
+
+    #[test]
+    fn result_unwrap_ok() {
+        assert_eq!(run(".ok(42).unwrap()").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn result_unwrap_or_ok() {
+        assert_eq!(run(".ok(42).unwrap_or(0)").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn result_unwrap_or_err() {
+        assert_eq!(run(".err(\"boom\").unwrap_or(99)").unwrap(), Value::Int(99));
+    }
+
+    #[test]
+    fn result_expect_ok() {
+        assert_eq!(
+            run(".ok(42).expect(\"should work\")").unwrap(),
+            Value::Int(42)
+        );
+    }
+
+    #[test]
+    fn result_expect_err_errors() {
+        let err = run(".err(\"bad\").expect(\"nope\")").unwrap_err();
+        assert!(err.contains("nope"), "{}", err);
+        assert!(err.contains("bad"), "{}", err);
+    }
+
+    // --- list comprehensions ----------------------------------------------------
+
+    #[test]
+    fn list_comp_basic() {
+        assert_eq!(
+            run("[x * 2 for x in [1, 2, 3, 4]]").unwrap(),
+            Value::Array(vec![
+                Value::Int(2),
+                Value::Int(4),
+                Value::Int(6),
+                Value::Int(8)
+            ])
+        );
+    }
+
+    #[test]
+    fn list_comp_filter() {
+        assert_eq!(
+            run("[x for x in [1, 2, 3, 4] if x > 2]").unwrap(),
+            Value::Array(vec![Value::Int(3), Value::Int(4)])
+        );
+    }
+
+    #[test]
+    fn list_comp_range() {
+        assert_eq!(
+            run("[x * x for x in 0..5]").unwrap(),
+            Value::Array(vec![
+                Value::Int(0),
+                Value::Int(1),
+                Value::Int(4),
+                Value::Int(9),
+                Value::Int(16)
+            ])
+        );
+    }
+
+    #[test]
+    fn list_comp_range_filter() {
+        assert_eq!(
+            run("[x * x for x in 0..10 if x % 2 == 0]").unwrap(),
+            Value::Array(vec![
+                Value::Int(0),
+                Value::Int(4),
+                Value::Int(16),
+                Value::Int(36),
+                Value::Int(64)
+            ])
+        );
+    }
+
+    /// Regression: three sequential comprehensions must not corrupt the stack.
+    #[test]
+    fn list_comp_multiple_sequential() {
+        let src = r#"
+            a := [i * 2 for i in [1, 2, 3]]
+            b := [i + 10 for i in [4, 5, 6]]
+            c := [i for i in 0..5 if i % 2 == 0]
+            a
+        "#;
+        assert_eq!(
+            run(src).unwrap(),
+            Value::Array(vec![Value::Int(2), Value::Int(4), Value::Int(6)])
+        );
+    }
+
+    /// Six sequential comprehensions to stress-test stack cleanup.
+    #[test]
+    fn list_comp_six_sequential() {
+        let src = r#"
+            a := [i * 1 for i in [1, 2, 3]]
+            b := [i * 2 for i in [4, 5, 6]]
+            c := [i * 3 for i in [7, 8, 9]]
+            d := [i for i in 0..10 if i > 5]
+            e := [i ** 2 for i in 0..5]
+            f := [x + 10 for x in [1, 2, 3, 4, 5]]
+            a
+        "#;
+        assert_eq!(
+            run(src).unwrap(),
+            Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+        );
+    }
+
+    // --- option.unwrap via variable -------------------------------------------
+
+    #[test]
+    fn option_unwrap_via_int_parse() {
+        assert_eq!(run("x := int(\"42\")\nx.unwrap()").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn option_unwrap_or_via_int_parse() {
+        assert_eq!(
+            run("x := int(\"abc\")\nx.unwrap_or(-1)").unwrap(),
+            Value::Int(-1)
+        );
+    }
+
+    // --- result.unwrap via variable -------------------------------------------
+
+    #[test]
+    fn result_unwrap_via_fs() {
+        let v =
+            run("import std.fs\nfs.read_file(\"/tmp/zz_no_such_file_zz\").unwrap_or(\"default\")")
+                .unwrap();
+        assert_eq!(v, Value::Str("default".to_string()));
+    }
+
+    // --- elvis operator ?? ---------------------------------------------------
+
+    #[test]
+    fn elvis_some_unwraps() {
+        assert_eq!(run("x := .some(42)\nx ?? 0").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn elvis_none_fallback() {
+        assert_eq!(
+            run("x: Option<int> = .none\nx ?? 0").unwrap(),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn elvis_non_option_passes_through() {
+        assert_eq!(run("42 ?? 0").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn elvis_chain() {
+        // Chained ?? with non-Option intermediate: 42 is not Option, passes through.
+        assert_eq!(run("42 ?? 0 ?? -1").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn elvis_none_to_none_chain() {
+        // .some then fallback: first ?? unwraps, second sees plain int.
+        assert_eq!(
+            run(r#"
+                a: Option<int> = .some(42)
+                a ?? 0 ?? -1
+            "#)
+            .unwrap(),
+            Value::Int(42)
+        );
+    }
+
+    #[test]
+    fn elvis_with_format_spec_hex() {
+        let v = run(r#"
+            n := 255
+            "{n:x}"
+        "#)
+        .unwrap();
+        assert_eq!(v, Value::Str("ff".to_string()));
+    }
+
+    #[test]
+    fn elvis_with_format_spec_float() {
+        let v = run(r#"
+            pi := 3.14159
+            "{pi:.2f}"
+        "#)
+        .unwrap();
+        assert_eq!(v, Value::Str("3.14".to_string()));
+    }
+
+    // --- default parameters ---------------------------------------------------
+
+    #[test]
+    fn default_param_uses_default() {
+        assert_eq!(
+            run(r#"
+                func greet(name: str, greeting: str = "Hello") -> str {
+                    "{greeting}, {name}!"
+                }
+                greet("Alice")
+            "#)
+            .unwrap(),
+            Value::Str("Hello, Alice!".to_string())
+        );
+    }
+
+    #[test]
+    fn default_param_override() {
+        assert_eq!(
+            run(r#"
+                func greet(name: str, greeting: str = "Hello") -> str {
+                    "{greeting}, {name}!"
+                }
+                greet("Bob", "Hi")
+            "#)
+            .unwrap(),
+            Value::Str("Hi, Bob!".to_string())
+        );
+    }
+
+    #[test]
+    fn multiple_defaults_partial_override() {
+        assert_eq!(
+            run(r#"
+                func connect(host: str, port: int = 8080, timeout: int = 30) -> str {
+                    "{host}:{port} t={timeout}"
+                }
+                connect("db.local", port: 5432)
+            "#)
+            .unwrap(),
+            Value::Str("db.local:5432 t=30".to_string())
+        );
+    }
+
+    // --- named arguments ------------------------------------------------------
+
+    #[test]
+    fn named_args_out_of_order() {
+        assert_eq!(
+            run(r#"
+                func f(a: int, b: int, c: int) -> int {
+                    a + b + c
+                }
+                f(c: 30, a: 1, b: 2)
+            "#)
+            .unwrap(),
+            Value::Int(33)
+        );
+    }
+
+    #[test]
+    fn named_args_with_defaults() {
+        assert_eq!(
+            run(r#"
+                func f(x: int, y: int = 10, z: int = 20) -> int {
+                    x + y + z
+                }
+                f(z: 5, x: 1)
+            "#)
+            .unwrap(),
+            Value::Int(16)
+        );
+    }
+
+    #[test]
+    fn named_args_all_positional() {
+        assert_eq!(
+            run(r#"
+                func add(a: int, b: int) -> int { a + b }
+                add(3, 4)
+            "#)
+            .unwrap(),
+            Value::Int(7)
         );
     }
 }

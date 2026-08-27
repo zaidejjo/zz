@@ -63,6 +63,11 @@ pub enum Stmt {
     Continue {
         span: Span,
     },
+    /// `defer expr` — schedule expr to run when the enclosing scope exits.
+    Defer {
+        expr: Box<Expr>,
+        span: Span,
+    },
     /// `target = value` — assignment to a variable or struct field.
     Assign {
         target: Expr,
@@ -82,6 +87,7 @@ pub struct Ident {
 pub struct Param {
     pub name: Ident,
     pub ty: Option<Ty>,
+    pub default: Option<Box<Expr>>,
     pub span: Span,
 }
 
@@ -145,6 +151,7 @@ pub enum Expr {
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        named: Vec<(String, Expr)>,
         span: Span,
     },
     Closure {
@@ -230,6 +237,15 @@ pub enum Expr {
         end: Option<Box<Expr>>,
         span: Span,
     },
+    /// List comprehension: `[expr for x in iter]` or
+    /// `[expr for x in iter if cond]`.
+    ListComp {
+        body: Box<Expr>,
+        var: Ident,
+        iter: Box<Expr>,
+        filter: Option<Box<Expr>>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -280,6 +296,7 @@ pub enum BinOp {
     Mul,
     Div,
     Rem,
+    Pow,
     Eq,
     Ne,
     Lt,
@@ -288,6 +305,7 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    Elvis,
 }
 
 impl BinOp {
@@ -298,6 +316,7 @@ impl BinOp {
             BinOp::Mul => "*",
             BinOp::Div => "/",
             BinOp::Rem => "%",
+            BinOp::Pow => "**",
             BinOp::Eq => "==",
             BinOp::Ne => "!=",
             BinOp::Lt => "<",
@@ -306,6 +325,7 @@ impl BinOp {
             BinOp::Ge => ">=",
             BinOp::And => "&&",
             BinOp::Or => "||",
+            BinOp::Elvis => "??",
         }
     }
 }
@@ -326,7 +346,8 @@ pub enum FmtPart {
     /// Literal text (escapes already processed).
     Text(String),
     /// An embedded expression, rendered via its Display form.
-    Expr(Box<Expr>),
+    /// Optional format spec: `{val:.2f}`, `{val:x}`, etc.
+    Expr(Box<Expr>, Option<String>),
 }
 
 /// A type annotation as written in source.
@@ -384,7 +405,8 @@ impl Expr {
             | Expr::Range { span, .. }
             | Expr::StructInit { span, .. }
             | Expr::Index { span, .. }
-            | Expr::Slice { span, .. } => *span,
+            | Expr::Slice { span, .. }
+            | Expr::ListComp { span, .. } => *span,
             Expr::Block(b) => b.span,
         }
     }
@@ -401,6 +423,7 @@ impl Stmt {
             | Stmt::For { span, .. }
             | Stmt::Break { span }
             | Stmt::Continue { span }
+            | Stmt::Defer { span, .. }
             | Stmt::Assign { span, .. } => *span,
             Stmt::Expr(e) => e.span(),
         }

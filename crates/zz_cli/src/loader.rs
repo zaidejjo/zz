@@ -305,13 +305,26 @@ impl Loader {
                 self.funcs.clone(),
                 self.structs.clone(),
             );
-            if !checked.errors.is_empty() {
+            let has_errors = checked
+                .errors
+                .iter()
+                .any(|e| e.severity == zz_frontend::diag::Severity::Error);
+            if has_errors {
                 self.errors.push(LoadError {
                     name,
                     source,
                     diags: checked.errors,
                 });
             } else {
+                // Propagate warnings (even if there are no hard errors)
+                // so they can be displayed to the user.
+                if !checked.errors.is_empty() {
+                    self.errors.push(LoadError {
+                        name,
+                        source,
+                        diags: checked.errors,
+                    });
+                }
                 self.bindings.extend(checked.bindings);
                 self.funcs.extend(checked.funcs);
                 self.structs.extend(checked.structs);
@@ -455,6 +468,9 @@ impl Rewriter<'_> {
                 self.pop_scope();
             }
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::Defer { expr, .. } => {
+                self.rewrite_expr(expr);
+            }
             Stmt::Assign { target, value, .. } => {
                 self.rewrite_expr(target);
                 self.rewrite_expr(value);
@@ -617,6 +633,19 @@ impl Rewriter<'_> {
                     self.rewrite_expr(e);
                 }
             }
+            Expr::ListComp {
+                body,
+                var: _,
+                iter,
+                filter,
+                ..
+            } => {
+                self.rewrite_expr(iter);
+                self.rewrite_expr(body);
+                if let Some(f) = filter {
+                    self.rewrite_expr(f);
+                }
+            }
             Expr::Dict { entries, .. } => {
                 for (k, v) in entries {
                     self.rewrite_expr(k);
@@ -625,7 +654,7 @@ impl Rewriter<'_> {
             }
             Expr::Fmt { parts, .. } => {
                 for part in parts {
-                    if let FmtPart::Expr(e) = part {
+                    if let FmtPart::Expr(e, _) = part {
                         self.rewrite_expr(e);
                     }
                 }

@@ -81,6 +81,9 @@ pub struct Interp {
     /// Command-line arguments passed to the running script (empty in the
     /// REPL). Exposed to scripts via `std.env.args`.
     pub args: Vec<String>,
+    /// Deferred closures per function call level. `Stmt::Defer` pushes
+    /// here; `call_func` pops and executes in LIFO order on return.
+    pub defer_stacks: Vec<Vec<Value>>,
 }
 
 impl Default for Interp {
@@ -97,6 +100,7 @@ impl Interp {
             natives: HashMap::new(),
             structs: HashMap::new(),
             args: Vec::new(),
+            defer_stacks: Vec::new(),
         }
     }
 
@@ -108,6 +112,7 @@ impl Interp {
             natives,
             structs: HashMap::new(),
             args: Vec::new(),
+            defer_stacks: Vec::new(),
         }
     }
 
@@ -209,22 +214,39 @@ impl Interp {
                         }
                         Ok(Flow::Value(result))
                     }
-                    Value::Range(start, end) => {
+                    Value::Range(start, end, step) => {
                         let mut result = Value::Unit;
                         let mut i = start;
-                        while i < end {
-                            let scope = Env::with_parent(&self.env);
-                            scope.borrow_mut().define(&var.name, Value::Int(i));
-                            let prev = std::mem::replace(&mut self.env, scope);
-                            let flow = self.eval_block(body);
-                            self.env = prev;
-                            match flow? {
-                                Flow::Value(v) => result = v,
-                                Flow::Return(v) => return Ok(Flow::Return(v)),
-                                Flow::Break => break,
-                                Flow::Continue => {}
+                        if step > 0 {
+                            while i < end {
+                                let scope = Env::with_parent(&self.env);
+                                scope.borrow_mut().define(&var.name, Value::Int(i));
+                                let prev = std::mem::replace(&mut self.env, scope);
+                                let flow = self.eval_block(body);
+                                self.env = prev;
+                                match flow? {
+                                    Flow::Value(v) => result = v,
+                                    Flow::Return(v) => return Ok(Flow::Return(v)),
+                                    Flow::Break => break,
+                                    Flow::Continue => {}
+                                }
+                                i += step;
                             }
-                            i += 1;
+                        } else {
+                            while i > end {
+                                let scope = Env::with_parent(&self.env);
+                                scope.borrow_mut().define(&var.name, Value::Int(i));
+                                let prev = std::mem::replace(&mut self.env, scope);
+                                let flow = self.eval_block(body);
+                                self.env = prev;
+                                match flow? {
+                                    Flow::Value(v) => result = v,
+                                    Flow::Return(v) => return Ok(Flow::Return(v)),
+                                    Flow::Break => break,
+                                    Flow::Continue => {}
+                                }
+                                i += step;
+                            }
                         }
                         Ok(Flow::Value(result))
                     }
@@ -236,6 +258,21 @@ impl Interp {
             }
             Stmt::Break { .. } => Ok(Flow::Break),
             Stmt::Continue { .. } => Ok(Flow::Continue),
+            Stmt::Defer { expr, .. } => {
+                // Compile the expression into a closure capturing the current
+                // environment, and push onto the frame's defer stack.
+                let closure = FuncValue {
+                    params: vec![],
+                    body: expr.as_ref().clone(),
+                    env: Rc::clone(&self.env),
+                    chunk: None,
+                };
+                self.defer_stacks
+                    .last_mut()
+                    .unwrap()
+                    .push(Value::Func(closure));
+                Ok(Flow::Value(Value::Unit))
+            }
             Stmt::Assign { target, value, .. } => {
                 let v = self.eval(value)?.into_value()?;
                 self.assign_target(target, v)?;
@@ -366,25 +403,31 @@ impl Interp {
     }
 
     /// Resolve a method on a receiver: try the bare name, then the
-    /// namespace implied by the receiver's struct type (`shapes.Point` →
-    /// `shapes.dist`).
+    /// namespace implied by the receiver's type (`str.trim`, `vec.push`,
+    /// or `shapes.Point` → `shapes.dist`).
     pub(crate) fn lookup_method(
         &self,
         recv: &Value,
         method: &str,
         span: Span,
     ) -> Result<Value, EvalError> {
-        match self.lookup_callable(method, span) {
-            Ok(f) => Ok(f),
-            Err(_) => {
-                if let Value::Object { name, .. } = recv {
-                    if let Some((ns, _)) = name.rsplit_once('.') {
-                        return self.lookup_callable(&format!("{ns}.{method}"), span);
-                    }
-                }
-                Err(EvalError::new(format!("undefined method `{method}`"), span))
+        // First try bare name (for top-level functions)
+        if let Ok(f) = self.lookup_callable(method, span) {
+            return Ok(f);
+        }
+        // Try type-specific namespace (str.trim, vec.push, etc.)
+        if let Some(ns) = recv.method_namespace() {
+            if let Ok(f) = self.lookup_callable(&format!("{ns}.{method}"), span) {
+                return Ok(f);
             }
         }
+        // Fallback: struct namespace (for backward compatibility)
+        if let Value::Object { name, .. } = recv {
+            if let Some((ns, _)) = name.rsplit_once('.') {
+                return self.lookup_callable(&format!("{ns}.{method}"), span);
+            }
+        }
+        Err(EvalError::new(format!("undefined method `{method}`"), span))
     }
 
     /// Write a mutated container back to the variable it came from. Handles
@@ -464,9 +507,12 @@ impl Interp {
                 for part in parts {
                     match part {
                         FmtPart::Text(t) => out.push_str(t),
-                        FmtPart::Expr(e) => {
+                        FmtPart::Expr(e, fmt) => {
                             let v = self.eval(e)?.into_value()?;
-                            out.push_str(&v.to_string());
+                            match fmt {
+                                Some(spec) => out.push_str(&format_value_with_spec(&v, spec)),
+                                None => out.push_str(&v.to_string()),
+                            }
                         }
                     }
                 }
@@ -484,7 +530,7 @@ impl Interp {
                 right,
                 span,
             } => {
-                // Short-circuit && and ||.
+                // Short-circuit &&, ||, and ??.
                 match op {
                     BinOp::And => {
                         let l = self.eval(left)?.into_value()?;
@@ -502,13 +548,34 @@ impl Interp {
                         let r = self.eval(right)?.into_value()?;
                         return Ok(Flow::Value(Value::Bool(r.is_truthy())));
                     }
+                    BinOp::Elvis => {
+                        let l = self.eval(left)?.into_value()?;
+                        match l {
+                            Value::Option(Some(v)) => return Ok(Flow::Value(*v)),
+                            Value::Option(None) => {
+                                // Fall through to evaluate right side as fallback.
+                            }
+                            other => {
+                                // Non-Option left: pass through (allows chaining).
+                                return Ok(Flow::Value(other));
+                            }
+                        }
+                        // None case: evaluate right and return it.
+                        let r = self.eval(right)?.into_value()?;
+                        return Ok(Flow::Value(r));
+                    }
                     _ => {}
                 }
                 let l = self.eval(left)?.into_value()?;
                 let r = self.eval(right)?.into_value()?;
                 self.eval_binary(*op, l, r, *span).map(Flow::Value)
             }
-            Expr::Call { callee, args, span } => {
+            Expr::Call {
+                callee,
+                args,
+                named,
+                span,
+            } => {
                 // Method call: `p.dist()` — when the full path isn't a direct
                 // function or field, resolve the last component as a method
                 // on the receiver (the path minus its last component).
@@ -534,10 +601,52 @@ impl Interp {
                         }
                     }
                 }
+                // Method call on expression: `expr.method(args)` — evaluates
+                // the receiver, looks up the method on its type, and calls it.
+                if let Expr::Field {
+                    obj,
+                    name,
+                    span: fspan,
+                } = callee.as_ref()
+                {
+                    let recv = self.eval(obj)?.into_value()?;
+                    let f = self.lookup_method(&recv, name, *fspan)?;
+                    let mut arg_vals = vec![recv];
+                    for a in args {
+                        arg_vals.push(self.eval(a)?.into_value()?);
+                    }
+                    return self.call(f, arg_vals, *span).map(Flow::Value);
+                }
                 let f = self.eval(callee)?.into_value()?;
-                let mut arg_vals = Vec::with_capacity(args.len());
+                // Evaluate positional args.
+                let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len() + named.len());
                 for a in args {
                     arg_vals.push(self.eval(a)?.into_value()?);
+                }
+                // Evaluate named args.
+                let mut named_vals: Vec<(String, Value)> = Vec::with_capacity(named.len());
+                for (n, v) in named {
+                    named_vals.push((n.clone(), self.eval(v)?.into_value()?));
+                }
+                // If there are named args, reorder to match parameter order.
+                if !named_vals.is_empty() {
+                    if let Value::Func(fv) = &f {
+                        let n = fv.params.len();
+                        let mut reordered: Vec<Value> = vec![Value::Unit; n];
+                        // Place positional args.
+                        for (i, v) in arg_vals.iter().enumerate() {
+                            if i < n {
+                                reordered[i] = v.clone();
+                            }
+                        }
+                        // Place named args.
+                        for (name, val) in &named_vals {
+                            if let Some(i) = fv.params.iter().position(|p| &p.name.name == name) {
+                                reordered[i] = val.clone();
+                            }
+                        }
+                        arg_vals = reordered;
+                    }
                 }
                 self.call(f, arg_vals, *span).map(Flow::Value)
             }
@@ -647,6 +756,83 @@ impl Interp {
                 }
                 Ok(Flow::Value(Value::Array(vs)))
             }
+            Expr::ListComp {
+                body,
+                var,
+                iter,
+                filter,
+                ..
+            } => {
+                let it = self.eval(iter)?.into_value()?;
+                let mut results = Vec::new();
+                match it {
+                    Value::Array(items) => {
+                        for item in items {
+                            let scope = Env::with_parent(&self.env);
+                            scope.borrow_mut().define(&var.name, item);
+                            let prev = std::mem::replace(&mut self.env, scope);
+                            let dominated = if let Some(f) = filter {
+                                let cond = self.eval(f)?.into_value()?;
+                                matches!(cond, Value::Bool(true))
+                            } else {
+                                true
+                            };
+                            if dominated {
+                                let v = self.eval(body)?.into_value()?;
+                                results.push(v);
+                            }
+                            self.env = prev;
+                        }
+                    }
+                    Value::Range(start, end, step) => {
+                        let mut i = start;
+                        if step > 0 {
+                            while i < end {
+                                let scope = Env::with_parent(&self.env);
+                                scope.borrow_mut().define(&var.name, Value::Int(i));
+                                let prev = std::mem::replace(&mut self.env, scope);
+                                let dominated = if let Some(f) = filter {
+                                    let cond = self.eval(f)?.into_value()?;
+                                    matches!(cond, Value::Bool(true))
+                                } else {
+                                    true
+                                };
+                                if dominated {
+                                    let v = self.eval(body)?.into_value()?;
+                                    results.push(v);
+                                }
+                                self.env = prev;
+                                i += step;
+                            }
+                        } else if step < 0 {
+                            while i > end {
+                                let scope = Env::with_parent(&self.env);
+                                scope.borrow_mut().define(&var.name, Value::Int(i));
+                                let prev = std::mem::replace(&mut self.env, scope);
+                                let dominated = if let Some(f) = filter {
+                                    let cond = self.eval(f)?.into_value()?;
+                                    matches!(cond, Value::Bool(true))
+                                } else {
+                                    true
+                                };
+                                if dominated {
+                                    let v = self.eval(body)?.into_value()?;
+                                    results.push(v);
+                                }
+                                self.env = prev;
+                                i += step;
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(EvalError::new(
+                            format!("cannot iterate a value of type `{other}`"),
+                            iter.span(),
+                        ));
+                    }
+                }
+                Ok(Flow::Value(Value::Array(results)))
+            }
             Expr::Dict { entries, .. } => {
                 let mut pairs = Vec::with_capacity(entries.len());
                 for (k, v) in entries {
@@ -684,7 +870,7 @@ impl Interp {
                 let s = self.eval(start)?.into_value()?;
                 let e = self.eval(end)?.into_value()?;
                 match (s, e) {
-                    (Value::Int(a), Value::Int(b)) => Ok(Flow::Value(Value::Range(a, b))),
+                    (Value::Int(a), Value::Int(b)) => Ok(Flow::Value(Value::Range(a, b, 1))),
                     _ => Err(EvalError::new("range bounds must be integers", *span)),
                 }
             }
@@ -843,10 +1029,26 @@ impl Interp {
         let prev = std::mem::replace(&mut self.env, scope);
         let result = match &fv.chunk {
             Some(chunk) => {
+                // Compiled closures expect params on the VM stack at
+                // LoadSlot(0..n). Push them first, then use run_chunk_with_base
+                // with stack_base=0 so LoadSlot reads the right slots.
                 let mut vm = crate::vm::Vm::new();
-                vm.run_chunk(chunk, self)
+                for p in &fv.params {
+                    vm.push(self.env.borrow().get(&p.name.name).unwrap().clone());
+                }
+                vm.run_chunk_with_base(chunk, self, 0)
             }
-            None => self.eval(&fv.body),
+            None => {
+                // Tree-walker path: push a defer stack for this call level.
+                self.defer_stacks.push(Vec::new());
+                let r = self.eval(&fv.body);
+                // Execute defers in LIFO order
+                let defers = self.defer_stacks.pop().unwrap();
+                for closure in defers.into_iter().rev() {
+                    let _ = self.call(closure, vec![], span)?;
+                }
+                r
+            }
         };
         self.env = prev;
         match result? {
@@ -1069,6 +1271,7 @@ impl Interp {
                     BinOp::Mul => a * b,
                     BinOp::Div => a / b,
                     BinOp::Rem => a % b,
+                    BinOp::Pow => a.powf(b),
                     _ => return Err(EvalError::new("arithmetic on non-numeric value", span)),
                 };
                 Ok(Value::Float(result))
@@ -1108,13 +1311,22 @@ impl Interp {
                         .ok_or_else(|| EvalError::new("integer overflow in modulo", span))
                 }
             }
+            BinOp::Pow => {
+                if b < 0 {
+                    Err(EvalError::new("negative exponent for integer power", span))
+                } else {
+                    a.checked_pow(b as u32)
+                        .map(Value::Int)
+                        .ok_or_else(|| EvalError::new("integer overflow in exponentiation", span))
+                }
+            }
             BinOp::Eq => Ok(Value::Bool(a == b)),
             BinOp::Ne => Ok(Value::Bool(a != b)),
             BinOp::Lt => Ok(Value::Bool(a < b)),
             BinOp::Gt => Ok(Value::Bool(a > b)),
             BinOp::Le => Ok(Value::Bool(a <= b)),
             BinOp::Ge => Ok(Value::Bool(a >= b)),
-            BinOp::And | BinOp::Or => unreachable!("short-circuited in eval"),
+            BinOp::And | BinOp::Or | BinOp::Elvis => unreachable!("short-circuited in eval"),
         }
     }
 }
@@ -1126,6 +1338,53 @@ fn value_matches_lit(value: &Value, lit: &Lit) -> bool {
         (Value::Str(a), Lit::Str(b)) => a == b,
         (Value::Bool(a), Lit::Bool(b)) => a == b,
         _ => false,
+    }
+}
+
+/// Apply a format spec to a value for string interpolation.
+///
+/// Supported specs:
+/// - `.Nf` — float with N decimal places (e.g. `.2f` → `3.14`)
+/// - `x` / `X` — hex integer (lowercase / uppercase)
+/// - `o` — octal integer
+/// - `b` — binary integer
+/// - `d` — decimal integer (default for ints)
+/// - `e` / `E` — scientific notation
+/// - `s` — string (default, no-op)
+pub(crate) fn format_value_with_spec(v: &crate::value::Value, spec: &str) -> String {
+    use crate::value::Value;
+    let spec = spec.trim();
+    match v {
+        Value::Int(n) => {
+            if spec == "x" {
+                format!("{n:x}")
+            } else if spec == "X" {
+                format!("{n:X}")
+            } else if spec == "o" {
+                format!("{n:o}")
+            } else if spec == "b" {
+                format!("{n:b}")
+            } else {
+                // "d", empty, or unrecognized specs all produce default decimal.
+                format!("{n}")
+            }
+        }
+        Value::Float(f) => {
+            if let Some(precision) = spec.strip_suffix('f') {
+                let precision: usize = precision.trim_start_matches('.').parse().unwrap_or(0);
+                format!("{f:.precision$}")
+            } else if spec == "e" {
+                format!("{f:e}")
+            } else if spec == "E" {
+                format!("{f:E}")
+            } else if spec == "x" || spec == "X" {
+                // Reinterpret the float bits as integer for hex display.
+                format!("{:?}", f)
+            } else {
+                format!("{f}")
+            }
+        }
+        other => other.to_string(),
     }
 }
 

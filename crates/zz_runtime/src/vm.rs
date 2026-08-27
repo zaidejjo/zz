@@ -141,6 +141,8 @@ pub enum Op {
     // ---- collections ----
     /// Pop `n` values and push an array.
     MakeArray(u16),
+    /// Pop a value and an array; push the array with the value appended.
+    ArrayPush(Span),
     /// Pop `2n` values (key, value pairs) and push a dict.
     MakeDict(u16),
     /// Pop an index, pop an object, push `object[index]`.
@@ -205,6 +207,14 @@ pub enum Op {
     /// Pop a value; unwrap Option/Result or `return` the None/Err variant.
     TryOp(Span),
 
+    // ---- elvis ----
+    /// Pop a value; if `.some(v)`, push `v` then `Bool(true)`.
+    /// If `.none`, push `Bool(false)`.
+    Elvis(Span),
+    /// Pop `Bool(success)`, pop right side, pop unwrapped left side.
+    /// If success: push unwrapped left. Otherwise: push right side.
+    ElvisResult,
+
     // ---- calls ----
     /// Pop `argc` arguments, pop the callee, call it, push the result.
     Call { argc: u16, span: Span },
@@ -225,6 +235,8 @@ pub enum Op {
     // ---- fmt ----
     /// Pop `n` values, concatenate their Display forms, push the string.
     Concat(u16),
+    /// Pop a format spec string, pop a value, push the formatted string.
+    FormatValue(Span),
 
     // ---- scopes ----
     /// Enter a new child scope (only emitted when the scope declares
@@ -235,6 +247,11 @@ pub enum Op {
     /// Pop the top value, discard `n` values below it, and push the value
     /// back: leaves a scope's result while dropping its local slots.
     PopN(u16),
+
+    // ---- defer ----
+    /// Record a deferred closure: pop a closure value, push onto the
+    /// frame's defer stack. Executed LIFO on scope exit.
+    DeferRecord,
 }
 
 /// A compile-time-resolved local variable.
@@ -256,6 +273,15 @@ enum Resolved {
     Env,
 }
 
+/// Compiled info for a known function, used to reorder named args
+/// and fill defaults at call sites.
+#[derive(Debug, Clone)]
+struct FuncInfo {
+    param_names: Vec<String>,
+    has_default: Vec<bool>,
+    defaults: Vec<Option<Box<zz_frontend::ast::Expr>>>,
+}
+
 /// Lowers an AST into a [`Chunk`].
 pub struct Compiler {
     chunk: Chunk,
@@ -272,6 +298,8 @@ pub struct Compiler {
     /// True for the top-level program chunk (depth-0 declarations are
     /// globals, stored in the environment).
     is_main: bool,
+    /// Known function signatures for named-arg reordering.
+    func_info: std::collections::HashMap<String, FuncInfo>,
 }
 
 enum JumpKind {
@@ -296,6 +324,7 @@ impl Compiler {
             stack_height: 0,
             captured: std::collections::HashSet::new(),
             is_main: false,
+            func_info: std::collections::HashMap::new(),
         }
     }
 
@@ -304,6 +333,20 @@ impl Compiler {
     pub fn compile_program(program: &Program) -> Chunk {
         let mut c = Compiler::new();
         c.is_main = true;
+        // Pre-scan: collect function signatures for named-arg reordering.
+        for stmt in &program.stmts {
+            if let Stmt::Func { name, params, .. } = stmt {
+                let full = name.join(".");
+                c.func_info.insert(
+                    full,
+                    FuncInfo {
+                        param_names: params.iter().map(|p| p.name.name.clone()).collect(),
+                        has_default: params.iter().map(|p| p.default.is_some()).collect(),
+                        defaults: params.iter().map(|p| p.default.clone()).collect(),
+                    },
+                );
+            }
+        }
         for (i, stmt) in program.stmts.iter().enumerate() {
             let v = c.compile_stmt(stmt);
             if i < program.stmts.len() - 1 && matches!(v, StmtValue::Discard) {
@@ -317,7 +360,11 @@ impl Compiler {
     }
 
     fn emit(&mut self, op: Op) {
-        self.stack_height = (self.stack_height as i64 + Self::stack_effect(&op)) as usize;
+        let effect = Self::stack_effect(&op);
+        // Use saturating arithmetic to prevent wrap-around on underflow.
+        // This can happen when stack_effect is negative and stack_height is 0,
+        // which indicates a compiler bug in stack tracking but shouldn't panic.
+        self.stack_height = self.stack_height.saturating_add_signed(effect as isize);
         self.chunk.code.push(op);
     }
 
@@ -342,6 +389,7 @@ impl Compiler {
             Op::Break | Op::Continue => 0,
             Op::SetLoopResult => -1,
             Op::MakeArray(n) => 1 - *n as i64,
+            Op::ArrayPush(_) => -1,
             Op::MakeDict(n) => 1 - 2 * *n as i64,
             Op::IndexOp(_) => -1,
             Op::StoreIndexOp(_) => -2,
@@ -361,14 +409,18 @@ impl Compiler {
             Op::MatchError(_) => 0,
             Op::IfLetMatch { .. } => -1,
             Op::TryOp(_) => 0,
+            Op::Elvis(_) => 1,
+            Op::ElvisResult => -2,
             // Call pops argc args + 1 callee (pushed by compiler), pushes 1 result: -argc
             // CallPath pops argc args, resolves callee by name (no stack pop), pushes 1: 1-argc
             // CallMethod pops argc args + 1 receiver (LoadSlot), pushes 1 result: -argc
             Op::Call { argc, .. } | Op::CallMethod { argc, .. } => -(*argc as i64),
             Op::CallPath { argc, .. } => 1 - (*argc as i64),
             Op::Concat(n) => 1 - *n as i64,
+            Op::FormatValue(_) => -1,
             Op::EnterScope | Op::ExitScope => 0,
             Op::PopN(n) => -(*n as i64),
+            Op::DeferRecord => -1,
         }
     }
 
@@ -636,6 +688,25 @@ impl Compiler {
                 self.emit(Op::Continue);
                 StmtValue::None
             }
+            Stmt::Defer { expr, .. } => {
+                // Compile the expression into a zero-param chunk and create a
+                // closure capturing the current environment. The closure is
+                // recorded on the frame's defer stack and executed LIFO when
+                // the scope exits.
+                let body = Block {
+                    stmts: vec![Stmt::Expr(expr.as_ref().clone())],
+                    span: expr.span(),
+                };
+                let chunk = self.compile_func_body(&body, &[]);
+                self.emit(Op::MakeClosure {
+                    params: vec![],
+                    chunk,
+                });
+                self.emit(Op::DeferRecord);
+                // Net stack effect is 0 (MakeClosure +1, DeferRecord -1).
+                // Return None so compile_block_body does NOT emit an extra Pop.
+                StmtValue::None
+            }
             Stmt::Assign { target, value, .. } => match target {
                 Expr::Ident { name, span } => {
                     self.compile_expr(value);
@@ -762,6 +833,57 @@ impl Compiler {
         Rc::new(sub.chunk)
     }
 
+    /// Compile call arguments reordered to match the parameter order of a
+    /// known function.  Positional args keep their slot; named args are
+    /// placed by name.  Missing args with defaults are compiled from the
+    /// stored AST.
+    fn compile_reordered_args(&mut self, func_name: &str, args: &[Expr], named: &[(String, Expr)]) {
+        let info = match self.func_info.get(func_name) {
+            Some(fi) => fi.clone(),
+            None => {
+                // Unknown function — just push positional then named.
+                for a in args {
+                    self.compile_expr(a);
+                }
+                for (_, val) in named {
+                    self.compile_expr(val);
+                }
+                return;
+            }
+        };
+        let n = info.param_names.len();
+        // Build a slot for each param: None = positional, Some(Expr) = named/default.
+        let mut slots: Vec<Option<Expr>> = vec![None; n];
+        // Place positional args.
+        for (i, arg) in args.iter().enumerate() {
+            if i < n {
+                slots[i] = Some(arg.clone());
+            }
+        }
+        // Place named args.
+        for (name, val) in named {
+            if let Some(i) = info.param_names.iter().position(|pn| pn == name) {
+                if slots[i].is_none() {
+                    slots[i] = Some(val.clone());
+                }
+            }
+        }
+        // Fill defaults for remaining slots.
+        for (i, slot) in slots.iter_mut().enumerate() {
+            if slot.is_none() {
+                if let Some(Some(default)) = info.defaults.get(i) {
+                    *slot = Some(default.as_ref().clone());
+                }
+            }
+        }
+        // Compile each slot.
+        for slot in &slots {
+            if let Some(expr) = slot {
+                self.compile_expr(expr);
+            }
+        }
+    }
+
     /// Compile a closure body (an expression) into its own chunk.
     fn compile_closure_body(&mut self, body: &Expr, params: &[Param]) -> Rc<Chunk> {
         let mut sub = Compiler::new();
@@ -838,52 +960,199 @@ impl Compiler {
                     self.emit_const(Value::Bool(true));
                     self.patch_jump(j2);
                 }
+                BinOp::Elvis => {
+                    self.compile_expr(left);
+                    self.emit(Op::Elvis(*span));
+                    self.compile_expr(right);
+                    self.emit(Op::ElvisResult);
+                }
                 _ => {
                     self.compile_expr(left);
                     self.compile_expr(right);
                     self.emit(Op::BinOp(*op, *span));
                 }
             },
-            Expr::Call { callee, args, span } => match callee.as_ref() {
+            Expr::Call {
+                callee,
+                args,
+                named,
+                span,
+            } => match callee.as_ref() {
                 Expr::Path { parts, span: pspan } => {
+                    let func_name = parts.join(".");
                     // Special case: `input()` with no args -> synthesize empty prompt
-                    let is_input = parts.len() == 1 && parts[0] == "input" && args.is_empty();
-                    let argc = if is_input { 1 } else { args.len() };
-                    for a in args {
-                        self.compile_expr(a);
-                    }
-                    if is_input {
-                        self.emit_const(Value::Str(String::new()));
-                    }
+                    let is_input = parts.len() == 1
+                        && parts[0] == "input"
+                        && args.is_empty()
+                        && named.is_empty();
+                    // Special case: `range` with 1 or 2 args -> synthesize defaults (start=0, step=1)
+                    let is_range = parts.len() == 1
+                        && parts[0] == "range"
+                        && args.len() + named.len() < 3
+                        && named.is_empty();
+
+                    // For named args or defaults, reorder and fill at compile time.
+                    let has_named_or_defaults = !named.is_empty()
+                        || self
+                            .func_info
+                            .get(&func_name)
+                            .map_or(false, |fi| fi.has_default.iter().any(|&d| d));
+
+                    let argc = if is_input {
+                        1
+                    } else if is_range {
+                        3
+                    } else if has_named_or_defaults {
+                        self.func_info
+                            .get(&func_name)
+                            .map_or(args.len() + named.len(), |fi| fi.param_names.len())
+                    } else {
+                        args.len() + named.len()
+                    };
+
                     if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
-                        // Slot-based receiver: load the receiver chain, then
-                        // resolve the last component as a field or method.
+                        // Slot-based method dispatch: push receiver first, then
+                        // args. CallMethod pops argc args (on top) then pops recv.
                         self.emit(Op::LoadSlot(slot as u16));
                         for part in &parts[1..parts.len() - 1] {
                             self.emit(Op::GetField(part.clone(), *pspan));
                         }
+                        if is_range {
+                            if args.len() == 1 {
+                                self.emit_const(Value::Int(0));
+                                self.compile_expr(&args[0]);
+                                self.emit_const(Value::Int(1));
+                            } else if args.len() == 2 {
+                                self.compile_expr(&args[0]);
+                                self.compile_expr(&args[1]);
+                                self.emit_const(Value::Int(1));
+                            } else {
+                                for a in args {
+                                    self.compile_expr(a);
+                                }
+                            }
+                        } else if has_named_or_defaults {
+                            self.compile_reordered_args(&func_name, args, named);
+                        } else {
+                            for a in args {
+                                self.compile_expr(a);
+                            }
+                        }
+                        if is_input {
+                            self.emit_const(Value::Str(String::new()));
+                        }
                         self.emit(Op::CallMethod {
                             name: parts.last().unwrap().clone(),
-                            argc: args.len() as u16,
+                            argc: argc as u16,
                             span: *span,
                         });
                     } else {
+                        // Path-based dispatch: args on stack, resolved at runtime.
+                        if is_range {
+                            if args.len() == 1 {
+                                self.emit_const(Value::Int(0));
+                                self.compile_expr(&args[0]);
+                                self.emit_const(Value::Int(1));
+                            } else if args.len() == 2 {
+                                self.compile_expr(&args[0]);
+                                self.compile_expr(&args[1]);
+                                self.emit_const(Value::Int(1));
+                            } else {
+                                for a in args {
+                                    self.compile_expr(a);
+                                }
+                            }
+                        } else if has_named_or_defaults {
+                            self.compile_reordered_args(&func_name, args, named);
+                        } else {
+                            for a in args {
+                                self.compile_expr(a);
+                            }
+                        }
+                        if is_input {
+                            self.emit_const(Value::Str(String::new()));
+                        }
                         self.emit(Op::CallPath {
                             parts: parts.clone(),
-                            argc: args.len() as u16,
+                            argc: argc as u16,
                             span: *span,
                             pspan: *pspan,
                         });
                     }
                 }
+                // Method call on expression: `expr.method(args)` — push receiver
+                // first, then args. CallMethod pops argc args (on top) then pops recv.
+                Expr::Field { obj, name, span: _ } => {
+                    self.compile_expr(obj);
+                    for a in args {
+                        self.compile_expr(a);
+                    }
+                    for (_, val) in named {
+                        self.compile_expr(val);
+                    }
+                    self.emit(Op::CallMethod {
+                        name: name.clone(),
+                        argc: (args.len() + named.len()) as u16,
+                        span: *span,
+                    });
+                }
                 _ => {
                     // Special case: `input()` with no args -> synthesize empty prompt
                     let is_input = matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "input")
-                        && args.is_empty();
-                    let argc = if is_input { 1 } else { args.len() };
+                        && args.is_empty()
+                        && named.is_empty();
+                    // Special case: `range` with 1 or 2 args -> synthesize defaults
+                    let is_range = matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "range")
+                        && args.len() + named.len() < 3
+                        && named.is_empty();
+
+                    // For Ident callees, look up func_info for defaults/named args.
+                    let callee_name = match callee.as_ref() {
+                        Expr::Ident { name, .. } => Some(name.as_str()),
+                        Expr::Path { parts, .. } => Some(parts[0].as_str()),
+                        _ => None,
+                    };
+                    let has_named_or_defaults = callee_name.map_or(false, |cn| {
+                        !named.is_empty()
+                            || self
+                                .func_info
+                                .get(cn)
+                                .map_or(false, |fi| fi.has_default.iter().any(|&d| d))
+                    });
+
+                    let argc = if is_input {
+                        1
+                    } else if is_range {
+                        3
+                    } else if has_named_or_defaults {
+                        callee_name
+                            .and_then(|cn| self.func_info.get(cn))
+                            .map_or(args.len() + named.len(), |fi| fi.param_names.len())
+                    } else {
+                        args.len() + named.len()
+                    };
+
                     self.compile_expr(callee);
-                    for a in args {
-                        self.compile_expr(a);
+                    if is_range {
+                        if args.len() == 1 {
+                            self.emit_const(Value::Int(0));
+                            self.compile_expr(&args[0]);
+                            self.emit_const(Value::Int(1));
+                        } else if args.len() == 2 {
+                            self.compile_expr(&args[0]);
+                            self.compile_expr(&args[1]);
+                            self.emit_const(Value::Int(1));
+                        } else {
+                            for a in args {
+                                self.compile_expr(a);
+                            }
+                        }
+                    } else if has_named_or_defaults {
+                        self.compile_reordered_args(callee_name.unwrap(), args, named);
+                    } else {
+                        for a in args {
+                            self.compile_expr(a);
+                        }
                     }
                     if is_input {
                         self.emit_const(Value::Str(String::new()));
@@ -925,7 +1194,13 @@ impl Compiler {
                             self.emit_const(Value::Str(t.clone()));
                             n += 1;
                         }
-                        FmtPart::Expr(e) => {
+                        FmtPart::Expr(e, Some(spec)) => {
+                            self.compile_expr(e);
+                            self.emit_const(Value::Str(spec.clone()));
+                            self.emit(Op::FormatValue(e.span()));
+                            n += 1;
+                        }
+                        FmtPart::Expr(e, None) => {
                             self.compile_expr(e);
                             n += 1;
                         }
@@ -964,6 +1239,75 @@ impl Compiler {
                     self.compile_expr(e);
                 }
                 self.emit(Op::MakeArray(elems.len() as u16));
+            }
+            Expr::ListComp {
+                body,
+                var,
+                iter,
+                filter,
+                span,
+            } => {
+                // Reserve a slot for the result array.
+                let result_slot = self.stack_height;
+                self.emit_const(Value::Unit); // placeholder
+                                              // Create empty result array and store it in the reserved slot.
+                self.emit(Op::MakeArray(0));
+                self.emit(Op::StoreSlot(result_slot as u16));
+                // Compile the iterator (now at stack bottom).
+                self.compile_expr(iter);
+                // Set up the for loop. ForSetup pops the iterable, pushes
+                // iterable, idx, placeholder. Result array stays in its slot.
+                let setup_pos = self.chunk.code.len();
+                self.emit(Op::ForSetup {
+                    exit: 0,
+                    header: 0,
+                    span: *span,
+                });
+                let header = self.chunk.code.len();
+                let in_env = self.captured.contains(&var.name);
+                let j = self.emit_for_next(&var.name, in_env);
+                // The loop variable: a slot (item left on the stack by ForNext)
+                // or an environment binding (captured).
+                // IMPORTANT: Add the local BEFORE compiling filter/body so the
+                // variable resolves correctly in those expressions.
+                self.locals.push(Local {
+                    name: var.name.clone(),
+                    slot: self.stack_height - 1,
+                    in_env,
+                });
+                // Loop body: load result array from slot, compile body, append, store back.
+                if let Some(f) = filter {
+                    self.compile_expr(f);
+                    // If filter is false, jump to header (next iteration).
+                    self.emit(Op::JumpIfFalse(header));
+                    // Load result array, compile body, append, store back.
+                    self.emit(Op::LoadSlot(result_slot as u16));
+                    self.compile_expr(body);
+                    self.emit(Op::ArrayPush(*span));
+                    self.emit(Op::StoreSlot(result_slot as u16));
+                    // Jump back to loop header.
+                    self.emit(Op::Jump(header));
+                } else {
+                    // No filter: load result array, compile body, append, store back.
+                    self.emit(Op::LoadSlot(result_slot as u16));
+                    self.compile_expr(body);
+                    self.emit(Op::ArrayPush(*span));
+                    self.emit(Op::StoreSlot(result_slot as u16));
+                    self.emit(Op::Jump(header));
+                }
+                self.patch_jump(j);
+                let exit = self.chunk.code.len();
+                self.chunk.code[setup_pos] = Op::ForSetup {
+                    exit,
+                    header,
+                    span: *span,
+                };
+                self.locals.pop();
+                // After ForNext truncation, the result array is already the
+                // only value on the stack at position `result_slot`. No need
+                // to LoadSlot — doing so would push a duplicate that leaks
+                // into subsequent comprehensions, shifting slot offsets.
+                self.stack_height = result_slot + 1;
             }
             Expr::Dict { entries, .. } => {
                 for (k, v) in entries {
@@ -1209,7 +1553,7 @@ fn scan_expr_captured(
         }
         Expr::Fmt { parts, .. } => {
             for part in parts {
-                if let FmtPart::Expr(e) = part {
+                if let FmtPart::Expr(e, _) = part {
                     scan_expr_captured(e, defined, free);
                 }
             }
@@ -1258,6 +1602,21 @@ fn scan_expr_captured(
             for e in elems {
                 scan_expr_captured(e, defined, free);
             }
+        }
+        Expr::ListComp {
+            body,
+            var,
+            iter,
+            filter,
+            ..
+        } => {
+            scan_expr_captured(iter, defined, free);
+            let mut inner = defined.clone();
+            inner.insert(var.name.clone());
+            if let Some(f) = filter {
+                scan_expr_captured(f, &mut inner, free);
+            }
+            scan_expr_captured(body, &mut inner, free);
         }
         Expr::Dict { entries, .. } => {
             for (k, v) in entries {
@@ -1336,6 +1695,9 @@ fn scan_stmt_captured(
             }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Defer { expr, .. } => {
+            scan_expr_captured(expr, defined, free);
+        }
         Stmt::Assign { target, value, .. } => {
             scan_expr_captured(value, defined, free);
             scan_expr_captured(target, defined, free);
@@ -1363,6 +1725,9 @@ struct Frame {
     prev_env: Rc<RefCell<Env>>,
     /// Stack index where this frame's evaluation begins.
     stack_base: usize,
+    /// Deferred closures accumulated in this frame. Saved/restored across
+    /// nested calls so each frame only drains its own defers.
+    defer_stack: Vec<Value>,
 }
 
 /// One active loop (native `for`/`while`). Used by `break`/`continue` to
@@ -1400,6 +1765,27 @@ pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<Frame>,
     loops: Vec<LoopInfo>,
+    /// Deferred closures for the current frame. `DeferRecord` pushes here;
+    /// `Return` and frame-end pop and execute in LIFO order.
+    defer_stack: Vec<Value>,
+    /// When executing defers before a return, this holds the saved return
+    /// value and remaining deferred closures. `None` when not in a defer-
+    /// execution sequence.
+    defer_return: Option<DeferReturn>,
+}
+
+/// State saved during defer-before-return execution.
+struct DeferReturn {
+    return_value: Value,
+    remaining: Vec<Value>,
+    /// Parent frame's deferred closures, saved so they can be restored
+    /// after this frame's defers complete.
+    parent_defers: Vec<Value>,
+    /// True if this defer sequence was triggered by an explicit `Return`
+    /// (as opposed to chunk-end implicit return). When all defers finish,
+    /// a Return-origin defer must unwind the current frame rather than
+    /// just pushing the return value and continuing.
+    from_return: bool,
 }
 
 impl Default for Vm {
@@ -1414,7 +1800,37 @@ impl Vm {
             stack: Vec::new(),
             frames: Vec::new(),
             loops: Vec::new(),
+            defer_stack: Vec::new(),
+            defer_return: None,
         }
+    }
+
+    /// Push a value onto the VM stack. Used by `Interp::call_func` to set up
+    /// compiled closure parameters before calling `run_chunk_with_base`.
+    pub(crate) fn push(&mut self, v: Value) {
+        self.stack.push(v);
+    }
+
+    /// Push a deferred closure's chunk as a new frame for inline execution.
+    fn push_defer_frame(&mut self, interp: &mut Interp) {
+        let state = self.defer_return.as_mut().unwrap();
+        let closure = state.remaining.pop().unwrap();
+        if let Value::Func(fv) = closure {
+            if let Some(chunk) = fv.chunk {
+                let stack_base = self.stack.len();
+                let prev_env = std::mem::replace(&mut interp.env, Rc::clone(&fv.env));
+                // Defer frames get their own empty defer stack.
+                let saved_defers = std::mem::take(&mut self.defer_stack);
+                self.frames.push(Frame {
+                    chunk,
+                    ip: 0,
+                    prev_env,
+                    stack_base,
+                    defer_stack: saved_defers,
+                });
+            }
+        }
+        // Non-chunk closure: ignore (shouldn't happen for defer)
     }
 
     /// Run a chunk to completion. Returns the chunk's value, or a control
@@ -1425,11 +1841,24 @@ impl Vm {
         chunk: &Rc<Chunk>,
         interp: &mut Interp,
     ) -> Result<Flow, EvalError> {
+        self.run_chunk_with_base(chunk, interp, self.stack.len())
+    }
+
+    /// Like `run_chunk`, but allows the caller to specify `stack_base`
+    /// explicitly. Used by `Interp::call_func` to run compiled closures
+    /// where args are already on the stack at index 0..n.
+    pub(crate) fn run_chunk_with_base(
+        &mut self,
+        chunk: &Rc<Chunk>,
+        interp: &mut Interp,
+        stack_base: usize,
+    ) -> Result<Flow, EvalError> {
         self.frames.push(Frame {
             chunk: Rc::clone(chunk),
             ip: 0,
             prev_env: Rc::clone(&interp.env),
-            stack_base: self.stack.len(),
+            stack_base,
+            defer_stack: Vec::new(),
         });
 
         loop {
@@ -1446,7 +1875,8 @@ impl Vm {
 
             if ip >= code.len() {
                 // Chunk ran off the end: implicit return of the block value.
-                let v = if self.stack.len() > self.frames.last().unwrap().stack_base {
+                let sb = self.frames.last().unwrap().stack_base;
+                let v = if self.stack.len() > sb {
                     self.stack.pop().unwrap()
                 } else {
                     Value::Unit
@@ -1454,6 +1884,59 @@ impl Vm {
                 let f = self.frames.pop().unwrap();
                 self.stack.truncate(f.stack_base);
                 interp.env = f.prev_env;
+                // f.defer_stack holds the parent frame's saved defers.
+                let parent_defers = f.defer_stack;
+
+                // If we're in a defer-execution sequence, check for more
+                // defers or finish the original return.
+                if let Some(ref mut state) = self.defer_return {
+                    if !state.remaining.is_empty() {
+                        // More defers to execute — push the next frame.
+                        self.push_defer_frame(interp);
+                        continue;
+                    } else {
+                        // All defers done — restore parent's defers and
+                        // complete the original return.
+                        let saved = std::mem::take(&mut self.defer_return).unwrap();
+                        self.defer_stack = saved.parent_defers;
+                        if saved.from_return {
+                            // The defers were triggered by an explicit
+                            // Return. Unwind the calling frame so we don't
+                            // continue executing past the Return.
+                            match self.unwind_frame(Flow::Return(saved.return_value), interp) {
+                                Unwind::Continue => {}
+                                Unwind::Escaped(flow) => return Ok(flow),
+                                Unwind::Error(e) => return Err(e),
+                            }
+                        } else {
+                            // Implicit chunk-end return. The frame was
+                            // already popped; just push the value.
+                            if self.frames.is_empty() {
+                                return Ok(Flow::Value(saved.return_value));
+                            }
+                            self.stack.push(saved.return_value);
+                        }
+                        continue;
+                    }
+                }
+
+                // Check for defers that need to execute on frame exit.
+                let defers: Vec<Value> = self.defer_stack.drain(..).collect();
+                if !defers.is_empty() {
+                    // Save the block value and execute defers inline.
+                    self.defer_return = Some(DeferReturn {
+                        return_value: v,
+                        remaining: defers,
+                        parent_defers,
+                        from_return: false,
+                    });
+                    self.push_defer_frame(interp);
+                    continue;
+                }
+
+                // No defers — restore parent's deferred closures and exit.
+                self.defer_stack = parent_defers;
+
                 if self.frames.is_empty() {
                     return Ok(Flow::Value(v));
                 }
@@ -1586,17 +2069,38 @@ impl Vm {
                 }
                 Op::Return => {
                     let v = self.stack.pop().unwrap();
-                    match self.unwind_frame(Flow::Return(v), interp) {
-                        Unwind::Continue => {}
-                        Unwind::Escaped(flow) => return Ok(flow),
-                        Unwind::Error(e) => return Err(e),
+                    // Execute defers in LIFO order before returning.
+                    // Push deferred frames inline (no sub-Vm) and save the
+                    // return value until all defers complete.
+                    let defers: Vec<Value> = self.defer_stack.drain(..).collect();
+                    if defers.is_empty() {
+                        match self.unwind_frame(Flow::Return(v), interp) {
+                            Unwind::Continue => {}
+                            Unwind::Escaped(flow) => return Ok(flow),
+                            Unwind::Error(e) => return Err(e),
+                        }
+                    } else {
+                        // Save the parent frame's defers before pushing the
+                        // defer frame (which will take self.defer_stack).
+                        let parent_defers = self
+                            .frames
+                            .last()
+                            .map(|f| f.defer_stack.clone())
+                            .unwrap_or_default();
+                        self.defer_return = Some(DeferReturn {
+                            return_value: v,
+                            remaining: defers,
+                            parent_defers,
+                            from_return: true,
+                        });
+                        self.push_defer_frame(interp);
                     }
                 }
                 Op::ForSetup { exit, header, span } => {
                     let it = self.stack.pop().unwrap();
                     let (iterable, idx) = match it.clone() {
                         Value::Array(_) => (it, Value::Int(0)),
-                        Value::Range(start, _) => (it, Value::Int(start)),
+                        Value::Range(start, _, _) => (it, Value::Int(start)),
                         other => {
                             return Err(EvalError::new(
                                 format!("cannot iterate a value of type `{other}`"),
@@ -1634,12 +2138,21 @@ impl Vm {
                                 (false, items[i as usize].clone())
                             }
                         }
-                        (Value::Range(_, end), Value::Int(i)) => {
+                        (Value::Range(_, end, step), Value::Int(i)) => {
                             let i = *i;
-                            if i >= *end {
-                                (true, Value::Unit)
+                            let step = *step;
+                            if step > 0 {
+                                if i >= *end {
+                                    (true, Value::Unit)
+                                } else {
+                                    (false, Value::Int(i))
+                                }
                             } else {
-                                (false, Value::Int(i))
+                                if i <= *end {
+                                    (true, Value::Unit)
+                                } else {
+                                    (false, Value::Int(i))
+                                }
                             }
                         }
                         _ => unreachable!("ForNext on non-iterable"),
@@ -1650,8 +2163,9 @@ impl Vm {
                         interp.env = li.env;
                         self.frames.last_mut().unwrap().ip = *exit;
                     } else {
-                        let next = match idx {
-                            Value::Int(i) => Value::Int(i + 1),
+                        let next = match (&self.stack[iterable_idx], idx) {
+                            (Value::Range(_, _, step), Value::Int(i)) => Value::Int(i + step),
+                            (Value::Array(_), Value::Int(i)) => Value::Int(i + 1),
                             _ => unreachable!(),
                         };
                         self.stack.push(next);
@@ -1729,6 +2243,20 @@ impl Vm {
                     items.reverse();
                     self.stack.push(Value::Array(items));
                 }
+                Op::ArrayPush(span) => {
+                    let value = self.stack.pop().unwrap();
+                    let mut arr = match self.stack.pop().unwrap() {
+                        Value::Array(a) => a,
+                        other => {
+                            return Err(EvalError::new(
+                                format!("ArrayPush: expected array, found `{other}`"),
+                                *span,
+                            ));
+                        }
+                    };
+                    arr.push(value);
+                    self.stack.push(Value::Array(arr));
+                }
                 Op::MakeDict(n) => {
                     let mut pairs = Vec::with_capacity(*n as usize);
                     for _ in 0..*n {
@@ -1771,7 +2299,7 @@ impl Vm {
                     let e = self.stack.pop().unwrap();
                     let s = self.stack.pop().unwrap();
                     match (s, e) {
-                        (Value::Int(a), Value::Int(b)) => self.stack.push(Value::Range(a, b)),
+                        (Value::Int(a), Value::Int(b)) => self.stack.push(Value::Range(a, b, 1)),
                         _ => return Err(EvalError::new("range bounds must be integers", *span)),
                     }
                 }
@@ -1928,6 +2456,39 @@ impl Vm {
                         }
                     }
                 }
+                Op::Elvis(_span) => {
+                    let v = self.stack.pop().unwrap();
+                    match v {
+                        Value::Option(Some(inner)) => {
+                            // Push: flag (deepest), unwrapped, then right is
+                            // compiled on top.  ElvisResult pops success, right,
+                            // left — so flag must be deepest of the three.
+                            self.stack.push(Value::Bool(true));
+                            self.stack.push(*inner);
+                        }
+                        Value::Option(None) => {
+                            // Flag false + Unit placeholder for the inner slot
+                            // so ElvisResult still pops 3 and pushes 1.
+                            self.stack.push(Value::Bool(false));
+                            self.stack.push(Value::Unit);
+                        }
+                        other => {
+                            // Non-Option left: pass through (allows chaining).
+                            self.stack.push(Value::Bool(true));
+                            self.stack.push(other);
+                        }
+                    }
+                }
+                Op::ElvisResult => {
+                    // Stack (bottom→top): flag, inner/placeholder, right.
+                    let right_val = self.stack.pop().unwrap();
+                    let inner_val = self.stack.pop().unwrap();
+                    let flag = self.stack.pop().unwrap();
+                    match flag {
+                        Value::Bool(true) => self.stack.push(inner_val),
+                        _ => self.stack.push(right_val),
+                    }
+                }
                 Op::Call { argc, span } => {
                     let argc = *argc;
                     let span = *span;
@@ -2005,6 +2566,21 @@ impl Vm {
                     }
                     self.stack.push(Value::Str(out));
                 }
+                Op::FormatValue(span) => {
+                    let spec = self.stack.pop().unwrap();
+                    let val = self.stack.pop().unwrap();
+                    let spec_str = match spec {
+                        Value::Str(s) => s,
+                        _ => {
+                            return Err(EvalError::new(
+                                "format spec must be a string".to_string(),
+                                *span,
+                            ))
+                        }
+                    };
+                    let formatted = crate::interp::format_value_with_spec(&val, &spec_str);
+                    self.stack.push(Value::Str(formatted));
+                }
                 Op::EnterScope => {
                     let scope = Env::with_parent(&interp.env);
                     interp.env = scope;
@@ -2022,6 +2598,10 @@ impl Vm {
                     let result = self.stack.pop().unwrap();
                     self.stack.truncate(len - 1 - *n as usize);
                     self.stack.push(result);
+                }
+                Op::DeferRecord => {
+                    let closure = self.stack.pop().unwrap();
+                    self.defer_stack.push(closure);
                 }
             }
         }
@@ -2055,11 +2635,16 @@ impl Vm {
                 let stack_base = self.stack.len();
                 self.stack.extend(args);
                 let prev_env = std::mem::replace(&mut interp.env, Rc::clone(&fv.env));
+                // Save the caller's defer stack and start fresh for the
+                // callee. This prevents nested function exits from draining
+                // defers that belong to an outer frame.
+                let saved_defers = std::mem::take(&mut self.defer_stack);
                 self.frames.push(Frame {
                     chunk: fv.chunk.unwrap(),
                     ip: 0,
                     prev_env,
                     stack_base,
+                    defer_stack: saved_defers,
                 });
                 Ok(())
             }
@@ -2461,6 +3046,7 @@ mod tests {
                 span: Span::new(0, 0),
             },
             ty: None,
+            default: None,
             span: Span::new(0, 0),
         }];
         let fv = FuncValue {

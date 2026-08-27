@@ -98,6 +98,7 @@ impl<'a> Lexer<'a> {
                 '/' if self.peek_char_at(1) == Some('/') => self.lex_line_comment(),
                 '/' if self.peek_char_at(1) == Some('*') => self.lex_block_comment(),
                 '/' => self.emit_significant(TokenKind::Slash, self.pos, self.pos + 1),
+                '#' => self.lex_line_comment(),
                 '(' => self.emit_significant(TokenKind::LParen, self.pos, self.pos + 1),
                 ')' => self.emit_significant(TokenKind::RParen, self.pos, self.pos + 1),
                 '{' => {
@@ -138,6 +139,9 @@ impl<'a> Lexer<'a> {
                     self.emit_significant(TokenKind::Arrow, self.pos, self.pos + 2)
                 }
                 '-' => self.emit_significant(TokenKind::Minus, self.pos, self.pos + 1),
+                '*' if self.peek_char_at(1) == Some('*') => {
+                    self.emit_significant(TokenKind::StarStar, self.pos, self.pos + 2)
+                }
                 '*' => self.emit_significant(TokenKind::Star, self.pos, self.pos + 1),
                 '%' => self.emit_significant(TokenKind::Percent, self.pos, self.pos + 1),
                 '=' if self.peek_char_at(1) == Some('=') => {
@@ -169,6 +173,9 @@ impl<'a> Lexer<'a> {
                     self.emit_significant(TokenKind::PipeGt, self.pos, self.pos + 2)
                 }
                 '|' => self.emit_significant(TokenKind::Pipe, self.pos, self.pos + 1),
+                '?' if self.peek_char_at(1) == Some('?') => {
+                    self.emit_significant(TokenKind::QuestionQuestion, self.pos, self.pos + 2)
+                }
                 '?' => self.emit_significant(TokenKind::Question, self.pos, self.pos + 1),
                 ':' if self.peek_char_at(1) == Some('=') => {
                     self.emit_significant(TokenKind::ColonEq, self.pos, self.pos + 2)
@@ -286,6 +293,7 @@ impl<'a> Lexer<'a> {
                 TokenKind::Plus
                     | TokenKind::Minus
                     | TokenKind::Star
+                    | TokenKind::StarStar
                     | TokenKind::Slash
                     | TokenKind::Percent
                     | TokenKind::Assign
@@ -299,6 +307,7 @@ impl<'a> Lexer<'a> {
                     | TokenKind::OrOr
                     | TokenKind::Bang
                     | TokenKind::Question
+                    | TokenKind::QuestionQuestion
                     | TokenKind::Colon
                     | TokenKind::Comma
                     | TokenKind::Dot
@@ -358,6 +367,7 @@ impl<'a> Lexer<'a> {
             "in" => TokenKind::In,
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
+            "defer" => TokenKind::Defer,
             _ => TokenKind::Ident,
         };
         self.push_token(kind, span, text);
@@ -392,7 +402,14 @@ impl<'a> Lexer<'a> {
                 .push(error_at("expected digit after decimal point", span));
         }
         // `123abc` is a single invalid token, not two.
-        if self.peek_char().is_some_and(is_ident_continue) {
+        // Exception: inside interpolation `{val:.2f}`, allow number+ident
+        // sequences so format specs like `.2f` lex as separate tokens.
+        if self.peek_char().is_some_and(is_ident_continue)
+            && !self
+                .contexts
+                .iter()
+                .any(|c| matches!(c, LexContext::Interp { .. }))
+        {
             while let Some(c) = self.peek_char() {
                 if is_ident_continue(c) {
                     self.bump_char();
@@ -645,6 +662,20 @@ mod tests {
         assert_eq!(stmt_end.leading.len(), 2);
         assert_eq!(stmt_end.leading[0].kind, TriviaKind::Whitespace);
         assert_eq!(stmt_end.leading[1].kind, TriviaKind::Comment);
+    }
+
+    #[test]
+    fn hash_line_comment() {
+        let lexed = lex("1 # comment\n2");
+        assert_eq!(
+            lexed.tokens.iter().map(|t| t.kind).collect::<Vec<_>>(),
+            vec![K::Int, K::StmtEnd, K::Int, K::Eof]
+        );
+        let stmt_end = &lexed.tokens[1];
+        assert!(stmt_end
+            .leading
+            .iter()
+            .any(|t| t.kind == TriviaKind::Comment));
     }
 
     #[test]

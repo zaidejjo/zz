@@ -7,6 +7,8 @@
 
 pub mod ast;
 pub mod diag;
+pub mod fmt;
+pub mod levenshtein;
 pub mod lexer;
 pub mod parser;
 pub mod printer;
@@ -15,6 +17,7 @@ pub mod token;
 
 pub use ast::{BinOp, Expr, Ident, Program, Stmt, UnOp};
 pub use diag::{Diag, Files};
+pub use fmt::{format_program, FormatConfig};
 pub use lexer::lex;
 pub use parser::{parse, Parsed};
 pub use printer::Printer;
