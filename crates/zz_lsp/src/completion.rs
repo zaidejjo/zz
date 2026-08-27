@@ -14,8 +14,14 @@ use crate::lookup::resolve_type_of_expr;
 // ── ZZ keywords ──────────────────────────────────────────────────────────
 
 const KEYWORDS: &[&str] = &[
-    "break", "continue", "defer", "else", "false", "for", "func", "if", "import", "let", "match",
-    "none", "return", "struct", "true", "while",
+    "break", "continue", "defer", "else", "false", "for", "func", "if", "import", "match", "none",
+    "return", "struct", "true", "while",
+];
+
+// ── Stdlib module names ──────────────────────────────────────────────────
+
+const STDLIB_MODULES: &[&str] = &[
+    "io", "str", "vec", "json", "http", "fs", "env", "math", "time",
 ];
 
 // ── Public API ───────────────────────────────────────────────────────────
@@ -156,10 +162,15 @@ fn dot_access_completions(
         None => return Vec::new(),
     };
 
+    // 1. Try struct field access (existing logic).
     let obj_type = resolve_obj_type(program, cr, obj_name);
     let struct_name = match obj_type {
         Some(Type::Struct(name)) => name,
-        _ => return Vec::new(),
+        _ => {
+            // 2. Not a struct — check if obj_name is an imported stdlib module
+            //    alias (e.g. `math` after `import std.math as math`).
+            return stdlib_module_completions(program, cr, obj_name, partial_prefix);
+        }
     };
 
     let sig = match cr.structs.get(&struct_name) {
@@ -178,6 +189,86 @@ fn dot_access_completions(
             ..Default::default()
         })
         .collect()
+}
+
+/// Provide completions for stdlib module access (`math.`, `str.`, etc.).
+///
+/// When the user types `math.`, look up the import alias in the AST and
+/// provide all functions from the corresponding stdlib module.
+fn stdlib_module_completions(
+    program: &Program,
+    cr: &CheckResult,
+    obj_name: &str,
+    partial_prefix: &str,
+) -> Vec<CompletionItem> {
+    // Find the stdlib module for this alias.
+    let module = find_stdlib_module_for_alias(program, obj_name);
+    let module = match module {
+        Some(m) => m,
+        None => return Vec::new(),
+    };
+
+    // The checker registers functions as `math.abs`, `math.floor`, etc.
+    // using the module's own name.  When the user uses an alias like
+    // `import std.math as m`, we need to match against `math.*` keys and
+    // present them as `m.*` completions.
+    let module_prefix = format!("{module}.");
+    let user_prefix = format!("{obj_name}.");
+    let mut items: Vec<CompletionItem> = cr
+        .funcs
+        .keys()
+        .filter(|k| k.starts_with(&module_prefix))
+        .map(|k| {
+            let func_name = &k[module_prefix.len()..];
+            CompletionItem {
+                label: func_name.to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(format!("{obj_name}.{func_name}")),
+                documentation: Some(tower_lsp::lsp_types::Documentation::String(format!(
+                    "std.{module}.{func_name}"
+                ))),
+                insert_text: Some(func_name.to_string()),
+                ..Default::default()
+            }
+        })
+        .filter(|item| item.label.starts_with(partial_prefix))
+        .collect();
+
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+/// Walk the AST import statements to find which stdlib module an alias
+/// maps to.  For example, `import std.math as math` maps alias `math`
+/// to module `math`.
+fn find_stdlib_module_for_alias(program: &Program, alias: &str) -> Option<String> {
+    for stmt in &program.stmts {
+        if let Stmt::Import {
+            path,
+            alias: import_alias,
+            ..
+        } = stmt
+        {
+            // The effective namespace is the import alias, or the last
+            // path segment if no explicit alias.
+            let ns = import_alias
+                .as_ref()
+                .cloned()
+                .or_else(|| path.last().cloned())
+                .unwrap_or_default();
+            if ns == alias {
+                // Extract the module name from the path (e.g. `std.math` → `math`).
+                if path.len() >= 2 && path[0] == "std" {
+                    return Some(path[1].clone());
+                }
+                // Direct import like `import math` — assume it's a stdlib module.
+                if path.len() == 1 && STDLIB_MODULES.contains(&path[0].as_str()) {
+                    return Some(path[0].clone());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn resolve_obj_type(program: &Program, cr: &CheckResult, name: &str) -> Option<Type> {
@@ -333,6 +424,30 @@ fn scope_completions(
                     label: name.clone(),
                     kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some(format!("{name}: {ty}")),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    // Stdlib module names (as imported aliases).
+    for stmt in &program.stmts {
+        if let Stmt::Import {
+            path,
+            alias: import_alias,
+            ..
+        } = stmt
+        {
+            let ns = import_alias
+                .as_ref()
+                .cloned()
+                .or_else(|| path.last().cloned())
+                .unwrap_or_default();
+            if ns.starts_with(partial_prefix) {
+                items.push(CompletionItem {
+                    label: ns.clone(),
+                    kind: Some(CompletionItemKind::MODULE),
+                    detail: Some(format!("import {}", path.join("."))),
                     ..Default::default()
                 });
             }
@@ -521,6 +636,23 @@ mod tests {
         (parsed.program, Some(cr))
     }
 
+    /// Check with stdlib functions registered (for stdlib module tests).
+    fn check_with_stdlib(source: &str) -> (Program, Option<CheckResult>) {
+        let parsed = parse(source);
+        let mut funcs = zz_stdlib::stdlib_funcs();
+        // Register each stdlib module under its own name (e.g. math.abs).
+        for module in zz_stdlib::STDLIB_MODULES {
+            let _ = zz_stdlib::register_module_namespace(
+                module,
+                module,
+                &mut funcs,
+                &mut std::collections::HashMap::new(),
+            );
+        }
+        let cr = check_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
+        (parsed.program, Some(cr))
+    }
+
     // ── Context detection ─────────────────────────────────────────────
 
     #[test]
@@ -693,5 +825,65 @@ mod tests {
         assert!(labels.contains(&"a1"));
         assert!(labels.contains(&"a2"));
         assert!(!labels.contains(&"b1"));
+    }
+
+    // ── Stdlib module completions ─────────────────────────────────────
+
+    #[test]
+    fn stdlib_module_dot_access() {
+        let src = "import std.math\nmath.";
+        let (program, cr) = check_with_stdlib(src);
+        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref());
+        let items = match resp {
+            Some(CompletionResponse::Array(v)) => v,
+            _ => panic!("expected array response"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"abs"), "expected 'abs' in {labels:?}");
+        assert!(labels.contains(&"floor"), "expected 'floor' in {labels:?}");
+        assert!(labels.contains(&"ceil"), "expected 'ceil' in {labels:?}");
+        assert!(labels.contains(&"sqrt"), "expected 'sqrt' in {labels:?}");
+        assert!(labels.contains(&"pow"), "expected 'pow' in {labels:?}");
+    }
+
+    #[test]
+    fn stdlib_module_dot_access_partial() {
+        let src = "import std.math\nmath.f";
+        let (program, cr) = check_with_stdlib(src);
+        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref());
+        let items = match resp {
+            Some(CompletionResponse::Array(v)) => v,
+            _ => panic!("expected array response"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"floor"), "expected 'floor' in {labels:?}");
+        assert!(!labels.contains(&"abs"), "should not contain 'abs'");
+    }
+
+    #[test]
+    fn stdlib_module_aliased_dot_access() {
+        let src = "import std.math as m\nm.";
+        let (program, cr) = check_with_stdlib(src);
+        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref());
+        let items = match resp {
+            Some(CompletionResponse::Array(v)) => v,
+            _ => panic!("expected array response"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"abs"), "expected 'abs' in {labels:?}");
+        assert!(labels.contains(&"pow"), "expected 'pow' in {labels:?}");
+    }
+
+    #[test]
+    fn stdlib_module_name_in_scope() {
+        let src = "import std.math as math\nmath";
+        let (program, cr) = check_with_stdlib(src);
+        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref());
+        let items = match resp {
+            Some(CompletionResponse::Array(v)) => v,
+            _ => panic!("expected array response"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"math"), "expected 'math' in {labels:?}");
     }
 }

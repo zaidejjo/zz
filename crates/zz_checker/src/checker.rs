@@ -380,6 +380,29 @@ impl Checker {
                     };
                     diag = diag.with_fixit(fixit);
                 }
+
+                // If the name looks like `module.func` and matches a known
+                // stdlib pattern, suggest adding the import.
+                if let Some((module, _func)) = name.split_once('.') {
+                    let std_module = match module {
+                        "io" | "str" | "vec" | "json" | "http" | "fs" | "env" | "math" | "time" => {
+                            Some(module)
+                        }
+                        _ => None,
+                    };
+                    if let Some(mod_name) = std_module {
+                        let import_stmt = format!("import std.{mod_name}");
+                        diag = diag.with_note(format!(
+                            "add `{import_stmt}` at the top of the file to use `{name}`"
+                        ));
+                        // Create an "add import" fixit that inserts at the top.
+                        diag = diag.with_fixit(FixIt::safe(
+                            Span::new(0, 0),
+                            format!("{import_stmt}\n"),
+                            "add import",
+                        ));
+                    }
+                }
                 self.errors.push(diag);
                 self.had_undefined_var = true;
                 Type::Error

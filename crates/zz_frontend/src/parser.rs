@@ -236,6 +236,52 @@ impl Parser {
                 }
                 self.pos = save_pos;
                 self.errors.truncate(save_errs);
+
+                // Recovery: `TYPE IDENT := expr` is invalid ZZ (should use
+                // `IDENT := expr` or `IDENT: TYPE = expr`). Detect the
+                // pattern and produce a usable Decl instead of degrading to
+                // `Stmt::Expr(Ident("int"))` which the formatter would
+                // garble.
+                if self.peek_kind_at(0) == TokenKind::Ident
+                    && !matches!(self.peek().text.as_str(), "true" | "false")
+                    && self.peek_kind_at(1) == TokenKind::Ident
+                    && self.peek_kind_at(2) == TokenKind::ColonEq
+                {
+                    let type_tok = self.peek().clone();
+                    let type_name = type_tok.text.clone();
+                    // Only treat as a type if the first identifier is a
+                    // known primitive or a user-defined type name.  Primitive
+                    // type keywords are lexed as Ident, so check for the
+                    // common ones.
+                    let is_type_kw = matches!(
+                        type_name.as_str(),
+                        "int" | "float" | "bool" | "str" | "Option" | "Result"
+                    );
+                    if is_type_kw {
+                        let ty = self.parse_type();
+                        let name = self.advance(); // identifier
+                        self.advance(); // `:=`
+                        let value = self.parse_expr();
+                        let span = ty.span.join(value.span());
+                        self.errors.push(error_at(
+                            format!(
+                                "invalid declaration: use `{}: {} = expr` (explicit type) or `{} := expr` (inferred type)",
+                                name.text, type_name, name.text,
+                            ),
+                            span,
+                        ));
+                        return Stmt::Decl {
+                            ty: Some(ty),
+                            name: Ident {
+                                name: name.text,
+                                span: name.span,
+                            },
+                            value,
+                            span,
+                        };
+                    }
+                }
+
                 let expr = self.parse_expr();
                 // `expr = expr` — assignment statement.
                 if self.at(TokenKind::Assign) {
