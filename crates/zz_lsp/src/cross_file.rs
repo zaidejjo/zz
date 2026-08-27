@@ -362,7 +362,7 @@ mod tests {
         // Verify that parsing a 1000-line file is fast.
         let mut source = String::new();
         for i in 0..1000 {
-            source.push_str(&format!("let x_{i} = {i}\n"));
+            source.push_str(&format!("x_{i} := {i}\n"));
         }
         let uri: Url = "file:///perf.zz".parse().unwrap();
         let start = std::time::Instant::now();
@@ -382,7 +382,7 @@ mod tests {
         // Verify that collecting definitions from many symbols is fast.
         let mut source = String::new();
         for i in 0..500 {
-            source.push_str(&format!("let val_{i} = {i}\n"));
+            source.push_str(&format!("val_{i} := {i}\n"));
         }
         let parsed = zz_frontend::parse(&source);
         let start = std::time::Instant::now();
@@ -424,7 +424,7 @@ mod tests {
         let root = PathBuf::from("/tmp/perf_ws");
         std::fs::create_dir_all(&root).unwrap();
         for i in 0..50 {
-            std::fs::write(root.join(format!("file_{i}.zz")), "let x = 1\n").unwrap();
+            std::fs::write(root.join(format!("file_{i}.zz")), "x := 1\n").unwrap();
         }
         let start = std::time::Instant::now();
         let files = scan_for_zz_files(&root);
@@ -445,7 +445,7 @@ mod tests {
         let mut expected_refs = 0;
         for i in 0..50 {
             let uri: Url = format!("file:///f{i}.zz").parse().unwrap();
-            let source = format!("let shared = {i}\nlet local_{i} = shared\n");
+            let source = format!("shared := {i}\nlocal_{i} := shared\n");
             let entry = parse_file_entry(uri.clone(), source, format!("f{i}"));
             index.module_to_uri.insert(format!("f{i}"), uri.clone());
             index.uri_to_module.insert(uri.clone(), format!("f{i}"));

@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn signature_help_no_call_returns_none() {
-        let src = "func add(x: int, y: int) -> int { return x + y }\nlet a = 1";
+        let src = "func add(x: int, y: int) -> int { return x + y }\na := 1";
         let (program, cr) = check(src);
         let help = signature_help_for_position(&program, src, src.len() as u32, cr.as_ref());
         assert!(help.is_none());

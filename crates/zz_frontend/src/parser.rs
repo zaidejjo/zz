@@ -227,7 +227,7 @@ impl Parser {
                 }
             }
             _ => {
-                // Try `TYPE IDENT = expr` (explicit declaration). Backtrack
+                // Try `IDENT: TYPE = expr` (explicit declaration). Backtrack
                 // on failure so ordinary expressions still parse.
                 let save_pos = self.pos;
                 let save_errs = self.errors.len();
@@ -237,11 +237,10 @@ impl Parser {
                 self.pos = save_pos;
                 self.errors.truncate(save_errs);
 
-                // Recovery: `TYPE IDENT := expr` is invalid ZZ (should use
-                // `IDENT := expr` or `IDENT: TYPE = expr`). Detect the
+                // Recovery: `TYPE IDENT := expr` is the OLD syntax which is
+                // no longer valid (now `IDENT: TYPE = expr`). Detect the
                 // pattern and produce a usable Decl instead of degrading to
-                // `Stmt::Expr(Ident("int"))` which the formatter would
-                // garble.
+                // `Stmt::Expr(Ident("int"))` which the formatter would garble.
                 if self.peek_kind_at(0) == TokenKind::Ident
                     && !matches!(self.peek().text.as_str(), "true" | "false")
                     && self.peek_kind_at(1) == TokenKind::Ident
@@ -249,10 +248,6 @@ impl Parser {
                 {
                     let type_tok = self.peek().clone();
                     let type_name = type_tok.text.clone();
-                    // Only treat as a type if the first identifier is a
-                    // known primitive or a user-defined type name.  Primitive
-                    // type keywords are lexed as Ident, so check for the
-                    // common ones.
                     let is_type_kw = matches!(
                         type_name.as_str(),
                         "int" | "float" | "bool" | "str" | "Option" | "Result"
@@ -401,19 +396,26 @@ impl Parser {
         }
     }
 
-    /// Parse `TYPE IDENT = expr`; returns `None` (with position restored by
+    /// Parse `IDENT: TYPE = expr`; returns `None` (with position restored by
     /// the caller) when the statement is not an explicit declaration.
     fn try_parse_explicit_decl(&mut self) -> Option<Stmt> {
-        let ty = self.parse_type();
+        // Must start with an identifier.
         if !self.at(TokenKind::Ident) {
             return None;
         }
         let name = self.advance();
+        // Then a colon.
+        if !self.eat(TokenKind::Colon) {
+            return None;
+        }
+        // Then a type.
+        let ty = self.parse_type();
+        // Then `=`.
         if !self.eat(TokenKind::Assign) {
             return None;
         }
         let value = self.parse_expr();
-        let span = ty.span.join(value.span());
+        let span = name.span.join(value.span());
         Some(Stmt::Decl {
             ty: Some(ty),
             name: Ident {
@@ -1975,7 +1977,7 @@ mod tests {
 
     #[test]
     fn parses_explicit_decl() {
-        let p = parse_ok("int x = 10");
+        let p = parse_ok("x: int = 10");
         match &p.stmts[0] {
             Stmt::Decl {
                 ty: Some(ty), name, ..
@@ -1989,7 +1991,7 @@ mod tests {
 
     #[test]
     fn parses_str_explicit_decl() {
-        let p = parse_ok("str s = \"hello\"");
+        let p = parse_ok("s: str = \"hello\"");
         match &p.stmts[0] {
             Stmt::Decl { ty: Some(ty), .. } => assert_eq!(ty.kind, TyKind::Str),
             other => panic!("unexpected: {other:?}"),
@@ -2007,7 +2009,7 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
-        let p = parse_ok("[int] scores = [10, 20, 30]");
+        let p = parse_ok("scores: [int] = [10, 20, 30]");
         match &p.stmts[0] {
             Stmt::Decl { ty: Some(ty), .. } => {
                 assert!(matches!(ty.kind, TyKind::Array(_)));
@@ -2027,7 +2029,7 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
-        let p = parse_ok("{str: int} ages = {\"Zaid\": 20}");
+        let p = parse_ok("ages: {str: int} = {\"Zaid\": 20}");
         match &p.stmts[0] {
             Stmt::Decl { ty: Some(ty), .. } => {
                 assert!(matches!(ty.kind, TyKind::Dict(_, _)));
@@ -2038,7 +2040,7 @@ mod tests {
 
     #[test]
     fn parses_union_type() {
-        let p = parse_ok("{str: str | int} user = {\"name\": \"Zaid\", \"age\": 20}");
+        let p = parse_ok("user: {str: str | int} = {\"name\": \"Zaid\", \"age\": 20}");
         match &p.stmts[0] {
             Stmt::Decl { ty: Some(ty), .. } => {
                 assert!(matches!(ty.kind, TyKind::Dict(_, _)));
@@ -2096,7 +2098,7 @@ mod tests {
 
     #[test]
     fn parses_option_result_types() {
-        let p = parse_ok("Option<int> a = .none\nResult<int, str> b = .ok(1)");
+        let p = parse_ok("a: Option<int> = .none\nb: Result<int, str> = .ok(1)");
         match &p.stmts[0] {
             Stmt::Decl { ty: Some(ty), .. } => {
                 assert!(matches!(ty.kind, TyKind::Option(_)));

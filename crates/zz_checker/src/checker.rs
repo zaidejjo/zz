@@ -2177,14 +2177,14 @@ mod tests {
 
     #[test]
     fn annotation_unifies() {
-        let r = check_src("float x = 1 + 2.5");
+        let r = check_src("x: float = 1 + 2.5");
         assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Float);
     }
 
     #[test]
     fn annotation_mismatch_errors() {
-        errors_contain("str x = 1 + 2", "type mismatch");
+        errors_contain("x: str = 1 + 2", "type mismatch");
     }
 
     #[test]
@@ -2345,7 +2345,7 @@ mod tests {
 
     #[test]
     fn struct_type_annotation_resolves() {
-        let r = check_src("struct Point { x: int, y: int }\nPoint p = Point{ x: 1, y: 2 }");
+        let r = check_src("struct Point { x: int, y: int }\np: Point = Point{ x: 1, y: 2 }");
         assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["p"], Type::Struct("Point".into()));
     }
@@ -2444,7 +2444,7 @@ mod tests {
     #[test]
     fn match_result() {
         let r =
-            check_src("Result<int, str> v = .ok(1)\nx := match v { .ok(n) => n, .err(_) => 0 }");
+            check_src("v: Result<int, str> = .ok(1)\nx := match v { .ok(n) => n, .err(_) => 0 }");
         assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["x"], Type::Int);
     }
@@ -2579,7 +2579,7 @@ mod tests {
 
     #[test]
     fn array_explicit_decl() {
-        let r = check_src("[int] scores = [10, 20, 30]");
+        let r = check_src("scores: [int] = [10, 20, 30]");
         assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["scores"], Type::Array(Box::new(Type::Int)));
     }
@@ -2596,14 +2596,14 @@ mod tests {
 
     #[test]
     fn array_annotation_unifies_with_union() {
-        let r = check_src("[int] v = [1, 2]");
+        let r = check_src("v: [int] = [1, 2]");
         assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(r.bindings["v"], Type::Array(Box::new(Type::Int)));
     }
 
     #[test]
     fn array_type_mismatch_errors() {
-        errors_contain("[int] v = [\"a\"]", "type mismatch");
+        errors_contain("v: [int] = [\"a\"]", "type mismatch");
     }
 
     #[test]
@@ -2611,7 +2611,7 @@ mod tests {
         // Union semantics: a value matches a declared type if any member
         // matches. `[1, "a"]` has element type `int | str`, which contains
         // `int`, so the annotation is accepted.
-        let r = check_src("[int] v = [1, \"a\"]");
+        let r = check_src("v: [int] = [1, \"a\"]");
         assert!(!has_errors(&r), "errors: {:?}", r.errors);
     }
 
@@ -2632,7 +2632,7 @@ mod tests {
 
     #[test]
     fn dict_explicit_decl() {
-        let r = check_src("{str: int} ages = {\"a\": 1}");
+        let r = check_src("ages: {str: int} = {\"a\": 1}");
         assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(
             r.bindings["ages"],
@@ -2642,7 +2642,7 @@ mod tests {
 
     #[test]
     fn dict_union_value_type() {
-        let r = check_src("{str: str | int} user = {\"name\": \"Zaid\", \"age\": 20}");
+        let r = check_src("user: {str: str | int} = {\"name\": \"Zaid\", \"age\": 20}");
         assert!(!has_errors(&r), "errors: {:?}", r.errors);
         assert_eq!(
             r.bindings["user"],
@@ -2655,7 +2655,7 @@ mod tests {
 
     #[test]
     fn dict_key_mismatch_errors() {
-        errors_contain("{str: int} m = {1: 2}", "type mismatch");
+        errors_contain("m: {str: int} = {1: 2}", "type mismatch");
     }
 
     #[test]
@@ -2672,7 +2672,7 @@ mod tests {
 
     #[test]
     fn union_annotation_accepts_member() {
-        let r = check_src("str | int v = 5");
+        let r = check_src("v: str | int = 5");
         assert!(!has_errors(&r), "errors: {:?}", r.errors);
         // Binding stores the value type (int), which unifies with the union.
         assert_eq!(r.bindings["v"], Type::Int);
@@ -2680,7 +2680,7 @@ mod tests {
 
     #[test]
     fn union_mismatch_errors() {
-        errors_contain("str | int v = true", "type mismatch");
+        errors_contain("v: str | int = true", "type mismatch");
     }
 
     // --- indexing & slicing -------------------------------------------------

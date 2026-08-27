@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn file_defs_from_check_result() {
-        let source = "let x = 10\nfunc add(a: int, b: int) -> int { return a + b }\nstruct Point { x: int, y: int }\n";
+        let source = "x := 10\nfunc add(a: int, b: int) -> int { return a + b }\nstruct Point { x: int, y: int }\n";
         let parsed = parse(source);
         let cr = check_program(
             &parsed.program,
@@ -358,11 +358,11 @@ mod tests {
         let uri: Url = "file:///test.zz".parse().unwrap();
 
         // First insert — no old defs.
-        let (_, old_defs) = state.update_document(uri.clone(), 1, "let x = 1\n".into());
+        let (_, old_defs) = state.update_document(uri.clone(), 1, "x := 1\n".into());
         assert!(old_defs.is_none(), "first insert should have no old defs");
 
         // Simulate absorbing a check result so the doc gets file_defs.
-        let parsed = parse("let x = 1\nlet y = 2\n");
+        let parsed = parse("x := 1\ny := 2\n");
         let cr = check_program(
             &parsed.program,
             HashMap::new(),
@@ -372,7 +372,7 @@ mod tests {
         state.absorb_result(&uri, &cr);
 
         // Update the document — should return old defs.
-        let (_, old_defs) = state.update_document(uri.clone(), 2, "let x = 3\n".into());
+        let (_, old_defs) = state.update_document(uri.clone(), 2, "x := 3\n".into());
         let old = old_defs.expect("second update should have old defs");
         assert!(old.bindings.contains(&"x".to_string()));
         assert!(old.bindings.contains(&"y".to_string()));
@@ -383,8 +383,8 @@ mod tests {
         let state = make_state();
         let uri: Url = "file:///test.zz".parse().unwrap();
 
-        state.update_document(uri.clone(), 1, "let z = 5\n".into());
-        let parsed = parse("let z = 5\n");
+        state.update_document(uri.clone(), 1, "z := 5\n".into());
+        let parsed = parse("z := 5\n");
         let cr = check_program(
             &parsed.program,
             HashMap::new(),
@@ -405,8 +405,8 @@ mod tests {
         let state = make_state();
         let uri: Url = "file:///test.zz".parse().unwrap();
 
-        state.update_document(uri.clone(), 1, "let a = 1\n".into());
-        let parsed = parse("let a = 1\n");
+        state.update_document(uri.clone(), 1, "a := 1\n".into());
+        let parsed = parse("a := 1\n");
         let cr = check_program(
             &parsed.program,
             HashMap::new(),
@@ -429,8 +429,8 @@ mod tests {
         let uri: Url = "file:///test.zz".parse().unwrap();
 
         // v1: defines x and y.
-        state.update_document(uri.clone(), 1, "let x = 1\nlet y = 2\n".into());
-        let parsed = parse("let x = 1\nlet y = 2\n");
+        state.update_document(uri.clone(), 1, "x := 1\ny := 2\n".into());
+        let parsed = parse("x := 1\ny := 2\n");
         let cr = check_program(
             &parsed.program,
             HashMap::new(),
@@ -442,7 +442,7 @@ mod tests {
         assert!(state.bindings.read().unwrap().contains_key("y"));
 
         // v2: defines only x (y removed). Prune old defs first.
-        let (_, old_defs) = state.update_document(uri.clone(), 2, "let x = 3\n".into());
+        let (_, old_defs) = state.update_document(uri.clone(), 2, "x := 3\n".into());
         if let Some(old) = &old_defs {
             state.prune_defs(old);
         }
@@ -455,8 +455,8 @@ mod tests {
         let state = make_state();
         let uri: Url = "file:///test.zz".parse().unwrap();
 
-        state.update_document(uri.clone(), 1, "let w = 99\n".into());
-        let parsed = parse("let w = 99\n");
+        state.update_document(uri.clone(), 1, "w := 99\n".into());
+        let parsed = parse("w := 99\n");
         let cr = check_program(
             &parsed.program,
             HashMap::new(),

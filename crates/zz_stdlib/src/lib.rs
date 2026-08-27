@@ -639,7 +639,10 @@ mod tests {
 
     #[test]
     fn elvis_none_fallback() {
-        assert_eq!(run("Option<int> x = .none\nx ?? 0").unwrap(), Value::Int(0));
+        assert_eq!(
+            run("x: Option<int> = .none\nx ?? 0").unwrap(),
+            Value::Int(0)
+        );
     }
 
     #[test]
@@ -658,7 +661,7 @@ mod tests {
         // .some then fallback: first ?? unwraps, second sees plain int.
         assert_eq!(
             run(r#"
-                Option<int> a = .some(42)
+                a: Option<int> = .some(42)
                 a ?? 0 ?? -1
             "#)
             .unwrap(),

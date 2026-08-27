@@ -171,7 +171,7 @@ mod tests {
                 alternatives: vec![],
             }],
         };
-        let diag = convert_diagnostic("let x = 1", &raw);
+        let diag = convert_diagnostic("x := 1", &raw);
         assert_eq!(diag.severity, Some(DiagnosticSeverity::WARNING));
         // Data should contain the serialized RawDiag.
         let data = diag.data.as_ref().expect("should have data");
@@ -204,7 +204,7 @@ mod tests {
     async fn recheck_publishes_diagnostics() {
         let state = make_state();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        let src = "let x = 1\n";
+        let src = "x := 1\n";
         state.update_document(uri.clone(), 1, src.to_string());
 
         // We can't easily test the full async pipeline without a mock client,

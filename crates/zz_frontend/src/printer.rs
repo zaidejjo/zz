@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn round_trip_simple() {
-        round_trips("let x = 1 + 2");
+        round_trips("x := 1 + 2");
     }
 
     #[test]
@@ -108,52 +108,52 @@ mod tests {
 
     #[test]
     fn round_trip_multiple_statements() {
-        round_trips("let a = 1\nlet b = 2\nlet c = a + b\n");
+        round_trips("a := 1\nb := 2\nc := a + b\n");
     }
 
     #[test]
     fn round_trip_weird_whitespace() {
-        round_trips("let   x   =   1   +   2");
+        round_trips("x   :=   1   +   2");
     }
 
     #[test]
     fn round_trip_comments() {
-        round_trips("// header comment\nlet x = 1 // trailing\nlet y = 2\n");
+        round_trips("// header comment\nx := 1 // trailing\ny := 2\n");
     }
 
     #[test]
     fn round_trip_nested_parens() {
-        round_trips("let x = ((1 + 2) * (3 - 4))");
+        round_trips("x := ((1 + 2) * (3 - 4))");
     }
 
     #[test]
     fn round_trip_multiline_parens() {
-        round_trips("let x = (1 +\n    2)\n");
+        round_trips("x := (1 +\n    2)\n");
     }
 
     #[test]
     fn round_trip_trailing_operator_continuation() {
-        round_trips("let x = 1 +\n    2\n");
+        round_trips("x := 1 +\n    2\n");
     }
 
     #[test]
     fn round_trip_block_comment() {
-        round_trips("let x = 1 /* block\ncomment */ + 2\n");
+        round_trips("x := 1 /* block\ncomment */ + 2\n");
     }
 
     #[test]
     fn round_trip_blank_lines() {
-        round_trips("let a = 1\n\n\nlet b = 2\n");
+        round_trips("a := 1\n\n\nb := 2\n");
     }
 
     #[test]
     fn round_trip_semicolons() {
-        round_trips("let a = 1; let b = 2;");
+        round_trips("a := 1; b := 2;");
     }
 
     #[test]
     fn round_trip_floats_and_unary() {
-        round_trips("let x = -1.5 + 2.0\n");
+        round_trips("x := -1.5 + 2.0\n");
     }
 
     #[test]
@@ -198,22 +198,22 @@ mod tests {
 
     #[test]
     fn round_trip_block_expr() {
-        round_trips("let x = {\n    let y = 1\n    y + 1\n}\n");
+        round_trips("x := {\n    y := 1\n    y + 1\n}\n");
     }
 
     #[test]
     fn round_trip_try_and_variants() {
-        round_trips("let a = .ok(1)\nlet b = .none\nlet c = f()?\n");
+        round_trips("a := .ok(1)\nb := .none\nc := f()?\n");
     }
 
     #[test]
     fn round_trip_strings_and_bools() {
-        round_trips("let s = \"hi\\n\"\nlet b = true && !false\n");
+        round_trips("s := \"hi\\n\"\nb := true && !false\n");
     }
 
     #[test]
     fn round_trip_annotated_types() {
-        round_trips("Option<int> a = .none\nResult<int, str> b = .ok(1)\n");
+        round_trips("a: Option<int> = .none\nb: Result<int, str> = .ok(1)\n");
     }
 
     #[test]
@@ -233,22 +233,22 @@ mod tests {
 
     #[test]
     fn round_trip_explicit_decl() {
-        round_trips("int x = 10\nstr s = \"hello\"\n");
+        round_trips("x: int = 10\ns: str = \"hello\"\n");
     }
 
     #[test]
     fn round_trip_arrays() {
-        round_trips("scores := [10, 20, 30]\n[int] names = [1, 2]\n");
+        round_trips("scores := [10, 20, 30]\nnames: [int] = [1, 2]\n");
     }
 
     #[test]
     fn round_trip_dicts() {
-        round_trips("ages := {\"Zaid\": 20}\n{str: int} ages2 = {\"a\": 1}\n");
+        round_trips("ages := {\"Zaid\": 20}\nages2: {str: int} = {\"a\": 1}\n");
     }
 
     #[test]
     fn round_trip_union_dict() {
-        round_trips("{str: str | int} user = {\"name\": \"Zaid\", \"age\": 20}\n");
+        round_trips("user: {str: str | int} = {\"name\": \"Zaid\", \"age\": 20}\n");
     }
 
     #[test]

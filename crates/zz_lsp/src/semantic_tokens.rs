@@ -582,7 +582,7 @@ mod tests {
 
     #[test]
     fn variables_are_highlighted() {
-        let src = "let x = 10\n";
+        let src = "x := 10\n";
         let parsed = parse(src);
         let tokens = collect_semantic_tokens(&parsed.program, src);
         let vars: Vec<_> = tokens
@@ -594,7 +594,7 @@ mod tests {
 
     #[test]
     fn numbers_are_highlighted() {
-        let src = "let x = 42\nlet y = 3.14\n";
+        let src = "x := 42\ny := 3.14\n";
         let parsed = parse(src);
         let tokens = collect_semantic_tokens(&parsed.program, src);
         let nums: Vec<_> = tokens
@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn strings_are_highlighted() {
-        let src = "let s = \"hello\"\n";
+        let src = "s := \"hello\"\n";
         let parsed = parse(src);
         let tokens = collect_semantic_tokens(&parsed.program, src);
         let strs: Vec<_> = tokens
@@ -637,7 +637,7 @@ mod tests {
 
     #[test]
     fn encode_produces_delta_encoding() {
-        let src = "let x = 1\nlet y = 2\n";
+        let src = "x := 1\ny := 2\n";
         let parsed = parse(src);
         let tokens = collect_semantic_tokens(&parsed.program, src);
         let encoded = encode_tokens(&tokens, src);

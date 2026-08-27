@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn call_has_parameter_hints() {
-        let src = "func add(a: int, b: int) -> int { return a + b }\nlet x = add(1, 2)\n";
+        let src = "func add(a: int, b: int) -> int { return a + b }\nx := add(1, 2)\n";
         let hints = hints_for(src);
         // Should have parameter name hints for the two arguments.
         let param_hints: Vec<_> = hints
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn no_hints_for_unknown_func() {
-        let src = "let x = unknown_func(1)\n";
+        let src = "x := unknown_func(1)\n";
         let hints = hints_for(src);
         // No param hints for unknown function.
         let param_hints: Vec<_> = hints
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn hints_in_nested_expressions() {
-        let src = "func add(a: int, b: int) -> int { return a + b }\nlet x = add(add(1, 2), 3)\n";
+        let src = "func add(a: int, b: int) -> int { return a + b }\nx := add(add(1, 2), 3)\n";
         let hints = hints_for(src);
         let param_hints: Vec<_> = hints
             .iter()

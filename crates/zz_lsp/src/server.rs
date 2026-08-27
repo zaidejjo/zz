@@ -323,56 +323,39 @@ impl LanguageServer for Backend {
         let def = defs.values().find(|d| d.name == name);
 
         // For struct fields (`s.field`), resolve through the struct.
-        let def = if def.is_none() {
-            if let Some(Expr::Field { name: field, obj, .. }) = node.expr {
-                // Resolve the object type to find which struct it is.
-                if let Some(check_result) = &doc.check_result {
-                    if let Some(zz_checker::Type::Struct(struct_name)) =
+        if def.is_none() {
+            if let Some(check_result) = &doc.check_result {
+                // Case 1: Expr::Field (non-trivial base like `f().x`)
+                if let Some(Expr::Field { name: field, obj, .. }) = node.expr {
+                    if let Some(zz_checker::Type::Struct(ref struct_name)) =
                         crate::lookup::resolve_type_of_expr(program, check_result, obj)
                     {
-                        // Find the struct definition and its field span.
-                        if let Some(ssig) = check_result.structs.get(&struct_name) {
-                            if let Some((fname, _)) =
-                                ssig.fields.iter().find(|(n, _)| n == field)
-                            {
-                                // Search for the field in the struct definition.
-                                for stmt in &program.stmts {
-                                    if let zz_frontend::ast::Stmt::Struct {
-                                        name: sname,
-                                        fields,
-                                        ..
-                                    } = stmt
-                                    {
-                                        if sname.join(".") == struct_name {
-                                            for (fi_name, _) in fields {
-                                                if fi_name.name == *fname {
-                                                    return Ok(Some(
-                                                        GotoDefinitionResponse::Scalar(
-                                                            Location {
-                                                                uri: uri.clone(),
-                                                                range: crate::convert::span_to_range(
-                                                                    &doc.source,
-                                                                    fi_name.span,
-                                                                ),
-                                                            },
-                                                        ),
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                        if let Some(resp) = find_struct_field_location(
+                            check_result, struct_name, &field, program, uri, &doc.source,
+                        ) {
+                            return Ok(Some(resp));
+                        }
+                    }
+                }
+
+                // Case 2: Expr::Path with 2+ parts (dotted path like `p.x`)
+                if let Some(Expr::Path { parts, .. }) = node.expr {
+                    if parts.len() >= 2 {
+                        let obj_name = &parts[0];
+                        let field = parts.last().unwrap();
+                        if let Some(zz_checker::Type::Struct(ref struct_name)) =
+                            check_result.bindings.get(obj_name)
+                        {
+                            if let Some(resp) = find_struct_field_location(
+                                check_result, struct_name, field, program, uri, &doc.source,
+                            ) {
+                                return Ok(Some(resp));
                             }
                         }
                     }
                 }
-                None
-            } else {
-                None
             }
-        } else {
-            def
-        };
+        }
 
         let def = match def {
             Some(d) => d,
@@ -801,6 +784,41 @@ impl LanguageServer for Backend {
     }
 }
 
+/// Find the location of a struct field definition.
+fn find_struct_field_location(
+    check_result: &zz_checker::CheckResult,
+    struct_name: &str,
+    field_name: &str,
+    program: &zz_frontend::ast::Program,
+    uri: &Url,
+    source: &str,
+) -> Option<GotoDefinitionResponse> {
+    if let Some(ssig) = check_result.structs.get(struct_name) {
+        if let Some((fname, _)) = ssig.fields.iter().find(|(n, _)| n == field_name) {
+            for stmt in &program.stmts {
+                if let zz_frontend::ast::Stmt::Struct {
+                    name: sname,
+                    fields,
+                    ..
+                } = stmt
+                {
+                    if sname.join(".") == struct_name {
+                        for (fi_name, _) in fields {
+                            if fi_name.name == *fname {
+                                return Some(GotoDefinitionResponse::Scalar(Location {
+                                    uri: uri.clone(),
+                                    range: crate::convert::span_to_range(source, fi_name.span),
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -973,12 +991,12 @@ mod tests {
     async fn hover_let_binding() {
         let (service, state) = setup();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        let src = "let x = 42\n";
+        let src = "x := 42\n";
         open_and_check(&state, &uri, src);
 
         let pos = Position {
             line: 0,
-            character: 4, // on "x"
+            character: 0, // on "x"
         };
         let hover = service
             .inner()
@@ -1024,12 +1042,12 @@ mod tests {
     async fn goto_definition_function() {
         let (service, state) = setup();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        let src = "func add(a: int, b: int) -> int { return a + b }\nlet x = add(1, 2)\n";
+        let src = "func add(a: int, b: int) -> int { return a + b }\nx := add(1, 2)\n";
         open_and_check(&state, &uri, src);
 
         let pos = Position {
             line: 1,
-            character: 8, // on "add" in call
+            character: 5, // on "add" in call
         };
         let def = service
             .inner()
@@ -1057,12 +1075,12 @@ mod tests {
     async fn goto_definition_struct_field() {
         let (service, state) = setup();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        let src = "struct Point { x: int, y: int }\nlet p = Point{ x: 1, y: 2 }\nlet v = p.x\n";
+        let src = "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\nv := p.x\n";
         open_and_check(&state, &uri, src);
 
         let pos = Position {
             line: 2,
-            character: 8, // on "x" in p.x
+            character: 7, // on "x" in p.x
         };
         let def = service
             .inner()
@@ -1105,7 +1123,7 @@ mod tests {
     async fn document_symbol_lists_functions_and_structs() {
         let (service, state) = setup();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        let src = "func add(a: int, b: int) -> int { return a + b }\nstruct Point { x: int, y: int }\nlet c = 1\n";
+        let src = "func add(a: int, b: int) -> int { return a + b }\nstruct Point { x: int, y: int }\nc := 1\n";
         open_and_check(&state, &uri, src);
 
         let syms = service
@@ -1174,7 +1192,7 @@ mod tests {
     async fn references_finds_usages() {
         let (service, state) = setup();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        let src = "func id(x: int) -> int { return x }\nlet a = id(1)\nlet b = id(2)\n";
+        let src = "func id(x: int) -> int { return x }\na := id(1)\nb := id(2)\n";
         open_and_check(&state, &uri, src);
 
         // Cursor on the `id` function definition.
@@ -1229,7 +1247,7 @@ mod tests {
     async fn prepare_rename_on_symbol() {
         let (service, state) = setup();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        let src = "let myvar = 1\n";
+        let src = "myvar := 1\n";
         open_and_check(&state, &uri, src);
 
         let resp = service
@@ -1238,7 +1256,7 @@ mod tests {
                 text_document: TextDocumentIdentifier { uri },
                 position: Position {
                     line: 0,
-                    character: 4,
+                    character: 0,
                 },
             })
             .await
@@ -1250,7 +1268,7 @@ mod tests {
     async fn prepare_rename_off_symbol_returns_none() {
         let (service, state) = setup();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        let src = "let x = 1\n";
+        let src = "x := 1\n";
         open_and_check(&state, &uri, src);
 
         let resp = service
@@ -1259,7 +1277,7 @@ mod tests {
                 text_document: TextDocumentIdentifier { uri },
                 position: Position {
                     line: 0,
-                    character: 0, // on "let" keyword
+                    character: 1, // on space between x and :=
                 },
             })
             .await
@@ -1273,7 +1291,7 @@ mod tests {
     async fn rename_replaces_all_refs() {
         let (service, state) = setup();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        let src = "let x = 1\nlet y = x + x\n";
+        let src = "x := 1\ny := x + x\n";
         open_and_check(&state, &uri, src);
 
         let edit = service
@@ -1283,7 +1301,7 @@ mod tests {
                     text_document: TextDocumentIdentifier { uri: uri.clone() },
                     position: Position {
                         line: 0,
-                        character: 4,
+                        character: 0,
                     },
                 },
                 new_name: "z".to_string(),
@@ -1304,7 +1322,7 @@ mod tests {
     async fn document_highlight_read_write() {
         let (service, state) = setup();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        let src = "let x = 1\nlet y = x\n";
+        let src = "x := 1\ny := x\n";
         open_and_check(&state, &uri, src);
 
         let highlights = service
@@ -1314,7 +1332,7 @@ mod tests {
                     text_document: TextDocumentIdentifier { uri },
                     position: Position {
                         line: 0,
-                        character: 4,
+                        character: 0,
                     },
                 },
                 work_done_progress_params: WorkDoneProgressParams::default(),
@@ -1355,7 +1373,7 @@ mod tests {
     async fn completion_scope_mode() {
         let (service, state) = setup();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        let src = "func greet(n: str) -> str { return n }\nlet x = gr\n";
+        let src = "func greet(n: str) -> str { return n }\nx := gr\n";
         open_and_check(&state, &uri, src);
 
         let resp = service
@@ -1392,7 +1410,7 @@ mod tests {
     async fn completion_dot_access() {
         let (service, state) = setup();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        let src = "struct Point { x: int, y: int }\nlet p = Point{ x: 1, y: 2 }\nlet v = p.\n";
+        let src = "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\nv := p.\n";
         open_and_check(&state, &uri, src);
 
         let resp = service
@@ -1402,7 +1420,7 @@ mod tests {
                     text_document: TextDocumentIdentifier { uri },
                     position: Position {
                         line: 2,
-                        character: 10, // after "p."
+                        character: 7, // after "p."
                     },
                 },
                 work_done_progress_params: WorkDoneProgressParams::default(),
@@ -1451,7 +1469,7 @@ mod tests {
     async fn signature_help_inside_call() {
         let (service, state) = setup();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        let src = "func add(a: int, b: int) -> int { return a + b }\nlet x = add(";
+        let src = "func add(a: int, b: int) -> int { return a + b }\nx := add(";
         open_and_check(&state, &uri, src);
 
         let help = service
@@ -1517,7 +1535,7 @@ mod tests {
     async fn code_action_empty_range_returns_none() {
         let (service, state) = setup();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        let src = "let x = 1\n";
+        let src = "x := 1\n";
         open_and_check(&state, &uri, src);
 
         let actions = service
@@ -1544,7 +1562,7 @@ mod tests {
     async fn did_close_removes_document() {
         let (service, state) = setup();
         let uri: Url = "file:///test.zz".parse().unwrap();
-        state.update_document(uri.clone(), 1, "let x = 1\n".into());
+        state.update_document(uri.clone(), 1, "x := 1\n".into());
         assert!(state.documents.contains_key(&uri));
 
         service
@@ -1669,8 +1687,8 @@ mod tests {
         let uri_a: Url = "file:///workspace/a.zz".parse().unwrap();
         let uri_b: Url = "file:///workspace/b.zz".parse().unwrap();
 
-        let src_a = "let shared_val = 42\n";
-        let src_b = "let x = shared_val\n";
+        let src_a = "shared_val := 42\n";
+        let src_b = "x := shared_val\n";
 
         populate_module_index(
             &state,
@@ -1724,8 +1742,8 @@ mod tests {
         let uri_a: Url = "file:///workspace/a.zz".parse().unwrap();
         let uri_b: Url = "file:///workspace/b.zz".parse().unwrap();
 
-        let src_a = "let myvar = 1\n";
-        let src_b = "let y = myvar\n";
+        let src_a = "myvar := 1\n";
+        let src_b = "y := myvar\n";
 
         populate_module_index(
             &state,
@@ -1863,7 +1881,7 @@ mod tests {
     async fn workspace_folder_change_triggers_rescan() {
         let root = std::path::PathBuf::from("/tmp/test_ws_folders");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("a.zz"), "let x = 1\n").unwrap();
+        std::fs::write(root.join("a.zz"), "x := 1\n").unwrap();
 
         let (service, state) = setup();
         let params = InitializeParams {
@@ -1882,7 +1900,7 @@ mod tests {
         }
 
         // Add another file and send workspace folder change.
-        std::fs::write(root.join("b.zz"), "let y = 2\n").unwrap();
+        std::fs::write(root.join("b.zz"), "y := 2\n").unwrap();
         service
             .inner()
             .did_change_workspace_folders(DidChangeWorkspaceFoldersParams {
@@ -1943,8 +1961,8 @@ mod tests {
         populate_module_index(
             &state,
             vec![
-                (uri_a.clone(), "a", "let x = 1\nlet y = 2\n"),
-                (uri_b.clone(), "b", "let x = 3\n"),
+                (uri_a.clone(), "a", "x := 1\ny := 2\n"),
+                (uri_b.clone(), "b", "x := 3\n"),
             ],
         );
 

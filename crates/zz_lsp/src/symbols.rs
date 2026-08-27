@@ -378,7 +378,7 @@ mod tests {
     use zz_frontend::parse;
 
     fn make_source() -> &'static str {
-        "func add(x: int, y: int) -> int {\n  return x + y\n}\n\nstruct Point {\n  x: int\n  y: int\n}\n\nlet PI = 3\n"
+        "func add(x: int, y: int) -> int {\n  return x + y\n}\n\nstruct Point {\n  x: int\n  y: int\n}\n\nPI := 3\n"
     }
 
     #[test]

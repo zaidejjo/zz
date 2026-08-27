@@ -398,7 +398,21 @@ fn walk_expr<'a>(expr: &'a Expr, _source: &str, offset: u32, result: &mut NodeAt
             }
         }
         Expr::Try { expr, .. } => walk_expr(expr, _source, offset, result),
-        Expr::Field { obj, .. } => walk_expr(obj, _source, offset, result),
+        Expr::Field { obj, name, span } => {
+            // Check if cursor is on the field name (after the dot).
+            // The field name starts after the dot, which is the last part of the span.
+            // Try to find the field name in source near the dot.
+            let field_str = name.as_str();
+            if let Some(pos) = _source[span.start as usize..span.end as usize].rfind(field_str) {
+                let field_start = span.start + pos as u32;
+                let field_end = field_start + field_str.len() as u32;
+                if offset >= field_start && offset < field_end {
+                    result.name = Some(name.clone());
+                    result.name_span = Some(Span::new(field_start, field_end));
+                }
+            }
+            walk_expr(obj, _source, offset, result);
+        }
         Expr::Index { obj, index, .. } => {
             walk_expr(obj, _source, offset, result);
             walk_expr(index, _source, offset, result);
@@ -538,7 +552,7 @@ pub fn resolve_type_at(
         return Some(ty.clone());
     }
 
-    // Check struct field access: `expr.field`
+    // Check struct field access: `expr.field` or `ident.field` (Path).
     if let Some(Expr::Field {
         obj, name: field, ..
     }) = node.expr
@@ -549,6 +563,22 @@ pub fn resolve_type_at(
                 for (fname, fty) in &sig.fields {
                     if fname == field {
                         return Some(fty.clone());
+                    }
+                }
+            }
+        }
+    }
+    // Handle dotted paths like `p.x` (Expr::Path with 2+ parts) as struct field access.
+    if let Some(Expr::Path { parts, .. }) = node.expr {
+        if parts.len() >= 2 {
+            let obj_name = &parts[0];
+            let field = parts.last().unwrap();
+            if let Some(Type::Struct(struct_name)) = check_result.bindings.get(obj_name) {
+                if let Some(sig) = check_result.structs.get(struct_name) {
+                    for (fname, fty) in &sig.fields {
+                        if fname == field {
+                            return Some(fty.clone());
+                        }
                     }
                 }
             }
@@ -1148,8 +1178,7 @@ mod tests {
 
     #[test]
     fn find_func_definition() {
-        let source =
-            "func add(x: int, y: int) -> int {\n  return x + y\n}\nlet result = add(1, 2)\n";
+        let source = "func add(x: int, y: int) -> int {\n  return x + y\n}\nresult := add(1, 2)\n";
         let parsed = parse(source);
         let defs = collect_definitions(&parsed.program, source);
         // Should find `add` as a function definition.
@@ -1161,7 +1190,7 @@ mod tests {
 
     #[test]
     fn find_var_definition() {
-        let source = "let x = 10\nlet y = x\n";
+        let source = "x := 10\ny := x\n";
         let parsed = parse(source);
         let defs = collect_definitions(&parsed.program, source);
         let x_def = defs
@@ -1194,8 +1223,7 @@ mod tests {
 
     #[test]
     fn resolve_func_type() {
-        let source =
-            "func add(x: int, y: int) -> int {\n  return x + y\n}\nlet result = add(1, 2)\n";
+        let source = "func add(x: int, y: int) -> int {\n  return x + y\n}\nresult := add(1, 2)\n";
         let cr = check(source);
         let parsed = parse(source);
         // Offset 5 is inside the `add` function name.
@@ -1205,10 +1233,10 @@ mod tests {
 
     #[test]
     fn find_node_at_ident() {
-        let source = "let x = 10\n";
+        let source = "x := 10\n";
         let parsed = parse(source);
-        // Offset 4 is inside the `x` identifier.
-        let node = find_node_at(&parsed.program, source, 4);
+        // Offset 0 is inside the `x` identifier.
+        let node = find_node_at(&parsed.program, source, 0);
         assert_eq!(node.name.as_deref(), Some("x"));
     }
 
@@ -1224,11 +1252,11 @@ mod tests {
 
     #[test]
     fn find_references_simple() {
-        let source = "let x = 10\nlet y = x\nlet z = x + y\n";
+        let source = "x := 10\ny := x\nz := x + y\n";
         let parsed = parse(source);
-        // Offset 4 is the `x` definition.
-        let refs = find_references_in_program(&parsed.program, source, 4);
-        // Should find: definition at 4, usage at 16, usage at 26
+        // Offset 0 is the `x` definition.
+        let refs = find_references_in_program(&parsed.program, source, 0);
+        // Should find: definition at 0, usage at 13, usage at 20
         assert!(
             refs.len() >= 2,
             "expected at least 2 references to x, got {}",
@@ -1238,7 +1266,7 @@ mod tests {
 
     #[test]
     fn find_references_func() {
-        let source = "func add(a: int, b: int) -> int {\n  return a + b\n}\nlet r = add(1, 2)\nlet s = add(3, 4)\n";
+        let source = "func add(a: int, b: int) -> int {\n  return a + b\n}\nr := add(1, 2)\ns := add(3, 4)\n";
         let parsed = parse(source);
         // Offset 5 is inside the `add` function name.
         let refs = find_references_in_program(&parsed.program, source, 5);
@@ -1252,7 +1280,7 @@ mod tests {
 
     #[test]
     fn find_references_none_for_unknown() {
-        let source = "let x = 10\n";
+        let source = "x := 10\n";
         let parsed = parse(source);
         // Offset 15 is outside any symbol.
         let refs = find_references_in_program(&parsed.program, source, 15);
@@ -1261,10 +1289,9 @@ mod tests {
 
     #[test]
     fn rename_creates_edits_for_all_refs() {
-        let source = "let x = 10\nlet y = x\nlet z = x + y\n";
+        let source = "x := 10\ny := x\nz := x + y\n";
         let parsed = parse(source);
-        let refs = find_references_in_program(&parsed.program, source, 4);
-        // Each reference should produce a TextEdit with the new name.
+        let refs = find_references_in_program(&parsed.program, source, 0);
         assert!(refs.len() >= 2);
         for r in &refs {
             assert!(r.span.start < source.len() as u32);
@@ -1273,10 +1300,10 @@ mod tests {
 
     #[test]
     fn prepare_rename_validates_symbol() {
-        let source = "let x = 10\nlet y = x\n";
+        let source = "x := 10\ny := x\n";
         let parsed = parse(source);
-        // Offset 4 is on the `x` identifier — valid rename target.
-        let node = find_node_at(&parsed.program, source, 4);
+        // Offset 0 is on the `x` identifier — valid rename target.
+        let node = find_node_at(&parsed.program, source, 0);
         assert!(
             node.name.is_some(),
             "prepare_rename: cursor on x should have a name"
@@ -1287,7 +1314,7 @@ mod tests {
 
     #[test]
     fn prepare_rename_rejects_no_symbol() {
-        let source = "let x = 10\n";
+        let source = "x := 10\n";
         let parsed = parse(source);
         // Offset 15 is after the newline — no symbol.
         let node = find_node_at(&parsed.program, source, 15);
@@ -1299,7 +1326,7 @@ mod tests {
 
     #[test]
     fn prepare_rename_works_for_func() {
-        let source = "func add(a: int) -> int { return a }\nlet r = add(1)\n";
+        let source = "func add(a: int) -> int { return a }\nr := add(1)\n";
         let parsed = parse(source);
         // Offset 5 is inside the function name `add`.
         let node = find_node_at(&parsed.program, source, 5);
@@ -1312,10 +1339,10 @@ mod tests {
 
     #[test]
     fn highlights_read_and_write() {
-        let source = "let x = 10\nlet y = x\n";
+        let source = "x := 10\ny := x\n";
         let parsed = parse(source);
-        // Offset 4 is the `x` in the declaration (`let x`).
-        let hl = find_highlights_in_program(&parsed.program, source, 4);
+        // Offset 0 is the `x` in the declaration.
+        let hl = find_highlights_in_program(&parsed.program, source, 0);
         assert!(!hl.is_empty(), "expected highlights for x");
         // The declaration is a Write.
         let writes: Vec<_> = hl
@@ -1333,7 +1360,7 @@ mod tests {
 
     #[test]
     fn highlights_func_name_and_calls() {
-        let source = "func add(a: int, b: int) -> int {\n  return a + b\n}\nlet r = add(1, 2)\nlet s = add(3, 4)\n";
+        let source = "func add(a: int, b: int) -> int {\n  return a + b\n}\nr := add(1, 2)\ns := add(3, 4)\n";
         let parsed = parse(source);
         // Offset 5 is inside the `add` function name definition.
         let hl = find_highlights_in_program(&parsed.program, source, 5);
