@@ -13,11 +13,12 @@ pub mod lexer;
 pub mod parser;
 pub mod printer;
 pub mod span;
+pub mod tests;
 pub mod token;
 
 pub use ast::{BinOp, Expr, Ident, Program, Stmt, UnOp};
 pub use diag::{Diag, Files};
-pub use fmt::{format_program, FormatConfig};
+pub use fmt::{format_program, is_formatted, FormatConfig};
 pub use lexer::lex;
 pub use parser::{parse, Parsed};
 pub use printer::Printer;

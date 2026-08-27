@@ -1,103 +1,60 @@
-//! Abstract syntax tree.
-//!
-//! Every node carries a `Span` covering its exact source text. The printer
-//! re-emits those slices verbatim, which makes parsing → printing a perfect
-//! round-trip (lossless).
+//! Expression AST nodes.
 
+use crate::ast::types::{Ty, TyKind};
 use crate::span::Span;
 
+/// One piece of an interpolated string.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Program {
-    pub stmts: Vec<Stmt>,
-    /// Covers the entire source buffer, so printing a program reproduces the
-    /// input exactly.
+pub enum FmtPart {
+    /// Literal text (escapes already processed).
+    Text(String),
+    /// An embedded expression, rendered via its Display form.
+    /// Optional format spec: `{val:.2f}`, `{val:x}`, etc.
+    Expr(Box<Expr>, Option<String>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchArm {
+    pub pat: Pattern,
+    pub body: Expr,
     pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Stmt {
-    /// A variable declaration. `ty == None` is the short form (`x := 10`);
-    /// `ty == Some(t)` is the explicit form (`int x = 10`).
-    Decl {
-        ty: Option<Ty>,
+pub enum Pattern {
+    Wildcard {
+        span: Span,
+    },
+    Binding {
         name: Ident,
-        value: Expr,
+    },
+    Literal {
+        value: Lit,
         span: Span,
     },
-    /// `import std.io` — a dotted path of identifiers, optionally aliased
-    /// (`import std.io as console`).
-    Import {
-        path: Vec<String>,
-        alias: Option<String>,
+    Variant {
+        name: String,
+        arg: Option<Box<Pattern>>,
         span: Span,
     },
-    Func {
-        name: Vec<String>,
-        generics: Vec<Ident>,
-        params: Vec<Param>,
-        ret: Option<Ty>,
-        body: Block,
-        span: Span,
-    },
-    Return {
-        value: Option<Expr>,
-        span: Span,
-    },
-    /// `struct Point { x: int, y: int }` — a named record type.
-    /// For cross-module: `struct shapes.Point { ... }` stores ["shapes", "Point"].
-    Struct {
-        name: Vec<String>,
-        fields: Vec<(Ident, Ty)>,
-        span: Span,
-    },
-    /// `for x in xs { ... }` — iterate an array or a range.
-    For {
-        var: Ident,
-        iter: Box<Expr>,
-        body: Block,
-        span: Span,
-    },
-    Break {
-        span: Span,
-    },
-    Continue {
-        span: Span,
-    },
-    /// `defer expr` — schedule expr to run when the enclosing scope exits.
-    Defer {
-        expr: Box<Expr>,
-        span: Span,
-    },
-    /// `target = value` — assignment to a variable or struct field.
-    Assign {
-        target: Expr,
-        value: Expr,
-        span: Span,
-    },
-    Expr(Expr),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lit {
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+}
+
+/// An identifier with its source span.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ident {
     pub name: String,
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Param {
-    pub name: Ident,
-    pub ty: Option<Ty>,
-    pub default: Option<Box<Expr>>,
-    pub span: Span,
-}
-
-/// A `{ ... }` block. Its value is the last expression statement, or unit.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Block {
-    pub stmts: Vec<Stmt>,
-    pub span: Span,
-}
-
+/// Expression AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Int {
@@ -248,136 +205,6 @@ pub enum Expr {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct MatchArm {
-    pub pat: Pattern,
-    pub body: Expr,
-    pub span: Span,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Pattern {
-    Wildcard {
-        span: Span,
-    },
-    Binding {
-        name: Ident,
-    },
-    Literal {
-        value: Lit,
-        span: Span,
-    },
-    Variant {
-        name: String,
-        arg: Option<Box<Pattern>>,
-        span: Span,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Lit {
-    Int(i64),
-    Float(f64),
-    Str(String),
-    Bool(bool),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnOp {
-    Neg,
-    Pos,
-    Not,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Rem,
-    Pow,
-    Eq,
-    Ne,
-    Lt,
-    Gt,
-    Le,
-    Ge,
-    And,
-    Or,
-    Elvis,
-}
-
-impl BinOp {
-    pub fn symbol(self) -> &'static str {
-        match self {
-            BinOp::Add => "+",
-            BinOp::Sub => "-",
-            BinOp::Mul => "*",
-            BinOp::Div => "/",
-            BinOp::Rem => "%",
-            BinOp::Pow => "**",
-            BinOp::Eq => "==",
-            BinOp::Ne => "!=",
-            BinOp::Lt => "<",
-            BinOp::Gt => ">",
-            BinOp::Le => "<=",
-            BinOp::Ge => ">=",
-            BinOp::And => "&&",
-            BinOp::Or => "||",
-            BinOp::Elvis => "??",
-        }
-    }
-}
-
-impl UnOp {
-    pub fn symbol(self) -> &'static str {
-        match self {
-            UnOp::Neg => "-",
-            UnOp::Pos => "+",
-            UnOp::Not => "!",
-        }
-    }
-}
-
-/// One piece of an interpolated string.
-#[derive(Debug, Clone, PartialEq)]
-pub enum FmtPart {
-    /// Literal text (escapes already processed).
-    Text(String),
-    /// An embedded expression, rendered via its Display form.
-    /// Optional format spec: `{val:.2f}`, `{val:x}`, etc.
-    Expr(Box<Expr>, Option<String>),
-}
-
-/// A type annotation as written in source.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Ty {
-    pub kind: TyKind,
-    pub span: Span,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum TyKind {
-    Int,
-    Float,
-    Bool,
-    Str,
-    Unit,
-    Tuple(Vec<Ty>),
-    Option(Box<Ty>),
-    Result(Box<Ty>, Box<Ty>),
-    Func(Vec<Ty>, Box<Ty>),
-    /// `[T]` — array type.
-    Array(Box<Ty>),
-    /// `{K: V}` — dictionary type.
-    Dict(Box<Ty>, Box<Ty>),
-    /// `A | B` — union type.
-    Union(Vec<Ty>),
-    /// Named type: a generic parameter or a future struct/alias.
-    Named(String, Vec<Ty>),
-}
-
 impl Expr {
     pub fn span(&self) -> Span {
         match self {
@@ -412,24 +239,6 @@ impl Expr {
     }
 }
 
-impl Stmt {
-    pub fn span(&self) -> Span {
-        match self {
-            Stmt::Decl { span, .. }
-            | Stmt::Func { span, .. }
-            | Stmt::Return { span, .. }
-            | Stmt::Import { span, .. }
-            | Stmt::Struct { span, .. }
-            | Stmt::For { span, .. }
-            | Stmt::Break { span }
-            | Stmt::Continue { span }
-            | Stmt::Defer { span, .. }
-            | Stmt::Assign { span, .. } => *span,
-            Stmt::Expr(e) => e.span(),
-        }
-    }
-}
-
 impl Pattern {
     pub fn span(&self) -> Span {
         match self {
@@ -440,3 +249,8 @@ impl Pattern {
         }
     }
 }
+
+// Re-export from stmt.rs to avoid circular dependency
+use crate::ast::stmt::{Block, Param};
+
+use crate::ast::types::{BinOp, UnOp};
