@@ -1234,14 +1234,14 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zz_checker"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "zz_frontend",
 ]
 
 [[package]]
 name = "zz_cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "codespan-reporting",
  "zz_checker",
@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "zz_frontend"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "codespan-reporting",
  "colored",
@@ -1261,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "zz_lsp"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "dashmap 6.2.1",
  "env_logger",
@@ -1276,7 +1276,7 @@ dependencies = [
 
 [[package]]
 name = "zz_runtime"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "codespan-reporting",
  "zz_frontend",
@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "zz_stdlib"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "zz_checker",
  "zz_frontend",

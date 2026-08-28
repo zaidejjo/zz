@@ -1,0 +1,374 @@
+//! Import resolution and program loading (Phase 2, extended in Phase 2.5).
+//!
+//! Resolves `import` statements to files, parses and type-checks every
+//! module in dependency order, and detects circular imports.
+//!
+//! Resolution rules:
+//! - `import std.*` → standard library (no file; signatures are seeded).
+//! - `import a.b`   → `<dir of importing file>/a/b.zz`.
+//!
+//! Namespacing (Phase 2.5): every module is bound to a namespace — the last
+//! path component of its file stem, or an explicit alias
+//! (`import math.utils as m`). The module's top-level functions and bindings
+//! are registered under `ns.name`, and references to them inside the module
+//! are rewritten to qualified paths. Imported modules are referenced by their
+//! namespace: `utils.double(6)`.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use zz_checker::{check_program, FuncSig, StructSig, Type};
+use zz_frontend::ast::{Program, Stmt};
+use zz_frontend::diag::{error_at, RawDiag};
+use zz_frontend::parse;
+use zz_frontend::span::Span;
+use zz_runtime::NativeEntry;
+use zz_stdlib::{register_module_namespace, stdlib_funcs, stdlib_natives, STDLIB_MODULES};
+
+mod rewrite;
+
+#[cfg(test)]
+mod tests;
+
+/// A file that failed to parse or type-check.
+#[derive(Debug)]
+pub struct LoadError {
+    /// Display name of the file (as given on the command line or import).
+    pub name: String,
+    /// Source text, for rendering diagnostics.
+    pub source: String,
+    pub diags: Vec<RawDiag>,
+}
+
+/// A fully loaded program: all modules in dependency order (imports first,
+/// the entry file last), plus the accumulated checker seed.
+#[derive(Debug)]
+pub struct LoadResult {
+    /// Modules in execution order: dependencies before dependents.
+    pub programs: Vec<Program>,
+    /// Parallel to `programs`: (display name, source) for error rendering.
+    pub files: Vec<(String, String)>,
+    /// All functions (stdlib + modules), for seeding the checker.
+    #[allow(dead_code)]
+    pub funcs: HashMap<String, FuncSig>,
+    /// Top-level bindings from all modules.
+    #[allow(dead_code)]
+    pub bindings: HashMap<String, Type>,
+    /// Struct definitions from all modules.
+    #[allow(dead_code)]
+    pub structs: HashMap<String, StructSig>,
+    /// Native implementations (stdlib + namespaced copies), for the
+    /// interpreter.
+    pub natives: HashMap<String, NativeEntry>,
+    pub errors: Vec<LoadError>,
+}
+
+struct Loader {
+    sources: HashMap<PathBuf, String>,
+    programs: HashMap<PathBuf, Program>,
+    order: Vec<PathBuf>,
+    visiting: HashSet<PathBuf>,
+    done: HashSet<PathBuf>,
+    errors: Vec<LoadError>,
+    funcs: HashMap<String, FuncSig>,
+    bindings: HashMap<String, Type>,
+    structs: HashMap<String, StructSig>,
+    natives: HashMap<String, NativeEntry>,
+    /// Namespace → canonical path of the module (or `std:<module>` for the
+    /// standard library) that owns it.
+    namespaces: HashMap<String, PathBuf>,
+    /// Canonical path → namespace it was registered under.
+    ns_of: HashMap<PathBuf, String>,
+}
+
+/// Load an entry file and all of its imports.
+pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
+    let mut loader = Loader {
+        sources: HashMap::new(),
+        programs: HashMap::new(),
+        order: Vec::new(),
+        visiting: HashSet::new(),
+        done: HashSet::new(),
+        errors: Vec::new(),
+        funcs: stdlib_funcs(),
+        bindings: HashMap::new(),
+        structs: HashMap::new(),
+        natives: stdlib_natives(),
+        namespaces: HashMap::new(),
+        ns_of: HashMap::new(),
+    };
+    loader.load_file(main_path, None)?;
+    Ok(loader.finish())
+}
+
+/// The namespace a module is bound to: its alias, or its file stem.
+fn module_ns(alias: Option<&str>, path: &Path) -> String {
+    alias.map(str::to_string).unwrap_or_else(|| {
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    })
+}
+
+impl Loader {
+    /// Parse a file and recursively load its imports (DFS post-order, so
+    /// dependencies land in `order` before their dependents).
+    fn load_file(&mut self, path: &Path, alias: Option<&str>) -> Result<(), String> {
+        let canon = path
+            .canonicalize()
+            .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+
+        if self.done.contains(&canon) {
+            return Ok(());
+        }
+        if self.visiting.contains(&canon) {
+            self.errors.push(LoadError {
+                name: path.display().to_string(),
+                source: String::new(),
+                diags: vec![error_at(
+                    format!(
+                        "circular import: `{}` is imported (directly or transitively) by itself",
+                        path.display()
+                    ),
+                    Span::new(0, 0),
+                )],
+            });
+            return Ok(());
+        }
+
+        let source = std::fs::read_to_string(&canon)
+            .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+        let parsed = parse(&source);
+        if !parsed.errors.is_empty() {
+            self.errors.push(LoadError {
+                name: path.display().to_string(),
+                source,
+                diags: parsed.errors,
+            });
+            return Ok(());
+        }
+
+        self.visiting.insert(canon.clone());
+
+        let imports: Vec<(Vec<String>, Option<String>)> = parsed
+            .program
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Import { path, alias, .. } => Some((path.clone(), alias.clone())),
+                _ => None,
+            })
+            .collect();
+
+        for (imp, imp_alias) in imports {
+            if imp.first().map(String::as_str) == Some("std") {
+                let Some(module) = imp.get(1) else { continue };
+                if !STDLIB_MODULES.contains(&module.as_str()) {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source: source.clone(),
+                        diags: vec![error_at(
+                            format!("unknown standard library module `std.{module}`"),
+                            Span::new(0, 0),
+                        )],
+                    });
+                    continue;
+                }
+                let ns = imp_alias.unwrap_or_else(|| module.clone());
+                if let Err(msg) =
+                    register_module_namespace(module, &ns, &mut self.funcs, &mut self.natives)
+                {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source: source.clone(),
+                        diags: vec![error_at(msg, Span::new(0, 0))],
+                    });
+                    continue;
+                }
+                self.register_ns(&ns, &PathBuf::from(format!("std:{module}")), path, &source);
+                continue;
+            }
+            let rel = canon
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(format!("{}.zz", imp.join("/")));
+            // Report cycles at the import site, against the importer's source.
+            if let Ok(rel_canon) = rel.canonicalize() {
+                if self.visiting.contains(&rel_canon) {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source: source.clone(),
+                        diags: vec![error_at(
+                            format!(
+                                "circular import: `{}` imports `{}`, which (transitively) imports `{}`",
+                                path.display(),
+                                rel.display(),
+                                path.display()
+                            ),
+                            Span::new(0, 0),
+                        )],
+                    });
+                    continue;
+                }
+                // A module already loaded under a different namespace cannot
+                // be re-imported under another one.
+                if let Some(existing) = self.ns_of.get(&rel_canon) {
+                    let want = module_ns(imp_alias.as_deref(), &rel);
+                    if existing != &want {
+                        self.errors.push(LoadError {
+                            name: path.display().to_string(),
+                            source: source.clone(),
+                            diags: vec![error_at(
+                                format!(
+                                    "`{}` is imported under two namespaces: `{existing}` and `{want}`",
+                                    rel.display()
+                                ),
+                                Span::new(0, 0),
+                            )],
+                        });
+                        continue;
+                    }
+                }
+            }
+            self.load_file(&rel, imp_alias.as_deref())?;
+        }
+
+        self.visiting.remove(&canon);
+        self.done.insert(canon.clone());
+        self.sources.insert(canon.clone(), source);
+
+        let ns = module_ns(alias, &canon);
+        let src = self.sources[&canon].clone();
+        if self.register_ns(&ns, &canon, path, &src) {
+            let mut program = parsed.program;
+            namespace_program(&mut program, &ns);
+            self.programs.insert(canon.clone(), program);
+            self.order.push(canon);
+        }
+        Ok(())
+    }
+
+    /// Register a namespace → module mapping, detecting collisions. Returns
+    /// false (and records an error) when two different modules claim the same
+    /// namespace, or one module is claimed by two namespaces.
+    fn register_ns(&mut self, ns: &str, canon: &Path, display: &Path, source: &str) -> bool {
+        if let Some(existing) = self.ns_of.get(canon) {
+            if existing != ns {
+                self.errors.push(LoadError {
+                    name: display.display().to_string(),
+                    source: source.to_string(),
+                    diags: vec![error_at(
+                        format!(
+                            "module `{}` is imported under two namespaces: `{existing}` and `{ns}`",
+                            display.display()
+                        ),
+                        Span::new(0, 0),
+                    )],
+                });
+                return false;
+            }
+            return true;
+        }
+        if let Some(existing) = self.namespaces.get(ns) {
+            if existing != canon {
+                self.errors.push(LoadError {
+                    name: display.display().to_string(),
+                    source: source.to_string(),
+                    diags: vec![error_at(
+                        format!(
+                            "namespace `{ns}` is claimed by both `{}` and `{}`",
+                            existing.display(),
+                            display.display()
+                        ),
+                        Span::new(0, 0),
+                    )],
+                });
+                return false;
+            }
+            return true;
+        }
+        self.namespaces.insert(ns.to_string(), canon.to_path_buf());
+        self.ns_of.insert(canon.to_path_buf(), ns.to_string());
+        true
+    }
+
+    /// Type-check every module in dependency order, accumulating the checker
+    /// seed. Modules with errors do not contribute their definitions.
+    fn finish(mut self) -> LoadResult {
+        let mut files = Vec::with_capacity(self.order.len());
+        let mut programs = Vec::with_capacity(self.order.len());
+
+        for path in &self.order {
+            let name = path.display().to_string();
+            let source = self.sources.remove(path).unwrap_or_default();
+            files.push((name.clone(), source.clone()));
+
+            let program = self.programs.remove(path).unwrap();
+            let checked = check_program(
+                &program,
+                self.bindings.clone(),
+                self.funcs.clone(),
+                self.structs.clone(),
+            );
+            let has_errors = checked
+                .errors
+                .iter()
+                .any(|e| e.severity == zz_frontend::diag::Severity::Error);
+            if has_errors {
+                self.errors.push(LoadError {
+                    name,
+                    source,
+                    diags: checked.errors,
+                });
+            } else {
+                // Propagate warnings (even if there are no hard errors)
+                // so they can be displayed to the user.
+                if !checked.errors.is_empty() {
+                    self.errors.push(LoadError {
+                        name,
+                        source,
+                        diags: checked.errors,
+                    });
+                }
+                self.bindings.extend(checked.bindings);
+                self.funcs.extend(checked.funcs);
+                self.structs.extend(checked.structs);
+            }
+            programs.push(program);
+        }
+
+        LoadResult {
+            programs,
+            files,
+            funcs: self.funcs,
+            bindings: self.bindings,
+            structs: self.structs,
+            natives: self.natives,
+            errors: self.errors,
+        }
+    }
+}
+
+/// Rewrite a module's AST so its top-level definitions are namespaced:
+/// - top-level `func foo` becomes `func ns.foo`,
+/// - top-level `x := ...` becomes `x := ...` with binding name `ns.x`,
+/// - references to those names (`Expr::Ident`) become `Expr::Path([ns, name])`
+///   unless shadowed by a local binding.
+fn namespace_program(program: &mut Program, ns: &str) {
+    let mut top = HashSet::new();
+    for stmt in &program.stmts {
+        match stmt {
+            Stmt::Func { name, .. } | Stmt::Struct { name, .. } => {
+                top.insert(name.join("."));
+            }
+            Stmt::Decl { name, .. } => {
+                top.insert(name.name.clone());
+            }
+            _ => {}
+        }
+    }
+    let mut rw = rewrite::Rewriter::new(ns, &top);
+    for stmt in &mut program.stmts {
+        rw.rewrite_stmt(stmt);
+    }
+}

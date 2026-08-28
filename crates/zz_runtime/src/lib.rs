@@ -4,12 +4,13 @@
 //! phase. The frontend stays shared between all execution modes.
 
 pub mod env;
-pub mod interp;
+pub mod eval;
 pub mod json;
+pub mod runtime;
 pub mod value;
 pub mod vm;
 
 pub use env::Env;
-pub use interp::{EvalError, Interp, NativeEntry, NativeFn};
+pub use eval::{EvalError, Interp, NativeEntry, NativeFn};
 pub use value::{NativeFunc, Value};
 pub use zz_frontend::span::Span;
