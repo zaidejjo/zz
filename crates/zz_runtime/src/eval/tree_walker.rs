@@ -812,7 +812,7 @@ impl Interp {
                     ));
                 }
                 match self.natives.get(&nf.name) {
-                    Some(entry) => (entry.f)(self, &mut args),
+                    Some(entry) => (entry.f)(self, &mut args, span),
                     None => Err(EvalError::new(
                         format!("unknown native function `{}`", nf.name),
                         span,

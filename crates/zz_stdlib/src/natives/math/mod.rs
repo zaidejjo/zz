@@ -1,10 +1,14 @@
-use zz_runtime::{EvalError, Interp, Value};
+use zz_runtime::{EvalError, Interp, Span, Value};
 
-pub(crate) fn math_abs(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+pub(crate) fn math_abs(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
     let v = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for abs", zz_runtime::Span::new(0, 0)))?;
+        .ok_or_else(|| EvalError::new("missing argument for abs", span))?;
     match v {
         Value::Int(i) => Ok(Value::Int(i.abs())),
         Value::Float(f) => Ok(Value::Float(f.abs())),
@@ -13,46 +17,58 @@ pub(crate) fn math_abs(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Va
                 "abs expects `int` or `float`, found `{}`",
                 other.type_name()
             ),
-            zz_runtime::Span::new(0, 0),
+            span,
         )),
     }
 }
 
-pub(crate) fn math_floor(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+pub(crate) fn math_floor(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
     let v = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for floor", zz_runtime::Span::new(0, 0)))?;
+        .ok_or_else(|| EvalError::new("missing argument for floor", span))?;
     match v {
         Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
         Value::Int(i) => Ok(Value::Int(i)),
         other => Err(EvalError::new(
             format!("floor expects `float`, found `{}`", other.type_name()),
-            zz_runtime::Span::new(0, 0),
+            span,
         )),
     }
 }
 
-pub(crate) fn math_ceil(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+pub(crate) fn math_ceil(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
     let v = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for ceil", zz_runtime::Span::new(0, 0)))?;
+        .ok_or_else(|| EvalError::new("missing argument for ceil", span))?;
     match v {
         Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
         Value::Int(i) => Ok(Value::Int(i)),
         other => Err(EvalError::new(
             format!("ceil expects `float`, found `{}`", other.type_name()),
-            zz_runtime::Span::new(0, 0),
+            span,
         )),
     }
 }
 
-pub(crate) fn math_sqrt(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+pub(crate) fn math_sqrt(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
     let v = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for sqrt", zz_runtime::Span::new(0, 0)))?;
+        .ok_or_else(|| EvalError::new("missing argument for sqrt", span))?;
     match v {
         Value::Int(i) => Ok(Value::Float((i as f64).sqrt())),
         Value::Float(f) => Ok(Value::Float(f.sqrt())),
@@ -61,20 +77,24 @@ pub(crate) fn math_sqrt(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<V
                 "sqrt expects `int` or `float`, found `{}`",
                 other.type_name()
             ),
-            zz_runtime::Span::new(0, 0),
+            span,
         )),
     }
 }
 
-pub(crate) fn math_pow(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+pub(crate) fn math_pow(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
     let base = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for pow", zz_runtime::Span::new(0, 0)))?;
+        .ok_or_else(|| EvalError::new("missing argument for pow", span))?;
     let exp = args
         .get(1)
         .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for pow", zz_runtime::Span::new(0, 0)))?;
+        .ok_or_else(|| EvalError::new("missing argument for pow", span))?;
     let to_f = |v: &Value| -> Option<f64> {
         match v {
             Value::Int(i) => Some(*i as f64),
@@ -91,7 +111,7 @@ pub(crate) fn math_pow(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Va
                     base.type_name(),
                     exp.type_name()
                 ),
-                zz_runtime::Span::new(0, 0),
+                span,
             ))
         }
     };
@@ -101,6 +121,7 @@ pub(crate) fn math_pow(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Va
 pub(crate) fn math_random(
     _interp: &mut Interp,
     _args: &mut Vec<Value>,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     // Simple LCG seeded from the clock — no external RNG dependency.
     let nanos = std::time::SystemTime::now()

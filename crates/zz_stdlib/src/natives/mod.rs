@@ -2,12 +2,15 @@
 //!
 //! Native functions take `&mut Vec<Value>` (not a slice) because
 //! `std.vec.push` must grow the argument vector.
+//!
+//! All native functions also receive a `Span` parameter representing the
+//! call-site source location for accurate error reporting.
 
 #![allow(clippy::ptr_arg)]
 
 use std::collections::HashMap;
 
-use zz_runtime::{EvalError, NativeEntry, Value};
+use zz_runtime::{EvalError, NativeEntry, Span, Value};
 
 pub(crate) mod builtins;
 pub(crate) mod env;
@@ -558,21 +561,27 @@ pub(crate) fn arg<'a>(
     args: &'a mut Vec<Value>,
     i: usize,
     name: &str,
+    span: Span,
 ) -> Result<&'a Value, EvalError> {
     args.get(i).ok_or_else(|| {
         EvalError::new(
             format!("missing argument `{name}` for native function"),
-            zz_runtime::Span::new(0, 0),
+            span,
         )
     })
 }
 
-pub(crate) fn expect_str(args: &mut Vec<Value>, i: usize, name: &str) -> Result<String, EvalError> {
-    match arg(args, i, name)? {
+pub(crate) fn expect_str(
+    args: &mut Vec<Value>,
+    i: usize,
+    name: &str,
+    span: Span,
+) -> Result<String, EvalError> {
+    match arg(args, i, name, span)? {
         Value::Str(s) => Ok(s.clone()),
         other => Err(EvalError::new(
             format!("`{name}` expects a string, found `{other}`"),
-            zz_runtime::Span::new(0, 0),
+            span,
         )),
     }
 }
@@ -581,33 +590,44 @@ pub(crate) fn expect_array(
     args: &mut Vec<Value>,
     i: usize,
     name: &str,
+    span: Span,
 ) -> Result<Vec<Value>, EvalError> {
-    match arg(args, i, name)? {
+    match arg(args, i, name, span)? {
         Value::Array(vs) => Ok(vs.clone()),
         other => Err(EvalError::new(
             format!("`{name}` expects an array, found `{other}`"),
-            zz_runtime::Span::new(0, 0),
+            span,
         )),
     }
 }
 
-pub(crate) fn expect_func(args: &mut Vec<Value>, i: usize, name: &str) -> Result<Value, EvalError> {
-    match arg(args, i, name)? {
+pub(crate) fn expect_func(
+    args: &mut Vec<Value>,
+    i: usize,
+    name: &str,
+    span: Span,
+) -> Result<Value, EvalError> {
+    match arg(args, i, name, span)? {
         Value::Func(f) => Ok(Value::Func(f.clone())),
         Value::Native(n) => Ok(Value::Native(n.clone())),
         other => Err(EvalError::new(
             format!("`{name}` expects a function, found `{other}`"),
-            zz_runtime::Span::new(0, 0),
+            span,
         )),
     }
 }
 
-pub(crate) fn expect_int(args: &mut Vec<Value>, i: usize, name: &str) -> Result<i64, EvalError> {
-    match arg(args, i, name)? {
+pub(crate) fn expect_int(
+    args: &mut Vec<Value>,
+    i: usize,
+    name: &str,
+    span: Span,
+) -> Result<i64, EvalError> {
+    match arg(args, i, name, span)? {
         Value::Int(n) => Ok(*n),
         other => Err(EvalError::new(
             format!("`{name}` expects an integer, found `{other}`"),
-            zz_runtime::Span::new(0, 0),
+            span,
         )),
     }
 }
