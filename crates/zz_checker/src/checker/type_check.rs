@@ -722,7 +722,7 @@ impl Checker {
                 let rt_resolved = self.unifier.resolve(&rt);
                 match lt_resolved {
                     Type::Option(inner) => {
-                        if let Err(e) = self.unifier.unify(&*inner, &rt_resolved) {
+                        if let Err(e) = self.unifier.unify(&inner, &rt_resolved) {
                             self.report_mismatch(e, span);
                         }
                         *inner
