@@ -87,9 +87,9 @@ pub enum Op {
     /// falsy.
     WhileCond { exit: usize, span: Span },
     /// Exit the innermost loop (restores the loop's environment).
-    Break,
+    Break(Span),
     /// Jump to the innermost loop's header (restores the loop's environment).
-    Continue,
+    Continue(Span),
     /// Pop a value and store it as the innermost loop's result.
     SetLoopResult,
 

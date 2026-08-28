@@ -24,8 +24,8 @@ impl Interp {
                     Ok(Flow::Value(v))
                 }
                 Flow::Return(v) => Ok(Flow::Return(v)),
-                Flow::Break => Ok(Flow::Break),
-                Flow::Continue => Ok(Flow::Continue),
+                Flow::Break(span) => Ok(Flow::Break(span)),
+                Flow::Continue(span) => Ok(Flow::Continue(span)),
             },
             Stmt::Import { .. } => Ok(Flow::Value(Value::Unit)),
             Stmt::Func {
@@ -47,8 +47,8 @@ impl Interp {
                 Some(e) => match self.eval(e)? {
                     Flow::Value(v) => Ok(Flow::Return(v)),
                     Flow::Return(v) => Ok(Flow::Return(v)),
-                    Flow::Break => Ok(Flow::Break),
-                    Flow::Continue => Ok(Flow::Continue),
+                    Flow::Break(span) => Ok(Flow::Break(span)),
+                    Flow::Continue(span) => Ok(Flow::Continue(span)),
                 },
                 None => Ok(Flow::Return(Value::Unit)),
             },
@@ -75,8 +75,8 @@ impl Interp {
                             match flow? {
                                 Flow::Value(v) => result = v,
                                 Flow::Return(v) => return Ok(Flow::Return(v)),
-                                Flow::Break => break,
-                                Flow::Continue => continue,
+                                Flow::Break(span) => break,
+                                Flow::Continue(span) => continue,
                             }
                         }
                         Ok(Flow::Value(result))
@@ -94,8 +94,8 @@ impl Interp {
                                 match flow? {
                                     Flow::Value(v) => result = v,
                                     Flow::Return(v) => return Ok(Flow::Return(v)),
-                                    Flow::Break => break,
-                                    Flow::Continue => {}
+                                    Flow::Break(span) => break,
+                                    Flow::Continue(span) => {}
                                 }
                                 i += step;
                             }
@@ -109,8 +109,8 @@ impl Interp {
                                 match flow? {
                                     Flow::Value(v) => result = v,
                                     Flow::Return(v) => return Ok(Flow::Return(v)),
-                                    Flow::Break => break,
-                                    Flow::Continue => {}
+                                    Flow::Break(span) => break,
+                                    Flow::Continue(span) => {}
                                 }
                                 i += step;
                             }
@@ -123,8 +123,8 @@ impl Interp {
                     )),
                 }
             }
-            Stmt::Break { .. } => Ok(Flow::Break),
-            Stmt::Continue { .. } => Ok(Flow::Continue),
+            Stmt::Break { span } => Ok(Flow::Break(*span)),
+            Stmt::Continue { span } => Ok(Flow::Continue(*span)),
             Stmt::Defer { expr, .. } => {
                 let closure = FuncValue {
                     params: vec![],
@@ -511,8 +511,8 @@ impl Interp {
                     match self.eval_block(body)? {
                         Flow::Value(v) => result = v,
                         Flow::Return(v) => return Ok(Flow::Return(v)),
-                        Flow::Break => break,
-                        Flow::Continue => {}
+                        Flow::Break(span) => break,
+                        Flow::Continue(span) => {}
                     }
                 }
                 Ok(Flow::Value(result))
@@ -764,7 +764,7 @@ impl Interp {
         let mut result = Flow::Value(Value::Unit);
         for stmt in &block.stmts {
             result = self.run_stmt(stmt)?;
-            if matches!(result, Flow::Return(_) | Flow::Break | Flow::Continue) {
+            if matches!(result, Flow::Return(_) | Flow::Break(_) | Flow::Continue(_)) {
                 break;
             }
         }
@@ -870,11 +870,8 @@ impl Interp {
         match result? {
             Flow::Value(v) => Ok(v),
             Flow::Return(v) => Ok(v),
-            Flow::Break => Err(EvalError::new("`break` outside of a loop", Span::new(0, 0))),
-            Flow::Continue => Err(EvalError::new(
-                "`continue` outside of a loop",
-                Span::new(0, 0),
-            )),
+            Flow::Break(span) => Err(EvalError::new("`break` outside of a loop", span)),
+            Flow::Continue(span) => Err(EvalError::new("`continue` outside of a loop", span)),
         }
     }
 }

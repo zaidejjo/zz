@@ -147,7 +147,7 @@ impl Compiler {
             Op::ForNext { .. } => 0,
             Op::WhileSetup { .. } => 0,
             Op::WhileCond { .. } => -1,
-            Op::Break | Op::Continue => 0,
+            Op::Break(_) | Op::Continue(_) => 0,
             Op::SetLoopResult => -1,
             Op::MakeArray(n) => 1 - *n as i64,
             Op::ArrayPush(_) => -1,
@@ -408,12 +408,12 @@ impl Compiler {
                 self.stack_height = pre + 1;
                 StmtValue::Discard
             }
-            Stmt::Break { .. } => {
-                self.emit(Op::Break);
+            Stmt::Break { span } => {
+                self.emit(Op::Break(*span));
                 StmtValue::None
             }
-            Stmt::Continue { .. } => {
-                self.emit(Op::Continue);
+            Stmt::Continue { span } => {
+                self.emit(Op::Continue(*span));
                 StmtValue::None
             }
             Stmt::Defer { expr, .. } => {

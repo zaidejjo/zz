@@ -468,29 +468,23 @@ impl Vm {
                         self.frames.last_mut().unwrap().ip = *exit;
                     }
                 }
-                Op::Break => {
+                Op::Break(span) => {
                     let Some(li) = self.loops.pop() else {
-                        return Err(EvalError::new("`break` outside of a loop", Span::new(0, 0)));
+                        return Err(EvalError::new("`break` outside of a loop", *span));
                     };
                     if li.frame_idx != self.frames.len() - 1 {
-                        return Err(EvalError::new("`break` outside of a loop", Span::new(0, 0)));
+                        return Err(EvalError::new("`break` outside of a loop", *span));
                     }
                     self.stack.truncate(li.stack_base + 1);
                     interp.env = li.env;
                     self.frames.last_mut().unwrap().ip = li.exit;
                 }
-                Op::Continue => {
+                Op::Continue(span) => {
                     let Some(li) = self.loops.last() else {
-                        return Err(EvalError::new(
-                            "`continue` outside of a loop",
-                            Span::new(0, 0),
-                        ));
+                        return Err(EvalError::new("`continue` outside of a loop", *span));
                     };
                     if li.frame_idx != self.frames.len() - 1 {
-                        return Err(EvalError::new(
-                            "`continue` outside of a loop",
-                            Span::new(0, 0),
-                        ));
+                        return Err(EvalError::new("`continue` outside of a loop", *span));
                     }
                     self.stack.truncate(li.stack_base + 1 + li.slots);
                     interp.env = Rc::clone(&li.env);
@@ -907,7 +901,7 @@ impl Vm {
     fn unwind_frame(&mut self, flow: Flow, interp: &mut Interp) -> Unwind {
         let v = match &flow {
             Flow::Return(v) => v.clone(),
-            Flow::Break | Flow::Continue => Value::Unit,
+            Flow::Break(_) | Flow::Continue(_) => Value::Unit,
             Flow::Value(_) => unreachable!("unwind_frame on a plain value"),
         };
         let f = self.frames.pop().unwrap();
@@ -922,13 +916,10 @@ impl Vm {
                 self.stack.push(v);
                 Unwind::Continue
             }
-            Flow::Break => {
-                Unwind::Error(EvalError::new("`break` outside of a loop", Span::new(0, 0)))
+            Flow::Break(span) => Unwind::Error(EvalError::new("`break` outside of a loop", span)),
+            Flow::Continue(span) => {
+                Unwind::Error(EvalError::new("`continue` outside of a loop", span))
             }
-            Flow::Continue => Unwind::Error(EvalError::new(
-                "`continue` outside of a loop",
-                Span::new(0, 0),
-            )),
             Flow::Value(_) => unreachable!(),
         }
     }

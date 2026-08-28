@@ -63,11 +63,8 @@ impl Interp {
                 "`return` outside of a function",
                 Span::new(0, 0),
             )),
-            Flow::Break => Err(EvalError::new("`break` outside of a loop", Span::new(0, 0))),
-            Flow::Continue => Err(EvalError::new(
-                "`continue` outside of a loop",
-                Span::new(0, 0),
-            )),
+            Flow::Break(span) => Err(EvalError::new("`break` outside of a loop", span)),
+            Flow::Continue(span) => Err(EvalError::new("`continue` outside of a loop", span)),
         }
     }
 
