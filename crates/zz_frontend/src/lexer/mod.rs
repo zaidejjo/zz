@@ -86,9 +86,10 @@ impl<'a> Lexer<'a> {
             match c {
                 ' ' | '\t' | '\r' => self.push_trivia(TriviaKind::Whitespace),
                 '\n' => {
-                    if !self.line_continues() {
+                    if !self.line_continues() && !self.next_is_pipe_arrow() {
                         // A newline terminates a statement unless the previous
-                        // token implies the expression continues (Go-style).
+                        // token implies the expression continues (Go-style),
+                        // or the next line starts with `|>` (multi-line pipe).
                         // This applies inside braces too, which is what makes
                         // match arms and block statements parse.
                         self.emit_significant(TokenKind::StmtEnd, self.pos, self.pos + 1);
@@ -323,6 +324,27 @@ impl<'a> Lexer<'a> {
                     | TokenKind::LBracket
             )
         )
+    }
+
+    /// Returns true if the next non-whitespace/non-newline in the source is
+    /// `|>`. Used to allow multi-line pipe chains:
+    /// ```zz
+    /// val
+    ///   |> f
+    ///   |> g
+    /// ```
+    fn next_is_pipe_arrow(&self) -> bool {
+        let mut offset = 1; // skip the newline we just saw
+        loop {
+            match self.peek_char_at(offset) {
+                Some(' ' | '\t' | '\r') => offset += 1,
+                Some('\n') => offset += 1,
+                Some('|') => {
+                    return self.peek_char_at(offset + 1) == Some('>');
+                }
+                _ => return false,
+            }
+        }
     }
 
     fn emit_significant(&mut self, kind: TokenKind, start: usize, end: usize) {
@@ -605,4 +627,98 @@ fn is_ident_start(c: char) -> bool {
 
 fn is_ident_continue(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: returns true if the token stream contains a `StmtEnd` between
+    /// the first `Int` and the first `PipeGt`.
+    fn has_stmt_end_before_pipe(src: &str) -> bool {
+        let tokens = lex(src).tokens;
+        let mut saw_int = false;
+        for t in &tokens {
+            match t.kind {
+                TokenKind::Int => saw_int = true,
+                TokenKind::PipeGt if saw_int => {
+                    // Check if any StmtEnd appeared between Int and PipeGt
+                    return false; // We already passed without finding StmtEnd
+                }
+                TokenKind::StmtEnd if saw_int => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn single_line_pipe_no_stmt_end() {
+        // "5 |> f" — no StmtEnd between 5 and |>
+        let tokens = lex("5 |> f").tokens;
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        assert!(!kinds.contains(&TokenKind::StmtEnd));
+    }
+
+    #[test]
+    fn multi_line_pipe_no_stmt_end() {
+        // "5\n  |> f" — newline before |> should NOT emit StmtEnd
+        let tokens = lex("5\n  |> f").tokens;
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        // There should be no StmtEnd between Int(5) and PipeGt
+        let mut found_int = false;
+        for k in &kinds {
+            if *k == TokenKind::Int {
+                found_int = true;
+            }
+            if *k == TokenKind::StmtEnd && found_int {
+                panic!(
+                    "StmtEnd found before PipeGt in multi-line pipe: {:?}",
+                    kinds
+                );
+            }
+            if *k == TokenKind::PipeGt {
+                assert!(found_int, "PipeGt should appear after Int");
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn multi_line_pipe_triple_chain() {
+        let tokens = lex("5\n  |> f\n  |> g").tokens;
+        let pipe_count = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::PipeGt)
+            .count();
+        assert_eq!(pipe_count, 2, "should have two PipeGt tokens");
+    }
+
+    #[test]
+    fn newline_before_non_pipe_still_emits_stmt_end() {
+        // "5\n  x" — plain newline without pipe → StmtEnd
+        let tokens = lex("5\n  x").tokens;
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        assert!(kinds.contains(&TokenKind::StmtEnd));
+    }
+
+    #[test]
+    fn multi_line_pipe_with_blank_lines() {
+        // "5\n\n  |> f" — blank line between, still a pipe
+        let tokens = lex("5\n\n  |> f").tokens;
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        let mut found_int = false;
+        for k in &kinds {
+            if *k == TokenKind::Int {
+                found_int = true;
+            }
+            if *k == TokenKind::StmtEnd && found_int {
+                panic!("StmtEnd found before PipeGt: {:?}", kinds);
+            }
+            if *k == TokenKind::PipeGt {
+                assert!(found_int);
+                break;
+            }
+        }
+    }
 }

@@ -252,6 +252,17 @@ fn vm_matches_tree_walker_on_basics() {
 }
 
 #[test]
+fn vm_multiline_pipe() {
+    for src in [
+        "func inc(n: int) -> int { n + 1 }\nfunc dbl(n: int) -> int { n * 2 }\n5\n  |> inc\n  |> dbl",
+        "func inc(n: int) -> int { n + 1 }\nfunc dbl(n: int) -> int { n * 2 }\nval := 10\nval\n  |> inc\n  |> dbl\n  |> inc",
+        "func inc(n: int) -> int { n + 1 }\nresult := {\n  5\n    |> inc\n    |> inc\n}\nresult",
+    ] {
+        assert_same(src);
+    }
+}
+
+#[test]
 fn vm_deep_recursion_no_rust_stack_overflow() {
     assert_eq!(
         run_src(
