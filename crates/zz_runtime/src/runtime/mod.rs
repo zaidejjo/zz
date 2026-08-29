@@ -25,6 +25,8 @@ pub use crate::value::{FuncValue as FuncValueReexport, Value as ValueReexport};
 pub struct EvalError {
     pub message: String,
     pub span: Span,
+    /// Call stack at the time of the error: (function_name, call_site_span).
+    pub backtrace: Vec<(String, Span)>,
 }
 
 impl EvalError {
@@ -32,7 +34,13 @@ impl EvalError {
         EvalError {
             message: message.into(),
             span,
+            backtrace: Vec::new(),
         }
+    }
+
+    pub fn with_backtrace(mut self, bt: Vec<(String, Span)>) -> Self {
+        self.backtrace = bt;
+        self
     }
 }
 

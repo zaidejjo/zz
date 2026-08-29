@@ -273,10 +273,7 @@ impl Vm {
                 Op::StoreVar(name, span) => {
                     let v = self.stack.pop().unwrap();
                     if !interp.env.borrow_mut().assign(name, v) {
-                        return Err(EvalError::new(
-                            format!("undefined variable `{name}`"),
-                            *span,
-                        ));
+                        return Err(self.error(format!("undefined variable `{name}`"), *span));
                     }
                 }
                 Op::StorePath(parts, span) => {
@@ -344,7 +341,7 @@ impl Vm {
                 Op::JumpIfFalseBool(target, span) => {
                     let v = self.stack.pop().unwrap();
                     if !matches!(v, Value::Bool(_)) {
-                        return Err(EvalError::new("`if` condition must be a bool", *span));
+                        return Err(self.error("`if` condition must be a bool", *span));
                     }
                     if !v.is_truthy() {
                         self.frames.last_mut().unwrap().ip = *target;
@@ -380,10 +377,8 @@ impl Vm {
                         Value::Array(_) => (it, Value::Int(0)),
                         Value::Range(start, _, _) => (it, Value::Int(start)),
                         other => {
-                            return Err(EvalError::new(
-                                format!("cannot iterate a value of type `{other}`"),
-                                *span,
-                            ))
+                            return Err(self
+                                .error(format!("cannot iterate a value of type `{other}`"), *span))
                         }
                     };
                     let stack_base = self.stack.len() - 1;
@@ -467,7 +462,7 @@ impl Vm {
                 Op::WhileCond { exit, span } => {
                     let c = self.stack.pop().unwrap();
                     if !matches!(c, Value::Bool(_)) {
-                        return Err(EvalError::new("`while` condition must be a bool", *span));
+                        return Err(self.error("`while` condition must be a bool", *span));
                     }
                     if !c.is_truthy() {
                         let li = self.loops.pop().unwrap();
@@ -478,10 +473,10 @@ impl Vm {
                 }
                 Op::Break(span) => {
                     let Some(li) = self.loops.pop() else {
-                        return Err(EvalError::new("`break` outside of a loop", *span));
+                        return Err(self.error("`break` outside of a loop", *span));
                     };
                     if li.frame_idx != self.frames.len() - 1 {
-                        return Err(EvalError::new("`break` outside of a loop", *span));
+                        return Err(self.error("`break` outside of a loop", *span));
                     }
                     self.stack.truncate(li.stack_base + 1);
                     interp.env = li.env;
@@ -489,10 +484,10 @@ impl Vm {
                 }
                 Op::Continue(span) => {
                     let Some(li) = self.loops.last() else {
-                        return Err(EvalError::new("`continue` outside of a loop", *span));
+                        return Err(self.error("`continue` outside of a loop", *span));
                     };
                     if li.frame_idx != self.frames.len() - 1 {
-                        return Err(EvalError::new("`continue` outside of a loop", *span));
+                        return Err(self.error("`continue` outside of a loop", *span));
                     }
                     self.stack.truncate(li.stack_base + 1 + li.slots);
                     interp.env = Rc::clone(&li.env);
@@ -516,7 +511,7 @@ impl Vm {
                     let mut arr = match self.stack.pop().unwrap() {
                         Value::Array(a) => a,
                         other => {
-                            return Err(EvalError::new(
+                            return Err(self.error(
                                 format!("ArrayPush: expected array, found `{other}`"),
                                 *span,
                             ));
@@ -555,10 +550,8 @@ impl Vm {
                     let bound = |v: Value| match v {
                         Value::Int(i) => Ok(Some(i)),
                         Value::Unit => Ok(None),
-                        other => Err(EvalError::new(
-                            format!("slice bound must be `int`, found `{other}`"),
-                            *span,
-                        )),
+                        other => Err(self
+                            .error(format!("slice bound must be `int`, found `{other}`"), *span)),
                     };
                     let v = slice_value(&ov, bound(s)?, bound(e)?, *span)?;
                     self.stack.push(v);
@@ -568,7 +561,7 @@ impl Vm {
                     let s = self.stack.pop().unwrap();
                     match (s, e) {
                         (Value::Int(a), Value::Int(b)) => self.stack.push(Value::Range(a, b, 1)),
-                        _ => return Err(EvalError::new("range bounds must be integers", *span)),
+                        _ => return Err(self.error("range bounds must be integers", *span)),
                     }
                 }
                 Op::MakeStruct {
@@ -577,7 +570,7 @@ impl Vm {
                     span,
                 } => {
                     let Some(registered) = interp.structs.get(name).cloned() else {
-                        return Err(EvalError::new(format!("unknown struct `{name}`"), *span));
+                        return Err(self.error(format!("unknown struct `{name}`"), *span));
                     };
                     let mut vals = Vec::with_capacity(field_names.len());
                     for _ in 0..field_names.len() {
@@ -587,7 +580,7 @@ impl Vm {
                     let mut out = Vec::with_capacity(registered.len());
                     for fname in &registered {
                         let Some(idx) = field_names.iter().position(|n| n == fname) else {
-                            return Err(EvalError::new(
+                            return Err(self.error(
                                 format!("missing field `{fname}` in struct literal"),
                                 *span,
                             ));
@@ -634,26 +627,22 @@ impl Vm {
                     };
                     match (name.as_str(), av) {
                         ("ok", Some(v)) => self.stack.push(Value::Result(Ok(Box::new(v)))),
-                        ("ok", None) => {
-                            return Err(EvalError::new("`.ok` requires an argument", *span))
-                        }
+                        ("ok", None) => return Err(self.error("`.ok` requires an argument", *span)),
                         ("err", Some(v)) => self.stack.push(Value::Result(Err(Box::new(v)))),
                         ("err", None) => {
-                            return Err(EvalError::new("`.err` requires an argument", *span))
+                            return Err(self.error("`.err` requires an argument", *span))
                         }
                         ("some", Some(v)) => self.stack.push(Value::Option(Some(Box::new(v)))),
                         ("some", None) => {
-                            return Err(EvalError::new("`.some` requires an argument", *span))
+                            return Err(self.error("`.some` requires an argument", *span))
                         }
                         ("none", None) => self.stack.push(Value::Option(None)),
                         ("none", Some(_)) => {
-                            return Err(EvalError::new("`.none` takes no argument", *span))
+                            return Err(self.error("`.none` takes no argument", *span))
                         }
                         (other, _) => {
-                            return Err(EvalError::new(
-                                format!("unknown variant constructor `.{other}`"),
-                                *span,
-                            ))
+                            return Err(self
+                                .error(format!("unknown variant constructor `.{other}`"), *span))
                         }
                     }
                 }
@@ -675,10 +664,7 @@ impl Vm {
                     }
                 }
                 Op::MatchError(span) => {
-                    return Err(EvalError::new(
-                        "non-exhaustive match: no arm matched",
-                        *span,
-                    ));
+                    return Err(self.error("non-exhaustive match: no arm matched", *span));
                 }
                 Op::IfLetMatch { pat, els, has_env } => {
                     let v = self.stack.pop().unwrap();
@@ -717,7 +703,7 @@ impl Vm {
                             }
                         }
                         other => {
-                            return Err(EvalError::new(
+                            return Err(self.error(
                                 format!("cannot use `?` on a value of type `{other}`"),
                                 *span,
                             ))
@@ -831,10 +817,9 @@ impl Vm {
                     let spec_str = match spec {
                         Value::Str(s) => s,
                         _ => {
-                            return Err(EvalError::new(
-                                "format spec must be a string".to_string(),
-                                *span,
-                            ))
+                            return Err(
+                                self.error("format spec must be a string".to_string(), *span)
+                            )
                         }
                     };
                     let formatted = crate::runtime::format::format_value_with_spec(&val, &spec_str);
@@ -876,7 +861,7 @@ impl Vm {
         match callee {
             Value::Func(fv) if fv.chunk.is_some() => {
                 if args.len() != fv.params.len() {
-                    return Err(EvalError::new(
+                    return Err(self.error(
                         format!(
                             "expected {} arguments, found {}",
                             fv.params.len(),
@@ -926,10 +911,8 @@ impl Vm {
                 self.stack.push(v);
                 Unwind::Continue
             }
-            Flow::Break(span) => Unwind::Error(EvalError::new("`break` outside of a loop", span)),
-            Flow::Continue(span) => {
-                Unwind::Error(EvalError::new("`continue` outside of a loop", span))
-            }
+            Flow::Break(span) => Unwind::Error(self.error("`break` outside of a loop", span)),
+            Flow::Continue(span) => Unwind::Error(self.error("`continue` outside of a loop", span)),
             Flow::Value(_) => unreachable!(),
         }
     }
@@ -940,5 +923,10 @@ impl Vm {
             .iter()
             .map(|f| (f.func_name.clone(), f.func_span))
             .collect()
+    }
+
+    /// Create an EvalError with the current backtrace attached.
+    fn error(&self, message: impl Into<String>, span: Span) -> EvalError {
+        EvalError::new(message, span).with_backtrace(self.backtrace())
     }
 }
