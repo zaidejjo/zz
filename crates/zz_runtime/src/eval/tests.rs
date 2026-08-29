@@ -26,24 +26,21 @@ fn arithmetic_and_precedence() {
 }
 
 #[test]
-fn let_binding_evaluates_to_value() {
-    assert_eq!(eval_src("let x = 1 + 2").unwrap(), Value::Int(3));
+fn binding_evaluates_to_value() {
+    assert_eq!(eval_src("x := 1 + 2").unwrap(), Value::Int(3));
 }
 
 #[test]
-fn let_references_previous_bindings() {
+fn references_previous_bindings() {
     assert_eq!(
-        eval_src("let a = 10\nlet b = 20\nlet c = a + b\nc").unwrap(),
+        eval_src("a := 10\nb := 20\nc := a + b\nc").unwrap(),
         Value::Int(30)
     );
 }
 
 #[test]
 fn shadowing() {
-    assert_eq!(
-        eval_src("let x = 1\nlet x = x + 1\nx").unwrap(),
-        Value::Int(2)
-    );
+    assert_eq!(eval_src("x := 1\nx := x + 1\nx").unwrap(), Value::Int(2));
 }
 
 #[test]
@@ -100,7 +97,7 @@ fn if_expression() {
 #[test]
 fn closure_and_call() {
     assert_eq!(
-        eval_src("let f = |x: int| x + 1\nf(5)").unwrap(),
+        eval_src("f := |x: int| x + 1\nf(5)").unwrap(),
         Value::Int(6)
     );
 }
@@ -108,7 +105,7 @@ fn closure_and_call() {
 #[test]
 fn closure_captures_env() {
     assert_eq!(
-        eval_src("let a = 10\nlet f = |x: int| x + a\nf(5)").unwrap(),
+        eval_src("a := 10\nf := |x: int| x + a\nf(5)").unwrap(),
         Value::Int(15)
     );
 }
@@ -133,11 +130,11 @@ fn return_unwinds() {
 #[test]
 fn match_option() {
     assert_eq!(
-        eval_src("let v = .some(1)\nmatch v { .some(n) => n, .none => 0 }").unwrap(),
+        eval_src("v := .some(1)\nmatch v { .some(n) => n, .none => 0 }").unwrap(),
         Value::Int(1)
     );
     assert_eq!(
-        eval_src("let v = .none\nmatch v { .some(n) => n, .none => 0 }").unwrap(),
+        eval_src("v := .none\nmatch v { .some(n) => n, .none => 0 }").unwrap(),
         Value::Int(0)
     );
 }
@@ -145,11 +142,11 @@ fn match_option() {
 #[test]
 fn match_result() {
     assert_eq!(
-        eval_src("let v = .ok(1)\nmatch v { .ok(n) => n, .err(_) => 0 }").unwrap(),
+        eval_src("v := .ok(1)\nmatch v { .ok(n) => n, .err(_) => 0 }").unwrap(),
         Value::Int(1)
     );
     assert_eq!(
-        eval_src("let v = .err(\"x\")\nmatch v { .ok(n) => n, .err(_) => 0 }").unwrap(),
+        eval_src("v := .err(\"x\")\nmatch v { .ok(n) => n, .err(_) => 0 }").unwrap(),
         Value::Int(0)
     );
 }
@@ -157,11 +154,11 @@ fn match_result() {
 #[test]
 fn if_let() {
     assert_eq!(
-        eval_src("let v = .some(3)\nif let .some(n) = v { n } else { 0 }").unwrap(),
+        eval_src("v := .some(3)\nif let .some(n) = v { n } else { 0 }").unwrap(),
         Value::Int(3)
     );
     assert_eq!(
-        eval_src("let v = .none\nif let .some(n) = v { n } else { 0 }").unwrap(),
+        eval_src("v := .none\nif let .some(n) = v { n } else { 0 }").unwrap(),
         Value::Int(0)
     );
 }
@@ -169,7 +166,7 @@ fn if_let() {
 #[test]
 fn try_unwraps_option() {
     assert_eq!(
-        eval_src("func f() -> Option<int> { let x = .some(1)?; .some(x) }\nf()").unwrap(),
+        eval_src("func f() -> Option<int> { x := .some(1)?; .some(x) }\nf()").unwrap(),
         Value::Option(Some(Box::new(Value::Int(1))))
     );
 }
@@ -210,7 +207,7 @@ fn array_literal() {
 #[test]
 fn array_explicit_decl() {
     assert_eq!(
-        eval_src("[int] scores = [1, 2]\nscores").unwrap(),
+        eval_src("scores: [int] = [1, 2]\nscores").unwrap(),
         Value::Array(vec![Value::Int(1), Value::Int(2)])
     );
 }
@@ -226,7 +223,7 @@ fn dict_literal() {
 #[test]
 fn dict_explicit_decl() {
     assert_eq!(
-        eval_src("{str: int} ages = {\"a\": 1}\nages").unwrap(),
+        eval_src("ages: {str: int} = {\"a\": 1}\nages").unwrap(),
         Value::Dict(vec![(Value::Str("a".into()), Value::Int(1))])
     );
 }
@@ -234,7 +231,7 @@ fn dict_explicit_decl() {
 #[test]
 fn dict_union_value_type() {
     assert_eq!(
-        eval_src("{str: str | int} user = {\"name\": \"Zaid\", \"age\": 20}\nuser").unwrap(),
+        eval_src("user: {str: str | int} = {\"name\": \"Zaid\", \"age\": 20}\nuser").unwrap(),
         Value::Dict(vec![
             (Value::Str("name".into()), Value::Str("Zaid".into())),
             (Value::Str("age".into()), Value::Int(20)),
