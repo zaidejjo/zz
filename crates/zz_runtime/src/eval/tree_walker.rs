@@ -75,8 +75,8 @@ impl Interp {
                             match flow? {
                                 Flow::Value(v) => result = v,
                                 Flow::Return(v) => return Ok(Flow::Return(v)),
-                                Flow::Break(span) => break,
-                                Flow::Continue(span) => continue,
+                                Flow::Break(_) => break,
+                                Flow::Continue(_) => {}
                             }
                         }
                         Ok(Flow::Value(result))
@@ -94,8 +94,8 @@ impl Interp {
                                 match flow? {
                                     Flow::Value(v) => result = v,
                                     Flow::Return(v) => return Ok(Flow::Return(v)),
-                                    Flow::Break(span) => break,
-                                    Flow::Continue(span) => {}
+                                    Flow::Break(_) => break,
+                                    Flow::Continue(_) => {}
                                 }
                                 i += step;
                             }
@@ -109,8 +109,8 @@ impl Interp {
                                 match flow? {
                                     Flow::Value(v) => result = v,
                                     Flow::Return(v) => return Ok(Flow::Return(v)),
-                                    Flow::Break(span) => break,
-                                    Flow::Continue(span) => {}
+                                    Flow::Break(_) => break,
+                                    Flow::Continue(_) => {}
                                 }
                                 i += step;
                             }
@@ -511,8 +511,8 @@ impl Interp {
                     match self.eval_block(body)? {
                         Flow::Value(v) => result = v,
                         Flow::Return(v) => return Ok(Flow::Return(v)),
-                        Flow::Break(span) => break,
-                        Flow::Continue(span) => {}
+                        Flow::Break(_) => break,
+                        Flow::Continue(_) => {}
                     }
                 }
                 Ok(Flow::Value(result))
@@ -812,7 +812,7 @@ impl Interp {
                     ));
                 }
                 match self.natives.get(&nf.name) {
-                    Some(entry) => (entry.f)(self, &mut args, span),
+                    Some(entry) => (entry.f)(self, &mut args),
                     None => Err(EvalError::new(
                         format!("unknown native function `{}`", nf.name),
                         span,

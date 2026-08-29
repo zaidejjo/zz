@@ -62,11 +62,10 @@ impl Flow {
 }
 
 /// A native function implementation. Receives the interpreter (so natives
-/// can call back into ZZ, e.g. HTTP route handlers), the argument vector
-/// (a `Vec`, not a slice, because `std.vec.push` must grow it), and the
-/// call-site span for accurate error reporting.
+/// can call back into ZZ, e.g. HTTP route handlers) and the argument vector
+/// (a `Vec`, not a slice, because `std.vec.push` must grow it).
 #[allow(clippy::ptr_arg)]
-pub type NativeFn = fn(&mut crate::eval::Interp, &mut Vec<Value>, Span) -> Result<Value, EvalError>;
+pub type NativeFn = fn(&mut crate::eval::Interp, &mut Vec<Value>) -> Result<Value, EvalError>;
 
 /// A registered native function: its arity and Rust implementation.
 #[derive(Debug, Clone, Copy)]
