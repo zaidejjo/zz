@@ -12,6 +12,7 @@ fn sig(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
             .into_iter()
             .map(|(n, t)| (n.to_string(), t))
             .collect(),
+        has_default: vec![],
         ret,
     }
 }
@@ -24,6 +25,20 @@ fn sig_t(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
             .into_iter()
             .map(|(n, t)| (n.to_string(), t))
             .collect(),
+        has_default: vec![],
+        ret,
+    }
+}
+
+/// Build a signature generic over `T, U`.
+fn sig_tu(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
+    FuncSig {
+        generics: vec!["T".to_string(), "U".to_string()],
+        params: params
+            .into_iter()
+            .map(|(n, t)| (n.to_string(), t))
+            .collect(),
+        has_default: vec![],
         ret,
     }
 }
@@ -50,6 +65,66 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert("println".into(), sig_t(vec![("v", t.clone())], Type::Unit));
     m.insert("input".into(), sig(vec![], Type::Str));
 
+    // Range and iterator builtins
+    let range_t = Type::Range(Box::new(Type::Int));
+    // range(stop) | range(start, stop) | range(start, stop, step)
+    // Checker handles variable arg count; signature declares max 3 args.
+    m.insert(
+        "range".into(),
+        sig(
+            vec![
+                ("start", Type::Int),
+                ("stop", Type::Int),
+                ("step", Type::Int),
+            ],
+            range_t.clone(),
+        ),
+    );
+    m.insert("len".into(), sig_t(vec![("v", t.clone())], Type::Int));
+    // Union of array-of-T and range-of-T so T stays as element type.
+    let iterable_t = Type::Union(vec![
+        Type::Array(Box::new(t.clone())),
+        Type::Range(Box::new(t.clone())),
+    ]);
+    m.insert("map".into(), {
+        let u = Type::Named("U".to_string());
+        sig_tu(
+            vec![
+                ("arr", iterable_t.clone()),
+                ("f", Type::Func(vec![t.clone()], Box::new(u.clone()))),
+            ],
+            Type::Array(Box::new(u.clone())),
+        )
+    });
+    m.insert(
+        "filter".into(),
+        sig_t(
+            vec![
+                ("arr", iterable_t.clone()),
+                ("f", Type::Func(vec![t.clone()], Box::new(Type::Bool))),
+            ],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "enumerate".into(),
+        sig_t(
+            vec![("arr", iterable_t.clone())],
+            Type::Array(Box::new(Type::Tuple(vec![Type::Int, t.clone()]))),
+        ),
+    );
+    m.insert("zip".into(), {
+        let t2 = Type::Named("U".to_string());
+        let iterable_t2 = Type::Union(vec![
+            Type::Array(Box::new(t2.clone())),
+            Type::Range(Box::new(t2.clone())),
+        ]);
+        sig_tu(
+            vec![("a", iterable_t.clone()), ("b", iterable_t2)],
+            Type::Array(Box::new(Type::Tuple(vec![t.clone(), t2.clone()]))),
+        )
+    });
+
     // std.str
     m.insert(
         "std.str.length".into(),
@@ -65,6 +140,43 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "std.str.contains".into(),
         sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Bool),
+    );
+
+    // str.* methods (for method dispatch: "hello".trim())
+    m.insert("str.trim".into(), sig(vec![("s", Type::Str)], Type::Str));
+    m.insert(
+        "str.to_upper".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "str.to_lower".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "str.split".into(),
+        sig(
+            vec![("s", Type::Str), ("sep", Type::Str)],
+            Type::Array(Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "str.contains".into(),
+        sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "str.replace".into(),
+        sig(
+            vec![("s", Type::Str), ("old", Type::Str), ("new", Type::Str)],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "str.starts_with".into(),
+        sig(vec![("s", Type::Str), ("prefix", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "str.ends_with".into(),
+        sig(vec![("s", Type::Str), ("suffix", Type::Str)], Type::Bool),
     );
 
     // std.vec — generic over element type T.
@@ -84,8 +196,139 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.vec.pop".into(),
         sig_t(
             vec![("v", Type::Array(Box::new(t.clone())))],
-            Type::Array(Box::new(t)),
+            Type::Array(Box::new(t.clone())),
         ),
+    );
+
+    // vec.* methods (for method dispatch: [1,2].push(3))
+    m.insert(
+        "vec.len".into(),
+        sig_t(vec![("v", Type::Array(Box::new(t.clone())))], Type::Int),
+    );
+    m.insert(
+        "vec.push".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone()))), ("x", t.clone())],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "vec.pop".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone())))],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "vec.reverse".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone())))],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "vec.join".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone()))), ("sep", Type::Str)],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "vec.contains".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone()))), ("x", t.clone())],
+            Type::Bool,
+        ),
+    );
+    m.insert(
+        "vec.sort".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone())))],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "vec.insert".into(),
+        sig_t(
+            vec![
+                ("v", Type::Array(Box::new(t.clone()))),
+                ("idx", Type::Int),
+                ("x", t.clone()),
+            ],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "vec.remove".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone()))), ("idx", Type::Int)],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+
+    // option.* methods (for method dispatch: .some(1).unwrap_or(0))
+    let t = Type::Named("T".to_string());
+    m.insert(
+        "option.unwrap".into(),
+        sig_t(vec![("opt", Type::Option(Box::new(t.clone())))], t.clone()),
+    );
+    m.insert(
+        "option.unwrap_or".into(),
+        sig_t(
+            vec![
+                ("opt", Type::Option(Box::new(t.clone()))),
+                ("default", t.clone()),
+            ],
+            t.clone(),
+        ),
+    );
+    m.insert(
+        "option.expect".into(),
+        sig_t(
+            vec![
+                ("opt", Type::Option(Box::new(t.clone()))),
+                ("msg", Type::Str),
+            ],
+            t.clone(),
+        ),
+    );
+
+    // result.* methods (for method dispatch: .ok(1).unwrap_or(0))
+    let t = Type::Named("T".to_string());
+    let e = Type::Named("E".to_string());
+    let result_t = Type::Result(Box::new(t.clone()), Box::new(e.clone()));
+    m.insert(
+        "result.unwrap".into(),
+        FuncSig {
+            generics: vec!["T".to_string(), "E".to_string()],
+            params: vec![("res".to_string(), result_t.clone())],
+            has_default: vec![],
+            ret: t.clone(),
+        },
+    );
+    m.insert(
+        "result.unwrap_or".into(),
+        FuncSig {
+            generics: vec!["T".to_string(), "E".to_string()],
+            params: vec![
+                ("res".to_string(), result_t.clone()),
+                ("default".to_string(), t.clone()),
+            ],
+            has_default: vec![],
+            ret: t.clone(),
+        },
+    );
+    m.insert(
+        "result.expect".into(),
+        FuncSig {
+            generics: vec!["T".to_string(), "E".to_string()],
+            params: vec![
+                ("res".to_string(), result_t),
+                ("msg".to_string(), Type::Str),
+            ],
+            has_default: vec![],
+            ret: t,
+        },
     );
 
     // std.json
@@ -273,7 +516,7 @@ mod tests {
         assert!(funcs.contains_key("str"));
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
-        assert_eq!(funcs.len(), 41);
+        assert_eq!(funcs.len(), 70);
     }
 
     #[test]

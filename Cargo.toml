@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/zz_frontend", "crates/zz_checker", "crates/zz_runtime", "crates/zz_stdlib", "crates/zz_cli"]
+members = ["crates/zz_frontend", "crates/zz_checker", "crates/zz_runtime", "crates/zz_stdlib", "crates/zz_cli", "crates/zz_lsp"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 

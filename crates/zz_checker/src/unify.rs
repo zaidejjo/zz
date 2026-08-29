@@ -106,6 +106,9 @@ impl Unifier {
             | (Type::Bool, Type::Bool)
             | (Type::Str, Type::Str)
             | (Type::Unit, Type::Unit) => Ok(()),
+            // Error is an absorbing type: unify with anything without binding,
+            // suppressing cascading type errors from earlier undefined symbols.
+            (Type::Error, _) | (_, Type::Error) => Ok(()),
             (Type::Named(a), Type::Named(b)) if a == b => Ok(()),
             (Type::Struct(a), Type::Struct(b)) if a == b => Ok(()),
             (Type::Range(x), Type::Range(y)) => self.unify(&x, &y),

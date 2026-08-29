@@ -134,7 +134,11 @@ impl Session {
             self.funcs.clone(),
             self.structs.clone(),
         );
-        if !checked.errors.is_empty() {
+        let has_errors = checked
+            .errors
+            .iter()
+            .any(|e| e.severity == zz_frontend::diag::Severity::Error);
+        if has_errors {
             self.last_had_errors = true;
             return EvalOutput {
                 output: String::new(),
@@ -180,7 +184,15 @@ fn display_value(v: &Value) -> String {
 }
 
 fn eval_error_to_diag(e: &EvalError) -> Vec<RawDiag> {
-    vec![error_at(e.message.clone(), e.span)]
+    let mut diag = error_at(e.message.clone(), e.span);
+    for (name, _span) in &e.backtrace {
+        if name.is_empty() {
+            diag = diag.with_note("  at <top-level>");
+        } else {
+            diag = diag.with_note(format!("  at {name}"));
+        }
+    }
+    vec![diag]
 }
 
 #[cfg(test)]
@@ -272,7 +284,7 @@ mod tests {
     #[test]
     fn explicit_decl_runs() {
         let mut s = Session::new("<test>");
-        let out = s.eval("int x = 10\nx");
+        let out = s.eval("x: int = 10\nx");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "10");
     }
@@ -283,7 +295,7 @@ mod tests {
         let out = s.eval("scores := [10, 20, 30]\nscores");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "[10, 20, 30]");
-        let out2 = s.eval("{str: int} ages = {\"a\": 1}\nages");
+        let out2 = s.eval("ages: {str: int} = {\"a\": 1}\nages");
         assert!(out2.errors.is_none(), "errors: {:?}", out2.errors);
         assert_eq!(out2.output, "{a: 1}");
     }
