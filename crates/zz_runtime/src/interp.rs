@@ -117,7 +117,7 @@ impl Interp {
     pub fn run(&mut self, program: &Program) -> Result<Value, EvalError> {
         let chunk = Rc::new(crate::vm::Compiler::compile_program(program));
         let mut vm = crate::vm::Vm::new();
-        match vm.run_chunk(&chunk, self)? {
+        match vm.run_chunk(&chunk, self, &[])? {
             Flow::Value(v) => Ok(v),
             Flow::Return(_) => Err(EvalError::new(
                 "`return` outside of a function",
@@ -837,14 +837,20 @@ impl Interp {
             ));
         }
         let scope = Env::with_parent(&fv.env);
-        for (p, v) in fv.params.iter().zip(args) {
-            scope.borrow_mut().define(&p.name.name, v);
-        }
+        let arg_values: Vec<Value> = fv
+            .params
+            .iter()
+            .zip(args)
+            .map(|(p, v)| {
+                scope.borrow_mut().define(&p.name.name, v.clone());
+                v
+            })
+            .collect();
         let prev = std::mem::replace(&mut self.env, scope);
         let result = match &fv.chunk {
             Some(chunk) => {
                 let mut vm = crate::vm::Vm::new();
-                vm.run_chunk(chunk, self)
+                vm.run_chunk(chunk, self, &arg_values)
             }
             None => self.eval(&fv.body),
         };

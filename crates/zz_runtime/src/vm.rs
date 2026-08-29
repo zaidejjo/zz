@@ -848,7 +848,7 @@ impl Compiler {
                 Expr::Path { parts, span: pspan } => {
                     // Special case: `input()` with no args -> synthesize empty prompt
                     let is_input = parts.len() == 1 && parts[0] == "input" && args.is_empty();
-                    let argc = if is_input { 1 } else { args.len() };
+                    let _argc = if is_input { 1 } else { args.len() };
                     for a in args {
                         self.compile_expr(a);
                     }
@@ -1424,6 +1424,7 @@ impl Vm {
         &mut self,
         chunk: &Rc<Chunk>,
         interp: &mut Interp,
+        args: &[Value],
     ) -> Result<Flow, EvalError> {
         self.frames.push(Frame {
             chunk: Rc::clone(chunk),
@@ -1431,6 +1432,8 @@ impl Vm {
             prev_env: Rc::clone(&interp.env),
             stack_base: self.stack.len(),
         });
+        // Push args after frame so LoadSlot(0..argc) indexes correctly.
+        self.stack.extend(args.iter().cloned());
 
         loop {
             // Fetch the current instruction without holding a borrow across
