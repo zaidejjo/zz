@@ -1,11 +1,11 @@
 use super::super::stdlib_natives;
-use zz_runtime::{EvalError, Interp, Value};
+use zz_runtime::{EvalError, Interp, Span, Value};
 
 fn call(name: &str, args: Vec<Value>) -> Result<Value, EvalError> {
     let mut interp = Interp::new();
     let mut args = args;
     let entry = stdlib_natives()[name];
-    (entry.f)(&mut interp, &mut args)
+    (entry.f)(&mut interp, &mut args, Span::new(0, 0))
 }
 
 #[test]

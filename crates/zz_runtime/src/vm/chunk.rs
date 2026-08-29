@@ -1,4 +1,5 @@
 use zz_frontend::ast::Param;
+use zz_frontend::span::Span;
 
 use crate::value::Value;
 
@@ -11,6 +12,9 @@ pub struct Chunk {
     pub constants: Vec<Value>,
     /// Parameter list when this chunk is a function body (empty otherwise).
     pub params: Vec<Param>,
+    /// Source span for each opcode. Same length as `code`.
+    /// `Span::default()` for ops that don't carry span info.
+    pub spans: Vec<Span>,
 }
 
 impl Chunk {
@@ -19,6 +23,7 @@ impl Chunk {
             code: Vec::new(),
             constants: Vec::new(),
             params: Vec::new(),
+            spans: Vec::new(),
         }
     }
 }

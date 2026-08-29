@@ -241,7 +241,13 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
                     .unwrap_or_else(|| (path.clone(), String::new()));
                 let mut files = Files::new();
                 let id = files.add(name, source);
-                let diags = vec![error_at(e.message.clone(), e.span)];
+                let mut diag = error_at(e.message.clone(), e.span);
+                for (name, _span) in &e.backtrace {
+                    if !name.is_empty() {
+                        diag = diag.with_note(format!("  at {name}"));
+                    }
+                }
+                let diags = vec![diag];
                 eprint!("{}", render_to_string(&files, id, &diags));
                 return Err("program failed".to_string());
             }

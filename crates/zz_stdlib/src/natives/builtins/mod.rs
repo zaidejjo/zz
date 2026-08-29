@@ -1,25 +1,38 @@
-use zz_runtime::{EvalError, Interp, Value};
+use zz_runtime::{EvalError, Interp, Span, Value};
 
-pub(crate) fn typeof_fn(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
-    let v = args.first().cloned().ok_or_else(|| {
-        EvalError::new("missing argument for typeof", zz_runtime::Span::new(0, 0))
-    })?;
+pub(crate) fn typeof_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for typeof", span))?;
     Ok(Value::Str(v.type_name()))
 }
 
-pub(crate) fn conv_str(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+pub(crate) fn conv_str(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
     let v = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for str", zz_runtime::Span::new(0, 0)))?;
+        .ok_or_else(|| EvalError::new("missing argument for str", span))?;
     Ok(Value::Str(v.to_string()))
 }
 
-pub(crate) fn conv_int(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+pub(crate) fn conv_int(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
     let v = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for int", zz_runtime::Span::new(0, 0)))?;
+        .ok_or_else(|| EvalError::new("missing argument for int", span))?;
     let result = match &v {
         Value::Int(i) => Some(*i),
         Value::Float(f) => Some(*f as i64),
@@ -29,11 +42,15 @@ pub(crate) fn conv_int(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Va
     Ok(Value::Option(result.map(|i| Box::new(Value::Int(i)))))
 }
 
-pub(crate) fn conv_float(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+pub(crate) fn conv_float(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
     let v = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for float", zz_runtime::Span::new(0, 0)))?;
+        .ok_or_else(|| EvalError::new("missing argument for float", span))?;
     let result = match &v {
         Value::Int(i) => Some(*i as f64),
         Value::Float(f) => Some(*f),

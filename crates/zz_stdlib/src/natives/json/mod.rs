@@ -1,33 +1,37 @@
 use crate::natives::{arg, expect_str};
 use zz_runtime::json::{parse_json, to_json_string, JsonValue};
-use zz_runtime::{EvalError, Interp, Value};
+use zz_runtime::{EvalError, Interp, Span, Value};
 
-pub(crate) fn json_parse(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+pub(crate) fn json_parse(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
     let s = expect_str(args, 0, "std.json.parse")?;
     match parse_json(&s) {
         Ok(j) => Ok(Value::Json(j)),
-        Err(msg) => Err(EvalError::new(
-            format!("std.json.parse: {msg}"),
-            zz_runtime::Span::new(0, 0),
-        )),
+        Err(msg) => Err(EvalError::new(format!("std.json.parse: {msg}"), span)),
     }
 }
 
 pub(crate) fn json_stringify(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
+    span: Span,
 ) -> Result<Value, EvalError> {
-    let v = args.first().cloned().ok_or_else(|| {
-        EvalError::new(
-            "missing argument for std.json.stringify",
-            zz_runtime::Span::new(0, 0),
-        )
-    })?;
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for std.json.stringify", span))?;
     let j = value_to_json(&v)?;
     Ok(Value::Str(to_json_string(&j)))
 }
 
-pub(crate) fn json_get(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+pub(crate) fn json_get(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
     let j = expect_json(args, 0, "std.json.get")?;
     let key = expect_str(args, 1, "std.json.get")?;
     match j {
@@ -35,35 +39,38 @@ pub(crate) fn json_get(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Va
             .into_iter()
             .find(|(k, _)| *k == key)
             .map(|(_, v)| Value::Json(v))
-            .ok_or_else(|| {
-                EvalError::new(
-                    format!("std.json.get: no key `{key}`"),
-                    zz_runtime::Span::new(0, 0),
-                )
-            }),
+            .ok_or_else(|| EvalError::new(format!("std.json.get: no key `{key}`"), span)),
         other => Err(EvalError::new(
             format!("std.json.get: expected an object, found `{other}`"),
-            zz_runtime::Span::new(0, 0),
+            span,
         )),
     }
 }
 
-pub(crate) fn json_as_str(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+pub(crate) fn json_as_str(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
     match expect_json(args, 0, "std.json.as_str")? {
         JsonValue::Str(s) => Ok(Value::Str(s)),
         other => Err(EvalError::new(
             format!("std.json.as_str: expected a string, found `{other}`"),
-            zz_runtime::Span::new(0, 0),
+            span,
         )),
     }
 }
 
-pub(crate) fn json_as_int(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+pub(crate) fn json_as_int(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
     match expect_json(args, 0, "std.json.as_int")? {
         JsonValue::Num(n) if n.fract() == 0.0 && n.is_finite() => Ok(Value::Int(n as i64)),
         other => Err(EvalError::new(
             format!("std.json.as_int: expected an integer, found `{other}`"),
-            zz_runtime::Span::new(0, 0),
+            span,
         )),
     }
 }
@@ -71,12 +78,13 @@ pub(crate) fn json_as_int(_interp: &mut Interp, args: &mut Vec<Value>) -> Result
 pub(crate) fn json_as_float(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
+    span: Span,
 ) -> Result<Value, EvalError> {
     match expect_json(args, 0, "std.json.as_float")? {
         JsonValue::Num(n) => Ok(Value::Float(n)),
         other => Err(EvalError::new(
             format!("std.json.as_float: expected a number, found `{other}`"),
-            zz_runtime::Span::new(0, 0),
+            span,
         )),
     }
 }
@@ -84,12 +92,13 @@ pub(crate) fn json_as_float(
 pub(crate) fn json_as_bool(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
+    span: Span,
 ) -> Result<Value, EvalError> {
     match expect_json(args, 0, "std.json.as_bool")? {
         JsonValue::Bool(b) => Ok(Value::Bool(b)),
         other => Err(EvalError::new(
             format!("std.json.as_bool: expected a boolean, found `{other}`"),
-            zz_runtime::Span::new(0, 0),
+            span,
         )),
     }
 }

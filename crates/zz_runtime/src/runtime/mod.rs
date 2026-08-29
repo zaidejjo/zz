@@ -25,6 +25,8 @@ pub use crate::value::{FuncValue as FuncValueReexport, Value as ValueReexport};
 pub struct EvalError {
     pub message: String,
     pub span: Span,
+    /// Call stack at the time of the error: (function_name, call_site_span).
+    pub backtrace: Vec<(String, Span)>,
 }
 
 impl EvalError {
@@ -32,7 +34,13 @@ impl EvalError {
         EvalError {
             message: message.into(),
             span,
+            backtrace: Vec::new(),
         }
+    }
+
+    pub fn with_backtrace(mut self, bt: Vec<(String, Span)>) -> Self {
+        self.backtrace = bt;
+        self
     }
 }
 
@@ -43,8 +51,8 @@ impl EvalError {
 pub(crate) enum Flow {
     Value(Value),
     Return(Value),
-    Break,
-    Continue,
+    Break(Span),
+    Continue(Span),
 }
 
 impl Flow {
@@ -55,20 +63,18 @@ impl Flow {
                 "`return` outside of a function",
                 Span::new(0, 0),
             )),
-            Flow::Break => Err(EvalError::new("`break` outside of a loop", Span::new(0, 0))),
-            Flow::Continue => Err(EvalError::new(
-                "`continue` outside of a loop",
-                Span::new(0, 0),
-            )),
+            Flow::Break(span) => Err(EvalError::new("`break` outside of a loop", span)),
+            Flow::Continue(span) => Err(EvalError::new("`continue` outside of a loop", span)),
         }
     }
 }
 
 /// A native function implementation. Receives the interpreter (so natives
-/// can call back into ZZ, e.g. HTTP route handlers) and the argument vector
-/// (a `Vec`, not a slice, because `std.vec.push` must grow it).
+/// can call back into ZZ, e.g. HTTP route handlers), the argument vector
+/// (a `Vec`, not a slice, because `std.vec.push` must grow it), and the
+/// call-site span for accurate error reporting.
 #[allow(clippy::ptr_arg)]
-pub type NativeFn = fn(&mut crate::eval::Interp, &mut Vec<Value>) -> Result<Value, EvalError>;
+pub type NativeFn = fn(&mut crate::eval::Interp, &mut Vec<Value>, Span) -> Result<Value, EvalError>;
 
 /// A registered native function: its arity and Rust implementation.
 #[derive(Debug, Clone, Copy)]

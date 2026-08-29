@@ -1,8 +1,9 @@
-use zz_runtime::{EvalError, Interp, Value};
+use zz_runtime::{EvalError, Interp, Span, Value};
 
 pub(crate) fn time_now_ms(
     _interp: &mut Interp,
     _args: &mut Vec<Value>,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -14,6 +15,7 @@ pub(crate) fn time_now_ms(
 pub(crate) fn time_sleep_ms(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
+    span: Span,
 ) -> Result<Value, EvalError> {
     let ms = match args.first() {
         Some(Value::Int(ms)) => *ms,
@@ -25,7 +27,7 @@ pub(crate) fn time_sleep_ms(
                         .map(|v| v.type_name())
                         .unwrap_or_else(|| "nothing".to_string())
                 ),
-                zz_runtime::Span::new(0, 0),
+                span,
             ))
         }
     };
