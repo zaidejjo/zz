@@ -6,12 +6,12 @@ use zz_runtime::{EvalError, Interp, Span, Value};
 pub(crate) fn printz(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    _span: Span,
+    span: Span,
 ) -> Result<Value, EvalError> {
     let v = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for std.io.printz", _span))?;
+        .ok_or_else(|| EvalError::new("missing argument for std.io.printz", span))?;
     print!("{v}");
     Ok(Value::Unit)
 }
@@ -19,12 +19,12 @@ pub(crate) fn printz(
 pub(crate) fn println(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    _span: Span,
+    span: Span,
 ) -> Result<Value, EvalError> {
     let v = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for std.io.println", _span))?;
+        .ok_or_else(|| EvalError::new("missing argument for std.io.println", span))?;
     println!("{v}");
     Ok(Value::Unit)
 }
@@ -36,7 +36,7 @@ pub(crate) fn read_line(
 ) -> Result<Value, EvalError> {
     // Optional prompt argument
     if !args.is_empty() {
-        let prompt = expect_str(args, 0, "input", span)?;
+        let prompt = expect_str(args, 0, "input")?;
         print!("{prompt}");
         std::io::stdout()
             .flush()

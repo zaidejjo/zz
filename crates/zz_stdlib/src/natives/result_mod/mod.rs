@@ -55,7 +55,7 @@ pub(crate) fn result_expect(
         .first()
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument for result.expect", span))?;
-    let msg = expect_str(args, 1, "result.expect", span)?;
+    let msg = expect_str(args, 1, "result.expect")?;
     match res {
         Value::Result(Ok(v)) => Ok(*v),
         Value::Result(Err(e)) => Err(EvalError::new(format!("result.expect: {msg}: {e}"), span)),

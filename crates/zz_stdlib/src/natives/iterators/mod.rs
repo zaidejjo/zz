@@ -7,16 +7,16 @@ pub(crate) fn range(
     span: Span,
 ) -> Result<Value, EvalError> {
     let (start, stop, step) = match args.len() {
-        1 => (0, expect_int(args, 0, "range", span)?, 1),
+        1 => (0, expect_int(args, 0, "range")?, 1),
         2 => (
-            expect_int(args, 0, "range", span)?,
-            expect_int(args, 1, "range", span)?,
+            expect_int(args, 0, "range")?,
+            expect_int(args, 1, "range")?,
             1,
         ),
         3 => (
-            expect_int(args, 0, "range", span)?,
-            expect_int(args, 1, "range", span)?,
-            expect_int(args, 2, "range", span)?,
+            expect_int(args, 0, "range")?,
+            expect_int(args, 1, "range")?,
+            expect_int(args, 2, "range")?,
         ),
         _ => {
             return Err(EvalError::new("range expects 1, 2, or 3 arguments", span));
@@ -94,7 +94,7 @@ pub(crate) fn map(
             .ok_or_else(|| EvalError::new("missing first argument for map", span))?,
         span,
     )?;
-    let f = expect_func(args, 1, "map", span)?;
+    let f = expect_func(args, 1, "map")?;
     let mut result = Vec::with_capacity(items.len());
     for item in items {
         let call_args = vec![item];
@@ -114,7 +114,7 @@ pub(crate) fn filter(
             .ok_or_else(|| EvalError::new("missing first argument for filter", span))?,
         span,
     )?;
-    let f = expect_func(args, 1, "filter", span)?;
+    let f = expect_func(args, 1, "filter")?;
     let mut result = Vec::new();
     for item in items {
         let call_args = vec![item.clone()];

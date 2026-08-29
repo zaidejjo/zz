@@ -34,8 +34,8 @@ fn http_route(
     method: &str,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let server = expect_server(args, 0, "std.http", span)?;
-    let path = expect_str(args, 1, "std.http", span)?;
+    let server = expect_server(args, 0, "std.http")?;
+    let path = expect_str(args, 1, "std.http")?;
     let handler = args
         .get(2)
         .cloned()
@@ -56,13 +56,12 @@ pub(crate) fn expect_server(
     args: &mut Vec<Value>,
     i: usize,
     name: &str,
-    span: Span,
 ) -> Result<HttpServer, EvalError> {
-    match arg(args, i, name, span)? {
+    match arg(args, i, name)? {
         Value::HttpServer(s) => Ok(s.clone()),
         other => Err(EvalError::new(
             format!("`{name}` expects an http server, found `{other}`"),
-            span,
+            zz_runtime::Span::new(0, 0),
         )),
     }
 }
@@ -73,10 +72,10 @@ pub(crate) fn http_handle(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let server = expect_server(args, 0, "std.http.handle", span)?;
-    let method = expect_str(args, 1, "std.http.handle", span)?;
-    let path = expect_str(args, 2, "std.http.handle", span)?;
-    let body = expect_str(args, 3, "std.http.handle", span)?;
+    let server = expect_server(args, 0, "std.http.handle")?;
+    let method = expect_str(args, 1, "std.http.handle")?;
+    let path = expect_str(args, 2, "std.http.handle")?;
+    let body = expect_str(args, 3, "std.http.handle")?;
     let body = dispatch(&server, &method, &path, body, interp, span)?;
     Ok(Value::Str(body))
 }
@@ -122,7 +121,7 @@ pub(crate) fn http_listen(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let server = expect_server(args, 0, "std.http.listen", span)?;
+    let server = expect_server(args, 0, "std.http.listen")?;
     let port = match args.get(1) {
         Some(Value::Int(p)) => *p,
         other => {
@@ -140,7 +139,7 @@ pub(crate) fn http_listen(
     })?;
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
-        let response = handle_connection(&server, &mut stream, interp);
+        let response = handle_connection(&server, &mut stream, interp, span);
         let _ = stream.write_all(response.as_bytes());
         let _ = stream.flush();
     }
@@ -152,6 +151,7 @@ fn handle_connection(
     server: &HttpServer,
     stream: &mut std::net::TcpStream,
     interp: &mut Interp,
+    span: Span,
 ) -> String {
     let mut buf = [0u8; 8192];
     let n = match stream.read(&mut buf) {
@@ -185,7 +185,7 @@ fn handle_connection(
             }
         }
     }
-    match dispatch(server, method, path, body, interp, Span::new(0, 0)) {
+    match dispatch(server, method, path, body, interp, span) {
         Ok(body) => http_response(200, &body),
         Err(e) => http_response(500, &e.message),
     }

@@ -7,7 +7,7 @@ pub(crate) fn json_parse(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let s = expect_str(args, 0, "std.json.parse", span)?;
+    let s = expect_str(args, 0, "std.json.parse")?;
     match parse_json(&s) {
         Ok(j) => Ok(Value::Json(j)),
         Err(msg) => Err(EvalError::new(format!("std.json.parse: {msg}"), span)),
@@ -23,7 +23,7 @@ pub(crate) fn json_stringify(
         .first()
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument for std.json.stringify", span))?;
-    let j = value_to_json(&v, span)?;
+    let j = value_to_json(&v)?;
     Ok(Value::Str(to_json_string(&j)))
 }
 
@@ -32,8 +32,8 @@ pub(crate) fn json_get(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let j = expect_json(args, 0, "std.json.get", span)?;
-    let key = expect_str(args, 1, "std.json.get", span)?;
+    let j = expect_json(args, 0, "std.json.get")?;
+    let key = expect_str(args, 1, "std.json.get")?;
     match j {
         JsonValue::Obj(entries) => entries
             .into_iter()
@@ -52,7 +52,7 @@ pub(crate) fn json_as_str(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    match expect_json(args, 0, "std.json.as_str", span)? {
+    match expect_json(args, 0, "std.json.as_str")? {
         JsonValue::Str(s) => Ok(Value::Str(s)),
         other => Err(EvalError::new(
             format!("std.json.as_str: expected a string, found `{other}`"),
@@ -66,7 +66,7 @@ pub(crate) fn json_as_int(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    match expect_json(args, 0, "std.json.as_int", span)? {
+    match expect_json(args, 0, "std.json.as_int")? {
         JsonValue::Num(n) if n.fract() == 0.0 && n.is_finite() => Ok(Value::Int(n as i64)),
         other => Err(EvalError::new(
             format!("std.json.as_int: expected an integer, found `{other}`"),
@@ -80,7 +80,7 @@ pub(crate) fn json_as_float(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    match expect_json(args, 0, "std.json.as_float", span)? {
+    match expect_json(args, 0, "std.json.as_float")? {
         JsonValue::Num(n) => Ok(Value::Float(n)),
         other => Err(EvalError::new(
             format!("std.json.as_float: expected a number, found `{other}`"),
@@ -94,7 +94,7 @@ pub(crate) fn json_as_bool(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    match expect_json(args, 0, "std.json.as_bool", span)? {
+    match expect_json(args, 0, "std.json.as_bool")? {
         JsonValue::Bool(b) => Ok(Value::Bool(b)),
         other => Err(EvalError::new(
             format!("std.json.as_bool: expected a boolean, found `{other}`"),
@@ -107,35 +107,38 @@ pub(crate) fn expect_json(
     args: &mut Vec<Value>,
     i: usize,
     name: &str,
-    span: Span,
 ) -> Result<JsonValue, EvalError> {
-    match arg(args, i, name, span)? {
+    match arg(args, i, name)? {
         Value::Json(j) => Ok(j.clone()),
         other => Err(EvalError::new(
             format!("`{name}` expects a JSON value, found `{other}`"),
-            span,
+            zz_runtime::Span::new(0, 0),
         )),
     }
 }
 
 /// Convert a runtime value to a JSON value.
-pub(crate) fn value_to_json(v: &Value, span: Span) -> Result<JsonValue, EvalError> {
-    let err =
-        |what: &str| EvalError::new(format!("std.json.stringify: cannot serialize {what}"), span);
+pub(crate) fn value_to_json(v: &Value) -> Result<JsonValue, EvalError> {
+    let err = |what: &str| {
+        EvalError::new(
+            format!("std.json.stringify: cannot serialize {what}"),
+            zz_runtime::Span::new(0, 0),
+        )
+    };
     match v {
         Value::Int(i) => Ok(JsonValue::Num(*i as f64)),
         Value::Float(f) => Ok(JsonValue::Num(*f)),
         Value::Str(s) => Ok(JsonValue::Str(s.clone())),
         Value::Bool(b) => Ok(JsonValue::Bool(*b)),
         Value::Unit => Ok(JsonValue::Null),
-        Value::Option(Some(inner)) => value_to_json(inner, span),
+        Value::Option(Some(inner)) => value_to_json(inner),
         Value::Option(None) => Ok(JsonValue::Null),
-        Value::Result(Ok(inner)) => value_to_json(inner, span),
+        Value::Result(Ok(inner)) => value_to_json(inner),
         Value::Result(Err(_)) => Ok(JsonValue::Null),
         Value::Array(vs) => {
             let mut items = Vec::with_capacity(vs.len());
             for x in vs {
-                items.push(value_to_json(x, span)?);
+                items.push(value_to_json(x)?);
             }
             Ok(JsonValue::Arr(items))
         }
@@ -146,7 +149,7 @@ pub(crate) fn value_to_json(v: &Value, span: Span) -> Result<JsonValue, EvalErro
                     Value::Str(s) => s.clone(),
                     other => return Err(err(&format!("a non-string key (`{other}`)"))),
                 };
-                out.push((key, value_to_json(val, span)?));
+                out.push((key, value_to_json(val)?));
             }
             Ok(JsonValue::Obj(out))
         }
@@ -158,7 +161,7 @@ pub(crate) fn value_to_json(v: &Value, span: Span) -> Result<JsonValue, EvalErro
         Value::Tuple(vs) => {
             let mut items = Vec::with_capacity(vs.len());
             for x in vs {
-                items.push(value_to_json(x, span)?);
+                items.push(value_to_json(x)?);
             }
             Ok(JsonValue::Arr(items))
         }

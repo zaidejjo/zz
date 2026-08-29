@@ -52,7 +52,7 @@ pub(crate) fn option_expect(
         .first()
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument for option.expect", span))?;
-    let msg = expect_str(args, 1, "option.expect", span)?;
+    let msg = expect_str(args, 1, "option.expect")?;
     match opt {
         Value::Option(Some(v)) => Ok(*v),
         Value::Option(None) => Err(EvalError::new(format!("option.expect: {msg}"), span)),

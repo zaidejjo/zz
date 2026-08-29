@@ -4,9 +4,9 @@ use zz_runtime::{EvalError, Interp, Span, Value};
 pub(crate) fn vec_len(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
-    let vs = expect_array(args, 0, "vec.len", span)?;
+    let vs = expect_array(args, 0, "vec.len")?;
     Ok(Value::Int(vs.len() as i64))
 }
 
@@ -15,7 +15,7 @@ pub(crate) fn vec_push(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "vec.push", span)?;
+    let mut vs = expect_array(args, 0, "vec.push")?;
     let x = args
         .get(1)
         .cloned()
@@ -29,7 +29,7 @@ pub(crate) fn vec_pop(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "vec.pop", span)?;
+    let mut vs = expect_array(args, 0, "vec.pop")?;
     if vs.is_empty() {
         return Err(EvalError::new(
             "vec.pop: cannot pop from an empty array",
@@ -43,9 +43,9 @@ pub(crate) fn vec_pop(
 pub(crate) fn vec_reverse(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "vec.reverse", span)?;
+    let mut vs = expect_array(args, 0, "vec.reverse")?;
     vs.reverse();
     Ok(Value::Array(vs))
 }
@@ -53,10 +53,10 @@ pub(crate) fn vec_reverse(
 pub(crate) fn vec_join(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
-    let vs = expect_array(args, 0, "vec.join", span)?;
-    let sep = expect_str(args, 1, "vec.join", span)?;
+    let vs = expect_array(args, 0, "vec.join")?;
+    let sep = expect_str(args, 1, "vec.join")?;
     let parts: Vec<String> = vs.iter().map(|v| v.to_string()).collect();
     Ok(Value::Str(parts.join(&sep)))
 }
@@ -66,7 +66,7 @@ pub(crate) fn vec_contains(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let vs = expect_array(args, 0, "vec.contains", span)?;
+    let vs = expect_array(args, 0, "vec.contains")?;
     let x = args
         .get(1)
         .cloned()
@@ -79,7 +79,7 @@ pub(crate) fn vec_sort(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "vec.sort", _span)?;
+    let mut vs = expect_array(args, 0, "vec.sort")?;
     // Sort by type name first, then by value for same types
     vs.sort_by(|a, b| {
         let ta = a.type_name();
@@ -102,8 +102,8 @@ pub(crate) fn vec_insert(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "vec.insert", span)?;
-    let idx = expect_int(args, 1, "vec.insert", span)?;
+    let mut vs = expect_array(args, 0, "vec.insert")?;
+    let idx = expect_int(args, 1, "vec.insert")?;
     let x = args
         .get(2)
         .cloned()
@@ -125,8 +125,8 @@ pub(crate) fn vec_remove(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "vec.remove", span)?;
-    let idx = expect_int(args, 1, "vec.remove", span)?;
+    let mut vs = expect_array(args, 0, "vec.remove")?;
+    let idx = expect_int(args, 1, "vec.remove")?;
     let len = vs.len() as i64;
     let idx = if idx < 0 { len + idx } else { idx };
     if idx < 0 || idx >= len {

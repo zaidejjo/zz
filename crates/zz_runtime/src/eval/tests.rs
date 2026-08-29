@@ -250,7 +250,11 @@ fn import_is_noop() {
 #[test]
 fn native_function_dispatches() {
     #[allow(clippy::ptr_arg)]
-    fn double(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
+    fn double(
+        _interp: &mut Interp,
+        args: &mut Vec<Value>,
+        _span: Span,
+    ) -> Result<Value, EvalError> {
         let n = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(EvalError::new("expected int", Span::new(0, 0))),
@@ -274,7 +278,7 @@ fn native_function_dispatches() {
 
 #[test]
 fn native_wrong_arity_errors() {
-    fn noop(_interp: &mut Interp, _: &mut Vec<Value>) -> Result<Value, EvalError> {
+    fn noop(_interp: &mut Interp, _: &mut Vec<Value>, _span: Span) -> Result<Value, EvalError> {
         Ok(Value::Unit)
     }
     let mut natives = HashMap::new();
