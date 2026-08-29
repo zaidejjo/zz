@@ -187,7 +187,7 @@ fn eval_error_to_diag(e: &EvalError) -> Vec<RawDiag> {
     let mut diag = error_at(e.message.clone(), e.span);
     for (name, _span) in &e.backtrace {
         if name.is_empty() {
-            diag = diag.with_note(format!("  at <top-level>"));
+            diag = diag.with_note("  at <top-level>");
         } else {
             diag = diag.with_note(format!("  at {name}"));
         }
