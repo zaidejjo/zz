@@ -25,6 +25,10 @@ struct Frame {
     /// Deferred closures accumulated in this frame. Saved/restored across
     /// nested calls so each frame only drains its own defers.
     defer_stack: Vec<Value>,
+    /// Function name for backtraces (empty string for top-level).
+    func_name: String,
+    /// Source span of the function definition for backtraces.
+    func_span: Span,
 }
 
 /// One active loop (native `for`/`while`). Used by `break`/`continue` to
@@ -123,6 +127,8 @@ impl Vm {
                     prev_env,
                     stack_base,
                     defer_stack: saved_defers,
+                    func_name: String::new(),
+                    func_span: Span::default(),
                 });
             }
         }
@@ -154,6 +160,8 @@ impl Vm {
             prev_env: Rc::clone(&interp.env),
             stack_base,
             defer_stack: Vec::new(),
+            func_name: String::new(),
+            func_span: Span::default(),
         });
 
         loop {
@@ -887,6 +895,8 @@ impl Vm {
                     prev_env,
                     stack_base,
                     defer_stack: saved_defers,
+                    func_name: String::new(),
+                    func_span: span,
                 });
                 Ok(())
             }
@@ -922,5 +932,13 @@ impl Vm {
             }
             Flow::Value(_) => unreachable!(),
         }
+    }
+
+    /// Build a backtrace string from the current call stack.
+    pub(crate) fn backtrace(&self) -> Vec<(String, Span)> {
+        self.frames
+            .iter()
+            .map(|f| (f.func_name.clone(), f.func_span))
+            .collect()
     }
 }

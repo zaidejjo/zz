@@ -124,8 +124,27 @@ impl Compiler {
     }
 
     fn emit(&mut self, op: Op) {
+        let span = match &op {
+            Op::Break(span) | Op::Continue(span) => *span,
+            Op::BinOp(_, span) | Op::UnOp(_, span) => *span,
+            Op::LoadVar(_, span) | Op::StoreVar(_, span) => *span,
+            Op::LoadPath(_, span) | Op::StorePath(_, span) => *span,
+            Op::JumpIfFalseBool(_, span) => *span,
+            Op::ForSetup { span, .. } | Op::WhileCond { span, .. } => *span,
+            Op::ArrayPush(span) | Op::IndexOp(span) | Op::StoreIndexOp(span) => *span,
+            Op::SliceOp(span) | Op::MakeRange(span) => *span,
+            Op::MakeStruct { span, .. } | Op::GetField(_, span) | Op::SetField(_, span) => *span,
+            Op::MakeVariant { span, .. } | Op::MatchError(span) => *span,
+            Op::TryOp(span) | Op::Elvis(span) => *span,
+            Op::Call { span, .. } | Op::CallPath { span, .. } | Op::CallMethod { span, .. } => {
+                *span
+            }
+            Op::FormatValue(span) => *span,
+            _ => Span::default(),
+        };
         let effect = Self::stack_effect(&op);
         self.stack_height = self.stack_height.saturating_add_signed(effect as isize);
+        self.chunk.spans.push(span);
         self.chunk.code.push(op);
     }
 
@@ -265,12 +284,13 @@ impl Compiler {
 
     fn emit_jump(&mut self, kind: JumpKind) -> usize {
         let pos = self.chunk.code.len();
-        let op = match kind {
-            JumpKind::Always => Op::Jump(0),
-            JumpKind::IfFalse => Op::JumpIfFalse(0),
-            JumpKind::IfTrue => Op::JumpIfTrue(0),
-            JumpKind::IfFalseBool(span) => Op::JumpIfFalseBool(0, span),
+        let (op, span) = match kind {
+            JumpKind::Always => (Op::Jump(0), Span::default()),
+            JumpKind::IfFalse => (Op::JumpIfFalse(0), Span::default()),
+            JumpKind::IfTrue => (Op::JumpIfTrue(0), Span::default()),
+            JumpKind::IfFalseBool(span) => (Op::JumpIfFalseBool(0, span), span),
         };
+        self.chunk.spans.push(span);
         self.chunk.code.push(op);
         pos
     }
