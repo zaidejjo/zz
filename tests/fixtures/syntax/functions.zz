@@ -1,0 +1,16 @@
+// E2E: Function definitions, default params, named args
+func add(a: int, b: int) -> int { a + b }
+
+func greet(name: str, prefix: str = "Hello") -> str {
+    "{prefix}, {name}!"
+}
+
+func fib(n: int) -> int {
+    if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+println("func_ok")
+println(add(3, 4))
+println(greet("World"))
+println(greet("ZZ", prefix: "Hi"))
+println(fib(10))

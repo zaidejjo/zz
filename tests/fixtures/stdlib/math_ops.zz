@@ -1,0 +1,20 @@
+// E2E: std.math — math functions
+import std.math
+
+println(math.abs(-5))
+println(math.abs(5))
+
+println(math.floor(3.7))
+println(math.ceil(3.2))
+
+println(math.sqrt(9.0))
+println(math.sqrt(2.0))
+
+println(math.pow(2, 10))
+println(math.pow(3, 3))
+
+// random is non-deterministic, just check type
+r := math.random()
+println(typeof(r))
+
+println("math_ok")

@@ -1,0 +1,19 @@
+// E2E: std.io — console I/O
+import std.io
+
+// println
+println("hello")
+
+// io.println
+io.println("io_hello")
+
+// print (no newline) + println
+print("partial")
+println("_done")
+
+// typeof output
+println(typeof(42))
+println(typeof("str"))
+println(typeof(3.14))
+
+println("io_ok")

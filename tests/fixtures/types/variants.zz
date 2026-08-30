@@ -1,0 +1,48 @@
+// E2E: Option/Result variants — .some, .none, .ok, .err, match, if-let
+
+// option basics
+val := .some(42)
+match val {
+    .some(v) => println(v),
+    .none    => println("none"),
+}
+
+none_val: Option<int> = .none
+fallback := none_val ?? 0
+println(fallback)
+
+// result basics
+ok_val := .ok("success")
+match ok_val {
+    .ok(v)  => println(v),
+    .err(e) => println(e),
+}
+
+err_val: Result<int, str> = .err("boom")
+match err_val {
+    .ok(v)  => println(v),
+    .err(e) => println(e),
+}
+
+// if-let binding
+x := .some(5)
+if let .some(v) = x {
+    println(v)
+}
+
+// nested option
+nested := .some(.some(99))
+match nested {
+    .some(.some(v)) => println(v),
+    _               => println("other"),
+}
+
+// match on literal
+match 3 {
+    1 => println("one"),
+    2 => println("two"),
+    3 => println("three"),
+    _ => println("many"),
+}
+
+println("variant_ok")

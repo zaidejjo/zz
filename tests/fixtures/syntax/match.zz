@@ -1,0 +1,27 @@
+// E2E: Pattern matching with match
+x := .some(42)
+match x {
+    .some(v) => println(v),
+    .none    => println("none"),
+}
+
+y := .err("oops")
+match y {
+    .ok(v)  => println(v),
+    .err(e) => println(e),
+}
+
+// literal patterns
+z := 2
+match z {
+    1 => println("one"),
+    2 => println("two"),
+    _ => println("other"),
+}
+
+// if-let
+if let .some(v) = x {
+    println(v)
+}
+
+println("match_ok")

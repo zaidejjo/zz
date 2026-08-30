@@ -1,0 +1,13 @@
+// E2E: Variable declarations — inferred and explicit types
+x := 42
+y: int = 10
+pi := 3.14
+name := "hello"
+flag := true
+
+println("decl_ok")
+println(x)
+println(y)
+println(pi)
+println(name)
+println(flag)

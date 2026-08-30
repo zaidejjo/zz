@@ -1,0 +1,29 @@
+// E2E: Generics — generic functions with type inference
+func identity<T>(x: T) -> T { x }
+
+func pair<T, U>(a: T, b: U) -> str {
+    "{a}-{b}"
+}
+
+func first<T>(arr: [T]) -> T {
+    arr[0]
+}
+
+// generic with int
+println(identity(42))
+
+// generic with str
+println(identity("hello"))
+
+// multi-generic
+println(pair(1, "two"))
+println(pair(true, 3.14))
+
+// generic on array
+nums := [10, 20, 30]
+println(first(nums))
+
+names := ["alice", "bob"]
+println(first(names))
+
+println("generic_ok")

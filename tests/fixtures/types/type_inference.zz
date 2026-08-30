@@ -1,0 +1,36 @@
+// E2E: Type inference — short vs explicit declarations
+// short declarations (inferred)
+x := 42
+y := 3.14
+z := "hello"
+w := true
+arr := [1, 2, 3]
+d := {"k": "v"}
+
+// explicit declarations (checked)
+a: int = 10
+b: float = 2.5
+c: str = "world"
+e: bool = false
+f: [int] = [4, 5, 6]
+
+// type checking
+println(x)
+println(y)
+println(z)
+println(w)
+println(a)
+println(b)
+println(c)
+println(e)
+println(f)
+println(arr)
+println(d)
+
+// typeof
+println(typeof(x))
+println(typeof(y))
+println(typeof(z))
+println(typeof(w))
+
+println("infer_ok")

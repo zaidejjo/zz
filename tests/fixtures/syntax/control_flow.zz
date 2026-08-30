@@ -1,0 +1,36 @@
+// E2E: Control flow — if/else, while, for, break, continue
+// if/else
+x := 10
+if x > 5 { println("big") } else { println("small") }
+
+// while
+sum := 0
+i := 1
+while i <= 5 { sum = sum + i; i = i + 1 }
+println(sum)
+
+// for over range
+total := 0
+for i in 0..5 { total = total + i }
+println(total)
+
+// for over array
+for name in ["a", "b", "c"] { print(name) }
+println("")
+
+// break
+found := 0
+for i in 0..100 {
+    if i == 7 { found = i; break }
+}
+println(found)
+
+// continue
+evens := 0
+for i in 0..10 {
+    if i % 2 != 0 { continue }
+    evens = evens + 1
+}
+println(evens)
+
+println("control_ok")

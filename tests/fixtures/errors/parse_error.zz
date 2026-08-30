@@ -1,0 +1,2 @@
+// E2E: Parse error — missing expression
+x := 1 +
