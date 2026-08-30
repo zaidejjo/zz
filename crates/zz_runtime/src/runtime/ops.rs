@@ -245,7 +245,19 @@ pub(crate) fn eval_binary(op: BinOp, l: Value, r: Value, span: Span) -> Result<V
     // Mixed int/float arithmetic promotes to float.
     match (l, r) {
         (Value::Int(a), Value::Int(b)) => eval_int_binary(op, a, b, span),
-        (Value::Str(a), Value::Str(b)) if op == BinOp::Add => Ok(Value::Str(format!("{a}{b}"))),
+        (Value::Str(a), Value::Str(b)) => match op {
+            BinOp::Add => Ok(Value::Str(format!("{a}{b}"))),
+            BinOp::Eq => Ok(Value::Bool(a == b)),
+            BinOp::Ne => Ok(Value::Bool(a != b)),
+            BinOp::Lt => Ok(Value::Bool(a < b)),
+            BinOp::Gt => Ok(Value::Bool(a > b)),
+            BinOp::Le => Ok(Value::Bool(a <= b)),
+            BinOp::Ge => Ok(Value::Bool(a >= b)),
+            _ => Err(EvalError::new(
+                format!("operator `{}` is not supported for strings", op.symbol()),
+                span,
+            )),
+        },
         (l, r) => {
             let (a, b) = match (l.to_float(), r.to_float()) {
                 (Some(a), Some(b)) => (a, b),

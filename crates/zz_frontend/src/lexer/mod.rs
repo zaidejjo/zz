@@ -129,6 +129,12 @@ impl<'a> Lexer<'a> {
                         if *depth == 0 {
                             // Closing the interpolation: resume string mode.
                             self.contexts.pop();
+                            // Reset the Str context start to after this `}`
+                            // so the next Str segment's span begins here,
+                            // not at the original opening quote.
+                            if let Some(LexContext::Str { start, .. }) = self.contexts.last_mut() {
+                                *start = self.pos + '}'.len_utf8();
+                            }
                         } else {
                             *depth -= 1;
                         }
