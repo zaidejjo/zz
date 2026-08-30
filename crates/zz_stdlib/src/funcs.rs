@@ -452,12 +452,8 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "int".into(),
         sig_t(vec![("v", t.clone())], Type::Option(Box::new(Type::Int))),
     );
-    // `float(v)` — parse a string or widen an int. Invalid parses yield
-    // `.none`.
-    m.insert(
-        "float".into(),
-        sig_t(vec![("v", t.clone())], Type::Option(Box::new(Type::Float))),
-    );
+    // `float(v)` — widen an int to float, identity for float, parse from str.
+    m.insert("float".into(), sig_t(vec![("v", t.clone())], Type::Float));
 
     // std.math
     m.insert(

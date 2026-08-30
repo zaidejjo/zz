@@ -246,6 +246,13 @@ fn vm_matches_tree_walker_on_basics() {
         "func f() -> option<int> { x := .some(3)\nx? }\nf()",
         "func f() -> option<int> { x := .none\nx? }\nf()",
         "func f() -> result<int, str> { x := .ok(5)\ny := .ok(6)\nx? + y? }\nf()",
+        // String comparison (Eq/Ne/Lt/Gt/Le/Ge)
+        "\"hello\" == \"hello\"",
+        "\"hello\" != \"world\"",
+        "\"abc\" < \"def\"",
+        "\"abc\" > \"aaa\"",
+        "\"abc\" <= \"abc\"",
+        "\"abc\" >= \"abc\"",
     ] {
         assert_same(src);
     }

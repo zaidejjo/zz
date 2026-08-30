@@ -389,12 +389,12 @@ impl Parser {
     }
 
     /// Assemble an interpolated string from the token sequence produced by
-    /// the lexer: `Str (LBrace expr [: fmt_spec] RBrace Str)*`.
+    /// the lexer: `StrFmt (LBrace expr [: fmt_spec] RBrace StrFmt)* [Str]`.
     pub(crate) fn parse_fmt_string(&mut self, first: Token) -> Expr {
         let mut parts = vec![FmtPart::Text(first.text)];
         let mut end = first.span;
         loop {
-            if !self.at(TokenKind::LBrace) || !self.lbrace_is_interpolation() {
+            if !self.at(TokenKind::LBrace) {
                 break;
             }
             self.advance();
@@ -429,11 +429,19 @@ impl Parser {
                 self.error_here("expected `}` to close interpolation");
             }
             parts.push(FmtPart::Expr(Box::new(expr), fmt_spec));
+            // After `}`, the next token is either StrFmt (more interpolation
+            // segments follow) or Str (final segment, end of string).
             match self.peek_kind() {
+                TokenKind::StrFmt => {
+                    let t = self.advance();
+                    parts.push(FmtPart::Text(t.text));
+                    end = t.span;
+                }
                 TokenKind::Str => {
                     let t = self.advance();
                     parts.push(FmtPart::Text(t.text));
                     end = t.span;
+                    break;
                 }
                 _ => {
                     self.error_here("expected string continuation after interpolation");
@@ -479,25 +487,14 @@ impl Parser {
             }
             TokenKind::Str => {
                 self.advance();
-                // A string followed by `{` could be an interpolated string:
-                // `"Hello {name}"` lexes as Str, LBrace, expr, RBrace, Str...
-                //
-                // However, it could also be a string comparison before a block:
-                // `if x == "zaid" { ... }` lexes as Str("zaid"), LBrace(...)
-                //
-                // The key difference: in genuine interpolation the `{` is inside
-                // the string literal, so the LBrace token has NO leading
-                // whitespace trivia. In the block case, there is always
-                // whitespace between the closing `"` and the `{`, which the
-                // lexer attaches as leading trivia on the LBrace token.
-                if self.at(TokenKind::LBrace) && self.lbrace_is_interpolation() {
-                    self.parse_fmt_string(tok)
-                } else {
-                    Expr::Str {
-                        value: tok.text,
-                        span: tok.span,
-                    }
+                Expr::Str {
+                    value: tok.text,
+                    span: tok.span,
                 }
+            }
+            TokenKind::StrFmt => {
+                self.advance();
+                self.parse_fmt_string(tok)
             }
             TokenKind::True => {
                 self.advance();
@@ -532,14 +529,12 @@ impl Parser {
                     end = member.span;
                 }
                 // Struct construction: `Point{ x: 1 }` or `Point { x: 1 }`.
-                // A `{` is treated as a struct literal when it is adjacent
-                // (no leading trivia) or when its contents look like fields
-                // (`ident : ...`). Otherwise the `{` belongs to an enclosing
-                // block (`if x { ... }`, `while x { ... }`, if-let values).
+                // A `{` is treated as a struct literal when its contents look
+                // like fields (`ident : ...`). Adjacency alone is not enough
+                // because `if x == y{ ... }` would be misparsed as struct init.
                 if self.at(TokenKind::LBrace)
-                    && (self.peek().leading.is_empty()
-                        || (self.peek_kind_at(1) == TokenKind::Ident
-                            && self.peek_kind_at(2) == TokenKind::Colon))
+                    && self.peek_kind_at(1) == TokenKind::Ident
+                    && self.peek_kind_at(2) == TokenKind::Colon
                 {
                     return self.parse_struct_init(parts, tok.span.join(end));
                 }

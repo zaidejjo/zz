@@ -38,6 +38,11 @@ enum LexContext {
         start: usize,
         /// Text accumulated so far, across interpolation segments.
         value: String,
+        /// True if this string was opened inside an interpolation expression
+        /// (e.g., `f("inner")` inside `"{f("inner")}"`). Its closing `"`
+        /// always emits `Str`, not `StrFmt`, because it terminates a
+        /// completely separate string literal, not a continuation segment.
+        is_nested: bool,
     },
     /// Inside an interpolation `{ expr }`. `depth` counts nested braces
     /// beyond the interpolation's own opening brace (dicts, blocks, ...).
@@ -467,9 +472,11 @@ impl<'a> Lexer<'a> {
     fn lex_string(&mut self) {
         let start = self.pos;
         self.bump_char(); // opening quote
+        let is_nested = matches!(self.contexts.last(), Some(LexContext::Interp { .. }));
         self.contexts.push(LexContext::Str {
             start,
             value: String::new(),
+            is_nested,
         });
     }
 
@@ -478,30 +485,56 @@ impl<'a> Lexer<'a> {
     fn lex_string_cont(&mut self) {
         // Pop the current string context; continuation arms re-push it with
         // the updated value.
-        let (start, value) = match self.contexts.pop() {
-            Some(LexContext::Str { start, value }) => (start, value),
+        let (start, value, is_nested) = match self.contexts.pop() {
+            Some(LexContext::Str {
+                start,
+                value,
+                is_nested,
+            }) => (start, value, is_nested),
             _ => unreachable!("lex_string_cont called outside string mode"),
         };
         match self.peek_char() {
             Some('"') => {
-                // End of the string (or of this continuation segment). The
-                // string context was already popped above.
                 let end = self.pos + '"'.len_utf8();
                 self.bump_char();
                 let span = Span::new(start as u32, end as u32);
-                self.push_token(TokenKind::Str, span, value);
+                // A nested string (opened inside an interpolation expression
+                // like `f("inner")`) always emits Str — its `"` is a real
+                // string terminator, not a segment boundary.
+                //
+                // A non-nested string with an Interp context on the stack is
+                // a continuation segment — emit StrFmt and keep the Str
+                // context alive for text after `}`.
+                if is_nested {
+                    self.push_token(TokenKind::Str, span, value);
+                } else if self
+                    .contexts
+                    .iter()
+                    .any(|c| matches!(c, LexContext::Interp { .. }))
+                {
+                    self.push_token(TokenKind::StrFmt, span, value);
+                    self.contexts.push(LexContext::Str {
+                        start: self.pos,
+                        value: String::new(),
+                        is_nested: false,
+                    });
+                } else {
+                    // Final closing quote — emit Str (complete string).
+                    self.push_token(TokenKind::Str, span, value);
+                }
             }
             // String interpolation: `{ident...` starts an embedded expression.
-            // Emit the accumulated text as a Str token and enter interpolation
+            // Emit the accumulated text as StrFmt and enter interpolation
             // mode (leaving the string context underneath); the main loop
             // lexes `{` as LBrace, the expression, and `}` as RBrace, popping
             // back into string mode for the continuation.
             Some('{') if self.peek_char_at(1).is_some_and(is_ident_start) => {
                 let span = Span::new(start as u32, self.pos as u32);
-                self.push_token(TokenKind::Str, span, value);
+                self.push_token(TokenKind::StrFmt, span, value);
                 self.contexts.push(LexContext::Str {
-                    start,
+                    start: self.pos,
                     value: String::new(),
+                    is_nested,
                 });
                 self.pending_interp = true;
             }
@@ -543,13 +576,21 @@ impl<'a> Lexer<'a> {
                         return;
                     }
                 }
-                self.contexts.push(LexContext::Str { start, value });
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                });
             }
             Some(c) => {
                 let mut value = value;
                 value.push(c);
                 self.bump_char();
-                self.contexts.push(LexContext::Str { start, value });
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                });
             }
             None => {
                 let span = Span::new(start as u32, self.src.len() as u32);

@@ -1,27 +1,35 @@
 // E2E: String comparison before block statements (regression: parser ambiguity)
-// Ensures "zaid" { } is NOT treated as string interpolation.
-// Uses integer comparisons at runtime since string == has a pre-existing VM bug.
+// Ensures "zaid"{ } is NOT treated as string interpolation.
+// Now tests actual string == comparisons (VM supports string equality).
 name1 := "Zaid"
-age1 := 16
 name2 := "Ali"
-age2 := 40
 
 // Parse correctly: string comparison before multi-line block
-if age1 == 16 {
+if name1 == "Zaid" {
     println("first branch")
 }
 
 // Parse correctly: string comparison before single-line block
-if age2 == 40 { println("second branch") }
+if name2 == "Ali" { println("second branch") }
 
 // Parse correctly: string comparison with else block
-if age1 == 99 {
+if name1 == "nobody" {
     println("should not print")
 } else {
     println("else branch")
 }
 
-// while with string assignment (parser test)
+// Unspaced: string comparison immediately before block (no whitespace)
+if name1 == "Zaid"{ println("unspaced if") }
+
+// Unspaced: else block directly after }
+if name1 == "nobody" {
+    println("nope")
+}else{
+    println("unspaced else")
+}
+
+// while with string comparison
 s := "start"
 count := 0
 while count < 1 {

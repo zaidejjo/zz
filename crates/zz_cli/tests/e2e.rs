@@ -255,21 +255,10 @@ fn e2e_eval_default_params() {
 
 #[test]
 fn e2e_eval_string_comparison_if() {
-    // Verify the parser parses string comparison before block correctly.
-    // Use `zz check` to validate parsing (string == has pre-existing VM bug).
-    let tmp = std::env::temp_dir().join("zz_str_cmp_test.zz");
-    std::fs::write(
-        &tmp,
-        r#"x := "hello"
-if x == "hello" { println("yes") } else { println("no") }"#,
-    )
-    .unwrap();
-    let (exit, _, stderr) = run_zz_check(&tmp);
-    assert_eq!(
-        exit, 0,
-        "check should pass for string-before-block.\nstderr: {stderr}"
-    );
-    std::fs::remove_file(&tmp).ok();
+    // Verify string comparison before block parses AND runs correctly.
+    let (exit, stdout, _) = run_zz_eval(r#"x := "hello"; if x == "hello" { "yes" } else { "no" }"#);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "yes");
 }
 
 #[test]
@@ -277,6 +266,20 @@ fn e2e_eval_string_interpolation_still_works() {
     let (exit, stdout, _) = run_zz_eval(r#"greeting := "Hi"; name := "ZZ"; "{greeting}, {name}!""#);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "Hi, ZZ!");
+}
+
+#[test]
+fn e2e_eval_unspaced_string_block() {
+    let (exit, stdout, _) = run_zz_eval(r#"x := "hello"; if x == "hello"{ "yes" }else{ "no" }"#);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "yes");
+}
+
+#[test]
+fn e2e_eval_multi_interpolation() {
+    let (exit, stdout, _) = run_zz_eval(r#"a := "Hello"; b := "World"; "{a} {b}!""#);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "Hello World!");
 }
 
 #[test]

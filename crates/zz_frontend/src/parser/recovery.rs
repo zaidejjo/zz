@@ -1,8 +1,8 @@
 //! Error recovery and helper functions.
 
-use crate::diag::{error_at, RawDiag};
+use crate::diag::error_at;
 use crate::span::Span;
-use crate::token::{Token, TokenKind, TriviaKind};
+use crate::token::{Token, TokenKind};
 
 use super::Parser;
 
@@ -98,92 +98,5 @@ impl Parser {
     pub(crate) fn eat_close(&mut self, kind: TokenKind) -> bool {
         self.skip_stmt_ends();
         self.eat(kind)
-    }
-
-    /// Peek ahead after a `{` to see if it starts a match arm block.
-    /// Returns true if the content looks like patterns followed by `=>`.
-    pub(crate) fn looks_like_match_arm_block(&self) -> bool {
-        let mut idx = self.pos + 1; // skip the LBrace token
-        while idx < self.toks.len() {
-            let tok = &self.toks[idx];
-            match tok.kind {
-                TokenKind::StmtEnd => {
-                    idx += 1;
-                    continue;
-                }
-                TokenKind::Ident if tok.text == "_" => return true, // wildcard pattern
-                TokenKind::Arrow => return true,                    // => directly
-                TokenKind::Str
-                | TokenKind::Int
-                | TokenKind::Float
-                | TokenKind::True
-                | TokenKind::False
-                | TokenKind::Ident
-                | TokenKind::Dot
-                | TokenKind::LBrace => {
-                    // Could be a pattern; scan ahead for `=>`.
-                    let mut j = idx;
-                    while j < self.toks.len() {
-                        let t = &self.toks[j];
-                        match t.kind {
-                            TokenKind::StmtEnd => j += 1,
-                            TokenKind::Arrow => return true,
-                            TokenKind::Str
-                            | TokenKind::Int
-                            | TokenKind::Float
-                            | TokenKind::True
-                            | TokenKind::False
-                            | TokenKind::Ident
-                            | TokenKind::Dot
-                            | TokenKind::LBrace
-                            | TokenKind::RBrace
-                            | TokenKind::Pipe
-                            | TokenKind::Comma => j += 1,
-                            _ => break,
-                        }
-                    }
-                    return false;
-                }
-                _ => return false,
-            }
-        }
-        false
-    }
-
-    /// Check whether the current `LBrace` token is part of a string
-    /// interpolation (e.g. `"hello {name}"`) rather than a block delimiter
-    /// (e.g. `if x == "zaid" { ... }`).
-    ///
-    /// The lexer emits `Str` tokens for both cases, but their spans differ:
-    /// - **Complete string** (`"zaid"`): span covers both quotes,
-    ///   so `span_length - text_length >= 2`.
-    /// - **Interpolation segment** (`"hello "` before `{name}`): span ends
-    ///   at the `{` (no closing quote yet), so
-    ///   `span_length - text_length < 2`.
-    ///
-    /// We also keep the trivia check as a fast path for the common case
-    /// where there IS whitespace between the string and `{`.
-    pub(crate) fn lbrace_is_interpolation(&self) -> bool {
-        // Fast path: whitespace between string and `{` means it's a block.
-        if self
-            .peek()
-            .leading
-            .iter()
-            .any(|t| t.kind == TriviaKind::Whitespace || t.kind == TriviaKind::Newline)
-        {
-            return false;
-        }
-        // Check the previous token (should be Str).
-        let prev = self.previous();
-        if prev.kind != TokenKind::Str {
-            return false;
-        }
-        let span_len = (prev.span.end - prev.span.start) as usize;
-        let text_len = prev.text.len();
-        // For a complete string the span includes both quote characters,
-        // so span_len - text_len >= 2.  For an interpolation segment the
-        // span ends at the `{` (only the opening quote is inside), so the
-        // difference is < 2.
-        span_len - text_len < 2
     }
 }

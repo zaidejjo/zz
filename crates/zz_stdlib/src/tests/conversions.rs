@@ -40,17 +40,12 @@ fn conv_int() {
 
 #[test]
 fn conv_float() {
-    assert_eq!(
-        run("float(\"2.5\")").unwrap(),
-        Value::Option(Some(Box::new(Value::Float(2.5))))
-    );
-    assert_eq!(run("float(\"x\")").unwrap(), Value::Option(None));
-    assert_eq!(
-        run("float(3)").unwrap(),
-        Value::Option(Some(Box::new(Value::Float(3.0))))
-    );
-    assert_eq!(
-        run("float(1.5)").unwrap(),
-        Value::Option(Some(Box::new(Value::Float(1.5))))
-    );
+    assert_eq!(run("float(\"2.5\")").unwrap(), Value::Float(2.5));
+    // Invalid parse returns NaN (not Option::None).
+    match run("float(\"x\")").unwrap() {
+        Value::Float(f) => assert!(f.is_nan()),
+        other => panic!("expected float NaN, got {:?}", other),
+    }
+    assert_eq!(run("float(3)").unwrap(), Value::Float(3.0));
+    assert_eq!(run("float(1.5)").unwrap(), Value::Float(1.5));
 }
