@@ -1,7 +1,7 @@
 //! Parser expression tests.
 
-use zz_frontend::tests::common::parse_ok;
 use zz_frontend::ast::{BinOp, Expr as E, UnOp};
+use zz_frontend::tests::common::parse_ok;
 
 #[test]
 fn precedence_multiplication_over_addition() {
@@ -215,5 +215,78 @@ fn single_ident_is_not_path() {
             ..
         } => {}
         other => panic!("expected plain decl, got {other:?}"),
+    }
+}
+
+// --- string interpolation vs block-start ambiguity regression tests --------
+
+#[test]
+fn string_comparison_in_if_condition() {
+    // `if x == "zaid" { ... }` must parse as a string comparison followed by
+    // a block — NOT as a string interpolation.
+    let p = parse_ok(
+        r#"x := "a"
+if x == "zaid" { println(x) }"#,
+    );
+    match &p.stmts[1] {
+        zz_frontend::ast::Stmt::Expr(E::If { cond, .. }) => {
+            // The condition should be a binary `==`, NOT an f-string.
+            match cond.as_ref() {
+                E::Binary { op: BinOp::Eq, .. } => {}
+                other => panic!("expected ==, got {other:?}"),
+            }
+        }
+        other => panic!("expected if stmt, got {other:?}"),
+    }
+}
+
+#[test]
+fn string_comparison_in_while_condition() {
+    let p = parse_ok(
+        r#"s := "test"
+while s == "test" { println(s) }"#,
+    );
+    match &p.stmts[1] {
+        zz_frontend::ast::Stmt::Expr(E::While { cond, .. }) => match cond.as_ref() {
+            E::Binary { op: BinOp::Eq, .. } => {}
+            other => panic!("expected ==, got {other:?}"),
+        },
+        other => panic!("expected while stmt, got {other:?}"),
+    }
+}
+
+#[test]
+fn string_interpolation_still_works() {
+    // `"hello {name}"` must still parse as an f-string with interpolation.
+    let p = parse_ok(
+        r#"name := "world"
+"hello {name}""#,
+    );
+    match &p.stmts[1] {
+        zz_frontend::ast::Stmt::Expr(E::Fmt { parts, .. }) => {
+            assert!(
+                parts.len() >= 2,
+                "expected text + interpolation, got {parts:?}"
+            );
+        }
+        other => panic!("expected fmt expr, got {other:?}"),
+    }
+}
+
+#[test]
+fn string_interpolation_with_multiline_block_after() {
+    // Multiline string comparison before a multiline block.
+    let p = parse_ok(
+        r#"x := "hello"
+if x == "world" {
+    println("yes")
+}"#,
+    );
+    match &p.stmts[1] {
+        zz_frontend::ast::Stmt::Expr(E::If { cond, .. }) => match cond.as_ref() {
+            E::Binary { op: BinOp::Eq, .. } => {}
+            other => panic!("expected ==, got {other:?}"),
+        },
+        other => panic!("expected if stmt, got {other:?}"),
     }
 }

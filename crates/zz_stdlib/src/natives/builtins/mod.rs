@@ -52,10 +52,10 @@ pub(crate) fn conv_float(
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument for float", span))?;
     let result = match &v {
-        Value::Int(i) => Some(*i as f64),
-        Value::Float(f) => Some(*f),
-        Value::Str(s) => s.trim().parse::<f64>().ok(),
-        _ => None,
+        Value::Int(i) => *i as f64,
+        Value::Float(f) => *f,
+        Value::Str(s) => s.trim().parse::<f64>().unwrap_or(f64::NAN),
+        _ => f64::NAN,
     };
-    Ok(Value::Option(result.map(|f| Box::new(Value::Float(f)))))
+    Ok(Value::Float(result))
 }

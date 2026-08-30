@@ -1,6 +1,6 @@
 //! Error recovery and helper functions.
 
-use crate::diag::{error_at, RawDiag};
+use crate::diag::error_at;
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
@@ -98,55 +98,5 @@ impl Parser {
     pub(crate) fn eat_close(&mut self, kind: TokenKind) -> bool {
         self.skip_stmt_ends();
         self.eat(kind)
-    }
-
-    /// Peek ahead after a `{` to see if it starts a match arm block.
-    /// Returns true if the content looks like patterns followed by `=>`.
-    pub(crate) fn looks_like_match_arm_block(&self) -> bool {
-        let mut idx = self.pos + 1; // skip the LBrace token
-        while idx < self.toks.len() {
-            let tok = &self.toks[idx];
-            match tok.kind {
-                TokenKind::StmtEnd => {
-                    idx += 1;
-                    continue;
-                }
-                TokenKind::Ident if tok.text == "_" => return true, // wildcard pattern
-                TokenKind::Arrow => return true,                    // => directly
-                TokenKind::Str
-                | TokenKind::Int
-                | TokenKind::Float
-                | TokenKind::True
-                | TokenKind::False
-                | TokenKind::Ident
-                | TokenKind::Dot
-                | TokenKind::LBrace => {
-                    // Could be a pattern; scan ahead for `=>`.
-                    let mut j = idx;
-                    while j < self.toks.len() {
-                        let t = &self.toks[j];
-                        match t.kind {
-                            TokenKind::StmtEnd => j += 1,
-                            TokenKind::Arrow => return true,
-                            TokenKind::Str
-                            | TokenKind::Int
-                            | TokenKind::Float
-                            | TokenKind::True
-                            | TokenKind::False
-                            | TokenKind::Ident
-                            | TokenKind::Dot
-                            | TokenKind::LBrace
-                            | TokenKind::RBrace
-                            | TokenKind::Pipe
-                            | TokenKind::Comma => j += 1,
-                            _ => break,
-                        }
-                    }
-                    return false;
-                }
-                _ => return false,
-            }
-        }
-        false
     }
 }

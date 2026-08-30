@@ -19,4 +19,12 @@ println("{version:d}")
 println("{1 + 2}")
 println("{name} is {version * 2}")
 
+// multi-interpolation: multiple {expr} in one string
+first := "Hello"
+last := "World"
+println("{first} {last}!")
+
+// adjacent interpolation segments
+println("a{1}b{2}c")
+
 println("fstr_ok")

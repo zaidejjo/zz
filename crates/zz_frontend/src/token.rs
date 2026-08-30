@@ -54,6 +54,11 @@ pub enum TokenKind {
     Int,
     Float,
     Str,
+    /// Interpolation segment inside a format string (`"hello {name}"`).
+    /// Emitted by the lexer for text segments that are part of an
+    /// interpolated string. The parser uses this to unambiguously
+    /// distinguish interpolation from a string followed by a block.
+    StrFmt,
     Ident,
     // Operators
     Plus,
@@ -116,6 +121,7 @@ impl TokenKind {
             TokenKind::Int => "integer literal",
             TokenKind::Float => "float literal",
             TokenKind::Str => "string literal",
+            TokenKind::StrFmt => "interpolated string segment",
             TokenKind::Ident => "identifier",
             TokenKind::Plus => "`+`",
             TokenKind::Minus => "`-`",
