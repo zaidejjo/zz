@@ -51,6 +51,22 @@ fn run_zz_eval(src: &str) -> (i32, String, String) {
     (exit_code, stdout, stderr)
 }
 
+/// Run `zz check <file>` and return (exit_code, stdout, stderr).
+fn run_zz_check(file: &Path) -> (i32, String, String) {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("check")
+        .arg(file)
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz check {file:?}`: {e}"));
+
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    (exit_code, stdout, stderr)
+}
+
 /// Discover all `.zz` files in a directory (non-recursive).
 fn find_fixtures(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -108,6 +124,7 @@ e2e_success_test!(e2e_syntax_fstrings, "syntax", "fstrings.zz");
 e2e_success_test!(e2e_syntax_arrays, "syntax", "arrays.zz");
 e2e_success_test!(e2e_syntax_dicts, "syntax", "dicts.zz");
 e2e_success_test!(e2e_syntax_defer, "syntax", "defer.zz");
+e2e_success_test!(e2e_syntax_string_blocks, "syntax", "string_blocks.zz");
 
 // Type fixtures
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
@@ -235,6 +252,51 @@ fn e2e_eval_default_params() {
 
 // Note: struct definitions/mutation don't work in eval mode (parser limitation).
 // Struct tests are covered by `e2e_types_structs` run fixture.
+
+#[test]
+fn e2e_eval_string_comparison_if() {
+    // Verify the parser parses string comparison before block correctly.
+    // Use `zz check` to validate parsing (string == has pre-existing VM bug).
+    let tmp = std::env::temp_dir().join("zz_str_cmp_test.zz");
+    std::fs::write(
+        &tmp,
+        r#"x := "hello"
+if x == "hello" { println("yes") } else { println("no") }"#,
+    )
+    .unwrap();
+    let (exit, _, stderr) = run_zz_check(&tmp);
+    assert_eq!(
+        exit, 0,
+        "check should pass for string-before-block.\nstderr: {stderr}"
+    );
+    std::fs::remove_file(&tmp).ok();
+}
+
+#[test]
+fn e2e_eval_string_interpolation_still_works() {
+    let (exit, stdout, _) = run_zz_eval(r#"greeting := "Hi"; name := "ZZ"; "{greeting}, {name}!""#);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "Hi, ZZ!");
+}
+
+#[test]
+fn e2e_check_string_before_while_block() {
+    let tmp = std::env::temp_dir().join("zz_str_while_test.zz");
+    std::fs::write(
+        &tmp,
+        r#"s := "test"
+while s == "test" {
+    println(s)
+}"#,
+    )
+    .unwrap();
+    let (exit, _, stderr) = run_zz_check(&tmp);
+    assert_eq!(
+        exit, 0,
+        "check should pass for string-before-while-block.\nstderr: {stderr}"
+    );
+    std::fs::remove_file(&tmp).ok();
+}
 
 // ---------------------------------------------------------------------------
 // Dynamic discovery: run every .zz under fixtures/success/

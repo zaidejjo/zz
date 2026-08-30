@@ -1,7 +1,7 @@
 //! Parser error recovery tests.
 
-use zz_frontend::tests::common::parse_ok;
 use zz_frontend::ast::Expr as E;
+use zz_frontend::tests::common::parse_ok;
 
 #[test]
 fn struct_init_with_space() {

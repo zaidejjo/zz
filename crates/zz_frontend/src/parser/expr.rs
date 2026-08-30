@@ -394,7 +394,7 @@ impl Parser {
         let mut parts = vec![FmtPart::Text(first.text)];
         let mut end = first.span;
         loop {
-            if !self.at(TokenKind::LBrace) {
+            if !self.at(TokenKind::LBrace) || !self.lbrace_is_interpolation() {
                 break;
             }
             self.advance();
@@ -479,11 +479,18 @@ impl Parser {
             }
             TokenKind::Str => {
                 self.advance();
-                // A string followed by `{` is an interpolated string:
+                // A string followed by `{` could be an interpolated string:
                 // `"Hello {name}"` lexes as Str, LBrace, expr, RBrace, Str...
-                // But if the `{` starts a match arm block (followed by patterns
-                // and `=>`), treat it as a plain string.
-                if self.at(TokenKind::LBrace) && !self.looks_like_match_arm_block() {
+                //
+                // However, it could also be a string comparison before a block:
+                // `if x == "zaid" { ... }` lexes as Str("zaid"), LBrace(...)
+                //
+                // The key difference: in genuine interpolation the `{` is inside
+                // the string literal, so the LBrace token has NO leading
+                // whitespace trivia. In the block case, there is always
+                // whitespace between the closing `"` and the `{`, which the
+                // lexer attaches as leading trivia on the LBrace token.
+                if self.at(TokenKind::LBrace) && self.lbrace_is_interpolation() {
                     self.parse_fmt_string(tok)
                 } else {
                     Expr::Str {

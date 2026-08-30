@@ -1,7 +1,7 @@
 //! Parser statement tests.
 
-use zz_frontend::tests::common::parse_ok;
 use zz_frontend::ast::{BinOp, Expr as E};
+use zz_frontend::tests::common::parse_ok;
 
 #[test]
 fn parses_short_decl() {

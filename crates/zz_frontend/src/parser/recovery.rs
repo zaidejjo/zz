@@ -2,7 +2,7 @@
 
 use crate::diag::{error_at, RawDiag};
 use crate::span::Span;
-use crate::token::{Token, TokenKind};
+use crate::token::{Token, TokenKind, TriviaKind};
 
 use super::Parser;
 
@@ -148,5 +148,21 @@ impl Parser {
             }
         }
         false
+    }
+
+    /// Check whether the current `LBrace` token is part of a string
+    /// interpolation (e.g. `"hello {name}"`) rather than a block delimiter
+    /// (e.g. `if x == "zaid" { ... }`).
+    ///
+    /// In genuine interpolation the `{` is inside the string literal, so the
+    /// lexer emits the `LBrace` with **no leading whitespace trivia**.  When
+    /// a string is followed by a block-opening brace, there is always at least
+    /// one space between the closing quote and `{`, which the lexer attaches
+    /// as leading trivia on the `LBrace` token.
+    pub(crate) fn lbrace_is_interpolation(&self) -> bool {
+        self.peek()
+            .leading
+            .iter()
+            .all(|t| t.kind != TriviaKind::Whitespace && t.kind != TriviaKind::Newline)
     }
 }
