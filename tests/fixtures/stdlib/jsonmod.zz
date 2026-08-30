@@ -1,0 +1,18 @@
+// E2E: std.json — JSON parsing and serialization
+import std.json
+
+// parse object
+data := json.parse("{\"name\": \"Alice\", \"age\": 30}")
+println(json.as_str(json.get(data, "name")))
+println(json.as_int(json.get(data, "age")))
+
+// stringify
+obj := {"key": "value", "num": 42}
+s := json.stringify(obj)
+println(s)
+
+// roundtrip
+parsed := json.parse(s)
+println(json.as_str(json.get(parsed, "key")))
+
+println("json_ok")

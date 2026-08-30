@@ -1,0 +1,19 @@
+// E2E: Dictionaries — creation, access, iteration
+d := {"a": 1, "b": 2, "c": 3}
+
+println(d["a"])
+println(d["b"])
+println(d["c"])
+
+// length
+println(len(d))
+
+// overwrite
+d["a"] = 100
+println(d["a"])
+
+// empty dict with type annotation
+empty: {str: int} = {}
+println(len(empty))
+
+println("dict_ok")

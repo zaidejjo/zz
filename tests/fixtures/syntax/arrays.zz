@@ -1,0 +1,33 @@
+// E2E: Arrays — creation, indexing, slicing, comprehensions
+// creation
+arr := [10, 20, 30, 40, 50]
+empty_ints: [int] = []
+mixed := [1, "two", true]
+
+// indexing
+println(arr[0])
+println(arr[-1])
+println(arr[2])
+
+// slicing
+println(arr[1:3])
+println(arr[:2])
+println(arr[3:])
+println(arr[:])
+
+// string slicing
+s := "hello"
+println(s[1:4])
+
+// length
+println(len(arr))
+println(len(s))
+
+// list comprehension
+squares := [x ** 2 for x in range(0, 5)]
+println(squares)
+
+filtered := [x for x in range(0, 10) if x % 2 == 0]
+println(filtered)
+
+println("array_ok")

@@ -1,0 +1,32 @@
+// E2E: Operators — arithmetic, comparison, logic, power
+// arithmetic
+println(10 + 3)
+println(10 - 3)
+println(10 * 3)
+println(10 / 3)
+println(10 % 3)
+println(2 ** 10)
+
+// comparison
+println(10 > 5)
+println(10 < 5)
+println(10 == 10)
+println(10 != 5)
+println(10 >= 10)
+println(5 <= 10)
+
+// logic
+println(true && false)
+println(true || false)
+println(!true)
+
+// string concat
+println("hello" + " " + "world")
+
+// elvis operator
+val := .some(99)
+println(val ?? 0)
+none_val: Option<int> = .none
+println(none_val ?? -1)
+
+println("op_ok")

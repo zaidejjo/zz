@@ -1,0 +1,22 @@
+// E2E: String interpolation and format specs
+name := "ZZ"
+version := 42
+pi := 3.14159
+
+// basic interpolation
+println("Hello, {name}!")
+println("Version: {version}")
+
+// format specs
+println("{pi:.2f}")
+println("{version:x}")
+println("{version:X}")
+println("{version:o}")
+println("{version:b}")
+println("{version:d}")
+
+// nested expressions in interpolation
+println("{1 + 2}")
+println("{name} is {version * 2}")
+
+println("fstr_ok")

@@ -1,0 +1,14 @@
+// E2E: std.env — environment variables and args
+import std.env
+
+// env.args
+my_args := env.args()
+println(len(my_args))
+
+// env.get_var
+match env.get_var("PATH") {
+    .some(p) => println("has_path"),
+    .none    => println("no_path"),
+}
+
+println("env_ok")

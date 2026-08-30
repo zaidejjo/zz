@@ -1,0 +1,22 @@
+// E2E: Pipeline operator |>
+func double(n: int) -> int { n * 2 }
+func add_one(n: int) -> int { n + 1 }
+func negate(n: int) -> int { -n }
+
+// basic pipeline
+r1 := 5 |> double |> add_one
+println(r1)
+
+// pipeline with method-like call
+import std.str
+greeting := "hello world" |> str.to_upper
+println(greeting)
+
+// pipeline across lines
+result := 10
+    |> double
+    |> add_one
+    |> double
+println(result)
+
+println("pipe_ok")

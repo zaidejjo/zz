@@ -1,0 +1,30 @@
+// E2E: Structs — definition, init, field access, mutation
+struct Point { x: int, y: int }
+struct Rect { origin: Point, w: int, h: int }
+
+p := Point{ x: 10, y: 20 }
+println(p.x)
+println(p.y)
+
+// field mutation
+p.x = 99
+println(p.x)
+
+// nested structs
+r := Rect{ origin: Point{ x: 1, y: 2 }, w: 10, h: 20 }
+println(r.origin.x)
+println(r.origin.y)
+println(r.w)
+println(r.h)
+
+// nested mutation
+r.origin.x = 42
+println(r.origin.x)
+
+// struct equality (same fields)
+a := Point{ x: 1, y: 2 }
+b := Point{ x: 1, y: 2 }
+println(a.x == b.x)
+println(a.y == b.y)
+
+println("struct_ok")
