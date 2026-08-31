@@ -298,11 +298,17 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
                 Severity::Help => carets.cyan().bold(),
             };
             // Inline the first fixit hint directly under the carets
+            // Use blank padding matching the source line prefix width
+            let blank_pad = format!("{:>width$}", "", width = pad.len());
             if let Some(fixit) = raw.fixits.first() {
                 let hint = format!(" help: replace with `{}`", fixit.replacement);
-                let _ = write!(out, "\n    | {spaces}{colored_carets}{}", hint.cyan());
+                let _ = write!(
+                    out,
+                    "\n {blank_pad} | {spaces}{colored_carets}{}",
+                    hint.cyan()
+                );
             } else {
-                let _ = write!(out, "\n    | {spaces}{colored_carets}");
+                let _ = write!(out, "\n {blank_pad} | {spaces}{colored_carets}");
             }
         }
     }
@@ -369,7 +375,8 @@ pub fn render_to_stderr(files: &Files, file_id: FileId, diags: &[RawDiag]) {
                     let _ = write!(line, "\n {:>4} | {line_text}", ln);
                     let col_off = span.start as usize - lstart;
                     let len = ((span.end - span.start).max(1)) as usize;
-                    let _ = write!(line, "\n    | {}{}", " ".repeat(col_off), "^".repeat(len));
+                    let _ = write!(line, "\n {:>4} |", "");
+                    let _ = write!(line, " {}{}", " ".repeat(col_off), "^".repeat(len));
                 }
             }
             for note_text in &raw.notes {
