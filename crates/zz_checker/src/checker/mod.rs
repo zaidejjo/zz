@@ -137,6 +137,13 @@ pub fn check_program(
         }
     }
 
+    // Populate pub_names so unused-warning logic can skip pub items.
+    checker.pub_names = pub_bindings_set
+        .union(&pub_funcs_set)
+        .chain(pub_structs_set.iter())
+        .cloned()
+        .collect();
+
     // Emit unused variable warnings for the global scope (the top scope
     // is never popped, so pop_scope's check never fires for it).
     checker.emit_global_unused_warnings();
@@ -185,6 +192,8 @@ pub(crate) struct Checker {
     pub(crate) loop_depth: usize,
     /// Names that were used (looked up) — for unused-variable warnings.
     pub(crate) used_names: std::collections::HashSet<String>,
+    /// Top-level names marked `pub` — should not emit unused warnings.
+    pub(crate) pub_names: std::collections::HashSet<String>,
     /// Names defined in the current scope with their spans — for unused
     /// variable warnings. Each scope level has its own map.
     pub(crate) defined_names: Vec<HashMap<String, zz_frontend::span::Span>>,
@@ -214,6 +223,7 @@ impl Checker {
             current_generics: Vec::new(),
             loop_depth: 0,
             used_names: std::collections::HashSet::new(),
+            pub_names: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,
             imports: Vec::new(),
