@@ -539,9 +539,9 @@ impl Parser {
                     return self.parse_struct_init(parts, tok.span.join(end));
                 }
                 // Recover from common mistake: `User{ id = 1 }` instead of
-                // `User{ id: 1 }`.  Detect `{ Ident =` and emit a clear error
-                // before falling through to struct init (which will handle the
-                // `=` as a missing `:` via its own recovery).
+                // `User{ id: 1 }`.  Detect `{ Ident =` and route to struct
+                // init so `parse_struct_init` can emit a clear error and
+                // recover by consuming `=` as if it were `:`.
                 //
                 // Only trigger when `{` is adjacent to the type name (no
                 // whitespace gap), to avoid false positives like
@@ -552,9 +552,6 @@ impl Parser {
                     && self.peek_kind_at(2) == TokenKind::Assign
                     && end.end == self.peek().span.start
                 {
-                    self.error_here(
-                        "expected `:` in struct initialization, found `=` — did you mean `:`?",
-                    );
                     return self.parse_struct_init(parts, tok.span.join(end));
                 }
                 if parts.len() == 1 {
@@ -627,7 +624,14 @@ impl Parser {
                 .expect_ident()
                 .unwrap_or_else(|| dummy_ident(self.peek().span));
             if !self.eat(TokenKind::Colon) {
-                self.error_here("expected `:` after field name");
+                if self.at(TokenKind::Assign) {
+                    self.error_here(
+                        "expected `:` in struct initialization, found `=` — did you mean `:`?",
+                    );
+                    self.advance(); // consume `=`
+                } else {
+                    self.error_here("expected `:` after field name");
+                }
             }
             let value = self.parse_expr();
             fields.push((fname.name, value));
