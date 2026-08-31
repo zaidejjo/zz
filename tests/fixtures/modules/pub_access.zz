@@ -1,13 +1,13 @@
-// Test: pub keyword on top-level declarations
-pub func public_func() -> int { 42 }
-pub struct PublicPoint { x: int, y: int }
-pub base := 100
-func private_func() -> int { 0 }
-struct PrivateStruct { x: int }
+// Test: pub keyword on all declaration types.
+// Single-file — no imports needed.
+pub PI := 314
+pub func add(a: int, b: int) -> int { a + b }
+pub struct Point { x: int, y: int }
 secret := 99
+func helper(x: int) -> int { x }
+struct Box { val: int }
 
 func main() {
-    x := public_func()
-    p := PublicPoint { x: 1, y: 2 }
-    std.io.println(x + p.x + base)
+    p := Point { x: 1, y: 2 }
+    std.io.println(PI + add(p.x, p.y))
 }

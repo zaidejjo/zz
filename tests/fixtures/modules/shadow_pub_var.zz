@@ -1,0 +1,9 @@
+// Test: local variable shadowing with pub bindings.
+PI := 314
+pub func double(x: int) -> int { x * 2 }
+
+func main() {
+    PI := 99
+    val := double(PI)
+    std.io.println(val)
+}

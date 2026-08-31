@@ -1,0 +1,9 @@
+// Test: pub struct fields accessible, private items stay private.
+pub struct Vec2 { x: int, y: int }
+pub struct Secret { val: int }
+secret_val := 42
+
+func main() {
+    v := Vec2 { x: 10, y: 20 }
+    std.io.println(v.x + v.y)
+}

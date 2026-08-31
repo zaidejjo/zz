@@ -1,0 +1,11 @@
+// Test: diamond import pattern — all pub items visible.
+// A → B, A → C, B → D, C → D.
+// This test is a single-file representation of the pattern.
+// Full multi-file test is in loader/tests.rs (diamond_import_no_errors).
+import std.io as io
+
+pub val := 10
+
+func main() {
+    io.println(val)
+}

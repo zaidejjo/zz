@@ -423,14 +423,16 @@ impl Loader {
                             for (k, v) in &seed_b {
                                 if k.starts_with(&prefix) {
                                     let new_key = format!("{}{}", new_prefix, &k[prefix.len()..]);
-                                    self.bindings.insert(new_key, v.clone());
+                                    self.bindings.insert(new_key.clone(), v.clone());
+                                    self.all_bindings.insert(new_key, v.clone());
                                 }
                             }
                             let seed_f = self.funcs.clone();
                             for (k, v) in &seed_f {
                                 if k.starts_with(&prefix) {
                                     let new_key = format!("{}{}", new_prefix, &k[prefix.len()..]);
-                                    self.funcs.insert(new_key, v.clone());
+                                    self.funcs.insert(new_key.clone(), v.clone());
+                                    self.all_funcs.insert(new_key, v.clone());
                                 }
                             }
                         }
