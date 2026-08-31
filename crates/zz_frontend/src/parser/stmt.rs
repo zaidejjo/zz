@@ -40,8 +40,42 @@ impl Parser {
 
     pub(crate) fn parse_stmt(&mut self) -> Stmt {
         match self.peek_kind() {
-            TokenKind::Import => self.parse_import(),
-            TokenKind::Func => self.parse_func(),
+            TokenKind::Pub => {
+                let _pub_tok = self.advance();
+                // `pub` must be followed by func, struct, import, or a declaration.
+                match self.peek_kind() {
+                    TokenKind::Func => self.parse_func(true),
+                    TokenKind::Struct => self.parse_struct(true),
+                    TokenKind::Import => self.parse_import(true),
+                    // `pub x := expr` or `pub x: type = expr`
+                    TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {
+                        self.parse_short_decl(true)
+                    }
+                    TokenKind::Ident => {
+                        // Try `pub x: type = expr`
+                        let save_pos = self.pos;
+                        let save_errs = self.errors.len();
+                        if let Some(decl) = self.try_parse_explicit_decl(true) {
+                            return decl;
+                        }
+                        self.pos = save_pos;
+                        self.errors.truncate(save_errs);
+                        self.error_here(
+                            "expected `func`, `struct`, `import`, or declaration after `pub`",
+                        );
+                        // Recover by parsing the next statement as if `pub` wasn't there.
+                        self.parse_stmt()
+                    }
+                    _ => {
+                        self.error_here(
+                            "expected `func`, `struct`, `import`, or declaration after `pub`",
+                        );
+                        self.parse_stmt()
+                    }
+                }
+            }
+            TokenKind::Import => self.parse_import(false),
+            TokenKind::Func => self.parse_func(false),
             TokenKind::Return => {
                 let ret_tok = self.advance();
                 let value = if self.at(TokenKind::StmtEnd)
@@ -59,9 +93,9 @@ impl Parser {
             }
             // `x := expr` — short declaration with inference.
             TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {
-                self.parse_short_decl()
+                self.parse_short_decl(false)
             }
-            TokenKind::Struct => self.parse_struct(),
+            TokenKind::Struct => self.parse_struct(false),
             TokenKind::For => self.parse_for(),
             TokenKind::Break => {
                 let tok = self.advance();
@@ -85,7 +119,7 @@ impl Parser {
                 // on failure so ordinary expressions still parse.
                 let save_pos = self.pos;
                 let save_errs = self.errors.len();
-                if let Some(decl) = self.try_parse_explicit_decl() {
+                if let Some(decl) = self.try_parse_explicit_decl(false) {
                     return decl;
                 }
                 self.pos = save_pos;
@@ -127,6 +161,7 @@ impl Parser {
                             },
                             value,
                             span,
+                            pub_: false,
                         };
                     }
                 }
@@ -148,7 +183,7 @@ impl Parser {
         }
     }
 
-    pub(crate) fn parse_struct(&mut self) -> Stmt {
+    pub(crate) fn parse_struct(&mut self, pub_: bool) -> Stmt {
         let struct_tok = self.advance();
         let name = self.parse_dotted_ident();
         if !self.eat(TokenKind::LBrace) {
@@ -192,7 +227,12 @@ impl Parser {
             self.peek().span
         };
         let span = struct_tok.span.join(end);
-        Stmt::Struct { name, fields, span }
+        Stmt::Struct {
+            name,
+            fields,
+            span,
+            pub_,
+        }
     }
 
     pub(crate) fn parse_for(&mut self) -> Stmt {
@@ -222,7 +262,7 @@ impl Parser {
         }
     }
 
-    pub(crate) fn parse_import(&mut self) -> Stmt {
+    pub(crate) fn parse_import(&mut self, pub_: bool) -> Stmt {
         let import_tok = self.advance();
         let mut path = Vec::new();
         if let Some(id) = self.expect_ident() {
@@ -239,10 +279,15 @@ impl Parser {
             None
         };
         let span = import_tok.span.join(self.previous().span);
-        Stmt::Import { path, alias, span }
+        Stmt::Import {
+            path,
+            alias,
+            span,
+            pub_,
+        }
     }
 
-    pub(crate) fn parse_short_decl(&mut self) -> Stmt {
+    pub(crate) fn parse_short_decl(&mut self, pub_: bool) -> Stmt {
         let name = self.advance(); // identifier
         self.advance(); // `:=`
         let value = self.parse_expr();
@@ -255,12 +300,13 @@ impl Parser {
             },
             value,
             span,
+            pub_,
         }
     }
 
     /// Parse `IDENT: TYPE = expr`; returns `None` (with position restored by
     /// the caller) when the statement is not an explicit declaration.
-    pub(crate) fn try_parse_explicit_decl(&mut self) -> Option<Stmt> {
+    pub(crate) fn try_parse_explicit_decl(&mut self, pub_: bool) -> Option<Stmt> {
         // Must start with an identifier.
         if !self.at(TokenKind::Ident) {
             return None;
@@ -286,10 +332,11 @@ impl Parser {
             },
             value,
             span,
+            pub_,
         })
     }
 
-    pub(crate) fn parse_func(&mut self) -> Stmt {
+    pub(crate) fn parse_func(&mut self, pub_: bool) -> Stmt {
         let func_tok = self.advance();
         let name = self.parse_dotted_ident();
         let generics = if self.eat(TokenKind::Lt) {
@@ -335,6 +382,7 @@ impl Parser {
             ret,
             body,
             span,
+            pub_,
         }
     }
 

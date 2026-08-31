@@ -78,7 +78,13 @@ impl Session {
         // (or alias) in both the checker seed and the interpreter. Relative
         // imports need a file context and are rejected in the REPL.
         for stmt in &parsed.program.stmts {
-            if let zz_frontend::ast::Stmt::Import { path, alias, span } = stmt {
+            if let zz_frontend::ast::Stmt::Import {
+                path,
+                alias,
+                span,
+                pub_: _,
+            } = stmt
+            {
                 if path.first().map(String::as_str) != Some("std") {
                     self.last_had_errors = true;
                     return EvalOutput {

@@ -38,6 +38,12 @@ pub struct CheckResult {
     pub funcs: HashMap<String, FuncSig>,
     /// Top-level struct definitions.
     pub structs: HashMap<String, StructSig>,
+    /// Only `pub` bindings (for cross-module export).
+    pub pub_bindings: HashMap<String, Type>,
+    /// Only `pub` functions (for cross-module export).
+    pub pub_funcs: HashMap<String, FuncSig>,
+    /// Only `pub` structs (for cross-module export).
+    pub pub_structs: HashMap<String, StructSig>,
 }
 
 /// Type-check a whole program, seeded with bindings/funcs/structs from prior
@@ -51,23 +57,35 @@ pub fn check_program(
 ) -> CheckResult {
     let mut checker = Checker::new(initial_bindings, initial_funcs, initial_structs);
 
+    // Track which items are pub (for cross-module export).
+    let mut pub_bindings_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut pub_funcs_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut pub_structs_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     // Pass 1: register struct definitions (fields are resolved against the
     // struct registry, so structs may reference earlier structs). Structs
     // must be registered before functions so `func f(p: Point)` resolves.
     let mut seen_structs = HashMap::new();
     for stmt in &program.stmts {
-        if let Stmt::Struct { name, span, .. } = stmt {
+        if let Stmt::Struct {
+            name, span, pub_, ..
+        } = stmt
+        {
             let full_name = name.join(".");
             if let Some(prev) = seen_structs.insert(full_name.clone(), *span) {
                 checker.errors.push(zz_frontend::diag::error_at(
                     format!("duplicate definition of struct `{}`", full_name),
                     *span,
                 ));
-                checker
-                    .errors
-                    .push(zz_frontend::diag::error_at("previous definition here", prev));
+                checker.errors.push(zz_frontend::diag::error_at(
+                    "previous definition here",
+                    prev,
+                ));
             }
             checker.collect_struct(stmt);
+            if *pub_ {
+                pub_structs_set.insert(full_name);
+            }
         }
     }
 
@@ -75,23 +93,36 @@ pub fn check_program(
     // recursion resolve.
     let mut seen = HashMap::new();
     for stmt in &program.stmts {
-        if let Stmt::Func { name, span, .. } = stmt {
+        if let Stmt::Func {
+            name, span, pub_, ..
+        } = stmt
+        {
             let full_name = name.join(".");
             if let Some(prev) = seen.insert(full_name.clone(), *span) {
                 checker.errors.push(zz_frontend::diag::error_at(
                     format!("duplicate definition of function `{}`", full_name),
                     *span,
                 ));
-                checker
-                    .errors
-                    .push(zz_frontend::diag::error_at("previous definition here", prev));
+                checker.errors.push(zz_frontend::diag::error_at(
+                    "previous definition here",
+                    prev,
+                ));
             }
             checker.collect_func(stmt);
+            if *pub_ {
+                pub_funcs_set.insert(full_name);
+            }
         }
     }
 
     // Pass 2: check top-level statements in order.
     for stmt in &program.stmts {
+        // Track pub on Decl before checking.
+        if let Stmt::Decl { name, pub_, .. } = stmt {
+            if *pub_ {
+                pub_bindings_set.insert(name.name.clone());
+            }
+        }
         checker.check_stmt(stmt);
     }
 
@@ -110,11 +141,33 @@ pub fn check_program(
     // is never popped, so pop_scope's check never fires for it).
     checker.emit_global_unused_warnings();
 
+    // Build pub-only maps for cross-module export.
+    let pub_bindings: HashMap<String, Type> = bindings
+        .iter()
+        .filter(|(k, _)| pub_bindings_set.contains(k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let pub_funcs: HashMap<String, FuncSig> = checker
+        .funcs
+        .iter()
+        .filter(|(k, _)| pub_funcs_set.contains(k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let pub_structs: HashMap<String, StructSig> = checker
+        .structs
+        .iter()
+        .filter(|(k, _)| pub_structs_set.contains(k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
     CheckResult {
         errors: checker.errors,
         bindings,
         funcs: checker.funcs,
         structs: checker.structs,
+        pub_bindings,
+        pub_funcs,
+        pub_structs,
     }
 }
 

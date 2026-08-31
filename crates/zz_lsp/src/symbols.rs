@@ -106,7 +106,9 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
                 children: None,
             })
         }
-        Stmt::Import { path, alias, span } => {
+        Stmt::Import {
+            path, alias, span, ..
+        } => {
             let display = match alias {
                 Some(a) => format!("{} as {}", path.join("."), a),
                 None => path.join("."),
@@ -344,7 +346,9 @@ fn collect_workspace_symbols(
                     container_name: None,
                 });
             }
-            Stmt::Import { path, alias, span } => {
+            Stmt::Import {
+                path, alias, span, ..
+            } => {
                 let display = match alias {
                     Some(a) => format!("{} as {}", path.join("."), a),
                     None => path.join("."),

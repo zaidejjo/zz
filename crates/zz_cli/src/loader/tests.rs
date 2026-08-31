@@ -30,7 +30,7 @@ fn no_errors(result: &LoadResult) -> bool {
 fn loads_relative_import() {
     let dir = temp_project(&[
         ("main.zz", "import math.utils\nx := utils.double(21)"),
-        ("math/utils.zz", "func double(n: int) -> int { n * 2 }"),
+        ("math/utils.zz", "pub func double(n: int) -> int { n * 2 }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -42,7 +42,7 @@ fn loads_relative_import() {
 fn imported_bindings_visible() {
     let dir = temp_project(&[
         ("main.zz", "import config\nx := config.base + 1"),
-        ("config.zz", "base := 41"),
+        ("config.zz", "pub base := 41"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -53,7 +53,7 @@ fn imported_bindings_visible() {
 fn import_alias_works() {
     let dir = temp_project(&[
         ("main.zz", "import math.utils as m\nx := m.double(21)"),
-        ("math/utils.zz", "func double(n: int) -> int { n * 2 }"),
+        ("math/utils.zz", "pub func double(n: int) -> int { n * 2 }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -67,7 +67,7 @@ fn module_internal_calls_rewritten() {
         ("main.zz", "import math.utils\nx := utils.double(21)"),
         (
             "math/utils.zz",
-            "func twice(n: int) -> int { n * 2 }\nfunc double(n: int) -> int { twice(n) }",
+            "func twice(n: int) -> int { n * 2 }\npub func double(n: int) -> int { twice(n) }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -82,7 +82,7 @@ fn shadowing_respected() {
         ("main.zz", "import math.utils\nx := utils.double(21)"),
         (
             "math/utils.zz",
-            "n := 100\nfunc double(n: int) -> int { n * 2 }",
+            "n := 100\npub func double(n: int) -> int { n * 2 }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -228,7 +228,7 @@ fn full_program_runs_with_imports() {
 
     let dir = temp_project(&[
         ("main.zz", "import std.io\nimport std.str\nimport math.utils\nn := utils.double(6)\nstr.length(\"abc\")"),
-        ("math/utils.zz", "func double(n: int) -> int { n * 2 }"),
+        ("math/utils.zz", "pub func double(n: int) -> int { n * 2 }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -264,7 +264,7 @@ fn struct_in_module_namespaced() {
         ),
         (
             "shapes.zz",
-            "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }",
+            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { p.x + p.y }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -283,7 +283,7 @@ fn struct_field_access_in_module() {
         ("main.zz", "import shapes\nz := shapes.get_x()"),
         (
             "shapes.zz",
-            "struct Point { x: int, y: int }\np := Point{ x: 42, y: 0 }\nfunc get_x() -> int { p.x }",
+            "pub struct Point { x: int, y: int }\npub p := Point{ x: 42, y: 0 }\npub func get_x() -> int { p.x }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -308,7 +308,7 @@ fn indexing_and_slicing_in_module() {
         ("main.zz", "import stats\nz := stats.first()\nw := stats.mid()"),
         (
             "stats.zz",
-            "scores := [10, 20, 30]\nfunc first() -> int { scores[0] }\nfunc mid() -> [int] { scores[1:3] }",
+            "pub scores := [10, 20, 30]\npub func first() -> int { scores[0] }\npub func mid() -> [int] { scores[1:3] }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -333,7 +333,7 @@ fn pipeline_in_module() {
         ("main.zz", "import math\nz := math.apply()"),
         (
             "math.zz",
-            "func inc(n: int) -> int { n + 1 }\nfunc apply() -> int { 5 |> inc }",
+            "func inc(n: int) -> int { n + 1 }\npub func apply() -> int { 5 |> inc }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -357,7 +357,7 @@ fn method_call_in_module() {
         ("main.zz", "import shapes\nz := shapes.apply()"),
         (
             "shapes.zz",
-            "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\nfunc apply() -> int { p := Point { x: 3, y: 4 }\np.dist() }",
+            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { p.x + p.y }\npub func apply() -> int { p := Point { x: 3, y: 4 }\np.dist() }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -384,7 +384,7 @@ fn method_call_cross_module() {
         ),
         (
             "shapes.zz",
-            "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }",
+            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { p.x + p.y }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -409,7 +409,7 @@ fn cross_module_struct_def() {
             "main.zz",
             "import shapes\np := shapes.Point { x: 2, y: 3 }\nz := p.x",
         ),
-        ("shapes.zz", "struct shapes.Point { x: int, y: int }"),
+        ("shapes.zz", "pub struct shapes.Point { x: int, y: int }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -435,7 +435,7 @@ fn cross_module_dotted_func_def() {
         ),
         (
             "shapes.zz",
-            "struct shapes.Point { x: int, y: int }\nfunc shapes.mk_point(x: int, y: int) -> shapes.Point { shapes.Point { x: x, y: y } }",
+            "pub struct shapes.Point { x: int, y: int }\npub func shapes.mk_point(x: int, y: int) -> shapes.Point { shapes.Point { x: x, y: y } }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -462,7 +462,7 @@ fn import_alias_struct() {
         ),
         (
             "shapes.zz",
-            "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }",
+            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { p.x + p.y }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -517,4 +517,93 @@ fn struct_method_then_recursion_in_for_loop() {
         last = interp.run(p).unwrap();
     }
     assert_eq!(last, Value::Int(7));
+}
+
+// ---- Phase 2: Visibility & Modules tests ----
+
+#[test]
+fn pub_access_works() {
+    // Public items from imported modules are accessible.
+    let dir = temp_project(&[
+        (
+            "main.zz",
+            "import shapes\nz := shapes.dist(shapes.Point{x:1, y:2})",
+        ),
+        (
+            "shapes.zz",
+            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { p.x + p.y }",
+        ),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.z"], Type::Int);
+}
+
+#[test]
+fn private_access_error() {
+    // Private items from imported modules produce an error.
+    let dir = temp_project(&[
+        ("main.zz", "import shapes\nz := shapes.hidden()"),
+        (
+            "shapes.zz",
+            "pub struct Point { x: int, y: int }\nfunc hidden() -> int { 42 }",
+        ),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(
+        result.errors.iter().any(|e| e
+            .diags
+            .iter()
+            .any(|d| d.message.contains("undefined variable") || d.message.contains("private"))),
+        "expected undefined/private error, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn private_struct_access_error() {
+    // Private struct from imported module produces an error when used.
+    let dir = temp_project(&[
+        ("main.zz", "import shapes\np := shapes.Secret{ x: 1 }"),
+        ("shapes.zz", "struct Secret { x: int }"),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.diags.iter().any(|d| d.message.contains("undefined")
+                || d.message.contains("private")
+                || d.message.contains("unknown struct"))),
+        "expected undefined/private error, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn pub_reexport_works() {
+    // `pub import` re-exports a namespace through the parent module.
+    // Note: re-exported functions/bindings work directly. Re-exported structs
+    // require type aliasing (future work) since struct types are identity-based.
+    let dir = temp_project(&[
+        ("main.zz", "import lib\nz := lib.math.double(21)"),
+        ("lib.zz", "pub import math"),
+        ("math.zz", "pub func double(n: int) -> int { n * 2 }"),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.z"], Type::Int);
+}
+
+#[test]
+fn import_alias_reexport() {
+    // `pub import math as m` re-exports as `lib.m.*`.
+    let dir = temp_project(&[
+        ("main.zz", "import lib\nz := lib.m.double(21)"),
+        ("lib.zz", "pub import math as m"),
+        ("math.zz", "pub func double(n: int) -> int { n * 2 }"),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.z"], Type::Int);
 }

@@ -1,0 +1,13 @@
+// Test: pub keyword on top-level declarations
+pub func public_func() -> int { 42 }
+pub struct PublicPoint { x: int, y: int }
+pub base := 100
+func private_func() -> int { 0 }
+struct PrivateStruct { x: int }
+secret := 99
+
+func main() {
+    x := public_func()
+    p := PublicPoint { x: 1, y: 2 }
+    std.io.println(x + p.x + base)
+}

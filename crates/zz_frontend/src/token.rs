@@ -50,6 +50,7 @@ pub enum TokenKind {
     Break,
     Continue,
     Defer,
+    Pub,
     // Literals
     Int,
     Float,
@@ -118,6 +119,7 @@ impl TokenKind {
             TokenKind::Break => "`break`",
             TokenKind::Continue => "`continue`",
             TokenKind::Defer => "`defer`",
+            TokenKind::Pub => "`pub`",
             TokenKind::Int => "integer literal",
             TokenKind::Float => "float literal",
             TokenKind::Str => "string literal",
