@@ -11,12 +11,13 @@ impl Parser {
     // --- expressions ------------------------------------------------------
 
     pub(crate) fn parse_expr(&mut self) -> Expr {
-        self.parse_pipe()
+        self.parse_elvis()
     }
 
-    /// `a |> f(b)` — pipeline. Lowest precedence. The right side must be a
-    /// function call or name; it receives the left side as its first
-    /// argument (`a |> f(b)` desugars to `f(a, b)`).
+    /// `a |> f(b)` — pipeline. Binds tighter than `??` but looser than
+    /// range `..`. The right side must be a function call or name; it
+    /// receives the left side as its first argument (`a |> f(b)` desugars
+    /// to `f(a, b)`).
     pub(crate) fn parse_pipe(&mut self) -> Expr {
         let mut left = self.parse_range();
         while self.at(TokenKind::PipeGt) {
@@ -63,15 +64,16 @@ impl Parser {
         }
     }
 
-    /// `a..b` — integer range. Lowest precedence so `for i in 0..n` parses
-    /// the bounds as full expressions.
+    /// `a..b` — integer range. Binds tighter than pipe `|>` but looser
+    /// than arithmetic. So `a + b |> f` pipes the sum, and `0..n |> f`
+    /// pipes the range.
     pub(crate) fn parse_range(&mut self) -> Expr {
-        let start = self.parse_elvis();
+        let start = self.parse_or();
         if !self.at(TokenKind::DotDot) {
             return start;
         }
         self.advance();
-        let end = self.parse_elvis();
+        let end = self.parse_or();
         let span = start.span().join(end.span());
         Expr::Range {
             start: Box::new(start),
@@ -80,12 +82,13 @@ impl Parser {
         }
     }
 
-    /// `left ?? right` — Elvis operator. Unwraps Option or falls back.
+    /// `left ?? right` — Elvis operator. Lowest precedence. Unwraps
+    /// Option or Result; falls back to `right` on None/Err.
     pub(crate) fn parse_elvis(&mut self) -> Expr {
-        let mut left = self.parse_or();
+        let mut left = self.parse_pipe();
         while self.at(TokenKind::QuestionQuestion) {
             self.advance();
-            let right = self.parse_or();
+            let right = self.parse_pipe();
             let span = left.span().join(right.span());
             left = Expr::Binary {
                 op: BinOp::Elvis,

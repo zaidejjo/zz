@@ -421,6 +421,8 @@ impl Interp {
                         match l {
                             Value::Option(Some(v)) => return Ok(Flow::Value(*v)),
                             Value::Option(None) => {}
+                            Value::Result(Ok(v)) => return Ok(Flow::Value(*v)),
+                            Value::Result(Err(_)) => {}
                             other => {
                                 return Ok(Flow::Value(other));
                             }

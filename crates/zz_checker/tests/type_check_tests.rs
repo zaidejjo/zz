@@ -456,8 +456,14 @@ fn array_union_member_accepted() {
 }
 
 #[test]
-fn empty_array_ambiguous() {
-    errors_contain("v := []", "cannot infer the type of `v`");
+fn empty_array_deferred_inference() {
+    // Empty array without context: inference is deferred, no error.
+    let r = check_src("v := []");
+    assert!(
+        !has_errors(&r),
+        "empty array should not error (deferred inference): {:?}",
+        r.errors
+    );
 }
 
 #[test]
@@ -499,8 +505,14 @@ fn dict_key_mismatch_errors() {
 }
 
 #[test]
-fn empty_dict_ambiguous() {
-    errors_contain("m := {}", "cannot infer the type of `m`");
+fn empty_dict_deferred_inference() {
+    // Empty dict without context: inference is deferred, no error.
+    let r = check_src("m := {}");
+    assert!(
+        !has_errors(&r),
+        "empty dict should not error (deferred inference): {:?}",
+        r.errors
+    );
 }
 
 #[test]

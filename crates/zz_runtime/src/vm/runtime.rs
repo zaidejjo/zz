@@ -744,6 +744,14 @@ impl Vm {
                             self.stack.push(Value::Bool(false));
                             self.stack.push(Value::Unit);
                         }
+                        Value::Result(Ok(inner)) => {
+                            self.stack.push(Value::Bool(true));
+                            self.stack.push(*inner);
+                        }
+                        Value::Result(Err(_)) => {
+                            self.stack.push(Value::Bool(false));
+                            self.stack.push(Value::Unit);
+                        }
                         other => {
                             self.stack.push(Value::Bool(true));
                             self.stack.push(other);

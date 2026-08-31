@@ -127,6 +127,8 @@ e2e_success_test!(e2e_syntax_defer, "syntax", "defer.zz");
 e2e_success_test!(e2e_syntax_string_blocks, "syntax", "string_blocks.zz");
 e2e_success_test!(e2e_syntax_return_in_loops, "syntax", "return_in_loops.zz");
 e2e_success_test!(e2e_syntax_dict_iteration, "syntax", "dict_iteration.zz");
+e2e_success_test!(e2e_syntax_pipe_elvis, "syntax", "pipe_elvis.zz");
+e2e_success_test!(e2e_syntax_empty_infer, "syntax", "empty_infer.zz");
 
 // Type fixtures
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
@@ -229,6 +231,37 @@ fn e2e_eval_elvis() {
     let (exit, stdout, _) = run_zz_eval("none_val: Option<int> = .none; none_val ?? 99");
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "99");
+}
+
+#[test]
+fn e2e_eval_elvis_result() {
+    let (exit, stdout, _) = run_zz_eval(".ok(42) ?? -1");
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn e2e_eval_elvis_result_err() {
+    let (exit, stdout, _) = run_zz_eval(".err(\"boom\") ?? -1");
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "-1");
+}
+
+#[test]
+fn e2e_eval_pipe_elvis_precedence() {
+    // | > binds tighter than ??, so `val ?? 0 |> double()` = `val ?? (0 |> double())`
+    let (exit, stdout, _) =
+        run_zz_eval("double := |x: int| x * 2; val: Option<int> = .some(21); val ?? 0 |> double()");
+    assert_eq!(exit, 0);
+    // val is Some(21), so ?? returns 21 directly (pipe is on the fallback side)
+    assert_eq!(stdout.trim(), "21");
+}
+
+#[test]
+fn e2e_eval_int_float_promotion() {
+    let (exit, stdout, _) = run_zz_eval("1 + 2.5");
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "3.5");
 }
 
 #[test]

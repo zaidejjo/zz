@@ -1,0 +1,42 @@
+// E2E: Empty collection type inference from context
+func sum(items: [int]) -> int {
+    total := 0
+    for item in items {
+        total := total + item
+    }
+    total
+}
+
+func count_size(counts: {str: int}) -> int {
+    n := 0
+    for _k in counts {
+        n := n + 1
+    }
+    n
+}
+
+func main() {
+    // Empty array inferred from function parameter context
+    items := []
+    r1 := sum(items)
+    println(r1)
+
+    // Empty dict inferred from function parameter context
+    counts := {}
+    r2 := count_size(counts)
+    println(r2)
+
+    // Explicit types still work
+    x: [int] = []
+    y: {str: int} = {}
+    println(sum(x))
+    println(count_size(y))
+
+    // Int-float promotion
+    z := 1 + 2.5
+    println(z)
+    w := 3 * 1.0
+    println(w)
+
+    println("empty_infer_ok")
+}

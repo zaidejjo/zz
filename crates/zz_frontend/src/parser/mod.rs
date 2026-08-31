@@ -18,7 +18,8 @@
 //!                | '(' type (',' type)* ')'
 //!                | '[' type ']'                           // array
 //!                | '{' type ':' type '}'                  // dict
-//! expr           := pipe
+//! expr           := elvis
+//! elvis          := pipe ('??' pipe)*                        // unwrap or fallback
 //! pipe           := range ('|>' range)*                    // pipeline
 //! range          := or ('..' or)?                          // integer range
 //! or             := and ('||' and)*
