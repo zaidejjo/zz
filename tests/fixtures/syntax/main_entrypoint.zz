@@ -1,0 +1,9 @@
+// E2E: Auto-call main() entrypoint — `func main()` is called automatically.
+// Top-level statements run first, then main() is called.
+
+println("top-level runs first")
+
+func main() {
+    println("hello from main")
+    println("main_entrypoint_ok")
+}

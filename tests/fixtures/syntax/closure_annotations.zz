@@ -1,0 +1,20 @@
+// E2E: Closure return type annotations — `|x: int| -> int { ... }`
+
+// With return type annotation
+add_one := |x: int| -> int { x + 1 }
+to_str := |x: int| -> str { str(x) }
+
+// Without return type annotation (backward compatible)
+double := |x: int| x * 2
+
+// Recursive closure with return type annotation
+factorial := |n: int| -> int {
+    if n <= 1 { 1 } else { n * factorial(n - 1) }
+}
+
+println(add_one(5))       // 6
+println(to_str(42))       // 42
+println(double(7))        // 14
+println(factorial(5))     // 120
+
+println("closure_annotations_ok")

@@ -672,10 +672,17 @@ impl Parser {
         if !self.eat(TokenKind::Pipe) {
             self.error_here("expected `|` to close closure parameters");
         }
+        // Optional return type annotation: `|x: int| -> int { ... }`
+        let ret_ty = if self.eat(TokenKind::Arrow) {
+            Some(self.parse_type())
+        } else {
+            None
+        };
         let body = self.parse_expr();
         let span = pipe_tok.span.join(body.span());
         Expr::Closure {
             params,
+            ret_ty,
             body: Box::new(body),
             span,
         }

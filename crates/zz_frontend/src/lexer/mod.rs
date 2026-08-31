@@ -320,7 +320,6 @@ impl<'a> Lexer<'a> {
                     | TokenKind::AndAnd
                     | TokenKind::OrOr
                     | TokenKind::Bang
-                    | TokenKind::Question
                     | TokenKind::QuestionQuestion
                     | TokenKind::Colon
                     | TokenKind::Comma

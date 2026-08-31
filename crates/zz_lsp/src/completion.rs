@@ -213,7 +213,7 @@ fn stdlib_module_completions(
     // `import std.math as m`, we need to match against `math.*` keys and
     // present them as `m.*` completions.
     let module_prefix = format!("{module}.");
-    let user_prefix = format!("{obj_name}.");
+    let _user_prefix = format!("{obj_name}.");
     let mut items: Vec<CompletionItem> = cr
         .funcs
         .keys()

@@ -3,7 +3,7 @@
 use crate::checker::inference::{contains_var, default_variant_vars};
 use crate::checker::Checker;
 use crate::type_::Type;
-use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Lit, Param, Pattern, Stmt, UnOp};
+use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Lit, Param, Pattern, Stmt, Ty, UnOp};
 use zz_frontend::diag::{error_at, FixIt};
 use zz_frontend::levenshtein::suggest_all;
 use zz_frontend::span::Span;
@@ -565,7 +565,12 @@ impl Checker {
                 named,
                 span,
             } => self.check_call(callee, args, named, *span),
-            Expr::Closure { params, body, span } => self.check_closure(params, body, *span),
+            Expr::Closure {
+                params,
+                ret_ty,
+                body,
+                span,
+            } => self.check_closure(params, ret_ty.as_ref(), body, *span),
             Expr::If {
                 cond,
                 then,
@@ -1222,7 +1227,13 @@ impl Checker {
         }
     }
 
-    pub(crate) fn check_closure(&mut self, params: &[Param], body: &Expr, _span: Span) -> Type {
+    pub(crate) fn check_closure(
+        &mut self,
+        params: &[Param],
+        ret_ty: Option<&Ty>,
+        body: &Expr,
+        _span: Span,
+    ) -> Type {
         self.push_scope();
         let mut ptypes = Vec::new();
         for p in params {
@@ -1244,7 +1255,16 @@ impl Checker {
         self.pop_scope();
         // Unify body type with the return var (from any `return` statements).
         let _ = self.unifier.unify(&ret_var, &bt);
-        let resolved_ret = self.unifier.resolve(&ret_var);
+        let mut resolved_ret = self.unifier.resolve(&ret_var);
+        // If a return type annotation is provided, unify it with the inferred return type.
+        if let Some(ann) = ret_ty {
+            let gens = self.current_generics.clone();
+            let ann_type = self.ast_to_type(ann, &gens);
+            if let Err(e) = self.unifier.unify(&ann_type, &resolved_ret) {
+                self.report_mismatch(e, ann.span);
+            }
+            resolved_ret = self.unifier.resolve(&ann_type);
+        }
         Type::Func(ptypes, Box::new(resolved_ret))
     }
 
