@@ -16,5 +16,3 @@ func main() {
 
     println("dict_iteration_ok")
 }
-
-main()

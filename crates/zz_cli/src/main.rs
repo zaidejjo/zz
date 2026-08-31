@@ -14,6 +14,7 @@ mod repl;
 mod session;
 
 use zz_frontend::diag::{error_at, render_to_string, Files};
+use zz_frontend::span::Span;
 use zz_runtime::{Interp, Value};
 
 use session::Session;
@@ -256,6 +257,42 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
     if last != Value::Unit {
         println!("{last}");
     }
+
+    // Auto-call `main()` if defined in the entry file.
+    // The entry file's namespace is its file stem (e.g. `myapp.zz` → `myapp`).
+    let entry_ns = std::path::Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let main_key = format!("{entry_ns}.main");
+    if let Some(fv) = interp.funcs.get(&main_key).cloned() {
+        let span = Span::new(0, 0);
+        // Pass script args only if main() accepts parameters.
+        let call_args = if fv.params.is_empty() {
+            vec![]
+        } else {
+            vec![Value::Array(
+                script_args.iter().map(|a| Value::Str(a.clone())).collect(),
+            )]
+        };
+        match interp.call(Value::Func(fv), call_args, span) {
+            Ok(_) => {}
+            Err(e) => {
+                let mut files = Files::new();
+                let id = files.add(path.clone(), String::new());
+                let mut diag = error_at(e.message.clone(), e.span);
+                for (name, _) in &e.backtrace {
+                    if !name.is_empty() {
+                        diag = diag.with_note(format!("  at {name}"));
+                    }
+                }
+                let diags = vec![diag];
+                eprint!("{}", render_to_string(&files, id, &diags));
+                return Err("program failed".to_string());
+            }
+        }
+    }
+
     Ok(())
 }
 

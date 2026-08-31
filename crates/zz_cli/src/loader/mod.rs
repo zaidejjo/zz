@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use zz_checker::{check_program, FuncSig, StructSig, Type};
-use zz_frontend::ast::{Program, Stmt};
+use zz_frontend::ast::{Expr, Program, Stmt};
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
 use zz_frontend::span::Span;
@@ -79,10 +79,15 @@ struct Loader {
     namespaces: HashMap<String, PathBuf>,
     /// Canonical path → namespace it was registered under.
     ns_of: HashMap<PathBuf, String>,
+    /// Canonical path of the entry file (for main() call validation).
+    entry: PathBuf,
 }
 
 /// Load an entry file and all of its imports.
 pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
+    let entry = main_path
+        .canonicalize()
+        .map_err(|e| format!("cannot read `{}`: {e}", main_path.display()))?;
     let mut loader = Loader {
         sources: HashMap::new(),
         programs: HashMap::new(),
@@ -96,6 +101,7 @@ pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
         natives: stdlib_natives(),
         namespaces: HashMap::new(),
         ns_of: HashMap::new(),
+        entry,
     };
     loader.load_file(main_path, None)?;
     Ok(loader.finish())
@@ -304,6 +310,47 @@ impl Loader {
             files.push((name.clone(), source.clone()));
 
             let program = self.programs.remove(path).unwrap();
+
+            // In the entry file, error if func main() and a top-level main()
+            // call coexist — the auto-call would double-execute main().
+            if *path == self.entry {
+                let mut has_main_func = false;
+                let mut has_main_call = false;
+                for stmt in &program.stmts {
+                    match stmt {
+                        Stmt::Func { name, .. } => {
+                            // After namespace rewriting, name may be
+                            // ["ns.main"] or ["ns", "main"]. Check the
+                            // joined form.
+                            let joined = name.join(".");
+                            if joined.ends_with(".main") || joined == "main" {
+                                has_main_func = true;
+                            }
+                        }
+                        Stmt::Expr(expr) => {
+                            if let Expr::Call { callee, .. } = expr {
+                                if let Expr::Path { parts, .. } = callee.as_ref() {
+                                    if parts.last().map(|s| s.as_str()) == Some("main") {
+                                        has_main_call = true;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if has_main_func && has_main_call {
+                    self.errors.push(LoadError {
+                        name: name.clone(),
+                        source: source.clone(),
+                        diags: vec![error_at(
+                            "`main()` is auto-called; remove the explicit `main()` call",
+                            Span::new(0, 0),
+                        )],
+                    });
+                }
+            }
+
             let checked = check_program(
                 &program,
                 self.bindings.clone(),

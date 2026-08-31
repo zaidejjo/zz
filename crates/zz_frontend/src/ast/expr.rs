@@ -113,6 +113,7 @@ pub enum Expr {
     },
     Closure {
         params: Vec<Param>,
+        ret_ty: Option<Ty>,
         body: Box<Expr>,
         span: Span,
     },

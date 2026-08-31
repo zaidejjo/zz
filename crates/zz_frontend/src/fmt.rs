@@ -499,10 +499,20 @@ impl<'a> FmtCtx<'a> {
                 }
                 self.write_str("]");
             }
-            Expr::Closure { params, body, .. } => {
+            Expr::Closure {
+                params,
+                ret_ty,
+                body,
+                ..
+            } => {
                 self.write_str("|");
                 self.fmt_params(params, source);
-                self.write_str("| ");
+                self.write_str("|");
+                if let Some(rt) = ret_ty {
+                    self.write_str(" -> ");
+                    self.fmt_ty(rt, source);
+                }
+                self.write_str(" ");
                 self.fmt_expr(body, source);
             }
             Expr::Variant { name, arg, .. } => {
