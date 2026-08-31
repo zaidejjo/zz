@@ -78,9 +78,13 @@ impl<'a> FmtCtx<'a> {
                 params,
                 ret,
                 body,
+                pub_,
                 ..
             } => {
                 self.write_indent();
+                if *pub_ {
+                    self.write_str("pub ");
+                }
                 self.write_str("func ");
                 self.write_str(&name.join("."));
                 if !generics.is_empty() {
@@ -103,8 +107,13 @@ impl<'a> FmtCtx<'a> {
                 self.write_str(" ");
                 self.fmt_block(body, source);
             }
-            Stmt::Struct { name, fields, .. } => {
+            Stmt::Struct {
+                name, fields, pub_, ..
+            } => {
                 self.write_indent();
+                if *pub_ {
+                    self.write_str("pub ");
+                }
                 self.write_str("struct ");
                 self.write_str(&name.join("."));
                 self.write_str(" {");
@@ -125,9 +134,16 @@ impl<'a> FmtCtx<'a> {
                 }
             }
             Stmt::Decl {
-                ty, name, value, ..
+                ty,
+                name,
+                value,
+                pub_,
+                ..
             } => {
                 self.write_indent();
+                if *pub_ {
+                    self.write_str("pub ");
+                }
                 if let Some(ty) = ty {
                     self.write_str(&name.name);
                     self.write_str(": ");
@@ -139,8 +155,13 @@ impl<'a> FmtCtx<'a> {
                 }
                 self.fmt_expr(value, source);
             }
-            Stmt::Import { path, alias, .. } => {
+            Stmt::Import {
+                path, alias, pub_, ..
+            } => {
                 self.write_indent();
+                if *pub_ {
+                    self.write_str("pub ");
+                }
                 self.write_str("import ");
                 self.write_str(&path.join("."));
                 if let Some(a) = alias {

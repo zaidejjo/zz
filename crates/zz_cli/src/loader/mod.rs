@@ -70,9 +70,14 @@ struct Loader {
     visiting: HashSet<PathBuf>,
     done: HashSet<PathBuf>,
     errors: Vec<LoadError>,
+    /// Cross-module seed: only `pub` items from previously loaded modules.
     funcs: HashMap<String, FuncSig>,
     bindings: HashMap<String, Type>,
     structs: HashMap<String, StructSig>,
+    /// All items (pub + private) for the entry file / runtime.
+    all_funcs: HashMap<String, FuncSig>,
+    all_bindings: HashMap<String, Type>,
+    all_structs: HashMap<String, StructSig>,
     natives: HashMap<String, NativeEntry>,
     /// Namespace → canonical path of the module (or `std:<module>` for the
     /// standard library) that owns it.
@@ -98,6 +103,9 @@ pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
         funcs: stdlib_funcs(),
         bindings: HashMap::new(),
         structs: HashMap::new(),
+        all_funcs: HashMap::new(),
+        all_bindings: HashMap::new(),
+        all_structs: HashMap::new(),
         natives: stdlib_natives(),
         namespaces: HashMap::new(),
         ns_of: HashMap::new(),
@@ -377,9 +385,59 @@ impl Loader {
                         diags: checked.errors,
                     });
                 }
-                self.bindings.extend(checked.bindings);
-                self.funcs.extend(checked.funcs);
-                self.structs.extend(checked.structs);
+                // Only propagate pub items to the cross-module seed.
+                self.bindings.extend(checked.pub_bindings.clone());
+                self.funcs.extend(checked.pub_funcs.clone());
+                self.structs.extend(checked.pub_structs.clone());
+                // Track all items for the entry file / runtime.
+                self.all_bindings.extend(checked.bindings);
+                self.all_funcs.extend(checked.funcs);
+                self.all_structs.extend(checked.structs);
+
+                // Handle `pub import` re-exports: for each `pub import ns` in
+                // this module, copy the re-exported namespace's pub functions
+                // and bindings into the current module's namespace in the
+                // cross-module seed.
+                // NOTE: struct re-exports are not yet supported because struct
+                // types are identity-based (Type::Struct("a.X") ≠
+                // Type::Struct("b.X")). Struct re-exports require type aliasing
+                // support (future work).
+                if let Some(module_ns) = self.ns_of.get(path).cloned() {
+                    for stmt in &program.stmts {
+                        if let Stmt::Import {
+                            path: imp_path,
+                            alias,
+                            pub_: true,
+                            ..
+                        } = stmt
+                        {
+                            let reexport_ns = alias
+                                .as_deref()
+                                .or_else(|| imp_path.last().map(|s| s.as_str()))
+                                .unwrap_or("");
+                            // Copy items from seed `reexport_ns.*` to
+                            // `module_ns.reexport_ns.*`
+                            let prefix = format!("{}.", reexport_ns);
+                            let new_prefix = format!("{}.{reexport_ns}.", module_ns);
+                            let seed_b = self.bindings.clone();
+                            for (k, v) in &seed_b {
+                                if k.starts_with(&prefix) {
+                                    let new_key = format!("{}{}", new_prefix, &k[prefix.len()..]);
+                                    self.bindings.insert(new_key.clone(), v.clone());
+                                    self.all_bindings.insert(new_key, v.clone());
+                                }
+                            }
+                            let seed_f = self.funcs.clone();
+                            for (k, v) in &seed_f {
+                                if k.starts_with(&prefix) {
+                                    let new_key = format!("{}{}", new_prefix, &k[prefix.len()..]);
+                                    self.funcs.insert(new_key.clone(), v.clone());
+                                    self.all_funcs.insert(new_key, v.clone());
+                                }
+                            }
+                        }
+                    }
+                }
             }
             programs.push(program);
         }
@@ -387,9 +445,9 @@ impl Loader {
         LoadResult {
             programs,
             files,
-            funcs: self.funcs,
-            bindings: self.bindings,
-            structs: self.structs,
+            funcs: self.all_funcs,
+            bindings: self.all_bindings,
+            structs: self.all_structs,
             natives: self.natives,
             errors: self.errors,
         }

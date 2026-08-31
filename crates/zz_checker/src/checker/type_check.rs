@@ -19,6 +19,7 @@ impl Checker {
                 ty,
                 value,
                 span: _,
+                pub_: _,
             } => {
                 // Pre-bind closures so recursive references resolve.
                 if matches!(value, Expr::Closure { .. }) {
@@ -59,7 +60,12 @@ impl Checker {
                 self.define_at(&name.name, rt.clone(), name.span);
                 rt
             }
-            Stmt::Import { path, alias, span } => {
+            Stmt::Import {
+                path,
+                alias,
+                span,
+                pub_: _,
+            } => {
                 let ns = alias
                     .as_ref()
                     .cloned()

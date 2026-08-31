@@ -1,0 +1,9 @@
+// Test: pub items should not emit unused variable warnings.
+pub PI := 3.14
+pub func add(a: int, b: int) -> int { a + b }
+pub struct Vec2 { x: int, y: int }
+
+func main() {
+    // Use nothing — pub items must NOT warn about being unused.
+    std.io.println("no warnings expected")
+}

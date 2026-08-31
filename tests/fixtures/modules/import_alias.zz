@@ -1,0 +1,9 @@
+// Test: import ... as aliasing works correctly
+import std.io as console
+import math.utils as m
+
+func main() {
+    console.println("Hello from alias")
+    n := m.double(21)
+    console.println(n)
+}

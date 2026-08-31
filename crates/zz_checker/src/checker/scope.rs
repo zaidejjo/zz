@@ -28,7 +28,10 @@ impl Checker {
         if let Some(defined) = self.defined_names.pop() {
             for (name, span) in &defined {
                 let display = Self::display_name(name);
-                if !self.used_names.contains(name) && !display.starts_with('_') {
+                if !self.used_names.contains(name)
+                    && !self.pub_names.contains(name)
+                    && !display.starts_with('_')
+                {
                     let fixit_name = format!("_{display}");
                     self.errors.push(
                         warning_at(
@@ -73,7 +76,10 @@ impl Checker {
                 defined.iter().map(|(k, &v)| (k.clone(), v)).collect();
             for (name, span) in &entries {
                 let display = Self::display_name(name);
-                if !self.used_names.contains(name) && !display.starts_with('_') {
+                if !self.used_names.contains(name)
+                    && !self.pub_names.contains(name)
+                    && !display.starts_with('_')
+                {
                     let fixit_name = format!("_{display}");
                     self.errors.push(
                         warning_at(

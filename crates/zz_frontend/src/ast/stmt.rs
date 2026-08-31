@@ -39,6 +39,7 @@ pub enum Stmt {
         name: Ident,
         value: Expr,
         span: Span,
+        pub_: bool,
     },
     /// `import std.io` — a dotted path of identifiers, optionally aliased
     /// (`import std.io as console`).
@@ -46,6 +47,7 @@ pub enum Stmt {
         path: Vec<String>,
         alias: Option<String>,
         span: Span,
+        pub_: bool,
     },
     Func {
         name: Vec<String>,
@@ -54,6 +56,7 @@ pub enum Stmt {
         ret: Option<Ty>,
         body: Block,
         span: Span,
+        pub_: bool,
     },
     Return {
         value: Option<Expr>,
@@ -65,6 +68,7 @@ pub enum Stmt {
         name: Vec<String>,
         fields: Vec<(Ident, Ty)>,
         span: Span,
+        pub_: bool,
     },
     /// `for x in xs { ... }` or `for k, v in dict { ... }` — iterate an
     /// array, range, or dictionary.
