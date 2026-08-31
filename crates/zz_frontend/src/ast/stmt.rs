@@ -66,9 +66,10 @@ pub enum Stmt {
         fields: Vec<(Ident, Ty)>,
         span: Span,
     },
-    /// `for x in xs { ... }` — iterate an array or a range.
+    /// `for x in xs { ... }` or `for k, v in dict { ... }` — iterate an
+    /// array, range, or dictionary.
     For {
-        var: Ident,
+        vars: Vec<Ident>,
         iter: Box<Expr>,
         body: Block,
         span: Span,

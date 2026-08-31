@@ -1,0 +1,25 @@
+// E2E: return inside for/while loops should compile and work correctly
+
+func find_in_for() -> int {
+    for i in 0..10 {
+        if i == 5 {
+            return i
+        }
+    }
+    -1
+}
+
+func find_in_while() -> int {
+    x := 0
+    while x < 10 {
+        if x == 5 {
+            return x
+        }
+        x = x + 1
+    }
+    -1
+}
+
+println(find_in_for())
+println(find_in_while())
+println("return_in_loops_ok")

@@ -335,9 +335,11 @@ fn find_local_in_block(
                     );
                 }
             }
-            Stmt::For { var, body, .. } => {
-                if var.name == name {
-                    return Some(Type::Unit);
+            Stmt::For { vars, body, .. } => {
+                for v in vars {
+                    if v.name == name {
+                        return Some(Type::Unit);
+                    }
                 }
                 if let Some(ty) = find_local_in_block(body, name, cr) {
                     return Some(ty);
@@ -500,15 +502,17 @@ fn collect_locals_in_stmt(stmt: &Stmt, items: &mut Vec<CompletionItem>, prefix: 
                 });
             }
         }
-        Stmt::For { var, body, .. } => {
-            if var.name.starts_with(prefix) {
-                items.push(CompletionItem {
-                    label: var.name.clone(),
-                    kind: Some(CompletionItemKind::VARIABLE),
-                    detail: Some(format!("for var {}", var.name)),
-                    insert_text: Some(var.name.clone()),
-                    ..Default::default()
-                });
+        Stmt::For { vars, body, .. } => {
+            for v in vars {
+                if v.name.starts_with(prefix) {
+                    items.push(CompletionItem {
+                        label: v.name.clone(),
+                        kind: Some(CompletionItemKind::VARIABLE),
+                        detail: Some(format!("for var {}", v.name)),
+                        insert_text: Some(v.name.clone()),
+                        ..Default::default()
+                    });
+                }
             }
             collect_locals_in_block(body, items, prefix);
         }

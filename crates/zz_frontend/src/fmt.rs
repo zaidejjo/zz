@@ -157,11 +157,16 @@ impl<'a> FmtCtx<'a> {
                 }
             }
             Stmt::For {
-                var, iter, body, ..
+                vars, iter, body, ..
             } => {
                 self.write_indent();
                 self.write_str("for ");
-                self.write_str(&var.name);
+                for (i, v) in vars.iter().enumerate() {
+                    if i > 0 {
+                        self.write_str(", ");
+                    }
+                    self.write_str(&v.name);
+                }
                 self.write_str(" in ");
                 self.fmt_expr(iter, source);
                 self.write_str(" ");

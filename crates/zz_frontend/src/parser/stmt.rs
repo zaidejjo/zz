@@ -197,9 +197,17 @@ impl Parser {
 
     pub(crate) fn parse_for(&mut self) -> Stmt {
         let for_tok = self.advance();
-        let var = self
+        let first = self
             .expect_ident()
             .unwrap_or_else(|| dummy_ident(for_tok.span));
+        let mut vars = vec![first];
+        // for k, v in dict
+        while self.eat(TokenKind::Comma) {
+            let v = self
+                .expect_ident()
+                .unwrap_or_else(|| dummy_ident(for_tok.span));
+            vars.push(v);
+        }
         if !self.eat(TokenKind::In) {
             self.error_here("expected `in` after loop variable");
         }
@@ -207,7 +215,7 @@ impl Parser {
         let body = self.parse_block();
         let span = for_tok.span.join(body.span);
         Stmt::For {
-            var,
+            vars,
             iter: Box::new(iter),
             body,
             span,

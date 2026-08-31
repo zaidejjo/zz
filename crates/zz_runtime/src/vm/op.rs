@@ -71,12 +71,14 @@ pub enum Op {
         exit: usize,
         header: usize,
         span: Span,
+        num_vars: u8,
     },
     /// Advance a `for` loop: pop the index, push `index + 1` and the current
-    /// item (bound to `var` in a fresh iteration scope when `in_env`, or left
-    /// on the stack as a local slot), or exit when the iterable is exhausted.
+    /// item(s) (bound to `var` in a fresh iteration scope when `in_env`, or
+    /// left on the stack as a local slot(s)), or exit when the iterable is
+    /// exhausted.
     ForNext {
-        var: String,
+        vars: Vec<String>,
         exit: usize,
         in_env: bool,
     },

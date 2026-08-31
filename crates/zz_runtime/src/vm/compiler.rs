@@ -162,7 +162,7 @@ impl Compiler {
             Op::Jump(_) => 0,
             Op::JumpIfFalse(_) | Op::JumpIfTrue(_) | Op::JumpIfFalseBool(..) => -1,
             Op::Return => -1,
-            Op::ForSetup { .. } => 2,
+            Op::ForSetup { num_vars, .. } => 1 + *num_vars as i64,
             Op::ForNext { .. } => 0,
             Op::WhileSetup { .. } => 0,
             Op::WhileCond { .. } => -1,
@@ -303,8 +303,8 @@ impl Compiler {
             Op::JumpIfFalse(_) => Op::JumpIfFalse(target),
             Op::JumpIfTrue(_) => Op::JumpIfTrue(target),
             Op::JumpIfFalseBool(_, span) => Op::JumpIfFalseBool(target, span),
-            Op::ForNext { var, in_env, .. } => Op::ForNext {
-                var,
+            Op::ForNext { vars, in_env, .. } => Op::ForNext {
+                vars,
                 exit: target,
                 in_env,
             },
@@ -313,10 +313,10 @@ impl Compiler {
         };
     }
 
-    fn emit_for_next(&mut self, var: &str, in_env: bool) -> usize {
+    fn emit_for_next(&mut self, vars: Vec<String>, in_env: bool) -> usize {
         let pos = self.chunk.code.len();
         self.emit(Op::ForNext {
-            var: var.to_string(),
+            vars,
             exit: 0,
             in_env,
         });
@@ -383,12 +383,13 @@ impl Compiler {
                 StmtValue::Discard
             }
             Stmt::For {
-                var,
+                vars,
                 iter,
                 body,
                 span,
             } => {
                 let pre = self.stack_height;
+                let num_vars_u8 = vars.len() as u8;
                 self.emit_const(Value::Unit);
                 self.compile_expr(iter);
                 let setup_pos = self.chunk.code.len();
@@ -396,15 +397,24 @@ impl Compiler {
                     exit: 0,
                     header: 0,
                     span: *span,
+                    num_vars: num_vars_u8,
                 });
                 let header = self.chunk.code.len();
-                let in_env = self.captured.contains(&var.name);
-                let j = self.emit_for_next(&var.name, in_env);
-                self.locals.push(Local {
-                    name: var.name.clone(),
-                    slot: self.stack_height - 1,
-                    in_env,
-                });
+                // Determine if any var is captured by an inner closure
+                let any_captured = vars.iter().any(|v| self.captured.contains(&v.name));
+                let var_names: Vec<String> = vars.iter().map(|v| v.name.clone()).collect();
+                let j = self.emit_for_next(var_names.clone(), any_captured);
+                // Push locals for each var — last var at highest slot,
+                // first at lowest
+                let num_vars = vars.len();
+                for (i, v) in vars.iter().enumerate().rev() {
+                    let in_env = self.captured.contains(&v.name);
+                    self.locals.push(Local {
+                        name: v.name.clone(),
+                        slot: self.stack_height - num_vars + i,
+                        in_env,
+                    });
+                }
                 let body_needs_env = self.scope_declares_captured(body);
                 if body_needs_env {
                     self.emit(Op::EnterScope);
@@ -423,8 +433,12 @@ impl Compiler {
                     exit,
                     header,
                     span: *span,
+                    num_vars: num_vars_u8,
                 };
-                self.locals.pop();
+                // Pop locals
+                for _ in vars {
+                    self.locals.pop();
+                }
                 self.stack_height = pre + 1;
                 StmtValue::Discard
             }
@@ -956,10 +970,11 @@ impl Compiler {
                     exit: 0,
                     header: 0,
                     span: *span,
+                    num_vars: 1,
                 });
                 let header = self.chunk.code.len();
                 let in_env = self.captured.contains(&var.name);
-                let j = self.emit_for_next(&var.name, in_env);
+                let j = self.emit_for_next(vec![var.name.clone()], in_env);
                 self.locals.push(Local {
                     name: var.name.clone(),
                     slot: self.stack_height - 1,
@@ -986,6 +1001,7 @@ impl Compiler {
                     exit,
                     header,
                     span: *span,
+                    num_vars: 1,
                 };
                 self.locals.pop();
                 self.stack_height = result_slot + 1;

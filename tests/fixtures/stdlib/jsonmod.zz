@@ -15,4 +15,9 @@ println(s)
 parsed := json.parse(s)
 println(json.as_str(json.get(parsed, "key")))
 
+// json.get on arrays
+arr := json.parse("[10, 20, 30]")
+println(json.as_int(json.get(arr, "0")))
+println(json.as_int(json.get(arr, "2")))
+
 println("json_ok")

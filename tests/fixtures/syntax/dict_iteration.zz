@@ -1,0 +1,20 @@
+// E2E: dict iteration with `for k, v in dict` and `for k in dict`
+
+func main() {
+    d := {"a": 1, "b": 2, "c": 3}
+
+    // Key-value iteration
+    for k, v in d {
+        println(k)
+        println(v)
+    }
+
+    // Keys-only iteration
+    for k in d {
+        println(k)
+    }
+
+    println("dict_iteration_ok")
+}
+
+main()

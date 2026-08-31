@@ -97,11 +97,13 @@ impl<'a> Rewriter<'a> {
                 }
             }
             Stmt::For {
-                var, iter, body, ..
+                vars, iter, body, ..
             } => {
                 self.rewrite_expr(iter);
                 self.push_scope();
-                self.declare(&var.name);
+                for v in vars {
+                    self.declare(&v.name);
+                }
                 self.rewrite_block(body);
                 self.pop_scope();
             }
