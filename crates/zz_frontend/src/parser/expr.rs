@@ -538,6 +538,25 @@ impl Parser {
                 {
                     return self.parse_struct_init(parts, tok.span.join(end));
                 }
+                // Recover from common mistake: `User{ id = 1 }` instead of
+                // `User{ id: 1 }`.  Detect `{ Ident =` and emit a clear error
+                // before falling through to struct init (which will handle the
+                // `=` as a missing `:` via its own recovery).
+                //
+                // Only trigger when `{` is adjacent to the type name (no
+                // whitespace gap), to avoid false positives like
+                // `for x in xs { total = total + x }` where `{` starts the
+                // loop body.
+                if self.at(TokenKind::LBrace)
+                    && self.peek_kind_at(1) == TokenKind::Ident
+                    && self.peek_kind_at(2) == TokenKind::Assign
+                    && end.end == self.peek().span.start
+                {
+                    self.error_here(
+                        "expected `:` in struct initialization, found `=` — did you mean `:`?",
+                    );
+                    return self.parse_struct_init(parts, tok.span.join(end));
+                }
                 if parts.len() == 1 {
                     Expr::Ident {
                         name: parts.pop().unwrap(),
