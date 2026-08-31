@@ -1,0 +1,6 @@
+// E2E: Struct init with `=` instead of `:` should produce clear error
+struct User { name: str, age: int }
+func main() {
+    u := User{name = "Alice", age = 30}
+    std.io.println(u.name)
+}

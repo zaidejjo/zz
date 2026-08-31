@@ -180,6 +180,7 @@ e2e_error_test!(e2e_err_arity, "arity.zz");
 e2e_error_test!(e2e_err_parse_error, "parse_error.zz");
 e2e_error_test!(e2e_err_div_by_zero, "div_by_zero.zz");
 e2e_error_test!(e2e_err_unknown_field, "unknown_field.zz");
+e2e_error_test!(e2e_err_struct_init_assign, "struct_init_assign_error.zz");
 
 // ---------------------------------------------------------------------------
 // Eval tests: inline code via `zz eval`
