@@ -20,10 +20,28 @@ fn parses_for() {
     let p = parse_ok("for x in xs { y := 1 }");
     match &p.stmts[0] {
         zz_frontend::ast::Stmt::For {
-            var, iter, body, ..
+            vars, iter, body, ..
         } => {
-            assert_eq!(var.name, "x");
+            assert_eq!(vars.len(), 1);
+            assert_eq!(vars[0].name, "x");
             assert!(matches!(iter.as_ref(), E::Ident { name, .. } if name == "xs"));
+            assert_eq!(body.stmts.len(), 1);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_for_with_two_vars() {
+    let p = parse_ok("for k, v in d { println(k) }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::For {
+            vars, iter, body, ..
+        } => {
+            assert_eq!(vars.len(), 2);
+            assert_eq!(vars[0].name, "k");
+            assert_eq!(vars[1].name, "v");
+            assert!(matches!(iter.as_ref(), E::Ident { name, .. } if name == "d"));
             assert_eq!(body.stmts.len(), 1);
         }
         other => panic!("unexpected: {other:?}"),

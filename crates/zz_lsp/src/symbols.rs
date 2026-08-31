@@ -123,7 +123,7 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
             })
         }
         Stmt::For {
-            var,
+            vars,
             iter,
             body,
             span,
@@ -133,14 +133,20 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
                 p.print_expr(iter)
             };
             let children = block_children(body, source);
+            let var_name = if vars.len() == 1 {
+                vars[0].name.clone()
+            } else {
+                let names: Vec<&str> = vars.iter().map(|v| v.name.as_str()).collect();
+                names.join(", ")
+            };
             Some(DocumentSymbol {
-                name: var.name.clone(),
+                name: var_name,
                 detail: Some(format!("in {iter_detail}")),
                 kind: SymbolKind::VARIABLE,
                 tags: None,
                 deprecated: None,
                 range: span_to_range(source, *span),
-                selection_range: span_to_range(source, var.span),
+                selection_range: span_to_range(source, vars[0].span),
                 children: if children.is_empty() {
                     None
                 } else {

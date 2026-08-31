@@ -40,8 +40,25 @@ pub(crate) fn json_get(
             .find(|(k, _)| *k == key)
             .map(|(_, v)| Value::Json(v))
             .ok_or_else(|| EvalError::new(format!("std.json.get: no key `{key}`"), span)),
+        JsonValue::Arr(items) => {
+            let idx: usize = key.parse().map_err(|_| {
+                EvalError::new(
+                    format!("std.json.get: expected a numeric index for array, got `{key}`"),
+                    span,
+                )
+            })?;
+            items.get(idx).cloned().map(Value::Json).ok_or_else(|| {
+                EvalError::new(
+                    format!(
+                        "std.json.get: index {idx} out of bounds (len {})",
+                        items.len()
+                    ),
+                    span,
+                )
+            })
+        }
         other => Err(EvalError::new(
-            format!("std.json.get: expected an object, found `{other}`"),
+            format!("std.json.get: expected an object or array, found `{other}`"),
             span,
         )),
     }

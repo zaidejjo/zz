@@ -371,57 +371,74 @@ impl Vm {
                         self.push_defer_frame(interp);
                     }
                 }
-                Op::ForSetup { exit, header, span } => {
+                Op::ForSetup {
+                    exit,
+                    header,
+                    span,
+                    num_vars,
+                } => {
                     let it = self.stack.pop().unwrap();
                     let (iterable, idx) = match it.clone() {
                         Value::Array(_) => (it, Value::Int(0)),
                         Value::Range(start, _, _) => (it, Value::Int(start)),
+                        Value::Dict(_) => (it, Value::Int(0)),
                         other => {
                             return Err(self
                                 .error(format!("cannot iterate a value of type `{other}`"), *span))
                         }
                     };
                     let stack_base = self.stack.len() - 1;
+                    let total_slots = 2 + *num_vars as usize; // iterable + index + num_vars placeholders
                     self.loops.push(LoopInfo {
                         exit: *exit,
                         header: *header,
                         env: Rc::clone(&interp.env),
                         frame_idx: self.frames.len() - 1,
                         stack_base,
-                        slots: 3,
+                        slots: total_slots,
                     });
                     self.stack.push(iterable);
                     self.stack.push(idx);
-                    self.stack.push(Value::Unit);
+                    // Push num_vars placeholder items (Unit)
+                    for _ in 0..*num_vars {
+                        self.stack.push(Value::Unit);
+                    }
                 }
-                Op::ForNext { var, exit, in_env } => {
-                    self.stack.pop().unwrap();
-                    let idx = self.stack.pop().unwrap();
+                Op::ForNext { vars, exit, in_env } => {
+                    let num_vars = vars.len();
+                    // Pop num_vars loop variables from previous iteration
+                    for _ in 0..num_vars {
+                        self.stack.pop().unwrap();
+                    }
+                    let idx = self.stack.pop().unwrap(); // pop index
                     let iterable_idx = self.stack.len() - 1;
-                    let (done, item) = match (&self.stack[iterable_idx], &idx) {
-                        (Value::Array(items), Value::Int(i)) => {
+                    let (done, items) = match (&self.stack[iterable_idx], &idx) {
+                        (Value::Array(arr), Value::Int(i)) => {
                             let i = *i;
-                            if i >= items.len() as i64 {
-                                (true, Value::Unit)
+                            if i >= arr.len() as i64 {
+                                (true, vec![])
                             } else {
-                                (false, items[i as usize].clone())
+                                (false, vec![arr[i as usize].clone()])
                             }
                         }
                         (Value::Range(_, end, step), Value::Int(i)) => {
                             let i = *i;
                             let step = *step;
-                            if step > 0 {
-                                if i >= *end {
-                                    (true, Value::Unit)
-                                } else {
-                                    (false, Value::Int(i))
-                                }
+                            let finished = if step > 0 { i >= *end } else { i <= *end };
+                            if finished {
+                                (true, vec![])
                             } else {
-                                if i <= *end {
-                                    (true, Value::Unit)
-                                } else {
-                                    (false, Value::Int(i))
-                                }
+                                (false, vec![Value::Int(i)])
+                            }
+                        }
+                        (Value::Dict(pairs), Value::Int(i)) => {
+                            let i = *i as usize;
+                            if i >= pairs.len() {
+                                (true, vec![])
+                            } else if num_vars == 2 {
+                                (false, vec![pairs[i].0.clone(), pairs[i].1.clone()])
+                            } else {
+                                (false, vec![pairs[i].0.clone()])
                             }
                         }
                         _ => unreachable!("ForNext on non-iterable"),
@@ -432,19 +449,25 @@ impl Vm {
                         interp.env = li.env;
                         self.frames.last_mut().unwrap().ip = *exit;
                     } else {
-                        let next = match (&self.stack[iterable_idx], idx) {
+                        let next = match (&self.stack[iterable_idx], &idx) {
                             (Value::Range(_, _, step), Value::Int(i)) => Value::Int(i + step),
                             (Value::Array(_), Value::Int(i)) => Value::Int(i + 1),
+                            (Value::Dict(_), Value::Int(i)) => Value::Int(i + 1),
                             _ => unreachable!(),
                         };
                         self.stack.push(next);
-                        self.stack.push(item.clone());
+                        // Push items (key, value for dict with 2 vars, or single item)
+                        for item in &items {
+                            self.stack.push(item.clone());
+                        }
                         if *in_env {
                             let li = self.loops.last().unwrap();
                             let loop_env = Rc::clone(&li.env);
                             interp.env = loop_env;
                             let scope = Env::with_parent(&interp.env);
-                            scope.borrow_mut().define(var, item);
+                            for (i, name) in vars.iter().enumerate() {
+                                scope.borrow_mut().define(name, items[i].clone());
+                            }
                             interp.env = scope;
                         }
                     }

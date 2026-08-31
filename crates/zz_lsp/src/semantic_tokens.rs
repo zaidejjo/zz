@@ -181,10 +181,16 @@ fn collect_stmt_tokens(stmt: &Stmt, source: &str, out: &mut Vec<RawToken>) {
             }
         }
         Stmt::For {
-            var, iter, body, ..
+            vars, iter, body, ..
         } => {
             push_keyword_token(stmt.span(), "for", source, out);
-            push_ident_token(&var.name, var.span, TokenType::Variable, source, out);
+            for (i, v) in vars.iter().enumerate() {
+                if i > 0 {
+                    // push comma token
+                    push_keyword_token(stmt.span(), ",", source, out);
+                }
+                push_ident_token(&v.name, v.span, TokenType::Variable, source, out);
+            }
             push_keyword_token_stmt(stmt.span(), "in", source, out);
             collect_expr_tokens(iter, source, out);
             collect_block_tokens(body, source, out);

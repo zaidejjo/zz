@@ -20,6 +20,11 @@ impl Checker {
                 value,
                 span: _,
             } => {
+                // Pre-bind closures so recursive references resolve.
+                if matches!(value, Expr::Closure { .. }) {
+                    let fv = self.unifier.fresh_var();
+                    self.define_at(&name.name, fv, name.span);
+                }
                 let vt = self.check_expr(value);
                 if let Some(ann) = ty {
                     let gens = self.current_generics.clone();
@@ -96,37 +101,95 @@ impl Checker {
             Stmt::Expr(e) => self.check_expr(e),
             Stmt::Struct { .. } => Type::Unit,
             Stmt::For {
-                var,
+                vars,
                 iter,
                 body,
                 span,
             } => {
                 let it = self.check_expr(iter);
                 let it = self.unifier.resolve(&it);
-                let elem = match it {
-                    Type::Array(elem) => *elem,
-                    Type::Range(elem) => *elem,
-                    Type::Var(_) => {
+                match vars.len() {
+                    0 => unreachable!(),
+                    1 => {
+                        // `for x in collection` — single variable
+                        let elem = match it {
+                            Type::Array(elem) => *elem,
+                            Type::Range(elem) => *elem,
+                            Type::Dict(_k, _v) => {
+                                // for x in dict → iterates keys
+                                *_k
+                            }
+                            Type::Var(_) => {
+                                self.errors.push(error_at(
+                                    "cannot iterate a value whose type could not be inferred",
+                                    *span,
+                                ));
+                                Type::Unit
+                            }
+                            other => {
+                                self.errors.push(error_at(
+                                    format!("cannot iterate a value of type `{other}`"),
+                                    *span,
+                                ));
+                                Type::Unit
+                            }
+                        };
+                        self.push_scope();
+                        self.define(&vars[0].name, elem);
+                        self.loop_depth += 1;
+                        self.check_block(body);
+                        self.loop_depth -= 1;
+                        self.pop_scope();
+                    }
+                    2 => {
+                        // `for k, v in dict` — key-value pair
+                        match it {
+                            Type::Dict(k, v) => {
+                                self.push_scope();
+                                self.define(&vars[0].name, *k);
+                                self.define(&vars[1].name, *v);
+                                self.loop_depth += 1;
+                                self.check_block(body);
+                                self.loop_depth -= 1;
+                                self.pop_scope();
+                            }
+                            Type::Var(_) => {
+                                self.errors.push(error_at(
+                                    "cannot iterate a value whose type could not be inferred",
+                                    *span,
+                                ));
+                                self.push_scope();
+                                self.define(&vars[0].name, Type::Unit);
+                                self.define(&vars[1].name, Type::Unit);
+                                self.loop_depth += 1;
+                                self.check_block(body);
+                                self.loop_depth -= 1;
+                                self.pop_scope();
+                            }
+                            other => {
+                                self.errors.push(error_at(
+                                    format!(
+                                        "expected a dictionary for `for k, v in ...`, got `{other}`"
+                                    ),
+                                    *span,
+                                ));
+                                self.push_scope();
+                                self.define(&vars[0].name, Type::Unit);
+                                self.define(&vars[1].name, Type::Unit);
+                                self.loop_depth += 1;
+                                self.check_block(body);
+                                self.loop_depth -= 1;
+                                self.pop_scope();
+                            }
+                        }
+                    }
+                    _ => {
                         self.errors.push(error_at(
-                            "cannot iterate a value whose type could not be inferred",
+                            "for loop supports at most 2 variables (e.g. `for k, v in dict`)",
                             *span,
                         ));
-                        Type::Unit
                     }
-                    other => {
-                        self.errors.push(error_at(
-                            format!("cannot iterate a value of type `{other}`"),
-                            *span,
-                        ));
-                        Type::Unit
-                    }
-                };
-                self.push_scope();
-                self.define(&var.name, elem);
-                self.loop_depth += 1;
-                self.check_block(body);
-                self.loop_depth -= 1;
-                self.pop_scope();
+                }
                 Type::Unit
             }
             Stmt::Break { span } => {
@@ -520,8 +583,13 @@ impl Checker {
                         }
                     }
                     None => {
-                        if let Err(err) = self.unifier.unify(&Type::Unit, &tt) {
-                            self.report_mismatch(err, *span);
+                        // If the then-block contains a `return`, its type
+                        // may not be Unit (e.g. `if x { return 5 }`), but
+                        // that's fine — the return short-circuits.
+                        if !Self::block_has_return(then) {
+                            if let Err(err) = self.unifier.unify(&Type::Unit, &tt) {
+                                self.report_mismatch(err, *span);
+                            }
                         }
                     }
                 }
@@ -926,6 +994,59 @@ impl Checker {
         // Method call: `p.dist()` resolves to `dist(p, ...)`.
         if let Expr::Path { parts, span: pspan } = callee {
             if parts.len() >= 2 {
+                // First check if the full path resolves as a variable
+                // (e.g. module-level closure `ns.f`). If so, treat it as
+                // a regular call, not a method call.
+                let joined = parts.join(".");
+                if let Some(var_ty) = self.lookup_opt(&joined) {
+                    self.used_names.insert(joined.clone());
+                    let callee_t = self.unifier.resolve(&var_ty);
+                    // If the var is still an unresolved inference var, or is
+                    // already known to be a Func/Named, treat as a variable
+                    // call — not a method call on the first path component.
+                    match &callee_t {
+                        Type::Func(..) | Type::Named(..) => {
+                            let pnames: Vec<String> =
+                                (0..args.len()).map(|i| format!("_{i}")).collect();
+                            match callee_t {
+                                Type::Func(ps, ret) => {
+                                    self.check_args_against(&pnames, &ps, &[], args, named, span);
+                                    return *ret;
+                                }
+                                Type::Named(ref nname) => {
+                                    if let Some(sig) = self.funcs.get(nname).cloned() {
+                                        let (ps, ret) = self.instantiate(&sig);
+                                        let pnames: Vec<String> =
+                                            sig.params.iter().map(|(n, _)| n.clone()).collect();
+                                        self.check_args_against(
+                                            &pnames,
+                                            &ps,
+                                            &sig.has_default,
+                                            args,
+                                            named,
+                                            span,
+                                        );
+                                        return ret;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        Type::Var(_) => {
+                            // Fresh var from recursive closure pre-binding.
+                            // Build a Func type from the args and unify.
+                            let arg_types: Vec<Type> =
+                                args.iter().map(|a| self.check_expr(a)).collect();
+                            let ret_var = self.unifier.fresh_var();
+                            let func_ty = Type::Func(arg_types, Box::new(ret_var.clone()));
+                            if let Err(e) = self.unifier.unify(&var_ty, &func_ty) {
+                                self.report_mismatch(e, span);
+                            }
+                            return self.unifier.resolve(&ret_var);
+                        }
+                        _ => {}
+                    }
+                }
                 let method = parts.last().unwrap();
                 let recv_t = self.lookup_path(&parts[..parts.len() - 1], *pspan);
                 let mut sig = self.funcs.get(method).cloned();
@@ -1115,9 +1236,16 @@ impl Checker {
             self.define(&p.name.name, ty.clone());
             ptypes.push(ty);
         }
+        // Allow `return` inside closures — same semantics as named functions.
+        let ret_var = self.unifier.fresh_var();
+        let prev_ret = self.current_ret.replace(ret_var.clone());
         let bt = self.check_expr(body);
+        self.current_ret = prev_ret;
         self.pop_scope();
-        Type::Func(ptypes, Box::new(bt))
+        // Unify body type with the return var (from any `return` statements).
+        let _ = self.unifier.unify(&ret_var, &bt);
+        let resolved_ret = self.unifier.resolve(&ret_var);
+        Type::Func(ptypes, Box::new(resolved_ret))
     }
 
     pub(crate) fn check_match(

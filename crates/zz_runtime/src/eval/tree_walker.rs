@@ -60,7 +60,7 @@ impl Interp {
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::For {
-                var, iter, body, ..
+                vars, iter, body, ..
             } => {
                 let it = self.eval(iter)?.into_value()?;
                 match it {
@@ -68,7 +68,10 @@ impl Interp {
                         let mut result = Value::Unit;
                         for item in items {
                             let scope = Env::with_parent(&self.env);
-                            scope.borrow_mut().define(&var.name, item);
+                            {
+                                let mut env = scope.borrow_mut();
+                                env.define(&vars[0].name, item);
+                            }
                             let prev = std::mem::replace(&mut self.env, scope);
                             let flow = self.eval_block(body);
                             self.env = prev;
@@ -87,7 +90,7 @@ impl Interp {
                         if step > 0 {
                             while i < end {
                                 let scope = Env::with_parent(&self.env);
-                                scope.borrow_mut().define(&var.name, Value::Int(i));
+                                scope.borrow_mut().define(&vars[0].name, Value::Int(i));
                                 let prev = std::mem::replace(&mut self.env, scope);
                                 let flow = self.eval_block(body);
                                 self.env = prev;
@@ -102,7 +105,7 @@ impl Interp {
                         } else {
                             while i > end {
                                 let scope = Env::with_parent(&self.env);
-                                scope.borrow_mut().define(&var.name, Value::Int(i));
+                                scope.borrow_mut().define(&vars[0].name, Value::Int(i));
                                 let prev = std::mem::replace(&mut self.env, scope);
                                 let flow = self.eval_block(body);
                                 self.env = prev;
@@ -113,6 +116,31 @@ impl Interp {
                                     Flow::Continue(_) => {}
                                 }
                                 i += step;
+                            }
+                        }
+                        Ok(Flow::Value(result))
+                    }
+                    Value::Dict(pairs) => {
+                        let mut result = Value::Unit;
+                        for (k, v) in pairs {
+                            let scope = Env::with_parent(&self.env);
+                            {
+                                let mut env = scope.borrow_mut();
+                                if vars.len() == 2 {
+                                    env.define(&vars[0].name, k);
+                                    env.define(&vars[1].name, v);
+                                } else {
+                                    env.define(&vars[0].name, k);
+                                }
+                            }
+                            let prev = std::mem::replace(&mut self.env, scope);
+                            let flow = self.eval_block(body);
+                            self.env = prev;
+                            match flow? {
+                                Flow::Value(v) => result = v,
+                                Flow::Return(v) => return Ok(Flow::Return(v)),
+                                Flow::Break(_) => break,
+                                Flow::Continue(_) => {}
                             }
                         }
                         Ok(Flow::Value(result))

@@ -2,7 +2,7 @@
 
 use crate::checker::Checker;
 use crate::type_::Type;
-use zz_frontend::ast::Stmt;
+use zz_frontend::ast::{Block, Expr, Stmt};
 
 impl Checker {
     pub(crate) fn collect_func(&mut self, stmt: &Stmt) {
@@ -60,8 +60,43 @@ impl Checker {
         self.current_generics = prev_gen;
         self.pop_scope();
         let _ = name;
-        if let Err(e) = self.unifier.unify(&body_t, &sig.ret) {
-            self.report_mismatch(e, body.span);
+        // If the body contains any `return` statement, the body's "natural"
+        // type (Unit for loops, etc.) doesn't reflect the actual return path.
+        // The `return` statements are already validated against current_ret,
+        // so we only check the body type when there are no early returns.
+        if !Self::block_has_return(body) {
+            if let Err(e) = self.unifier.unify(&body_t, &sig.ret) {
+                self.report_mismatch(e, body.span);
+            }
+        }
+    }
+
+    /// Recursively check whether a block contains a `return` statement.
+    pub(crate) fn block_has_return(block: &Block) -> bool {
+        block.stmts.iter().any(|s| Self::stmt_has_return(s))
+    }
+
+    fn stmt_has_return(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Return { .. } => true,
+            Stmt::For { body, .. } => Self::block_has_return(body),
+            Stmt::Expr(Expr::While { body, .. }) => Self::block_has_return(body),
+            Stmt::Expr(Expr::If { then, els, .. }) => {
+                Self::block_has_return(then)
+                    || els.as_ref().map_or(false, |e| Self::expr_has_return(e))
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_has_return(expr: &Expr) -> bool {
+        match expr {
+            Expr::Block(b) => Self::block_has_return(b),
+            Expr::If { then, els, .. } => {
+                Self::block_has_return(then)
+                    || els.as_ref().map_or(false, |e| Self::expr_has_return(e))
+            }
+            _ => false,
         }
     }
 }

@@ -100,16 +100,18 @@ fn collect_stmt_defs(stmt: &Stmt, source: &str, defs: &mut HashMap<u32, Definiti
             collect_expr_defs(value, source, defs);
         }
         Stmt::For {
-            var, iter, body, ..
+            vars, iter, body, ..
         } => {
-            defs.insert(
-                var.span.start,
-                Definition {
-                    name: var.name.clone(),
-                    span: var.span,
-                    kind: DefKind::Var,
-                },
-            );
+            for v in vars {
+                defs.insert(
+                    v.span.start,
+                    Definition {
+                        name: v.name.clone(),
+                        span: v.span,
+                        kind: DefKind::Var,
+                    },
+                );
+            }
             collect_expr_defs(iter, source, defs);
             collect_block_defs(body, source, defs);
         }
@@ -301,9 +303,11 @@ fn walk_stmt<'a>(stmt: &'a Stmt, source: &str, offset: u32, result: &mut NodeAtO
             walk_block(body, source, offset, result);
         }
         Stmt::For {
-            var, iter, body, ..
+            vars, iter, body, ..
         } => {
-            check_ident(var, offset, result);
+            for v in vars {
+                check_ident(v, offset, result);
+            }
             walk_expr(iter, source, offset, result);
             walk_block(body, source, offset, result);
         }
@@ -757,15 +761,17 @@ fn collect_name_refs_in_stmt(stmt: &Stmt, name: &str, refs: &mut Vec<Reference>)
             collect_name_refs_in_expr(value, name, refs);
         }
         Stmt::For {
-            var, iter, body, ..
+            vars, iter, body, ..
         } => {
-            if var.name == name {
-                let already = refs.iter().any(|r| r.span == var.span);
-                if !already {
-                    refs.push(Reference {
-                        span: var.span,
-                        is_definition: false,
-                    });
+            for v in vars {
+                if v.name == name {
+                    let already = refs.iter().any(|r| r.span == v.span);
+                    if !already {
+                        refs.push(Reference {
+                            span: v.span,
+                            is_definition: false,
+                        });
+                    }
                 }
             }
             collect_name_refs_in_expr(iter, name, refs);
@@ -996,13 +1002,15 @@ fn collect_hl_stmt(stmt: &Stmt, name: &str, source: &str, out: &mut Vec<Highligh
             collect_hl_expr(value, name, out);
         }
         Stmt::For {
-            var, iter, body, ..
+            vars, iter, body, ..
         } => {
-            if var.name == name {
-                out.push(Highlight {
-                    span: var.span,
-                    kind: HighlightKind::Write,
-                });
+            for v in vars {
+                if v.name == name {
+                    out.push(Highlight {
+                        span: v.span,
+                        kind: HighlightKind::Write,
+                    });
+                }
             }
             collect_hl_expr(iter, name, out);
             collect_hl_block(body, name, source, out);

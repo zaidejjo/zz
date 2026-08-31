@@ -216,11 +216,13 @@ pub(crate) fn scan_stmt_captured(
         }
         Stmt::Struct { .. } => {}
         Stmt::For {
-            var, iter, body, ..
+            vars, iter, body, ..
         } => {
             scan_expr_captured(iter, defined, free);
             let mut inner = defined.clone();
-            inner.insert(var.name.clone());
+            for v in vars {
+                inner.insert(v.name.clone());
+            }
             for stmt in &body.stmts {
                 scan_stmt_captured(stmt, &mut inner, free);
             }
