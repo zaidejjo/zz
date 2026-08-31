@@ -39,13 +39,25 @@ impl Checker {
                     let mut d = rt.clone();
                     default_variant_vars(&mut d);
                     if contains_var(&d) {
-                        self.errors.push(error_at(
-                            format!(
-                                "cannot infer the type of `{}`; add a type annotation",
-                                name.name
-                            ),
-                            name.span,
-                        ));
+                        // Empty collections like `[]` or `{}` get a fresh var for
+                        // element/key/value types. Defer inference — the var may be
+                        // resolved later by usage context (e.g. function calls).
+                        let may_defer = matches!(
+                            &d,
+                            Type::Array(inner) if matches!(inner.as_ref(), Type::Var(_))
+                        ) || matches!(
+                            &d,
+                            Type::Dict(k, v) if matches!(k.as_ref(), Type::Var(_)) || matches!(v.as_ref(), Type::Var(_))
+                        );
+                        if !may_defer {
+                            self.errors.push(error_at(
+                                format!(
+                                    "cannot infer the type of `{}`; add a type annotation",
+                                    name.name
+                                ),
+                                name.span,
+                            ));
+                        }
                     } else {
                         self.define_at(&name.name, d.clone(), name.span);
                         if self.env.len() == 1 {
@@ -801,6 +813,12 @@ impl Checker {
                 let rt_resolved = self.unifier.resolve(&rt);
                 match lt_resolved {
                     Type::Option(inner) => {
+                        if let Err(e) = self.unifier.unify(&inner, &rt_resolved) {
+                            self.report_mismatch(e, span);
+                        }
+                        *inner
+                    }
+                    Type::Result(inner, _err) => {
                         if let Err(e) = self.unifier.unify(&inner, &rt_resolved) {
                             self.report_mismatch(e, span);
                         }

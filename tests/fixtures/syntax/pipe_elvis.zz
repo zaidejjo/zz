@@ -1,0 +1,25 @@
+// E2E: Pipe |> and Elvis ?? precedence
+// |> binds tighter than ?? — so `a ?? b |> f` = `a ?? (b |> f)`
+func double(n: int) -> int { n * 2 }
+
+// Scenario 1: elvis unwraps, then pipe
+val: Option<int> = .some(21)
+r1 := val ?? 0 |> double()
+println(r1)
+
+// Scenario 2: elvis with None fallback, then pipe
+none_val: Option<int> = .none
+r2 := none_val ?? 10 |> double()
+println(r2)
+
+// Scenario 3: Result ?? default (no pipe)
+func ok_val() -> Result<int, str> { .ok(42) }
+r3 := ok_val() ?? -1
+println(r3)
+
+// Scenario 4: Result ?? default when Err
+func fail_val() -> Result<int, str> { .err("boom") }
+r4 := fail_val() ?? 99
+println(r4)
+
+println("pipe_elvis_ok")
