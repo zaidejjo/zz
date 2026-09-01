@@ -171,7 +171,100 @@ impl Interp {
                 self.assign_target(target, v)?;
                 Ok(Flow::Value(Value::Unit))
             }
-            Stmt::Expr(e) => self.eval(e),
+            Stmt::Expr(e) => {
+                // Method call write-back: if `obj.method(args)` is called as a
+                // statement, the return value (e.g. the new array from push/pop)
+                // must be written back to `obj` so the mutation is visible.
+                // Only intercept known mutating methods to avoid corrupting
+                // non-mutating calls (e.g. `arr.len()` should not write back).
+                if let Expr::Call {
+                    callee,
+                    args,
+                    named,
+                    ..
+                } = e
+                {
+                    const MUTATING_METHODS: &[&str] = &[
+                        "push", "pop", "insert", "remove", "reverse", "sort", "append",
+                    ];
+
+                    // Handle `arr.push(x)` — parsed as Path { parts: ["arr", "push"] }
+                    if let Expr::Path { parts, span: pspan } = callee.as_ref() {
+                        if parts.len() == 2 {
+                            let method_name = &parts[1];
+                            if MUTATING_METHODS.contains(&method_name.as_str()) {
+                                let obj_name = &parts[0];
+                                let recv = self.resolve_path_value(parts, *pspan)?;
+                                let f = self.lookup_method(&recv, method_name, *pspan)?;
+                                let mut arg_vals = vec![recv];
+                                for a in args {
+                                    arg_vals.push(self.eval(a)?.into_value()?);
+                                }
+                                for (_, v) in named {
+                                    arg_vals.push(self.eval(v)?.into_value()?);
+                                }
+                                let result = self.call(f, arg_vals, *pspan)?;
+                                if !self.env.borrow_mut().assign(obj_name, result) {
+                                    return Err(EvalError::new(
+                                        format!("undefined variable `{obj_name}`"),
+                                        *pspan,
+                                    ));
+                                }
+                                return Ok(Flow::Value(Value::Unit));
+                            }
+                        }
+                    }
+                    // Handle `obj.method(x)` — parsed as Field { obj, name }
+                    if let Expr::Field {
+                        obj: field_obj,
+                        name: method_name,
+                        ..
+                    } = callee.as_ref()
+                    {
+                        if MUTATING_METHODS.contains(&method_name.as_str()) {
+                            if let Expr::Ident { name, span } = field_obj.as_ref() {
+                                let recv = self.eval(field_obj)?.into_value()?;
+                                let f = self.lookup_method(&recv, method_name, *span)?;
+                                let mut arg_vals = vec![recv];
+                                for a in args {
+                                    arg_vals.push(self.eval(a)?.into_value()?);
+                                }
+                                for (_, v) in named {
+                                    arg_vals.push(self.eval(v)?.into_value()?);
+                                }
+                                let result = self.call(f, arg_vals, *span)?;
+                                if !self.env.borrow_mut().assign(name, result) {
+                                    return Err(EvalError::new(
+                                        format!("undefined variable `{name}`"),
+                                        *span,
+                                    ));
+                                }
+                                return Ok(Flow::Value(Value::Unit));
+                            }
+                        }
+                    }
+                    // Built-in `append(arr, val)` write-back.
+                    if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                        if fname == "append" && args.len() == 2 && named.is_empty() {
+                            if let Expr::Ident {
+                                name: arr_name,
+                                span,
+                            } = &args[0]
+                            {
+                                let result = self.eval(e)?;
+                                if !self.env.borrow_mut().assign(arr_name, result.into_value()?) {
+                                    return Err(EvalError::new(
+                                        format!("undefined variable `{arr_name}`"),
+                                        *span,
+                                    ));
+                                }
+                                return Ok(Flow::Value(Value::Unit));
+                            }
+                        }
+                    }
+                }
+                self.eval(e)
+            }
         }
     }
 

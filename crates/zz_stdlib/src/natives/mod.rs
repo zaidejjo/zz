@@ -283,6 +283,14 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
             f: vec_mod::vec_remove,
         },
     );
+    // vec.append — alias for vec.push, same semantics
+    m.insert(
+        "vec.append".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_mod::vec_push,
+        },
+    );
 
     // option.* methods (for method dispatch: .some(1).unwrap_or(0))
     m.insert(
@@ -546,6 +554,15 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: builtins::conv_float,
+        },
+    );
+
+    // Built-in: `append(arr, val)` — mutates array in-place, returns unit.
+    m.insert(
+        "append".into(),
+        NativeEntry {
+            arity: 2,
+            f: builtins::append_fn,
         },
     );
 
