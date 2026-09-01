@@ -1,0 +1,27 @@
+// Tuple destructuring
+(a, b) := (1, 2)
+println(a)
+println(b)
+
+// Nested destructuring
+(x, y, z) := (10, "hello", true)
+println(x)
+println(y)
+println(z)
+
+// Wildcard in destructuring
+(_, value) := (42, "keep")
+println(value)
+
+// Destructuring with expressions
+(a, b) := (2 + 3, 7 * 8)
+println(a)
+println(b)
+
+// Tuple from variable
+pair := (99, "pair")
+(p1, p2) := pair
+println(p1)
+println(p2)
+
+print("all destructuring tests passed")

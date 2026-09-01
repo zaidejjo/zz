@@ -59,6 +59,29 @@ impl Interp {
                 );
                 Ok(Flow::Value(Value::Unit))
             }
+            Stmt::Impl { name, methods, .. } => {
+                let type_name = name.join(".");
+                for method in methods {
+                    if let Stmt::Func {
+                        name: mname,
+                        params,
+                        body,
+                        ..
+                    } = method
+                    {
+                        let full_name = format!("{}.{}", type_name, mname.join("."));
+                        let fv = FuncValue {
+                            params: params.clone(),
+                            body: Expr::Block(body.clone()),
+                            env: Rc::clone(&self.env),
+                            chunk: None,
+                        };
+                        self.funcs.insert(full_name.clone(), fv.clone());
+                        self.env.borrow_mut().define(&full_name, Value::Func(fv));
+                    }
+                }
+                Ok(Flow::Value(Value::Unit))
+            }
             Stmt::For {
                 vars, iter, body, ..
             } => {
@@ -164,6 +187,16 @@ impl Interp {
                     .last_mut()
                     .unwrap()
                     .push(Value::Func(closure));
+                Ok(Flow::Value(Value::Unit))
+            }
+            Stmt::Destructure { pat, value, .. } => {
+                let v = self.eval(value)?.into_value()?;
+                if !self.match_pattern(pat, &v, &self.env) {
+                    return Err(EvalError::new(
+                        "destructuring pattern does not match value",
+                        pat.span(),
+                    ));
+                }
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Assign { target, value, .. } => {
@@ -390,8 +423,15 @@ impl Interp {
             }
         }
         if let Value::Object { name, .. } = recv {
+            // Try TypeName.method (impl block methods)
+            if let Ok(f) = self.lookup_callable(&format!("{name}.{method}"), span) {
+                return Ok(f);
+            }
+            // Try namespace.method (cross-module)
             if let Some((ns, _)) = name.rsplit_once('.') {
-                return self.lookup_callable(&format!("{ns}.{method}"), span);
+                if let Ok(f) = self.lookup_callable(&format!("{ns}.{method}"), span) {
+                    return Ok(f);
+                }
             }
         }
         Err(EvalError::new(format!("undefined method `{method}`"), span))
@@ -650,6 +690,17 @@ impl Interp {
                     let scope = Env::with_parent(&self.env);
                     if self.match_pattern(&arm.pat, &sv, &scope) {
                         let prev = std::mem::replace(&mut self.env, scope);
+                        // Check match guard if present
+                        if let Some(ref guard) = arm.guard {
+                            let guard_val = self.eval(guard)?.into_value()?;
+                            match guard_val {
+                                Value::Bool(true) => {}
+                                _ => {
+                                    self.env = prev;
+                                    continue;
+                                }
+                            }
+                        }
                         let result = self.eval(&arm.body);
                         self.env = prev;
                         return result;
@@ -698,6 +749,13 @@ impl Interp {
             Expr::Array { elems, .. } => {
                 let mut vs = Vec::with_capacity(elems.len());
                 for e in elems {
+                    vs.push(self.eval(e)?.into_value()?);
+                }
+                Ok(Flow::Value(Value::Array(vs)))
+            }
+            Expr::Tuple { items, .. } => {
+                let mut vs = Vec::with_capacity(items.len());
+                for e in items {
                     vs.push(self.eval(e)?.into_value()?);
                 }
                 Ok(Flow::Value(Value::Array(vs)))
@@ -920,6 +978,21 @@ impl Interp {
                     (Some(p), Some(v)) => self.match_pattern(p, v, scope),
                     (None, None) => true,
                     _ => false,
+                }
+            }
+            Pattern::Tuple { pats, .. } => {
+                if let Value::Array(items) = value {
+                    if pats.len() != items.len() {
+                        return false;
+                    }
+                    for (pat, item) in pats.iter().zip(items.iter()) {
+                        if !self.match_pattern(pat, item, scope) {
+                            return false;
+                        }
+                    }
+                    true
+                } else {
+                    false
                 }
             }
         }

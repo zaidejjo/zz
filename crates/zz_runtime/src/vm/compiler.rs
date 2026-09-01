@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Param, Program, Stmt};
+use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Param, Pattern, Program, Stmt};
 use zz_frontend::span::Span;
 
 use super::capture::*;
@@ -170,6 +170,7 @@ impl Compiler {
             Op::Break(_) | Op::Continue(_) => 0,
             Op::SetLoopResult => -1,
             Op::MakeArray(n) => 1 - *n as i64,
+            Op::UnpackTuple(n) => *n as i64 - 1,
             Op::ArrayPush(_) => -1,
             Op::MakeDict(n) => 1 - 2 * *n as i64,
             Op::IndexOp(_) => -1,
@@ -187,6 +188,7 @@ impl Compiler {
                 }
             }
             Op::MatchArm { .. } => -1,
+            Op::MatchGuard { .. } => -1,
             Op::MatchError(_) => 0,
             Op::IfLetMatch { .. } => -1,
             Op::TryOp(_) => 0,
@@ -346,6 +348,38 @@ impl Compiler {
         }
     }
 
+    /// Compile a destructuring pattern. Expects the value to be on the stack.
+    fn compile_destructure(&mut self, pat: &Pattern) {
+        match pat {
+            Pattern::Wildcard { .. } => {
+                self.emit(Op::Pop);
+            }
+            Pattern::Binding { name } => {
+                if self.declare_local(&name.name) {
+                    // Local already declared, value stays on stack
+                } else {
+                    self.emit(Op::Pop);
+                }
+            }
+            Pattern::Tuple { pats, .. } => {
+                // Value is on stack. We need to unpack it.
+                // Emit UnpackTuple to split into individual elements.
+                self.emit(Op::UnpackTuple(pats.len() as u8));
+                // After UnpackTuple, elements are in reverse order on stack:
+                // [last, ..., second, first] where first is on top.
+                // Declare locals in forward order so first name gets the
+                // slot for the top-of-stack element.
+                for pat in pats {
+                    self.compile_destructure(pat);
+                }
+            }
+            Pattern::Literal { .. } | Pattern::Variant { .. } => {
+                // These are match-only patterns, not valid in destructuring
+                self.emit(Op::Pop);
+            }
+        }
+    }
+
     fn compile_stmt(&mut self, stmt: &Stmt) -> StmtValue {
         match stmt {
             Stmt::Decl { name, value, .. } => {
@@ -381,6 +415,29 @@ impl Compiler {
                     name: name.join("."),
                     fields: fields.iter().map(|(n, _)| n.name.clone()).collect(),
                 });
+                StmtValue::Discard
+            }
+            Stmt::Impl { name, methods, .. } => {
+                let type_name = name.join(".");
+                for method in methods {
+                    if let Stmt::Func {
+                        name: mname,
+                        generics: _,
+                        params,
+                        ret: _,
+                        body,
+                        ..
+                    } = method
+                    {
+                        let full_name = format!("{}.{}", type_name, mname.join("."));
+                        let chunk = self.compile_func_body(body, params);
+                        self.emit(Op::MakeFunc {
+                            name: full_name,
+                            params: params.clone(),
+                            chunk,
+                        });
+                    }
+                }
                 StmtValue::Discard
             }
             Stmt::For {
@@ -462,6 +519,11 @@ impl Compiler {
                     chunk,
                 });
                 self.emit(Op::DeferRecord);
+                StmtValue::None
+            }
+            Stmt::Destructure { pat, value, .. } => {
+                self.compile_expr(value);
+                self.compile_destructure(pat);
                 StmtValue::None
             }
             Stmt::Assign { target, value, .. } => match target {
@@ -1064,6 +1126,12 @@ impl Compiler {
                 }
                 self.emit(Op::MakeArray(elems.len() as u16));
             }
+            Expr::Tuple { items, .. } => {
+                for e in items {
+                    self.compile_expr(e);
+                }
+                self.emit(Op::MakeArray(items.len() as u16));
+            }
             Expr::ListComp {
                 body,
                 var,
@@ -1177,41 +1245,126 @@ impl Compiler {
                 arms,
                 span,
             } => {
-                self.compile_expr(scrutinee);
-                let mut arm_positions = Vec::with_capacity(arms.len());
-                let mut body_jumps = Vec::with_capacity(arms.len());
-                for arm in arms {
-                    let pos = self.chunk.code.len();
-                    let has_env = pattern_binds(&arm.pat);
-                    self.emit(Op::MatchArm {
-                        pat: arm.pat.clone(),
-                        next: 0,
-                        has_env,
-                    });
-                    self.compile_expr(&arm.body);
-                    if has_env {
-                        self.emit(Op::ExitScope);
+                // Save scrutinee in a slot. When arms have guards, each
+                // arm reloads from the slot (no push-back on miss). Without
+                // guards, the original single-copy approach works.
+                let has_guards = arms.iter().any(|a| a.guard.is_some());
+                if has_guards {
+                    self.compile_expr(scrutinee);
+                    // Store scrutinee in a temporary variable, then pop
+                    // the stack copy (only env copy remains for reload).
+                    let tmp_name = format!("__match_scrutinee_{}", self.chunk.code.len());
+                    self.emit(Op::DefineVar(tmp_name.clone()));
+                    self.emit(Op::Pop);
+                    let mut arm_positions = Vec::with_capacity(arms.len());
+                    let mut body_jumps = Vec::with_capacity(arms.len());
+                    let mut guard_positions: Vec<usize> = Vec::new();
+                    for arm in arms {
+                        let has_env = pattern_binds(&arm.pat);
+                        self.emit(Op::LoadVar(tmp_name.clone(), *span));
+                        let pos = self.chunk.code.len();
+                        self.emit(Op::MatchArm {
+                            pat: arm.pat.clone(),
+                            next: 0,
+                            has_env,
+                            restore: false,
+                        });
+                        // Compile guard if present
+                        if let Some(guard) = &arm.guard {
+                            guard_positions.push(pos);
+                            self.compile_expr(guard);
+                            let guard_pos = self.chunk.code.len();
+                            self.emit(Op::MatchGuard {
+                                next: 0,
+                                has_env: pattern_binds(&arm.pat),
+                            });
+                            guard_positions.push(guard_pos);
+                        }
+                        self.compile_expr(&arm.body);
+                        if has_env {
+                            self.emit(Op::ExitScope);
+                        }
+                        let j = self.emit_jump(JumpKind::Always);
+                        arm_positions.push(pos);
+                        body_jumps.push(j);
                     }
-                    let j = self.emit_jump(JumpKind::Always);
-                    arm_positions.push(pos);
-                    body_jumps.push(j);
-                }
-                let error_pos = self.chunk.code.len();
-                self.emit(Op::MatchError(*span));
-                for (i, pos) in arm_positions.iter().enumerate() {
-                    let next = if i + 1 < arms.len() {
-                        arm_positions[i + 1]
-                    } else {
-                        error_pos
-                    };
-                    self.chunk.code[*pos] = Op::MatchArm {
-                        pat: arms[i].pat.clone(),
-                        next,
-                        has_env: pattern_binds(&arms[i].pat),
-                    };
-                }
-                for j in body_jumps {
-                    self.patch_jump(j);
+                    let error_pos = self.chunk.code.len();
+                    self.emit(Op::MatchError(*span));
+                    // Patch arm jumps
+                    for (i, pos) in arm_positions.iter().enumerate() {
+                        let next = if i + 1 < arms.len() {
+                            arm_positions[i + 1]
+                        } else {
+                            error_pos
+                        };
+                        self.chunk.code[*pos] = Op::MatchArm {
+                            pat: arms[i].pat.clone(),
+                            next,
+                            has_env: pattern_binds(&arms[i].pat),
+                            restore: false,
+                        };
+                    }
+                    // Patch guard jumps — jump to the LoadVar before the next
+                    // arm's MatchArm (arm_positions[i+1] - 1).
+                    let mut gi = 0;
+                    for (i, arm) in arms.iter().enumerate() {
+                        if arm.guard.is_some() {
+                            let guard_jmp_pos = guard_positions[gi + 1];
+                            let next = if i + 1 < arms.len() {
+                                arm_positions[i + 1] - 1 // LoadVar before MatchArm
+                            } else {
+                                error_pos
+                            };
+                            self.chunk.code[guard_jmp_pos] = Op::MatchGuard {
+                                next,
+                                has_env: pattern_binds(&arms[i].pat),
+                            };
+                            gi += 2;
+                        }
+                    }
+                    for j in body_jumps {
+                        self.patch_jump(j);
+                    }
+                } else {
+                    // No guards: original single-copy approach
+                    self.compile_expr(scrutinee);
+                    let mut arm_positions = Vec::with_capacity(arms.len());
+                    let mut body_jumps = Vec::with_capacity(arms.len());
+                    for arm in arms {
+                        let pos = self.chunk.code.len();
+                        let has_env = pattern_binds(&arm.pat);
+                        self.emit(Op::MatchArm {
+                            pat: arm.pat.clone(),
+                            next: 0,
+                            has_env,
+                            restore: true,
+                        });
+                        self.compile_expr(&arm.body);
+                        if has_env {
+                            self.emit(Op::ExitScope);
+                        }
+                        let j = self.emit_jump(JumpKind::Always);
+                        arm_positions.push(pos);
+                        body_jumps.push(j);
+                    }
+                    let error_pos = self.chunk.code.len();
+                    self.emit(Op::MatchError(*span));
+                    for (i, pos) in arm_positions.iter().enumerate() {
+                        let next = if i + 1 < arms.len() {
+                            arm_positions[i + 1]
+                        } else {
+                            error_pos
+                        };
+                        self.chunk.code[*pos] = Op::MatchArm {
+                            pat: arms[i].pat.clone(),
+                            next,
+                            has_env: pattern_binds(&arms[i].pat),
+                            restore: true,
+                        };
+                    }
+                    for j in body_jumps {
+                        self.patch_jump(j);
+                    }
                 }
             }
             Expr::IfLet {

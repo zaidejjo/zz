@@ -91,6 +91,18 @@ impl Checker {
                 self.check_func_body(stmt, &sig);
                 Type::Unit
             }
+            Stmt::Impl { name, methods, .. } => {
+                let type_name = name.join(".");
+                for method in methods {
+                    if let Stmt::Func { .. } = method {
+                        let method_name = Self::func_name(method);
+                        let full_name = format!("{}.{}", type_name, method_name);
+                        let sig = self.funcs.get(&full_name).unwrap().clone();
+                        self.check_func_body(method, &sig);
+                    }
+                }
+                Type::Unit
+            }
             Stmt::Return { value, span } => {
                 let ret = match self.current_ret.clone() {
                     Some(r) => r,
@@ -230,6 +242,16 @@ impl Checker {
                         .push(error_at("`defer` outside of a function", *span));
                 }
                 self.check_expr(expr);
+                Type::Unit
+            }
+            Stmt::Destructure {
+                pat,
+                value,
+                span: _,
+            } => {
+                let vt = self.check_expr(value);
+                let vt = self.unifier.resolve(&vt);
+                self.bind_pattern(pat, &vt);
                 Type::Unit
             }
             Stmt::Assign {
@@ -665,6 +687,10 @@ impl Checker {
                 let elem_t = self.merge_types(types);
                 Type::Array(Box::new(elem_t))
             }
+            Expr::Tuple { items, .. } => {
+                let types: Vec<Type> = items.iter().map(|e| self.check_expr(e)).collect();
+                Type::Tuple(types)
+            }
             Expr::ListComp {
                 body,
                 var,
@@ -930,8 +956,13 @@ impl Checker {
                             sig = self.funcs.get(&format!("result.{method}")).cloned()
                         }
                         Type::Struct(sname) => {
-                            if let Some((ns, _)) = sname.rsplit_once('.') {
-                                sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                            // Try TypeName.method (impl block methods)
+                            sig = self.funcs.get(&format!("{sname}.{method}")).cloned();
+                            if sig.is_none() {
+                                // Try namespace.method (cross-module)
+                                if let Some((ns, _)) = sname.rsplit_once('.') {
+                                    sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                                }
                             }
                         }
                         _ => {}
@@ -1095,8 +1126,13 @@ impl Checker {
                             sig = self.funcs.get(&format!("result.{method}")).cloned();
                         }
                         Type::Struct(sname) => {
-                            if let Some((ns, _)) = sname.rsplit_once('.') {
-                                sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                            // Try TypeName.method (impl block methods)
+                            sig = self.funcs.get(&format!("{sname}.{method}")).cloned();
+                            if sig.is_none() {
+                                // Try namespace.method (cross-module)
+                                if let Some((ns, _)) = sname.rsplit_once('.') {
+                                    sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                                }
                             }
                         }
                         _ => {}
@@ -1305,6 +1341,13 @@ impl Checker {
         for arm in arms {
             self.push_scope();
             self.bind_pattern(&arm.pat, &st);
+            // Check match guard: must resolve to bool
+            if let Some(ref guard) = arm.guard {
+                let gt = self.check_expr(guard);
+                if let Err(e) = self.unifier.unify(&gt, &Type::Bool) {
+                    self.report_mismatch(e, guard.span());
+                }
+            }
             let bt = self.check_expr(&arm.body);
             self.pop_scope();
             match &result {
@@ -1439,6 +1482,42 @@ impl Checker {
                 };
                 if let Some((p, inner)) = inner {
                     self.bind_pattern(&p, &inner);
+                }
+            }
+            Pattern::Tuple { pats, span } => {
+                let rt = self.unifier.resolve(ty);
+                match rt {
+                    Type::Tuple(inner_types) => {
+                        if pats.len() != inner_types.len() {
+                            self.errors.push(error_at(
+                                format!(
+                                    "expected tuple with {} elements, found {}",
+                                    inner_types.len(),
+                                    pats.len()
+                                ),
+                                *span,
+                            ));
+                        } else {
+                            for (pat, inner_ty) in pats.iter().zip(inner_types.iter()) {
+                                self.bind_pattern(pat, inner_ty);
+                            }
+                        }
+                    }
+                    Type::Var(_) => {
+                        // If type is unknown, bind all patterns to fresh vars
+                        let fv = self.unifier.fresh_var();
+                        for pat in pats {
+                            self.bind_pattern(pat, &fv);
+                        }
+                    }
+                    other => {
+                        self.errors.push(error_at(
+                            format!(
+                                "cannot destructure a value of type `{other}` into a tuple pattern"
+                            ),
+                            *span,
+                        ));
+                    }
                 }
             }
         }

@@ -1,6 +1,6 @@
 //! Statement AST nodes.
 
-use crate::ast::expr::{Expr, Ident};
+use crate::ast::expr::{Expr, Ident, Pattern};
 use crate::ast::types::Ty;
 use crate::span::Span;
 
@@ -70,6 +70,14 @@ pub enum Stmt {
         span: Span,
         pub_: bool,
     },
+    /// `impl Point { func dist(self) -> int { ... } }` — method block.
+    /// Methods inside are registered as `TypeName.method_name` functions.
+    Impl {
+        name: Vec<String>,
+        methods: Vec<Stmt>,
+        span: Span,
+        pub_: bool,
+    },
     /// `for x in xs { ... }` or `for k, v in dict { ... }` — iterate an
     /// array, range, or dictionary.
     For {
@@ -95,6 +103,12 @@ pub enum Stmt {
         value: Expr,
         span: Span,
     },
+    /// Tuple destructuring: `(a, b) := expr`
+    Destructure {
+        pat: Pattern,
+        value: Expr,
+        span: Span,
+    },
     Expr(Expr),
 }
 
@@ -111,6 +125,8 @@ impl Stmt {
             | Stmt::Continue { span }
             | Stmt::Defer { span, .. }
             | Stmt::Assign { span, .. } => *span,
+            Stmt::Impl { span, .. } => *span,
+            Stmt::Destructure { span, .. } => *span,
             Stmt::Expr(e) => e.span(),
         }
     }

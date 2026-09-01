@@ -87,6 +87,32 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
                 },
             })
         }
+        Stmt::Impl {
+            name,
+            methods,
+            span,
+            ..
+        } => {
+            let full_name = format!("{} impl", name.join("."));
+            let children: Vec<DocumentSymbol> = methods
+                .iter()
+                .filter_map(|m| stmt_to_document_symbol(m, source))
+                .collect();
+            Some(DocumentSymbol {
+                name: full_name,
+                detail: None,
+                kind: SymbolKind::INTERFACE,
+                tags: None,
+                deprecated: None,
+                range: span_to_range(source, *span),
+                selection_range: struct_name_range(name, source),
+                children: if children.is_empty() {
+                    None
+                } else {
+                    Some(children)
+                },
+            })
+        }
         Stmt::Decl {
             name, value, span, ..
         } => {
@@ -161,6 +187,7 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
             None
         }
         Stmt::Assign { .. } => None,
+        Stmt::Destructure { .. } => None,
         Stmt::Expr(_) => None,
     }
 }
@@ -324,6 +351,20 @@ fn collect_workspace_symbols(
                 out.push(SymbolInformation {
                     name: full_name,
                     kind: SymbolKind::STRUCT,
+                    tags: None,
+                    deprecated: None,
+                    location: tower_lsp::lsp_types::Location {
+                        uri: uri.clone(),
+                        range: span_to_range(source, *span),
+                    },
+                    container_name: None,
+                });
+            }
+            Stmt::Impl { name, span, .. } => {
+                let full_name = format!("{} impl", name.join("."));
+                out.push(SymbolInformation {
+                    name: full_name,
+                    kind: SymbolKind::INTERFACE,
                     tags: None,
                     deprecated: None,
                     location: tower_lsp::lsp_types::Location {

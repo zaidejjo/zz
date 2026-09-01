@@ -1,6 +1,6 @@
 //! Statement parsing.
 
-use crate::ast::{Block, Expr, Ident, Param, Program, Stmt, Ty};
+use crate::ast::{Block, Expr, Ident, Param, Pattern, Program, Stmt, Ty};
 use crate::diag::{error_at, RawDiag};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
@@ -46,6 +46,7 @@ impl Parser {
                 match self.peek_kind() {
                     TokenKind::Func => self.parse_func(true),
                     TokenKind::Struct => self.parse_struct(true),
+                    TokenKind::Impl => self.parse_impl(true),
                     TokenKind::Import => self.parse_import(true),
                     // `pub x := expr` or `pub x: type = expr`
                     TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {
@@ -68,7 +69,7 @@ impl Parser {
                     }
                     _ => {
                         self.error_here(
-                            "expected `func`, `struct`, `import`, or declaration after `pub`",
+                            "expected `func`, `struct`, `impl`, `import`, or declaration after `pub`",
                         );
                         self.parse_stmt()
                     }
@@ -95,7 +96,15 @@ impl Parser {
             TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {
                 self.parse_short_decl(false)
             }
+            // `(a, b) := expr` — tuple destructuring declaration.
+            TokenKind::LParen
+                if self.peek_kind_at(1) == TokenKind::Ident
+                    && self.peek_kind_at(2) == TokenKind::Comma =>
+            {
+                self.parse_destructure_decl(false)
+            }
             TokenKind::Struct => self.parse_struct(false),
+            TokenKind::Impl => self.parse_impl(false),
             TokenKind::For => self.parse_for(),
             TokenKind::Break => {
                 let tok = self.advance();
@@ -235,6 +244,55 @@ impl Parser {
         }
     }
 
+    pub(crate) fn parse_impl(&mut self, pub_: bool) -> Stmt {
+        let impl_tok = self.advance();
+        let name = self.parse_dotted_ident();
+        if !self.eat(TokenKind::LBrace) {
+            self.error_here("expected `{` to start impl body");
+            self.skip_to_rbrace();
+        }
+        let mut methods = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            self.skip_stmt_ends();
+            if self.at(TokenKind::RBrace) {
+                break;
+            }
+            match self.peek_kind() {
+                TokenKind::Func => {
+                    methods.push(self.parse_func(false));
+                }
+                TokenKind::Pub => {
+                    let _pub_tok = self.advance();
+                    if self.peek_kind() == TokenKind::Func {
+                        methods.push(self.parse_func(true));
+                    } else {
+                        self.error_here("expected `func` after `pub` in impl block");
+                    }
+                }
+                _ => {
+                    self.error_here("expected `func` in impl block");
+                    // Skip to next statement or end of block
+                    if self.pos < self.toks.len() {
+                        self.advance();
+                    }
+                }
+            }
+        }
+        let end = if self.eat(TokenKind::RBrace) {
+            self.previous().span
+        } else {
+            self.error_here("expected `}` to close impl body");
+            self.peek().span
+        };
+        let span = impl_tok.span.join(end);
+        Stmt::Impl {
+            name,
+            methods,
+            span,
+            pub_,
+        }
+    }
+
     pub(crate) fn parse_for(&mut self) -> Stmt {
         let for_tok = self.advance();
         let first = self
@@ -301,6 +359,41 @@ impl Parser {
             value,
             span,
             pub_,
+        }
+    }
+
+    /// Parse `(a, b) := expr` — tuple destructuring declaration.
+    pub(crate) fn parse_destructure_decl(&mut self, _pub_: bool) -> Stmt {
+        let lparen = self.advance(); // `(`
+        let mut pats = Vec::new();
+        // Parse first pattern
+        pats.push(self.parse_pattern());
+        // Parse remaining patterns
+        while self.eat(TokenKind::Comma) {
+            if self.at(TokenKind::RParen) {
+                break;
+            }
+            pats.push(self.parse_pattern());
+        }
+        let rparen = if self.eat(TokenKind::RParen) {
+            self.previous().span
+        } else {
+            self.error_here("expected `)` to close destructuring pattern");
+            self.peek().span
+        };
+        // Parse `:=`
+        if !self.eat(TokenKind::ColonEq) {
+            self.error_here("expected `:=` after destructuring pattern");
+        }
+        let value = self.parse_expr();
+        let span = lparen.span.join(value.span());
+        Stmt::Destructure {
+            pat: Pattern::Tuple {
+                pats,
+                span: lparen.span.join(rparen),
+            },
+            value,
+            span,
         }
     }
 

@@ -161,6 +161,13 @@ fn collect_stmt_tokens(stmt: &Stmt, source: &str, out: &mut Vec<RawToken>) {
                 collect_type_tokens(fty, source, out);
             }
         }
+        Stmt::Impl { name, methods, .. } => {
+            push_keyword_token(stmt.span(), "impl", source, out);
+            push_name_tokens(name, TokenType::Struct, source, out);
+            for method in methods {
+                collect_stmt_tokens(method, source, out);
+            }
+        }
         Stmt::Decl {
             ty, name, value, ..
         } => {
@@ -205,6 +212,7 @@ fn collect_stmt_tokens(stmt: &Stmt, source: &str, out: &mut Vec<RawToken>) {
             collect_expr_tokens(target, source, out);
             collect_expr_tokens(value, source, out);
         }
+        Stmt::Destructure { value, .. } => collect_expr_tokens(value, source, out),
         Stmt::Expr(e) => collect_expr_tokens(e, source, out),
     }
 }
@@ -381,6 +389,11 @@ fn collect_expr_tokens(expr: &Expr, source: &str, out: &mut Vec<RawToken>) {
             }
         }
         Expr::Paren { expr, .. } => collect_expr_tokens(expr, source, out),
+        Expr::Tuple { items, .. } => {
+            for e in items {
+                collect_expr_tokens(e, source, out);
+            }
+        }
     }
 }
 

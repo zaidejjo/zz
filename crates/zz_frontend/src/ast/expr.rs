@@ -16,6 +16,7 @@ pub enum FmtPart {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
     pub pat: Pattern,
+    pub guard: Option<Expr>,
     pub body: Expr,
     pub span: Span,
 }
@@ -35,6 +36,10 @@ pub enum Pattern {
     Variant {
         name: String,
         arg: Option<Box<Pattern>>,
+        span: Span,
+    },
+    Tuple {
+        pats: Vec<Pattern>,
         span: Span,
     },
 }
@@ -92,6 +97,11 @@ pub enum Expr {
     /// parens (round-trip fidelity); the checker/interpreter just unwrap it.
     Paren {
         expr: Box<Expr>,
+        span: Span,
+    },
+    /// Tuple literal: `(a, b, c)`.
+    Tuple {
+        items: Vec<Expr>,
         span: Span,
     },
     Unary {
@@ -234,7 +244,8 @@ impl Expr {
             | Expr::StructInit { span, .. }
             | Expr::Index { span, .. }
             | Expr::Slice { span, .. }
-            | Expr::ListComp { span, .. } => *span,
+            | Expr::ListComp { span, .. }
+            | Expr::Tuple { span, .. } => *span,
             Expr::Block(b) => b.span,
         }
     }
@@ -247,6 +258,7 @@ impl Pattern {
             Pattern::Binding { name } => name.span,
             Pattern::Literal { span, .. } => *span,
             Pattern::Variant { span, .. } => *span,
+            Pattern::Tuple { span, .. } => *span,
         }
     }
 }

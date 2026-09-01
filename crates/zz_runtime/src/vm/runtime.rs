@@ -529,6 +529,34 @@ impl Vm {
                     items.reverse();
                     self.stack.push(Value::Array(items));
                 }
+                Op::UnpackTuple(n) => {
+                    let val = self.stack.pop().unwrap();
+                    match val {
+                        Value::Array(items) => {
+                            if items.len() != *n as usize {
+                                // This should be caught by the checker, but just in case.
+                                return Err(self.error(
+                                    format!(
+                                        "expected tuple with {} elements, found {}",
+                                        n,
+                                        items.len()
+                                    ),
+                                    Span::default(),
+                                ));
+                            }
+                            // Push elements in reverse so first is on top
+                            for item in items.into_iter().rev() {
+                                self.stack.push(item);
+                            }
+                        }
+                        other => {
+                            return Err(self.error(
+                                format!("cannot unpack a value of type `{other}`"),
+                                Span::default(),
+                            ));
+                        }
+                    }
+                }
                 Op::ArrayPush(span) => {
                     let value = self.stack.pop().unwrap();
                     let mut arr = match self.stack.pop().unwrap() {
@@ -669,7 +697,12 @@ impl Vm {
                         }
                     }
                 }
-                Op::MatchArm { pat, next, has_env } => {
+                Op::MatchArm {
+                    pat,
+                    next,
+                    has_env,
+                    restore,
+                } => {
                     let sv = self.stack.pop().unwrap();
                     let matched = if *has_env {
                         let scope = Env::with_parent(&interp.env);
@@ -682,8 +715,29 @@ impl Vm {
                         interp.match_pattern(pat, &sv, &interp.env)
                     };
                     if !matched {
-                        self.stack.push(sv);
+                        if *restore {
+                            self.stack.push(sv);
+                        }
                         self.frames.last_mut().unwrap().ip = *next;
+                    }
+                }
+                Op::MatchGuard { next, has_env } => {
+                    let guard_val = self.stack.pop().unwrap();
+                    match guard_val {
+                        Value::Bool(true) => {}
+                        _ => {
+                            if *has_env {
+                                // Exit the scope created by MatchArm
+                                let parent = {
+                                    let env = interp.env.borrow();
+                                    env.parent_rc()
+                                };
+                                if let Some(env_ref) = parent {
+                                    interp.env = env_ref;
+                                }
+                            }
+                            self.frames.last_mut().unwrap().ip = *next;
+                        }
                     }
                 }
                 Op::MatchError(span) => {
