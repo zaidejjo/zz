@@ -436,11 +436,39 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.fs.exists".into(),
         sig(vec![("path", Type::Str)], Type::Bool),
     );
+    m.insert(
+        "std.fs.read_to_string".into(),
+        sig(
+            vec![("path", Type::Str)],
+            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.fs.write".into(),
+        sig(
+            vec![("path", Type::Str), ("content", Type::Str)],
+            Type::Result(Box::new(Type::Unit), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.fs.remove_file".into(),
+        sig(
+            vec![("path", Type::Str)],
+            Type::Result(Box::new(Type::Unit), Box::new(Type::Str)),
+        ),
+    );
 
     // std.env
     m.insert(
         "std.env.get_var".into(),
         sig(vec![("name", Type::Str)], Type::Option(Box::new(Type::Str))),
+    );
+    m.insert(
+        "std.env.var".into(),
+        sig(
+            vec![("name", Type::Str)],
+            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+        ),
     );
     m.insert(
         "std.env.args".into(),
@@ -519,8 +547,12 @@ mod tests {
         assert!(funcs.contains_key("std.http.server"));
         assert!(funcs.contains_key("std.http.handle"));
         assert!(funcs.contains_key("std.http.listen"));
-        assert!(funcs.contains_key("std.fs.read_file"));
+        assert!(funcs.contains_key("std.fs.read_to_string"));
+        assert!(funcs.contains_key("std.fs.write"));
+        assert!(funcs.contains_key("std.fs.remove_file"));
         assert!(funcs.contains_key("std.env.get_var"));
+        assert!(funcs.contains_key("std.env.var"));
+        assert!(funcs.contains_key("std.env.args"));
         assert!(funcs.contains_key("std.math.abs"));
         assert!(funcs.contains_key("std.math.random"));
         assert!(funcs.contains_key("std.time.now_ms"));
@@ -529,7 +561,7 @@ mod tests {
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
         assert!(funcs.contains_key("append"));
-        assert_eq!(funcs.len(), 72);
+        assert_eq!(funcs.len(), 76);
     }
 
     #[test]

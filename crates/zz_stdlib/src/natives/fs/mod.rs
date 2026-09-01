@@ -34,3 +34,15 @@ pub(crate) fn fs_exists(
     let path = expect_str(args, 0, "std.fs.exists")?;
     Ok(Value::Bool(std::path::Path::new(&path).exists()))
 }
+
+pub(crate) fn fs_remove_file(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let path = expect_str(args, 0, "std.fs.remove_file")?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(Value::Result(Ok(Box::new(Value::Unit)))),
+        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!("{e}")))))),
+    }
+}
