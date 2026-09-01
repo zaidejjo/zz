@@ -1,0 +1,29 @@
+// examples/math_example.zz — std.math demonstrations
+import std.math
+
+// ── abs ──
+println("1. abs(-5):  {math.abs(-5)}")
+println("2. abs(3):   {math.abs(3)}")
+println("3. abs(-1.5): {math.abs(-1.5)}")
+
+// ── floor / ceil ──
+println("4. floor(3.7): {math.floor(3.7)}")
+println("5. ceil(3.2):  {math.ceil(3.2)}")
+println("6. floor(-2.3): {math.floor(-2.3)}")
+println("7. ceil(-2.3):  {math.ceil(-2.3)}")
+
+// ── sqrt ──
+println("8. sqrt(16):  {math.sqrt(16.0)}")
+println("9. sqrt(2):   {math.sqrt(2.0)}")
+
+// ── pow ──
+println("10. pow(2, 10): {math.pow(2, 10)}")
+println("11. pow(3, 0):  {math.pow(3, 0)}")
+
+// ── random ──
+r := math.random()
+println("12. random: {r}")
+println("13. random in [0,1): {r >= 0.0}")
+println("14. random in [0,1): {r < 1.0}")
+
+println("math_example_done")

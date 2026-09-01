@@ -1,0 +1,23 @@
+// examples/io_example.zz — std.io demonstrations
+import std.io
+
+// ── printz (no newline) ──
+io.printz("Hello ")
+io.printz("World")
+println("")
+
+// ── println ──
+io.println("println with std.io prefix")
+
+// ── string interpolation ──
+name := "ZZ"
+version := 42
+io.println("Language: {name}, version: {version}")
+
+// ── print any value ──
+io.println(42)
+io.println(3.14)
+io.println(true)
+io.println([1, 2, 3])
+
+println("io_example_done")

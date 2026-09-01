@@ -1,0 +1,54 @@
+// examples/fs_example.zz — std.fs demonstrations
+import std.fs
+
+// ── Write a file ──
+match fs.write("/tmp/zz_fs_demo.txt", "Hello from ZZ filesystem module!") {
+    .ok(_)  => println("1. write: OK"),
+    .err(e) => println("1. write FAILED: {e}"),
+}
+
+// ── Read it back ──
+match fs.read_to_string("/tmp/zz_fs_demo.txt") {
+    .ok(content) => println("2. read_to_string: {content}"),
+    .err(e)      => println("2. read FAILED: {e}"),
+}
+
+// ── Check existence ──
+println("3. exists (before remove): {fs.exists("/tmp/zz_fs_demo.txt")}")
+println("4. exists (nonexistent):   {fs.exists("/tmp/zz_definitely_gone.txt")}")
+
+// ── Write + read round trip ──
+match fs.write("/tmp/zz_roundtrip.txt", "round trip data") {
+    .ok(_) => {
+        match fs.read_to_string("/tmp/zz_roundtrip.txt") {
+            .ok(c) => println("5. round trip: {c}"),
+            .err(e) => println("5. round trip FAILED: {e}"),
+        }
+    },
+    .err(e) => println("write err: {e}"),
+}
+
+// ── Remove file ──
+match fs.remove_file("/tmp/zz_roundtrip.txt") {
+    .ok(_)  => println("6. remove: OK"),
+    .err(e) => println("6. remove FAILED: {e}"),
+}
+
+println("7. exists after remove: {fs.exists("/tmp/zz_roundtrip.txt")}")
+
+// ── Read missing file returns .err ──
+match fs.read_to_string("/tmp/zz_no_such_file.txt") {
+    .ok(_)  => println("8. unexpected success"),
+    .err(e) => println("8. read missing file: err (expected)"),
+}
+
+// ── Remove missing file returns .err ──
+match fs.remove_file("/tmp/zz_no_such_file.txt") {
+    .ok(_)  => println("9. unexpected success"),
+    .err(e) => println("9. remove missing file: err (expected)"),
+}
+
+// cleanup
+fs.remove_file("/tmp/zz_fs_demo.txt")
+
+println("fs_example_done")

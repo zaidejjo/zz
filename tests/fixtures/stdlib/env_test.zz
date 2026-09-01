@@ -1,0 +1,14 @@
+// E2E: std.env — args, var
+import std.env
+
+// args
+my_args := env.args()
+println(len(my_args))
+
+// var (Result variant)
+match env.var("PATH") {
+    .ok(p)  => println("has_path"),
+    .err(e) => println("no_path: {e}"),
+}
+
+println("env_test_ok")

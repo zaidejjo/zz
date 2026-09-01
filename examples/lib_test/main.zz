@@ -1,0 +1,36 @@
+// examples/lib_test/main.zz — comprehensive stdlib demo (top-level)
+import std.fs
+import std.env
+import std.time
+
+// ── fs ──
+println("=== std.fs ===")
+fs.write("/tmp/zz_lib_test.txt", "Hello from ZZ!")
+match fs.read_to_string("/tmp/zz_lib_test.txt") {
+    .ok(c) => println("read: {c}"),
+    .err(e) => println("err: {e}"),
+}
+println("exists: {fs.exists("/tmp/zz_lib_test.txt")}")
+fs.remove_file("/tmp/zz_lib_test.txt")
+
+// ── env ──
+println("")
+println("=== std.env ===")
+my_args := env.args()
+println("arg count: {len(my_args)}")
+match env.var("PATH") {
+    .ok(p) => println("PATH set ({len(p)} chars)"),
+    .err(e) => println("PATH: {e}"),
+}
+
+// ── time ──
+println("")
+println("=== std.time ===")
+t1 := time.now_ms()
+println("timestamp: {t1}")
+time.sleep_ms(10)
+t2 := time.now_ms()
+println("after sleep: {t2 >= t1}")
+
+println("")
+println("lib_test_done")

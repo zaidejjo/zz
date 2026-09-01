@@ -1,0 +1,36 @@
+// examples/json_example.zz — std.json demonstrations
+import std.json
+
+// ── parse ──
+j := json.parse("{\"name\": \"ZZ\", \"version\": 42, \"active\": true}")
+println("1. parsed: {j}")
+
+// ── get ──
+name := json.get(j, "name")
+println("2. name: {name}")
+
+ver := json.get(j, "version")
+println("3. version: {ver}")
+
+active := json.get(j, "active")
+println("4. active: {active}")
+
+// ── as_str / as_int / as_bool ──
+println("5. as_str: {json.as_str(name)}")
+println("6. as_int: {json.as_int(ver)}")
+println("7. as_bool: {json.as_bool(active)}")
+
+// ── stringify ──
+data := json.stringify([1, 2, 3])
+println("8. stringify array: {data}")
+
+dict_data := json.stringify({"key": "value"})
+println("9. stringify dict: {dict_data}")
+
+// ── round trip ──
+original := "{\"x\": 10}"
+parsed := json.parse(original)
+roundtrip := json.stringify(parsed)
+println("10. round trip: {roundtrip}")
+
+println("json_example_done")

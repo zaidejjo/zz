@@ -448,6 +448,27 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
             f: fs::fs_exists,
         },
     );
+    m.insert(
+        "std.fs.read_to_string".into(),
+        NativeEntry {
+            arity: 1,
+            f: fs::fs_read_file,
+        },
+    );
+    m.insert(
+        "std.fs.write".into(),
+        NativeEntry {
+            arity: 2,
+            f: fs::fs_write_file,
+        },
+    );
+    m.insert(
+        "std.fs.remove_file".into(),
+        NativeEntry {
+            arity: 1,
+            f: fs::fs_remove_file,
+        },
+    );
 
     // std.env
     m.insert(
@@ -455,6 +476,13 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: env::env_get_var,
+        },
+    );
+    m.insert(
+        "std.env.var".into(),
+        NativeEntry {
+            arity: 1,
+            f: env::env_var,
         },
     );
     m.insert(

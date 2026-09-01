@@ -1,0 +1,13 @@
+// E2E: std.time — now_ms, sleep_ms
+import std.time
+
+t := time.now_ms()
+println(typeof(t))
+println(t > 0)
+
+time.sleep_ms(10)
+
+t2 := time.now_ms()
+println(t2 >= t)
+
+println("time_test_ok")
