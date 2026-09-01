@@ -59,3 +59,34 @@ pub(crate) fn conv_float(
     };
     Ok(Value::Float(result))
 }
+
+/// Built-in `append(arr, val)` — returns the array with val appended.
+/// The compiler write-back stores the result back to `arr`, making it
+/// appear to mutate in-place.
+pub(crate) fn append_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return Err(EvalError::new(
+            "append() expects 2 arguments: append(array, value)",
+            span,
+        ));
+    }
+    let val = args.remove(1);
+    match &args[0] {
+        Value::Array(arr) => {
+            let mut new_arr = arr.clone();
+            new_arr.push(val);
+            Ok(Value::Array(new_arr))
+        }
+        other => Err(EvalError::new(
+            format!(
+                "append() first argument must be an array, got `{}`",
+                other.type_name()
+            ),
+            span,
+        )),
+    }
+}

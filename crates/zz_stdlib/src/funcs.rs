@@ -443,6 +443,14 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     let t = Type::Named("T".to_string());
     m.insert("typeof".into(), sig_t(vec![("v", t.clone())], Type::Str));
 
+    // Built-in: `append(arr, val)` — returns array with val appended.
+    // Used as a statement: compiler write-back stores result to arr.
+    let t_arr = Type::Array(Box::new(Type::Named("T".to_string())));
+    m.insert(
+        "append".into(),
+        sig_t(vec![("arr", t_arr.clone()), ("val", t.clone())], t_arr),
+    );
+
     // Built-in conversions.
     // `str(v)` — stringify any value (total).
     m.insert("str".into(), sig_t(vec![("v", t.clone())], Type::Str));
@@ -512,7 +520,8 @@ mod tests {
         assert!(funcs.contains_key("str"));
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
-        assert_eq!(funcs.len(), 70);
+        assert!(funcs.contains_key("append"));
+        assert_eq!(funcs.len(), 71);
     }
 
     #[test]

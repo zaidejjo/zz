@@ -56,3 +56,81 @@ fn literal_array_method_sort() {
         Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3),])
     );
 }
+
+#[test]
+fn push_mutates_array() {
+    let result = run(r#"
+        arr := [1, 2, 3]
+        arr.push(4)
+        arr.len()
+    "#)
+    .unwrap();
+    assert_eq!(result, Value::Int(4));
+}
+
+#[test]
+fn push_preserves_elements() {
+    let result = run(r#"
+        arr := [1, 2, 3]
+        arr.push(4)
+        arr[0] + arr[1] + arr[2] + arr[3]
+    "#)
+    .unwrap();
+    assert_eq!(result, Value::Int(10));
+}
+
+#[test]
+fn push_struct_array() {
+    let result = run(r#"
+        struct User {
+            name: str
+        }
+        users := []
+        users.push(User { name: "Alice" })
+        users.push(User { name: "Bob" })
+        users.len()
+    "#)
+    .unwrap();
+    assert_eq!(result, Value::Int(2));
+}
+
+#[test]
+fn push_struct_array_for_loop() {
+    let result = run(r#"
+        struct User {
+            name: str
+        }
+        users := []
+        users.push(User { name: "Alice" })
+        users.push(User { name: "Bob" })
+        names := ""
+        for u in users {
+            names = names + u.name + " "
+        }
+        names.trim()
+    "#)
+    .unwrap();
+    assert_eq!(result, Value::Str("Alice Bob".to_string()));
+}
+
+#[test]
+fn append_mutates_array() {
+    let result = run(r#"
+        arr := [1, 2, 3]
+        append(arr, 4)
+        arr.len()
+    "#)
+    .unwrap();
+    assert_eq!(result, Value::Int(4));
+}
+
+#[test]
+fn append_preserves_elements() {
+    let result = run(r#"
+        arr := [1, 2, 3]
+        append(arr, 4)
+        arr[0] + arr[1] + arr[2] + arr[3]
+    "#)
+    .unwrap();
+    assert_eq!(result, Value::Int(10));
+}

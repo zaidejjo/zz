@@ -500,6 +500,115 @@ impl Compiler {
                 _ => unreachable!("unhandled assignment target"),
             },
             Stmt::Expr(e) => {
+                // Method call write-back: if `obj.method(args)` is called as a
+                // statement, the return value (e.g. the new array from push/pop)
+                // must be written back to `obj` so the mutation is visible.
+                // Only intercept known mutating methods to avoid corrupting
+                // non-mutating calls (e.g. `arr.len()` should not write back).
+                if let Expr::Call {
+                    callee,
+                    args,
+                    named,
+                    ..
+                } = e
+                {
+                    // Known mutating array methods that return the modified array.
+                    const MUTATING_METHODS: &[&str] =
+                        &["push", "pop", "insert", "remove", "reverse", "sort"];
+
+                    // Handle `arr.push(x)` — parsed as Path { parts: ["arr", "push"] }
+                    if let Expr::Path { parts, .. } = callee.as_ref() {
+                        if parts.len() == 2 {
+                            let method_name = &parts[1];
+                            if MUTATING_METHODS.contains(&method_name.as_str()) {
+                                let obj_name = &parts[0];
+                                // Compile: LoadVar(obj) + args + CallMethod(method)
+                                match self.resolve(obj_name) {
+                                    Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
+                                    Resolved::Env => {
+                                        self.emit(Op::LoadVar(obj_name.clone(), e.span()))
+                                    }
+                                }
+                                for a in args {
+                                    self.compile_expr(a);
+                                }
+                                for (_, val) in named {
+                                    self.compile_expr(val);
+                                }
+                                self.emit(Op::CallMethod {
+                                    name: method_name.clone(),
+                                    argc: (args.len() + named.len()) as u16,
+                                    span: e.span(),
+                                });
+                                // Write back: StoreVar(obj) pops the result into the variable
+                                match self.resolve(obj_name) {
+                                    Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
+                                    Resolved::Env => {
+                                        self.emit(Op::StoreVar(obj_name.clone(), e.span()))
+                                    }
+                                }
+                                return StmtValue::None;
+                            }
+                        }
+                    }
+                    // Handle `obj.method(x)` — parsed as Field { obj, name }
+                    if let Expr::Field {
+                        obj: field_obj,
+                        name: method_name,
+                        ..
+                    } = callee.as_ref()
+                    {
+                        if MUTATING_METHODS.contains(&method_name.as_str()) {
+                            if let Expr::Ident { name, span } = field_obj.as_ref() {
+                                self.compile_expr(field_obj);
+                                for a in args {
+                                    self.compile_expr(a);
+                                }
+                                for (_, val) in named {
+                                    self.compile_expr(val);
+                                }
+                                self.emit(Op::CallMethod {
+                                    name: method_name.clone(),
+                                    argc: (args.len() + named.len()) as u16,
+                                    span: e.span(),
+                                });
+                                match self.resolve(name) {
+                                    Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
+                                    Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+                                }
+                                return StmtValue::None;
+                            }
+                        }
+                    }
+                }
+                // Built-in `append(arr, val)` write-back: same as method call.
+                // append returns the mutated array; store it back to arr.
+                if let Expr::Call {
+                    callee,
+                    args,
+                    named,
+                    ..
+                } = e
+                {
+                    if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                        if fname == "append" && args.len() == 2 && named.is_empty() {
+                            if let Expr::Ident {
+                                name: arr_name,
+                                span,
+                            } = &args[0]
+                            {
+                                self.compile_expr(e);
+                                match self.resolve(arr_name) {
+                                    Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
+                                    Resolved::Env => {
+                                        self.emit(Op::StoreVar(arr_name.clone(), *span))
+                                    }
+                                }
+                                return StmtValue::None;
+                            }
+                        }
+                    }
+                }
                 self.compile_expr(e);
                 StmtValue::Discard
             }

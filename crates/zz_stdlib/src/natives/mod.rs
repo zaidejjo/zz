@@ -549,6 +549,15 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
+    // Built-in: `append(arr, val)` — mutates array in-place, returns unit.
+    m.insert(
+        "append".into(),
+        NativeEntry {
+            arity: 2,
+            f: builtins::append_fn,
+        },
+    );
+
     m
 }
 

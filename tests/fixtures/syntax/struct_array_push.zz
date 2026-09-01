@@ -1,0 +1,15 @@
+struct User {
+    name: str,
+    age: int
+}
+
+users := []
+users.push(User { name: "Alice", age: 30 })
+users.push(User { name: "Bob", age: 25 })
+users.push(User { name: "Charlie", age: 35 })
+
+println("len: " + str(users.len()))
+println("names:")
+for u in users {
+    println("  " + u.name + " (" + str(u.age) + ")")
+}
