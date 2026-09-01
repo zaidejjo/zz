@@ -513,8 +513,9 @@ impl Compiler {
                 } = e
                 {
                     // Known mutating array methods that return the modified array.
-                    const MUTATING_METHODS: &[&str] =
-                        &["push", "pop", "insert", "remove", "reverse", "sort"];
+                    const MUTATING_METHODS: &[&str] = &[
+                        "push", "pop", "insert", "remove", "reverse", "sort", "append",
+                    ];
 
                     // Handle `arr.push(x)` — parsed as Path { parts: ["arr", "push"] }
                     if let Expr::Path { parts, .. } = callee.as_ref() {

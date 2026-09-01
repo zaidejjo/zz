@@ -184,8 +184,9 @@ impl Interp {
                     ..
                 } = e
                 {
-                    const MUTATING_METHODS: &[&str] =
-                        &["push", "pop", "insert", "remove", "reverse", "sort"];
+                    const MUTATING_METHODS: &[&str] = &[
+                        "push", "pop", "insert", "remove", "reverse", "sort", "append",
+                    ];
 
                     // Handle `arr.push(x)` — parsed as Path { parts: ["arr", "push"] }
                     if let Expr::Path { parts, span: pspan } = callee.as_ref() {

@@ -212,6 +212,14 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             Type::Array(Box::new(t.clone())),
         ),
     );
+    // vec.append — alias for vec.push
+    m.insert(
+        "vec.append".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone()))), ("x", t.clone())],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
     m.insert(
         "vec.pop".into(),
         sig_t(
@@ -521,7 +529,7 @@ mod tests {
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
         assert!(funcs.contains_key("append"));
-        assert_eq!(funcs.len(), 71);
+        assert_eq!(funcs.len(), 72);
     }
 
     #[test]

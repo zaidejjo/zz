@@ -134,3 +134,14 @@ fn append_preserves_elements() {
     .unwrap();
     assert_eq!(result, Value::Int(10));
 }
+
+#[test]
+fn append_method_syntax() {
+    let result = run(r#"
+        arr := [1, 2, 3]
+        arr.append(4)
+        arr.len()
+    "#)
+    .unwrap();
+    assert_eq!(result, Value::Int(4));
+}
