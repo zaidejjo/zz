@@ -96,6 +96,14 @@ impl<'a> Rewriter<'a> {
                     self.rewrite_ty(fty);
                 }
             }
+            Stmt::Impl { name, methods, .. } => {
+                if self.top.contains(&name.join(".")) && name[0] != self.ns {
+                    name[0] = format!("{}.{}", self.ns, name[0]);
+                }
+                for method in methods {
+                    self.rewrite_stmt(method);
+                }
+            }
             Stmt::For {
                 vars, iter, body, ..
             } => {

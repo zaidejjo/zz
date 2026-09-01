@@ -88,6 +88,27 @@ fn collect_stmt_defs(stmt: &Stmt, source: &str, defs: &mut HashMap<u32, Definiti
                 );
             }
         }
+        Stmt::Impl { name, methods, .. } => {
+            let type_name = name.join(".");
+            for method in methods {
+                if let Stmt::Func {
+                    name: mname, span, ..
+                } = method
+                {
+                    let full_name = format!("{}.{}", type_name, mname.join("."));
+                    if let Some(s) = find_name_in_source(source, &full_name) {
+                        defs.insert(
+                            s.start,
+                            Definition {
+                                name: full_name,
+                                span: s,
+                                kind: DefKind::Func,
+                            },
+                        );
+                    }
+                }
+            }
+        }
         Stmt::Decl { name, value, .. } => {
             defs.insert(
                 name.span.start,
@@ -336,6 +357,18 @@ fn walk_stmt<'a>(stmt: &'a Stmt, source: &str, offset: u32, result: &mut NodeAtO
         Stmt::Destructure { pat, value, .. } => {
             walk_pattern(pat, source, offset, result);
             walk_expr(value, source, offset, result);
+        }
+        Stmt::Impl { name, methods, .. } => {
+            let joined = name.join(".");
+            if let Some(name_span) = find_name_in_source(source, &joined) {
+                if offset >= name_span.start && offset < name_span.end {
+                    result.name = Some(joined);
+                    result.name_span = Some(name_span);
+                }
+            }
+            for method in methods {
+                walk_stmt(method, source, offset, result);
+            }
         }
         Stmt::Expr(e) => walk_expr(e, source, offset, result),
     }
@@ -812,6 +845,11 @@ fn collect_name_refs_in_stmt(stmt: &Stmt, name: &str, refs: &mut Vec<Reference>)
         }
         Stmt::Defer { expr, .. } => collect_name_refs_in_expr(expr, name, refs),
         Stmt::Destructure { value, .. } => collect_name_refs_in_expr(value, name, refs),
+        Stmt::Impl { methods, .. } => {
+            for method in methods {
+                collect_name_refs_in_stmt(method, name, refs);
+            }
+        }
         Stmt::Expr(e) => collect_name_refs_in_expr(e, name, refs),
         Stmt::Import { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
     }
@@ -1051,6 +1089,11 @@ fn collect_hl_stmt(stmt: &Stmt, name: &str, source: &str, out: &mut Vec<Highligh
         }
         Stmt::Defer { expr, .. } => collect_hl_expr(expr, name, out),
         Stmt::Destructure { value, .. } => collect_hl_expr(value, name, out),
+        Stmt::Impl { methods, .. } => {
+            for method in methods {
+                collect_hl_stmt(method, name, source, out);
+            }
+        }
         Stmt::Expr(e) => collect_hl_expr(e, name, out),
         Stmt::Import { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
     }

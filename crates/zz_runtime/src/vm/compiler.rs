@@ -417,6 +417,29 @@ impl Compiler {
                 });
                 StmtValue::Discard
             }
+            Stmt::Impl { name, methods, .. } => {
+                let type_name = name.join(".");
+                for method in methods {
+                    if let Stmt::Func {
+                        name: mname,
+                        generics: _,
+                        params,
+                        ret: _,
+                        body,
+                        ..
+                    } = method
+                    {
+                        let full_name = format!("{}.{}", type_name, mname.join("."));
+                        let chunk = self.compile_func_body(body, params);
+                        self.emit(Op::MakeFunc {
+                            name: full_name,
+                            params: params.clone(),
+                            chunk,
+                        });
+                    }
+                }
+                StmtValue::Discard
+            }
             Stmt::For {
                 vars,
                 iter,

@@ -161,6 +161,13 @@ fn collect_stmt_tokens(stmt: &Stmt, source: &str, out: &mut Vec<RawToken>) {
                 collect_type_tokens(fty, source, out);
             }
         }
+        Stmt::Impl { name, methods, .. } => {
+            push_keyword_token(stmt.span(), "impl", source, out);
+            push_name_tokens(name, TokenType::Struct, source, out);
+            for method in methods {
+                collect_stmt_tokens(method, source, out);
+            }
+        }
         Stmt::Decl {
             ty, name, value, ..
         } => {

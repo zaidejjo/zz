@@ -89,9 +89,81 @@ pub fn check_program(
         }
     }
 
-    // Pass 1b: register all function signatures so recursion and mutual
-    // recursion resolve.
+    // Pass 1b: register impl method signatures so method calls resolve.
+    // Impl methods are registered as `TypeName.method_name` functions with
+    // `self` typed as the struct type.
     let mut seen = HashMap::new();
+    for stmt in &program.stmts {
+        if let Stmt::Impl {
+            name,
+            methods,
+            pub_,
+            ..
+        } = stmt
+        {
+            let type_name = name.join(".");
+            for method in methods {
+                if let Stmt::Func {
+                    name: mname,
+                    params,
+                    ret,
+                    generics,
+                    ..
+                } = method
+                {
+                    let full_name = format!("{}.{}", type_name, mname.join("."));
+                    let gen_names: Vec<String> = generics.iter().map(|g| g.name.clone()).collect();
+                    // Build params, replacing `self` with the struct type
+                    let sig_params: Vec<(String, Type)> = params
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| {
+                            let ty = if i == 0 && p.name.name == "self" {
+                                Type::Struct(type_name.clone())
+                            } else {
+                                match &p.ty {
+                                    Some(t) => checker.ast_to_type(t, &gen_names),
+                                    None => checker.unifier.fresh_var(),
+                                }
+                            };
+                            (p.name.name.clone(), ty)
+                        })
+                        .collect();
+                    let has_default: Vec<bool> =
+                        params.iter().map(|p| p.default.is_some()).collect();
+                    let sig_ret = match ret {
+                        Some(t) => checker.ast_to_type(t, &gen_names),
+                        None => checker.unifier.fresh_var(),
+                    };
+                    if let Some(prev) = seen.insert(full_name.clone(), method.span()) {
+                        checker.errors.push(zz_frontend::diag::error_at(
+                            format!("duplicate definition of method `{}`", full_name),
+                            method.span(),
+                        ));
+                        checker.errors.push(zz_frontend::diag::error_at(
+                            "previous definition here",
+                            prev,
+                        ));
+                    }
+                    checker.funcs.insert(
+                        full_name.clone(),
+                        crate::checker::FuncSig {
+                            generics: gen_names,
+                            params: sig_params,
+                            has_default,
+                            ret: sig_ret,
+                        },
+                    );
+                    if *pub_ {
+                        pub_funcs_set.insert(full_name);
+                    }
+                }
+            }
+        }
+    }
+
+    // Pass 1c: register all function signatures so recursion and mutual
+    // recursion resolve.
     for stmt in &program.stmts {
         if let Stmt::Func {
             name, span, pub_, ..

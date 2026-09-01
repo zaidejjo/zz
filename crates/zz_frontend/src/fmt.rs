@@ -218,6 +218,36 @@ impl<'a> FmtCtx<'a> {
                 self.write_str(" := ");
                 self.fmt_expr(value, source);
             }
+            Stmt::Impl {
+                name,
+                methods,
+                pub_,
+                ..
+            } => {
+                self.write_indent();
+                if *pub_ {
+                    self.write_str("pub ");
+                }
+                self.write_str("impl ");
+                self.write_str(&name.join("."));
+                self.write_str(" {");
+                if methods.is_empty() {
+                    self.write_str("}");
+                } else {
+                    self.write_line();
+                    self.indent += 1;
+                    for (i, m) in methods.iter().enumerate() {
+                        if i > 0 {
+                            self.write_line();
+                        }
+                        self.fmt_stmt(m, source);
+                    }
+                    self.indent -= 1;
+                    self.write_line();
+                    self.write_indent();
+                    self.write_str("}");
+                }
+            }
             Stmt::Expr(e) => {
                 self.write_indent();
                 self.fmt_expr(e, source);

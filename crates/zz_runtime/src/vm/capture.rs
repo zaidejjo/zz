@@ -220,6 +220,11 @@ pub(crate) fn scan_stmt_captured(
             }
         }
         Stmt::Struct { .. } => {}
+        Stmt::Impl { methods, .. } => {
+            for method in methods {
+                scan_stmt_captured(method, defined, free);
+            }
+        }
         Stmt::For {
             vars, iter, body, ..
         } => {

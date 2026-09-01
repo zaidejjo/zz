@@ -59,6 +59,29 @@ impl Interp {
                 );
                 Ok(Flow::Value(Value::Unit))
             }
+            Stmt::Impl { name, methods, .. } => {
+                let type_name = name.join(".");
+                for method in methods {
+                    if let Stmt::Func {
+                        name: mname,
+                        params,
+                        body,
+                        ..
+                    } = method
+                    {
+                        let full_name = format!("{}.{}", type_name, mname.join("."));
+                        let fv = FuncValue {
+                            params: params.clone(),
+                            body: Expr::Block(body.clone()),
+                            env: Rc::clone(&self.env),
+                            chunk: None,
+                        };
+                        self.funcs.insert(full_name.clone(), fv.clone());
+                        self.env.borrow_mut().define(&full_name, Value::Func(fv));
+                    }
+                }
+                Ok(Flow::Value(Value::Unit))
+            }
             Stmt::For {
                 vars, iter, body, ..
             } => {
@@ -400,8 +423,15 @@ impl Interp {
             }
         }
         if let Value::Object { name, .. } = recv {
+            // Try TypeName.method (impl block methods)
+            if let Ok(f) = self.lookup_callable(&format!("{name}.{method}"), span) {
+                return Ok(f);
+            }
+            // Try namespace.method (cross-module)
             if let Some((ns, _)) = name.rsplit_once('.') {
-                return self.lookup_callable(&format!("{ns}.{method}"), span);
+                if let Ok(f) = self.lookup_callable(&format!("{ns}.{method}"), span) {
+                    return Ok(f);
+                }
             }
         }
         Err(EvalError::new(format!("undefined method `{method}`"), span))

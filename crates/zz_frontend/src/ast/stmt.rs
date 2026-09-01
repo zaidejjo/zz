@@ -70,6 +70,14 @@ pub enum Stmt {
         span: Span,
         pub_: bool,
     },
+    /// `impl Point { func dist(self) -> int { ... } }` — method block.
+    /// Methods inside are registered as `TypeName.method_name` functions.
+    Impl {
+        name: Vec<String>,
+        methods: Vec<Stmt>,
+        span: Span,
+        pub_: bool,
+    },
     /// `for x in xs { ... }` or `for k, v in dict { ... }` — iterate an
     /// array, range, or dictionary.
     For {
@@ -117,6 +125,7 @@ impl Stmt {
             | Stmt::Continue { span }
             | Stmt::Defer { span, .. }
             | Stmt::Assign { span, .. } => *span,
+            Stmt::Impl { span, .. } => *span,
             Stmt::Destructure { span, .. } => *span,
             Stmt::Expr(e) => e.span(),
         }

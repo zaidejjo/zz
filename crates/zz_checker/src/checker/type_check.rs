@@ -91,6 +91,18 @@ impl Checker {
                 self.check_func_body(stmt, &sig);
                 Type::Unit
             }
+            Stmt::Impl { name, methods, .. } => {
+                let type_name = name.join(".");
+                for method in methods {
+                    if let Stmt::Func { .. } = method {
+                        let method_name = Self::func_name(method);
+                        let full_name = format!("{}.{}", type_name, method_name);
+                        let sig = self.funcs.get(&full_name).unwrap().clone();
+                        self.check_func_body(method, &sig);
+                    }
+                }
+                Type::Unit
+            }
             Stmt::Return { value, span } => {
                 let ret = match self.current_ret.clone() {
                     Some(r) => r,
@@ -944,8 +956,13 @@ impl Checker {
                             sig = self.funcs.get(&format!("result.{method}")).cloned()
                         }
                         Type::Struct(sname) => {
-                            if let Some((ns, _)) = sname.rsplit_once('.') {
-                                sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                            // Try TypeName.method (impl block methods)
+                            sig = self.funcs.get(&format!("{sname}.{method}")).cloned();
+                            if sig.is_none() {
+                                // Try namespace.method (cross-module)
+                                if let Some((ns, _)) = sname.rsplit_once('.') {
+                                    sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                                }
                             }
                         }
                         _ => {}
@@ -1109,8 +1126,13 @@ impl Checker {
                             sig = self.funcs.get(&format!("result.{method}")).cloned();
                         }
                         Type::Struct(sname) => {
-                            if let Some((ns, _)) = sname.rsplit_once('.') {
-                                sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                            // Try TypeName.method (impl block methods)
+                            sig = self.funcs.get(&format!("{sname}.{method}")).cloned();
+                            if sig.is_none() {
+                                // Try namespace.method (cross-module)
+                                if let Some((ns, _)) = sname.rsplit_once('.') {
+                                    sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                                }
                             }
                         }
                         _ => {}
