@@ -1,0 +1,32 @@
+// examples/str_example.zz — std.str demonstrations
+import std.str
+
+// ── length ──
+s := "Hello, ZZ!"
+println("1. length: {str.length(s)}")
+
+// ── contains ──
+println("2. contains 'ZZ': {str.contains(s, "ZZ")}")
+println("3. contains 'xx': {str.contains(s, "xx")}")
+
+// ── split ──
+parts := str.split("a,b,c", ",")
+println("4. split: {parts}")
+
+// ── trim ──
+padded := "  spaces  "
+println("5. trimmed: '{str.trim(padded)}'")
+
+// ── case conversion ──
+println("6. upper: {str.to_upper("hello")}")
+println("7. lower: {str.to_lower("HELLO")}")
+
+// ── replace ──
+replaced := str.replace("foo bar foo", "foo", "baz")
+println("8. replaced: {replaced}")
+
+// ── starts_with / ends_with ──
+println("9. starts_with 'Hello': {str.starts_with(s, "Hello")}")
+println("10. ends_with '!':      {str.ends_with(s, "!")}")
+
+println("str_example_done")

@@ -1,0 +1,27 @@
+// examples/env_example.zz — std.env demonstrations
+import std.env
+
+// ── Get CLI args ──
+my_args := env.args()
+println("1. arg count: {len(my_args)}")
+println("2. args: {my_args}")
+
+// ── Read environment variable (exists) ──
+match env.var("PATH") {
+    .ok(p)  => println("3. PATH exists (length: {len(p)})"),
+    .err(e) => println("3. PATH missing: {e}"),
+}
+
+// ── Read environment variable (missing) ──
+match env.var("ZZ_TEST_MISSING_VAR_12345") {
+    .ok(v)  => println("4. unexpected: {v}"),
+    .err(e) => println("4. missing var: err (expected)"),
+}
+
+// ── Legacy get_var (returns Option) ──
+match env.get_var("HOME") {
+    .some(v) => println("5. HOME exists"),
+    .none    => println("5. HOME missing"),
+}
+
+println("env_example_done")
