@@ -142,6 +142,7 @@ fn collect_stmt_defs(stmt: &Stmt, source: &str, defs: &mut HashMap<u32, Definiti
         }
         Stmt::Expr(e) => collect_expr_defs(e, source, defs),
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Destructure { value, .. } => collect_expr_defs(value, source, defs),
     }
 }
 
@@ -332,6 +333,10 @@ fn walk_stmt<'a>(stmt: &'a Stmt, source: &str, offset: u32, result: &mut NodeAtO
         Stmt::Defer { expr, .. } => walk_expr(expr, source, offset, result),
         Stmt::Import { .. } => {}
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Destructure { pat, value, .. } => {
+            walk_pattern(pat, source, offset, result);
+            walk_expr(value, source, offset, result);
+        }
         Stmt::Expr(e) => walk_expr(e, source, offset, result),
     }
 }
@@ -339,6 +344,25 @@ fn walk_stmt<'a>(stmt: &'a Stmt, source: &str, offset: u32, result: &mut NodeAtO
 fn walk_block<'a>(block: &'a Block, source: &str, offset: u32, result: &mut NodeAtOffset<'a>) {
     for stmt in &block.stmts {
         walk_stmt(stmt, source, offset, result);
+    }
+}
+
+fn walk_pattern<'a>(pat: &'a Pattern, _source: &str, offset: u32, result: &mut NodeAtOffset<'a>) {
+    let span = pat.span();
+    if offset < span.start || offset >= span.end {
+        return;
+    }
+    match pat {
+        Pattern::Binding { name } => {
+            result.name = Some(name.name.clone());
+            result.name_span = Some(name.span);
+        }
+        Pattern::Tuple { pats, .. } => {
+            for p in pats {
+                walk_pattern(p, _source, offset, result);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -787,6 +811,7 @@ fn collect_name_refs_in_stmt(stmt: &Stmt, name: &str, refs: &mut Vec<Reference>)
             collect_name_refs_in_expr(value, name, refs);
         }
         Stmt::Defer { expr, .. } => collect_name_refs_in_expr(expr, name, refs),
+        Stmt::Destructure { value, .. } => collect_name_refs_in_expr(value, name, refs),
         Stmt::Expr(e) => collect_name_refs_in_expr(e, name, refs),
         Stmt::Import { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
     }
@@ -1025,6 +1050,7 @@ fn collect_hl_stmt(stmt: &Stmt, name: &str, source: &str, out: &mut Vec<Highligh
             collect_hl_expr(value, name, out);
         }
         Stmt::Defer { expr, .. } => collect_hl_expr(expr, name, out),
+        Stmt::Destructure { value, .. } => collect_hl_expr(value, name, out),
         Stmt::Expr(e) => collect_hl_expr(e, name, out),
         Stmt::Import { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
     }

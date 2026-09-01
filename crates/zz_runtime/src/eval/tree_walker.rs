@@ -166,6 +166,16 @@ impl Interp {
                     .push(Value::Func(closure));
                 Ok(Flow::Value(Value::Unit))
             }
+            Stmt::Destructure { pat, value, .. } => {
+                let v = self.eval(value)?.into_value()?;
+                if !self.match_pattern(pat, &v, &self.env) {
+                    return Err(EvalError::new(
+                        "destructuring pattern does not match value",
+                        pat.span(),
+                    ));
+                }
+                Ok(Flow::Value(Value::Unit))
+            }
             Stmt::Assign { target, value, .. } => {
                 let v = self.eval(value)?.into_value()?;
                 self.assign_target(target, v)?;
@@ -650,6 +660,17 @@ impl Interp {
                     let scope = Env::with_parent(&self.env);
                     if self.match_pattern(&arm.pat, &sv, &scope) {
                         let prev = std::mem::replace(&mut self.env, scope);
+                        // Check match guard if present
+                        if let Some(ref guard) = arm.guard {
+                            let guard_val = self.eval(guard)?.into_value()?;
+                            match guard_val {
+                                Value::Bool(true) => {}
+                                _ => {
+                                    self.env = prev;
+                                    continue;
+                                }
+                            }
+                        }
                         let result = self.eval(&arm.body);
                         self.env = prev;
                         return result;
@@ -698,6 +719,13 @@ impl Interp {
             Expr::Array { elems, .. } => {
                 let mut vs = Vec::with_capacity(elems.len());
                 for e in elems {
+                    vs.push(self.eval(e)?.into_value()?);
+                }
+                Ok(Flow::Value(Value::Array(vs)))
+            }
+            Expr::Tuple { items, .. } => {
+                let mut vs = Vec::with_capacity(items.len());
+                for e in items {
                     vs.push(self.eval(e)?.into_value()?);
                 }
                 Ok(Flow::Value(Value::Array(vs)))
@@ -920,6 +948,21 @@ impl Interp {
                     (Some(p), Some(v)) => self.match_pattern(p, v, scope),
                     (None, None) => true,
                     _ => false,
+                }
+            }
+            Pattern::Tuple { pats, .. } => {
+                if let Value::Array(items) = value {
+                    if pats.len() != items.len() {
+                        return false;
+                    }
+                    for (pat, item) in pats.iter().zip(items.iter()) {
+                        if !self.match_pattern(pat, item, scope) {
+                            return false;
+                        }
+                    }
+                    true
+                } else {
+                    false
                 }
             }
         }

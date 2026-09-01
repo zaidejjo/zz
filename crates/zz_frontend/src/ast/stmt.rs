@@ -1,6 +1,6 @@
 //! Statement AST nodes.
 
-use crate::ast::expr::{Expr, Ident};
+use crate::ast::expr::{Expr, Ident, Pattern};
 use crate::ast::types::Ty;
 use crate::span::Span;
 
@@ -95,6 +95,12 @@ pub enum Stmt {
         value: Expr,
         span: Span,
     },
+    /// Tuple destructuring: `(a, b) := expr`
+    Destructure {
+        pat: Pattern,
+        value: Expr,
+        span: Span,
+    },
     Expr(Expr),
 }
 
@@ -111,6 +117,7 @@ impl Stmt {
             | Stmt::Continue { span }
             | Stmt::Defer { span, .. }
             | Stmt::Assign { span, .. } => *span,
+            Stmt::Destructure { span, .. } => *span,
             Stmt::Expr(e) => e.span(),
         }
     }

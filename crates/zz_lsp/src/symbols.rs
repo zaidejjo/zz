@@ -161,6 +161,7 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
             None
         }
         Stmt::Assign { .. } => None,
+        Stmt::Destructure { .. } => None,
         Stmt::Expr(_) => None,
     }
 }

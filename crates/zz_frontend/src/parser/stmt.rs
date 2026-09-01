@@ -1,6 +1,6 @@
 //! Statement parsing.
 
-use crate::ast::{Block, Expr, Ident, Param, Program, Stmt, Ty};
+use crate::ast::{Block, Expr, Ident, Param, Pattern, Program, Stmt, Ty};
 use crate::diag::{error_at, RawDiag};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
@@ -94,6 +94,13 @@ impl Parser {
             // `x := expr` — short declaration with inference.
             TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {
                 self.parse_short_decl(false)
+            }
+            // `(a, b) := expr` — tuple destructuring declaration.
+            TokenKind::LParen
+                if self.peek_kind_at(1) == TokenKind::Ident
+                    && self.peek_kind_at(2) == TokenKind::Comma =>
+            {
+                self.parse_destructure_decl(false)
             }
             TokenKind::Struct => self.parse_struct(false),
             TokenKind::For => self.parse_for(),
@@ -301,6 +308,41 @@ impl Parser {
             value,
             span,
             pub_,
+        }
+    }
+
+    /// Parse `(a, b) := expr` — tuple destructuring declaration.
+    pub(crate) fn parse_destructure_decl(&mut self, _pub_: bool) -> Stmt {
+        let lparen = self.advance(); // `(`
+        let mut pats = Vec::new();
+        // Parse first pattern
+        pats.push(self.parse_pattern());
+        // Parse remaining patterns
+        while self.eat(TokenKind::Comma) {
+            if self.at(TokenKind::RParen) {
+                break;
+            }
+            pats.push(self.parse_pattern());
+        }
+        let rparen = if self.eat(TokenKind::RParen) {
+            self.previous().span
+        } else {
+            self.error_here("expected `)` to close destructuring pattern");
+            self.peek().span
+        };
+        // Parse `:=`
+        if !self.eat(TokenKind::ColonEq) {
+            self.error_here("expected `:=` after destructuring pattern");
+        }
+        let value = self.parse_expr();
+        let span = lparen.span.join(value.span());
+        Stmt::Destructure {
+            pat: Pattern::Tuple {
+                pats,
+                span: lparen.span.join(rparen),
+            },
+            value,
+            span,
         }
     }
 

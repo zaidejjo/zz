@@ -115,6 +115,9 @@ impl<'a> Rewriter<'a> {
                 self.rewrite_expr(target);
                 self.rewrite_expr(value);
             }
+            Stmt::Destructure { value, .. } => {
+                self.rewrite_expr(value);
+            }
             Stmt::Expr(e) => self.rewrite_expr(e),
             Stmt::Import { .. } => {}
         }
@@ -270,6 +273,11 @@ impl<'a> Rewriter<'a> {
             }
             Expr::Array { elems, .. } => {
                 for e in elems {
+                    self.rewrite_expr(e);
+                }
+            }
+            Expr::Tuple { items, .. } => {
+                for e in items {
                     self.rewrite_expr(e);
                 }
             }

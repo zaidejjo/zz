@@ -134,6 +134,11 @@ pub(crate) fn scan_expr_captured(
                 scan_expr_captured(e, defined, free);
             }
         }
+        Expr::Tuple { items, .. } => {
+            for e in items {
+                scan_expr_captured(e, defined, free);
+            }
+        }
         Expr::ListComp {
             body,
             var,
@@ -235,6 +240,10 @@ pub(crate) fn scan_stmt_captured(
             scan_expr_captured(value, defined, free);
             scan_expr_captured(target, defined, free);
         }
+        Stmt::Destructure { pat, value, .. } => {
+            scan_expr_captured(value, defined, free);
+            collect_pattern_bindings(pat, defined);
+        }
         Stmt::Expr(e) => scan_expr_captured(e, defined, free),
     }
 }
@@ -249,6 +258,11 @@ pub(crate) fn collect_pattern_bindings(
             defined.insert(name.name.clone());
         }
         Pattern::Variant { arg: Some(p), .. } => collect_pattern_bindings(p, defined),
+        Pattern::Tuple { pats, .. } => {
+            for p in pats {
+                collect_pattern_bindings(p, defined);
+            }
+        }
         _ => {}
     }
 }

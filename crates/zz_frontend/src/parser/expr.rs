@@ -572,18 +572,51 @@ impl Parser {
             TokenKind::LParen => {
                 let lparen = self.advance();
                 self.push_delim(TokenKind::LParen, lparen.span);
-                let inner = self.parse_expr();
+                // Check for empty tuple `()`
+                if self.at(TokenKind::RParen) {
+                    let rparen = self.advance().span;
+                    self.pop_delim(TokenKind::RParen, rparen);
+                    return Expr::Tuple {
+                        items: vec![],
+                        span: tok.span.join(rparen),
+                    };
+                }
+                let first = self.parse_expr();
+                let first_span = first.span();
+                // Check for tuple: `(expr, ...)`
+                if self.at(TokenKind::Comma) {
+                    let mut items = vec![first];
+                    while self.eat(TokenKind::Comma) {
+                        if self.at(TokenKind::RParen) {
+                            break;
+                        }
+                        items.push(self.parse_expr());
+                    }
+                    let end = if self.eat_close(TokenKind::RParen) {
+                        let rparen = self.previous().span;
+                        self.pop_delim(TokenKind::RParen, rparen);
+                        rparen
+                    } else {
+                        self.error_here("expected `)` to close tuple expression");
+                        items.last().map(|e| e.span()).unwrap_or(first_span)
+                    };
+                    return Expr::Tuple {
+                        items,
+                        span: tok.span.join(end),
+                    };
+                }
+                // Grouped expression: `(expr)`
                 let end = if self.eat_close(TokenKind::RParen) {
                     let rparen = self.previous().span;
                     self.pop_delim(TokenKind::RParen, rparen);
                     rparen
                 } else {
                     self.error_here("expected `)` to close parenthesized expression");
-                    inner.span()
+                    first.span()
                 };
                 let span = tok.span.join(end);
                 Expr::Paren {
-                    expr: Box::new(inner),
+                    expr: Box::new(first),
                     span,
                 }
             }
@@ -909,12 +942,26 @@ impl Parser {
                 break;
             }
             let pat = self.parse_pattern();
+            // Match guard: `pat if guard => body`
+            let guard = if self.at(TokenKind::If) && !self.at(TokenKind::Arrow) {
+                self.advance(); // consume `if`
+                Some(self.parse_expr())
+            } else {
+                None
+            };
             if !self.eat(TokenKind::Arrow) {
                 self.error_here("expected `=>` after match pattern");
             }
             let body = self.parse_expr();
-            let span = pat.span().join(body.span());
-            arms.push(MatchArm { pat, body, span });
+            let start_span = pat.span();
+            let end_span = body.span();
+            let span = start_span.join(end_span);
+            arms.push(MatchArm {
+                pat,
+                guard,
+                body,
+                span,
+            });
             if self.eat(TokenKind::Comma) {
                 continue;
             }
@@ -1050,6 +1097,27 @@ impl Parser {
                     arg,
                     span,
                 }
+            }
+            TokenKind::LParen => {
+                self.advance(); // consume `(`
+                let mut pats = Vec::new();
+                if !self.at(TokenKind::RParen) {
+                    pats.push(self.parse_pattern());
+                    while self.eat(TokenKind::Comma) {
+                        if self.at(TokenKind::RParen) {
+                            break;
+                        }
+                        pats.push(self.parse_pattern());
+                    }
+                }
+                let end = if self.eat(TokenKind::RParen) {
+                    self.previous().span
+                } else {
+                    self.error_here("expected `)` to close tuple pattern");
+                    self.peek().span
+                };
+                let span = tok.span.join(end);
+                Pattern::Tuple { pats, span }
             }
             _ => {
                 self.error_here(format!("expected pattern, found {}", tok.kind.describe()));

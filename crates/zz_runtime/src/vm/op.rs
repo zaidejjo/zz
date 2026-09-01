@@ -98,6 +98,8 @@ pub enum Op {
     // ---- collections ----
     /// Pop `n` values and push an array.
     MakeArray(u16),
+    /// Pop a tuple/array and push its elements on the stack.
+    UnpackTuple(u8),
     /// Pop a value and an array; push the array with the value appended.
     ArrayPush(Span),
     /// Pop `2n` values (key, value pairs) and push a dict.
@@ -151,6 +153,9 @@ pub enum Op {
         next: usize,
         has_env: bool,
     },
+    /// Pop a bool guard value; if false, jump to `next` (next arm).
+    /// Used after MatchArm when a guard is present.
+    MatchGuard { next: usize },
     /// Error: no match arm matched.
     MatchError(Span),
     /// Pop the value; try `pat` in a fresh scope (when `has_env`). On a

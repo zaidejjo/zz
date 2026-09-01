@@ -232,6 +232,16 @@ impl Checker {
                 self.check_expr(expr);
                 Type::Unit
             }
+            Stmt::Destructure {
+                pat,
+                value,
+                span: _,
+            } => {
+                let vt = self.check_expr(value);
+                let vt = self.unifier.resolve(&vt);
+                self.bind_pattern(pat, &vt);
+                Type::Unit
+            }
             Stmt::Assign {
                 target,
                 value,
@@ -664,6 +674,10 @@ impl Checker {
                 let types: Vec<Type> = elems.iter().map(|e| self.check_expr(e)).collect();
                 let elem_t = self.merge_types(types);
                 Type::Array(Box::new(elem_t))
+            }
+            Expr::Tuple { items, .. } => {
+                let types: Vec<Type> = items.iter().map(|e| self.check_expr(e)).collect();
+                Type::Tuple(types)
             }
             Expr::ListComp {
                 body,
@@ -1305,6 +1319,13 @@ impl Checker {
         for arm in arms {
             self.push_scope();
             self.bind_pattern(&arm.pat, &st);
+            // Check match guard: must resolve to bool
+            if let Some(ref guard) = arm.guard {
+                let gt = self.check_expr(guard);
+                if let Err(e) = self.unifier.unify(&gt, &Type::Bool) {
+                    self.report_mismatch(e, guard.span());
+                }
+            }
             let bt = self.check_expr(&arm.body);
             self.pop_scope();
             match &result {
@@ -1439,6 +1460,42 @@ impl Checker {
                 };
                 if let Some((p, inner)) = inner {
                     self.bind_pattern(&p, &inner);
+                }
+            }
+            Pattern::Tuple { pats, span } => {
+                let rt = self.unifier.resolve(ty);
+                match rt {
+                    Type::Tuple(inner_types) => {
+                        if pats.len() != inner_types.len() {
+                            self.errors.push(error_at(
+                                format!(
+                                    "expected tuple with {} elements, found {}",
+                                    inner_types.len(),
+                                    pats.len()
+                                ),
+                                *span,
+                            ));
+                        } else {
+                            for (pat, inner_ty) in pats.iter().zip(inner_types.iter()) {
+                                self.bind_pattern(pat, inner_ty);
+                            }
+                        }
+                    }
+                    Type::Var(_) => {
+                        // If type is unknown, bind all patterns to fresh vars
+                        let fv = self.unifier.fresh_var();
+                        for pat in pats {
+                            self.bind_pattern(pat, &fv);
+                        }
+                    }
+                    other => {
+                        self.errors.push(error_at(
+                            format!(
+                                "cannot destructure a value of type `{other}` into a tuple pattern"
+                            ),
+                            *span,
+                        ));
+                    }
                 }
             }
         }
