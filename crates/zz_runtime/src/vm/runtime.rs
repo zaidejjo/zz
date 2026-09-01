@@ -697,7 +697,12 @@ impl Vm {
                         }
                     }
                 }
-                Op::MatchArm { pat, next, has_env } => {
+                Op::MatchArm {
+                    pat,
+                    next,
+                    has_env,
+                    restore,
+                } => {
                     let sv = self.stack.pop().unwrap();
                     let matched = if *has_env {
                         let scope = Env::with_parent(&interp.env);
@@ -710,15 +715,27 @@ impl Vm {
                         interp.match_pattern(pat, &sv, &interp.env)
                     };
                     if !matched {
-                        self.stack.push(sv);
+                        if *restore {
+                            self.stack.push(sv);
+                        }
                         self.frames.last_mut().unwrap().ip = *next;
                     }
                 }
-                Op::MatchGuard { next } => {
+                Op::MatchGuard { next, has_env } => {
                     let guard_val = self.stack.pop().unwrap();
                     match guard_val {
                         Value::Bool(true) => {}
                         _ => {
+                            if *has_env {
+                                // Exit the scope created by MatchArm
+                                let parent = {
+                                    let env = interp.env.borrow();
+                                    env.parent_rc()
+                                };
+                                if let Some(env_ref) = parent {
+                                    interp.env = env_ref;
+                                }
+                            }
                             self.frames.last_mut().unwrap().ip = *next;
                         }
                     }

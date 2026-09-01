@@ -146,16 +146,18 @@ pub enum Op {
     // ---- pattern matching ----
     /// Pop the scrutinee; try `pat` in a fresh scope (when `has_env`, i.e.
     /// the pattern binds names). On a match, run the body in that scope;
-    /// otherwise push the scrutinee back and jump to `next` (the following
-    /// arm or the non-exhaustive error).
+    /// otherwise jump to `next` (the following arm or the non-exhaustive
+    /// error). When `restore` is true, push the scrutinee back before
+    /// jumping (used when the compiler reloads the scrutinee from a slot).
     MatchArm {
         pat: Pattern,
         next: usize,
         has_env: bool,
+        restore: bool,
     },
     /// Pop a bool guard value; if false, jump to `next` (next arm).
-    /// Used after MatchArm when a guard is present.
-    MatchGuard { next: usize },
+    /// When `has_env` is true, also exit the scope created by MatchArm.
+    MatchGuard { next: usize, has_env: bool },
     /// Error: no match arm matched.
     MatchError(Span),
     /// Pop the value; try `pat` in a fresh scope (when `has_env`). On a
