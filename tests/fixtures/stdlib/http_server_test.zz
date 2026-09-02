@@ -1,0 +1,39 @@
+// tests/fixtures/stdlib/http_server_test.zz — HTTP server routes
+import std.http
+
+// Create a server and chain routes
+s := http.server()
+s2 := http.route_get(s, "/greet", |_path: str| "hello!")
+s3 := http.route_post(s2, "/data", |body: str| "got: {body}")
+s4 := http.route_put(s3, "/items", |body: str| "item updated")
+s5 := http.route_delete(s4, "/items", |_path: str| "item deleted")
+
+// Dispatch requests
+match http.handle(s5, "GET", "/greet", "") {
+    .ok(v) => println("r1: {v}"),
+    .err(e) => println("ERROR: {e}"),
+}
+
+match http.handle(s5, "POST", "/data", "test-payload") {
+    .ok(v) => println("r2: {v}"),
+    .err(e) => println("ERROR: {e}"),
+}
+
+match http.handle(s5, "PUT", "/items", "new-item") {
+    .ok(v) => println("r3: {v}"),
+    .err(e) => println("ERROR: {e}"),
+}
+
+match http.handle(s5, "DELETE", "/items", "") {
+    .ok(v) => println("r4: {v}"),
+    .err(e) => println("ERROR: {e}"),
+}
+
+// Test wildcard route
+s6 := http.route_get(s5, "*", |_path: str| "fallback")
+match http.handle(s6, "GET", "/anything", "") {
+    .ok(v) => println("r5 (wildcard): {v}"),
+    .err(e) => println("ERROR: {e}"),
+}
+
+println("http_server_test_ok")

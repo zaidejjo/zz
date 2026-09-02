@@ -1,0 +1,38 @@
+// tests/fixtures/stdlib/http_client_test.zz — HTTP server + dispatch
+import std.http
+
+// Create a server and chain routes
+s := http.server()
+s2 := http.route_get(s, "/hello", |_path: str| "world")
+s3 := http.route_post(s2, "/echo", |body: str| body)
+s4 := http.route_put(s3, "/update", |body: str| "updated: {body}")
+s5 := http.route_delete(s4, "/remove", |_path: str| "removed")
+
+// Test dispatch
+match http.handle(s5, "GET", "/hello", "") {
+    .ok(v) => println("GET /hello: {v}"),
+    .err(e) => println("ERROR: {e}"),
+}
+
+match http.handle(s5, "POST", "/echo", "ping") {
+    .ok(v) => println("POST /echo: {v}"),
+    .err(e) => println("ERROR: {e}"),
+}
+
+match http.handle(s5, "PUT", "/update", "data") {
+    .ok(v) => println("PUT /update: {v}"),
+    .err(e) => println("ERROR: {e}"),
+}
+
+match http.handle(s5, "DELETE", "/remove", "") {
+    .ok(v) => println("DELETE /remove: {v}"),
+    .err(e) => println("ERROR: {e}"),
+}
+
+// Test error on missing route
+match http.handle(s5, "GET", "/missing", "") {
+    .ok(v) => println("ERROR: should have failed"),
+    .err(_e) => println("missing_route_ok"),
+}
+
+println("http_client_test_ok")

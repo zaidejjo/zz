@@ -1,0 +1,48 @@
+// examples/weather_api_client.zz — Fetch data from a public REST API
+import std.http
+import std.json
+
+println("=== HTTP Client Demo ===")
+
+// GET request to JSONPlaceholder
+println("1. GET request to jsonplaceholder...")
+match http.get("https://jsonplaceholder.typicode.com/posts/1", {}) {
+    .ok(res) => {
+        status := res.status() ?? 0
+        println("   Status: {status}")
+
+        body := res.text() ?? ""
+        println("   Body length: {str.length(body)} chars")
+
+        // Parse as JSON
+        json_data := res.json() ?? json.null()
+        println("   JSON type: {typeof(json_data)}")
+    },
+    .err(e) => println("   Error: {e}"),
+}
+
+// POST request
+println("2. POST request...")
+match http.post("https://jsonplaceholder.typicode.com/posts", "{\"title\": \"foo\", \"body\": \"bar\", \"userId\": 1}", {"Content-Type": "application/json"}) {
+    .ok(res) => {
+        status := res.status() ?? 0
+        println("   Status: {status}")
+        body := res.text() ?? ""
+        println("   Response length: {str.length(body)} chars")
+    },
+    .err(e) => println("   Error: {e}"),
+}
+
+// GET with headers
+println("3. GET with custom headers...")
+match http.get("https://httpbin.org/headers", {"X-Custom": "zz-lang", "Accept": "application/json"}) {
+    .ok(res) => {
+        status := res.status() ?? 0
+        println("   Status: {status}")
+        headers := res.headers() ?? {}
+        println("   Got response headers")
+    },
+    .err(e) => println("   Error: {e}"),
+}
+
+println("weather_api_client_done")

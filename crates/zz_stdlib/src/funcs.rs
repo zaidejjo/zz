@@ -427,12 +427,73 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("encoded", Type::Str)], result_str()),
     );
 
-    // std.http
+    // std.http — Client
+    let result_response = || Type::Result(Box::new(Type::Response), Box::new(Type::Str));
+    let dict_str = || Type::Dict(Box::new(Type::Str), Box::new(Type::Str));
+    m.insert(
+        "std.http.get".into(),
+        sig(
+            vec![("url", Type::Str), ("headers", dict_str())],
+            result_response(),
+        ),
+    );
+    m.insert(
+        "std.http.post".into(),
+        sig(
+            vec![
+                ("url", Type::Str),
+                ("body", Type::Str),
+                ("headers", dict_str()),
+            ],
+            result_response(),
+        ),
+    );
+    m.insert(
+        "std.http.put".into(),
+        sig(
+            vec![
+                ("url", Type::Str),
+                ("body", Type::Str),
+                ("headers", dict_str()),
+            ],
+            result_response(),
+        ),
+    );
+    m.insert(
+        "std.http.delete".into(),
+        sig(
+            vec![("url", Type::Str), ("headers", dict_str())],
+            result_response(),
+        ),
+    );
+
+    // std.http — Response methods (dispatched via method_namespace "http")
+    m.insert(
+        "http.status".into(),
+        sig(vec![("res", Type::Response)], Type::Int),
+    );
+    m.insert(
+        "http.text".into(),
+        sig(vec![("res", Type::Response)], Type::Str),
+    );
+    m.insert(
+        "http.json".into(),
+        sig(vec![("res", Type::Response)], Type::Json),
+    );
+    m.insert(
+        "http.headers".into(),
+        sig(
+            vec![("res", Type::Response)],
+            Type::Dict(Box::new(Type::Str), Box::new(Type::Str)),
+        ),
+    );
+
+    // std.http — Server (per-route model)
     let server_t = Type::HttpServer;
     let handler_t = Type::Func(vec![Type::Str], Box::new(Type::Str));
     m.insert("std.http.server".into(), sig(vec![], server_t.clone()));
     m.insert(
-        "std.http.get".into(),
+        "std.http.route_get".into(),
         sig(
             vec![
                 ("server", server_t.clone()),
@@ -443,7 +504,29 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
     m.insert(
-        "std.http.post".into(),
+        "std.http.route_post".into(),
+        sig(
+            vec![
+                ("server", server_t.clone()),
+                ("path", Type::Str),
+                ("handler", handler_t.clone()),
+            ],
+            server_t.clone(),
+        ),
+    );
+    m.insert(
+        "std.http.route_put".into(),
+        sig(
+            vec![
+                ("server", server_t.clone()),
+                ("path", Type::Str),
+                ("handler", handler_t.clone()),
+            ],
+            server_t.clone(),
+        ),
+    );
+    m.insert(
+        "std.http.route_delete".into(),
         sig(
             vec![
                 ("server", server_t.clone()),
@@ -462,12 +545,138 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
                 ("path", Type::Str),
                 ("body", Type::Str),
             ],
-            Type::Str,
+            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
         ),
     );
     m.insert(
         "std.http.listen".into(),
         sig(vec![("server", server_t), ("port", Type::Int)], Type::Unit),
+    );
+
+    // std.http — Request helpers
+    m.insert(
+        "std.http.request_method".into(),
+        sig(
+            vec![("req", Type::Dict(Box::new(Type::Str), Box::new(Type::Str)))],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "std.http.request_path".into(),
+        sig(
+            vec![("req", Type::Dict(Box::new(Type::Str), Box::new(Type::Str)))],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "std.http.request_body".into(),
+        sig(
+            vec![("req", Type::Dict(Box::new(Type::Str), Box::new(Type::Str)))],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "std.http.request_headers".into(),
+        sig(
+            vec![("req", Type::Dict(Box::new(Type::Str), Box::new(Type::Str)))],
+            Type::Dict(Box::new(Type::Str), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.http.request_query".into(),
+        sig(
+            vec![("req", Type::Dict(Box::new(Type::Str), Box::new(Type::Str)))],
+            Type::Str,
+        ),
+    );
+
+    // std.http — Response builders
+    m.insert(
+        "std.http.response_json".into(),
+        sig(
+            vec![("data", Type::Json), ("status", Type::Int)],
+            Type::Response,
+        ),
+    );
+    m.insert(
+        "std.http.response_text".into(),
+        sig(
+            vec![("data", Type::Str), ("status", Type::Int)],
+            Type::Response,
+        ),
+    );
+    m.insert(
+        "std.http.response_html".into(),
+        sig(
+            vec![("data", Type::Str), ("status", Type::Int)],
+            Type::Response,
+        ),
+    );
+
+    // std.net — TCP networking
+    let result_tcp_stream = || Type::Result(Box::new(Type::TcpStream), Box::new(Type::Str));
+    let result_tcp_listener = || Type::Result(Box::new(Type::TcpListener), Box::new(Type::Str));
+    let result_int = || Type::Result(Box::new(Type::Int), Box::new(Type::Str));
+    let result_str = || Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+    let result_bool = || Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
+    m.insert(
+        "std.net.tcp_connect".into(),
+        sig(
+            vec![("addr", Type::Str), ("timeout_ms", Type::Int)],
+            result_tcp_stream(),
+        ),
+    );
+    m.insert(
+        "std.net.tcp_listen".into(),
+        sig(vec![("addr", Type::Str)], result_tcp_listener()),
+    );
+    m.insert(
+        "std.net.tcp_accept".into(),
+        sig(vec![("listener", Type::TcpListener)], result_tcp_stream()),
+    );
+    m.insert(
+        "std.net.tcp_write".into(),
+        sig(
+            vec![("stream", Type::TcpStream), ("data", Type::Str)],
+            result_int(),
+        ),
+    );
+    m.insert(
+        "std.net.tcp_read".into(),
+        sig(
+            vec![("stream", Type::TcpStream), ("max_bytes", Type::Int)],
+            result_str(),
+        ),
+    );
+    m.insert(
+        "std.net.tcp_readline".into(),
+        sig(vec![("stream", Type::TcpStream)], result_str()),
+    );
+    m.insert(
+        "std.net.tcp_close".into(),
+        sig(vec![("stream", Type::TcpStream)], result_bool()),
+    );
+    m.insert(
+        "std.net.peer_addr".into(),
+        sig(vec![("stream", Type::TcpStream)], result_str()),
+    );
+    m.insert(
+        "std.net.local_addr".into(),
+        sig(vec![("stream", Type::TcpStream)], result_str()),
+    );
+    m.insert(
+        "std.net.set_read_timeout".into(),
+        sig(
+            vec![("stream", Type::TcpStream), ("ms", Type::Int)],
+            result_bool(),
+        ),
+    );
+    m.insert(
+        "std.net.set_write_timeout".into(),
+        sig(
+            vec![("stream", Type::TcpStream), ("ms", Type::Int)],
+            result_bool(),
+        ),
     );
 
     // std.fs
@@ -813,7 +1022,7 @@ mod tests {
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
         assert!(funcs.contains_key("append"));
-        assert_eq!(funcs.len(), 124);
+        assert_eq!(funcs.len(), 153);
     }
 
     #[test]

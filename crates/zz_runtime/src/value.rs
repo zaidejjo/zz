@@ -1,12 +1,14 @@
 //! Runtime values for the Phase 1 tree-walker.
 
 use std::fmt;
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 
 use zz_frontend::ast::{Expr, Param};
 
 use crate::env::Env;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
     Float(f64),
@@ -29,6 +31,12 @@ pub enum Value {
     Json(JsonValue),
     /// An HTTP server handle with its registered routes.
     HttpServer(HttpServer),
+    /// A TCP stream (opaque, wrapped in Arc<Mutex> for clone safety).
+    TcpStream(Arc<Mutex<TcpStream>>),
+    /// A TCP listener (opaque, wrapped in Arc<Mutex> for clone safety).
+    TcpListener(Arc<Mutex<TcpListener>>),
+    /// An HTTP response (status + body + headers).
+    Response(Response),
     /// A struct instance: its type name and insertion-ordered fields.
     Object {
         name: String,
@@ -47,6 +55,14 @@ pub use crate::json::JsonValue;
 #[derive(Debug, Clone, PartialEq)]
 pub struct HttpServer {
     pub routes: Vec<(String, String, Value)>,
+}
+
+/// An HTTP response: status code, body, and headers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Response {
+    pub status: u16,
+    pub body: String,
+    pub headers: Vec<(String, String)>,
 }
 
 /// A native function reference: name + arity. The implementation lives in
@@ -100,6 +116,9 @@ impl Value {
             Value::Native(_) => "native".to_string(),
             Value::Json(_) => "json".to_string(),
             Value::HttpServer(_) => "http.server".to_string(),
+            Value::TcpStream(_) => "tcp.stream".to_string(),
+            Value::TcpListener(_) => "tcp.listener".to_string(),
+            Value::Response(_) => "http.response".to_string(),
             Value::Object { name, .. } => name.clone(),
             Value::Range(..) => "range".to_string(),
             Value::Tuple(_) => "tuple".to_string(),
@@ -115,6 +134,9 @@ impl Value {
             Value::Array(_) => Some("vec"),
             Value::Option(_) => Some("option"),
             Value::Result(_) => Some("result"),
+            Value::TcpStream(_) => Some("net"),
+            Value::TcpListener(_) => Some("net"),
+            Value::Response(_) => Some("http"),
             Value::Object { name, .. } => {
                 // Extract namespace from struct name (e.g., "shapes.Point" -> "shapes")
                 name.rsplit_once('.')
@@ -168,6 +190,9 @@ impl fmt::Display for Value {
             Value::Native(nf) => write!(f, "<native {}>", nf.name),
             Value::Json(j) => write!(f, "{j}"),
             Value::HttpServer(_) => write!(f, "<http server>"),
+            Value::TcpStream(_) => write!(f, "<tcp stream>"),
+            Value::TcpListener(_) => write!(f, "<tcp listener>"),
+            Value::Response(res) => write!(f, "<http response {}>", res.status),
             Value::Object { name, fields } => {
                 write!(f, "{name}{{")?;
                 for (i, (k, v)) in fields.iter().enumerate() {
@@ -195,6 +220,46 @@ impl fmt::Display for Value {
                 }
                 write!(f, ")")
             }
+        }
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Unit, Value::Unit) => true,
+            (Value::Option(a), Value::Option(b)) => a == b,
+            (Value::Result(a), Value::Result(b)) => a == b,
+            (Value::Array(a), Value::Array(b)) => a == b,
+            (Value::Dict(a), Value::Dict(b)) => a == b,
+            (Value::Json(a), Value::Json(b)) => a == b,
+            (Value::Tuple(a), Value::Tuple(b)) => a == b,
+            (Value::Response(a), Value::Response(b)) => a == b,
+            (Value::HttpServer(a), Value::HttpServer(b)) => a == b,
+            (
+                Value::Object {
+                    name: an,
+                    fields: af,
+                },
+                Value::Object {
+                    name: bn,
+                    fields: bf,
+                },
+            ) => an == bn && af == bf,
+            // Opaque types: compare by Arc pointer (identity, not deep equality)
+            (Value::TcpStream(a), Value::TcpStream(b)) => Arc::ptr_eq(a, b),
+            (Value::TcpListener(a), Value::TcpListener(b)) => Arc::ptr_eq(a, b),
+            // Func and Native: compare by reference identity (not deep equality)
+            (Value::Func(_), Value::Func(_)) => std::ptr::eq(self, other),
+            (Value::Native(_), Value::Native(_)) => std::ptr::eq(self, other),
+            (Value::Range(a1, a2, a3), Value::Range(b1, b2, b3)) => {
+                a1 == b1 && a2 == b2 && a3 == b3
+            }
+            _ => false,
         }
     }
 }
