@@ -5,62 +5,61 @@ use zz_runtime::{EvalError, Interp, Span, Value};
 pub(crate) fn json_parse(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let s = expect_str(args, 0, "std.json.parse")?;
     match parse_json(&s) {
-        Ok(j) => Ok(Value::Json(j)),
-        Err(msg) => Err(EvalError::new(format!("std.json.parse: {msg}"), span)),
+        Ok(j) => Ok(Value::Result(Ok(Box::new(Value::Json(j))))),
+        Err(msg) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
+            "invalid JSON: {msg}"
+        )))))),
     }
 }
 
 pub(crate) fn json_stringify(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let v = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for std.json.stringify", span))?;
-    let j = value_to_json(&v)?;
-    Ok(Value::Str(to_json_string(&j)))
+        .ok_or_else(|| EvalError::new("missing argument for std.json.stringify", _span))?;
+    match value_to_json(&v) {
+        Ok(j) => Ok(Value::Result(Ok(Box::new(Value::Str(to_json_string(&j)))))),
+        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(e.message))))),
+    }
 }
 
 pub(crate) fn json_get(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let j = expect_json(args, 0, "std.json.get")?;
     let key = expect_str(args, 1, "std.json.get")?;
     match j {
-        JsonValue::Obj(entries) => entries
-            .into_iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| Value::Json(v))
-            .ok_or_else(|| EvalError::new(format!("std.json.get: no key `{key}`"), span)),
-        JsonValue::Arr(items) => {
-            let idx: usize = key.parse().map_err(|_| {
-                EvalError::new(
-                    format!("std.json.get: expected a numeric index for array, got `{key}`"),
-                    span,
-                )
-            })?;
-            items.get(idx).cloned().map(Value::Json).ok_or_else(|| {
-                EvalError::new(
-                    format!(
-                        "std.json.get: index {idx} out of bounds (len {})",
-                        items.len()
-                    ),
-                    span,
-                )
-            })
-        }
-        other => Err(EvalError::new(
-            format!("std.json.get: expected an object or array, found `{other}`"),
-            span,
-        )),
+        JsonValue::Obj(entries) => match entries.into_iter().find(|(k, _)| *k == key) {
+            Some((_, v)) => Ok(Value::Result(Ok(Box::new(Value::Json(v))))),
+            None => Ok(Value::Result(Err(Box::new(Value::Str(format!(
+                "key `{key}` not found"
+            )))))),
+        },
+        JsonValue::Arr(items) => match key.parse::<usize>() {
+            Ok(idx) => match items.get(idx) {
+                Some(v) => Ok(Value::Result(Ok(Box::new(Value::Json(v.clone()))))),
+                None => Ok(Value::Result(Err(Box::new(Value::Str(format!(
+                    "index {idx} out of bounds (len {})",
+                    items.len()
+                )))))),
+            },
+            Err(_) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
+                "expected a numeric index for array, got `{key}`"
+            )))))),
+        },
+        other => Ok(Value::Result(Err(Box::new(Value::Str(format!(
+            "expected an object or array, found `{other}`"
+        )))))),
     }
 }
 

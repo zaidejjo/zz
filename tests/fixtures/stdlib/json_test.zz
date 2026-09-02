@@ -1,0 +1,72 @@
+// tests/fixtures/stdlib/json_test.zz — json E2E test
+import std.json
+
+// ── parse valid JSON ──
+j := json.parse("{\"a\": 1, \"b\": [2, 3], \"c\": {\"nested\": true}}").unwrap()
+
+// ── get object keys ──
+a := json.get(j, "a").unwrap()
+println("a: {a}")
+
+b := json.get(j, "b").unwrap()
+println("b: {b}")
+
+c := json.get(j, "c").unwrap()
+println("c: {c}")
+
+// ── get array element ──
+first := json.get(b, "0").unwrap()
+println("b[0]: {first}")
+
+second := json.get(b, "1").unwrap()
+println("b[1]: {second}")
+
+// ── nested get ──
+nested := json.get(c, "nested").unwrap()
+println("c.nested: {nested}")
+
+// ── type extraction ──
+println("a as int: {json.as_int(a)}")
+println("a as float: {json.as_float(a)}")
+
+// ── stringify ──
+arr := json.stringify([10, 20, 30]).unwrap()
+println("array: {arr}")
+
+obj := json.stringify({"x": 1}).unwrap()
+println("object: {obj}")
+
+null_val := json.stringify(()).unwrap()
+println("null: {null_val}")
+
+bool_val := json.stringify(true).unwrap()
+println("bool: {bool_val}")
+
+// ── round trip ──
+original := "{\"msg\": \"hello\", \"n\": 42}"
+reparsed := json.parse(original).unwrap()
+roundtrip := json.stringify(reparsed).unwrap()
+println("roundtrip: {roundtrip}")
+
+// ── parse error ──
+bad := json.parse("not valid json at all!!!")
+match bad {
+    .ok(_) => println("bad parse: should not happen"),
+    .err(msg) => println("bad parse: {msg}"),
+}
+
+// ── missing key ──
+miss := json.get(j, "missing")
+match miss {
+    .ok(_) => println("missing: should not happen"),
+    .err(msg) => println("missing key: {msg}"),
+}
+
+// ── invalid index ──
+bad_idx := json.get(b, "abc")
+match bad_idx {
+    .ok(_) => println("bad index: should not happen"),
+    .err(msg) => println("bad index: {msg}"),
+}
+
+println("json_test_ok")

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use zz_runtime::{EvalError, NativeEntry, Value};
 
 pub(crate) mod builtins;
+pub(crate) mod encoding;
 pub(crate) mod env;
 pub(crate) mod fs;
 pub(crate) mod http;
@@ -141,6 +142,13 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
     );
     // str.* methods (for method dispatch: "hello".trim())
     m.insert(
+        "str.length".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_length,
+        },
+    );
+    m.insert(
         "str.trim".into(),
         NativeEntry {
             arity: 1,
@@ -194,6 +202,27 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 2,
             f: str_mod::str_ends_with,
+        },
+    );
+    m.insert(
+        "str.join".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_mod::str_join,
+        },
+    );
+    m.insert(
+        "str.trim_start".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_trim_start,
+        },
+    );
+    m.insert(
+        "str.trim_end".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_trim_end,
         },
     );
 
@@ -386,6 +415,50 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: json::json_as_bool,
+        },
+    );
+
+    // std.encoding
+    m.insert(
+        "std.encoding.base64_encode".into(),
+        NativeEntry {
+            arity: 1,
+            f: encoding::encoding_base64_encode,
+        },
+    );
+    m.insert(
+        "std.encoding.base64_decode".into(),
+        NativeEntry {
+            arity: 1,
+            f: encoding::encoding_base64_decode,
+        },
+    );
+    m.insert(
+        "std.encoding.hex_encode".into(),
+        NativeEntry {
+            arity: 1,
+            f: encoding::encoding_hex_encode,
+        },
+    );
+    m.insert(
+        "std.encoding.hex_decode".into(),
+        NativeEntry {
+            arity: 1,
+            f: encoding::encoding_hex_decode,
+        },
+    );
+    m.insert(
+        "std.encoding.url_encode".into(),
+        NativeEntry {
+            arity: 1,
+            f: encoding::encoding_url_encode,
+        },
+    );
+    m.insert(
+        "std.encoding.url_decode".into(),
+        NativeEntry {
+            arity: 1,
+            f: encoding::encoding_url_decode,
         },
     );
 
