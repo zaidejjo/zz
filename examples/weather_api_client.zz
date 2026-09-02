@@ -1,5 +1,6 @@
 // examples/weather_api_client.zz — Fetch data from a public REST API
 import std.http
+import std.json
 
 println("=== HTTP Client Demo ===")
 

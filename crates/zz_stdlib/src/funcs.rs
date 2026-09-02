@@ -469,19 +469,19 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
 
     // std.http — Response methods (dispatched via method_namespace "http")
     m.insert(
-        "http.response.status".into(),
+        "http.status".into(),
         sig(vec![("res", Type::Response)], Type::Int),
     );
     m.insert(
-        "http.response.text".into(),
+        "http.text".into(),
         sig(vec![("res", Type::Response)], Type::Str),
     );
     m.insert(
-        "http.response.json".into(),
+        "http.json".into(),
         sig(vec![("res", Type::Response)], Type::Json),
     );
     m.insert(
-        "http.response.headers".into(),
+        "http.headers".into(),
         sig(
             vec![("res", Type::Response)],
             Type::Dict(Box::new(Type::Str), Box::new(Type::Str)),

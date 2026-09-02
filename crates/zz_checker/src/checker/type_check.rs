@@ -955,6 +955,15 @@ impl Checker {
                         Type::Result(_, _) => {
                             sig = self.funcs.get(&format!("result.{method}")).cloned()
                         }
+                        Type::Response => sig = self.funcs.get(&format!("http.{method}")).cloned(),
+                        Type::TcpStream => sig = self.funcs.get(&format!("net.{method}")).cloned(),
+                        Type::TcpListener => {
+                            sig = self.funcs.get(&format!("net.{method}")).cloned()
+                        }
+                        Type::HttpServer => {
+                            sig = self.funcs.get(&format!("http.{method}")).cloned()
+                        }
+                        Type::Json => sig = self.funcs.get(&format!("json.{method}")).cloned(),
                         Type::Struct(sname) => {
                             // Try TypeName.method (impl block methods)
                             sig = self.funcs.get(&format!("{sname}.{method}")).cloned();
@@ -1124,6 +1133,21 @@ impl Checker {
                         }
                         Type::Result(_, _) => {
                             sig = self.funcs.get(&format!("result.{method}")).cloned();
+                        }
+                        Type::Response => {
+                            sig = self.funcs.get(&format!("http.{method}")).cloned();
+                        }
+                        Type::TcpStream => {
+                            sig = self.funcs.get(&format!("net.{method}")).cloned();
+                        }
+                        Type::TcpListener => {
+                            sig = self.funcs.get(&format!("net.{method}")).cloned();
+                        }
+                        Type::HttpServer => {
+                            sig = self.funcs.get(&format!("http.{method}")).cloned();
+                        }
+                        Type::Json => {
+                            sig = self.funcs.get(&format!("json.{method}")).cloned();
                         }
                         Type::Struct(sname) => {
                             // Try TypeName.method (impl block methods)

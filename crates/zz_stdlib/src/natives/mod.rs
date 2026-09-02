@@ -502,28 +502,28 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
 
     // std.http — Response methods (dispatched via method_namespace "http")
     m.insert(
-        "http.response.status".into(),
+        "http.status".into(),
         NativeEntry {
             arity: 1,
             f: http::http_response_status,
         },
     );
     m.insert(
-        "http.response.text".into(),
+        "http.text".into(),
         NativeEntry {
             arity: 1,
             f: http::http_response_text,
         },
     );
     m.insert(
-        "http.response.json".into(),
+        "http.json".into(),
         NativeEntry {
             arity: 1,
             f: http::http_response_json,
         },
     );
     m.insert(
-        "http.response.headers".into(),
+        "http.headers".into(),
         NativeEntry {
             arity: 1,
             f: http::http_response_headers,
