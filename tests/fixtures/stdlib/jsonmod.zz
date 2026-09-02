@@ -2,25 +2,22 @@
 import std.json
 
 // parse object
-data := json.parse("{\"name\": \"Alice\", \"age\": 30}").unwrap()
-println(json.as_str(json.get(data, "name").unwrap()))
-println(json.as_int(json.get(data, "age").unwrap()))
+data := json.parse("{\"name\": \"Alice\", \"age\": 30}") ?? json.null()
+println(json.as_str(json.get(data, "name") ?? json.null()))
+println(json.as_int(json.get(data, "age") ?? json.null()))
 
 // stringify
 obj := {"key": "value", "num": 42}
-match json.stringify(obj) {
-  .ok(json_s) => println(json_s),
-  .err(_) => println("FAIL")
-}
+s := json.stringify(obj) ?? "{}"
+println(s)
 
 // roundtrip
-s := json.stringify(obj).unwrap()
-parsed := json.parse(s).unwrap()
-println(json.as_str(json.get(parsed, "key").unwrap()))
+parsed := json.parse(s) ?? json.null()
+println(json.as_str(json.get(parsed, "key") ?? json.null()))
 
 // json.get on arrays
-arr := json.parse("[10, 20, 30]").unwrap()
-println(json.as_int(json.get(arr, "0").unwrap()))
-println(json.as_int(json.get(arr, "2").unwrap()))
+arr := json.parse("[10, 20, 30]") ?? json.null()
+println(json.as_int(json.get(arr, "0") ?? json.null()))
+println(json.as_int(json.get(arr, "2") ?? json.null()))
 
 println("json_ok")

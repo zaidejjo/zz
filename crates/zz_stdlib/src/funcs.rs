@@ -396,8 +396,9 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert(
         "std.json.as_bool".into(),
-        sig(vec![("j", json_t)], Type::Bool),
+        sig(vec![("j", json_t.clone())], Type::Bool),
     );
+    m.insert("std.json.null".into(), sig(vec![], json_t));
 
     // std.encoding
     let result_str = || Type::Result(Box::new(Type::Str), Box::new(Type::Str));
@@ -812,7 +813,7 @@ mod tests {
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
         assert!(funcs.contains_key("append"));
-        assert_eq!(funcs.len(), 123);
+        assert_eq!(funcs.len(), 124);
     }
 
     #[test]

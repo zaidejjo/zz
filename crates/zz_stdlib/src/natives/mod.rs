@@ -390,6 +390,13 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "std.json.null".into(),
+        NativeEntry {
+            arity: 0,
+            f: json::json_null,
+        },
+    );
+    m.insert(
         "std.json.as_str".into(),
         NativeEntry {
             arity: 1,

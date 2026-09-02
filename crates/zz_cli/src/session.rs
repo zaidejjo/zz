@@ -431,7 +431,7 @@ mod tests {
     fn json_parse_and_get() {
         let mut s = Session::new("<test>");
         let out = s.eval(
-            "import std.json\nj := json.parse(\"{\\\"a\\\": [1, 2]}\").unwrap()\njson.get(j, \"a\")",
+            "import std.json\nj := json.parse(\"{\\\"a\\\": [1, 2]}\") ?? json.null()\njson.get(j, \"a\")",
         );
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, ".ok([1,2])");
@@ -441,7 +441,7 @@ mod tests {
     fn json_as_int() {
         let mut s = Session::new("<test>");
         let out = s.eval(
-            "import std.json\nj := json.parse(\"{\\\"n\\\": 42}\").unwrap()\njson.as_int(json.get(j, \"n\").unwrap())",
+            "import std.json\nj := json.parse(\"{\\\"n\\\": 42}\") ?? json.null()\njson.as_int(json.get(j, \"n\") ?? json.null())",
         );
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "42");

@@ -1,36 +1,44 @@
 // examples/json_example.zz — std.json demonstrations
 import std.json
 
-// ── parse ──
-j := json.parse("{\"name\": \"ZZ\", \"version\": 42, \"active\": true}")
+// ── parse (returns Result) ──
+j := json.parse("{\"name\": \"ZZ\", \"version\": 42, \"active\": true}") ?? json.null()
 println("1. parsed: {j}")
 
-// ── get ──
-name := json.get(j, "name")
-println("2. name: {name}")
+// ── get (returns Result) ──
+name := json.get(j, "name") ?? json.null()
+println("2. name: {json.as_str(name)}")
 
-ver := json.get(j, "version")
-println("3. version: {ver}")
+ver := json.get(j, "version") ?? json.null()
+println("3. version: {json.as_int(ver)}")
 
-active := json.get(j, "active")
-println("4. active: {active}")
+active := json.get(j, "active") ?? json.null()
+println("4. active: {json.as_bool(active)}")
 
-// ── as_str / as_int / as_bool ──
-println("5. as_str: {json.as_str(name)}")
-println("6. as_int: {json.as_int(ver)}")
-println("7. as_bool: {json.as_bool(active)}")
+// ── stringify (returns Result) ──
+data := json.stringify([1, 2, 3]) ?? "[]"
+println("5. stringify array: {data}")
 
-// ── stringify ──
-data := json.stringify([1, 2, 3])
-println("8. stringify array: {data}")
-
-dict_data := json.stringify({"key": "value"})
-println("9. stringify dict: {dict_data}")
+dict_data := json.stringify({"key": "value"}) ?? "{}"
+println("6. stringify dict: {dict_data}")
 
 // ── round trip ──
 original := "{\"x\": 10}"
-parsed := json.parse(original)
-roundtrip := json.stringify(parsed)
-println("10. round trip: {roundtrip}")
+parsed := json.parse(original) ?? json.null()
+roundtrip := json.stringify(parsed) ?? ""
+println("7. round trip: {roundtrip}")
+
+// ── error handling with match ──
+bad := json.parse("not json at all")
+match bad {
+    .ok(_) => println("8. should not happen"),
+    .err(msg) => println("8. parse error: {msg}"),
+}
+
+missing := json.get(j, "nonexistent")
+match missing {
+    .ok(_) => println("9. should not happen"),
+    .err(msg) => println("9. missing key: {msg}"),
+}
 
 println("json_example_done")

@@ -119,6 +119,14 @@ pub(crate) fn json_as_bool(
     }
 }
 
+pub(crate) fn json_null(
+    _interp: &mut Interp,
+    _args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    Ok(Value::Json(JsonValue::Null))
+}
+
 pub(crate) fn expect_json(
     args: &mut Vec<Value>,
     i: usize,
