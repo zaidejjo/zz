@@ -143,6 +143,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     );
 
     // str.* methods (for method dispatch: "hello".trim())
+    m.insert("str.length".into(), sig(vec![("s", Type::Str)], Type::Int));
     m.insert("str.trim".into(), sig(vec![("s", Type::Str)], Type::Str));
     m.insert(
         "str.to_upper".into(),
@@ -177,6 +178,24 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "str.ends_with".into(),
         sig(vec![("s", Type::Str), ("suffix", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "str.join".into(),
+        sig(
+            vec![
+                ("items", Type::Array(Box::new(Type::Str))),
+                ("sep", Type::Str),
+            ],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "str.trim_start".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "str.trim_end".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
     );
 
     // std.vec — generic over element type T.
@@ -344,17 +363,23 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     let t = Type::Named("T".to_string());
     m.insert(
         "std.json.parse".into(),
-        sig(vec![("s", Type::Str)], json_t.clone()),
+        sig(
+            vec![("s", Type::Str)],
+            Type::Result(Box::new(json_t.clone()), Box::new(Type::Str)),
+        ),
     );
     m.insert(
         "std.json.stringify".into(),
-        sig_t(vec![("v", t.clone())], Type::Str),
+        sig_t(
+            vec![("v", t.clone())],
+            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+        ),
     );
     m.insert(
         "std.json.get".into(),
         sig(
             vec![("j", json_t.clone()), ("key", Type::Str)],
-            json_t.clone(),
+            Type::Result(Box::new(json_t.clone()), Box::new(Type::Str)),
         ),
     );
     m.insert(
@@ -371,7 +396,35 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert(
         "std.json.as_bool".into(),
-        sig(vec![("j", json_t)], Type::Bool),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert("std.json.null".into(), sig(vec![], json_t));
+
+    // std.encoding
+    let result_str = || Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+    m.insert(
+        "std.encoding.base64_encode".into(),
+        sig(vec![("data", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.encoding.base64_decode".into(),
+        sig(vec![("encoded", Type::Str)], result_str()),
+    );
+    m.insert(
+        "std.encoding.hex_encode".into(),
+        sig(vec![("data", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.encoding.hex_decode".into(),
+        sig(vec![("encoded", Type::Str)], result_str()),
+    );
+    m.insert(
+        "std.encoding.url_encode".into(),
+        sig(vec![("data", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.encoding.url_decode".into(),
+        sig(vec![("encoded", Type::Str)], result_str()),
     );
 
     // std.http
@@ -760,7 +813,7 @@ mod tests {
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
         assert!(funcs.contains_key("append"));
-        assert_eq!(funcs.len(), 113);
+        assert_eq!(funcs.len(), 124);
     }
 
     #[test]

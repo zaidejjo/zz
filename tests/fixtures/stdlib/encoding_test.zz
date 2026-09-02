@@ -1,0 +1,53 @@
+// tests/fixtures/stdlib/encoding_test.zz — encoding E2E test
+import std.encoding
+
+// ── base64 encode/decode ──
+encoded := encoding.base64_encode("Hello, ZZ!")
+println("b64: {encoded}")
+
+decoded := encoding.base64_decode(encoded) ?? "decode failed"
+println("decoded: {decoded}")
+
+// ── base64 error handling ──
+bad_b64 := encoding.base64_decode("!!!not-valid-base64!!!")
+match bad_b64 {
+    .ok(v) => println("bad b64: should not happen"),
+    .err(msg) => println("bad b64: {msg}"),
+}
+
+// ── hex encode/decode ──
+hex := encoding.hex_encode("ZZ")
+println("hex: {hex}")
+
+hex_decoded := encoding.hex_decode(hex) ?? "hex decode failed"
+println("hex decoded: {hex_decoded}")
+
+// ── hex error handling ──
+bad_hex_len := encoding.hex_decode("abc")
+match bad_hex_len {
+    .ok(_) => println("bad hex len: should not happen"),
+    .err(msg) => println("bad hex len: {msg}"),
+}
+
+bad_hex_char := encoding.hex_encode("ZZ")
+unhex := encoding.hex_decode("zzzz")
+match unhex {
+    .ok(_) => println("bad hex char: should not happen"),
+    .err(msg) => println("bad hex char: {msg}"),
+}
+
+// ── URL encode/decode ──
+url := encoding.url_encode("hello world & foo=bar")
+println("url: {url}")
+
+url_decoded := encoding.url_decode(url) ?? "url decode failed"
+println("url decoded: {url_decoded}")
+
+// ── URL error handling ──
+bad_url := encoding.url_decode("%zz")
+match bad_url {
+    .ok(_) => println("bad url: should not happen"),
+    .err(msg) => println("bad url: {msg}"),
+}
+
+println("encoding_test_ok")

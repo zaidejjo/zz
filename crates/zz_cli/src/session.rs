@@ -430,17 +430,18 @@ mod tests {
     #[test]
     fn json_parse_and_get() {
         let mut s = Session::new("<test>");
-        let out =
-            s.eval("import std.json\nj := json.parse(\"{\\\"a\\\": [1, 2]}\")\njson.get(j, \"a\")");
+        let out = s.eval(
+            "import std.json\nj := json.parse(\"{\\\"a\\\": [1, 2]}\") ?? json.null()\njson.get(j, \"a\")",
+        );
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
-        assert_eq!(out.output, "[1,2]");
+        assert_eq!(out.output, ".ok([1,2])");
     }
 
     #[test]
     fn json_as_int() {
         let mut s = Session::new("<test>");
         let out = s.eval(
-            "import std.json\nj := json.parse(\"{\\\"n\\\": 42}\")\njson.as_int(json.get(j, \"n\"))",
+            "import std.json\nj := json.parse(\"{\\\"n\\\": 42}\") ?? json.null()\njson.as_int(json.get(j, \"n\") ?? json.null())",
         );
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "42");
@@ -451,7 +452,7 @@ mod tests {
         let mut s = Session::new("<test>");
         let out = s.eval("import std.json\njson.stringify([1, 2, 3])");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
-        assert_eq!(out.output, "[1,2,3]");
+        assert_eq!(out.output, ".ok([1,2,3])");
     }
 
     #[test]
@@ -459,13 +460,13 @@ mod tests {
         let mut s = Session::new("<test>");
         let out = s.eval("import std.json\njson.stringify({\"name\": \"zaid\"})");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
-        assert_eq!(out.output, r#"{"name":"zaid"}"#);
+        assert_eq!(out.output, r#".ok({"name":"zaid"})"#);
     }
 
     #[test]
     fn json_wrong_access_errors() {
         let mut s = Session::new("<test>");
-        let out = s.eval("import std.json\nj := json.parse(\"[1, 2]\")\njson.as_int(j)");
+        let out = s.eval("import std.json\nj := json.parse(\"[1, 2]\").unwrap()\njson.as_int(j)");
         assert!(out.errors.is_some(), "expected error");
     }
 

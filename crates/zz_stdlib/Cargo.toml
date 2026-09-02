@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 zz_checker = { path = "../zz_checker" }
 zz_runtime = { path = "../zz_runtime" }
+base64 = "0.22"
+urlencoding = "2"
 
 [dev-dependencies]
 zz_frontend = { path = "../zz_frontend" }

@@ -1,4 +1,4 @@
-use crate::natives::expect_str;
+use crate::natives::{arg, expect_str};
 use zz_runtime::{EvalError, Interp, Span, Value};
 
 pub(crate) fn str_length(
@@ -87,4 +87,47 @@ pub(crate) fn str_ends_with(
     let s = expect_str(args, 0, "str.ends_with")?;
     let suffix = expect_str(args, 1, "str.ends_with")?;
     Ok(Value::Bool(s.ends_with(&suffix)))
+}
+
+pub(crate) fn str_join(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let items = match arg(args, 0, "str.join")?.clone() {
+        Value::Array(arr) => arr,
+        other => {
+            return Err(EvalError::new(
+                format!("`str.join` expects an array, found `{other}`"),
+                _span,
+            ));
+        }
+    };
+    let sep = expect_str(args, 1, "str.join")?;
+    let strs: Vec<String> = items
+        .iter()
+        .map(|v| match v {
+            Value::Str(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .collect();
+    Ok(Value::Str(strs.join(&sep)))
+}
+
+pub(crate) fn str_trim_start(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "str.trim_start")?;
+    Ok(Value::Str(s.trim_start().to_string()))
+}
+
+pub(crate) fn str_trim_end(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "str.trim_end")?;
+    Ok(Value::Str(s.trim_end().to_string()))
 }

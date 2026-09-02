@@ -2,22 +2,22 @@
 import std.json
 
 // parse object
-data := json.parse("{\"name\": \"Alice\", \"age\": 30}")
-println(json.as_str(json.get(data, "name")))
-println(json.as_int(json.get(data, "age")))
+data := json.parse("{\"name\": \"Alice\", \"age\": 30}") ?? json.null()
+println(json.as_str(json.get(data, "name") ?? json.null()))
+println(json.as_int(json.get(data, "age") ?? json.null()))
 
 // stringify
 obj := {"key": "value", "num": 42}
-s := json.stringify(obj)
+s := json.stringify(obj) ?? "{}"
 println(s)
 
 // roundtrip
-parsed := json.parse(s)
-println(json.as_str(json.get(parsed, "key")))
+parsed := json.parse(s) ?? json.null()
+println(json.as_str(json.get(parsed, "key") ?? json.null()))
 
 // json.get on arrays
-arr := json.parse("[10, 20, 30]")
-println(json.as_int(json.get(arr, "0")))
-println(json.as_int(json.get(arr, "2")))
+arr := json.parse("[10, 20, 30]") ?? json.null()
+println(json.as_int(json.get(arr, "0") ?? json.null()))
+println(json.as_int(json.get(arr, "2") ?? json.null()))
 
 println("json_ok")

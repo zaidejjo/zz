@@ -149,6 +149,13 @@ e2e_success_test!(e2e_stdlib_fs_test, "stdlib", "fs_test.zz");
 e2e_success_test!(e2e_stdlib_env_test, "stdlib", "env_test.zz");
 e2e_success_test!(e2e_stdlib_time_test, "stdlib", "time_test.zz");
 e2e_success_test!(e2e_stdlib_math_extended, "stdlib", "math_extended_test.zz");
+e2e_success_test!(e2e_stdlib_json_test, "stdlib", "json_test.zz");
+e2e_success_test!(e2e_stdlib_encoding_test, "stdlib", "encoding_test.zz");
+e2e_success_test!(
+    e2e_stdlib_str_extended_test,
+    "stdlib",
+    "str_extended_test.zz"
+);
 
 // ---------------------------------------------------------------------------
 // Error fixtures: must exit 1
