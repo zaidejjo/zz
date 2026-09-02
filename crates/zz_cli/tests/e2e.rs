@@ -148,6 +148,7 @@ e2e_success_test!(e2e_stdlib_time_ops, "stdlib", "time_ops.zz");
 e2e_success_test!(e2e_stdlib_fs_test, "stdlib", "fs_test.zz");
 e2e_success_test!(e2e_stdlib_env_test, "stdlib", "env_test.zz");
 e2e_success_test!(e2e_stdlib_time_test, "stdlib", "time_test.zz");
+e2e_success_test!(e2e_stdlib_math_extended, "stdlib", "math_extended_test.zz");
 
 // ---------------------------------------------------------------------------
 // Error fixtures: must exit 1

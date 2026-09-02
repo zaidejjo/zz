@@ -1,0 +1,79 @@
+// examples/math_advanced_example.zz — extended std.math demonstrations
+import std.math
+
+// ── Constants ──
+println("=== Constants ===")
+println("PI  = {math.PI()}")
+println("E   = {math.E()}")
+println("TAU = {math.TAU()}")
+println("INF = {math.INF()}")
+println("NAN is nan: {math.is_nan(math.NAN())}")
+
+// ── Rounding & Clamping ──
+println("")
+println("=== Rounding & Utilities ===")
+println("round(3.7)  = {math.round(3.7)}")
+println("floor(3.7)  = {math.floor(3.7)}")
+println("ceil(3.2)   = {math.ceil(3.2)}")
+println("trunc(-3.7) = {math.trunc(-3.7)}")
+println("clamp(5, 1, 3) = {math.clamp(5, 1, 3)}")
+println("signum(-5)  = {math.signum(-5)}")
+println("hypot(3, 4) = {math.hypot(3, 4)}")
+
+// ── Number Theory ──
+println("")
+println("=== Number Theory ===")
+println("root(8, 3) = {math.root(8, 3)}")
+println("gcd(12, 8) = {math.gcd(12, 8)}")
+println("lcm(4, 6)  = {math.lcm(4, 6)}")
+match math.factorial(10) {
+    .ok(v) => println("10! = {v}"),
+    .err(e) => println("err: {e}"),
+}
+match math.isqrt(144) {
+    .ok(v) => println("isqrt(144) = {v}"),
+    .err(e) => println("err: {e}"),
+}
+
+// ── Trigonometry ──
+println("")
+println("=== Trigonometry ===")
+println("sin(pi/2) = {math.sin(math.PI() / 2)}")
+println("cos(0)    = {math.cos(0)}")
+println("sin_deg(90) = {math.sin_deg(90)}")
+println("to_degrees(pi) = {math.to_degrees(math.PI())}")
+
+// ── Logarithms & Exponents ──
+println("")
+println("=== Logarithms & Exponents ===")
+println("ln(e)     = {math.log(math.E())}")
+println("log10(1k) = {math.log10(1000)}")
+println("e^0       = {math.exp(0)}")
+println("e^1       = {math.exp(1)}")
+println("sqrt(2)   = {math.sqrt(2.0)}")
+
+// ── Linear Algebra ──
+println("")
+println("=== Linear Algebra ===")
+match math.dot_product([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]) {
+    .ok(v) => println("[1,2,3] . [4,5,6] = {v}"),
+    .err(e) => println("err: {e}"),
+}
+println("|[3, 4]| = {math.magnitude([3.0, 4.0])}")
+
+// ── Statistics ──
+println("")
+println("=== Statistics ===")
+data := [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
+match math.mean(data) {
+    .ok(v) => println("mean = {v}"),
+    .err(e) => println("err: {e}"),
+}
+match math.median(data) {
+    .ok(v) => println("median = {v}"),
+    .err(e) => println("err: {e}"),
+}
+println("rand_range(1, 100) = {math.rand_range(1, 100)}")
+
+println("")
+println("math_advanced_example_done")
