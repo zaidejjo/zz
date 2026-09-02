@@ -522,6 +522,176 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert("std.math.random".into(), sig(vec![], Type::Float));
 
+    // ── std.math constants ──
+    m.insert("std.math.PI".into(), sig(vec![], Type::Float));
+    m.insert("std.math.E".into(), sig(vec![], Type::Float));
+    m.insert("std.math.TAU".into(), sig(vec![], Type::Float));
+    m.insert("std.math.INF".into(), sig(vec![], Type::Float));
+    m.insert("std.math.NAN".into(), sig(vec![], Type::Float));
+
+    // ── std.math utilities & rounding ──
+    m.insert(
+        "std.math.round".into(),
+        sig_t(vec![("x", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.trunc".into(),
+        sig_t(vec![("x", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.clamp".into(),
+        sig_t(
+            vec![("val", t.clone()), ("min", t.clone()), ("max", t.clone())],
+            Type::Float,
+        ),
+    );
+    m.insert(
+        "std.math.signum".into(),
+        sig_t(vec![("x", t.clone())], t.clone()),
+    );
+    m.insert(
+        "std.math.hypot".into(),
+        sig_t(vec![("x", t.clone()), ("y", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.is_nan".into(),
+        sig_t(vec![("x", t.clone())], Type::Bool),
+    );
+    m.insert(
+        "std.math.is_inf".into(),
+        sig_t(vec![("x", t.clone())], Type::Bool),
+    );
+
+    // ── std.math number theory ──
+    m.insert(
+        "std.math.root".into(),
+        sig_t(vec![("x", t.clone()), ("n", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.isqrt".into(),
+        sig(
+            vec![("n", Type::Int)],
+            Type::Result(Box::new(Type::Int), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.math.factorial".into(),
+        sig(
+            vec![("n", Type::Int)],
+            Type::Result(Box::new(Type::Int), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.math.gcd".into(),
+        sig(vec![("a", Type::Int), ("b", Type::Int)], Type::Int),
+    );
+    m.insert(
+        "std.math.lcm".into(),
+        sig(vec![("a", Type::Int), ("b", Type::Int)], Type::Int),
+    );
+
+    // ── std.math trigonometry ──
+    m.insert(
+        "std.math.sin".into(),
+        sig_t(vec![("x", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.cos".into(),
+        sig_t(vec![("x", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.tan".into(),
+        sig_t(vec![("x", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.asin".into(),
+        sig_t(vec![("x", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.acos".into(),
+        sig_t(vec![("x", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.atan".into(),
+        sig_t(vec![("x", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.sin_deg".into(),
+        sig_t(vec![("x", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.cos_deg".into(),
+        sig_t(vec![("x", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.tan_deg".into(),
+        sig_t(vec![("x", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.to_radians".into(),
+        sig_t(vec![("deg", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.to_degrees".into(),
+        sig_t(vec![("rad", t.clone())], Type::Float),
+    );
+
+    // ── std.math logarithms & exponents ──
+    m.insert(
+        "std.math.log".into(),
+        sig_t(vec![("x", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.log10".into(),
+        sig_t(vec![("x", t.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.exp".into(),
+        sig_t(vec![("x", t.clone())], Type::Float),
+    );
+
+    // ── std.math linear algebra ──
+    let float_arr = Type::Array(Box::new(Type::Float));
+    let float_arr_arr = Type::Array(Box::new(Type::Array(Box::new(Type::Float))));
+    m.insert(
+        "std.math.dot_product".into(),
+        sig(
+            vec![("v1", float_arr.clone()), ("v2", float_arr.clone())],
+            Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.math.magnitude".into(),
+        sig(vec![("v", float_arr.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.matrix_mul".into(),
+        sig(
+            vec![("m1", float_arr_arr.clone()), ("m2", float_arr_arr.clone())],
+            Type::Result(Box::new(float_arr_arr), Box::new(Type::Str)),
+        ),
+    );
+
+    // ── std.math statistics & random ──
+    m.insert(
+        "std.math.mean".into(),
+        sig(
+            vec![("list", float_arr.clone())],
+            Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.math.median".into(),
+        sig(
+            vec![("list", float_arr.clone())],
+            Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.math.rand_range".into(),
+        sig_t(vec![("min", t.clone()), ("max", t.clone())], Type::Float),
+    );
+
     // std.time
     m.insert("std.time.now_ms".into(), sig(vec![], Type::Int));
     m.insert(
@@ -555,13 +725,42 @@ mod tests {
         assert!(funcs.contains_key("std.env.args"));
         assert!(funcs.contains_key("std.math.abs"));
         assert!(funcs.contains_key("std.math.random"));
+        assert!(funcs.contains_key("std.math.PI"));
+        assert!(funcs.contains_key("std.math.E"));
+        assert!(funcs.contains_key("std.math.round"));
+        assert!(funcs.contains_key("std.math.trunc"));
+        assert!(funcs.contains_key("std.math.clamp"));
+        assert!(funcs.contains_key("std.math.isqrt"));
+        assert!(funcs.contains_key("std.math.factorial"));
+        assert!(funcs.contains_key("std.math.gcd"));
+        assert!(funcs.contains_key("std.math.lcm"));
+        assert!(funcs.contains_key("std.math.sin"));
+        assert!(funcs.contains_key("std.math.cos"));
+        assert!(funcs.contains_key("std.math.tan"));
+        assert!(funcs.contains_key("std.math.asin"));
+        assert!(funcs.contains_key("std.math.acos"));
+        assert!(funcs.contains_key("std.math.atan"));
+        assert!(funcs.contains_key("std.math.sin_deg"));
+        assert!(funcs.contains_key("std.math.cos_deg"));
+        assert!(funcs.contains_key("std.math.tan_deg"));
+        assert!(funcs.contains_key("std.math.to_radians"));
+        assert!(funcs.contains_key("std.math.to_degrees"));
+        assert!(funcs.contains_key("std.math.log"));
+        assert!(funcs.contains_key("std.math.log10"));
+        assert!(funcs.contains_key("std.math.exp"));
+        assert!(funcs.contains_key("std.math.dot_product"));
+        assert!(funcs.contains_key("std.math.magnitude"));
+        assert!(funcs.contains_key("std.math.matrix_mul"));
+        assert!(funcs.contains_key("std.math.mean"));
+        assert!(funcs.contains_key("std.math.median"));
+        assert!(funcs.contains_key("std.math.rand_range"));
         assert!(funcs.contains_key("std.time.now_ms"));
         assert!(funcs.contains_key("typeof"));
         assert!(funcs.contains_key("str"));
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
         assert!(funcs.contains_key("append"));
-        assert_eq!(funcs.len(), 76);
+        assert_eq!(funcs.len(), 113);
     }
 
     #[test]

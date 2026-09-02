@@ -1,0 +1,94 @@
+// E2E: std.math — extended math functions
+import std.math
+
+// ── Constants ──
+println("PI: {math.PI()}")
+println("E: {math.E()}")
+println("TAU: {math.TAU()}")
+
+// ── Rounding ──
+println("round(3.7): {math.round(3.7)}")
+println("round(3.2): {math.round(3.2)}")
+println("trunc(-3.7): {math.trunc(-3.7)}")
+println("trunc(3.9): {math.trunc(3.9)}")
+println("clamp(5, 1, 3): {math.clamp(5, 1, 3)}")
+println("clamp(2, 1, 3): {math.clamp(2, 1, 3)}")
+println("signum(-5): {math.signum(-5)}")
+println("signum(0): {math.signum(0)}")
+println("signum(7): {math.signum(7)}")
+println("hypot(3, 4): {math.hypot(3, 4)}")
+println("is_nan(1.0): {math.is_nan(1.0)}")
+println("is_nan(NaN): {math.is_nan(math.NAN())}")
+println("is_inf(1.0): {math.is_inf(1.0)}")
+println("is_inf(INF): {math.is_inf(math.INF())}")
+
+// ── Number theory ──
+println("root(8, 3): {math.root(8, 3)}")
+match math.isqrt(16) {
+    .ok(v) => println("isqrt(16): {v}"),
+    .err(e) => println("isqrt err: {e}"),
+}
+match math.isqrt(-5) {
+    .ok(v) => println("isqrt(-5): {v}"),
+    .err(e) => println("isqrt(-5) err: {e}"),
+}
+match math.factorial(5) {
+    .ok(v) => println("5!: {v}"),
+    .err(e) => println("factorial err: {e}"),
+}
+match math.factorial(-1) {
+    .ok(v) => println("factorial(-1): {v}"),
+    .err(e) => println("factorial(-1) err: {e}"),
+}
+println("gcd(12, 8): {math.gcd(12, 8)}")
+println("lcm(4, 6): {math.lcm(4, 6)}")
+
+// ── Trigonometry ──
+println("sin(0): {math.sin(0)}")
+println("cos(0): {math.cos(0)}")
+println("tan(0): {math.tan(0)}")
+println("asin(1): {math.asin(1)}")
+println("acos(1): {math.acos(1)}")
+println("atan(1): {math.atan(1)}")
+println("sin_deg(90): {math.sin_deg(90)}")
+println("cos_deg(90): {math.cos_deg(90)}")
+println("tan_deg(45): {math.tan_deg(45)}")
+println("to_radians(180): {math.to_radians(180)}")
+println("to_degrees(pi): {math.to_degrees(math.PI())}")
+
+// ── Logarithms & exponents ──
+println("log(1): {math.log(1)}")
+println("log(E): {math.log(math.E())}")
+println("log10(100): {math.log10(100)}")
+println("exp(0): {math.exp(0)}")
+println("exp(1): {math.exp(1)}")
+
+// ── Linear algebra ──
+match math.dot_product([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]) {
+    .ok(v) => println("dot([1,2,3],[4,5,6]): {v}"),
+    .err(e) => println("dot err: {e}"),
+}
+println("magnitude([3,4]): {math.magnitude([3.0, 4.0])}")
+
+// ── Statistics ──
+match math.mean([1.0, 2.0, 3.0, 4.0, 5.0]) {
+    .ok(v) => println("mean([1..5]): {v}"),
+    .err(e) => println("mean err: {e}"),
+}
+match math.median([1.0, 3.0, 5.0]) {
+    .ok(v) => println("median([1,3,5]): {v}"),
+    .err(e) => println("median err: {e}"),
+}
+match math.median([1.0, 2.0, 3.0, 4.0]) {
+    .ok(v) => println("median([1,2,3,4]): {v}"),
+    .err(e) => println("median err: {e}"),
+}
+r := math.rand_range(1.0, 10.0)
+println("rand_range(1,10): {r}")
+
+// ── Int-to-float promotion ──
+println("sin(1): {math.sin(1)}")
+println("abs(-3.5): {math.abs(-3.5)}")
+println("round(3): {math.round(3)}")
+
+println("math_extended_ok")
