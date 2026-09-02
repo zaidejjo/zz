@@ -1,0 +1,80 @@
+// tests/fixtures/stdlib/net_tcp_test.zz — TCP operations on loopback
+import std.net
+
+// Test tcp_listen
+match net.tcp_listen("127.0.0.1:19876") {
+    .ok(l) => {
+        println("listen_ok")
+
+        // Test tcp_connect to our listener
+        match net.tcp_connect("127.0.0.1:19876", 5000) {
+            .ok(c) => {
+                match net.tcp_accept(l) {
+                    .ok(ss) => {
+                        // Test peer_addr
+                        match net.peer_addr(c) {
+                            .ok(p) => println("peer_addr_ok: {p}"),
+                            .err(e) => println("peer_addr_err: {e}"),
+                        }
+
+                        // Test local_addr
+                        match net.local_addr(c) {
+                            .ok(a) => println("local_addr_ok: {a}"),
+                            .err(e) => println("local_addr_err: {e}"),
+                        }
+
+                        // Test write/read roundtrip
+                        match net.tcp_write(c, "ping\n") {
+                            .ok(n) => println("write_ok: {n}"),
+                            .err(e) => println("write_err: {e}"),
+                        }
+
+                        match net.tcp_read(ss, 1024) {
+                            .ok(d) => println("read_ok: {d}"),
+                            .err(e) => println("read_err: {e}"),
+                        }
+
+                        // Test tcp_readline
+                        match net.tcp_write(c, "line1\nline2\n") {
+                            .ok(_) => println("write2_ok"),
+                            .err(e) => println("write2_err: {e}"),
+                        }
+
+                        match net.tcp_readline(ss) {
+                            .ok(l) => println("readline_ok: {l}"),
+                            .err(e) => println("readline_err: {e}"),
+                        }
+
+                        // Test set_read_timeout
+                        match net.set_read_timeout(c, 1000) {
+                            .ok(_) => println("set_timeout_ok"),
+                            .err(e) => println("set_timeout_err: {e}"),
+                        }
+
+                        // Close
+                        net.tcp_close(c) ?? false
+                        net.tcp_close(ss) ?? false
+                        println("close_ok")
+                    },
+                    .err(e) => println("accept_err: {e}"),
+                }
+            },
+            .err(e) => println("connect_err: {e}"),
+        }
+    },
+    .err(e) => println("listen_err: {e}"),
+}
+
+// Test connection refused
+match net.tcp_connect("127.0.0.1:19877", 1000) {
+    .ok(_) => println("ERROR: should have failed"),
+    .err(e) => println("connect_refused_ok"),
+}
+
+// Test invalid address
+match net.tcp_connect("not-a-valid-addr", 1000) {
+    .ok(_) => println("ERROR: should have failed"),
+    .err(e) => println("bad_addr_ok"),
+}
+
+println("net_tcp_test_ok")

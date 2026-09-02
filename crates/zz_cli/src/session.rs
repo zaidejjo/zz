@@ -476,7 +476,7 @@ mod tests {
     fn http_get_route() {
         let mut s = Session::new("<test>");
         let out = s.eval(
-            "import std.http\ns := http.server()\ns2 := http.get(s, \"/hi\", |path: str| \"hello\")\nhttp.handle(s2, \"GET\", \"/hi\", \"\")",
+            "import std.http\ns := http.server()\ns2 := http.route_get(s, \"/hi\", |path: str| \"hello\")\nhttp.handle(s2, \"GET\", \"/hi\", \"\") ?? \"error\"",
         );
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "hello");
@@ -486,7 +486,7 @@ mod tests {
     fn http_post_body_passthrough() {
         let mut s = Session::new("<test>");
         let out = s.eval(
-            "import std.http\ns := http.server()\ns2 := http.post(s, \"/echo\", |body: str| body)\nhttp.handle(s2, \"POST\", \"/echo\", \"ping\")",
+            "import std.http\ns := http.server()\ns2 := http.route_post(s, \"/echo\", |body: str| body)\nhttp.handle(s2, \"POST\", \"/echo\", \"ping\") ?? \"error\"",
         );
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "ping");
@@ -497,7 +497,13 @@ mod tests {
         let mut s = Session::new("<test>");
         let out =
             s.eval("import std.http\ns := http.server()\nhttp.handle(s, \"GET\", \"/nope\", \"\")");
-        assert!(out.errors.is_some(), "expected error");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        // Result::Err — the output renders as .err(...)
+        assert!(
+            out.output.starts_with(".err("),
+            "expected .err(...), got: {}",
+            out.output
+        );
     }
 
     // --- structs -----------------------------------------------------------

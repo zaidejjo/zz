@@ -27,6 +27,12 @@ pub enum Type {
     Json,
     /// Opaque HTTP server handle (produced by `std.http.server`).
     HttpServer,
+    /// Opaque TCP stream handle (produced by `std.net.tcp_connect`).
+    TcpStream,
+    /// Opaque TCP listener handle (produced by `std.net.tcp_listen`).
+    TcpListener,
+    /// Opaque HTTP response (produced by `std.http.get`, etc.).
+    Response,
     /// A named struct type: `Point` from `struct Point { ... }`.
     Struct(String),
     /// `a..b` — an integer range (used by `for` loops).
@@ -90,6 +96,9 @@ impl fmt::Display for Type {
             }
             Type::Json => write!(f, "json"),
             Type::HttpServer => write!(f, "http.server"),
+            Type::TcpStream => write!(f, "tcp.stream"),
+            Type::TcpListener => write!(f, "tcp.listener"),
+            Type::Response => write!(f, "http.response"),
             Type::Struct(n) => write!(f, "{n}"),
             Type::Range(t) => write!(f, "{t}.."),
             Type::Var(_) => write!(f, "_"),

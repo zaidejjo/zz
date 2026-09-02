@@ -18,6 +18,7 @@ pub(crate) mod io;
 pub(crate) mod iterators;
 pub(crate) mod json;
 pub(crate) mod math;
+pub(crate) mod net;
 pub(crate) mod option_mod;
 pub(crate) mod result_mod;
 pub(crate) mod str_mod;
@@ -469,18 +470,11 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
-    // std.http
-    m.insert(
-        "std.http.server".into(),
-        NativeEntry {
-            arity: 0,
-            f: http::http_server,
-        },
-    );
+    // std.http — Client
     m.insert(
         "std.http.get".into(),
         NativeEntry {
-            arity: 3,
+            arity: 2,
             f: http::http_get,
         },
     );
@@ -489,6 +483,87 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 3,
             f: http::http_post,
+        },
+    );
+    m.insert(
+        "std.http.put".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_put,
+        },
+    );
+    m.insert(
+        "std.http.delete".into(),
+        NativeEntry {
+            arity: 2,
+            f: http::http_delete,
+        },
+    );
+
+    // std.http — Response methods (dispatched via method_namespace "http")
+    m.insert(
+        "http.response.status".into(),
+        NativeEntry {
+            arity: 1,
+            f: http::http_response_status,
+        },
+    );
+    m.insert(
+        "http.response.text".into(),
+        NativeEntry {
+            arity: 1,
+            f: http::http_response_text,
+        },
+    );
+    m.insert(
+        "http.response.json".into(),
+        NativeEntry {
+            arity: 1,
+            f: http::http_response_json,
+        },
+    );
+    m.insert(
+        "http.response.headers".into(),
+        NativeEntry {
+            arity: 1,
+            f: http::http_response_headers,
+        },
+    );
+
+    // std.http — Server (per-route model)
+    m.insert(
+        "std.http.server".into(),
+        NativeEntry {
+            arity: 0,
+            f: http::http_server,
+        },
+    );
+    m.insert(
+        "std.http.route_get".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_route_get,
+        },
+    );
+    m.insert(
+        "std.http.route_post".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_route_post,
+        },
+    );
+    m.insert(
+        "std.http.route_put".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_route_put,
+        },
+    );
+    m.insert(
+        "std.http.route_delete".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_route_delete,
         },
     );
     m.insert(
@@ -503,6 +578,66 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 2,
             f: http::http_listen,
+        },
+    );
+
+    // std.http — Request helpers
+    m.insert(
+        "std.http.request_method".into(),
+        NativeEntry {
+            arity: 1,
+            f: http::http_request_method,
+        },
+    );
+    m.insert(
+        "std.http.request_path".into(),
+        NativeEntry {
+            arity: 1,
+            f: http::http_request_path,
+        },
+    );
+    m.insert(
+        "std.http.request_body".into(),
+        NativeEntry {
+            arity: 1,
+            f: http::http_request_body,
+        },
+    );
+    m.insert(
+        "std.http.request_headers".into(),
+        NativeEntry {
+            arity: 1,
+            f: http::http_request_headers,
+        },
+    );
+    m.insert(
+        "std.http.request_query".into(),
+        NativeEntry {
+            arity: 1,
+            f: http::http_request_query,
+        },
+    );
+
+    // std.http — Response builders
+    m.insert(
+        "std.http.response_json".into(),
+        NativeEntry {
+            arity: 2,
+            f: http::http_response_json_builder,
+        },
+    );
+    m.insert(
+        "std.http.response_text".into(),
+        NativeEntry {
+            arity: 2,
+            f: http::http_response_text_builder,
+        },
+    );
+    m.insert(
+        "std.http.response_html".into(),
+        NativeEntry {
+            arity: 2,
+            f: http::http_response_html_builder,
         },
     );
 
@@ -903,6 +1038,85 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: time::time_sleep_ms,
+        },
+    );
+
+    // std.net — TCP networking
+    m.insert(
+        "std.net.tcp_connect".into(),
+        NativeEntry {
+            arity: 2,
+            f: net::tcp_connect,
+        },
+    );
+    m.insert(
+        "std.net.tcp_listen".into(),
+        NativeEntry {
+            arity: 1,
+            f: net::tcp_listen,
+        },
+    );
+    m.insert(
+        "std.net.tcp_accept".into(),
+        NativeEntry {
+            arity: 1,
+            f: net::tcp_accept,
+        },
+    );
+    m.insert(
+        "std.net.tcp_write".into(),
+        NativeEntry {
+            arity: 2,
+            f: net::tcp_write,
+        },
+    );
+    m.insert(
+        "std.net.tcp_read".into(),
+        NativeEntry {
+            arity: 2,
+            f: net::tcp_read,
+        },
+    );
+    m.insert(
+        "std.net.tcp_readline".into(),
+        NativeEntry {
+            arity: 1,
+            f: net::tcp_readline,
+        },
+    );
+    m.insert(
+        "std.net.tcp_close".into(),
+        NativeEntry {
+            arity: 1,
+            f: net::tcp_close,
+        },
+    );
+    m.insert(
+        "std.net.peer_addr".into(),
+        NativeEntry {
+            arity: 1,
+            f: net::peer_addr,
+        },
+    );
+    m.insert(
+        "std.net.local_addr".into(),
+        NativeEntry {
+            arity: 1,
+            f: net::local_addr,
+        },
+    );
+    m.insert(
+        "std.net.set_read_timeout".into(),
+        NativeEntry {
+            arity: 2,
+            f: net::set_read_timeout,
+        },
+    );
+    m.insert(
+        "std.net.set_write_timeout".into(),
+        NativeEntry {
+            arity: 2,
+            f: net::set_write_timeout,
         },
     );
 

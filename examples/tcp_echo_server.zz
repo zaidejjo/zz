@@ -1,0 +1,39 @@
+// examples/tcp_echo_server.zz — TCP echo server with broadcast
+import std.net
+
+println("Starting echo server on 127.0.0.1:8080...")
+
+match net.tcp_listen("127.0.0.1:8080") {
+    .ok(listener) => {
+        println("Server listening. Connect with: nc 127.0.0.1 8080")
+        println("Waiting for connections...")
+
+        // Accept first client
+        match net.tcp_accept(listener) {
+            .ok(client) => {
+                match net.peer_addr(client) {
+                    .ok(addr) => println("Client connected from {addr}"),
+                    .err(_) => println("Client connected"),
+                }
+
+                // Echo loop
+                loop {
+                    match net.tcp_readline(client) {
+                        .ok(line) => {
+                            println("Received: {line}")
+                            net.tcp_write(client, "Echo: {line}\n") ?? false
+                        },
+                        .err(e) => {
+                            println("Client disconnected: {e}")
+                            break
+                        },
+                    }
+                }
+
+                net.tcp_close(client) ?? false
+            },
+            .err(e) => println("Accept failed: {e}"),
+        }
+    },
+    .err(e) => println("Listen failed: {e}"),
+}
