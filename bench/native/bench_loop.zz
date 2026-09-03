@@ -1,0 +1,8 @@
+import std.io
+func main() {
+    sum := 0
+    for i in 0..10000000 {
+        sum = sum + i
+    }
+    io.println(sum)
+}

@@ -522,9 +522,9 @@ impl Lowerer {
         // A native may be bound under `std.io.println` (stdlib_funcs) while
         // the source calls `io.println` (namespace-registered). Match either.
         let std_name = format!("std.{cname_for_native}");
-        let native_rt = if self.reachable_natives.contains(&cname_for_native)
-            || self.reachable_natives.contains(&std_name)
-        {
+        let is_native = self.reachable_natives.contains(&cname_for_native)
+            || self.reachable_natives.contains(&std_name);
+        let native_rt = if is_native {
             native_impl(&cname_for_native)
         } else {
             None
@@ -538,6 +538,13 @@ impl Lowerer {
                 0 => format!("zz_call_native0({impl_name})"),
                 _ => "zz_unit()".to_string(),
             };
+        }
+
+        // Reachable native without a C runtime impl (e.g. time.now_ms)
+        // lowers to Unit.
+        if is_native {
+            let _ = (cname_for_native.is_empty(),);
+            return "zz_unit()".to_string();
         }
 
         if self.reachable_funcs.contains(&cname) {

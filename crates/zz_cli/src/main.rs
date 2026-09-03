@@ -9,6 +9,7 @@
 
 use std::process::ExitCode;
 
+mod build;
 mod loader;
 mod repl;
 mod session;
@@ -37,6 +38,8 @@ FLAGS:
     --fix, -f          apply safe auto-fixes (typo replacements, field corrections)
     --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
     --interactive, -i  with --fix, prompt for ambiguous fixes interactively
+    --native           with run, use the native AOT compiler instead of the VM
+    -p, --release      with build, full optimization (-O3 -flto, DCE, stripped)
     --help, -h         show this help
     --version, -V      show version
 
@@ -85,7 +88,30 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
-        Some("run") => match run_file(rest.first(), &rest[1..]) {
+        Some("run") => {
+            let native = rest.iter().any(|a| a == "--native");
+            let args: Vec<String> = rest.iter().filter(|a| *a != "--native").cloned().collect();
+            let script_args = args.get(1..).unwrap_or(&[]).to_vec();
+            let file = args.iter().find(|a| !a.starts_with('-'));
+            if native {
+                match run_native(file, &script_args) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(msg) => {
+                        eprintln!("zz: {msg}");
+                        ExitCode::FAILURE
+                    }
+                }
+            } else {
+                match run_file(rest.first(), &script_args) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(msg) => {
+                        eprintln!("zz: {msg}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+        }
+        Some("build") => match build_cmd(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("zz: {msg}");
@@ -296,6 +322,51 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
         }
     }
 
+    Ok(())
+}
+
+/// `zz run --native <file>`: compile to a temp location, execute, cleanup.
+fn run_native(path: Option<&String>, script_args: &[String]) -> Result<(), String> {
+    let path = path
+        .ok_or_else(|| "missing file argument\n\nusage: zz run --native <file.zz>".to_string())?;
+    let p = std::path::Path::new(path);
+    // Use cache when possible (fast re-run).
+    let cached = build::build_native(p, build::BuildMode::Dev)?;
+    let code = build::exec_binary(&cached, script_args)?;
+    if code != 0 {
+        return Err(format!("native program exited with code {code}"));
+    }
+    Ok(())
+}
+
+/// `zz build [-p] <file>`: compile a native binary (cached).
+fn build_cmd(args: &[String]) -> Result<(), String> {
+    let release = args.iter().any(|a| a == "-p" || a == "--release");
+    let path = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .ok_or_else(|| "missing file argument\n\nusage: zz build [-p] <file.zz>".to_string())?;
+    let p = std::path::Path::new(path);
+    let mode = if release {
+        build::BuildMode::Release
+    } else {
+        build::BuildMode::Dev
+    };
+    let out = build::build_native(p, mode)?;
+    // Copy the cached binary next to the source (zz build intent).
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let dest = p.with_file_name(format!("{stem}"));
+    std::fs::copy(&out, &dest).map_err(|e| format!("cannot write binary: {e}"))?;
+    let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "built {} ({}, {:.1} KB)",
+        dest.display(),
+        if release { "release" } else { "dev" },
+        meta as f64 / 1024.0
+    );
     Ok(())
 }
 

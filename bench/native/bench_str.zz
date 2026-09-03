@@ -1,0 +1,8 @@
+import std.io
+func main() {
+    s := ""
+    for i in 0..20000 {
+        s = s + "a"
+    }
+    io.println(len(s))
+}

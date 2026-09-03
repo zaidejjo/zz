@@ -11,6 +11,8 @@ path = "src/main.rs"
 [dependencies]
 zz_frontend = { path = "../zz_frontend" }
 zz_checker = { path = "../zz_checker" }
+zz_hir = { path = "../zz_hir" }
 zz_runtime = { path = "../zz_runtime" }
 zz_stdlib = { path = "../zz_stdlib" }
+zz_codegen = { path = "../zz_codegen" }
 codespan-reporting = "0.11"
