@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/zz_frontend", "crates/zz_checker", "crates/zz_hir", "crates/zz_runtime", "crates/zz_stdlib", "crates/zz_cli", "crates/zz_lsp"]
+members = ["crates/zz_frontend", "crates/zz_checker", "crates/zz_hir", "crates/zz_runtime", "crates/zz_stdlib", "crates/zz_codegen", "crates/zz_cli", "crates/zz_lsp"]
 
 [workspace.package]
 version = "0.1.0"
