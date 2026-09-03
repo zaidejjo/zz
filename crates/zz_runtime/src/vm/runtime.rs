@@ -198,6 +198,18 @@ impl Vm {
 
             if ip >= code.len() {
                 let sb = self.frames.last().unwrap().stack_base;
+                let f = self.frames.last().unwrap();
+                // Sync promoted top-level slots back into the environment so
+                // later chunks (REPL statements, other modules) can read them.
+                // Do this BEFORE popping the chunk result, since a `Keep`
+                // declaration's value may live in a promoted slot.
+                for (name, slot) in &f.chunk.toplevel_slots {
+                    let idx = sb + *slot as usize;
+                    if idx < self.stack.len() {
+                        let val = self.stack[idx].clone();
+                        interp.env.borrow_mut().define(name, val);
+                    }
+                }
                 let v = if self.stack.len() > sb {
                     self.stack.pop().unwrap()
                 } else {
@@ -307,7 +319,6 @@ impl Vm {
                 }
                 Op::StoreVar(name, span) => {
                     let v = self.stack.pop().unwrap();
-                    eprintln!("DEBUG StoreVar {name} = {v}");
                     if !interp.env.borrow_mut().assign(name, v) {
                         return Err(self.error(format!("undefined variable `{name}`"), *span));
                     }

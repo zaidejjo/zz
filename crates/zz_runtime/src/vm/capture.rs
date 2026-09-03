@@ -185,11 +185,17 @@ pub(crate) fn scan_expr_captured(
                 scan_expr_captured(e, defined, free);
             }
         }
-        Expr::Int { .. }
-        | Expr::Float { .. }
-        | Expr::Str { .. }
-        | Expr::Bool { .. }
-        | Expr::Path { .. } => {}
+        Expr::Int { .. } | Expr::Float { .. } | Expr::Str { .. } | Expr::Bool { .. } => {}
+        // A dotted path may reference a namespaced top-level binding
+        // (`ns.var`) or a struct field. Treat the full joined name as a
+        // potential free variable so namespaced top-level vars referenced
+        // from closures stay in the environment.
+        Expr::Path { parts, .. } => {
+            let full = parts.join(".");
+            if !defined.contains(&full) {
+                free.insert(full);
+            }
+        }
     }
 }
 
