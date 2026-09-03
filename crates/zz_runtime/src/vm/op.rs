@@ -40,6 +40,18 @@ pub enum Op {
     /// no generic `BinOp` dispatch. Falls back to the generic path when
     /// either slot does not hold an `Int`.
     SlotAddInt { dst: u16, src: u16 },
+    /// In-place integer increment: `slot[slot] = Int(slot[slot] + 1)`.
+    ///
+    /// Fused fast path for `x = x + 1` / `x += 1` inside hot loops.
+    SlotInc { slot: u16 },
+    /// In-place integer add of an immediate: `slot[dst] = Int(slot[dst] + imm)`.
+    ///
+    /// Fused fast path for `x = x + N` with a literal `N`.
+    SlotAddIntImm { dst: u16, imm: i64 },
+    /// Compare two slots as integers, push `Bool(a < b)`.
+    SlotLessIntSlot { a: u16, b: u16 },
+    /// Compare a slot against an immediate integer, push `Bool(a < imm)`.
+    SlotLessIntImm { a: u16, imm: i64 },
 
     // ---- functions & structs ----
     /// Create a named function value from a pre-compiled body chunk, register

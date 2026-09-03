@@ -307,6 +307,7 @@ impl Vm {
                 }
                 Op::StoreVar(name, span) => {
                     let v = self.stack.pop().unwrap();
+                    eprintln!("DEBUG StoreVar {name} = {v}");
                     if !interp.env.borrow_mut().assign(name, v) {
                         return Err(self.error(format!("undefined variable `{name}`"), *span));
                     }
@@ -339,6 +340,72 @@ impl Vm {
                             let span = Span::default();
                             let r = eval_binary(zz_frontend::ast::BinOp::Add, a, b, span)?;
                             self.stack[idx_dst] = r;
+                        }
+                    }
+                }
+                Op::SlotInc { slot } => {
+                    let base = self.frames.last().unwrap().stack_base;
+                    let idx = base + *slot as usize;
+                    match &self.stack[idx] {
+                        Value::Int(a) => self.stack[idx] = Value::Int(*a + 1),
+                        _ => {
+                            let v = self.stack[idx].clone();
+                            let span = Span::default();
+                            let r =
+                                eval_binary(zz_frontend::ast::BinOp::Add, v, Value::Int(1), span)?;
+                            self.stack[idx] = r;
+                        }
+                    }
+                }
+                Op::SlotAddIntImm { dst, imm } => {
+                    let base = self.frames.last().unwrap().stack_base;
+                    let idx = base + *dst as usize;
+                    match &self.stack[idx] {
+                        Value::Int(a) => self.stack[idx] = Value::Int(*a + *imm),
+                        _ => {
+                            let v = self.stack[idx].clone();
+                            let span = Span::default();
+                            let r = eval_binary(
+                                zz_frontend::ast::BinOp::Add,
+                                v,
+                                Value::Int(*imm),
+                                span,
+                            )?;
+                            self.stack[idx] = r;
+                        }
+                    }
+                }
+                Op::SlotLessIntSlot { a, b } => {
+                    let base = self.frames.last().unwrap().stack_base;
+                    let idx_a = base + *a as usize;
+                    let idx_b = base + *b as usize;
+                    match (&self.stack[idx_a], &self.stack[idx_b]) {
+                        (Value::Int(x), Value::Int(y)) => {
+                            self.stack.push(Value::Bool(x < y));
+                        }
+                        _ => {
+                            let (l, r) = (self.stack[idx_a].clone(), self.stack[idx_b].clone());
+                            let span = Span::default();
+                            let v = eval_binary(zz_frontend::ast::BinOp::Lt, l, r, span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::SlotLessIntImm { a, imm } => {
+                    let base = self.frames.last().unwrap().stack_base;
+                    let idx = base + *a as usize;
+                    match &self.stack[idx] {
+                        Value::Int(x) => self.stack.push(Value::Bool(x < imm)),
+                        _ => {
+                            let l = self.stack[idx].clone();
+                            let span = Span::default();
+                            let v = eval_binary(
+                                zz_frontend::ast::BinOp::Lt,
+                                l,
+                                Value::Int(*imm),
+                                span,
+                            )?;
+                            self.stack.push(v);
                         }
                     }
                 }
@@ -462,7 +529,9 @@ impl Vm {
                         self.stack.push(Value::Unit);
                     }
                 }
-                Op::ForNext { vars, exit, in_env } => {
+                Op::ForNext {
+                    vars, exit, in_env, ..
+                } => {
                     let num_vars = vars.len();
                     // Pop num_vars loop variables from previous iteration
                     self.stack.truncate(self.stack.len() - num_vars);
