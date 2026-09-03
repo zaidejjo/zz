@@ -1,5 +1,6 @@
 // ZZ native runtime — implementation.
 #include <math.h>
+#include <time.h>
 #include "runtime.h"
 
 // ---- string helpers ----------------------------------------------------
@@ -415,6 +416,28 @@ zz_value zz_io_print(zz_value v, int *err) {
     return zz_unit();
 }
 
+/// `input("prompt")` — print the prompt and read a line from stdin.
+/// The prompt string lacks a trailing newline, so stdout must be flushed
+/// explicitly or the terminal stays silent while the program blocks on
+/// `fgets`.
+zz_value zz_io_input(zz_value prompt, int *err) {
+    (void)err;
+    if (prompt.tag == ZZ_STR) {
+        fwrite(prompt.s->data, 1, prompt.s->len, stdout);
+        fflush(stdout);
+    }
+    char buf[1024];
+    if (fgets(buf, sizeof buf, stdin) == NULL) {
+        return zz_str_static("");
+    }
+    // Strip trailing newline (and CR for Windows line endings).
+    size_t len = strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) {
+        buf[--len] = '\0';
+    }
+    return zz_str_new(buf, len);
+}
+
 zz_value zz_math_pow(zz_value a, zz_value b, int *err) {
     (void)err;
     if (a.tag == ZZ_INT && b.tag == ZZ_INT)
@@ -422,6 +445,18 @@ zz_value zz_math_pow(zz_value a, zz_value b, int *err) {
     double x = a.tag == ZZ_FLOAT ? a.f : (double)a.i;
     double y = b.tag == ZZ_FLOAT ? b.f : (double)b.i;
     return zz_float(dpow(x, y));
+}
+
+/// `time.now_ms()` — monotonic milliseconds since an arbitrary epoch,
+/// matching the stdlib native's behavior for elapsed-time measurements.
+/// The `zz_value` arg is ignored (native has zero zz-level arguments).
+zz_value zz_time_now_ms(zz_value unused, int *err) {
+    (void)unused;
+    (void)err;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return zz_int(ms);
 }
 
 // ---- formatting (malloc'd, caller frees) --------------------------------

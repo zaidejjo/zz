@@ -2023,7 +2023,9 @@ version = "0.1.0"
 dependencies = [
  "codespan-reporting",
  "zz_checker",
+ "zz_codegen",
  "zz_frontend",
+ "zz_hir",
  "zz_runtime",
  "zz_stdlib",
 ]

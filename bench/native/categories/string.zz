@@ -1,0 +1,9 @@
+import std.io
+// Strings: 20k concat
+func main() {
+    s := ""
+    for i in 0..20000 {
+        s = s + "a"
+    }
+    io.println(len(s))
+}

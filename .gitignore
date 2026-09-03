@@ -2,3 +2,19 @@
 **/*.rs.bk
 /examples
 /plans
+bench/add_to_1M
+bench/native/bench_fib
+bench/native/bench_loop
+bench/native/bench_str
+bench/native/_go/main
+target/
+
+# native build artifacts
+bench/add_to_1M
+bench/native/bench_fib
+bench/native/bench_loop
+bench/native/bench_str
+bench/native/_go/main
+bench/native/.bin
+bench/native/categories/*
+!bench/native/categories/*.zz
