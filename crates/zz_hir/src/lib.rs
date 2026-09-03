@@ -19,6 +19,9 @@ pub mod walk;
 
 pub use walk::{walk_expr, walk_exprs, walk_stmt, TypedExpr};
 
+pub mod callgraph;
+pub use callgraph::{dce, prune_program, reachable, reachable_from, CallGraph, ReachableSet, TOP};
+
 /// The typed program: the original AST plus resolved types per span.
 ///
 /// Types are deep-resolved (no inference variables); nodes whose type could
