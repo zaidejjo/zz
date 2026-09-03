@@ -1,0 +1,47 @@
+// tests/fixtures/stdlib/http_phase5b_test.zz — Phase 5B features
+// Tests: path params, query parsing, body_json, http.test
+import std.http
+
+// ── Feature 1: Dynamic routing & path parameters ──
+s := http.server()
+s2 := http.route_get(s, "/users/:id", |req| "user-{req.params.id}")
+s3 := http.route_get(s2, "/posts/:pid/comments/:cid", |req| "post-{req.params.pid}-comment-{req.params.cid}")
+
+res1 := http.test(s3, "GET", "/users/42", "")
+println("param1: {res1.text()}")
+
+res2 := http.test(s3, "GET", "/posts/5/comments/99", "")
+println("param2: {res2.text()}")
+
+// ── Feature 3: Query string parsing ──
+s4 := http.route_get(s3, "/search", |req| "q={req.query.q}")
+res3 := http.test(s4, "GET", "/search?q=hello+world", "")
+println("query: {res3.text()}")
+
+// ── Feature 2: Auto JSON serialization (dict returned as JSON) ──
+s5 := http.route_get(s4, "/api/data", |req| "{\"name\": \"zz\", \"version\": \"0.5\"}")
+res4 := http.test(s5, "GET", "/api/data", "")
+println("json_status: {res4.status()}")
+println("json_body: {res4.text()}")
+
+// ── Feature 2: body_json (access request body as JSON) ──
+s6 := http.route_post(s5, "/api/echo", |req| req.body)
+res5 := http.test(s6, "POST", "/api/echo", "{\"key\": \"val\"}")
+println("echo: {res5.text()}")
+
+// ── Feature 3: header access ──
+s7 := http.route_get(s6, "/api/headers", |req| "ct=ok")
+res6 := http.test(s7, "GET", "/api/headers", "")
+println("headers: {res6.text()}")
+
+// ── Feature 5: Middleware — simple pass-through ──
+s8 := http.pipe(s7, |req| .ok(req))
+res7 := http.test(s8, "GET", "/api/data", "")
+println("mw_get: {res7.status()}")
+
+// ── Feature 6: Structured logging ──
+s9 := http.log(s8, true)
+res8 := http.test(s9, "GET", "/users/1", "")
+println("log: {res8.status()}")
+
+println("http_phase5b_test_ok")

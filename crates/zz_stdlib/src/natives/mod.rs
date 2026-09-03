@@ -581,63 +581,68 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
-    // std.http — Request helpers
+    // std.http — Phase 5B features
     m.insert(
-        "std.http.request_method".into(),
-        NativeEntry {
-            arity: 1,
-            f: http::http_request_method,
-        },
-    );
-    m.insert(
-        "std.http.request_path".into(),
-        NativeEntry {
-            arity: 1,
-            f: http::http_request_path,
-        },
-    );
-    m.insert(
-        "std.http.request_body".into(),
-        NativeEntry {
-            arity: 1,
-            f: http::http_request_body,
-        },
-    );
-    m.insert(
-        "std.http.request_headers".into(),
-        NativeEntry {
-            arity: 1,
-            f: http::http_request_headers,
-        },
-    );
-    m.insert(
-        "std.http.request_query".into(),
-        NativeEntry {
-            arity: 1,
-            f: http::http_request_query,
-        },
-    );
-
-    // std.http — Response builders
-    m.insert(
-        "std.http.response_json".into(),
+        "std.http.log".into(),
         NativeEntry {
             arity: 2,
-            f: http::http_response_json_builder,
+            f: http::http_log,
         },
     );
     m.insert(
-        "std.http.response_text".into(),
+        "std.http.pipe".into(),
         NativeEntry {
             arity: 2,
-            f: http::http_response_text_builder,
+            f: http::http_pipe,
         },
     );
     m.insert(
-        "std.http.response_html".into(),
+        "std.http.serve_dir".into(),
         NativeEntry {
             arity: 2,
-            f: http::http_response_html_builder,
+            f: http::http_serve_dir,
+        },
+    );
+    m.insert(
+        "std.http.test".into(),
+        NativeEntry {
+            arity: 4,
+            f: http::http_test,
+        },
+    );
+    m.insert(
+        "std.http.param".into(),
+        NativeEntry {
+            arity: 2,
+            f: http::http_param,
+        },
+    );
+    m.insert(
+        "std.http.query".into(),
+        NativeEntry {
+            arity: 1,
+            f: http::http_query,
+        },
+    );
+    m.insert(
+        "std.http.header".into(),
+        NativeEntry {
+            arity: 2,
+            f: http::http_header,
+        },
+    );
+    m.insert(
+        "std.http.body_json".into(),
+        NativeEntry {
+            arity: 1,
+            f: http::http_body_json,
+        },
+    );
+    m.insert(
+        "std.http.body_form".into(),
+        NativeEntry {
+            arity: 1,
+            f: http::http_body_form,
         },
     );
 

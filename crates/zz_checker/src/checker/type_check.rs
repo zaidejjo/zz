@@ -326,6 +326,13 @@ impl Checker {
                             Type::Unit
                         }
                     },
+                    Type::Dict(k, v) => {
+                        // Dict field access: req.body returns the value type
+                        if let Err(e) = self.unifier.unify(&Type::Str, &k) {
+                            self.report_mismatch(e, *span);
+                        }
+                        *v
+                    }
                     other => {
                         self.errors.push(error_at(
                             format!("cannot assign to field `{name}` of a value of type `{other}`"),
@@ -449,6 +456,18 @@ impl Checker {
                             Type::Unit
                         }
                     },
+                    Type::Dict(k, v) => {
+                        // Dict field access: req.body returns the value type
+                        if let Err(e) = self.unifier.unify(&Type::Str, &k) {
+                            self.report_mismatch(e, *span);
+                        }
+                        *v
+                    }
+                    Type::Var(_id) => {
+                        // Inference variable — not yet resolved (e.g. untyped closure param).
+                        // Return a fresh var; unification will catch real mismatches later.
+                        self.unifier.fresh_var()
+                    }
                     other => {
                         let method = name.clone();
                         let ns = match &other {

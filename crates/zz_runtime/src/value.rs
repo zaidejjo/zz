@@ -55,6 +55,9 @@ pub use crate::json::JsonValue;
 #[derive(Debug, Clone, PartialEq)]
 pub struct HttpServer {
     pub routes: Vec<(String, String, Value)>,
+    pub middlewares: Vec<Value>,
+    pub log_enabled: bool,
+    pub static_dir: Option<String>,
 }
 
 /// An HTTP response: status code, body, and headers.
@@ -239,7 +242,7 @@ impl PartialEq for Value {
             (Value::Json(a), Value::Json(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Response(a), Value::Response(b)) => a == b,
-            (Value::HttpServer(a), Value::HttpServer(b)) => a == b,
+            (Value::HttpServer(_), Value::HttpServer(_)) => std::ptr::eq(self, other),
             (
                 Value::Object {
                     name: an,

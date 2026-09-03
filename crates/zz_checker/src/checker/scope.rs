@@ -303,6 +303,18 @@ impl Checker {
                         return Type::Error;
                     }
                 },
+                Type::Dict(k, v) => {
+                    // Dict field access: req.body returns the value type
+                    if let Err(e) = self.unifier.unify(&Type::Str, &k) {
+                        self.report_mismatch(e, span);
+                    }
+                    ty = *v;
+                }
+                Type::Var(_) => {
+                    // Inference variable — not yet resolved (e.g. untyped closure param).
+                    // Return a fresh var; unification will catch real mismatches later.
+                    ty = self.unifier.fresh_var();
+                }
                 other => {
                     self.errors.push(error_at(
                         format!("cannot access field `{field}` on a value of type `{other}`"),

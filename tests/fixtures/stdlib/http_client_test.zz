@@ -3,10 +3,10 @@ import std.http
 
 // Create a server and chain routes
 s := http.server()
-s2 := http.route_get(s, "/hello", |_path: str| "world")
-s3 := http.route_post(s2, "/echo", |body: str| body)
-s4 := http.route_put(s3, "/update", |body: str| "updated: {body}")
-s5 := http.route_delete(s4, "/remove", |_path: str| "removed")
+s2 := http.route_get(s, "/hello", |req| "world")
+s3 := http.route_post(s2, "/echo", |req| req.body)
+s4 := http.route_put(s3, "/update", |req| "updated: {req.body}")
+s5 := http.route_delete(s4, "/remove", |req| "removed")
 
 // Test dispatch
 match http.handle(s5, "GET", "/hello", "") {
