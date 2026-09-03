@@ -11,7 +11,11 @@ fn call(name: &str, args: Vec<Value>) -> Result<Value, EvalError> {
 #[test]
 fn str_length_counts_chars() {
     assert_eq!(
-        call("std.str.length", vec![Value::Str("héllo".to_string().into())]).unwrap(),
+        call(
+            "std.str.length",
+            vec![Value::Str("héllo".to_string().into())]
+        )
+        .unwrap(),
         Value::Int(5)
     );
 }
@@ -21,7 +25,10 @@ fn str_split_splits() {
     assert_eq!(
         call(
             "std.str.split",
-            vec![Value::Str("a,b,c".to_string().into()), Value::Str(",".to_string().into())]
+            vec![
+                Value::Str("a,b,c".to_string().into()),
+                Value::Str(",".to_string().into())
+            ]
         )
         .unwrap(),
         Value::Array(Box::new(vec![
@@ -37,7 +44,10 @@ fn str_contains_finds_substring() {
     assert_eq!(
         call(
             "std.str.contains",
-            vec![Value::Str("hello".to_string().into()), Value::Str("ell".to_string().into())]
+            vec![
+                Value::Str("hello".to_string().into()),
+                Value::Str("ell".to_string().into())
+            ]
         )
         .unwrap(),
         Value::Bool(true)
@@ -45,7 +55,10 @@ fn str_contains_finds_substring() {
     assert_eq!(
         call(
             "std.str.contains",
-            vec![Value::Str("hello".to_string().into()), Value::Str("xyz".to_string().into())]
+            vec![
+                Value::Str("hello".to_string().into()),
+                Value::Str("xyz".to_string().into())
+            ]
         )
         .unwrap(),
         Value::Bool(false)

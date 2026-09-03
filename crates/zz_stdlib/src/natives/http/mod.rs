@@ -169,9 +169,18 @@ fn build_request_dict(
         (Value::Str("method".to_string().into()), method_val),
         (Value::Str("path".to_string().into()), path_val),
         (Value::Str("body".to_string().into()), body_val),
-        (Value::Str("headers".to_string().into()), Value::Dict(Box::new(headers_dict))),
-        (Value::Str("query".to_string().into()), Value::Dict(Box::new(query_dict))),
-        (Value::Str("params".to_string().into()), Value::Dict(Box::new(params_dict))),
+        (
+            Value::Str("headers".to_string().into()),
+            Value::Dict(Box::new(headers_dict)),
+        ),
+        (
+            Value::Str("query".to_string().into()),
+            Value::Dict(Box::new(query_dict)),
+        ),
+        (
+            Value::Str("params".to_string().into()),
+            Value::Dict(Box::new(params_dict)),
+        ),
     ]))
 }
 
@@ -208,7 +217,10 @@ pub(crate) fn http_get(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.get")?;
-    let headers = args.get(1).cloned().unwrap_or(Value::Dict(Box::new(vec![])));
+    let headers = args
+        .get(1)
+        .cloned()
+        .unwrap_or(Value::Dict(Box::new(vec![])));
     let client = build_client()?;
     let hdrs = dict_to_headers(&headers);
     let mut req = client.get(&url);
@@ -219,9 +231,9 @@ pub(crate) fn http_get(
         Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
-            "HTTP GET failed: {e}"
-        ).into()))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("HTTP GET failed: {e}").into(),
+        ))))),
     }
 }
 
@@ -233,7 +245,10 @@ pub(crate) fn http_post(
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.post")?;
     let body = expect_str(args, 1, "std.http.post")?;
-    let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::new(vec![])));
+    let headers = args
+        .get(2)
+        .cloned()
+        .unwrap_or(Value::Dict(Box::new(vec![])));
     let client = build_client()?;
     let hdrs = dict_to_headers(&headers);
     let mut req = client.post(&url);
@@ -244,9 +259,9 @@ pub(crate) fn http_post(
         Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
-            "HTTP POST failed: {e}"
-        ).into()))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("HTTP POST failed: {e}").into(),
+        ))))),
     }
 }
 
@@ -258,7 +273,10 @@ pub(crate) fn http_put(
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.put")?;
     let body = expect_str(args, 1, "std.http.put")?;
-    let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::new(vec![])));
+    let headers = args
+        .get(2)
+        .cloned()
+        .unwrap_or(Value::Dict(Box::new(vec![])));
     let client = build_client()?;
     let hdrs = dict_to_headers(&headers);
     let mut req = client.put(&url);
@@ -269,9 +287,9 @@ pub(crate) fn http_put(
         Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
-            "HTTP PUT failed: {e}"
-        ).into()))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("HTTP PUT failed: {e}").into(),
+        ))))),
     }
 }
 
@@ -282,7 +300,10 @@ pub(crate) fn http_delete(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.delete")?;
-    let headers = args.get(1).cloned().unwrap_or(Value::Dict(Box::new(vec![])));
+    let headers = args
+        .get(1)
+        .cloned()
+        .unwrap_or(Value::Dict(Box::new(vec![])));
     let client = build_client()?;
     let hdrs = dict_to_headers(&headers);
     let mut req = client.delete(&url);
@@ -293,9 +314,9 @@ pub(crate) fn http_delete(
         Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
-            "HTTP DELETE failed: {e}"
-        ).into()))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("HTTP DELETE failed: {e}").into(),
+        ))))),
     }
 }
 
@@ -339,9 +360,9 @@ pub(crate) fn http_response_json(
     match arg(args, 0, "std.http.json")? {
         Value::Response(r) => match parse_json(&r.body) {
             Ok(j) => Ok(Value::Json(Box::new(j))),
-            Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
-                "JSON parse error: {e}"
-            ).into()))))),
+            Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+                format!("JSON parse error: {e}").into(),
+            ))))),
         },
         other => Err(EvalError::new(
             format!("std.http.json: expected an http.response, found `{other}`"),
@@ -606,9 +627,9 @@ pub(crate) fn http_header(
             }
         }
     }
-    Ok(Value::Result(Box::new(Err(Value::Str(format!(
-        "header `{name}` not found"
-    ).into())))))
+    Ok(Value::Result(Box::new(Err(Value::Str(
+        format!("header `{name}` not found").into(),
+    )))))
 }
 
 /// `http.body_json(req: dict) -> json`
@@ -620,9 +641,9 @@ pub(crate) fn http_body_json(
     let body = extract_dict_field_str(args, 0, "body", "std.http.body_json", span)?;
     match parse_json(&body) {
         Ok(j) => Ok(Value::Json(Box::new(j))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
-            "JSON parse error: {e}"
-        ).into()))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("JSON parse error: {e}").into(),
+        ))))),
     }
 }
 
@@ -674,9 +695,9 @@ pub(crate) fn http_param(
             }
         }
     }
-    Ok(Value::Result(Box::new(Err(Value::Str(format!(
-        "param `{name}` not found"
-    ).into())))))
+    Ok(Value::Result(Box::new(Err(Value::Str(
+        format!("param `{name}` not found").into(),
+    )))))
 }
 
 // ===========================================================================
@@ -853,7 +874,10 @@ fn dispatch_with_request(
         // Replace the "params" key in the request dict
         if let Value::Dict(mut entries) = current_req {
             entries.retain(|(k, _)| k != &Value::Str("params".to_string().into()));
-            entries.push((Value::Str("params".to_string().into()), Value::Dict(Box::new(params_dict))));
+            entries.push((
+                Value::Str("params".to_string().into()),
+                Value::Dict(Box::new(params_dict)),
+            ));
             Value::Dict(entries)
         } else {
             current_req

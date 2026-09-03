@@ -17,7 +17,10 @@ pub(crate) fn str_split(
 ) -> Result<Value, EvalError> {
     let s = expect_str(args, 0, "std.str.split")?;
     let sep = expect_str(args, 1, "std.str.split")?;
-    let parts: Vec<Value> = s.split(&sep).map(|p| Value::Str(p.to_string().into())).collect();
+    let parts: Vec<Value> = s
+        .split(&sep)
+        .map(|p| Value::Str(p.to_string().into()))
+        .collect();
     Ok(Value::Array(Box::new(parts)))
 }
 

@@ -10,9 +10,9 @@ pub(crate) fn json_parse(
     let s = expect_str(args, 0, "std.json.parse")?;
     match parse_json(&s) {
         Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(j)))))),
-        Err(msg) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
-            "invalid JSON: {msg}"
-        ).into()))))),
+        Err(msg) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("invalid JSON: {msg}").into(),
+        ))))),
     }
 }
 
@@ -26,7 +26,9 @@ pub(crate) fn json_stringify(
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument for std.json.stringify", _span))?;
     match value_to_json(&v) {
-        Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Str(to_json_string(&j).into()))))),
+        Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Str(
+            to_json_string(&j).into(),
+        ))))),
         Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(e.message.into()))))),
     }
 }
@@ -41,25 +43,26 @@ pub(crate) fn json_get(
     match j {
         JsonValue::Obj(entries) => match entries.into_iter().find(|(k, _)| *k == key) {
             Some((_, v)) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(v)))))),
-            None => Ok(Value::Result(Box::new(Err(Value::Str(format!(
-                "key `{key}` not found"
-            ).into()))))),
+            None => Ok(Value::Result(Box::new(Err(Value::Str(
+                format!("key `{key}` not found").into(),
+            ))))),
         },
         JsonValue::Arr(items) => match key.parse::<usize>() {
             Ok(idx) => match items.get(idx) {
-                Some(v) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(v.clone())))))),
-                None => Ok(Value::Result(Box::new(Err(Value::Str(format!(
-                    "index {idx} out of bounds (len {})",
-                    items.len()
-                ).into()))))),
+                Some(v) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(
+                    v.clone(),
+                )))))),
+                None => Ok(Value::Result(Box::new(Err(Value::Str(
+                    format!("index {idx} out of bounds (len {})", items.len()).into(),
+                ))))),
             },
-            Err(_) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
-                "expected a numeric index for array, got `{key}`"
-            ).into()))))),
+            Err(_) => Ok(Value::Result(Box::new(Err(Value::Str(
+                format!("expected a numeric index for array, got `{key}`").into(),
+            ))))),
         },
-        other => Ok(Value::Result(Box::new(Err(Value::Str(format!(
-            "expected an object or array, found `{other}`"
-        ).into()))))),
+        other => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("expected an object or array, found `{other}`").into(),
+        ))))),
     }
 }
 
@@ -158,10 +161,10 @@ pub(crate) fn value_to_json(v: &Value) -> Result<JsonValue, EvalError> {
         Value::Option(Some(inner)) => value_to_json(inner),
         Value::Option(None) => Ok(JsonValue::Null),
         Value::Result(r) => match &**r {
-                            Ok(inner) => value_to_json(inner),
-                            Err(_) => Ok(JsonValue::Null),
-                        },
-        
+            Ok(inner) => value_to_json(inner),
+            Err(_) => Ok(JsonValue::Null),
+        },
+
         Value::Array(vs) => {
             let mut items = Vec::with_capacity(vs.len());
             for x in &**vs {

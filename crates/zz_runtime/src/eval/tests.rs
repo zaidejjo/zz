@@ -73,7 +73,10 @@ fn empty_program_is_unit() {
 
 #[test]
 fn strings_and_concat() {
-    assert_eq!(eval_src("\"a\" + \"b\"").unwrap(), Value::Str("ab".to_string().into()));
+    assert_eq!(
+        eval_src("\"a\" + \"b\"").unwrap(),
+        Value::Str("ab".to_string().into())
+    );
 }
 
 #[test]
@@ -200,7 +203,11 @@ fn variant_constructors() {
 fn array_literal() {
     assert_eq!(
         eval_src("scores := [10, 20, 30]\nscores").unwrap(),
-        Value::Array(Box::new(vec![Value::Int(10), Value::Int(20), Value::Int(30)]))
+        Value::Array(Box::new(vec![
+            Value::Int(10),
+            Value::Int(20),
+            Value::Int(30)
+        ]))
     );
 }
 
@@ -216,7 +223,10 @@ fn array_explicit_decl() {
 fn dict_literal() {
     assert_eq!(
         eval_src("ages := {\"Zaid\": 20}\nages").unwrap(),
-        Value::Dict(Box::new(vec![(Value::Str("Zaid".to_string().into()), Value::Int(20))]))
+        Value::Dict(Box::new(vec![(
+            Value::Str("Zaid".to_string().into()),
+            Value::Int(20)
+        )]))
     );
 }
 
@@ -224,7 +234,10 @@ fn dict_literal() {
 fn dict_explicit_decl() {
     assert_eq!(
         eval_src("ages: {str: int} = {\"a\": 1}\nages").unwrap(),
-        Value::Dict(Box::new(vec![(Value::Str("a".to_string().into()), Value::Int(1))]))
+        Value::Dict(Box::new(vec![(
+            Value::Str("a".to_string().into()),
+            Value::Int(1)
+        )]))
     );
 }
 
@@ -233,7 +246,10 @@ fn dict_union_value_type() {
     assert_eq!(
         eval_src("user: {str: str | int} = {\"name\": \"Zaid\", \"age\": 20}\nuser").unwrap(),
         Value::Dict(Box::new(vec![
-            (Value::Str("name".to_string().into()), Value::Str("Zaid".to_string().into())),
+            (
+                Value::Str("name".to_string().into()),
+                Value::Str("Zaid".to_string().into())
+            ),
             (Value::Str("age".to_string().into()), Value::Int(20)),
         ]))
     );
@@ -542,7 +558,10 @@ fn index_non_indexable_errors() {
 #[test]
 fn array_slice() {
     let v = eval_src("scores := [10, 20, 30, 40]\nscores[1:3]").unwrap();
-    assert_eq!(v, Value::Array(Box::new(vec![Value::Int(20), Value::Int(30)])));
+    assert_eq!(
+        v,
+        Value::Array(Box::new(vec![Value::Int(20), Value::Int(30)]))
+    );
 }
 
 #[test]
@@ -557,7 +576,11 @@ fn slice_open_bounds() {
     );
     assert_eq!(
         eval_src("scores := [10, 20, 30]\nscores[:]").unwrap(),
-        Value::Array(Box::new(vec![Value::Int(10), Value::Int(20), Value::Int(30)]))
+        Value::Array(Box::new(vec![
+            Value::Int(10),
+            Value::Int(20),
+            Value::Int(30)
+        ]))
     );
 }
 
@@ -570,7 +593,10 @@ fn slice_negative_bounds() {
 #[test]
 fn slice_clamps_bounds() {
     let v = eval_src("scores := [10, 20, 30]\nscores[1:99]").unwrap();
-    assert_eq!(v, Value::Array(Box::new(vec![Value::Int(20), Value::Int(30)])));
+    assert_eq!(
+        v,
+        Value::Array(Box::new(vec![Value::Int(20), Value::Int(30)]))
+    );
 }
 
 #[test]

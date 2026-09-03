@@ -3,10 +3,22 @@ use zz_runtime::Value;
 
 #[test]
 fn typeof_builtin() {
-    assert_eq!(run("typeof(1)").unwrap(), Value::Str("int".to_string().into()));
-    assert_eq!(run("typeof(1.5)").unwrap(), Value::Str("float".to_string().into()));
-    assert_eq!(run("typeof(\"x\")").unwrap(), Value::Str("str".to_string().into()));
-    assert_eq!(run("typeof(true)").unwrap(), Value::Str("bool".to_string().into()));
+    assert_eq!(
+        run("typeof(1)").unwrap(),
+        Value::Str("int".to_string().into())
+    );
+    assert_eq!(
+        run("typeof(1.5)").unwrap(),
+        Value::Str("float".to_string().into())
+    );
+    assert_eq!(
+        run("typeof(\"x\")").unwrap(),
+        Value::Str("str".to_string().into())
+    );
+    assert_eq!(
+        run("typeof(true)").unwrap(),
+        Value::Str("bool".to_string().into())
+    );
     assert_eq!(
         run("typeof([1, 2])").unwrap(),
         Value::Str("array".to_string().into())

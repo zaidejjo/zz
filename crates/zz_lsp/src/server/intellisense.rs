@@ -36,10 +36,7 @@ pub(crate) async fn handle_completion_resolve(
     for entry in backend.state.documents.iter() {
         let doc = entry.value();
         if doc.check_result.is_some() {
-            crate::completion::resolve_completion_detail(
-                &mut item,
-                doc.check_result.as_ref(),
-            );
+            crate::completion::resolve_completion_detail(&mut item, doc.check_result.as_ref());
             break;
         }
     }
@@ -72,10 +69,7 @@ pub(crate) async fn handle_signature_help(
     Ok(help)
 }
 
-pub(crate) async fn handle_hover(
-    backend: &Backend,
-    params: HoverParams,
-) -> Result<Option<Hover>> {
+pub(crate) async fn handle_hover(backend: &Backend, params: HoverParams) -> Result<Option<Hover>> {
     use zz_frontend::ast::Expr;
 
     let uri = &params.text_document_position_params.text_document.uri;
@@ -126,7 +120,10 @@ pub(crate) async fn handle_hover(
         contents.push_str("```\n");
     } else if let Some(ty) = check_result.bindings.get(&name) {
         contents.push_str(&format!("**let** `{name}: {ty}`\n"));
-    } else if let Some(Expr::Field { name: field, obj, .. }) = node.expr {
+    } else if let Some(Expr::Field {
+        name: field, obj, ..
+    }) = node.expr
+    {
         if let Some(zz_checker::Type::Struct(struct_name)) =
             crate::lookup::resolve_type_of_expr(program, check_result, obj)
         {

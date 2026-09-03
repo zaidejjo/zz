@@ -23,7 +23,9 @@ pub(crate) fn object_field(obj: &Value, name: &str, span: Span) -> Result<Value,
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, v)| v.clone())
-            .ok_or_else(|| EvalError::new(format!("struct `{}` has no field `{name}`", o.name), span)),
+            .ok_or_else(|| {
+                EvalError::new(format!("struct `{}` has no field `{name}`", o.name), span)
+            }),
         Value::Dict(entries) => entries
             .iter()
             .find(|(k, _)| matches!(k, Value::Str(s) if &**s == name))

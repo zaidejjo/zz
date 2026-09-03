@@ -21,9 +21,9 @@ pub(crate) fn env_var(
     let name = expect_str(args, 0, "std.env.var")?;
     match std::env::var(&name) {
         Ok(v) => Ok(Value::Result(Box::new(Ok(Value::Str(v.into()))))),
-        Err(_) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
-            "environment variable `{name}` not set"
-        ).into()))))),
+        Err(_) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("environment variable `{name}` not set").into(),
+        ))))),
     }
 }
 
@@ -33,6 +33,10 @@ pub(crate) fn env_args(
     _span: Span,
 ) -> Result<Value, EvalError> {
     Ok(Value::Array(Box::new(
-        interp.args.iter().map(|s| Value::Str(s.clone().into())).collect(),
+        interp
+            .args
+            .iter()
+            .map(|s| Value::Str(s.clone().into()))
+            .collect(),
     )))
 }

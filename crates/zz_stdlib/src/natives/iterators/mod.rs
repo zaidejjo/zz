@@ -25,7 +25,11 @@ pub(crate) fn range(
     if step == 0 {
         return Err(EvalError::new("range step cannot be zero", span));
     }
-    Ok(Value::Range(Box::new(RangeValue { start, end: stop, step })))
+    Ok(Value::Range(Box::new(RangeValue {
+        start,
+        end: stop,
+        step,
+    })))
 }
 
 pub(crate) fn len(
