@@ -1,4 +1,5 @@
 import std.io
+// Recursion: classic fib(30)
 func fib(n: int) -> int {
     if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
 }

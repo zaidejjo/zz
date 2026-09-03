@@ -15,3 +15,6 @@ bench/native/bench_fib
 bench/native/bench_loop
 bench/native/bench_str
 bench/native/_go/main
+bench/native/.bin
+bench/native/categories/*
+!bench/native/categories/*.zz
