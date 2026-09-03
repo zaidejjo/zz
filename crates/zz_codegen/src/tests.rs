@@ -264,6 +264,38 @@ func main() {
     assert_eq!(stdout.trim_end(), "prompt: got Alice");
 }
 
+#[test]
+fn native_range_call_loop_and_bare_println() {
+    // Mirrors the performance-check fixture: `range(n)` loop + bare
+    // `println` (no io. prefix) + time.now_ms for elapsed timing.
+    let src = r#"
+func main() {
+    result := 0
+    for i in range(1000) {
+        result = result + i
+    }
+    println(result)
+    start := time.now_ms()
+    println(start - 0)
+}
+"#;
+    let (pruned, reach) = build_reachable(src);
+    let tmp = std::env::temp_dir().join(format!("zz-test-range-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let bin = tmp.join("zz_out");
+    build_native(&pruned, &reach, "main", BuildOptions::dev(), &bin)
+        .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
+    let (_, out) = compile::run_binary(&bin, &[]).unwrap();
+    let _ = std::fs::remove_dir_all(&tmp);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "499500", "range(1000) sum wrong: {out}");
+    // Second line is a monotonic ms timestamp — must parse as int.
+    assert!(
+        lines[1].parse::<i64>().is_ok(),
+        "time.now_ms not int: {out}"
+    );
+}
+
 /// Helper to build a TypedProgram for tests that need the real stdlib.
 #[allow(dead_code)]
 fn _seed() -> HashMap<String, FuncSig> {

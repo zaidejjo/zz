@@ -1,5 +1,6 @@
 // ZZ native runtime — implementation.
 #include <math.h>
+#include <time.h>
 #include "runtime.h"
 
 // ---- string helpers ----------------------------------------------------
@@ -444,6 +445,18 @@ zz_value zz_math_pow(zz_value a, zz_value b, int *err) {
     double x = a.tag == ZZ_FLOAT ? a.f : (double)a.i;
     double y = b.tag == ZZ_FLOAT ? b.f : (double)b.i;
     return zz_float(dpow(x, y));
+}
+
+/// `time.now_ms()` — monotonic milliseconds since an arbitrary epoch,
+/// matching the stdlib native's behavior for elapsed-time measurements.
+/// The `zz_value` arg is ignored (native has zero zz-level arguments).
+zz_value zz_time_now_ms(zz_value unused, int *err) {
+    (void)unused;
+    (void)err;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return zz_int(ms);
 }
 
 // ---- formatting (malloc'd, caller frees) --------------------------------

@@ -352,9 +352,39 @@ impl Lowerer {
         names: &mut NameCtx,
         out: &mut String,
     ) {
-        if let Expr::Range { start, end, .. } = iter {
-            let sv = self.emit_expr(start, names, out);
-            let ev = self.emit_expr(end, names, out);
+        // Resolve the iteration bounds: `a..b` or `range(...)` builtin calls.
+        // Returns (start_expr, end_expr) when statically int-rangeable.
+        let bounds: Option<(Expr, Expr)> = match iter {
+            Expr::Range { start, end, .. } => Some(((**start).clone(), (**end).clone())),
+            Expr::Call { callee, args, .. } => {
+                let is_range = matches!(
+                    callee.as_ref(),
+                    Expr::Ident { name, .. } if name == "range"
+                );
+                if is_range {
+                    match args.len() {
+                        // range(stop) == 0..stop
+                        1 => Some((
+                            Expr::Int {
+                                value: 0,
+                                span: zz_frontend::span::Span { start: 0, end: 0 },
+                            },
+                            args[0].clone(),
+                        )),
+                        // range(start, stop)
+                        2 => Some((args[0].clone(), args[1].clone())),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some((start_expr, end_expr)) = bounds {
+            let sv = self.emit_expr(&start_expr, names, out);
+            let ev = self.emit_expr(&end_expr, names, out);
             let v = &vars[0].name;
             let cid = names.enter(v);
             let s = format!(
@@ -599,10 +629,12 @@ fn get_block(e: &Expr) -> &Block {
 /// Map a zz native qualified name to its C runtime implementation name.
 fn native_impl(name: &str) -> Option<&'static str> {
     match name {
-        "io.println" | "std.io.println" => Some("zz_io_println"),
-        "io.print" | "std.io.print" => Some("zz_io_print"),
+        // Bare builtins (no namespace) registered by stdlib at top level.
+        "println" | "io.println" | "std.io.println" => Some("zz_io_println"),
+        "print" | "io.print" | "std.io.print" => Some("zz_io_print"),
         "input" | "io.read_line" | "main_io.input" => Some("zz_io_input"),
         "math.pow" | "std.math.pow" => Some("zz_math_pow"),
+        "time.now_ms" | "std.time.now_ms" => Some("zz_time_now_ms"),
         _ => None,
     }
 }

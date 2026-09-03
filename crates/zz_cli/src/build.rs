@@ -34,12 +34,17 @@ pub fn cache_dir() -> PathBuf {
     home.join(".zz").join("cache")
 }
 
+/// Cache schema version — bump when codegen/runtime changes invalidate old
+/// binaries.
+const CACHE_VERSION: u32 = 2;
+
 /// Hash of the source + mode, used as the cache key.
 fn cache_key(src: &str, mode: BuildMode) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     src.hash(&mut hasher);
     mode_hash(mode).hash(&mut hasher);
+    CACHE_VERSION.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
