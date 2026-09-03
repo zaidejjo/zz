@@ -488,9 +488,49 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
 
+    // std.http — Server methods (dispatched via method_namespace "http")
+    m.insert(
+        "http.log".into(),
+        sig(
+            vec![("server", Type::HttpServer), ("enabled", Type::Bool)],
+            Type::HttpServer,
+        ),
+    );
+    m.insert(
+        "http.pipe".into(),
+        sig(
+            vec![
+                ("server", Type::HttpServer),
+                (
+                    "middleware",
+                    Type::Func(
+                        vec![Type::Dict(Box::new(Type::Str), Box::new(Type::Str))],
+                        Box::new(Type::Result(
+                            Box::new(Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
+                            Box::new(Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
+                        )),
+                    ),
+                ),
+            ],
+            Type::HttpServer,
+        ),
+    );
+    m.insert(
+        "http.serve_dir".into(),
+        sig(
+            vec![("server", Type::HttpServer), ("dir", Type::Str)],
+            Type::HttpServer,
+        ),
+    );
+
     // std.http — Server (per-route model)
     let server_t = Type::HttpServer;
-    let handler_t = Type::Func(vec![Type::Str], Box::new(Type::Str));
+    // Handler receives a request dict and returns a string, dict, array, or response.
+    // We use a loose Func type: Dict → Str (the checker doesn't enforce return strictly).
+    let handler_t = Type::Func(
+        vec![Type::Dict(Box::new(Type::Str), Box::new(Type::Str))],
+        Box::new(Type::Str),
+    );
     m.insert("std.http.server".into(), sig(vec![], server_t.clone()));
     m.insert(
         "std.http.route_get".into(),
@@ -553,64 +593,80 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("server", server_t), ("port", Type::Int)], Type::Unit),
     );
 
-    // std.http — Request helpers
-    m.insert(
-        "std.http.request_method".into(),
-        sig(
-            vec![("req", Type::Dict(Box::new(Type::Str), Box::new(Type::Str)))],
-            Type::Str,
-        ),
-    );
-    m.insert(
-        "std.http.request_path".into(),
-        sig(
-            vec![("req", Type::Dict(Box::new(Type::Str), Box::new(Type::Str)))],
-            Type::Str,
-        ),
-    );
-    m.insert(
-        "std.http.request_body".into(),
-        sig(
-            vec![("req", Type::Dict(Box::new(Type::Str), Box::new(Type::Str)))],
-            Type::Str,
-        ),
-    );
-    m.insert(
-        "std.http.request_headers".into(),
-        sig(
-            vec![("req", Type::Dict(Box::new(Type::Str), Box::new(Type::Str)))],
-            Type::Dict(Box::new(Type::Str), Box::new(Type::Str)),
-        ),
-    );
-    m.insert(
-        "std.http.request_query".into(),
-        sig(
-            vec![("req", Type::Dict(Box::new(Type::Str), Box::new(Type::Str)))],
-            Type::Str,
-        ),
-    );
+    // std.http — Phase 5B features
+    let dict_str_str = Type::Dict(Box::new(Type::Str), Box::new(Type::Str));
+    let result_bool = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
 
-    // std.http — Response builders
     m.insert(
-        "std.http.response_json".into(),
+        "std.http.log".into(),
         sig(
-            vec![("data", Type::Json), ("status", Type::Int)],
+            vec![("server", Type::HttpServer), ("enabled", Type::Bool)],
+            Type::HttpServer,
+        ),
+    );
+    m.insert(
+        "std.http.pipe".into(),
+        sig(
+            vec![
+                ("server", Type::HttpServer),
+                (
+                    "middleware",
+                    Type::Func(
+                        vec![Type::Dict(Box::new(Type::Str), Box::new(Type::Str))],
+                        Box::new(Type::Result(
+                            Box::new(Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
+                            Box::new(Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
+                        )),
+                    ),
+                ),
+            ],
+            Type::HttpServer,
+        ),
+    );
+    m.insert(
+        "std.http.serve_dir".into(),
+        sig(
+            vec![("server", Type::HttpServer), ("dir", Type::Str)],
+            Type::HttpServer,
+        ),
+    );
+    m.insert(
+        "std.http.test".into(),
+        sig(
+            vec![
+                ("server", Type::HttpServer),
+                ("method", Type::Str),
+                ("path", Type::Str),
+                ("body", Type::Str),
+            ],
             Type::Response,
         ),
     );
     m.insert(
-        "std.http.response_text".into(),
+        "std.http.param".into(),
         sig(
-            vec![("data", Type::Str), ("status", Type::Int)],
-            Type::Response,
+            vec![("req", dict_str_str.clone()), ("name", Type::Str)],
+            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
         ),
     );
     m.insert(
-        "std.http.response_html".into(),
+        "std.http.query".into(),
+        sig(vec![("req", dict_str_str.clone())], dict_str_str.clone()),
+    );
+    m.insert(
+        "std.http.header".into(),
         sig(
-            vec![("data", Type::Str), ("status", Type::Int)],
-            Type::Response,
+            vec![("req", dict_str_str.clone()), ("name", Type::Str)],
+            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
         ),
+    );
+    m.insert(
+        "std.http.body_json".into(),
+        sig(vec![("req", dict_str_str.clone())], Type::Json),
+    );
+    m.insert(
+        "std.http.body_form".into(),
+        sig(vec![("req", dict_str_str.clone())], dict_str_str.clone()),
     );
 
     // std.net — TCP networking
@@ -979,6 +1035,15 @@ mod tests {
         assert!(funcs.contains_key("std.http.server"));
         assert!(funcs.contains_key("std.http.handle"));
         assert!(funcs.contains_key("std.http.listen"));
+        assert!(funcs.contains_key("std.http.log"));
+        assert!(funcs.contains_key("std.http.pipe"));
+        assert!(funcs.contains_key("std.http.serve_dir"));
+        assert!(funcs.contains_key("std.http.test"));
+        assert!(funcs.contains_key("std.http.param"));
+        assert!(funcs.contains_key("std.http.query"));
+        assert!(funcs.contains_key("std.http.header"));
+        assert!(funcs.contains_key("std.http.body_json"));
+        assert!(funcs.contains_key("std.http.body_form"));
         assert!(funcs.contains_key("std.fs.read_to_string"));
         assert!(funcs.contains_key("std.fs.write"));
         assert!(funcs.contains_key("std.fs.remove_file"));
@@ -1022,7 +1087,7 @@ mod tests {
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
         assert!(funcs.contains_key("append"));
-        assert_eq!(funcs.len(), 153);
+        assert_eq!(funcs.len(), 157);
     }
 
     #[test]

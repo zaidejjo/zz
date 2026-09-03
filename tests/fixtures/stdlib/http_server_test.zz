@@ -3,10 +3,10 @@ import std.http
 
 // Create a server and chain routes
 s := http.server()
-s2 := http.route_get(s, "/greet", |_path: str| "hello!")
-s3 := http.route_post(s2, "/data", |body: str| "got: {body}")
-s4 := http.route_put(s3, "/items", |body: str| "item updated")
-s5 := http.route_delete(s4, "/items", |_path: str| "item deleted")
+s2 := http.route_get(s, "/greet", |req| "hello!")
+s3 := http.route_post(s2, "/data", |req| "got: {req.body}")
+s4 := http.route_put(s3, "/items", |req| "item updated")
+s5 := http.route_delete(s4, "/items", |req| "item deleted")
 
 // Dispatch requests
 match http.handle(s5, "GET", "/greet", "") {
@@ -30,7 +30,7 @@ match http.handle(s5, "DELETE", "/items", "") {
 }
 
 // Test wildcard route
-s6 := http.route_get(s5, "*", |_path: str| "fallback")
+s6 := http.route_get(s5, "*", |req| "fallback")
 match http.handle(s6, "GET", "/anything", "") {
     .ok(v) => println("r5 (wildcard): {v}"),
     .err(e) => println("ERROR: {e}"),

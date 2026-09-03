@@ -25,6 +25,11 @@ pub(crate) fn object_field(obj: &Value, name: &str, span: Span) -> Result<Value,
             .find(|(n, _)| n == name)
             .map(|(_, v)| v.clone())
             .ok_or_else(|| EvalError::new(format!("struct `{tname}` has no field `{name}`"), span)),
+        Value::Dict(entries) => entries
+            .iter()
+            .find(|(k, _)| matches!(k, Value::Str(s) if s == name))
+            .map(|(_, v)| v.clone())
+            .ok_or_else(|| EvalError::new(format!("dict has no key `{name}`"), span)),
         other => Err(EvalError::new(
             format!("cannot access field `{name}` on a value of type `{other}`"),
             span,

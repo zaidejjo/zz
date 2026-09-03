@@ -476,7 +476,7 @@ mod tests {
     fn http_get_route() {
         let mut s = Session::new("<test>");
         let out = s.eval(
-            "import std.http\ns := http.server()\ns2 := http.route_get(s, \"/hi\", |path: str| \"hello\")\nhttp.handle(s2, \"GET\", \"/hi\", \"\") ?? \"error\"",
+            "import std.http\ns := http.server()\ns2 := http.route_get(s, \"/hi\", |req| \"hello\")\nhttp.handle(s2, \"GET\", \"/hi\", \"\") ?? \"error\"",
         );
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "hello");
@@ -486,7 +486,7 @@ mod tests {
     fn http_post_body_passthrough() {
         let mut s = Session::new("<test>");
         let out = s.eval(
-            "import std.http\ns := http.server()\ns2 := http.route_post(s, \"/echo\", |body: str| body)\nhttp.handle(s2, \"POST\", \"/echo\", \"ping\") ?? \"error\"",
+            "import std.http\ns := http.server()\ns2 := http.route_post(s, \"/echo\", |req| req.body)\nhttp.handle(s2, \"POST\", \"/echo\", \"ping\") ?? \"error\"",
         );
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "ping");
