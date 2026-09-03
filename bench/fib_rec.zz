@@ -1,0 +1,9 @@
+// fib_rec.zz — Recursive fibonacci benchmark (n=30)
+func fib(n: int) -> int {
+    if n < 2 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
+    }
+}
+fib(30)

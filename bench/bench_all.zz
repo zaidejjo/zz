@@ -1,0 +1,34 @@
+import std.time
+
+// Warmup
+s := 0
+for i in 0..100000 { s = s + i }
+
+// Benchmark 1: add_to_1M
+t0 := time.now_ms()
+sum := 0
+for i in 0..1000000 {
+    sum = sum + i
+}
+t1 := time.now_ms()
+println("add_to_1M: {t1 - t0}ms result={sum}")
+
+// Benchmark 2: add_to_10M
+t2 := time.now_ms()
+sum2 := 0
+for j in 0..10000000 {
+    sum2 = sum2 + j
+}
+t3 := time.now_ms()
+println("add_to_10M: {t3 - t2}ms result={sum2}")
+
+// Benchmark 3: nested loop
+t4 := time.now_ms()
+count := 0
+for a in 0..1000 {
+    for b in 0..1000 {
+        count = count + 1
+    }
+}
+t5 := time.now_ms()
+println("nested_1M: {t5 - t4}ms result={count}")

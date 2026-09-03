@@ -98,6 +98,7 @@ impl Value {
         }
     }
 
+    #[inline(always)]
     pub fn is_truthy(&self) -> bool {
         matches!(self, Value::Bool(true))
     }
