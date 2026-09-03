@@ -157,6 +157,7 @@ impl Compiler {
             Op::LoadVar(..) | Op::LoadPath(..) | Op::LoadSlot(_) => 1,
             Op::DefineVar(_) => 0,
             Op::StoreVar(..) | Op::StorePath(..) | Op::StoreSlot(_) => -1,
+            Op::SlotAddInt { .. } => 0,
             Op::MakeFunc { .. } | Op::RegisterStruct { .. } | Op::MakeClosure { .. } => 1,
             Op::BinOp(..) => -1,
             Op::UnOp(..) => 0,
@@ -235,6 +236,48 @@ impl Compiler {
             }
         }
         Resolved::Env
+    }
+
+    /// Match `x = x + y` / `x = y + x` where `x` and `y` both resolve to
+    /// local slots. Returns `(dst, src)` so the VM can fuse the load/add/
+    /// store into a single in-place `SlotAddInt`.
+    fn try_slot_add(&self, target: &str, value: &Expr) -> Option<(u16, u16)> {
+        let Expr::Binary {
+            op: binop,
+            left,
+            right,
+            ..
+        } = value
+        else {
+            return None;
+        };
+        if *binop != zz_frontend::ast::BinOp::Add {
+            return None;
+        }
+        let dst = match self.resolve(target) {
+            Resolved::Slot(slot) => slot as u16,
+            Resolved::Env => return None,
+        };
+        let src = match (left.as_ref(), right.as_ref()) {
+            (Expr::Ident { name: ln, .. }, Expr::Ident { name: rn, .. }) => {
+                // `x = x + y` -> dst + src, or `x = y + x` -> dst + src
+                if ln == target {
+                    match self.resolve(rn) {
+                        Resolved::Slot(slot) => slot as u16,
+                        Resolved::Env => return None,
+                    }
+                } else if rn == target {
+                    match self.resolve(ln) {
+                        Resolved::Slot(slot) => slot as u16,
+                        Resolved::Env => return None,
+                    }
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+        Some((dst, src))
     }
 
     fn compile_path_load(&mut self, parts: &[String], span: Span) {
@@ -528,13 +571,21 @@ impl Compiler {
             }
             Stmt::Assign { target, value, .. } => match target {
                 Expr::Ident { name, span } => {
-                    self.compile_expr(value);
-                    match self.resolve(name) {
-                        Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
-                        Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+                    // Fast path: `x = x + y` / `x = y + x` with both operands
+                    // resolving to local slots -> single in-place int add.
+                    if let Some((dst, src)) = self.try_slot_add(name, value) {
+                        self.emit(Op::SlotAddInt { dst, src });
+                        self.emit_const(Value::Unit);
+                        StmtValue::Discard
+                    } else {
+                        self.compile_expr(value);
+                        match self.resolve(name) {
+                            Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
+                            Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+                        }
+                        self.emit_const(Value::Unit);
+                        StmtValue::Discard
                     }
-                    self.emit_const(Value::Unit);
-                    StmtValue::Discard
                 }
                 Expr::Path { parts, span } => {
                     self.compile_expr(value);
@@ -823,7 +874,7 @@ impl Compiler {
         match expr {
             Expr::Int { value, .. } => self.emit_const(Value::Int(*value)),
             Expr::Float { value, .. } => self.emit_const(Value::Float(*value)),
-            Expr::Str { value, .. } => self.emit_const(Value::Str(value.clone())),
+            Expr::Str { value, .. } => self.emit_const(Value::Str(value.clone().into())),
             Expr::Bool { value, .. } => self.emit_const(Value::Bool(*value)),
             Expr::Ident { name, span } => match self.resolve(name) {
                 Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
@@ -935,7 +986,7 @@ impl Compiler {
                             }
                         }
                         if is_input {
-                            self.emit_const(Value::Str(String::new()));
+                            self.emit_const(Value::Str(String::new().into()));
                         }
                         self.emit(Op::CallMethod {
                             name: parts.last().unwrap().clone(),
@@ -965,7 +1016,7 @@ impl Compiler {
                             }
                         }
                         if is_input {
-                            self.emit_const(Value::Str(String::new()));
+                            self.emit_const(Value::Str(String::new().into()));
                         }
                         self.emit(Op::CallPath {
                             parts: parts.clone(),
@@ -1045,7 +1096,7 @@ impl Compiler {
                         }
                     }
                     if is_input {
-                        self.emit_const(Value::Str(String::new()));
+                        self.emit_const(Value::Str(String::new().into()));
                     }
                     self.emit(Op::Call {
                         argc: argc as u16,
@@ -1078,12 +1129,12 @@ impl Compiler {
                 for part in parts {
                     match part {
                         FmtPart::Text(t) => {
-                            self.emit_const(Value::Str(t.clone()));
+                            self.emit_const(Value::Str(t.clone().into()));
                             n += 1;
                         }
                         FmtPart::Expr(e, Some(spec)) => {
                             self.compile_expr(e);
-                            self.emit_const(Value::Str(spec.clone()));
+                            self.emit_const(Value::Str(spec.clone().into()));
                             self.emit(Op::FormatValue(e.span()));
                             n += 1;
                         }

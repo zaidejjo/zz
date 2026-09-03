@@ -3,16 +3,16 @@ use zz_runtime::Value;
 
 #[test]
 fn conv_str() {
-    assert_eq!(run("str(42)").unwrap(), Value::Str("42".to_string()));
-    assert_eq!(run("str(3.5)").unwrap(), Value::Str("3.5".to_string()));
-    assert_eq!(run("str(true)").unwrap(), Value::Str("true".to_string()));
+    assert_eq!(run("str(42)").unwrap(), Value::Str("42".to_string().into()));
+    assert_eq!(run("str(3.5)").unwrap(), Value::Str("3.5".to_string().into()));
+    assert_eq!(run("str(true)").unwrap(), Value::Str("true".to_string().into()));
     assert_eq!(
         run("str([1, 2])").unwrap(),
-        Value::Str("[1, 2]".to_string())
+        Value::Str("[1, 2]".to_string().into())
     );
     assert_eq!(
         run("str({\"a\": 1})").unwrap(),
-        Value::Str("{a: 1}".to_string())
+        Value::Str("{a: 1}".to_string().into())
     );
 }
 

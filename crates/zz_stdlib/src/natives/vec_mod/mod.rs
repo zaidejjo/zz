@@ -21,7 +21,7 @@ pub(crate) fn vec_push(
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument `x` for vec.push", span))?;
     vs.push(x);
-    Ok(Value::Array(vs))
+    Ok(Value::Array(Box::new(vs)))
 }
 
 pub(crate) fn vec_pop(
@@ -37,7 +37,7 @@ pub(crate) fn vec_pop(
         ));
     }
     vs.pop();
-    Ok(Value::Array(vs))
+    Ok(Value::Array(Box::new(vs)))
 }
 
 pub(crate) fn vec_reverse(
@@ -47,7 +47,7 @@ pub(crate) fn vec_reverse(
 ) -> Result<Value, EvalError> {
     let mut vs = expect_array(args, 0, "vec.reverse")?;
     vs.reverse();
-    Ok(Value::Array(vs))
+    Ok(Value::Array(Box::new(vs)))
 }
 
 pub(crate) fn vec_join(
@@ -58,7 +58,7 @@ pub(crate) fn vec_join(
     let vs = expect_array(args, 0, "vec.join")?;
     let sep = expect_str(args, 1, "vec.join")?;
     let parts: Vec<String> = vs.iter().map(|v| v.to_string()).collect();
-    Ok(Value::Str(parts.join(&sep)))
+    Ok(Value::Str(parts.join(&sep).into()))
 }
 
 pub(crate) fn vec_contains(
@@ -94,7 +94,7 @@ pub(crate) fn vec_sort(
             _ => std::cmp::Ordering::Equal,
         })
     });
-    Ok(Value::Array(vs))
+    Ok(Value::Array(Box::new(vs)))
 }
 
 pub(crate) fn vec_insert(
@@ -117,7 +117,7 @@ pub(crate) fn vec_insert(
         ));
     }
     vs.insert(idx as usize, x);
-    Ok(Value::Array(vs))
+    Ok(Value::Array(Box::new(vs)))
 }
 
 pub(crate) fn vec_remove(
@@ -136,5 +136,5 @@ pub(crate) fn vec_remove(
         ));
     }
     vs.remove(idx as usize);
-    Ok(Value::Array(vs))
+    Ok(Value::Array(Box::new(vs)))
 }

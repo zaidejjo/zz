@@ -5,7 +5,7 @@ use zz_runtime::Value;
 fn literal_str_method_trim() {
     assert_eq!(
         run("\" hello \".trim()").unwrap(),
-        Value::Str("hello".to_string())
+        Value::Str("hello".to_string().into())
     );
 }
 
@@ -13,7 +13,7 @@ fn literal_str_method_trim() {
 fn literal_str_method_to_upper() {
     assert_eq!(
         run("\"hello\".to_upper()").unwrap(),
-        Value::Str("HELLO".to_string())
+        Value::Str("HELLO".to_string().into())
     );
 }
 
@@ -21,7 +21,7 @@ fn literal_str_method_to_upper() {
 fn literal_str_method_to_lower() {
     assert_eq!(
         run("\"HELLO\".to_lower()").unwrap(),
-        Value::Str("hello".to_string())
+        Value::Str("hello".to_string().into())
     );
 }
 
@@ -29,7 +29,7 @@ fn literal_str_method_to_lower() {
 fn literal_str_method_chaining() {
     assert_eq!(
         run("\" hello \".trim().to_upper()").unwrap(),
-        Value::Str("HELLO".to_string())
+        Value::Str("HELLO".to_string().into())
     );
 }
 
@@ -37,7 +37,7 @@ fn literal_str_method_chaining() {
 fn literal_str_method_triple_chain() {
     assert_eq!(
         run("\"  world  \".trim().to_upper().to_lower()").unwrap(),
-        Value::Str("world".to_string())
+        Value::Str("world".to_string().into())
     );
 }
 
@@ -45,7 +45,7 @@ fn literal_str_method_triple_chain() {
 fn literal_array_method_reverse() {
     assert_eq!(
         run("[1, 2, 3].reverse()").unwrap(),
-        Value::Array(vec![Value::Int(3), Value::Int(2), Value::Int(1),])
+        Value::Array(Box::new(vec![Value::Int(3), Value::Int(2), Value::Int(1),]))
     );
 }
 
@@ -53,7 +53,7 @@ fn literal_array_method_reverse() {
 fn literal_array_method_sort() {
     assert_eq!(
         run("[3, 1, 2].sort()").unwrap(),
-        Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3),])
+        Value::Array(Box::new(vec![Value::Int(1), Value::Int(2), Value::Int(3),]))
     );
 }
 
@@ -110,7 +110,7 @@ fn push_struct_array_for_loop() {
         names.trim()
     "#)
     .unwrap();
-    assert_eq!(result, Value::Str("Alice Bob".to_string()));
+    assert_eq!(result, Value::Str("Alice Bob".to_string().into()));
 }
 
 #[test]

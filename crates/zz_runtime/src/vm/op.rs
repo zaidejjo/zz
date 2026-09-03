@@ -34,6 +34,12 @@ pub enum Op {
     LoadSlot(u16),
     /// Pop a value and write it to a compile-time-resolved local slot.
     StoreSlot(u16),
+    /// In-place integer add: `slot[dst] = Int(slot[dst] + slot[src])`.
+    ///
+    /// Fused fast path for `x = x + y` inside hot loops: no stack traffic,
+    /// no generic `BinOp` dispatch. Falls back to the generic path when
+    /// either slot does not hold an `Int`.
+    SlotAddInt { dst: u16, src: u16 },
 
     // ---- functions & structs ----
     /// Create a named function value from a pre-compiled body chunk, register

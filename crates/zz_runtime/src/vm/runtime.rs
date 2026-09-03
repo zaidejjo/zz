@@ -12,7 +12,7 @@ use crate::runtime::ops::{
     eval_binary, eval_unary, get_index, object_field, set_index, set_object_field, slice_value,
 };
 use crate::runtime::Flow;
-use crate::value::{FuncValue, NativeFunc, Value};
+use crate::value::{FuncValue, NativeFunc, ObjectValue, RangeValue, Value};
 
 /// One active call frame.
 struct Frame {
@@ -277,13 +277,18 @@ impl Vm {
                         .env
                         .borrow()
                         .get(name)
-                        .or_else(|| interp.funcs.get(name).map(|fv| Value::Func(fv.clone())))
+                        .or_else(|| {
+                            interp
+                                .funcs
+                                .get(name)
+                                .map(|fv| Value::Func(Box::new(fv.clone())))
+                        })
                         .or_else(|| {
                             interp.natives.get(name).map(|entry| {
-                                Value::Native(NativeFunc {
+                                Value::Native(Box::new(NativeFunc {
                                     name: name.clone(),
                                     arity: entry.arity,
-                                })
+                                }))
                             })
                         })
                         .ok_or_else(|| {
@@ -320,6 +325,23 @@ impl Vm {
                     let base = self.frames.last().unwrap().stack_base;
                     self.stack[base + *slot as usize] = v;
                 }
+                Op::SlotAddInt { dst, src } => {
+                    let base = self.frames.last().unwrap().stack_base;
+                    let idx_dst = base + *dst as usize;
+                    let idx_src = base + *src as usize;
+                    match (&self.stack[idx_dst], &self.stack[idx_src]) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            self.stack[idx_dst] = Value::Int(*a + *b);
+                        }
+                        // Slow path: fall back to generic add semantics.
+                        _ => {
+                            let (a, b) = (self.stack[idx_dst].clone(), self.stack[idx_src].clone());
+                            let span = Span::default();
+                            let r = eval_binary(zz_frontend::ast::BinOp::Add, a, b, span)?;
+                            self.stack[idx_dst] = r;
+                        }
+                    }
+                }
                 Op::MakeFunc {
                     name,
                     params,
@@ -335,7 +357,10 @@ impl Vm {
                         chunk: Some(Rc::clone(fchunk)),
                     };
                     interp.funcs.insert(name.clone(), fv.clone());
-                    interp.env.borrow_mut().define(name, Value::Func(fv));
+                    interp
+                        .env
+                        .borrow_mut()
+                        .define(name, Value::Func(Box::new(fv)));
                     self.stack.push(Value::Unit);
                 }
                 Op::RegisterStruct { name, fields } => {
@@ -413,7 +438,7 @@ impl Vm {
                     let it = self.stack.pop().unwrap();
                     let (iterable, idx) = match it.clone() {
                         Value::Array(_) => (it, Value::Int(0)),
-                        Value::Range(start, _, _) => (it, Value::Int(start)),
+                        Value::Range(r) => (it, Value::Int(r.start)),
                         Value::Dict(_) => (it, Value::Int(0)),
                         other => {
                             return Err(self
@@ -452,10 +477,10 @@ impl Vm {
                     let push_val2: Option<Value>; // for dict iteration with 2 vars
                     {
                         match (&self.stack[iterable_idx], &idx) {
-                            (Value::Range(_, end, step), Value::Int(i)) => {
+                            (Value::Range(r), Value::Int(i)) => {
                                 let i = *i;
-                                let step = *step;
-                                let end = *end;
+                                let step = r.step;
+                                let end = r.end;
                                 let finished = if step > 0 { i >= end } else { i <= end };
                                 iter_done = finished;
                                 next_idx = Value::Int(i + step);
@@ -578,7 +603,7 @@ impl Vm {
                         items.push(self.stack.pop().unwrap());
                     }
                     items.reverse();
-                    self.stack.push(Value::Array(items));
+                    self.stack.push(Value::Array(Box::new(items)));
                 }
                 Op::UnpackTuple(n) => {
                     let val = self.stack.pop().unwrap();
@@ -630,7 +655,7 @@ impl Vm {
                         pairs.push((k, v));
                     }
                     pairs.reverse();
-                    self.stack.push(Value::Dict(pairs));
+                    self.stack.push(Value::Dict(Box::new(pairs)));
                 }
                 Op::IndexOp(span) => {
                     let iv = self.stack.pop().unwrap();
@@ -662,7 +687,13 @@ impl Vm {
                     let e = self.stack.pop().unwrap();
                     let s = self.stack.pop().unwrap();
                     match (s, e) {
-                        (Value::Int(a), Value::Int(b)) => self.stack.push(Value::Range(a, b, 1)),
+                        (Value::Int(a), Value::Int(b)) => {
+                            self.stack.push(Value::Range(Box::new(RangeValue {
+                                start: a,
+                                end: b,
+                                step: 1,
+                            })))
+                        }
                         _ => return Err(self.error("range bounds must be integers", *span)),
                     }
                 }
@@ -689,10 +720,10 @@ impl Vm {
                         };
                         out.push((fname.clone(), vals[idx].clone()));
                     }
-                    self.stack.push(Value::Object {
+                    self.stack.push(Value::Object(Box::new(ObjectValue {
                         name: name.clone(),
                         fields: out,
-                    });
+                    })));
                 }
                 Op::GetField(name, span) => {
                     let ov = self.stack.pop().unwrap();
@@ -715,7 +746,7 @@ impl Vm {
                         env: Rc::clone(&interp.env),
                         chunk: Some(Rc::clone(chunk)),
                     };
-                    self.stack.push(Value::Func(fv));
+                    self.stack.push(Value::Func(Box::new(fv)));
                 }
                 Op::MakeVariant {
                     name,
@@ -728,9 +759,9 @@ impl Vm {
                         None
                     };
                     match (name.as_str(), av) {
-                        ("ok", Some(v)) => self.stack.push(Value::Result(Ok(Box::new(v)))),
+                        ("ok", Some(v)) => self.stack.push(Value::Result(Box::new(Ok(v)))),
                         ("ok", None) => return Err(self.error("`.ok` requires an argument", *span)),
-                        ("err", Some(v)) => self.stack.push(Value::Result(Err(Box::new(v)))),
+                        ("err", Some(v)) => self.stack.push(Value::Result(Box::new(Err(v)))),
                         ("err", None) => {
                             return Err(self.error("`.err` requires an argument", *span))
                         }
@@ -824,16 +855,21 @@ impl Vm {
                                 Unwind::Error(e) => return Err(e),
                             }
                         }
-                        Value::Result(Ok(inner)) => self.stack.push(*inner),
-                        Value::Result(Err(e)) => {
-                            match self.unwind_frame(Flow::Return(Value::Result(Err(e))), interp) {
-                                Unwind::Continue => {
-                                    re_cache!();
+                        Value::Result(r) => match &*r {
+                            Ok(inner) => self.stack.push(inner.clone()),
+                            Err(e) => {
+                                match self.unwind_frame(
+                                    Flow::Return(Value::Result(Box::new(Err(e.clone())))),
+                                    interp,
+                                ) {
+                                    Unwind::Continue => {
+                                        re_cache!();
+                                    }
+                                    Unwind::Escaped(flow) => return Ok(flow),
+                                    Unwind::Error(err) => return Err(err),
                                 }
-                                Unwind::Escaped(flow) => return Ok(flow),
-                                Unwind::Error(e) => return Err(e),
                             }
-                        }
+                        },
                         other => {
                             return Err(self.error(
                                 format!("cannot use `?` on a value of type `{other}`"),
@@ -853,14 +889,16 @@ impl Vm {
                             self.stack.push(Value::Bool(false));
                             self.stack.push(Value::Unit);
                         }
-                        Value::Result(Ok(inner)) => {
-                            self.stack.push(Value::Bool(true));
-                            self.stack.push(*inner);
-                        }
-                        Value::Result(Err(_)) => {
-                            self.stack.push(Value::Bool(false));
-                            self.stack.push(Value::Unit);
-                        }
+                        Value::Result(r) => match &*r {
+                            Ok(inner) => {
+                                self.stack.push(Value::Bool(true));
+                                self.stack.push(inner.clone());
+                            }
+                            Err(_) => {
+                                self.stack.push(Value::Bool(false));
+                                self.stack.push(Value::Unit);
+                            }
+                        },
                         other => {
                             self.stack.push(Value::Bool(true));
                             self.stack.push(other);
@@ -958,7 +996,7 @@ impl Vm {
                     for p in parts {
                         out.push_str(&p.to_string());
                     }
-                    self.stack.push(Value::Str(out));
+                    self.stack.push(Value::Str(out.into()));
                 }
                 Op::FormatValue(span) => {
                     let spec = self.stack.pop().unwrap();
@@ -972,7 +1010,7 @@ impl Vm {
                         }
                     };
                     let formatted = crate::runtime::format::format_value_with_spec(&val, &spec_str);
-                    self.stack.push(Value::Str(formatted));
+                    self.stack.push(Value::Str(formatted.into()));
                 }
                 Op::EnterScope => {
                     let scope = Env::with_parent(&interp.env);

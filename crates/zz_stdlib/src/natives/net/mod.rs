@@ -23,18 +23,18 @@ pub(crate) fn tcp_connect(
             EvalError::new(format!("no addresses found for `{addr}`"), Span::new(0, 0))
         })?,
         Err(e) => {
-            return Ok(Value::Result(Err(Box::new(Value::Str(format!(
+            return Ok(Value::Result(Box::new(Err(Value::Str(format!(
                 "invalid address: {e}"
-            ))))))
+            ).into())))))
         }
     };
     match TcpStream::connect_timeout(&socket_addr, timeout) {
-        Ok(stream) => Ok(Value::Result(Ok(Box::new(Value::TcpStream(Arc::new(
+        Ok(stream) => Ok(Value::Result(Box::new(Ok(Value::TcpStream(Arc::new(
             Mutex::new(stream),
         )))))),
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
             "tcp_connect failed: {e}"
-        )))))),
+        ).into()))))),
     }
 }
 
@@ -46,12 +46,12 @@ pub(crate) fn tcp_listen(
 ) -> Result<Value, EvalError> {
     let addr = expect_str(args, 0, "std.net.tcp_listen")?;
     match std::net::TcpListener::bind(&addr) {
-        Ok(listener) => Ok(Value::Result(Ok(Box::new(Value::TcpListener(Arc::new(
+        Ok(listener) => Ok(Value::Result(Box::new(Ok(Value::TcpListener(Arc::new(
             Mutex::new(listener),
         )))))),
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
             "tcp_listen failed: {e}"
-        )))))),
+        ).into()))))),
     }
 }
 
@@ -74,12 +74,12 @@ pub(crate) fn tcp_accept(
         .lock()
         .map_err(|e| EvalError::new(format!("std.net.tcp_accept: lock poisoned: {e}"), span))?;
     match lock.accept() {
-        Ok((stream, _addr)) => Ok(Value::Result(Ok(Box::new(Value::TcpStream(Arc::new(
+        Ok((stream, _addr)) => Ok(Value::Result(Box::new(Ok(Value::TcpStream(Arc::new(
             Mutex::new(stream),
         )))))),
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
             "tcp_accept failed: {e}"
-        )))))),
+        ).into()))))),
     }
 }
 
@@ -105,11 +105,11 @@ pub(crate) fn tcp_write(
     match lock.write_all(data.as_bytes()) {
         Ok(()) => {
             let len = data.len() as i64;
-            Ok(Value::Result(Ok(Box::new(Value::Int(len)))))
+            Ok(Value::Result(Box::new(Ok(Value::Int(len)))))
         }
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
             "tcp_write failed: {e}"
-        )))))),
+        ).into()))))),
     }
 }
 
@@ -137,11 +137,11 @@ pub(crate) fn tcp_read(
         Ok(n) => {
             buf.truncate(n);
             let s = String::from_utf8_lossy(&buf).to_string();
-            Ok(Value::Result(Ok(Box::new(Value::Str(s)))))
+            Ok(Value::Result(Box::new(Ok(Value::Str(s.into())))))
         }
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
             "tcp_read failed: {e}"
-        )))))),
+        ).into()))))),
     }
 }
 
@@ -177,21 +177,19 @@ pub(crate) fn tcp_readline(
             }
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 if line.is_empty() {
-                    return Ok(Value::Result(Err(Box::new(Value::Str(
-                        "connection closed".to_string(),
-                    )))));
+                    return Ok(Value::Result(Box::new(Err(Value::Str("connection closed".to_string().into())))));
                 }
                 break;
             }
             Err(e) => {
-                return Ok(Value::Result(Err(Box::new(Value::Str(format!(
+                return Ok(Value::Result(Box::new(Err(Value::Str(format!(
                     "tcp_readline failed: {e}"
-                ))))))
+                ).into())))))
             }
         }
     }
     let s = String::from_utf8_lossy(&line).to_string();
-    Ok(Value::Result(Ok(Box::new(Value::Str(s)))))
+    Ok(Value::Result(Box::new(Ok(Value::Str(s.into())))))
 }
 
 /// `net.tcp_close(stream: tcp.stream) -> Result<bool, str>`
@@ -204,7 +202,7 @@ pub(crate) fn tcp_close(
     _span: Span,
 ) -> Result<Value, EvalError> {
     // The stream will be closed when the last Arc reference is dropped.
-    Ok(Value::Result(Ok(Box::new(Value::Bool(true)))))
+    Ok(Value::Result(Box::new(Ok(Value::Bool(true)))))
 }
 
 /// `net.peer_addr(stream: tcp.stream) -> Result<str, str>`
@@ -226,10 +224,10 @@ pub(crate) fn peer_addr(
         .lock()
         .map_err(|e| EvalError::new(format!("std.net.peer_addr: lock poisoned: {e}"), span))?;
     match lock.peer_addr() {
-        Ok(addr) => Ok(Value::Result(Ok(Box::new(Value::Str(addr.to_string()))))),
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
+        Ok(addr) => Ok(Value::Result(Box::new(Ok(Value::Str(addr.to_string().into()))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
             "peer_addr failed: {e}"
-        )))))),
+        ).into()))))),
     }
 }
 
@@ -252,10 +250,10 @@ pub(crate) fn local_addr(
         .lock()
         .map_err(|e| EvalError::new(format!("std.net.local_addr: lock poisoned: {e}"), span))?;
     match lock.local_addr() {
-        Ok(addr) => Ok(Value::Result(Ok(Box::new(Value::Str(addr.to_string()))))),
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
+        Ok(addr) => Ok(Value::Result(Box::new(Ok(Value::Str(addr.to_string().into()))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
             "local_addr failed: {e}"
-        )))))),
+        ).into()))))),
     }
 }
 
@@ -282,10 +280,10 @@ pub(crate) fn set_read_timeout(
         )
     })?;
     match lock.set_read_timeout(Some(Duration::from_millis(ms))) {
-        Ok(()) => Ok(Value::Result(Ok(Box::new(Value::Bool(true))))),
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
+        Ok(()) => Ok(Value::Result(Box::new(Ok(Value::Bool(true))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
             "set_read_timeout failed: {e}"
-        )))))),
+        ).into()))))),
     }
 }
 
@@ -312,9 +310,9 @@ pub(crate) fn set_write_timeout(
         )
     })?;
     match lock.set_write_timeout(Some(Duration::from_millis(ms))) {
-        Ok(()) => Ok(Value::Result(Ok(Box::new(Value::Bool(true))))),
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
+        Ok(()) => Ok(Value::Result(Box::new(Ok(Value::Bool(true))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(format!(
             "set_write_timeout failed: {e}"
-        )))))),
+        ).into()))))),
     }
 }

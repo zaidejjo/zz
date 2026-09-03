@@ -18,17 +18,15 @@ use crate::value::Value;
 #[inline(always)]
 pub(crate) fn object_field(obj: &Value, name: &str, span: Span) -> Result<Value, EvalError> {
     match obj {
-        Value::Object {
-            name: tname,
-            fields,
-        } => fields
+        Value::Object(o) => o
+            .fields
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, v)| v.clone())
-            .ok_or_else(|| EvalError::new(format!("struct `{tname}` has no field `{name}`"), span)),
+            .ok_or_else(|| EvalError::new(format!("struct `{}` has no field `{name}`", o.name), span)),
         Value::Dict(entries) => entries
             .iter()
-            .find(|(k, _)| matches!(k, Value::Str(s) if s == name))
+            .find(|(k, _)| matches!(k, Value::Str(s) if &**s == name))
             .map(|(_, v)| v.clone())
             .ok_or_else(|| EvalError::new(format!("dict has no key `{name}`"), span)),
         other => Err(EvalError::new(
@@ -46,16 +44,13 @@ pub(crate) fn set_object_field(
     span: Span,
 ) -> Result<(), EvalError> {
     match obj {
-        Value::Object {
-            name: tname,
-            fields,
-        } => {
-            if let Some((_, slot)) = fields.iter_mut().find(|(n, _)| n == name) {
+        Value::Object(o) => {
+            if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n == name) {
                 *slot = value;
                 Ok(())
             } else {
                 Err(EvalError::new(
-                    format!("struct `{tname}` has no field `{name}`"),
+                    format!("struct `{}` has no field `{name}`", o.name),
                     span,
                 ))
             }
@@ -102,7 +97,7 @@ pub(crate) fn get_index(obj: &Value, index: &Value, span: Span) -> Result<Value,
         (Value::Str(s), Value::Int(i)) => {
             let chars: Vec<char> = s.chars().collect();
             let idx = normalize_index(*i, chars.len(), span)?;
-            Ok(Value::Str(chars[idx].to_string()))
+            Ok(Value::Str(chars[idx].to_string().into()))
         }
         (other, _) => Err(EvalError::new(
             format!("cannot index a value of type `{}`", other.type_name()),
@@ -178,12 +173,12 @@ pub(crate) fn slice_value(
     match obj {
         Value::Array(items) => {
             let (a, b) = slice_bounds(start, end, items.len());
-            Ok(Value::Array(items[a..b].to_vec()))
+            Ok(Value::Array(Box::new(items[a..b].to_vec())))
         }
         Value::Str(s) => {
             let chars: Vec<char> = s.chars().collect();
             let (a, b) = slice_bounds(start, end, chars.len());
-            Ok(Value::Str(chars[a..b].iter().collect()))
+            Ok(Value::Str(chars[a..b].iter().collect::<String>().into()))
         }
         other => Err(EvalError::new(
             format!("cannot slice a value of type `{}`", other.type_name()),
@@ -307,7 +302,7 @@ pub(crate) fn eval_binary(op: BinOp, l: Value, r: Value, span: Span) -> Result<V
             )),
         },
         (Value::Str(a), Value::Str(b)) => match op {
-            BinOp::Add => Ok(Value::Str(format!("{a}{b}"))),
+            BinOp::Add => Ok(Value::Str(format!("{a}{b}").into())),
             BinOp::Eq => Ok(Value::Bool(a == b)),
             BinOp::Ne => Ok(Value::Bool(a != b)),
             BinOp::Lt => Ok(Value::Bool(a < b)),

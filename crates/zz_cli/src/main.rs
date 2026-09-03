@@ -271,11 +271,14 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
         let call_args = if fv.params.is_empty() {
             vec![]
         } else {
-            vec![Value::Array(
-                script_args.iter().map(|a| Value::Str(a.clone())).collect(),
-            )]
+            vec![Value::Array(Box::new(
+                script_args
+                    .iter()
+                    .map(|a| Value::Str(a.clone().into()))
+                    .collect(),
+            ))]
         };
-        match interp.call(Value::Func(fv), call_args, span) {
+        match interp.call(Value::Func(Box::new(fv)), call_args, span) {
             Ok(_) => {}
             Err(e) => {
                 let mut files = Files::new();

@@ -9,7 +9,7 @@ pub(crate) fn typeof_fn(
         .first()
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument for typeof", span))?;
-    Ok(Value::Str(v.type_name()))
+    Ok(Value::Str(v.type_name().into()))
 }
 
 pub(crate) fn conv_str(
@@ -21,7 +21,7 @@ pub(crate) fn conv_str(
         .first()
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument for str", span))?;
-    Ok(Value::Str(v.to_string()))
+    Ok(Value::Str(v.to_string().into()))
 }
 
 pub(crate) fn conv_int(

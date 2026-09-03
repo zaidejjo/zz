@@ -1186,7 +1186,7 @@ pub(crate) fn arg<'a>(
 
 pub(crate) fn expect_str(args: &mut Vec<Value>, i: usize, name: &str) -> Result<String, EvalError> {
     match arg(args, i, name)? {
-        Value::Str(s) => Ok(s.clone()),
+        Value::Str(s) => Ok((**s).clone()),
         other => Err(EvalError::new(
             format!("`{name}` expects a string, found `{other}`"),
             zz_runtime::Span::new(0, 0),
@@ -1200,7 +1200,7 @@ pub(crate) fn expect_array(
     name: &str,
 ) -> Result<Vec<Value>, EvalError> {
     match arg(args, i, name)? {
-        Value::Array(vs) => Ok(vs.clone()),
+        Value::Array(vs) => Ok((**vs).clone()),
         other => Err(EvalError::new(
             format!("`{name}` expects an array, found `{other}`"),
             zz_runtime::Span::new(0, 0),
@@ -1210,8 +1210,8 @@ pub(crate) fn expect_array(
 
 pub(crate) fn expect_func(args: &mut Vec<Value>, i: usize, name: &str) -> Result<Value, EvalError> {
     match arg(args, i, name)? {
-        Value::Func(f) => Ok(Value::Func(f.clone())),
-        Value::Native(n) => Ok(Value::Native(n.clone())),
+        Value::Func(f) => Ok(Value::Func(Box::new((**f).clone()))),
+        Value::Native(n) => Ok(Value::Native(Box::new((**n).clone()))),
         other => Err(EvalError::new(
             format!("`{name}` expects a function, found `{other}`"),
             zz_runtime::Span::new(0, 0),

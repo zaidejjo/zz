@@ -40,9 +40,9 @@ fn env_args_returns_script_args() {
     let v = interp.run(&parsed.program).unwrap();
     assert_eq!(
         v,
-        Value::Array(vec![
-            Value::Str("one".to_string()),
-            Value::Str("two".to_string())
-        ])
+        Value::Array(Box::new(vec![
+            Value::Str("one".to_string().into()),
+            Value::Str("two".to_string().into())
+        ]))
     );
 }

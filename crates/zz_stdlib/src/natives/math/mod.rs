@@ -270,13 +270,11 @@ pub(crate) fn math_isqrt(
         None => return Err(EvalError::new("missing argument for isqrt", span)),
     };
     if n < 0 {
-        return Ok(Value::Result(Err(Box::new(Value::Str(
-            "isqrt: negative input".to_string(),
-        )))));
+        return Ok(Value::Result(Box::new(Err(Value::Str("isqrt: negative input".to_string().into())))));
     }
     // Newton's method for integer square root
     if n == 0 {
-        return Ok(Value::Result(Ok(Box::new(Value::Int(0)))));
+        return Ok(Value::Result(Box::new(Ok(Value::Int(0)))));
     }
     let mut x = n;
     let mut y = (x + 1) / 2;
@@ -284,7 +282,7 @@ pub(crate) fn math_isqrt(
         x = y;
         y = (x + n / x) / 2;
     }
-    Ok(Value::Result(Ok(Box::new(Value::Int(x)))))
+    Ok(Value::Result(Box::new(Ok(Value::Int(x)))))
 }
 
 pub(crate) fn math_factorial(
@@ -306,20 +304,16 @@ pub(crate) fn math_factorial(
         None => return Err(EvalError::new("missing argument for factorial", span)),
     };
     if n < 0 {
-        return Ok(Value::Result(Err(Box::new(Value::Str(
-            "factorial: negative input".to_string(),
-        )))));
+        return Ok(Value::Result(Box::new(Err(Value::Str("factorial: negative input".to_string().into())))));
     }
     if n > 20 {
-        return Ok(Value::Result(Err(Box::new(Value::Str(
-            "factorial: input too large (max 20)".to_string(),
-        )))));
+        return Ok(Value::Result(Box::new(Err(Value::Str("factorial: input too large (max 20)".to_string().into())))));
     }
     let mut result: i64 = 1;
     for i in 2..=n {
         result = result.saturating_mul(i);
     }
-    Ok(Value::Result(Ok(Box::new(Value::Int(result)))))
+    Ok(Value::Result(Box::new(Ok(Value::Int(result)))))
 }
 
 pub(crate) fn math_gcd(
@@ -608,14 +602,14 @@ pub(crate) fn math_dot_product(
         span,
     )?;
     if v1.len() != v2.len() {
-        return Ok(Value::Result(Err(Box::new(Value::Str(format!(
+        return Ok(Value::Result(Box::new(Err(Value::Str(format!(
             "dot_product: length mismatch ({} vs {})",
             v1.len(),
             v2.len()
-        ))))));
+        ).into())))));
     }
     let sum: f64 = v1.iter().zip(v2.iter()).map(|(a, b)| a * b).sum();
-    Ok(Value::Result(Ok(Box::new(Value::Float(sum)))))
+    Ok(Value::Result(Box::new(Ok(Value::Float(sum)))))
 }
 
 pub(crate) fn math_magnitude(
@@ -649,7 +643,7 @@ pub(crate) fn math_matrix_mul(
         match v {
             Value::Array(rows) => {
                 let mut out = Vec::with_capacity(rows.len());
-                for row in rows {
+                for row in &**rows {
                     out.push(as_float_array(row, "matrix_mul", span)?);
                 }
                 Ok(out)
@@ -668,20 +662,18 @@ pub(crate) fn math_matrix_mul(
     let m2 = to_matrix(m2_val)?;
 
     if m1.is_empty() || m2.is_empty() {
-        return Ok(Value::Result(Err(Box::new(Value::Str(
-            "matrix_mul: empty matrix".to_string(),
-        )))));
+        return Ok(Value::Result(Box::new(Err(Value::Str("matrix_mul: empty matrix".to_string().into())))));
     }
     let cols1 = m1[0].len();
     let rows2 = m2.len();
     if cols1 != rows2 {
-        return Ok(Value::Result(Err(Box::new(Value::Str(format!(
+        return Ok(Value::Result(Box::new(Err(Value::Str(format!(
             "matrix_mul: dimension mismatch ({}x{}) * ({}x{})",
             m1.len(),
             cols1,
             rows2,
             m2[0].len()
-        ))))));
+        ).into())))));
     }
     let cols2 = m2[0].len();
     let mut result = vec![vec![0.0f64; cols2]; m1.len()];
@@ -697,9 +689,9 @@ pub(crate) fn math_matrix_mul(
     // Convert to Value::Array of Value::Array of Value::Float
     let out: Vec<Value> = result
         .into_iter()
-        .map(|row| Value::Array(row.into_iter().map(Value::Float).collect()))
+        .map(|row| Value::Array(Box::new(row.into_iter().map(Value::Float).collect())))
         .collect();
-    Ok(Value::Result(Ok(Box::new(Value::Array(out)))))
+    Ok(Value::Result(Box::new(Ok(Value::Array(Box::new(out))))))
 }
 
 // ── Basic Statistics & Random ───────────────────────────────────────────────
@@ -716,12 +708,10 @@ pub(crate) fn math_mean(
         span,
     )?;
     if vals.is_empty() {
-        return Ok(Value::Result(Err(Box::new(Value::Str(
-            "mean: empty list".to_string(),
-        )))));
+        return Ok(Value::Result(Box::new(Err(Value::Str("mean: empty list".to_string().into())))));
     }
     let sum: f64 = vals.iter().sum();
-    Ok(Value::Result(Ok(Box::new(Value::Float(
+    Ok(Value::Result(Box::new(Ok(Value::Float(
         sum / vals.len() as f64,
     )))))
 }
@@ -738,9 +728,7 @@ pub(crate) fn math_median(
         span,
     )?;
     if vals.is_empty() {
-        return Ok(Value::Result(Err(Box::new(Value::Str(
-            "median: empty list".to_string(),
-        )))));
+        return Ok(Value::Result(Box::new(Err(Value::Str("median: empty list".to_string().into())))));
     }
     vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = vals.len();
@@ -749,7 +737,7 @@ pub(crate) fn math_median(
     } else {
         vals[n / 2]
     };
-    Ok(Value::Result(Ok(Box::new(Value::Float(median)))))
+    Ok(Value::Result(Box::new(Ok(Value::Float(median)))))
 }
 
 pub(crate) fn math_rand_range(
