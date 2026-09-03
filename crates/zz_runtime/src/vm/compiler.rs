@@ -60,6 +60,13 @@ pub struct Compiler {
     /// True for the top-level program chunk (depth-0 declarations are
     /// globals, stored in the environment).
     is_main: bool,
+    /// Top-level names that nested closures/functions reference. These must
+    /// stay in the environment (capture-by-reference); all other top-level
+    /// names are promoted to frame slots.
+    captured_at_top: std::collections::HashSet<String>,
+    /// Slots reserved at the frame base for promoted top-level vars,
+    /// in declaration order.
+    promoted_slots: std::collections::HashMap<String, usize>,
     /// Known function signatures for named-arg reordering.
     func_info: std::collections::HashMap<String, FuncInfo>,
 }
@@ -97,6 +104,8 @@ impl Compiler {
             stack_height: 0,
             captured: std::collections::HashSet::new(),
             is_main: false,
+            captured_at_top: std::collections::HashSet::new(),
+            promoted_slots: std::collections::HashMap::new(),
             func_info: std::collections::HashMap::new(),
         }
     }
@@ -106,6 +115,55 @@ impl Compiler {
     pub fn compile_program(program: &Program) -> Chunk {
         let mut c = Compiler::new();
         c.is_main = true;
+        // Collect top-level declared names (post-rewrite, so namespaced).
+        let mut top_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Decl { name, pub_, .. } => {
+                    top_names.insert(name.name.clone());
+                    // pub bindings are exported cross-module via the env and
+                    // must never be promoted to frame-local slots.
+                    if *pub_ {
+                        c.captured_at_top.insert(name.name.clone());
+                    }
+                }
+                Stmt::Func { name, .. } => {
+                    top_names.insert(name.join("."));
+                }
+                _ => {}
+            }
+        }
+        // Pre-scan: names referenced by nested closures/functions must stay
+        // in the environment so closures can capture them by reference.
+        // Everything else declared at top level can be promoted to a direct
+        // frame slot, letting the slot peepholes fire in top-level loops.
+        let mut defined: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut free: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in &program.stmts {
+            super::capture::scan_stmt_captured(stmt, &mut defined, &mut free);
+        }
+        // Only names that are actually declared at top level matter for
+        // promotion; paths like `std.time.now_ms` or `p.x` are not top-level
+        // bindings and must not block promotion. For a path `ns.var.field`,
+        // the captured name is the longest prefix that is a top-level decl
+        // (`ns.var`), not the full path.
+        let mut captured: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for name in &free {
+            if top_names.contains(name) {
+                captured.insert(name.clone());
+            } else {
+                // Try progressively shorter prefixes: `a.b.c` -> `a.b` -> `a`.
+                let parts: Vec<&str> = name.split('.').collect();
+                for end in (1..parts.len()).rev() {
+                    let prefix = parts[..end].join(".");
+                    if top_names.contains(&prefix) {
+                        captured.insert(prefix);
+                        break;
+                    }
+                }
+            }
+        }
+        c.captured_at_top = captured;
         for stmt in &program.stmts {
             if let Stmt::Func { name, params, .. } = stmt {
                 let full = name.join(".");
@@ -119,6 +177,26 @@ impl Compiler {
                 );
             }
         }
+        // Pre-allocate a reserved region at the frame base for every
+        // promotable top-level decl, in declaration order. Statement code
+        // runs above this region, so top-level slot indices are stable and
+        // independent of transient stack activity (short-circuit joins etc).
+        let mut promoted_index = 0usize;
+        let mut promoted_slots: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for stmt in &program.stmts {
+            if let Stmt::Decl { name, .. } = stmt {
+                if !c.captured_at_top.contains(&name.name) {
+                    promoted_slots.insert(name.name.clone(), promoted_index);
+                    promoted_index += 1;
+                }
+            }
+        }
+        for _ in 0..promoted_index {
+            c.emit_const(Value::Unit);
+        }
+        c.promoted_slots = promoted_slots;
+        c.stack_height = promoted_index;
         for (i, stmt) in program.stmts.iter().enumerate() {
             let v = c.compile_stmt(stmt);
             if i < program.stmts.len() - 1 && matches!(v, StmtValue::Discard) {
@@ -152,6 +230,7 @@ impl Compiler {
         };
         let effect = Self::stack_effect(&op);
         self.stack_height = self.stack_height.saturating_add_signed(effect as isize);
+
         self.chunk.spans.push(span);
         self.chunk.code.push(op);
     }
@@ -169,6 +248,7 @@ impl Compiler {
             Op::SlotInc { .. } => 0,
             Op::SlotAddIntImm { .. } => 0,
             Op::SlotLessIntSlot { .. } | Op::SlotLessIntImm { .. } => 1,
+            Op::SlotBinaryInt { .. } | Op::SlotBinaryIntImm { .. } => 0,
             Op::MakeFunc { .. } | Op::RegisterStruct { .. } | Op::MakeClosure { .. } => 1,
             Op::BinOp(..) => -1,
             Op::UnOp(..) => 0,
@@ -217,7 +297,12 @@ impl Compiler {
     }
 
     fn declare_local(&mut self, name: &str) -> bool {
-        if self.captured.contains(name) || (self.is_main && self.scope_depth == 0) {
+        // Top-level names referenced by nested closures/functions must stay
+        // in the environment (capture-by-reference). All other names resolve
+        // to frame slots. Top-level (is_main && depth 0) declarations are
+        // handled directly in `compile_stmt` (reserved-slot promotion); this
+        // method handles function-local and nested-scope declarations.
+        if self.captured.contains(name) {
             self.emit(Op::DefineVar(name.to_string()));
             self.locals.push(Local {
                 name: name.to_string(),
@@ -332,6 +417,127 @@ impl Compiler {
         if let Some((d, s)) = self.try_slot_add(target, value) {
             return Some(Op::SlotAddInt { dst: d, src: s });
         }
+        // 3-address: `x = y op z` / `x = y op N` / `x = N op y` where the
+        // target is NOT one of the operands. Covers any integer BinOp
+        // (add/sub/mul/div/rem/power/comparisons): earlier rules handled the
+        // in-place `x = x op ...` forms; this is the general form.
+        let (l, r) = (left.as_ref(), right.as_ref());
+        let target_slot = self.resolve_expr_slot(&Expr::Ident {
+            name: target.to_string(),
+            span: Span::default(),
+        });
+        let lhs = self.resolve_expr_slot(l);
+        let rhs = self.resolve_expr_slot(r);
+        let lhs_imm = int_literal(l);
+        let rhs_imm = int_literal(r);
+        // y op z (both slots)
+        if let (Some(d), Some(a), Some(b)) = (target_slot, lhs, rhs) {
+            return Some(Op::SlotBinaryInt {
+                dst: d,
+                lhs: a,
+                rhs: b,
+                op: *binop,
+            });
+        }
+        // y op N
+        if let (Some(d), Some(a), Some(imm)) = (target_slot, lhs, rhs_imm) {
+            if imm != 1 || *binop != zz_frontend::ast::BinOp::Add {
+                return Some(Op::SlotBinaryIntImm {
+                    dst: d,
+                    lhs: a,
+                    imm,
+                    op: *binop,
+                });
+            }
+        }
+        // N op y
+        if let (Some(d), Some(imm), Some(b)) = (target_slot, lhs_imm, rhs) {
+            if imm != 1 || *binop != zz_frontend::ast::BinOp::Add {
+                return Some(Op::SlotBinaryIntImm {
+                    dst: d,
+                    lhs: b,
+                    imm,
+                    op: *binop,
+                });
+            }
+        }
+        None
+    }
+
+    fn resolve_expr_slot(&self, e: &Expr) -> Option<u16> {
+        match e {
+            Expr::Ident { name, .. } => match self.resolve(name) {
+                Resolved::Slot(slot) => Some(slot as u16),
+                Resolved::Env => None,
+            },
+            // Namespaced top-level slot: `ns.var` resolves to a slot when the
+            // full dotted name is a promoted local.
+            Expr::Path { parts, .. } => match self.resolve(&parts.join(".")) {
+                Resolved::Slot(slot) => Some(slot as u16),
+                Resolved::Env => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Path-target variant of [`Compiler::try_slot_binop`] for namespaced
+    /// top-level slots (`ns.sum = ns.sum + i`).
+    fn try_slot_binop_path(&self, target_parts: &[String], value: &Expr) -> Option<Op> {
+        let Expr::Binary {
+            op: binop,
+            left,
+            right,
+            ..
+        } = value
+        else {
+            return None;
+        };
+        let full = target_parts.join(".");
+        let dst = match self.resolve(&full) {
+            Resolved::Slot(slot) => slot as u16,
+            Resolved::Env => return None,
+        };
+        // `ns.sum = ns.sum + 1` -> SlotInc
+        if *binop == zz_frontend::ast::BinOp::Add {
+            let is_one = |e: &Expr| matches!(e, Expr::Int { value: 1, .. });
+            let (l, r) = (left.as_ref(), right.as_ref());
+            let is_target = |e: &Expr| match e {
+                Expr::Ident { name, .. } => name == &full,
+                Expr::Path { parts, .. } => parts.join(".") == full,
+                _ => false,
+            };
+            if (is_target(l) && is_one(r)) || (is_target(r) && is_one(l)) {
+                return Some(Op::SlotInc { slot: dst });
+            }
+            // `ns.sum = ns.sum + N` -> SlotAddIntImm
+            let imm = match (l, r) {
+                (e, other) if is_target(e) => int_literal(other),
+                (other, e) if is_target(e) => int_literal(other),
+                _ => None,
+            };
+            if let Some(imm) = imm {
+                return Some(Op::SlotAddIntImm { dst, imm });
+            }
+        }
+        // `ns.sum = ns.sum + y` -> SlotAddInt
+        if *binop == zz_frontend::ast::BinOp::Add {
+            let (l, r) = (left.as_ref(), right.as_ref());
+            let is_target = |e: &Expr| match e {
+                Expr::Ident { name, .. } => name == &full,
+                Expr::Path { parts, .. } => parts.join(".") == full,
+                _ => false,
+            };
+            let src = if is_target(l) {
+                self.resolve_expr_slot(r)
+            } else if is_target(r) {
+                self.resolve_expr_slot(l)
+            } else {
+                None
+            };
+            if let Some(src) = src {
+                return Some(Op::SlotAddInt { dst, src });
+            }
+        }
         None
     }
 
@@ -370,7 +576,12 @@ impl Compiler {
     }
 
     fn compile_path_load(&mut self, parts: &[String], span: Span) {
-        if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
+        // A top-level var promoted to a slot is declared under its full
+        // dotted name (`add_to_1M.sum`); resolve the joined name first.
+        let full = parts.join(".");
+        if let Resolved::Slot(slot) = self.resolve(&full) {
+            self.emit(Op::LoadSlot(slot as u16));
+        } else if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
             self.emit(Op::LoadSlot(slot as u16));
             for part in &parts[1..] {
                 self.emit(Op::GetField(part.clone(), span));
@@ -381,6 +592,12 @@ impl Compiler {
     }
 
     fn compile_path_store(&mut self, parts: &[String], span: Span) {
+        let full = parts.join(".");
+        // Top-level slot promoted under the full dotted name -> direct store.
+        if let Resolved::Slot(slot) = self.resolve(&full) {
+            self.emit(Op::StoreSlot(slot as u16));
+            return;
+        }
         if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
             self.emit(Op::LoadSlot(slot as u16));
             for part in &parts[1..parts.len() - 1] {
@@ -516,7 +733,35 @@ impl Compiler {
         match stmt {
             Stmt::Decl { name, value, .. } => {
                 self.compile_expr(value);
-                if self.declare_local(&name.name) {
+                if self.is_main && self.scope_depth == 0 {
+                    // Top-level: value goes into the reserved slot region.
+                    if self.captured_at_top.contains(&name.name) {
+                        self.emit(Op::DefineVar(name.name.clone()));
+                        self.locals.push(Local {
+                            name: name.name.clone(),
+                            slot: 0,
+                            in_env: true,
+                        });
+                        // DefineVar re-pushes the value; discard it.
+                        StmtValue::Discard
+                    } else {
+                        let slot = self.promoted_slots[&name.name];
+                        self.emit(Op::StoreSlot(slot as u16));
+                        // Sync back to env at frame exit so later chunks
+                        // (REPL statements, other modules) can read it.
+                        self.chunk
+                            .toplevel_slots
+                            .push((name.name.clone(), slot as u16));
+                        self.locals.push(Local {
+                            name: name.name.clone(),
+                            slot,
+                            in_env: false,
+                        });
+                        // StoreSlot consumes the value; nothing left on the
+                        // statement stack.
+                        StmtValue::None
+                    }
+                } else if self.declare_local(&name.name) {
                     StmtValue::Keep
                 } else {
                     StmtValue::Discard
@@ -677,6 +922,16 @@ impl Compiler {
                     }
                 }
                 Expr::Path { parts, span } => {
+                    let full = parts.join(".");
+                    // Namespaced top-level slot promotion: `ns.sum = ns.sum + i`
+                    // resolves to a direct slot when the full name is a local.
+                    if let Resolved::Slot(_) = self.resolve(&full) {
+                        if let Some(op) = self.try_slot_binop_path(parts, value) {
+                            self.emit(op);
+                            self.emit_const(Value::Unit);
+                            return StmtValue::Discard;
+                        }
+                    }
                     self.compile_expr(value);
                     self.compile_path_store(parts, *span);
                     self.emit_const(Value::Unit);
@@ -1048,7 +1303,40 @@ impl Compiler {
                         args.len() + named.len()
                     };
 
-                    if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
+                    // A namespaced top-level closure promoted to a slot
+                    // (`ns.foo(...)` where `ns.foo` resolves directly) is a
+                    // plain function call, not a method call or env lookup.
+                    if let Resolved::Slot(slot) = self.resolve(&parts.join(".")) {
+                        self.emit(Op::LoadSlot(slot as u16));
+                        if is_range {
+                            if args.len() == 1 {
+                                self.emit_const(Value::Int(0));
+                                self.compile_expr(&args[0]);
+                                self.emit_const(Value::Int(1));
+                            } else if args.len() == 2 {
+                                self.compile_expr(&args[0]);
+                                self.compile_expr(&args[1]);
+                                self.emit_const(Value::Int(1));
+                            } else {
+                                for a in args {
+                                    self.compile_expr(a);
+                                }
+                            }
+                        } else if has_named_or_defaults {
+                            self.compile_reordered_args(&func_name, args, named);
+                        } else {
+                            for a in args {
+                                self.compile_expr(a);
+                            }
+                        }
+                        if is_input {
+                            self.emit_const(Value::Str(String::new().into()));
+                        }
+                        self.emit(Op::Call {
+                            argc: argc as u16,
+                            span: *span,
+                        });
+                    } else if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
                         self.emit(Op::LoadSlot(slot as u16));
                         for part in &parts[1..parts.len() - 1] {
                             self.emit(Op::GetField(part.clone(), *pspan));

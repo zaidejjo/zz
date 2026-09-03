@@ -9,7 +9,8 @@ use super::op::Op;
 use crate::env::Env;
 use crate::eval::{EvalError, Interp};
 use crate::runtime::ops::{
-    eval_binary, eval_unary, get_index, object_field, set_index, set_object_field, slice_value,
+    eval_binary, eval_int_binary, eval_unary, get_index, object_field, set_index, set_object_field,
+    slice_value,
 };
 use crate::runtime::Flow;
 use crate::value::{FuncValue, NativeFunc, ObjectValue, RangeValue, Value};
@@ -198,6 +199,18 @@ impl Vm {
 
             if ip >= code.len() {
                 let sb = self.frames.last().unwrap().stack_base;
+                let f = self.frames.last().unwrap();
+                // Sync promoted top-level slots back into the environment so
+                // later chunks (REPL statements, other modules) can read them.
+                // Do this BEFORE popping the chunk result, since a `Keep`
+                // declaration's value may live in a promoted slot.
+                for (name, slot) in &f.chunk.toplevel_slots {
+                    let idx = sb + *slot as usize;
+                    if idx < self.stack.len() {
+                        let val = self.stack[idx].clone();
+                        interp.env.borrow_mut().define(name, val);
+                    }
+                }
                 let v = if self.stack.len() > sb {
                     self.stack.pop().unwrap()
                 } else {
@@ -307,7 +320,6 @@ impl Vm {
                 }
                 Op::StoreVar(name, span) => {
                     let v = self.stack.pop().unwrap();
-                    eprintln!("DEBUG StoreVar {name} = {v}");
                     if !interp.env.borrow_mut().assign(name, v) {
                         return Err(self.error(format!("undefined variable `{name}`"), *span));
                     }
@@ -406,6 +418,41 @@ impl Vm {
                                 span,
                             )?;
                             self.stack.push(v);
+                        }
+                    }
+                }
+                Op::SlotBinaryInt { dst, lhs, rhs, op } => {
+                    let base = self.frames.last().unwrap().stack_base;
+                    let idx_d = base + *dst as usize;
+                    let idx_l = base + *lhs as usize;
+                    let idx_r = base + *rhs as usize;
+                    match (&self.stack[idx_l], &self.stack[idx_r]) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            let v = eval_int_binary(*op, *a, *b, Span::default())?;
+                            self.stack[idx_d] = v;
+                        }
+                        _ => {
+                            let (l, r) = (self.stack[idx_l].clone(), self.stack[idx_r].clone());
+                            let span = Span::default();
+                            let v = eval_binary(*op, l, r, span)?;
+                            self.stack[idx_d] = v;
+                        }
+                    }
+                }
+                Op::SlotBinaryIntImm { dst, lhs, imm, op } => {
+                    let base = self.frames.last().unwrap().stack_base;
+                    let idx_d = base + *dst as usize;
+                    let idx_l = base + *lhs as usize;
+                    match &self.stack[idx_l] {
+                        Value::Int(a) => {
+                            let v = eval_int_binary(*op, *a, *imm, Span::default())?;
+                            self.stack[idx_d] = v;
+                        }
+                        _ => {
+                            let l = self.stack[idx_l].clone();
+                            let span = Span::default();
+                            let v = eval_binary(*op, l, Value::Int(*imm), span)?;
+                            self.stack[idx_d] = v;
                         }
                     }
                 }

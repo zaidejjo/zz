@@ -15,6 +15,10 @@ pub struct Chunk {
     /// Source span for each opcode. Same length as `code`.
     /// `Span::default()` for ops that don't carry span info.
     pub spans: Vec<Span>,
+    /// Top-level vars promoted to frame slots: `(env_name, slot_index)`.
+    /// The VM syncs these values into the environment at frame exit so
+    /// later chunks (REPL statements, other modules) can still read them.
+    pub toplevel_slots: Vec<(String, u16)>,
 }
 
 impl Chunk {
@@ -24,6 +28,7 @@ impl Chunk {
             constants: Vec::new(),
             params: Vec::new(),
             spans: Vec::new(),
+            toplevel_slots: Vec::new(),
         }
     }
 }
