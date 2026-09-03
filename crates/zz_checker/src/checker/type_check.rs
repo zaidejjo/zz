@@ -400,7 +400,17 @@ impl Checker {
 
     // --- expressions ------------------------------------------------------
 
+    /// Check an expression, recording its resolved type keyed by span so the
+    /// HIR could bindings can be built deterministically afterward.
     pub(crate) fn check_expr(&mut self, e: &Expr) -> Type {
+        let ty = self.check_expr_impl(e);
+        // Unresolved types stay as `Var`s during the walk; the typed map is
+        // deep-resolved at the end (see `check_program_typed`).
+        self.span_types.insert(e.span(), ty.clone());
+        ty
+    }
+
+    fn check_expr_impl(&mut self, e: &Expr) -> Type {
         match e {
             Expr::Int { .. } => Type::Int,
             Expr::Float { .. } => Type::Float,

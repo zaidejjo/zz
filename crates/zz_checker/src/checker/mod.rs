@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use zz_frontend::ast::{Program, Stmt};
 use zz_frontend::diag::RawDiag;
+use zz_frontend::span::Span;
 
 use crate::type_::Type;
 
@@ -55,6 +56,29 @@ pub fn check_program(
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
 ) -> CheckResult {
+    check_program_impl(program, initial_bindings, initial_funcs, initial_structs).result
+}
+
+/// Like [`check_program`], but also returns a deep-resolved type annotation
+/// map keyed by expression span. The map is the typed view of the AST used
+/// by the HIR builder for native codegen.
+pub fn check_program_typed(
+    program: &Program,
+    initial_bindings: HashMap<String, Type>,
+    initial_funcs: HashMap<String, FuncSig>,
+    initial_structs: HashMap<String, StructSig>,
+) -> (CheckResult, std::collections::HashMap<Span, Type>) {
+    let out = check_program_impl(program, initial_bindings, initial_funcs, initial_structs);
+    (out.result, out.span_types)
+}
+
+/// Core pass shared by [`check_program`] and [`check_program_typed`].
+fn check_program_impl(
+    program: &Program,
+    initial_bindings: HashMap<String, Type>,
+    initial_funcs: HashMap<String, FuncSig>,
+    initial_structs: HashMap<String, StructSig>,
+) -> CheckerOutcome {
     let mut checker = Checker::new(initial_bindings, initial_funcs, initial_structs);
 
     // Track which items are pub (for cross-module export).
@@ -239,15 +263,36 @@ pub fn check_program(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    CheckResult {
-        errors: checker.errors,
-        bindings,
-        funcs: checker.funcs,
-        structs: checker.structs,
-        pub_bindings,
-        pub_funcs,
-        pub_structs,
+    // Deep-resolve the recorded span types now that all unification is done.
+    // Skip any that still contain inference variables (unresolvable at
+    // compile time — the node lowers dynamically).
+    let mut span_types: std::collections::HashMap<Span, Type> = std::collections::HashMap::new();
+    for (span, ty) in &checker.span_types {
+        let rt = checker.unifier.resolve_deep(ty);
+        if !inference::contains_var(&rt) {
+            span_types.insert(*span, rt);
+        }
     }
+
+    CheckerOutcome {
+        result: CheckResult {
+            errors: checker.errors,
+            bindings,
+            funcs: checker.funcs,
+            structs: checker.structs,
+            pub_bindings,
+            pub_funcs,
+            pub_structs,
+        },
+        span_types,
+    }
+}
+
+/// Result of the check pass: the public [`CheckResult`] plus the typed AST
+/// view (span → resolved type) for codegen.
+struct CheckerOutcome {
+    result: CheckResult,
+    span_types: std::collections::HashMap<Span, Type>,
 }
 
 pub(crate) struct Checker {
@@ -275,6 +320,9 @@ pub(crate) struct Checker {
     pub(crate) had_undefined_var: bool,
     /// Imported namespaces: (alias, span). Used to detect unused imports.
     pub(crate) imports: Vec<(String, zz_frontend::span::Span)>,
+    /// Resolved type per expression span, recorded during the type walk.
+    /// Used by the HIR builder to attach a resolved `Type` to every AST node.
+    pub(crate) span_types: std::collections::HashMap<zz_frontend::span::Span, Type>,
 }
 
 impl Checker {
@@ -299,6 +347,7 @@ impl Checker {
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,
             imports: Vec::new(),
+            span_types: std::collections::HashMap::new(),
         }
     }
 

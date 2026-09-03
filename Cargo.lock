@@ -2038,6 +2038,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_hir"
+version = "0.1.0"
+dependencies = [
+ "zz_checker",
+ "zz_frontend",
+]
+
+[[package]]
 name = "zz_lsp"
 version = "0.1.0"
 dependencies = [
