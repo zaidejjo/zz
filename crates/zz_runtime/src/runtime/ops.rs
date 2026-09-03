@@ -198,7 +198,7 @@ pub(crate) fn slice_value(
 /// In release builds, arithmetic uses wrapping semantics for speed.
 /// In debug builds, checked operations catch overflow.
 #[inline(always)]
-fn eval_int_binary(op: BinOp, a: i64, b: i64, span: Span) -> Result<Value, EvalError> {
+pub(crate) fn eval_int_binary(op: BinOp, a: i64, b: i64, span: Span) -> Result<Value, EvalError> {
     match op {
         #[cfg(not(debug_assertions))]
         BinOp::Add => Ok(Value::Int(a.wrapping_add(b))),

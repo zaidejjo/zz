@@ -248,6 +248,7 @@ impl Compiler {
             Op::SlotInc { .. } => 0,
             Op::SlotAddIntImm { .. } => 0,
             Op::SlotLessIntSlot { .. } | Op::SlotLessIntImm { .. } => 1,
+            Op::SlotBinaryInt { .. } | Op::SlotBinaryIntImm { .. } => 0,
             Op::MakeFunc { .. } | Op::RegisterStruct { .. } | Op::MakeClosure { .. } => 1,
             Op::BinOp(..) => -1,
             Op::UnOp(..) => 0,
@@ -415,6 +416,50 @@ impl Compiler {
         // `x = x + y` -> SlotAddInt (existing)
         if let Some((d, s)) = self.try_slot_add(target, value) {
             return Some(Op::SlotAddInt { dst: d, src: s });
+        }
+        // 3-address: `x = y op z` / `x = y op N` / `x = N op y` where the
+        // target is NOT one of the operands. Covers any integer BinOp
+        // (add/sub/mul/div/rem/power/comparisons): earlier rules handled the
+        // in-place `x = x op ...` forms; this is the general form.
+        let (l, r) = (left.as_ref(), right.as_ref());
+        let target_slot = self.resolve_expr_slot(&Expr::Ident {
+            name: target.to_string(),
+            span: Span::default(),
+        });
+        let lhs = self.resolve_expr_slot(l);
+        let rhs = self.resolve_expr_slot(r);
+        let lhs_imm = int_literal(l);
+        let rhs_imm = int_literal(r);
+        // y op z (both slots)
+        if let (Some(d), Some(a), Some(b)) = (target_slot, lhs, rhs) {
+            return Some(Op::SlotBinaryInt {
+                dst: d,
+                lhs: a,
+                rhs: b,
+                op: *binop,
+            });
+        }
+        // y op N
+        if let (Some(d), Some(a), Some(imm)) = (target_slot, lhs, rhs_imm) {
+            if imm != 1 || *binop != zz_frontend::ast::BinOp::Add {
+                return Some(Op::SlotBinaryIntImm {
+                    dst: d,
+                    lhs: a,
+                    imm,
+                    op: *binop,
+                });
+            }
+        }
+        // N op y
+        if let (Some(d), Some(imm), Some(b)) = (target_slot, lhs_imm, rhs) {
+            if imm != 1 || *binop != zz_frontend::ast::BinOp::Add {
+                return Some(Op::SlotBinaryIntImm {
+                    dst: d,
+                    lhs: b,
+                    imm,
+                    op: *binop,
+                });
+            }
         }
         None
     }

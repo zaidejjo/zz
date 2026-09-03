@@ -52,6 +52,26 @@ pub enum Op {
     SlotLessIntSlot { a: u16, b: u16 },
     /// Compare a slot against an immediate integer, push `Bool(a < imm)`.
     SlotLessIntImm { a: u16, imm: i64 },
+    /// 3-address integer binary op: `slot[dst] = Int(slot[lhs] op slot[rhs])`.
+    ///
+    /// Fused fast path for `x = y op z` where all three resolve to local
+    /// slots: no stack traffic for the operands, no generic `BinOp`
+    /// dispatch. Fallback to `eval_binary` when either operand is not an
+    /// `Int`.
+    SlotBinaryInt {
+        dst: u16,
+        lhs: u16,
+        rhs: u16,
+        op: zz_frontend::ast::BinOp,
+    },
+    /// 3-address integer binary op with an immediate RHS:
+    /// `slot[dst] = Int(slot[lhs] op imm)`.
+    SlotBinaryIntImm {
+        dst: u16,
+        lhs: u16,
+        imm: i64,
+        op: zz_frontend::ast::BinOp,
+    },
 
     // ---- functions & structs ----
     /// Create a named function value from a pre-compiled body chunk, register
