@@ -2029,6 +2029,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_codegen"
+version = "0.1.0"
+dependencies = [
+ "zz_checker",
+ "zz_frontend",
+ "zz_hir",
+ "zz_runtime",
+ "zz_stdlib",
+]
+
+[[package]]
 name = "zz_frontend"
 version = "0.1.0"
 dependencies = [
