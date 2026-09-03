@@ -415,6 +415,28 @@ zz_value zz_io_print(zz_value v, int *err) {
     return zz_unit();
 }
 
+/// `input("prompt")` — print the prompt and read a line from stdin.
+/// The prompt string lacks a trailing newline, so stdout must be flushed
+/// explicitly or the terminal stays silent while the program blocks on
+/// `fgets`.
+zz_value zz_io_input(zz_value prompt, int *err) {
+    (void)err;
+    if (prompt.tag == ZZ_STR) {
+        fwrite(prompt.s->data, 1, prompt.s->len, stdout);
+        fflush(stdout);
+    }
+    char buf[1024];
+    if (fgets(buf, sizeof buf, stdin) == NULL) {
+        return zz_str_static("");
+    }
+    // Strip trailing newline (and CR for Windows line endings).
+    size_t len = strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) {
+        buf[--len] = '\0';
+    }
+    return zz_str_new(buf, len);
+}
+
 zz_value zz_math_pow(zz_value a, zz_value b, int *err) {
     (void)err;
     if (a.tag == ZZ_INT && b.tag == ZZ_INT)

@@ -601,6 +601,7 @@ fn native_impl(name: &str) -> Option<&'static str> {
     match name {
         "io.println" | "std.io.println" => Some("zz_io_println"),
         "io.print" | "std.io.print" => Some("zz_io_print"),
+        "input" | "io.read_line" | "main_io.input" => Some("zz_io_input"),
         "math.pow" | "std.math.pow" => Some("zz_math_pow"),
         _ => None,
     }

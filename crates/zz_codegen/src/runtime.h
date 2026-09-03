@@ -165,6 +165,7 @@ size_t zz_dict_len(const zz_dict *d);
 zz_value zz_call(zz_value fn, zz_value *args, size_t argc, int *err);
 zz_value zz_io_println(zz_value v, int *err);
 zz_value zz_io_print(zz_value v, int *err);
+zz_value zz_io_input(zz_value prompt, int *err);
 zz_value zz_math_pow(zz_value a, zz_value b, int *err);
 
 // Codegen helper shims.

@@ -220,6 +220,50 @@ io.println(used(1))
     assert!(!lowered.source.contains("zz_fn_unused"));
 }
 
+#[test]
+fn native_input_reads_line_and_flushes_prompt() {
+    // Compile a program using input("prompt: "); pipe a line into stdin.
+    // The prompt is flushed BEFORE the blocking fgets (fflush(stdout)),
+    // so the user sees "prompt: " even without a trailing newline.
+    let src = r#"
+func main() {
+    name := input("prompt: ")
+    io.println("got " + name)
+}
+"#;
+    let (pruned, reach) = build_reachable(src);
+    let tmp = std::env::temp_dir().join(format!("zz-test-input-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let bin = tmp.join("zz_out");
+    build_native(&pruned, &reach, "main", BuildOptions::dev(), &bin)
+        .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
+
+    // Pipe "Alice\n" into stdin; capture both stdout and stderr.
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(&bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"Alice\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = std::fs::remove_dir_all(&tmp);
+    assert!(
+        out.status.success(),
+        "native input program failed: {stderr}"
+    );
+    // Prompt appears (flushed) AND the echoed input line is present.
+    assert!(
+        stdout.contains("prompt: "),
+        "prompt not flushed, got {stdout:?}"
+    );
+    assert_eq!(stdout.trim_end(), "prompt: got Alice");
+}
+
 /// Helper to build a TypedProgram for tests that need the real stdlib.
 #[allow(dead_code)]
 fn _seed() -> HashMap<String, FuncSig> {
