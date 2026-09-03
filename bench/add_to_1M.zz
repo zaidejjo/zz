@@ -1,0 +1,11 @@
+import std.time
+
+t0 := time.now_ms()
+sum := 0
+for i in 0..1000000 {
+    sum = sum + i
+}
+t1 := time.now_ms()
+elapsed := t1 - t0
+println("add_to_1M result: {sum}")
+println("elapsed: {elapsed}ms")

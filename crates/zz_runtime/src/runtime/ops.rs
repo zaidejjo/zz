@@ -15,6 +15,7 @@ use crate::value::Value;
 // ---------------------------------------------------------------------------
 
 /// Read a field from a struct instance.
+#[inline(always)]
 pub(crate) fn object_field(obj: &Value, name: &str, span: Span) -> Result<Value, EvalError> {
     match obj {
         Value::Object {
@@ -71,6 +72,7 @@ pub(crate) fn set_object_field(
 // ---------------------------------------------------------------------------
 
 /// Normalize an index (negative counts from the end) and bounds-check it.
+#[inline(always)]
 pub(crate) fn normalize_index(i: i64, len: usize, span: Span) -> Result<usize, EvalError> {
     let len_i = len as i64;
     let idx = if i < 0 { len_i + i } else { i };
@@ -85,6 +87,7 @@ pub(crate) fn normalize_index(i: i64, len: usize, span: Span) -> Result<usize, E
 
 /// Read an element: `arr[i]`, `dict[key]`, `str[i]`. Negative indices
 /// count from the end.
+#[inline(always)]
 pub(crate) fn get_index(obj: &Value, index: &Value, span: Span) -> Result<Value, EvalError> {
     match (obj, index) {
         (Value::Array(items), Value::Int(i)) => {
@@ -193,17 +196,30 @@ pub(crate) fn slice_value(
 // Arithmetic / unary helpers
 // ---------------------------------------------------------------------------
 
-/// Evaluate an integer binary operation with overflow checking.
+/// Evaluate an integer binary operation.
+///
+/// In release builds, arithmetic uses wrapping semantics for speed.
+/// In debug builds, checked operations catch overflow.
+#[inline(always)]
 fn eval_int_binary(op: BinOp, a: i64, b: i64, span: Span) -> Result<Value, EvalError> {
     match op {
+        #[cfg(not(debug_assertions))]
+        BinOp::Add => Ok(Value::Int(a.wrapping_add(b))),
+        #[cfg(not(debug_assertions))]
+        BinOp::Sub => Ok(Value::Int(a.wrapping_sub(b))),
+        #[cfg(not(debug_assertions))]
+        BinOp::Mul => Ok(Value::Int(a.wrapping_mul(b))),
+        #[cfg(debug_assertions)]
         BinOp::Add => a
             .checked_add(b)
             .map(Value::Int)
             .ok_or_else(|| EvalError::new("integer overflow in addition", span)),
+        #[cfg(debug_assertions)]
         BinOp::Sub => a
             .checked_sub(b)
             .map(Value::Int)
             .ok_or_else(|| EvalError::new("integer overflow in subtraction", span)),
+        #[cfg(debug_assertions)]
         BinOp::Mul => a
             .checked_mul(b)
             .map(Value::Int)
@@ -212,27 +228,48 @@ fn eval_int_binary(op: BinOp, a: i64, b: i64, span: Span) -> Result<Value, EvalE
             if b == 0 {
                 Err(EvalError::new("division by zero", span))
             } else {
-                a.checked_div(b)
-                    .map(Value::Int)
-                    .ok_or_else(|| EvalError::new("integer overflow in division", span))
+                #[cfg(not(debug_assertions))]
+                {
+                    Ok(Value::Int(a.wrapping_div(b)))
+                }
+                #[cfg(debug_assertions)]
+                {
+                    a.checked_div(b)
+                        .map(Value::Int)
+                        .ok_or_else(|| EvalError::new("integer overflow in division", span))
+                }
             }
         }
         BinOp::Rem => {
             if b == 0 {
                 Err(EvalError::new("modulo by zero", span))
             } else {
-                a.checked_rem(b)
-                    .map(Value::Int)
-                    .ok_or_else(|| EvalError::new("integer overflow in modulo", span))
+                #[cfg(not(debug_assertions))]
+                {
+                    Ok(Value::Int(a.wrapping_rem(b)))
+                }
+                #[cfg(debug_assertions)]
+                {
+                    a.checked_rem(b)
+                        .map(Value::Int)
+                        .ok_or_else(|| EvalError::new("integer overflow in modulo", span))
+                }
             }
         }
         BinOp::Pow => {
             if b < 0 {
                 Err(EvalError::new("negative exponent for integer power", span))
             } else {
-                a.checked_pow(b as u32)
-                    .map(Value::Int)
-                    .ok_or_else(|| EvalError::new("integer overflow in exponentiation", span))
+                #[cfg(not(debug_assertions))]
+                {
+                    Ok(Value::Int(a.wrapping_pow(b as u32)))
+                }
+                #[cfg(debug_assertions)]
+                {
+                    a.checked_pow(b as u32)
+                        .map(Value::Int)
+                        .ok_or_else(|| EvalError::new("integer overflow in exponentiation", span))
+                }
             }
         }
         BinOp::Eq => Ok(Value::Bool(a == b)),
@@ -246,6 +283,7 @@ fn eval_int_binary(op: BinOp, a: i64, b: i64, span: Span) -> Result<Value, EvalE
 }
 
 /// Evaluate a binary operation, promoting mixed int/float to float.
+#[inline(always)]
 pub(crate) fn eval_binary(op: BinOp, l: Value, r: Value, span: Span) -> Result<Value, EvalError> {
     // Mixed int/float arithmetic promotes to float.
     match (l, r) {
@@ -300,6 +338,7 @@ pub(crate) fn eval_binary(op: BinOp, l: Value, r: Value, span: Span) -> Result<V
 }
 
 /// Evaluate a unary operation.
+#[inline(always)]
 pub(crate) fn eval_unary(op: UnOp, v: Value, span: Span) -> Result<Value, EvalError> {
     match op {
         UnOp::Pos => Ok(v),

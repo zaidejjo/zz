@@ -164,12 +164,37 @@ impl Vm {
             func_span: Span::default(),
         });
 
-        loop {
-            let (code, constants, ip) = {
+        // Cache chunk pointers locally to avoid re-fetching from frames on
+        // every instruction.  `ip` stays in a register; we only sync it back
+        // to the Frame struct at frame-change points (Call/Return/defer).
+        let mut cached_code: *const Vec<Op> = {
+            let f = self.frames.last().unwrap();
+            let c = unsafe { &*Rc::as_ptr(&f.chunk) };
+            &c.code
+        };
+        let mut cached_constants: *const Vec<Value> = {
+            let f = self.frames.last().unwrap();
+            let c = unsafe { &*Rc::as_ptr(&f.chunk) };
+            &c.constants
+        };
+        let mut ip: usize = 0;
+
+        // Re-cache from the current top frame (after any frame push/pop).
+        macro_rules! re_cache {
+            () => {{
                 let f = self.frames.last().unwrap();
-                let chunk = unsafe { &*Rc::as_ptr(&f.chunk) };
-                (&chunk.code, &chunk.constants, f.ip)
-            };
+                let c = unsafe { &*Rc::as_ptr(&f.chunk) };
+                cached_code = &c.code;
+                cached_constants = &c.constants;
+                ip = f.ip;
+            }};
+        }
+
+        loop {
+            // SAFETY: cached_code/cached_constants point into the current
+            // frame's Chunk which is kept alive by the Rc in self.frames.
+            let code: &Vec<Op> = unsafe { &*cached_code };
+            let constants: &Vec<Value> = unsafe { &*cached_constants };
 
             if ip >= code.len() {
                 let sb = self.frames.last().unwrap().stack_base;
@@ -186,6 +211,7 @@ impl Vm {
                 if let Some(ref mut state) = self.defer_return {
                     if !state.remaining.is_empty() {
                         self.push_defer_frame(interp);
+                        re_cache!();
                         continue;
                     } else {
                         let saved = std::mem::take(&mut self.defer_return).unwrap();
@@ -202,6 +228,7 @@ impl Vm {
                             }
                             self.stack.push(saved.return_value);
                         }
+                        re_cache!();
                         continue;
                     }
                 }
@@ -215,6 +242,7 @@ impl Vm {
                         from_return: false,
                     });
                     self.push_defer_frame(interp);
+                    re_cache!();
                     continue;
                 }
 
@@ -224,11 +252,13 @@ impl Vm {
                     return Ok(Flow::Value(v));
                 }
                 self.stack.push(v);
+                re_cache!();
                 continue;
             }
 
             let op = &code[ip];
-            self.frames.last_mut().unwrap().ip = ip + 1;
+            ip += 1;
+            // NO frame.ip write-back here — ip lives in a register.
 
             match op {
                 Op::PushConst(i) => {
@@ -324,18 +354,18 @@ impl Vm {
                     self.stack.push(v);
                 }
                 Op::Jump(target) => {
-                    self.frames.last_mut().unwrap().ip = *target;
+                    ip = *target;
                 }
                 Op::JumpIfFalse(target) => {
                     let v = self.stack.pop().unwrap();
                     if !v.is_truthy() {
-                        self.frames.last_mut().unwrap().ip = *target;
+                        ip = *target;
                     }
                 }
                 Op::JumpIfTrue(target) => {
                     let v = self.stack.pop().unwrap();
                     if v.is_truthy() {
-                        self.frames.last_mut().unwrap().ip = *target;
+                        ip = *target;
                     }
                 }
                 Op::JumpIfFalseBool(target, span) => {
@@ -344,7 +374,7 @@ impl Vm {
                         return Err(self.error("`if` condition must be a bool", *span));
                     }
                     if !v.is_truthy() {
-                        self.frames.last_mut().unwrap().ip = *target;
+                        ip = *target;
                     }
                 }
                 Op::Return => {
@@ -352,7 +382,9 @@ impl Vm {
                     let defers: Vec<Value> = self.defer_stack.drain(..).collect();
                     if defers.is_empty() {
                         match self.unwind_frame(Flow::Return(v), interp) {
-                            Unwind::Continue => {}
+                            Unwind::Continue => {
+                                re_cache!();
+                            }
                             Unwind::Escaped(flow) => return Ok(flow),
                             Unwind::Error(e) => return Err(e),
                         }
@@ -369,6 +401,7 @@ impl Vm {
                             from_return: true,
                         });
                         self.push_defer_frame(interp);
+                        re_cache!();
                     }
                 }
                 Op::ForSetup {
@@ -407,66 +440,84 @@ impl Vm {
                 Op::ForNext { vars, exit, in_env } => {
                     let num_vars = vars.len();
                     // Pop num_vars loop variables from previous iteration
-                    for _ in 0..num_vars {
-                        self.stack.pop().unwrap();
-                    }
+                    self.stack.truncate(self.stack.len() - num_vars);
                     let idx = self.stack.pop().unwrap(); // pop index
                     let iterable_idx = self.stack.len() - 1;
-                    let (done, items) = match (&self.stack[iterable_idx], &idx) {
-                        (Value::Array(arr), Value::Int(i)) => {
-                            let i = *i;
-                            if i >= arr.len() as i64 {
-                                (true, vec![])
-                            } else {
-                                (false, vec![arr[i as usize].clone()])
+
+                    // Inline dispatch — zero heap allocations for Range/Array hot paths.
+                    // Extract data from stack first, then drop borrow, then mutate.
+                    let iter_done: bool;
+                    let next_idx: Value;
+                    let push_val: Value;
+                    let push_val2: Option<Value>; // for dict iteration with 2 vars
+                    {
+                        match (&self.stack[iterable_idx], &idx) {
+                            (Value::Range(_, end, step), Value::Int(i)) => {
+                                let i = *i;
+                                let step = *step;
+                                let end = *end;
+                                let finished = if step > 0 { i >= end } else { i <= end };
+                                iter_done = finished;
+                                next_idx = Value::Int(i + step);
+                                push_val = Value::Int(i);
+                                push_val2 = None;
                             }
-                        }
-                        (Value::Range(_, end, step), Value::Int(i)) => {
-                            let i = *i;
-                            let step = *step;
-                            let finished = if step > 0 { i >= *end } else { i <= *end };
-                            if finished {
-                                (true, vec![])
-                            } else {
-                                (false, vec![Value::Int(i)])
+                            (Value::Array(arr), Value::Int(i)) => {
+                                let i = *i;
+                                if i >= arr.len() as i64 {
+                                    iter_done = true;
+                                    next_idx = Value::Unit;
+                                    push_val = Value::Unit;
+                                } else {
+                                    iter_done = false;
+                                    next_idx = Value::Int(i + 1);
+                                    push_val = arr[i as usize].clone();
+                                }
+                                push_val2 = None;
                             }
-                        }
-                        (Value::Dict(pairs), Value::Int(i)) => {
-                            let i = *i as usize;
-                            if i >= pairs.len() {
-                                (true, vec![])
-                            } else if num_vars == 2 {
-                                (false, vec![pairs[i].0.clone(), pairs[i].1.clone()])
-                            } else {
-                                (false, vec![pairs[i].0.clone()])
+                            (Value::Dict(pairs), Value::Int(i)) => {
+                                let i = *i as usize;
+                                if i >= pairs.len() {
+                                    iter_done = true;
+                                    next_idx = Value::Unit;
+                                    push_val = Value::Unit;
+                                    push_val2 = None;
+                                } else {
+                                    iter_done = false;
+                                    next_idx = Value::Int(i as i64 + 1);
+                                    push_val = pairs[i].0.clone();
+                                    if num_vars == 2 {
+                                        push_val2 = Some(pairs[i].1.clone());
+                                    } else {
+                                        push_val2 = None;
+                                    }
+                                }
                             }
+                            _ => unreachable!("ForNext on non-iterable"),
                         }
-                        _ => unreachable!("ForNext on non-iterable"),
-                    };
-                    if done {
+                    } // immutable borrow of self.stack dropped here
+
+                    if iter_done {
                         let li = self.loops.pop().unwrap();
                         self.stack.truncate(li.stack_base + 1);
                         interp.env = li.env;
-                        self.frames.last_mut().unwrap().ip = *exit;
+                        ip = *exit;
                     } else {
-                        let next = match (&self.stack[iterable_idx], &idx) {
-                            (Value::Range(_, _, step), Value::Int(i)) => Value::Int(i + step),
-                            (Value::Array(_), Value::Int(i)) => Value::Int(i + 1),
-                            (Value::Dict(_), Value::Int(i)) => Value::Int(i + 1),
-                            _ => unreachable!(),
-                        };
-                        self.stack.push(next);
-                        // Push items (key, value for dict with 2 vars, or single item)
-                        for item in &items {
-                            self.stack.push(item.clone());
+                        self.stack.push(next_idx);
+                        self.stack.push(push_val.clone());
+                        if let Some(ref v) = push_val2 {
+                            self.stack.push(v.clone());
                         }
                         if *in_env {
                             let li = self.loops.last().unwrap();
                             let loop_env = Rc::clone(&li.env);
                             interp.env = loop_env;
                             let scope = Env::with_parent(&interp.env);
-                            for (i, name) in vars.iter().enumerate() {
-                                scope.borrow_mut().define(name, items[i].clone());
+                            if let Some(ref v2) = push_val2 {
+                                scope.borrow_mut().define(&vars[0], push_val);
+                                scope.borrow_mut().define(&vars[1], v2.clone());
+                            } else {
+                                scope.borrow_mut().define(&vars[0], push_val);
                             }
                             interp.env = scope;
                         }
@@ -491,7 +542,7 @@ impl Vm {
                         let li = self.loops.pop().unwrap();
                         self.stack.truncate(li.stack_base + 1);
                         interp.env = li.env;
-                        self.frames.last_mut().unwrap().ip = *exit;
+                        ip = *exit;
                     }
                 }
                 Op::Break(span) => {
@@ -503,7 +554,7 @@ impl Vm {
                     }
                     self.stack.truncate(li.stack_base + 1);
                     interp.env = li.env;
-                    self.frames.last_mut().unwrap().ip = li.exit;
+                    ip = li.exit;
                 }
                 Op::Continue(span) => {
                     let Some(li) = self.loops.last() else {
@@ -514,7 +565,7 @@ impl Vm {
                     }
                     self.stack.truncate(li.stack_base + 1 + li.slots);
                     interp.env = Rc::clone(&li.env);
-                    self.frames.last_mut().unwrap().ip = li.header;
+                    ip = li.header;
                 }
                 Op::SetLoopResult => {
                     let v = self.stack.pop().unwrap();
@@ -718,7 +769,7 @@ impl Vm {
                         if *restore {
                             self.stack.push(sv);
                         }
-                        self.frames.last_mut().unwrap().ip = *next;
+                        ip = *next;
                     }
                 }
                 Op::MatchGuard { next, has_env } => {
@@ -736,7 +787,7 @@ impl Vm {
                                     interp.env = env_ref;
                                 }
                             }
-                            self.frames.last_mut().unwrap().ip = *next;
+                            ip = *next;
                         }
                     }
                 }
@@ -757,7 +808,7 @@ impl Vm {
                     };
                     if !matched {
                         self.stack.push(v);
-                        self.frames.last_mut().unwrap().ip = *els;
+                        ip = *els;
                     }
                 }
                 Op::TryOp(span) => {
@@ -766,7 +817,9 @@ impl Vm {
                         Value::Option(Some(inner)) => self.stack.push(*inner),
                         Value::Option(None) => {
                             match self.unwind_frame(Flow::Return(Value::Option(None)), interp) {
-                                Unwind::Continue => {}
+                                Unwind::Continue => {
+                                    re_cache!();
+                                }
                                 Unwind::Escaped(flow) => return Ok(flow),
                                 Unwind::Error(e) => return Err(e),
                             }
@@ -774,7 +827,9 @@ impl Vm {
                         Value::Result(Ok(inner)) => self.stack.push(*inner),
                         Value::Result(Err(e)) => {
                             match self.unwind_frame(Flow::Return(Value::Result(Err(e))), interp) {
-                                Unwind::Continue => {}
+                                Unwind::Continue => {
+                                    re_cache!();
+                                }
                                 Unwind::Escaped(flow) => return Ok(flow),
                                 Unwind::Error(e) => return Err(e),
                             }
@@ -830,7 +885,10 @@ impl Vm {
                     }
                     args.reverse();
                     let callee = self.stack.pop().unwrap();
+                    // Sync ip back so the parent frame resumes at the right spot.
+                    self.frames.last_mut().unwrap().ip = ip;
                     self.call_value(callee, args, span, interp)?;
+                    re_cache!();
                 }
                 Op::CallPath {
                     parts,
@@ -858,12 +916,16 @@ impl Vm {
                             let f = interp.lookup_method(&recv, method, pspan)?;
                             let mut arg_vals = vec![recv];
                             arg_vals.extend(args);
+                            self.frames.last_mut().unwrap().ip = ip;
                             self.call_value(f, arg_vals, span, interp)?;
+                            re_cache!();
                             continue;
                         }
                     }
                     let callee = interp.resolve_path_value(parts, pspan)?;
+                    self.frames.last_mut().unwrap().ip = ip;
                     self.call_value(callee, args, span, interp)?;
+                    re_cache!();
                 }
                 Op::CallMethod { name, argc, span } => {
                     let argc = *argc;
@@ -874,6 +936,7 @@ impl Vm {
                     }
                     args.reverse();
                     let recv = self.stack.pop().unwrap();
+                    self.frames.last_mut().unwrap().ip = ip;
                     match object_field(&recv, name, span) {
                         Ok(f) => self.call_value(f, args, span, interp)?,
                         Err(_) => {
@@ -883,6 +946,7 @@ impl Vm {
                             self.call_value(f, arg_vals, span, interp)?;
                         }
                     }
+                    re_cache!();
                 }
                 Op::Concat(n) => {
                     let mut parts = Vec::with_capacity(*n as usize);
