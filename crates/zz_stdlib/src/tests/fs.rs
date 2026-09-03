@@ -11,12 +11,12 @@ fn fs_write_and_read_file() {
         "import std.fs\nfs.write_file(\"{path_str}\", \"hello fs\")"
     ))
     .unwrap();
-    assert_eq!(v, Value::Result(Ok(Box::new(Value::Unit))));
+    assert_eq!(v, Value::Result(Box::new(Ok(Value::Unit))));
 
     let v = run(&format!("import std.fs\nfs.read_file(\"{path_str}\")")).unwrap();
     assert_eq!(
         v,
-        Value::Result(Ok(Box::new(Value::Str("hello fs".to_string()))))
+        Value::Result(Box::new(Ok(Value::Str("hello fs".to_string().into()))))
     );
 
     let v = run(&format!("import std.fs\nfs.exists(\"{path_str}\")")).unwrap();
@@ -29,12 +29,15 @@ fn fs_write_and_read_file() {
 fn fs_read_missing_file_is_err() {
     let v = run("import std.fs\nfs.read_file(\"/tmp/zz_no_such_file_zz\")").unwrap();
     match v {
-        Value::Result(Err(e)) => {
-            assert!(
-                e.to_string().contains("No such file"),
-                "unexpected error: {e}"
-            );
-        }
+        Value::Result(r) => match &*r {
+            Err(e) => {
+                assert!(
+                    e.to_string().contains("No such file"),
+                    "unexpected error: {e}"
+                );
+            }
+            Ok(_) => panic!("expected err result, got ok"),
+        },
         other => panic!("expected err result, got {other}"),
     }
 }

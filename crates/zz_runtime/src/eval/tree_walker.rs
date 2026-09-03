@@ -11,7 +11,7 @@ use crate::runtime::ops::{
 };
 use crate::runtime::{EvalError, Flow};
 use crate::value::NativeFunc;
-use crate::value::{FuncValue, Value};
+use crate::value::{FuncValue, ObjectValue, RangeValue, Value};
 
 use super::Interp;
 
@@ -40,7 +40,7 @@ impl Interp {
                 self.funcs.insert(name.join("."), fv.clone());
                 self.env
                     .borrow_mut()
-                    .define(&name.join("."), Value::Func(fv));
+                    .define(&name.join("."), Value::Func(Box::new(fv)));
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Return { value, .. } => match value {
@@ -77,7 +77,9 @@ impl Interp {
                             chunk: None,
                         };
                         self.funcs.insert(full_name.clone(), fv.clone());
-                        self.env.borrow_mut().define(&full_name, Value::Func(fv));
+                        self.env
+                            .borrow_mut()
+                            .define(&full_name, Value::Func(Box::new(fv)));
                     }
                 }
                 Ok(Flow::Value(Value::Unit))
@@ -89,7 +91,7 @@ impl Interp {
                 match it {
                     Value::Array(items) => {
                         let mut result = Value::Unit;
-                        for item in items {
+                        for item in *items {
                             let scope = Env::with_parent(&self.env);
                             {
                                 let mut env = scope.borrow_mut();
@@ -107,7 +109,8 @@ impl Interp {
                         }
                         Ok(Flow::Value(result))
                     }
-                    Value::Range(start, end, step) => {
+                    Value::Range(r) => {
+                        let (start, end, step) = (r.start, r.end, r.step);
                         let mut result = Value::Unit;
                         let mut i = start;
                         if step > 0 {
@@ -145,7 +148,7 @@ impl Interp {
                     }
                     Value::Dict(pairs) => {
                         let mut result = Value::Unit;
-                        for (k, v) in pairs {
+                        for (k, v) in *pairs {
                             let scope = Env::with_parent(&self.env);
                             {
                                 let mut env = scope.borrow_mut();
@@ -186,7 +189,7 @@ impl Interp {
                 self.defer_stacks
                     .last_mut()
                     .unwrap()
-                    .push(Value::Func(closure));
+                    .push(Value::Func(Box::new(closure)));
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Destructure { pat, value, .. } => {
@@ -375,13 +378,13 @@ impl Interp {
             return Ok(v);
         }
         if let Some(fv) = self.funcs.get(&name) {
-            return Ok(Value::Func(fv.clone()));
+            return Ok(Value::Func(Box::new(fv.clone())));
         }
         if let Some(entry) = self.natives.get(&name) {
-            return Ok(Value::Native(NativeFunc {
+            return Ok(Value::Native(Box::new(NativeFunc {
                 name,
                 arity: entry.arity,
-            }));
+            })));
         }
         if let Some(mut v) = self.env.borrow().get(&parts[0]) {
             for field in &parts[1..] {
@@ -397,13 +400,13 @@ impl Interp {
             return Ok(v);
         }
         if let Some(fv) = self.funcs.get(name) {
-            return Ok(Value::Func(fv.clone()));
+            return Ok(Value::Func(Box::new(fv.clone())));
         }
         if let Some(entry) = self.natives.get(name) {
-            return Ok(Value::Native(NativeFunc {
+            return Ok(Value::Native(Box::new(NativeFunc {
                 name: name.to_string(),
                 arity: entry.arity,
-            }));
+            })));
         }
         Err(EvalError::new(format!("undefined method `{name}`"), span))
     }
@@ -422,13 +425,13 @@ impl Interp {
                 return Ok(f);
             }
         }
-        if let Value::Object { name, .. } = recv {
+        if let Value::Object(o) = recv {
             // Try TypeName.method (impl block methods)
-            if let Ok(f) = self.lookup_callable(&format!("{name}.{method}"), span) {
+            if let Ok(f) = self.lookup_callable(&format!("{}.{}", o.name, method), span) {
                 return Ok(f);
             }
             // Try namespace.method (cross-module)
-            if let Some((ns, _)) = name.rsplit_once('.') {
+            if let Some((ns, _)) = o.name.rsplit_once('.') {
                 if let Ok(f) = self.lookup_callable(&format!("{ns}.{method}"), span) {
                     return Ok(f);
                 }
@@ -484,20 +487,20 @@ impl Interp {
         match expr {
             Expr::Int { value, .. } => Ok(Flow::Value(Value::Int(*value))),
             Expr::Float { value, .. } => Ok(Flow::Value(Value::Float(*value))),
-            Expr::Str { value, .. } => Ok(Flow::Value(Value::Str(value.clone()))),
+            Expr::Str { value, .. } => Ok(Flow::Value(Value::Str(value.clone().into()))),
             Expr::Bool { value, .. } => Ok(Flow::Value(Value::Bool(*value))),
             Expr::Ident { name, span } => {
                 if let Some(v) = self.env.borrow().get(name) {
                     return Ok(Flow::Value(v));
                 }
                 if let Some(fv) = self.funcs.get(name) {
-                    return Ok(Flow::Value(Value::Func(fv.clone())));
+                    return Ok(Flow::Value(Value::Func(Box::new(fv.clone()))));
                 }
                 if let Some(entry) = self.natives.get(name) {
-                    return Ok(Flow::Value(Value::Native(NativeFunc {
+                    return Ok(Flow::Value(Value::Native(Box::new(NativeFunc {
                         name: name.clone(),
                         arity: entry.arity,
-                    })));
+                    }))));
                 }
                 Err(EvalError::new(
                     format!("undefined variable `{name}`"),
@@ -518,7 +521,7 @@ impl Interp {
                         }
                     }
                 }
-                Ok(Flow::Value(Value::Str(out)))
+                Ok(Flow::Value(Value::Str(out.into())))
             }
             Expr::Path { parts, span } => self.resolve_path_value(parts, *span).map(Flow::Value),
             Expr::Paren { expr, .. } => self.eval(expr),
@@ -554,8 +557,11 @@ impl Interp {
                         match l {
                             Value::Option(Some(v)) => return Ok(Flow::Value(*v)),
                             Value::Option(None) => {}
-                            Value::Result(Ok(v)) => return Ok(Flow::Value(*v)),
-                            Value::Result(Err(_)) => {}
+                            Value::Result(r) => match &*r {
+                                Ok(v) => return Ok(Flow::Value(v.clone())),
+                                Err(_) => {}
+                            },
+
                             other => {
                                 return Ok(Flow::Value(other));
                             }
@@ -636,12 +642,14 @@ impl Interp {
                 }
                 self.call(f, arg_vals, *span).map(Flow::Value)
             }
-            Expr::Closure { params, body, .. } => Ok(Flow::Value(Value::Func(FuncValue {
-                params: params.clone(),
-                body: (**body).clone(),
-                env: Rc::clone(&self.env),
-                chunk: None,
-            }))),
+            Expr::Closure { params, body, .. } => {
+                Ok(Flow::Value(Value::Func(Box::new(FuncValue {
+                    params: params.clone(),
+                    body: (**body).clone(),
+                    env: Rc::clone(&self.env),
+                    chunk: None,
+                }))))
+            }
             Expr::If {
                 cond,
                 then,
@@ -737,8 +745,11 @@ impl Interp {
                 match v {
                     Value::Option(Some(inner)) => Ok(Flow::Value(*inner)),
                     Value::Option(None) => Ok(Flow::Return(Value::Option(None))),
-                    Value::Result(Ok(inner)) => Ok(Flow::Value(*inner)),
-                    Value::Result(Err(e)) => Ok(Flow::Return(Value::Result(Err(e)))),
+                    Value::Result(r) => match &*r {
+                        Ok(inner) => Ok(Flow::Value(inner.clone())),
+                        Err(e) => Ok(Flow::Return(Value::Result(Box::new(Err(e.clone()))))),
+                    },
+
                     other => Err(EvalError::new(
                         format!("cannot use `?` on a value of type `{other}`"),
                         *span,
@@ -751,14 +762,14 @@ impl Interp {
                 for e in elems {
                     vs.push(self.eval(e)?.into_value()?);
                 }
-                Ok(Flow::Value(Value::Array(vs)))
+                Ok(Flow::Value(Value::Array(Box::new(vs))))
             }
             Expr::Tuple { items, .. } => {
                 let mut vs = Vec::with_capacity(items.len());
                 for e in items {
                     vs.push(self.eval(e)?.into_value()?);
                 }
-                Ok(Flow::Value(Value::Array(vs)))
+                Ok(Flow::Value(Value::Array(Box::new(vs))))
             }
             Expr::ListComp {
                 body,
@@ -771,7 +782,7 @@ impl Interp {
                 let mut results = Vec::new();
                 match it {
                     Value::Array(items) => {
-                        for item in items {
+                        for item in *items {
                             let scope = Env::with_parent(&self.env);
                             scope.borrow_mut().define(&var.name, item);
                             let prev = std::mem::replace(&mut self.env, scope);
@@ -788,7 +799,8 @@ impl Interp {
                             self.env = prev;
                         }
                     }
-                    Value::Range(start, end, step) => {
+                    Value::Range(r) => {
+                        let (start, end, step) = (r.start, r.end, r.step);
                         let mut i = start;
                         if step > 0 {
                             while i < end {
@@ -835,7 +847,7 @@ impl Interp {
                         ));
                     }
                 }
-                Ok(Flow::Value(Value::Array(results)))
+                Ok(Flow::Value(Value::Array(Box::new(results))))
             }
             Expr::Dict { entries, .. } => {
                 let mut pairs = Vec::with_capacity(entries.len());
@@ -844,7 +856,7 @@ impl Interp {
                     let vv = self.eval(v)?.into_value()?;
                     pairs.push((kv, vv));
                 }
-                Ok(Flow::Value(Value::Dict(pairs)))
+                Ok(Flow::Value(Value::Dict(Box::new(pairs))))
             }
             Expr::Variant { name, arg, span } => {
                 let av = match arg {
@@ -852,9 +864,9 @@ impl Interp {
                     None => None,
                 };
                 match (name.as_str(), av) {
-                    ("ok", Some(v)) => Ok(Flow::Value(Value::Result(Ok(Box::new(v))))),
+                    ("ok", Some(v)) => Ok(Flow::Value(Value::Result(Box::new(Ok(v))))),
                     ("ok", None) => Err(EvalError::new("`.ok` requires an argument", *span)),
-                    ("err", Some(v)) => Ok(Flow::Value(Value::Result(Err(Box::new(v))))),
+                    ("err", Some(v)) => Ok(Flow::Value(Value::Result(Box::new(Err(v))))),
                     ("err", None) => Err(EvalError::new("`.err` requires an argument", *span)),
                     ("some", Some(v)) => Ok(Flow::Value(Value::Option(Some(Box::new(v))))),
                     ("some", None) => Err(EvalError::new("`.some` requires an argument", *span)),
@@ -874,7 +886,13 @@ impl Interp {
                 let s = self.eval(start)?.into_value()?;
                 let e = self.eval(end)?.into_value()?;
                 match (s, e) {
-                    (Value::Int(a), Value::Int(b)) => Ok(Flow::Value(Value::Range(a, b, 1))),
+                    (Value::Int(a), Value::Int(b)) => {
+                        Ok(Flow::Value(Value::Range(Box::new(RangeValue {
+                            start: a,
+                            end: b,
+                            step: 1,
+                        }))))
+                    }
                     _ => Err(EvalError::new("range bounds must be integers", *span)),
                 }
             }
@@ -893,10 +911,10 @@ impl Interp {
                     let v = self.eval(&fexpr.1)?.into_value()?;
                     out.push((fname.clone(), v));
                 }
-                Ok(Flow::Value(Value::Object {
+                Ok(Flow::Value(Value::Object(Box::new(ObjectValue {
                     name: name.clone(),
                     fields: out,
-                }))
+                }))))
             }
             Expr::Index { obj, index, span } => {
                 let ov = self.eval(obj)?.into_value()?;
@@ -970,8 +988,14 @@ impl Interp {
                 let inner = match (name.as_str(), value) {
                     ("some", Value::Option(Some(v))) => Some(v.as_ref()),
                     ("none", Value::Option(None)) => None,
-                    ("ok", Value::Result(Ok(v))) => Some(v.as_ref()),
-                    ("err", Value::Result(Err(e))) => Some(e.as_ref()),
+                    ("ok", Value::Result(r)) => match &**r {
+                        Ok(v) => Some(v),
+                        Err(_) => None,
+                    },
+                    ("err", Value::Result(r)) => match &**r {
+                        Err(e) => Some(e),
+                        Ok(_) => None,
+                    },
                     _ => return false,
                 };
                 match (arg.as_deref(), inner) {
@@ -1015,7 +1039,7 @@ impl Interp {
                     )),
                 }
             }
-            Value::Func(fv) => self.call_func(fv, args, span),
+            Value::Func(fv) => self.call_func(*fv, args, span),
             other => Err(EvalError::new(
                 format!("cannot call a value of type `{other}`"),
                 span,

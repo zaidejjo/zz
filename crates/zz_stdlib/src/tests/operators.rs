@@ -72,7 +72,7 @@ fn elvis_with_format_spec_hex() {
         "{n:x}"
     "#)
     .unwrap();
-    assert_eq!(v, Value::Str("ff".to_string()));
+    assert_eq!(v, Value::Str("ff".to_string().into()));
 }
 
 #[test]
@@ -82,5 +82,5 @@ fn elvis_with_format_spec_float() {
         "{pi:.2f}"
     "#)
     .unwrap();
-    assert_eq!(v, Value::Str("3.14".to_string()));
+    assert_eq!(v, Value::Str("3.14".to_string().into()));
 }

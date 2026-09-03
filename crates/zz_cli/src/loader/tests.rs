@@ -762,7 +762,10 @@ fn indexing_and_slicing_in_module() {
     for p in &result.programs {
         last = interp.run(p).unwrap();
     }
-    assert_eq!(last, Value::Array(vec![Value::Int(20), Value::Int(30)]));
+    assert_eq!(
+        last,
+        Value::Array(Box::new(vec![Value::Int(20), Value::Int(30)]))
+    );
 }
 
 #[test]

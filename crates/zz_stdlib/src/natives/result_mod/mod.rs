@@ -11,11 +11,13 @@ pub(crate) fn result_unwrap(
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument for result.unwrap", span))?;
     match res {
-        Value::Result(Ok(v)) => Ok(*v),
-        Value::Result(Err(e)) => Err(EvalError::new(
-            format!("result.unwrap: called unwrap on .err({e})"),
-            span,
-        )),
+        Value::Result(r) => match &*r {
+            Ok(v) => Ok(v.clone()),
+            Err(e) => Err(EvalError::new(
+                format!("result.unwrap: called unwrap on .err({e})"),
+                span,
+            )),
+        },
         other => Err(EvalError::new(
             format!("result.unwrap: expected a result, found `{other}`"),
             span,
@@ -35,10 +37,12 @@ pub(crate) fn result_unwrap_or(
     let default = args
         .get(1)
         .cloned()
-        .ok_or_else(|| EvalError::new("missing `default` argument for result.unwrap_or", span))?;
+        .ok_or_else(|| EvalError::new("missing argument for result.unwrap_or", span))?;
     match res {
-        Value::Result(Ok(v)) => Ok(*v),
-        Value::Result(Err(_)) => Ok(default),
+        Value::Result(r) => match &*r {
+            Ok(v) => Ok(v.clone()),
+            Err(_) => Ok(default),
+        },
         other => Err(EvalError::new(
             format!("result.unwrap_or: expected a result, found `{other}`"),
             span,
@@ -57,8 +61,10 @@ pub(crate) fn result_expect(
         .ok_or_else(|| EvalError::new("missing argument for result.expect", span))?;
     let msg = expect_str(args, 1, "result.expect")?;
     match res {
-        Value::Result(Ok(v)) => Ok(*v),
-        Value::Result(Err(e)) => Err(EvalError::new(format!("result.expect: {msg}: {e}"), span)),
+        Value::Result(r) => match &*r {
+            Ok(v) => Ok(v.clone()),
+            Err(e) => Err(EvalError::new(format!("result.expect: {msg}: {e}"), span)),
+        },
         other => Err(EvalError::new(
             format!("result.expect: expected a result, found `{other}`"),
             span,

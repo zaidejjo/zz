@@ -5,8 +5,8 @@ use crate::convert::LineIndex;
 use crate::state::DocumentState;
 use zz_frontend::ast::{Expr, Stmt};
 
-use super::Backend;
 use super::find_struct_field_location;
+use super::Backend;
 
 pub(crate) async fn handle_goto_definition(
     backend: &Backend,
@@ -72,7 +72,10 @@ pub(crate) async fn handle_goto_definition(
 
     if def.is_none() {
         if let Some(check_result) = &doc.check_result {
-            if let Some(Expr::Field { name: field, obj, .. }) = node.expr {
+            if let Some(Expr::Field {
+                name: field, obj, ..
+            }) = node.expr
+            {
                 if let Some(zz_checker::Type::Struct(ref struct_name)) =
                     crate::lookup::resolve_type_of_expr(program, check_result, obj)
                 {

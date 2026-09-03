@@ -18,7 +18,7 @@ fn dict_to_headers(v: &Value) -> HashMap<String, String> {
     if let Value::Dict(entries) = v {
         for (k, val) in entries.iter() {
             if let (Value::Str(key), Value::Str(val)) = (k, val) {
-                map.insert(key.clone(), val.clone());
+                map.insert((**key).clone(), (**val).clone());
             }
         }
     }
@@ -29,7 +29,7 @@ fn jsonify_value(v: &Value) -> JsonValue {
     match v {
         Value::Int(i) => JsonValue::Num(*i as f64),
         Value::Float(f) => JsonValue::Num(*f),
-        Value::Str(s) => JsonValue::Str(s.clone()),
+        Value::Str(s) => JsonValue::Str((**s).clone()),
         Value::Bool(b) => JsonValue::Bool(*b),
         Value::Unit => JsonValue::Null,
         Value::Array(arr) => JsonValue::Arr(arr.iter().map(jsonify_value).collect()),
@@ -38,7 +38,7 @@ fn jsonify_value(v: &Value) -> JsonValue {
                 .iter()
                 .filter_map(|(k, v)| {
                     if let Value::Str(key) = k {
-                        Some((key.clone(), jsonify_value(v)))
+                        Some(((**key).clone(), jsonify_value(v)))
                     } else {
                         None
                     }
@@ -46,7 +46,7 @@ fn jsonify_value(v: &Value) -> JsonValue {
                 .collect();
             JsonValue::Obj(obj)
         }
-        Value::Json(j) => j.clone(),
+        Value::Json(j) => (**j).clone(),
         _ => JsonValue::Null,
     }
 }
@@ -146,33 +146,42 @@ fn build_request_dict(
     query_pairs: &[(String, String)],
     params: &[(String, String)],
 ) -> Value {
-    let method_val = Value::Str(method.to_string());
-    let path_val = Value::Str(path.to_string());
-    let body_val = Value::Str(body.to_string());
+    let method_val = Value::Str(method.to_string().into());
+    let path_val = Value::Str(path.to_string().into());
+    let body_val = Value::Str(body.to_string().into());
 
     let headers_dict: Vec<(Value, Value)> = headers
         .iter()
-        .map(|(k, v)| (Value::Str(k.clone()), Value::Str(v.clone())))
+        .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
         .collect();
 
     let query_dict: Vec<(Value, Value)> = query_pairs
         .iter()
-        .map(|(k, v)| (Value::Str(k.clone()), Value::Str(v.clone())))
+        .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
         .collect();
 
     let params_dict: Vec<(Value, Value)> = params
         .iter()
-        .map(|(k, v)| (Value::Str(k.clone()), Value::Str(v.clone())))
+        .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
         .collect();
 
-    Value::Dict(vec![
-        (Value::Str("method".into()), method_val),
-        (Value::Str("path".into()), path_val),
-        (Value::Str("body".into()), body_val),
-        (Value::Str("headers".into()), Value::Dict(headers_dict)),
-        (Value::Str("query".into()), Value::Dict(query_dict)),
-        (Value::Str("params".into()), Value::Dict(params_dict)),
-    ])
+    Value::Dict(Box::new(vec![
+        (Value::Str("method".to_string().into()), method_val),
+        (Value::Str("path".to_string().into()), path_val),
+        (Value::Str("body".to_string().into()), body_val),
+        (
+            Value::Str("headers".to_string().into()),
+            Value::Dict(Box::new(headers_dict)),
+        ),
+        (
+            Value::Str("query".to_string().into()),
+            Value::Dict(Box::new(query_dict)),
+        ),
+        (
+            Value::Str("params".to_string().into()),
+            Value::Dict(Box::new(params_dict)),
+        ),
+    ]))
 }
 
 // ===========================================================================
@@ -194,11 +203,11 @@ fn build_response_from_reqwest(resp: reqwest::blocking::Response) -> Value {
         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
     let body = resp.text().unwrap_or_default();
-    Value::Response(Response {
+    Value::Response(Box::new(Response {
         status,
         body,
         headers,
-    })
+    }))
 }
 
 /// `http.get(url: str, headers: {str: str}) -> Result<Response, str>`
@@ -208,7 +217,10 @@ pub(crate) fn http_get(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.get")?;
-    let headers = args.get(1).cloned().unwrap_or(Value::Dict(vec![]));
+    let headers = args
+        .get(1)
+        .cloned()
+        .unwrap_or(Value::Dict(Box::new(vec![])));
     let client = build_client()?;
     let hdrs = dict_to_headers(&headers);
     let mut req = client.get(&url);
@@ -216,12 +228,12 @@ pub(crate) fn http_get(
         req = req.header(k, v);
     }
     match req.send() {
-        Ok(resp) => Ok(Value::Result(Ok(Box::new(build_response_from_reqwest(
+        Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
-            "HTTP GET failed: {e}"
-        )))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("HTTP GET failed: {e}").into(),
+        ))))),
     }
 }
 
@@ -233,7 +245,10 @@ pub(crate) fn http_post(
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.post")?;
     let body = expect_str(args, 1, "std.http.post")?;
-    let headers = args.get(2).cloned().unwrap_or(Value::Dict(vec![]));
+    let headers = args
+        .get(2)
+        .cloned()
+        .unwrap_or(Value::Dict(Box::new(vec![])));
     let client = build_client()?;
     let hdrs = dict_to_headers(&headers);
     let mut req = client.post(&url);
@@ -241,12 +256,12 @@ pub(crate) fn http_post(
         req = req.header(k, v);
     }
     match req.body(body).send() {
-        Ok(resp) => Ok(Value::Result(Ok(Box::new(build_response_from_reqwest(
+        Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
-            "HTTP POST failed: {e}"
-        )))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("HTTP POST failed: {e}").into(),
+        ))))),
     }
 }
 
@@ -258,7 +273,10 @@ pub(crate) fn http_put(
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.put")?;
     let body = expect_str(args, 1, "std.http.put")?;
-    let headers = args.get(2).cloned().unwrap_or(Value::Dict(vec![]));
+    let headers = args
+        .get(2)
+        .cloned()
+        .unwrap_or(Value::Dict(Box::new(vec![])));
     let client = build_client()?;
     let hdrs = dict_to_headers(&headers);
     let mut req = client.put(&url);
@@ -266,12 +284,12 @@ pub(crate) fn http_put(
         req = req.header(k, v);
     }
     match req.body(body).send() {
-        Ok(resp) => Ok(Value::Result(Ok(Box::new(build_response_from_reqwest(
+        Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
-            "HTTP PUT failed: {e}"
-        )))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("HTTP PUT failed: {e}").into(),
+        ))))),
     }
 }
 
@@ -282,7 +300,10 @@ pub(crate) fn http_delete(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.delete")?;
-    let headers = args.get(1).cloned().unwrap_or(Value::Dict(vec![]));
+    let headers = args
+        .get(1)
+        .cloned()
+        .unwrap_or(Value::Dict(Box::new(vec![])));
     let client = build_client()?;
     let hdrs = dict_to_headers(&headers);
     let mut req = client.delete(&url);
@@ -290,12 +311,12 @@ pub(crate) fn http_delete(
         req = req.header(k, v);
     }
     match req.send() {
-        Ok(resp) => Ok(Value::Result(Ok(Box::new(build_response_from_reqwest(
+        Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
-            "HTTP DELETE failed: {e}"
-        )))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("HTTP DELETE failed: {e}").into(),
+        ))))),
     }
 }
 
@@ -323,7 +344,7 @@ pub(crate) fn http_response_text(
     span: Span,
 ) -> Result<Value, EvalError> {
     match arg(args, 0, "std.http.text")? {
-        Value::Response(r) => Ok(Value::Str(r.body.clone())),
+        Value::Response(r) => Ok(Value::Str(r.body.clone().into())),
         other => Err(EvalError::new(
             format!("std.http.text: expected an http.response, found `{other}`"),
             span,
@@ -338,10 +359,10 @@ pub(crate) fn http_response_json(
 ) -> Result<Value, EvalError> {
     match arg(args, 0, "std.http.json")? {
         Value::Response(r) => match parse_json(&r.body) {
-            Ok(j) => Ok(Value::Json(j)),
-            Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
-                "JSON parse error: {e}"
-            )))))),
+            Ok(j) => Ok(Value::Json(Box::new(j))),
+            Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+                format!("JSON parse error: {e}").into(),
+            ))))),
         },
         other => Err(EvalError::new(
             format!("std.http.json: expected an http.response, found `{other}`"),
@@ -360,9 +381,9 @@ pub(crate) fn http_response_headers(
             let entries: Vec<(Value, Value)> = r
                 .headers
                 .iter()
-                .map(|(k, v)| (Value::Str(k.clone()), Value::Str(v.clone())))
+                .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
                 .collect();
-            Ok(Value::Dict(entries))
+            Ok(Value::Dict(Box::new(entries)))
         }
         other => Err(EvalError::new(
             format!("std.http.headers: expected an http.response, found `{other}`"),
@@ -380,12 +401,12 @@ pub(crate) fn http_server(
     _args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    Ok(Value::HttpServer(HttpServer {
+    Ok(Value::HttpServer(Box::new(HttpServer {
         routes: Vec::new(),
         middlewares: Vec::new(),
         log_enabled: false,
         static_dir: None,
-    }))
+    })))
 }
 
 pub(crate) fn http_route_get(
@@ -441,12 +462,12 @@ fn http_route(
     let _ = interp;
     let mut server = server;
     server.routes.push((method.to_string(), path, handler));
-    Ok(Value::HttpServer(server))
+    Ok(Value::HttpServer(Box::new(server)))
 }
 
 fn expect_server(args: &mut Vec<Value>, i: usize, name: &str) -> Result<HttpServer, EvalError> {
     match arg(args, i, name)? {
-        Value::HttpServer(s) => Ok(s.clone()),
+        Value::HttpServer(s) => Ok((**s).clone()),
         other => Err(EvalError::new(
             format!("`{name}` expects an http server, found `{other}`"),
             Span::new(0, 0),
@@ -475,7 +496,7 @@ pub(crate) fn http_log(
         }
     };
     server.log_enabled = enabled;
-    Ok(Value::HttpServer(server))
+    Ok(Value::HttpServer(Box::new(server)))
 }
 
 // ===========================================================================
@@ -500,7 +521,7 @@ pub(crate) fn http_pipe(
         ));
     }
     server.middlewares.push(middleware);
-    Ok(Value::HttpServer(server))
+    Ok(Value::HttpServer(Box::new(server)))
 }
 
 // ===========================================================================
@@ -516,7 +537,7 @@ pub(crate) fn http_serve_dir(
     let mut server = expect_server(args, 0, "std.http.serve_dir")?;
     let dir = expect_str(args, 1, "std.http.serve_dir")?;
     server.static_dir = Some(dir);
-    Ok(Value::HttpServer(server))
+    Ok(Value::HttpServer(Box::new(server)))
 }
 
 // ===========================================================================
@@ -557,16 +578,16 @@ pub(crate) fn http_test(
     );
 
     match result {
-        Ok((status, resp_body, resp_headers)) => Ok(Value::Response(Response {
+        Ok((status, resp_body, resp_headers)) => Ok(Value::Response(Box::new(Response {
             status,
             body: resp_body,
             headers: resp_headers,
-        })),
-        Err(e) => Ok(Value::Response(Response {
+        }))),
+        Err(e) => Ok(Value::Response(Box::new(Response {
             status: 500,
             body: e.message,
             headers: Vec::new(),
-        })),
+        }))),
     }
 }
 
@@ -590,7 +611,7 @@ pub(crate) fn http_header(
     span: Span,
 ) -> Result<Value, EvalError> {
     let req = match arg(args, 0, "std.http.header")? {
-        Value::Dict(entries) => entries.clone(),
+        Value::Dict(entries) => (**entries).clone(),
         other => {
             return Err(EvalError::new(
                 format!("std.http.header: expected a dict, found `{other}`"),
@@ -601,14 +622,14 @@ pub(crate) fn http_header(
     let name = expect_str(args, 1, "std.http.header")?;
     for (k, v) in &req {
         if let (Value::Str(key), val) = (k, v) {
-            if key.to_lowercase() == name.to_lowercase() {
-                return Ok(Value::Result(Ok(Box::new(val.clone()))));
+            if (**key).to_lowercase() == name.to_lowercase() {
+                return Ok(Value::Result(Box::new(Ok(val.clone()))));
             }
         }
     }
-    Ok(Value::Result(Err(Box::new(Value::Str(format!(
-        "header `{name}` not found"
-    ))))))
+    Ok(Value::Result(Box::new(Err(Value::Str(
+        format!("header `{name}` not found").into(),
+    )))))
 }
 
 /// `http.body_json(req: dict) -> json`
@@ -619,10 +640,10 @@ pub(crate) fn http_body_json(
 ) -> Result<Value, EvalError> {
     let body = extract_dict_field_str(args, 0, "body", "std.http.body_json", span)?;
     match parse_json(&body) {
-        Ok(j) => Ok(Value::Json(j)),
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
-            "JSON parse error: {e}"
-        )))))),
+        Ok(j) => Ok(Value::Json(Box::new(j))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("JSON parse error: {e}").into(),
+        ))))),
     }
 }
 
@@ -636,9 +657,9 @@ pub(crate) fn http_body_form(
     let pairs = parse_query_string(&body);
     let dict: Vec<(Value, Value)> = pairs
         .iter()
-        .map(|(k, v)| (Value::Str(k.clone()), Value::Str(v.clone())))
+        .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
         .collect();
-    Ok(Value::Dict(dict))
+    Ok(Value::Dict(Box::new(dict)))
 }
 
 // ===========================================================================
@@ -652,7 +673,7 @@ pub(crate) fn http_param(
     span: Span,
 ) -> Result<Value, EvalError> {
     let req = match arg(args, 0, "std.http.param")? {
-        Value::Dict(entries) => entries.clone(),
+        Value::Dict(entries) => (**entries).clone(),
         other => {
             return Err(EvalError::new(
                 format!("std.http.param: expected a dict, found `{other}`"),
@@ -663,20 +684,20 @@ pub(crate) fn http_param(
     let name = expect_str(args, 1, "std.http.param")?;
     for (k, v) in &req {
         if let (Value::Str(key), Value::Dict(params)) = (k, v) {
-            if key == "params" {
-                for (pk, pv) in params {
+            if &**key == "params" {
+                for (pk, pv) in &**params {
                     if let (Value::Str(pname), Value::Str(pval)) = (pk, pv) {
-                        if pname == &name {
-                            return Ok(Value::Result(Ok(Box::new(Value::Str(pval.clone())))));
+                        if &**pname == name.as_str() {
+                            return Ok(Value::Result(Box::new(Ok(Value::Str(pval.clone())))));
                         }
                     }
                 }
             }
         }
     }
-    Ok(Value::Result(Err(Box::new(Value::Str(format!(
-        "param `{name}` not found"
-    ))))))
+    Ok(Value::Result(Box::new(Err(Value::Str(
+        format!("param `{name}` not found").into(),
+    )))))
 }
 
 // ===========================================================================
@@ -691,7 +712,7 @@ fn extract_dict_field(
     span: Span,
 ) -> Result<Value, EvalError> {
     let req = match arg(args, i, func_name)? {
-        Value::Dict(entries) => entries.clone(),
+        Value::Dict(entries) => (**entries).clone(),
         other => {
             return Err(EvalError::new(
                 format!("{func_name}: expected a dict, found `{other}`"),
@@ -701,12 +722,12 @@ fn extract_dict_field(
     };
     for (k, v) in &req {
         if let Value::Str(key) = k {
-            if key == field {
+            if &**key == field {
                 return Ok(v.clone());
             }
         }
     }
-    Ok(Value::Dict(vec![]))
+    Ok(Value::Dict(Box::new(vec![])))
 }
 
 fn extract_dict_field_str(
@@ -718,7 +739,7 @@ fn extract_dict_field_str(
 ) -> Result<String, EvalError> {
     let val = extract_dict_field(args, i, field, func_name, span)?;
     match val {
-        Value::Str(s) => Ok(s),
+        Value::Str(s) => Ok((*s).clone()),
         _ => Ok("".to_string()),
     }
 }
@@ -773,23 +794,25 @@ fn dispatch_with_request(
     let mut current_req = req_dict.clone();
     for mw in &server.middlewares {
         match interp.call(mw.clone(), vec![current_req.clone()], span)? {
-            Value::Result(Ok(val)) => {
-                // Middleware passed — it may have modified the request dict
-                if let Value::Dict(_) = &*val {
-                    current_req = (*val).clone();
-                }
-            }
-            Value::Result(Err(err_val)) => {
-                // Middleware rejected — err_val should be a Response
-                match *err_val {
-                    Value::Response(r) => {
-                        return Ok((r.status, r.body.clone(), r.headers.clone()));
-                    }
-                    other => {
-                        return Ok((401, format!("{other}"), vec![]));
+            Value::Result(r) => match &*r {
+                Ok(val) => {
+                    // Middleware passed — it may have modified the request dict
+                    if let Value::Dict(_) = &*val {
+                        current_req = (*val).clone();
                     }
                 }
-            }
+                Err(err_val) => {
+                    // Middleware rejected — err_val should be a Response
+                    match err_val {
+                        Value::Response(r) => {
+                            return Ok((r.status, r.body.clone(), r.headers.clone()));
+                        }
+                        other => {
+                            return Ok((401, format!("{other}"), vec![]));
+                        }
+                    }
+                }
+            },
             other => {
                 return Err(EvalError::new(
                     format!("std.http: middleware returned `{other}`, expected .ok or .err"),
@@ -846,12 +869,15 @@ fn dispatch_with_request(
     } else {
         let params_dict: Vec<(Value, Value)> = matched_params
             .iter()
-            .map(|(k, v)| (Value::Str(k.clone()), Value::Str(v.clone())))
+            .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
             .collect();
         // Replace the "params" key in the request dict
         if let Value::Dict(mut entries) = current_req {
-            entries.retain(|(k, _)| k != &Value::Str("params".into()));
-            entries.push((Value::Str("params".into()), Value::Dict(params_dict)));
+            entries.retain(|(k, _)| k != &Value::Str("params".to_string().into()));
+            entries.push((
+                Value::Str("params".to_string().into()),
+                Value::Dict(Box::new(params_dict)),
+            ));
             Value::Dict(entries)
         } else {
             current_req
@@ -864,7 +890,7 @@ fn dispatch_with_request(
         // String response → 200 text/plain
         Value::Str(s) => Ok((
             200,
-            s,
+            (*s).clone(),
             vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
         )),
         // Response object → use its status/headers/body
@@ -950,8 +976,8 @@ pub(crate) fn http_handle(
     let path = expect_str(args, 2, "std.http.handle")?;
     let body = expect_str(args, 3, "std.http.handle")?;
     match dispatch(&server, &method, &path, body, interp, span) {
-        Ok(body) => Ok(Value::Result(Ok(Box::new(Value::Str(body))))),
-        Err(e) => Ok(Value::Result(Err(Box::new(Value::Str(e.message))))),
+        Ok(body) => Ok(Value::Result(Box::new(Ok(Value::Str(body.into()))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(e.message.into()))))),
     }
 }
 

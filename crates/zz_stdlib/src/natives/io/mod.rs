@@ -47,5 +47,7 @@ pub(crate) fn read_line(
         .read_line(&mut line)
         .map_err(|e| EvalError::new(format!("failed to read line: {e}"), span))?;
     // Strip the trailing newline (and CR for Windows line endings).
-    Ok(Value::Str(line.trim_end_matches(['\n', '\r']).to_string()))
+    Ok(Value::Str(
+        line.trim_end_matches(['\n', '\r']).to_string().into(),
+    ))
 }

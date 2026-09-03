@@ -8,7 +8,7 @@ pub(crate) fn env_get_var(
 ) -> Result<Value, EvalError> {
     let name = expect_str(args, 0, "std.env.get_var")?;
     match std::env::var(&name) {
-        Ok(v) => Ok(Value::Option(Some(Box::new(Value::Str(v))))),
+        Ok(v) => Ok(Value::Option(Some(Box::new(Value::Str(v.into()))))),
         Err(_) => Ok(Value::Option(None)),
     }
 }
@@ -20,10 +20,10 @@ pub(crate) fn env_var(
 ) -> Result<Value, EvalError> {
     let name = expect_str(args, 0, "std.env.var")?;
     match std::env::var(&name) {
-        Ok(v) => Ok(Value::Result(Ok(Box::new(Value::Str(v))))),
-        Err(_) => Ok(Value::Result(Err(Box::new(Value::Str(format!(
-            "environment variable `{name}` not set"
-        )))))),
+        Ok(v) => Ok(Value::Result(Box::new(Ok(Value::Str(v.into()))))),
+        Err(_) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("environment variable `{name}` not set").into(),
+        ))))),
     }
 }
 
@@ -32,7 +32,11 @@ pub(crate) fn env_args(
     _args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    Ok(Value::Array(
-        interp.args.iter().map(|s| Value::Str(s.clone())).collect(),
-    ))
+    Ok(Value::Array(Box::new(
+        interp
+            .args
+            .iter()
+            .map(|s| Value::Str(s.clone().into()))
+            .collect(),
+    )))
 }

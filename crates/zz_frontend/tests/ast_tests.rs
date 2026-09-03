@@ -1,7 +1,7 @@
 //! AST tests.
 
-use zz_frontend::tests::common::parse_ok;
 use zz_frontend::ast::{BinOp, Expr as E, UnOp};
+use zz_frontend::tests::common::parse_ok;
 
 #[test]
 fn ast_span_access() {

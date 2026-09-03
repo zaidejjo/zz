@@ -8,44 +8,63 @@ use zz_frontend::ast::{Expr, Param};
 
 use crate::env::Env;
 
+/// A struct instance payload (boxed so `Value` stays small).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectValue {
+    pub name: String,
+    pub fields: Vec<(String, Value)>,
+}
+
+/// An integer range `a..b` / `a..b..step` (boxed so `Value` stays small).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RangeValue {
+    pub start: i64,
+    pub end: i64,
+    pub step: i64,
+}
+
+/// A runtime value.
+///
+/// Heap-allocates (boxes) every payload larger than a word so the enum fits
+/// in 16 bytes (including its discriminant byte and padding). This keeps
+/// `LoadSlot`/`StoreSlot`/stack-push copies to a single 16-byte memcpy
+/// instead of copying large strings, vectors, or environments inline.
 #[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
     Float(f64),
-    Str(String),
+    /// A heap-allocated string (thin pointer).
+    Str(Box<String>),
     Bool(bool),
     Unit,
     /// `.some(v)` / `.none`.
     Option(Option<Box<Value>>),
     /// `.ok(v)` / `.err(e)`.
-    Result(Result<Box<Value>, Box<Value>>),
+    Result(Box<Result<Value, Value>>),
     /// A closure or named function, with its captured environment.
-    Func(FuncValue),
+    Func(Box<FuncValue>),
     /// `[v1, v2, ...]`.
-    Array(Vec<Value>),
+    Array(Box<Vec<Value>>),
     /// `{k1: v1, k2: v2, ...}` — insertion-ordered key/value pairs.
-    Dict(Vec<(Value, Value)>),
+    Dict(Box<Vec<(Value, Value)>>),
     /// A native (Rust-backed) function from the standard library.
-    Native(NativeFunc),
+    Native(Box<NativeFunc>),
     /// A parsed JSON value (opaque to the type system).
-    Json(JsonValue),
+    Json(Box<JsonValue>),
     /// An HTTP server handle with its registered routes.
-    HttpServer(HttpServer),
+    HttpServer(Box<HttpServer>),
     /// A TCP stream (opaque, wrapped in Arc<Mutex> for clone safety).
     TcpStream(Arc<Mutex<TcpStream>>),
     /// A TCP listener (opaque, wrapped in Arc<Mutex> for clone safety).
     TcpListener(Arc<Mutex<TcpListener>>),
     /// An HTTP response (status + body + headers).
-    Response(Response),
+    Response(Box<Response>),
     /// A struct instance: its type name and insertion-ordered fields.
-    Object {
-        name: String,
-        fields: Vec<(String, Value)>,
-    },
+    Object(Box<ObjectValue>),
     /// `a..b` or `a..b..step` — an integer range (used by `for` loops).
-    Range(i64, i64, i64),
+    Range(Box<RangeValue>),
     /// `(v1, v2, ...)` — tuple value.
-    Tuple(Vec<Value>),
+    Tuple(Box<Vec<Value>>),
 }
 
 /// A JSON value (see [`crate::json`]).
@@ -123,8 +142,8 @@ impl Value {
             Value::TcpStream(_) => "tcp.stream".to_string(),
             Value::TcpListener(_) => "tcp.listener".to_string(),
             Value::Response(_) => "http.response".to_string(),
-            Value::Object { name, .. } => name.clone(),
-            Value::Range(..) => "range".to_string(),
+            Value::Object(o) => o.name.clone(),
+            Value::Range(_) => "range".to_string(),
             Value::Tuple(_) => "tuple".to_string(),
         }
     }
@@ -141,9 +160,10 @@ impl Value {
             Value::TcpStream(_) => Some("net"),
             Value::TcpListener(_) => Some("net"),
             Value::Response(_) => Some("http"),
-            Value::Object { name, .. } => {
+            Value::Object(o) => {
                 // Extract namespace from struct name (e.g., "shapes.Point" -> "shapes")
-                name.rsplit_once('.')
+                o.name
+                    .rsplit_once('.')
                     .map(|(ns, _)| Box::leak(ns.to_string().into_boxed_str()) as &str)
             }
             _ => None,
@@ -168,8 +188,10 @@ impl fmt::Display for Value {
             Value::Unit => write!(f, ""),
             Value::Option(Some(v)) => write!(f, ".some({v})"),
             Value::Option(None) => write!(f, ".none"),
-            Value::Result(Ok(v)) => write!(f, ".ok({v})"),
-            Value::Result(Err(e)) => write!(f, ".err({e})"),
+            Value::Result(r) => match &**r {
+                Ok(v) => write!(f, ".ok({v})"),
+                Err(e) => write!(f, ".err({e})"),
+            },
             Value::Func(_) => write!(f, "<func>"),
             Value::Array(vs) => {
                 write!(f, "[")?;
@@ -197,9 +219,9 @@ impl fmt::Display for Value {
             Value::TcpStream(_) => write!(f, "<tcp stream>"),
             Value::TcpListener(_) => write!(f, "<tcp listener>"),
             Value::Response(res) => write!(f, "<http response {}>", res.status),
-            Value::Object { name, fields } => {
-                write!(f, "{name}{{")?;
-                for (i, (k, v)) in fields.iter().enumerate() {
+            Value::Object(o) => {
+                write!(f, "{}{{", o.name)?;
+                for (i, (k, v)) in o.fields.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -207,11 +229,11 @@ impl fmt::Display for Value {
                 }
                 write!(f, "}}")
             }
-            Value::Range(a, b, step) => {
-                if *step == 1 {
-                    write!(f, "{a}..{b}")
+            Value::Range(r) => {
+                if r.step == 1 {
+                    write!(f, "{}..{}", r.start, r.end)
                 } else {
-                    write!(f, "{a}..{b}..{step}")
+                    write!(f, "{}..{}..{}", r.start, r.end, r.step)
                 }
             }
             Value::Tuple(vs) => {
@@ -244,27 +266,29 @@ impl PartialEq for Value {
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Response(a), Value::Response(b)) => a == b,
             (Value::HttpServer(_), Value::HttpServer(_)) => std::ptr::eq(self, other),
-            (
-                Value::Object {
-                    name: an,
-                    fields: af,
-                },
-                Value::Object {
-                    name: bn,
-                    fields: bf,
-                },
-            ) => an == bn && af == bf,
+            (Value::Object(a), Value::Object(b)) => a == b,
             // Opaque types: compare by Arc pointer (identity, not deep equality)
             (Value::TcpStream(a), Value::TcpStream(b)) => Arc::ptr_eq(a, b),
             (Value::TcpListener(a), Value::TcpListener(b)) => Arc::ptr_eq(a, b),
             // Func and Native: compare by reference identity (not deep equality)
             (Value::Func(_), Value::Func(_)) => std::ptr::eq(self, other),
             (Value::Native(_), Value::Native(_)) => std::ptr::eq(self, other),
-            (Value::Range(a1, a2, a3), Value::Range(b1, b2, b3)) => {
-                a1 == b1 && a2 == b2 && a3 == b3
-            }
+            (Value::Range(a), Value::Range(b)) => a == b,
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod size_assert {
+    use super::*;
+    #[test]
+    fn value_fits_in_16_bytes() {
+        assert!(
+            std::mem::size_of::<Value>() <= 16,
+            "Value grew to {} bytes",
+            std::mem::size_of::<Value>()
+        );
     }
 }
 
@@ -291,7 +315,7 @@ mod tests {
     #[test]
     fn array_displays() {
         assert_eq!(
-            Value::Array(vec![Value::Int(1), Value::Int(2)]).to_string(),
+            Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)])).to_string(),
             "[1, 2]"
         );
     }
@@ -299,10 +323,10 @@ mod tests {
     #[test]
     fn dict_displays() {
         assert_eq!(
-            Value::Dict(vec![
-                (Value::Str("a".into()), Value::Int(1)),
-                (Value::Str("b".into()), Value::Int(2)),
-            ])
+            Value::Dict(Box::new(vec![
+                (Value::Str("a".to_string().into()), Value::Int(1)),
+                (Value::Str("b".to_string().into()), Value::Int(2)),
+            ]))
             .to_string(),
             "{a: 1, b: 2}"
         );
@@ -316,11 +340,11 @@ mod tests {
         );
         assert_eq!(Value::Option(None).to_string(), ".none");
         assert_eq!(
-            Value::Result(Ok(Box::new(Value::Int(1)))).to_string(),
+            Value::Result(Box::new(Ok(Value::Int(1)))).to_string(),
             ".ok(1)"
         );
         assert_eq!(
-            Value::Result(Err(Box::new(Value::Str("x".into())))).to_string(),
+            Value::Result(Box::new(Err(Value::Str("x".to_string().into())))).to_string(),
             ".err(x)"
         );
     }
