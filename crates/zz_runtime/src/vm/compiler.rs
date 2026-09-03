@@ -8,6 +8,14 @@ use super::chunk::Chunk;
 use super::op::Op;
 use crate::value::Value;
 
+/// Extract an integer literal from an expression, if it is one.
+fn int_literal(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Int { value, .. } => Some(*value),
+        _ => None,
+    }
+}
+
 /// A compile-time-resolved local variable.
 struct Local {
     name: String,
@@ -158,6 +166,9 @@ impl Compiler {
             Op::DefineVar(_) => 0,
             Op::StoreVar(..) | Op::StorePath(..) | Op::StoreSlot(_) => -1,
             Op::SlotAddInt { .. } => 0,
+            Op::SlotInc { .. } => 0,
+            Op::SlotAddIntImm { .. } => 0,
+            Op::SlotLessIntSlot { .. } | Op::SlotLessIntImm { .. } => 1,
             Op::MakeFunc { .. } | Op::RegisterStruct { .. } | Op::MakeClosure { .. } => 1,
             Op::BinOp(..) => -1,
             Op::UnOp(..) => 0,
@@ -278,6 +289,84 @@ impl Compiler {
             _ => return None,
         };
         Some((dst, src))
+    }
+
+    /// Extended peephole for `x = x op N` / `x = x op y` on local slots.
+    ///
+    /// Returns the fused opcode to emit, or `None` to fall back to the
+    /// generic compile path.
+    fn try_slot_binop(&self, target: &str, value: &Expr) -> Option<Op> {
+        let Expr::Binary {
+            op: binop,
+            left,
+            right,
+            ..
+        } = value
+        else {
+            return None;
+        };
+        let dst = match self.resolve(target) {
+            Resolved::Slot(slot) => slot as u16,
+            Resolved::Env => return None,
+        };
+        // `x = x + 1` -> SlotInc
+        if *binop == zz_frontend::ast::BinOp::Add {
+            let is_one = |e: &Expr| matches!(e, Expr::Int { value: 1, .. });
+            let (l, r) = (left.as_ref(), right.as_ref());
+            if (matches!(l, Expr::Ident { name, .. } if name == target) && is_one(r))
+                || (matches!(r, Expr::Ident { name, .. } if name == target) && is_one(l))
+            {
+                return Some(Op::SlotInc { slot: dst });
+            }
+            // `x = x + N` -> SlotAddIntImm
+            let imm = match (l, r) {
+                (Expr::Ident { name, .. }, e) if name == target => int_literal(e),
+                (e, Expr::Ident { name, .. }) if name == target => int_literal(e),
+                _ => None,
+            };
+            if let Some(imm) = imm {
+                return Some(Op::SlotAddIntImm { dst, imm });
+            }
+        }
+        // `x = x + y` -> SlotAddInt (existing)
+        if let Some((d, s)) = self.try_slot_add(target, value) {
+            return Some(Op::SlotAddInt { dst: d, src: s });
+        }
+        None
+    }
+
+    /// Peephole for `while`-style conditions: `a < b` / `a < N` where both
+    /// sides resolve to local slots (or one is an int literal).
+    fn try_slot_compare(&self, value: &Expr) -> Option<Op> {
+        let Expr::Binary {
+            op: binop,
+            left,
+            right,
+            ..
+        } = value
+        else {
+            return None;
+        };
+        let slot_of = |e: &Expr| match e {
+            Expr::Ident { name, .. } => match self.resolve(name) {
+                Resolved::Slot(slot) => Some(slot as u16),
+                Resolved::Env => None,
+            },
+            _ => None,
+        };
+        let imm_of = |e: &Expr| int_literal(e);
+        match (*binop, left.as_ref(), right.as_ref()) {
+            (BinOp::Lt, l, r) => {
+                if let (Some(a), Some(b)) = (slot_of(l), slot_of(r)) {
+                    Some(Op::SlotLessIntSlot { a, b })
+                } else if let (Some(a), Some(imm)) = (slot_of(l), imm_of(r)) {
+                    Some(Op::SlotLessIntImm { a, imm })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     fn compile_path_load(&mut self, parts: &[String], span: Span) {
@@ -571,10 +660,10 @@ impl Compiler {
             }
             Stmt::Assign { target, value, .. } => match target {
                 Expr::Ident { name, span } => {
-                    // Fast path: `x = x + y` / `x = y + x` with both operands
-                    // resolving to local slots -> single in-place int add.
-                    if let Some((dst, src)) = self.try_slot_add(name, value) {
-                        self.emit(Op::SlotAddInt { dst, src });
+                    // Fast path: `x = x + y` / `x = x + 1` / `x = x + N` with
+                    // operands resolving to local slots -> single fused op.
+                    if let Some(op) = self.try_slot_binop(name, value) {
+                        self.emit(op);
                         self.emit_const(Value::Unit);
                         StmtValue::Discard
                     } else {
@@ -1152,7 +1241,13 @@ impl Compiler {
                 self.emit(Op::WhileSetup { exit: 0, header: 0 });
                 self.emit_const(Value::Unit);
                 let header = self.chunk.code.len();
-                self.compile_expr(cond);
+                // Fast path: `a < b` / `a < N` on local slots -> single
+                // fused comparison op instead of LoadSlot/LoadSlot/BinOp.
+                if let Some(op) = self.try_slot_compare(cond) {
+                    self.emit(op);
+                } else {
+                    self.compile_expr(cond);
+                }
                 let j = self.emit_while_cond(*span);
                 let body_needs_env = self.scope_declares_captured(body);
                 if body_needs_env {

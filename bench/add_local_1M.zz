@@ -1,0 +1,18 @@
+import std.time
+
+compute := |n: int| -> int {
+    sum := 0
+    i := 0
+    while i < n {
+        sum = sum + i
+        i = i + 1
+    }
+    sum
+}
+
+t0 := time.now_ms()
+result := compute(1000000)
+t1 := time.now_ms()
+elapsed := t1 - t0
+println("add_local_1M result: {result}")
+println("elapsed: {elapsed}ms")
