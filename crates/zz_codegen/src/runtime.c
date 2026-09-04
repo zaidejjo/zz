@@ -3,17 +3,125 @@
 #include <time.h>
 #include "runtime.h"
 
-// ---- string helpers ----------------------------------------------------
-static zz_str *str_alloc(size_t len) {
+// =====================================================================
+//  String interning
+//
+//  `zz_str_static(literal)` returns a *singleton* for each distinct literal,
+//  built lazily on first request. The table is fixed-size and indexed by a
+//  32-bit FNV-1a hash of the literal bytes. Collisions fall through to a
+//  linear probe. The interned strings are never freed (they live for the
+//  process lifetime), so `zz_release` must check the `interned` flag.
+//
+//  Tradeoffs:
+//   - No locks: assumes single-threaded execution (matches zz's native
+//     runtime model — there is one `zz_main` running on one thread).
+//   - O(1) expected lookup, O(N) in the worst case if the table is full.
+//   - Literals share a single pointer, so `==` between two interned
+//     literals of the same bytes is a single pointer compare.
+#define ZZ_INTERN_BUCKETS 1024
+typedef struct {
+    const char *src;     // pointer to the C string literal (stable)
+    size_t len;
+    zz_str *singleton;   // heap-allocated once, freed at process exit (none)
+} zz_intern_entry;
+
+static zz_intern_entry zz_intern_table[ZZ_INTERN_BUCKETS];
+
+static uint32_t fnv1a(const char *s, size_t len) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (unsigned char)s[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static zz_str *intern_lookup_or_create(const char *src, size_t len) {
+    uint32_t h = fnv1a(src, len);
+    uint32_t idx = h % ZZ_INTERN_BUCKETS;
+    for (uint32_t probe = 0; probe < ZZ_INTERN_BUCKETS; probe++) {
+        uint32_t i = (idx + probe) % ZZ_INTERN_BUCKETS;
+        zz_intern_entry *e = &zz_intern_table[i];
+        if (e->src == NULL) {
+            // Empty slot: build singleton, store, return.
+            zz_str *s = (zz_str *)malloc(sizeof(zz_str) + len + 1);
+            if (!s) {
+                fprintf(stderr, "zz: out of memory\n");
+                exit(1);
+            }
+            s->refs = 1;
+            s->interned = 1;
+            s->cap = len;
+            s->len = len;
+            memcpy(s->data, src, len);
+            s->data[len] = '\0';
+            e->src = src;
+            e->len = len;
+            e->singleton = s;
+            return s;
+        }
+        if (e->len == len && e->src == src) {
+            // Same literal pointer: guaranteed match.
+            return e->singleton;
+        }
+        if (e->len == len && memcmp(e->src, src, len) == 0) {
+            // Same bytes, different .rodata address (e.g., the same literal
+            // duplicated by the compiler or by string concatenation in C).
+            return e->singleton;
+        }
+    }
+    // Table full: fall back to a fresh allocation. Should never happen in
+    // practice for any reasonable program.
     zz_str *s = (zz_str *)malloc(sizeof(zz_str) + len + 1);
     if (!s) {
         fprintf(stderr, "zz: out of memory\n");
         exit(1);
     }
     s->refs = 1;
+    s->interned = 1;
+    s->cap = len;
     s->len = len;
+    memcpy(s->data, src, len);
     s->data[len] = '\0';
     return s;
+}
+
+// ---- string helpers ----------------------------------------------------
+// Allocate a heap string with at least `need` bytes of payload capacity.
+// `need` is the exact required length; capacity may grow beyond it (1.5x
+// amortization) for future appends.
+static zz_str *str_alloc(size_t need) {
+    size_t cap = need;
+    // Amortization: start with enough room for ~1.5 future growths so a
+    // tight loop of small appends avoids repeated reallocs. 32 is a
+    // reasonable lower bound for the first allocation.
+    if (cap < 32) cap = 32;
+    zz_str *s = (zz_str *)malloc(sizeof(zz_str) + cap + 1);
+    if (!s) {
+        fprintf(stderr, "zz: out of memory\n");
+        exit(1);
+    }
+    s->refs = 1;
+    s->interned = 0;
+    s->cap = cap;
+    s->len = need;
+    s->data[need] = '\0';
+    return s;
+}
+
+// Grow an existing heap string's buffer to hold at least `new_len` bytes.
+// Caller must have already verified new_len > s->cap and refs==1.
+static zz_str *str_grow(zz_str *s, size_t new_len) {
+    // 1.5x growth factor: amortized O(1) for repeated appends.
+    size_t nc = s->cap + s->cap / 2;
+    if (nc < new_len) nc = new_len;
+    zz_str *ns = (zz_str *)realloc(s, sizeof(zz_str) + nc + 1);
+    if (!ns) {
+        fprintf(stderr, "zz: out of memory\n");
+        exit(1);
+    }
+    ns->cap = nc;
+    return ns;
 }
 
 zz_value zz_str_new(const char *src, size_t len) {
@@ -33,7 +141,17 @@ zz_value zz_str_owned(char *src) {
 }
 
 zz_value zz_str_static(const char *src) {
-    return zz_str_new(src, strlen(src));
+    size_t len = strlen(src);
+    zz_str *s = intern_lookup_or_create(src, len);
+    // Note: do NOT bump refs here — the singleton is permanent and owned
+    // by the intern table. Generated code treats the returned zz_value as
+    // a borrowed reference; if it ever escapes into zz_assign / zz_release,
+    // we must not double-free. Interned objects have refs==1 forever and
+    // zz_release checks interned before freeing.
+    zz_value v;
+    v.tag = ZZ_STR;
+    v.s = s;
+    return v;
 }
 
 // ---- refcounting -------------------------------------------------------
@@ -50,7 +168,7 @@ void zz_retain(zz_value *v) {
 void zz_release(zz_value *v) {
     switch (v->tag) {
     case ZZ_STR:
-        if (v->s && --v->s->refs == 0) {
+        if (v->s && !v->s->interned && --v->s->refs == 0) {
             free(v->s);
         }
         break;
@@ -520,9 +638,25 @@ zz_value zz_call_native0(zz_value (*f)(zz_value, int *)) {
 
 zz_value zz_binop_cat(zz_value a, zz_value b) {
     if (a.tag == ZZ_STR && b.tag == ZZ_STR) {
-        zz_str *out = str_alloc(a.s->len + b.s->len);
-        memcpy(out->data, a.s->data, a.s->len);
-        memcpy(out->data + a.s->len, b.s->data, b.s->len);
+        size_t la = a.s->len, lb = b.s->len;
+        size_t need = la + lb;
+        zz_str *out;
+        // In-place fast path: a is uniquely owned (refs==1) and is NOT
+        // interned (we must never mutate an interned singleton) and has
+        // capacity for the result.
+        if (a.s->refs == 1 && !a.s->interned && a.s->cap >= need) {
+            out = a.s;
+            memcpy(out->data + la, b.s->data, lb);
+            out->len = need;
+            out->data[need] = '\0';
+            zz_value v;
+            v.tag = ZZ_STR;
+            v.s = out;
+            return v;
+        }
+        out = str_alloc(need);
+        memcpy(out->data, a.s->data, la);
+        memcpy(out->data + la, b.s->data, lb);
         zz_value v;
         v.tag = ZZ_STR;
         v.s = out;
@@ -538,6 +672,58 @@ zz_value zz_binop_cat_str(zz_value a, zz_value b) {
     zz_value r = zz_binop_cat(a, sb);
     zz_release(&sb);
     return r;
+}
+
+// In-place append used by loop lowerings (`s = s + literal`). Mutates *a
+// in place. If *a is not a string or its buffer can't be reused, fall back
+// to zz_binop_cat + zz_assign semantics via the caller.
+void zz_str_append_str(zz_value *a, zz_value b) {
+    if (a->tag != ZZ_STR || b.tag != ZZ_STR) return;
+    size_t la = a->s->len, lb = b.s->len;
+    size_t need = la + lb;
+    if (a->s->refs == 1 && !a->s->interned) {
+        if (a->s->cap < need) {
+            a->s = str_grow(a->s, need);
+        }
+        memcpy(a->s->data + la, b.s->data, lb);
+        a->s->len = need;
+        a->s->data[need] = '\0';
+        return;
+    }
+    // Buffer not reusable: replace with a fresh allocation. Release the
+    // old ref first so we don't leak (and don't double-free if the old
+    // buffer happened to be interned — refs==1 interned strings stay put).
+    zz_str *fresh = str_alloc(need);
+    memcpy(fresh->data, a->s->data, la);
+    memcpy(fresh->data + la, b.s->data, lb);
+    if (!a->s->interned && --a->s->refs == 0) {
+        free(a->s);
+    }
+    a->s = fresh;
+}
+
+// Variant: append a C literal directly without allocating a temporary
+// zz_str. Used by the most common hot pattern `s = s + "x"`.
+void zz_str_append_lit(zz_value *a, const char *lit, size_t lit_len) {
+    if (a->tag != ZZ_STR) return;
+    size_t la = a->s->len;
+    size_t need = la + lit_len;
+    if (a->s->refs == 1 && !a->s->interned) {
+        if (a->s->cap < need) {
+            a->s = str_grow(a->s, need);
+        }
+        memcpy(a->s->data + la, lit, lit_len);
+        a->s->len = need;
+        a->s->data[need] = '\0';
+        return;
+    }
+    zz_str *fresh = str_alloc(need);
+    memcpy(fresh->data, a->s->data, la);
+    memcpy(fresh->data + la, lit, lit_len);
+    if (!a->s->interned && --a->s->refs == 0) {
+        free(a->s);
+    }
+    a->s = fresh;
 }
 
 zz_value zz_range_build(zz_value start, zz_value end) {

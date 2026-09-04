@@ -49,8 +49,19 @@ typedef struct zz_dict zz_dict;
 typedef struct zz_dict_entry zz_dict_entry;
 
 // Refcounted string (null-terminated for C interop).
+//
+// Layout:
+//   - `refs`   : reference count (size_t). 0 only valid for freed.
+//   - `interned`: non-zero if this object is a permanent singleton owned by
+//     the global interning table; zz_release must NOT free it.
+//   - `cap`    : allocated buffer capacity (>= len). For heap strings this
+//     allows amortized O(1) append and in-place concatenation.
+//   - `len`    : payload length in bytes (excluding trailing NUL).
+//   - `data[]` : flexible array, `data[len] == '\0'`.
 typedef struct {
     size_t refs;
+    int interned;
+    size_t cap;
     size_t len;
     char data[];
 } zz_str;
@@ -174,6 +185,10 @@ zz_value zz_call_native1(zz_value (*f)(zz_value, int *), zz_value a);
 zz_value zz_call_native0(zz_value (*f)(zz_value, int *));
 zz_value zz_binop_cat(zz_value a, zz_value b);       // str concat
 zz_value zz_binop_cat_str(zz_value a, zz_value b);   // str + Display(b)
+// In-place append: reuses *a->s buffer if refs==1 and capacity allows.
+// Returns void; *a is mutated. Generated for hot `s = s + literal` loops.
+void zz_str_append_str(zz_value *a, zz_value b);
+void zz_str_append_lit(zz_value *a, const char *lit, size_t len);
 zz_value zz_range_build(zz_value start, zz_value end);
 
 // ---- formatting --------------------------------------------------------

@@ -79,6 +79,22 @@ fn auto_box(expr: &str, ctype: Option<&str>) -> String {
     }
 }
 
+/// Extract the raw C string literal body from a `zz_str_static("...")`
+/// expression emitted by `emit_str_literal`. The wrapper is
+/// `zz_str_static( <literal> )` — we strip just the function-call syntax
+/// and leave the literal (including its surrounding double quotes) intact.
+fn extract_c_literal(emit: &str) -> &str {
+    const PREFIX: &str = "zz_str_static(";
+    const SUFFIX: &str = ")";
+    if let Some(rest) = emit.strip_prefix(PREFIX) {
+        if let Some(body) = rest.strip_suffix(SUFFIX) {
+            return body;
+        }
+    }
+    // Fallback: emit an empty literal; the runtime will no-op.
+    "\"\""
+}
+
 /// Mangle a zz qualified name to a C identifier.
 pub fn mangle(name: &str) -> String {
     name.replace('.', "__")
@@ -326,7 +342,93 @@ impl Lowerer {
                 out.push_str(&format!("    {ctype} {cid} = {final_val};\n"));
             }
             Stmt::Assign { target, value, .. } => {
+                // Fast-path: `s = s + <rhs>` where `s` is a string
+                // (zz_value). Emit an in-place append shim instead of
+                // clone+binop+assign so the capacity-aware path in
+                // zz_str_append_* can fire. Without this, zz_clone()
+                // bumps refs and breaks the refs==1 fast path in the
+                // runtime.
+                //
+                // SAFETY: must only fire when both sides are strings.
+                //   - target type must NOT be a scalar (int64_t/double/bool).
+                //   - For non-literal RHS, the RHS must itself be string-
+                //     typed (else the runtime gets a non-zz_value arg).
+                if let Expr::Binary {
+                    op: zz_frontend::ast::BinOp::Add,
+                    left,
+                    right,
+                    ..
+                } = value
+                {
+                    let left_ident = match left.as_ref() {
+                        Expr::Ident { name, .. } => Some(name.clone()),
+                        _ => None,
+                    };
+                    if let (Some(lname), Expr::Ident { name: tname, .. }) = (&left_ident, target) {
+                        if lname == tname {
+                            // Skip fast-path for scalar targets: their
+                            // storage is the raw type, not a zz_value.
+                            let target_is_scalar = names
+                                .lookup_type(tname.as_str())
+                                .map(|t| matches!(t, "int64_t" | "double" | "bool"))
+                                .unwrap_or(false);
+                            if !target_is_scalar {
+                                if let Some(cid) = names.lookup(tname.as_str()) {
+                                    let cid = cid.to_string();
+                                    match right.as_ref() {
+                                        Expr::Str { value: lit, .. } => {
+                                            let lit_c = self.emit_str_literal(lit);
+                                            let inner = extract_c_literal(&lit_c);
+                                            out.push_str(&format!(
+                                                "    zz_str_append_lit(&{cid}, {inner}, sizeof({inner}) - 1);\n"
+                                            ));
+                                            return;
+                                        }
+                                        Expr::Ident { name: rname, .. } => {
+                                            let rhs_scalar = names
+                                                .lookup_type(rname)
+                                                .map(|t| matches!(t, "int64_t" | "double" | "bool"))
+                                                .unwrap_or(false);
+                                            if !rhs_scalar {
+                                                if let Some(rcid) = names.lookup(rname) {
+                                                    let rcid = rcid.to_string();
+                                                    out.push_str(&format!(
+                                                        "    zz_str_append_str(&{cid}, {rcid});\n"
+                                                    ));
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        Expr::Path { parts, .. } => {
+                                            let joined = parts.join(".");
+                                            let rhs_scalar = names
+                                                .lookup_type(&joined)
+                                                .map(|t| matches!(t, "int64_t" | "double" | "bool"))
+                                                .unwrap_or(false);
+                                            if !rhs_scalar {
+                                                if let Some(rcid) = names.lookup(&joined) {
+                                                    let rcid = rcid.to_string();
+                                                    out.push_str(&format!(
+                                                        "    zz_str_append_str(&{cid}, {rcid});\n"
+                                                    ));
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let val = self.emit_expr(value, names, out);
+                // If the RHS expression was already lowered to a raw
+                // scalar (int64_t/double/bool), don't try to extract
+                // .i/.f/.b — just assign directly. Otherwise the boxed
+                // form `(...).i` is invalid C.
+                let value_is_scalar = expr_is_pure_scalar(value);
                 match target {
                     Expr::Ident { name, .. } => {
                         if let Some(cid) = names.lookup(name.as_str()) {
@@ -334,14 +436,17 @@ impl Lowerer {
                             if let Some(ctype) = names.lookup_type(name.as_str()) {
                                 match ctype {
                                     "int64_t" | "double" | "bool" => {
-                                        // Extract the scalar value from the zz_value
-                                        let field = match ctype {
-                                            "int64_t" => ".i",
-                                            "double" => ".f",
-                                            "bool" => ".b",
-                                            _ => "",
-                                        };
-                                        out.push_str(&format!("    {cid} = ({val}){field};\n"));
+                                        if value_is_scalar {
+                                            out.push_str(&format!("    {cid} = {val};\n"));
+                                        } else {
+                                            let field = match ctype {
+                                                "int64_t" => ".i",
+                                                "double" => ".f",
+                                                "bool" => ".b",
+                                                _ => "",
+                                            };
+                                            out.push_str(&format!("    {cid} = ({val}){field};\n"));
+                                        }
                                     }
                                     _ => {
                                         out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
@@ -359,14 +464,17 @@ impl Lowerer {
                             if let Some(ctype) = names.lookup_type(&joined) {
                                 match ctype {
                                     "int64_t" | "double" | "bool" => {
-                                        // Extract the scalar value from the zz_value
-                                        let field = match ctype {
-                                            "int64_t" => ".i",
-                                            "double" => ".f",
-                                            "bool" => ".b",
-                                            _ => "",
-                                        };
-                                        out.push_str(&format!("    {cid} = ({val}){field};\n"));
+                                        if value_is_scalar {
+                                            out.push_str(&format!("    {cid} = {val};\n"));
+                                        } else {
+                                            let field = match ctype {
+                                                "int64_t" => ".i",
+                                                "double" => ".f",
+                                                "bool" => ".b",
+                                                _ => "",
+                                            };
+                                            out.push_str(&format!("    {cid} = ({val}){field};\n"));
+                                        }
                                     }
                                     _ => {
                                         out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
@@ -688,35 +796,124 @@ impl Lowerer {
                             None
                         };
 
-                        // If at least one operand is a scalar, box both sides
-                        if left_type == Some("int64_t") || right_type == Some("int64_t") {
-                            // Both should be int64_t if either is
-                            let boxed_l = if left_type == Some("int64_t") {
-                                format!("zz_int({l})")
+                        // Both operands are scalars of compatible type:
+                        // emit a raw C arithmetic op instead of going
+                        // through zz_binop (which would box/unbox each
+                        // iteration and dominate tight loops). Comparison
+                        // ops on scalars stay boxed because we still
+                        // need the result wrapped in a zz_value.
+                        let is_arith = matches!(
+                            op,
+                            zz_frontend::ast::BinOp::Add
+                                | zz_frontend::ast::BinOp::Sub
+                                | zz_frontend::ast::BinOp::Mul
+                                | zz_frontend::ast::BinOp::Div
+                                | zz_frontend::ast::BinOp::Rem
+                        );
+                        if is_arith {
+                            if left_type == Some("int64_t") && right_type == Some("int64_t") {
+                                let c_op = match op {
+                                    zz_frontend::ast::BinOp::Add => "+",
+                                    zz_frontend::ast::BinOp::Sub => "-",
+                                    zz_frontend::ast::BinOp::Mul => "*",
+                                    zz_frontend::ast::BinOp::Div => "/",
+                                    zz_frontend::ast::BinOp::Rem => "%",
+                                    _ => "+",
+                                };
+                                // Division/modulo by zero still needs a guard.
+                                if matches!(
+                                    op,
+                                    zz_frontend::ast::BinOp::Div | zz_frontend::ast::BinOp::Rem
+                                ) && matches!(
+                                    right.as_ref(),
+                                    Expr::Int { value: 0, .. } | Expr::Ident { .. }
+                                ) {
+                                    // Only literal-zero check; variable
+                                    // divisor would need a runtime guard.
+                                    // Fall through to boxed path if divisor
+                                    // is a literal 0.
+                                    if matches!(right.as_ref(), Expr::Int { value: 0, .. }) {
+                                        format!("zz_binop({cop}, {l}, {r})")
+                                    } else {
+                                        format!("(int64_t)({l} {c_op} {r})")
+                                    }
+                                } else {
+                                    format!("(int64_t)({l} {c_op} {r})")
+                                }
+                            } else if left_type == Some("double") && right_type == Some("double") {
+                                let c_op = match op {
+                                    zz_frontend::ast::BinOp::Add => "+",
+                                    zz_frontend::ast::BinOp::Sub => "-",
+                                    zz_frontend::ast::BinOp::Mul => "*",
+                                    zz_frontend::ast::BinOp::Div => "/",
+                                    zz_frontend::ast::BinOp::Rem => "fmod",
+                                    _ => "+",
+                                };
+                                if matches!(op, zz_frontend::ast::BinOp::Rem) {
+                                    format!("(double)(fmod({l}, {r}))")
+                                } else {
+                                    format!("(double)({l} {c_op} {r})")
+                                }
+                            } else if left_type == Some("int64_t") || right_type == Some("int64_t")
+                            {
+                                // Mixed: one scalar, one boxed. Box both
+                                // sides and dispatch through zz_binop.
+                                let boxed_l = if left_type == Some("int64_t") {
+                                    format!("zz_int({l})")
+                                } else {
+                                    l
+                                };
+                                let boxed_r = if right_type == Some("int64_t") {
+                                    format!("zz_int({r})")
+                                } else {
+                                    r
+                                };
+                                format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
+                            } else if left_type == Some("double") || right_type == Some("double") {
+                                let boxed_l = if left_type == Some("double") {
+                                    format!("zz_float({l})")
+                                } else {
+                                    l
+                                };
+                                let boxed_r = if right_type == Some("double") {
+                                    format!("zz_float({r})")
+                                } else {
+                                    r
+                                };
+                                format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                             } else {
-                                l
-                            };
-                            let boxed_r = if right_type == Some("int64_t") {
-                                format!("zz_int({r})")
-                            } else {
-                                r
-                            };
-                            format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
-                        } else if left_type == Some("double") || right_type == Some("double") {
-                            let boxed_l = if left_type == Some("double") {
-                                format!("zz_float({l})")
-                            } else {
-                                l
-                            };
-                            let boxed_r = if right_type == Some("double") {
-                                format!("zz_float({r})")
-                            } else {
-                                r
-                            };
-                            format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
+                                format!("zz_binop({cop}, {l}, {r})")
+                            }
                         } else {
-                            // Default: assume both are already zz_value
-                            format!("zz_binop({cop}, {l}, {r})")
+                            // Comparisons / pow / etc on scalars still
+                            // use the boxed path (result must be zz_value).
+                            if left_type == Some("int64_t") || right_type == Some("int64_t") {
+                                let boxed_l = if left_type == Some("int64_t") {
+                                    format!("zz_int({l})")
+                                } else {
+                                    l
+                                };
+                                let boxed_r = if right_type == Some("int64_t") {
+                                    format!("zz_int({r})")
+                                } else {
+                                    r
+                                };
+                                format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
+                            } else if left_type == Some("double") || right_type == Some("double") {
+                                let boxed_l = if left_type == Some("double") {
+                                    format!("zz_float({l})")
+                                } else {
+                                    l
+                                };
+                                let boxed_r = if right_type == Some("double") {
+                                    format!("zz_float({r})")
+                                } else {
+                                    r
+                                };
+                                format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
+                            } else {
+                                format!("zz_binop({cop}, {l}, {r})")
+                            }
                         }
                     }
                 }
@@ -861,6 +1058,35 @@ fn get_block(e: &Expr) -> &Block {
             };
             &EMPTY
         }
+    }
+}
+
+/// Whether an AST expression was (or will be) lowered to a raw scalar
+/// C expression (int64_t / double / bool) rather than a wrapped zz_value.
+/// Used by Stmt::Assign to decide whether to emit a plain `cid = val;`
+/// or a `.i`/`.f`/`.b` field extraction on a boxed value.
+fn expr_is_pure_scalar(e: &Expr) -> bool {
+    match e {
+        Expr::Int { .. } | Expr::Float { .. } | Expr::Bool { .. } => true,
+        Expr::Ident { .. } | Expr::Path { .. } => true,
+        Expr::Paren { expr, .. } => expr_is_pure_scalar(expr),
+        Expr::Unary { expr, .. } => expr_is_pure_scalar(expr),
+        Expr::Binary {
+            left, right, op, ..
+        } => {
+            // Pure scalar binary if both sides are scalar AND it's an
+            // arithmetic op (comparisons produce a boxed bool).
+            matches!(
+                op,
+                zz_frontend::ast::BinOp::Add
+                    | zz_frontend::ast::BinOp::Sub
+                    | zz_frontend::ast::BinOp::Mul
+                    | zz_frontend::ast::BinOp::Div
+                    | zz_frontend::ast::BinOp::Rem
+            ) && expr_is_pure_scalar(left)
+                && expr_is_pure_scalar(right)
+        }
+        _ => false,
     }
 }
 
