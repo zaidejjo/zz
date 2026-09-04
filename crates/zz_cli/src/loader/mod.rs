@@ -90,9 +90,13 @@ struct Loader {
 
 /// Load an entry file and all of its imports.
 pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
-    let entry = main_path
-        .canonicalize()
-        .map_err(|e| format!("cannot read `{}`: {e}", main_path.display()))?;
+    let entry = main_path.canonicalize().map_err(|e| {
+        format!(
+            "cannot read entry file `{}`: {e}\n\
+                 hint: check that the file exists and the path is correct",
+            main_path.display()
+        )
+    })?;
     let mut loader = Loader {
         sources: HashMap::new(),
         programs: HashMap::new(),
@@ -128,9 +132,13 @@ impl Loader {
     /// Parse a file and recursively load its imports (DFS post-order, so
     /// dependencies land in `order` before their dependents).
     fn load_file(&mut self, path: &Path, alias: Option<&str>) -> Result<(), String> {
-        let canon = path
-            .canonicalize()
-            .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+        let canon = path.canonicalize().map_err(|e| {
+            format!(
+                "cannot read imported file `{}`: {e}\n\
+                     hint: check that the file exists relative to the importing module",
+                path.display()
+            )
+        })?;
 
         if self.done.contains(&canon) {
             return Ok(());
@@ -150,8 +158,13 @@ impl Loader {
             return Ok(());
         }
 
-        let source = std::fs::read_to_string(&canon)
-            .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+        let source = std::fs::read_to_string(&canon).map_err(|e| {
+            format!(
+                "cannot read imported file `{}`: {e}\n\
+                      hint: check that the file exists and you have permission to read it",
+                path.display()
+            )
+        })?;
         let parsed = parse(&source);
         if !parsed.errors.is_empty() {
             self.errors.push(LoadError {
@@ -182,7 +195,15 @@ impl Loader {
                         name: path.display().to_string(),
                         source: source.clone(),
                         diags: vec![error_at(
-                            format!("unknown standard library module `std.{module}`"),
+                            format!(
+                                "unknown standard library module `std.{module}`\n\
+                                     hint: available modules are: {}",
+                                STDLIB_MODULES
+                                    .iter()
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
                             Span::new(0, 0),
                         )],
                     });
@@ -193,10 +214,14 @@ impl Loader {
                     register_module_namespace(module, &ns, &mut self.funcs, &mut self.natives)
                 {
                     self.errors.push(LoadError {
-                        name: path.display().to_string(),
-                        source: source.clone(),
-                        diags: vec![error_at(msg, Span::new(0, 0))],
-                    });
+                         name: path.display().to_string(),
+                         source: source.clone(),
+                         diags: vec![error_at(
+                             format!("{msg}\n\
+                                      hint: this may occur if the stdlib module exports a conflicting name"),
+                             Span::new(0, 0),
+                         )],
+                     });
                     continue;
                 }
                 self.register_ns(&ns, &PathBuf::from(format!("std:{module}")), path, &source);
@@ -210,18 +235,19 @@ impl Loader {
             if let Ok(rel_canon) = rel.canonicalize() {
                 if self.visiting.contains(&rel_canon) {
                     self.errors.push(LoadError {
-                        name: path.display().to_string(),
-                        source: source.clone(),
-                        diags: vec![error_at(
-                            format!(
-                                "circular import: `{}` imports `{}`, which (transitively) imports `{}`",
-                                path.display(),
-                                rel.display(),
-                                path.display()
-                            ),
-                            Span::new(0, 0),
-                        )],
-                    });
+                         name: path.display().to_string(),
+                         source: source.clone(),
+                         diags: vec![error_at(
+                             format!(
+                                 "circular import: `{}` imports `{}`, which (transitively) imports `{}`\n\
+                                  hint: circular imports are not allowed; consider restructuring your code to break the cycle",
+                                 path.display(),
+                                 rel.display(),
+                                 path.display()
+                             ),
+                             Span::new(0, 0),
+                         )],
+                     });
                     continue;
                 }
                 // A module already loaded under a different namespace cannot
@@ -230,16 +256,18 @@ impl Loader {
                     let want = module_ns(imp_alias.as_deref(), &rel);
                     if existing != &want {
                         self.errors.push(LoadError {
-                            name: path.display().to_string(),
-                            source: source.clone(),
-                            diags: vec![error_at(
-                                format!(
-                                    "`{}` is imported under two namespaces: `{existing}` and `{want}`",
-                                    rel.display()
-                                ),
-                                Span::new(0, 0),
-                            )],
-                        });
+                             name: path.display().to_string(),
+                             source: source.clone(),
+                             diags: vec![error_at(
+                                 format!(
+                                     "`{}` is imported under two namespaces: `{existing}` and `{want}`\n\
+                                      hint: each file can only be imported under one namespace; \
+                                      consider using an alias to avoid the conflict",
+                                     rel.display()
+                                 ),
+                                 Span::new(0, 0),
+                             )],
+                         });
                         continue;
                     }
                 }
@@ -273,7 +301,8 @@ impl Loader {
                     source: source.to_string(),
                     diags: vec![error_at(
                         format!(
-                            "module `{}` is imported under two namespaces: `{existing}` and `{ns}`",
+                            "module `{}` is imported under two namespaces: `{existing}` and `{ns}`\n\
+                             hint: this can happen when the same file is imported via different paths",
                             display.display()
                         ),
                         Span::new(0, 0),
@@ -290,7 +319,9 @@ impl Loader {
                     source: source.to_string(),
                     diags: vec![error_at(
                         format!(
-                            "namespace `{ns}` is claimed by both `{}` and `{}`",
+                            "namespace `{ns}` is claimed by both `{}` and `{}`\n\
+                             hint: two different files are trying to use the same namespace; \
+                             consider using an alias for one of the imports",
                             existing.display(),
                             display.display()
                         ),
@@ -352,7 +383,9 @@ impl Loader {
                         name: name.clone(),
                         source: source.clone(),
                         diags: vec![error_at(
-                            "`main()` is auto-called; remove the explicit `main()` call",
+                            "`main()` is auto-called; remove the explicit `main()` call\n\
+                             hint: ZZ automatically calls main() if it exists; \
+                             having both causes double execution",
                             Span::new(0, 0),
                         )],
                     });
@@ -371,8 +404,8 @@ impl Loader {
                 .any(|e| e.severity == zz_frontend::diag::Severity::Error);
             if has_errors {
                 self.errors.push(LoadError {
-                    name,
-                    source,
+                    name: name.clone(),
+                    source: source.clone(),
                     diags: checked.errors,
                 });
             } else {
@@ -380,8 +413,8 @@ impl Loader {
                 // so they can be displayed to the user.
                 if !checked.errors.is_empty() {
                     self.errors.push(LoadError {
-                        name,
-                        source,
+                        name: name.clone(),
+                        source: source.clone(),
                         diags: checked.errors,
                     });
                 }

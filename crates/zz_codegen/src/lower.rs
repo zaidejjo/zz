@@ -18,8 +18,8 @@ pub struct LoweredC {
 /// Scope-aware C identifier allocator (handles shadowing).
 #[derive(Default)]
 pub struct NameCtx {
-    /// zz var name → stack of active C identifiers (innermost last).
-    stack: HashMap<String, Vec<String>>,
+    /// zz var name → stack of active (C identifier, C type) tuples (innermost last).
+    stack: HashMap<String, Vec<(String, String)>>,
     counter: usize,
 }
 
@@ -31,27 +31,51 @@ impl NameCtx {
         }
     }
 
+    /// Enter a new scope for `name`, returning the fresh C identifier.
     fn enter(&mut self, name: &str) -> String {
         let cid = format!("v{}", self.counter);
         self.counter += 1;
         self.stack
             .entry(name.to_string())
             .or_default()
-            .push(cid.clone());
+            .push((cid.clone(), "zz_value".to_string()));
         cid
     }
 
+    /// Look up the variable's C identifier.
     fn lookup(&self, name: &str) -> Option<&str> {
         self.stack
             .get(name)
-            .and_then(|s| s.last())
-            .map(String::as_str)
+            .and_then(|vec| vec.last())
+            .map(|(ident, _)| ident.as_str())
     }
 
+    /// Look up the variable's C type.
+    fn lookup_type(&self, name: &str) -> Option<&str> {
+        self.stack
+            .get(name)
+            .and_then(|vec| vec.last())
+            .map(|(_, typ)| typ.as_str())
+    }
+
+    /// Leave the current scope for `name`.
     fn leave(&mut self, name: &str) {
-        if let Some(s) = self.stack.get_mut(name) {
-            s.pop();
+        if let Some(vec) = self.stack.get_mut(name) {
+            vec.pop();
         }
+    }
+}
+
+/// Auto-box an unboxed scalar expression to a `zz_value` C expression.
+/// If the expression is already a `zz_value` (i.e., the variable's C type is
+/// `zz_value` or unknown), it is returned as-is. Otherwise, the appropriate
+/// boxing helper (`zz_int`, `zz_float`, `zz_bool`) is inserted.
+fn auto_box(expr: &str, ctype: Option<&str>) -> String {
+    match ctype {
+        Some("int64_t") => format!("zz_int({expr})"),
+        Some("double") => format!("zz_float({expr})"),
+        Some("bool") => format!("zz_bool({expr})"),
+        _ => expr.to_string(),
     }
 }
 
@@ -99,6 +123,7 @@ pub struct Lowerer {
     reachable_funcs: std::collections::HashSet<String>,
     reachable_natives: std::collections::HashSet<String>,
     entry_main: String,
+    tp: zz_hir::TypedProgram,
 }
 
 impl Lowerer {
@@ -106,22 +131,24 @@ impl Lowerer {
         reachable_funcs: std::collections::HashSet<String>,
         reachable_natives: std::collections::HashSet<String>,
         entry_main: String,
+        tp: zz_hir::TypedProgram,
     ) -> Self {
         Lowerer {
             reachable_funcs,
             reachable_natives,
             entry_main,
+            tp,
         }
     }
 
-    pub fn lower(&self, tp: &zz_hir::TypedProgram) -> LoweredC {
+    pub fn lower(&self) -> LoweredC {
         let mut funcs = String::new();
         let mut body = String::new();
         // One NameCtx shared across ALL top-level statements: top-level vars
         // remain visible across statements (like zz_main's single frame).
         let mut names = NameCtx::new();
 
-        for stmt in tp.stmts() {
+        for stmt in self.tp.stmts() {
             match stmt {
                 Stmt::Func {
                     name,
@@ -226,7 +253,7 @@ impl Lowerer {
                 }
                 // Tail call/compound was captured into __tail by emit_block.
                 if let Some(tmp) = names.stack.get("__tail").and_then(|s| s.last()).cloned() {
-                    out.push_str(&format!("    return {tmp};\n"));
+                    out.push_str(&format!("    return {};\n", tmp.0));
                     return Some(());
                 }
                 // Pure leaf tail: emit directly (rarely reached).
@@ -277,20 +304,77 @@ impl Lowerer {
             Stmt::Decl { name, value, .. } => {
                 let cid = names.enter(&name.name);
                 let val = self.emit_expr(value, names, out);
-                out.push_str(&format!("    zz_value {cid} = {val};\n"));
+                // Look up the type of the initializer expression
+                let ctype = if let Some(ty) = self.tp.types.get(&value.span()) {
+                    ty_to_ctype(ty)
+                } else {
+                    "zz_value".to_string() // fallback
+                };
+                // Update the name ctx with the correct type
+                if let Some(vec) = names.stack.get_mut(&name.name) {
+                    if let Some((_, existing_ty)) = vec.last_mut() {
+                        *existing_ty = ctype.clone();
+                    }
+                }
+                // For scalar types, extract the underlying value from the zz_value
+                let final_val = match ctype.as_str() {
+                    "int64_t" => format!("({val}).i"),
+                    "double" => format!("({val}).f"),
+                    "bool" => format!("({val}).b"),
+                    _ => val,
+                };
+                out.push_str(&format!("    {ctype} {cid} = {final_val};\n"));
             }
             Stmt::Assign { target, value, .. } => {
                 let val = self.emit_expr(value, names, out);
                 match target {
                     Expr::Ident { name, .. } => {
                         if let Some(cid) = names.lookup(name.as_str()) {
-                            out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
+                            // Check if the target variable is a scalar type
+                            if let Some(ctype) = names.lookup_type(name.as_str()) {
+                                match ctype {
+                                    "int64_t" | "double" | "bool" => {
+                                        // Extract the scalar value from the zz_value
+                                        let field = match ctype {
+                                            "int64_t" => ".i",
+                                            "double" => ".f",
+                                            "bool" => ".b",
+                                            _ => "",
+                                        };
+                                        out.push_str(&format!("    {cid} = ({val}){field};\n"));
+                                    }
+                                    _ => {
+                                        out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
+                                    }
+                                }
+                            } else {
+                                out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
+                            }
                         }
                     }
                     Expr::Path { parts, .. } => {
                         let joined = parts.join(".");
                         if let Some(cid) = names.lookup(&joined) {
-                            out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
+                            // Check if the target variable is a scalar type
+                            if let Some(ctype) = names.lookup_type(&joined) {
+                                match ctype {
+                                    "int64_t" | "double" | "bool" => {
+                                        // Extract the scalar value from the zz_value
+                                        let field = match ctype {
+                                            "int64_t" => ".i",
+                                            "double" => ".f",
+                                            "bool" => ".b",
+                                            _ => "",
+                                        };
+                                        out.push_str(&format!("    {cid} = ({val}){field};\n"));
+                                    }
+                                    _ => {
+                                        out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
+                                    }
+                                }
+                            } else {
+                                out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
+                            }
                         }
                     }
                     _ => {}
@@ -313,7 +397,7 @@ impl Lowerer {
                             .stack
                             .entry("__tail".to_string())
                             .or_default()
-                            .push(tmp);
+                            .push((tmp.clone(), "zz_value".to_string()));
                     }
                     // leaf tails skipped (no side effect)
                 } else if matches!(e, Expr::Call { .. }) {
@@ -383,22 +467,94 @@ impl Lowerer {
         };
 
         if let Some((start_expr, end_expr)) = bounds {
+            // Check if end is an unboxed scalar variable (for fast path)
+            let end_name_opt: Option<String> = match &end_expr {
+                Expr::Ident { name, .. } => Some(name.clone()),
+                Expr::Path { parts, .. } => Some(parts.join(".")),
+                _ => None,
+            };
+            let end_is_scalar = end_name_opt
+                .as_ref()
+                .and_then(|n| names.lookup_type(n))
+                .map(|t| t == "int64_t" || t == "double" || t == "bool")
+                .unwrap_or(false);
+
             let sv = self.emit_expr(&start_expr, names, out);
             let ev = self.emit_expr(&end_expr, names, out);
             let v = &vars[0].name;
             let cid = names.enter(v);
-            let s = format!(
-                "{{ zz_value _s = {sv}; zz_value _e = {ev};\n    \
-                 if (_s.tag == ZZ_INT && _e.tag == ZZ_INT) {{\n        \
-                 for (int64_t {cid}_i = _s.i; {cid}_i < _e.i; {cid}_i++) {{\n            \
-                 zz_value {cid} = zz_int({cid}_i);\n"
-            );
-            out.push_str(&s);
+            // Update the type in NameCtx to int64_t since the loop variable is unboxed
+            if let Some(vec) = names.stack.get_mut(v) {
+                if let Some((_, existing_ty)) = vec.last_mut() {
+                    *existing_ty = "int64_t".to_string();
+                }
+            }
+
+            // Fast path: if end is an unboxed scalar, use unboxed C loop variables
+            if end_is_scalar {
+                // Determine the actual unboxed value
+                // If ev is a simple C identifier (like "v0"), it's already unboxed
+                // If ev is a boxing call like "zz_int(...)", extract the inner expression
+                // Otherwise, unbox it with .i
+                let is_simple_ident = |s: &str| -> bool {
+                    !s.is_empty()
+                        && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !s.starts_with("zz_")
+                };
+
+                let ev_unboxed = if is_simple_ident(&ev) {
+                    // ev is a simple identifier (like v0), it's already unboxed
+                    ev.clone()
+                } else if ev.starts_with("zz_int(")
+                    || ev.starts_with("zz_float(")
+                    || ev.starts_with("zz_bool(")
+                {
+                    // Already a boxing call, extract the inner expression
+                    // e.g., "zz_int(v0)" -> "v0"
+                    let inner = &ev[7..ev.len() - 1];
+                    inner.to_string()
+                } else {
+                    // Some other expression, unbox it
+                    format!("({ev}).i")
+                };
+
+                // For start, similar logic
+                let sv_unboxed = if sv.starts_with("zz_int(") {
+                    // Literal like zz_int(0) -> extract the literal
+                    let inner = &sv[7..sv.len() - 1];
+                    inner.to_string()
+                } else if is_simple_ident(&sv) {
+                    // Simple identifier, already unboxed
+                    sv.clone()
+                } else {
+                    // For other expressions, assume they need unboxing
+                    format!("({sv}).i")
+                };
+
+                let s = format!(
+                    "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++) {{\n"
+                );
+                out.push_str(&s);
+            } else {
+                // Slow path: both bounds are general expressions, use boxed loop
+                let sv_boxed = sv;
+                let ev_boxed = auto_box(&ev, if end_is_scalar { Some("int64_t") } else { None });
+                let s = format!(
+                    "{{ zz_value _s = {sv_boxed}; zz_value _e = {ev_boxed};\n    \
+                     if (_s.tag == ZZ_INT && _e.tag == ZZ_INT) {{\n        \
+                     for (int64_t {cid}_i = _s.i; {cid}_i < _e.i; {cid}_i++) {{\n            \
+                     int64_t {cid} = {cid}_i;\n"
+                );
+                out.push_str(&s);
+            }
             // Loop body is never a function tail.
             for bstmt in &body.stmts {
                 self.emit_stmt(bstmt, names, out, false);
             }
-            out.push_str("        }\n    }\n}\n");
+            out.push_str("    }\n");
+            if !end_is_scalar {
+                out.push_str("    }\n}\n");
+            }
             names.leave(v);
         } else {
             out.push_str("    // for over non-range unsupported\n");
@@ -432,20 +588,50 @@ impl Lowerer {
                         }
                         FmtPart::Expr(inner, _) => {
                             let v = self.emit_expr(inner, names, out);
-                            acc = format!("zz_binop_cat_str({acc}, {v})");
+                            // Auto-box if the embedded expression is an unboxed scalar
+                            let boxed_v = if let Expr::Ident { name, .. } = inner.as_ref() {
+                                let name_str = name.clone();
+                                auto_box(&v, names.lookup_type(&name_str))
+                            } else if let Expr::Path { parts, .. } = inner.as_ref() {
+                                let joined = parts.join(".");
+                                auto_box(&v, names.lookup_type(&joined))
+                            } else {
+                                v
+                            };
+                            acc = format!("zz_binop_cat_str({acc}, {boxed_v})");
                         }
                     }
                 }
                 acc
             }
             Expr::Ident { name, .. } => match names.lookup(name) {
-                Some(cid) => format!("zz_clone({cid})"),
+                Some(cid) => {
+                    // Check if the variable is a scalar type that can be used directly
+                    if let Some(ctype) = names.lookup_type(name) {
+                        match ctype {
+                            "int64_t" | "double" | "bool" => format!("{cid}"),
+                            _ => format!("zz_clone({cid})"),
+                        }
+                    } else {
+                        // Fallback to safe behavior if type unknown
+                        format!("zz_clone({cid})")
+                    }
+                }
                 None => "zz_unit()".to_string(),
             },
             Expr::Path { parts, .. } => {
                 let joined = parts.join(".");
                 if let Some(cid) = names.lookup(&joined) {
-                    format!("zz_clone({cid})")
+                    // Check if the variable is a scalar type that can be used directly
+                    if let Some(ctype) = names.lookup_type(&joined) {
+                        match ctype {
+                            "int64_t" | "double" | "bool" => format!("{cid}"),
+                            _ => format!("zz_clone({cid})"),
+                        }
+                    } else {
+                        // Fallback to safe behavior if type unknown
+                        format!("zz_clone({cid})")
+                    }
                 } else {
                     "zz_unit()".to_string()
                 }
@@ -490,7 +676,48 @@ impl Lowerer {
                             zz_frontend::ast::BinOp::Ge => "ZZOP_GE",
                             _ => "ZZOP_ADD",
                         };
-                        format!("zz_binop({cop}, {l}, {r})")
+                        // Check if either operand is a scalar variable
+                        let left_type = if let Expr::Ident { name, .. } = left.as_ref() {
+                            names.lookup_type(name)
+                        } else {
+                            None
+                        };
+                        let right_type = if let Expr::Ident { name, .. } = right.as_ref() {
+                            names.lookup_type(name)
+                        } else {
+                            None
+                        };
+
+                        // If at least one operand is a scalar, box both sides
+                        if left_type == Some("int64_t") || right_type == Some("int64_t") {
+                            // Both should be int64_t if either is
+                            let boxed_l = if left_type == Some("int64_t") {
+                                format!("zz_int({l})")
+                            } else {
+                                l
+                            };
+                            let boxed_r = if right_type == Some("int64_t") {
+                                format!("zz_int({r})")
+                            } else {
+                                r
+                            };
+                            format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
+                        } else if left_type == Some("double") || right_type == Some("double") {
+                            let boxed_l = if left_type == Some("double") {
+                                format!("zz_float({l})")
+                            } else {
+                                l
+                            };
+                            let boxed_r = if right_type == Some("double") {
+                                format!("zz_float({r})")
+                            } else {
+                                r
+                            };
+                            format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
+                        } else {
+                            // Default: assume both are already zz_value
+                            format!("zz_binop({cop}, {l}, {r})")
+                        }
                     }
                 }
             }
@@ -543,7 +770,18 @@ impl Lowerer {
 
         let mut arg_items: Vec<String> = Vec::new();
         for a in args {
-            arg_items.push(self.emit_expr(a, names, out));
+            let emitted = self.emit_expr(a, names, out);
+            // Auto-box if this argument is a scalar variable
+            let boxed = if let Expr::Ident { name, .. } = a {
+                let name_str = name.clone();
+                auto_box(&emitted, names.lookup_type(&name_str))
+            } else if let Expr::Path { parts, .. } = a {
+                let joined = parts.join(".");
+                auto_box(&emitted, names.lookup_type(&joined))
+            } else {
+                emitted
+            };
+            arg_items.push(boxed);
         }
 
         // Only lower natives that survived DCE reachability AND have a C
@@ -623,6 +861,30 @@ fn get_block(e: &Expr) -> &Block {
             };
             &EMPTY
         }
+    }
+}
+
+/// Convert a zz_type to a C type string for variable declarations.
+fn ty_to_ctype(ty: &zz_hir::Type) -> String {
+    match ty {
+        zz_hir::Type::Int => "int64_t".to_string(),
+        zz_hir::Type::Float => "double".to_string(),
+        zz_hir::Type::Bool => "bool".to_string(),
+        zz_hir::Type::Unit => "zz_value".to_string(), // Unit is represented as zz_value
+        zz_hir::Type::Str => "zz_value".to_string(),  // Strings are heap-allocated
+        zz_hir::Type::Tuple(_) => "zz_value".to_string(), // Tuples are heap-allocated
+        zz_hir::Type::Option(_) => "zz_value".to_string(), // Options are heap-allocated
+        zz_hir::Type::Result(_, _) => "zz_value".to_string(), // Results are heap-allocated
+        zz_hir::Type::Func(_, _) => "zz_value".to_string(), // Functions are heap-allocated
+        zz_hir::Type::Array(_) => "zz_value".to_string(), // Arrays are heap-allocated
+        zz_hir::Type::Dict(_, _) => "zz_value".to_string(), // Dicts are heap-allocated
+        zz_hir::Type::Union(_) => "zz_value".to_string(), // Unions are heap-allocated
+        zz_hir::Type::Json => "zz_value".to_string(), // JSON is heap-allocated
+        zz_hir::Type::HttpServer => "zz_value".to_string(), // HTTP server is heap-allocated
+        zz_hir::Type::TcpStream => "zz_value".to_string(), // TcpStream is heap-allocated
+        zz_hir::Type::TcpListener => "zz_value".to_string(), // TcpListener is heap-allocated
+        zz_hir::Type::Response => "zz_value".to_string(), // Response is heap-allocated
+        _ => "zz_value".to_string(),                  // All other types are heap-allocated
     }
 }
 

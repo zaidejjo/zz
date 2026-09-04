@@ -37,8 +37,9 @@ pub fn build_native(
         reach.funcs.clone(),
         reach.natives.clone(),
         entry_main.to_string(),
+        tp.clone(),
     );
-    let lowered = lowerer.lower(tp);
+    let lowered = lowerer.lower();
     compile::build(&lowered.source, out_path, opts)?;
     Ok(lowered)
 }
