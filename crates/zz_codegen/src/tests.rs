@@ -190,8 +190,13 @@ func main() {
 fn generated_source_contains_expected_sections() {
     let src = "io.println(42)\n";
     let (pruned, reach) = build_reachable(src);
-    let lowerer = crate::Lowerer::new(reach.funcs.clone(), reach.natives.clone(), "main".into());
-    let lowered = lowerer.lower(&pruned);
+    let lowerer = crate::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".into(),
+        pruned.clone(),
+    );
+    let lowered = lowerer.lower();
     assert!(lowered.source.contains("zz_main"), "missing zz_main");
     assert!(
         lowered.source.contains("zz_io_println"),
@@ -214,8 +219,13 @@ io.println(used(1))
     let (pruned, reach) = build_reachable(src);
     assert!(reach.funcs.contains("used"));
     assert!(!reach.funcs.contains("unused"));
-    let lowerer = crate::Lowerer::new(reach.funcs.clone(), reach.natives.clone(), "main".into());
-    let lowered = lowerer.lower(&pruned);
+    let lowerer = crate::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".into(),
+        pruned.clone(),
+    );
+    let lowered = lowerer.lower();
     assert!(lowered.source.contains("zz_fn_used"));
     assert!(!lowered.source.contains("zz_fn_unused"));
 }

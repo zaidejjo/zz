@@ -234,8 +234,12 @@ fn collect_zz_recursive(
 }
 
 fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String> {
-    let path =
-        path.ok_or_else(|| "missing file argument\n\nusage: zz run <file.zz>".to_string())?;
+    let path = path.ok_or_else(|| {
+        "missing file argument\n\n\
+             usage: zz run <file.zz>\n\
+             hint: provide the path to a .zz file to execute"
+            .to_string()
+    })?;
 
     let loaded = loader::load_program(std::path::Path::new(path))?;
     let mut has_errors = false;
@@ -251,7 +255,9 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
         }
     }
     if has_errors {
-        return Err("program failed".to_string());
+        return Err("program failed\n\n\
+                   hint: fix the errors shown above and try again"
+            .to_string());
     }
 
     let mut interp = Interp::with_natives(loaded.natives.clone());
@@ -327,14 +333,21 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
 
 /// `zz run --native <file>`: compile to a temp location, execute, cleanup.
 fn run_native(path: Option<&String>, script_args: &[String]) -> Result<(), String> {
-    let path = path
-        .ok_or_else(|| "missing file argument\n\nusage: zz run --native <file.zz>".to_string())?;
+    let path = path.ok_or_else(|| {
+        "missing file argument\n\n\
+             usage: zz run --native <file.zz>\n\
+             hint: provide the path to a .zz file to compile and execute"
+            .to_string()
+    })?;
     let p = std::path::Path::new(path);
-    // Use cache when possible (fast re-run).
-    let cached = build::build_native(p, build::BuildMode::Dev)?;
+    // Use release mode for native runs to get -O3 optimization (true native speed).
+    let cached = build::build_native(p, build::BuildMode::Release)?;
     let code = build::exec_binary(&cached, script_args)?;
     if code != 0 {
-        return Err(format!("native program exited with code {code}"));
+        return Err(format!(
+            "native program exited with code {code}\n\
+             hint: the program may have panicked or returned a non-zero exit code"
+        ));
     }
     Ok(())
 }
@@ -342,10 +355,12 @@ fn run_native(path: Option<&String>, script_args: &[String]) -> Result<(), Strin
 /// `zz build [-p] <file>`: compile a native binary (cached).
 fn build_cmd(args: &[String]) -> Result<(), String> {
     let release = args.iter().any(|a| a == "-p" || a == "--release");
-    let path = args
-        .iter()
-        .find(|a| !a.starts_with('-'))
-        .ok_or_else(|| "missing file argument\n\nusage: zz build [-p] <file.zz>".to_string())?;
+    let path = args.iter().find(|a| !a.starts_with('-')).ok_or_else(|| {
+        "missing file argument\n\n\
+             usage: zz build [-p] <file.zz>\n\
+             hint: provide the path to a .zz file to build"
+            .to_string()
+    })?;
     let p = std::path::Path::new(path);
     let mode = if release {
         build::BuildMode::Release
