@@ -306,10 +306,74 @@ func main() {
     );
 }
 
+#[test]
+fn native_struct_init_and_fields() {
+    let src = r#"
+struct Point { x: int, y: int }
+p := Point{ x: 10, y: 20 }
+io.println(p.x)
+io.println(p.y)
+p.x = 99
+io.println(p.x)
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "10\n20\n99\n");
+}
+
+#[test]
+fn native_struct_nested() {
+    let src = r#"
+struct Point { x: int, y: int }
+struct Rect { origin: Point, w: int, h: int }
+r := Rect{ origin: Point{ x: 1, y: 2 }, w: 10, h: 20 }
+io.println(r.origin.x)
+io.println(r.origin.y)
+io.println(r.w)
+r.origin.x = 42
+io.println(r.origin.x)
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "1\n2\n10\n42\n");
+}
+
 /// Helper to build a TypedProgram for tests that need the real stdlib.
 #[allow(dead_code)]
 fn _seed() -> HashMap<String, FuncSig> {
     stdlib_funcs()
+}
+
+#[test]
+fn debug_method_dispatch_c_source() {
+    let src = r#"
+s := "Hello World"
+r := s.contains("World")
+println(r)
+println("done")
+"#;
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".to_string(),
+        pruned.clone(),
+    );
+    let lowered = lowerer.lower();
+    // Print only the zz_main function body
+    let mut in_main = false;
+    let mut brace_depth = 0;
+    for line in lowered.source.lines() {
+        if line.starts_with("void zz_main(") {
+            in_main = true;
+        }
+        if in_main {
+            eprintln!("C: {}", line);
+            brace_depth += line.matches('{').count();
+            brace_depth = brace_depth.saturating_sub(line.matches('}').count());
+            if brace_depth == 0 && line.contains('}') && !line.starts_with("void zz_main") {
+                break;
+            }
+        }
+    }
 }
 
 #[allow(dead_code)]

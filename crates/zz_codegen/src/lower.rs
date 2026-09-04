@@ -42,6 +42,17 @@ impl NameCtx {
         cid
     }
 
+    /// Enter a new scope for `name` with a specific C type.
+    fn enter_with_type(&mut self, name: &str, ctype: &str) -> String {
+        let cid = format!("v{}", self.counter);
+        self.counter += 1;
+        self.stack
+            .entry(name.to_string())
+            .or_default()
+            .push((cid.clone(), ctype.to_string()));
+        cid
+    }
+
     /// Look up the variable's C identifier.
     fn lookup(&self, name: &str) -> Option<&str> {
         self.stack
@@ -98,6 +109,15 @@ fn extract_c_literal(emit: &str) -> &str {
 /// Mangle a zz qualified name to a C identifier.
 pub fn mangle(name: &str) -> String {
     name.replace('.', "__")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Expressions that are pure leaves (no side effects, no captured value).
@@ -157,6 +177,169 @@ impl Lowerer {
         }
     }
 
+    /// Check if a struct type is unboxed (all scalar or nested unboxed struct fields).
+    fn is_unboxed_struct(&self, name: &str) -> bool {
+        if let Some(sig) = self.tp.structs.get(name) {
+            sig.fields
+                .iter()
+                .all(|(_, ty)| self.is_scalar_type(ty) || matches!(ty, zz_checker::Type::Struct(inner) if self.is_unboxed_struct(inner)))
+        } else {
+            false
+        }
+    }
+
+    /// Check if a type is scalar (can be unboxed).
+    fn is_scalar_type(&self, ty: &zz_checker::Type) -> bool {
+        matches!(
+            ty,
+            zz_checker::Type::Int | zz_checker::Type::Float | zz_checker::Type::Bool
+        )
+    }
+
+    /// Convert a checker type to C type string.
+    fn type_to_c(&self, ty: &zz_checker::Type) -> String {
+        match ty {
+            zz_checker::Type::Int => "int64_t".to_string(),
+            zz_checker::Type::Float => "double".to_string(),
+            zz_checker::Type::Bool => "bool".to_string(),
+            zz_checker::Type::Struct(name) => {
+                if self.is_unboxed_struct(name) {
+                    format!("zz_struct_{}", name)
+                } else {
+                    "zz_value".to_string()
+                }
+            }
+            _ => "zz_value".to_string(),
+        }
+    }
+
+    /// Get the C type name for a struct.
+    fn struct_c_type(&self, name: &str) -> String {
+        format!("zz_struct_{}", name)
+    }
+
+    /// Check if a type string is a struct type.
+    fn is_struct_type_str(&self, type_str: &str) -> bool {
+        type_str.starts_with("zz_struct_")
+    }
+
+    /// Extract the struct name from a type string like "zz_struct_Point" -> "Point".
+    fn struct_name_from_c_type<'a>(&self, c_type: &'a str) -> Option<&'a str> {
+        c_type.strip_prefix("zz_struct_")
+    }
+
+    /// Get the C type of a field from a struct type string.
+    /// Returns the C type string (e.g., "int64_t", "zz_struct_Point") for the named field.
+    fn field_type_from_struct(&self, base_c_type: &str, field_name: &str) -> Option<&str> {
+        let struct_name = self.struct_name_from_c_type(base_c_type)?;
+        let sig = self.tp.structs.get(struct_name)?;
+        let (_, field_ty) = sig.fields.iter().find(|(n, _)| n == field_name)?;
+        match field_ty {
+            zz_checker::Type::Int => Some("int64_t"),
+            zz_checker::Type::Float => Some("double"),
+            zz_checker::Type::Bool => Some("bool"),
+            zz_checker::Type::Struct(name) if self.is_unboxed_struct(name) => {
+                // Return a static string — leak the Box for the 'static lifetime.
+                // This is fine for codegen: small number of struct types, process exits.
+                let s = format!("zz_struct_{}", name);
+                Some(Box::leak(s.into_boxed_str()) as &str)
+            }
+            _ => None, // non-scalar boxed type: caller handles
+        }
+    }
+
+    /// Auto-box a nested struct field value (e.g., r.origin.x).
+    fn auto_box_nested_field(&self, parts: &[String], names: &NameCtx, emitted: &str) -> String {
+        if parts.len() >= 2 {
+            if let Some(base_type) = names.lookup_type(&parts[0]) {
+                // Walk the chain: r (Rect) -> origin (Point) -> x (int)
+                let mut current_type = base_type.to_string();
+                for i in 1..parts.len() - 1 {
+                    if let Some(inner_name) = self.struct_name_from_c_type(&current_type) {
+                        if let Some(sig) = self.tp.structs.get(inner_name) {
+                            if let Some((_, next_ty)) =
+                                sig.fields.iter().find(|(n, _)| n == &parts[i])
+                            {
+                                current_type = self.type_to_c(next_ty);
+                            }
+                        }
+                    }
+                }
+                // Now current_type is the type of the second-to-last part.
+                // The last part is the leaf field.
+                if let Some(leaf_name) = self.struct_name_from_c_type(&current_type) {
+                    if let Some(sig) = self.tp.structs.get(leaf_name) {
+                        if let Some((_, leaf_ty)) =
+                            sig.fields.iter().find(|(n, _)| n == parts.last().unwrap())
+                        {
+                            let leaf_c = self.type_to_c(leaf_ty);
+                            return auto_box(emitted, Some(leaf_c.as_str()));
+                        }
+                    }
+                }
+            }
+        }
+        emitted.to_string()
+    }
+
+    /// Generate C typedefs for all reachable structs, in dependency order.
+    fn lower_structs_preamble(&self) -> String {
+        let mut preamble = String::new();
+        let mut emitted = std::collections::HashSet::new();
+
+        // Emit structs in dependency order (topological sort).
+        fn emit_struct<'a>(
+            name: &'a str,
+            tp: &'a zz_hir::TypedProgram,
+            is_unboxed: &dyn Fn(&str) -> bool,
+            emitted: &mut std::collections::HashSet<String>,
+            preamble: &mut String,
+        ) {
+            if emitted.contains(name) {
+                return;
+            }
+            if let Some(sig) = tp.structs.get(name) {
+                // Emit dependencies first.
+                for (_, field_type) in &sig.fields {
+                    if let zz_checker::Type::Struct(dep_name) = field_type {
+                        if is_unboxed(dep_name) {
+                            emit_struct(dep_name, tp, is_unboxed, emitted, preamble);
+                        }
+                    }
+                }
+                // Emit this struct.
+                preamble.push_str(&format!("typedef struct {{\n"));
+                for (field_name, field_type) in &sig.fields {
+                    let c_type = match field_type {
+                        zz_checker::Type::Int => "int64_t".to_string(),
+                        zz_checker::Type::Float => "double".to_string(),
+                        zz_checker::Type::Bool => "bool".to_string(),
+                        zz_checker::Type::Struct(n) if is_unboxed(n) => format!("zz_struct_{}", n),
+                        _ => "zz_value".to_string(),
+                    };
+                    preamble.push_str(&format!("    {} {};\n", c_type, field_name));
+                }
+                preamble.push_str(&format!("}} zz_struct_{};\n\n", name));
+                emitted.insert(name.to_string());
+            }
+        }
+
+        let names: Vec<String> = self.tp.structs.keys().cloned().collect();
+        for name in &names {
+            if self.is_unboxed_struct(name) {
+                emit_struct(
+                    name,
+                    &self.tp,
+                    &|n| self.is_unboxed_struct(n),
+                    &mut emitted,
+                    &mut preamble,
+                );
+            }
+        }
+
+        preamble
+    }
+
     pub fn lower(&self) -> LoweredC {
         let mut funcs = String::new();
         let mut body = String::new();
@@ -194,10 +377,14 @@ impl Lowerer {
             String::new()
         };
 
+        // Generate struct typedefs preamble
+        let struct_preamble = self.lower_structs_preamble();
+
         let source = format!(
-            "{runtime_h}\n{runtime_c}\n\n// ---- generated code ----\n{funcs}\nvoid zz_main(void) {{\n{body}}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
+            "{runtime_h}\n{runtime_c}\n\n// ---- struct definitions ----\n{struct_preamble}\n// ---- generated code ----\n{funcs}\nvoid zz_main(void) {{\n{body}}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
             runtime_h = crate::RUNTIME_H,
             runtime_c = crate::RUNTIME_C,
+            struct_preamble = struct_preamble,
             funcs = funcs,
             body = body,
             main_decl = main_decl,
@@ -318,14 +505,29 @@ impl Lowerer {
     fn emit_stmt(&self, stmt: &Stmt, names: &mut NameCtx, out: &mut String, is_tail: bool) {
         match stmt {
             Stmt::Decl { name, value, .. } => {
-                let cid = names.enter(&name.name);
-                let val = self.emit_expr(value, names, out);
                 // Look up the type of the initializer expression
                 let ctype = if let Some(ty) = self.tp.types.get(&value.span()) {
                     ty_to_ctype(ty)
                 } else {
                     "zz_value".to_string() // fallback
                 };
+
+                // Check if this is a struct initialization
+                if let Expr::StructInit {
+                    name: struct_name, ..
+                } = value
+                {
+                    if self.is_unboxed_struct(struct_name) {
+                        let c_type = self.struct_c_type(struct_name);
+                        let cid = names.enter_with_type(&name.name, &c_type);
+                        let val = self.emit_expr(value, names, out);
+                        out.push_str(&format!("    {c_type} {cid} = {val};\n"));
+                        return;
+                    }
+                }
+
+                let cid = names.enter(&name.name);
+                let val = self.emit_expr(value, names, out);
                 // Update the name ctx with the correct type
                 if let Some(vec) = names.stack.get_mut(&name.name) {
                     if let Some((_, existing_ty)) = vec.last_mut() {
@@ -428,7 +630,7 @@ impl Lowerer {
                 // scalar (int64_t/double/bool), don't try to extract
                 // .i/.f/.b — just assign directly. Otherwise the boxed
                 // form `(...).i` is invalid C.
-                let value_is_scalar = expr_is_pure_scalar(value);
+                let value_is_scalar = expr_emits_raw_scalar(value);
                 match target {
                     Expr::Ident { name, .. } => {
                         if let Some(cid) = names.lookup(name.as_str()) {
@@ -459,6 +661,72 @@ impl Lowerer {
                     }
                     Expr::Path { parts, .. } => {
                         let joined = parts.join(".");
+                        // Handle struct field assignment: p.x = 99 or r.origin.x = 42
+                        if parts.len() == 2 {
+                            if let Some(base_cid) = names.lookup(&parts[0]) {
+                                if let Some(base_type) = names.lookup_type(&parts[0]) {
+                                    if self.is_struct_type_str(base_type) {
+                                        // Scalar field assignment: p.x = <val>
+                                        if let Some(field_type) =
+                                            self.field_type_from_struct(base_type, &parts[1])
+                                        {
+                                            let final_val = match field_type {
+                                                "int64_t" if !value_is_scalar => {
+                                                    format!("({val}).i")
+                                                }
+                                                "double" if !value_is_scalar => {
+                                                    format!("({val}).f")
+                                                }
+                                                "bool" if !value_is_scalar => format!("({val}).b"),
+                                                _ => val,
+                                            };
+                                            out.push_str(&format!(
+                                                "    ({base_cid}).{field_name} = {final_val};\n",
+                                                field_name = &parts[1]
+                                            ));
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if parts.len() == 3 {
+                            // Nested field: r.origin.x = 42
+                            if let Some(base_cid) = names.lookup(&parts[0]) {
+                                if let Some(base_type) = names.lookup_type(&parts[0]) {
+                                    if self.is_struct_type_str(base_type) {
+                                        if let Some(field1_type) =
+                                            self.field_type_from_struct(base_type, &parts[1])
+                                        {
+                                            if let Some(leaf_type) =
+                                                self.field_type_from_struct(field1_type, &parts[2])
+                                            {
+                                                let final_val = match leaf_type {
+                                                    "int64_t" if !value_is_scalar => {
+                                                        format!("({val}).i")
+                                                    }
+                                                    "double" if !value_is_scalar => {
+                                                        format!("({val}).f")
+                                                    }
+                                                    "bool" if !value_is_scalar => {
+                                                        format!("({val}).b")
+                                                    }
+                                                    _ => val,
+                                                };
+                                                out.push_str(&format!(
+                                                    "    (({base_cid}).{f1}).{f2} = {final_val};\n",
+                                                    f1 = &parts[1],
+                                                    f2 = &parts[2]
+                                                ));
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Standard variable assignment via path
                         if let Some(cid) = names.lookup(&joined) {
                             // Check if the target variable is a scalar type
                             if let Some(ctype) = names.lookup_type(&joined) {
@@ -728,12 +996,42 @@ impl Lowerer {
                 None => "zz_unit()".to_string(),
             },
             Expr::Path { parts, .. } => {
+                // Handle struct field access (e.g., p.x or r.origin.x)
+                if parts.len() == 2 {
+                    if let Some(base_name) = names.lookup(&parts[0]) {
+                        if let Some(base_type) = names.lookup_type(&parts[0]) {
+                            // Check if base is a struct type
+                            if self.is_struct_type_str(base_type) {
+                                // Extract field access
+                                let field_name = &parts[1];
+                                return format!("({base_name}).{field_name}");
+                            }
+                        }
+                    }
+                }
+
+                // Handle nested struct field access (e.g., r.origin.x = parts[0..2] + parts[2])
+                if parts.len() >= 3 {
+                    // Try to find the base variable
+                    if let Some(base_name) = names.lookup(&parts[0]) {
+                        if let Some(base_type) = names.lookup_type(&parts[0]) {
+                            // For now, only handle 2-level deep fields
+                            if parts.len() == 3 && self.is_struct_type_str(base_type) {
+                                let field1 = &parts[1];
+                                let field2 = &parts[2];
+                                return format!("(({base_name}).{field1}).{field2}");
+                            }
+                        }
+                    }
+                }
+
                 let joined = parts.join(".");
                 if let Some(cid) = names.lookup(&joined) {
                     // Check if the variable is a scalar type that can be used directly
                     if let Some(ctype) = names.lookup_type(&joined) {
                         match ctype {
                             "int64_t" | "double" | "bool" => format!("{cid}"),
+                            _ if self.is_struct_type_str(ctype) => format!("{cid}"),
                             _ => format!("zz_clone({cid})"),
                         }
                     } else {
@@ -944,6 +1242,84 @@ impl Lowerer {
                 let en = self.emit_expr(end, names, out);
                 format!("zz_range_build({s}, {en})")
             }
+            Expr::StructInit { name, fields, .. } => {
+                // Check if this struct is unboxed
+                if self.is_unboxed_struct(name) {
+                    let c_type = self.struct_c_type(name);
+                    let mut field_inits = Vec::new();
+                    for (field_name, field_expr) in fields {
+                        let field_val = self.emit_expr(field_expr, names, out);
+                        // Check if the field type is scalar
+                        if let Some(sig) = self.tp.structs.get(name) {
+                            if let Some((_, field_type)) =
+                                sig.fields.iter().find(|(n, _)| n == field_name)
+                            {
+                                let final_val = match field_type {
+                                    zz_checker::Type::Int => format!("({field_val}).i"),
+                                    zz_checker::Type::Float => format!("({field_val}).f"),
+                                    zz_checker::Type::Bool => format!("({field_val}).b"),
+                                    _ => field_val,
+                                };
+                                field_inits.push(format!(".{field_name} = {final_val}"));
+                            } else {
+                                field_inits.push(format!(".{field_name} = {field_val}"));
+                            }
+                        } else {
+                            field_inits.push(format!(".{field_name} = {field_val}"));
+                        }
+                    }
+                    format!("({c_type}){{ {}}}", field_inits.join(", "))
+                } else {
+                    "zz_unit()".to_string()
+                }
+            }
+            Expr::Field { obj, name, .. } => {
+                // For now, just emit the object and append the field access
+                let obj_val = self.emit_expr(obj, names, out);
+                format!("({obj_val}).{name}")
+            }
+            Expr::Array { elems, .. } => {
+                // Emit array literal: zz_array_new() then append each item.
+                let arr_var = format!("__arr{}", names.counter);
+                names.counter += 1;
+                out.push_str(&format!("    zz_value {arr_var} = zz_array_new();\n"));
+                for item in elems {
+                    let item_val = self.emit_expr(item, names, out);
+                    // Auto-box if needed
+                    let boxed = if let Expr::Ident { name: n, .. } = item {
+                        auto_box(&item_val, names.lookup_type(n))
+                    } else {
+                        item_val
+                    };
+                    out.push_str(&format!(
+                        "    {{ int _e = 0; zz_vec_append({arr_var}, {boxed}, &_e); }}\n"
+                    ));
+                }
+                arr_var
+            }
+            Expr::Dict { .. } => "zz_dict_new()".to_string(),
+            Expr::Fmt { parts, .. } => {
+                // Format string: build by concatenating parts as strings.
+                if parts.is_empty() {
+                    return "zz_str_static(\"\")".to_string();
+                }
+                let fvar = format!("__fmt{}", names.counter);
+                names.counter += 1;
+                out.push_str(&format!("    zz_value {fvar} = zz_str_static(\"\");\n"));
+                for part in parts {
+                    match part {
+                        zz_frontend::ast::FmtPart::Text(value) => {
+                            let lit = self.emit_str_literal(value);
+                            out.push_str(&format!("    {{ zz_value _r = zz_to_str({lit}, &(int){{0}}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
+                        }
+                        zz_frontend::ast::FmtPart::Expr(expr, _spec) => {
+                            let val = self.emit_expr(expr, names, out);
+                            out.push_str(&format!("    {{ zz_value _r = zz_to_str({val}, &(int){{0}}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
+                        }
+                    }
+                }
+                fvar
+            }
             _ => "zz_unit()".to_string(),
         }
     }
@@ -955,26 +1331,138 @@ impl Lowerer {
         names: &mut NameCtx,
         out: &mut String,
     ) -> String {
-        let cname = match callee {
-            Expr::Ident { name, .. } => Some(name.clone()),
-            Expr::Path { parts, .. } => Some(parts.join(".")),
-            _ => None,
-        };
-        let cname = match cname {
-            Some(n) => n,
-            None => return "zz_unit()".to_string(),
+        // Resolve callee name — handle method dispatch for Path/Field expressions.
+        // Returns (cname, method_receiver) where method_receiver is the owned Expr
+        // to insert as the first argument for method calls like `x.push(4)`.
+        let (cname, method_receiver): (String, Option<Expr>) = match callee {
+            Expr::Ident { name, .. } => (name.clone(), None),
+            Expr::Path { parts, span, .. } if parts.len() == 2 => {
+                let obj_name = &parts[0];
+                let method = &parts[1];
+                if names.lookup(obj_name).is_some() {
+                    // obj_name is a LOCAL variable — this is a method call.
+                    // Try each known method namespace to find a registered native.
+                    let first_ident_end = span.start + obj_name.len() as u32;
+                    let first_ident_span =
+                        zz_frontend::span::Span::new(span.start, first_ident_end);
+                    let namespaces = ["vec", "str", "dict", "option", "result"];
+                    let mut found_ns = "";
+                    for ns in &namespaces {
+                        let candidate = format!("{ns}.{method}");
+                        let std_candidate = format!("std.{ns}.{method}");
+                        if self.reachable_natives.contains(&candidate)
+                            || self.reachable_natives.contains(&std_candidate)
+                        {
+                            found_ns = ns;
+                            break;
+                        }
+                    }
+                    if found_ns.is_empty() {
+                        // Also try matching by native_impl — checks if there's
+                        // a C runtime function registered for this method under
+                        // any namespace.
+                        for ns in &namespaces {
+                            let candidate = format!("{ns}.{method}");
+                            if native_supported(&candidate) {
+                                found_ns = ns;
+                                break;
+                            }
+                        }
+                        if found_ns.is_empty() {
+                            eprintln!("[codegen-warn] method {}.{}: no namespace found. reach_natives={:?}", obj_name, method, self.reachable_natives);
+                        }
+                    }
+                    if found_ns.is_empty() {
+                        // Also check if the bare method name is a native
+                        // (e.g. `len`, `println`).
+                        if self.reachable_natives.contains(method) {
+                            // Bare builtin — no receiver injection needed.
+                            (method.clone(), None)
+                        } else {
+                            // Unknown — fall through
+                            (method.clone(), None)
+                        }
+                    } else {
+                        let receiver = Expr::Ident {
+                            name: obj_name.clone(),
+                            span: first_ident_span,
+                        };
+                        (format!("{found_ns}.{method}"), Some(receiver))
+                    }
+                } else {
+                    // obj_name is NOT a local — it's a namespace like `vec`, `io`.
+                    (parts.join("."), None)
+                }
+            }
+            Expr::Path { parts, .. } => (parts.join("."), None),
+            Expr::Field {
+                obj, name: method, ..
+            } => {
+                // Expr::Field callee — rare since parser consumes ident chains as Path.
+                // Look up receiver type and dispatch.
+                if let Some(zzty) = self.tp.types.get(&obj.span()) {
+                    match zzty {
+                        zz_checker::Type::Struct(sname) => (format!("{sname}.{method}"), None),
+                        _ => {
+                            let ns = match zzty {
+                                zz_checker::Type::Array(_) => "vec",
+                                zz_checker::Type::Str => "str",
+                                zz_checker::Type::Dict(_, _) => "dict",
+                                zz_checker::Type::Option(_) => "option",
+                                zz_checker::Type::Result(_, _) => "result",
+                                _ => "",
+                            };
+                            if !ns.is_empty() {
+                                (format!("{ns}.{method}"), Some(*obj.clone()))
+                            } else {
+                                (method.clone(), None)
+                            }
+                        }
+                    }
+                } else {
+                    (method.clone(), None)
+                }
+            }
+            _ => return "zz_unit()".to_string(),
         };
 
         let mut arg_items: Vec<String> = Vec::new();
+        // If this is a method call, emit and insert the receiver as first arg.
+        if let Some(recv) = method_receiver {
+            let recv_val = self.emit_expr(&recv, names, out);
+            let boxed = auto_box(&recv_val, None); // receiver is always zz_value
+            arg_items.push(boxed);
+        }
         for a in args {
             let emitted = self.emit_expr(a, names, out);
-            // Auto-box if this argument is a scalar variable
+            // Auto-box if this argument is a scalar variable or struct field
             let boxed = if let Expr::Ident { name, .. } = a {
                 let name_str = name.clone();
                 auto_box(&emitted, names.lookup_type(&name_str))
             } else if let Expr::Path { parts, .. } = a {
                 let joined = parts.join(".");
-                auto_box(&emitted, names.lookup_type(&joined))
+                // First try direct lookup (e.g., a local variable named "p.x")
+                let direct_type = names.lookup_type(&joined);
+                if direct_type.is_some() {
+                    auto_box(&emitted, direct_type)
+                } else if parts.len() == 2 {
+                    // Struct field access: parts[0] is the base, parts[1] is the field
+                    if let Some(base_type) = names.lookup_type(&parts[0]) {
+                        if let Some(field_type) = self.field_type_from_struct(base_type, &parts[1])
+                        {
+                            auto_box(&emitted, Some(field_type))
+                        } else {
+                            emitted
+                        }
+                    } else {
+                        emitted
+                    }
+                } else if parts.len() >= 3 {
+                    // Nested struct field: e.g., r.origin.x
+                    self.auto_box_nested_field(parts, names, &emitted)
+                } else {
+                    emitted
+                }
             } else {
                 emitted
             };
@@ -1001,6 +1489,17 @@ impl Lowerer {
                     format!("zz_call_native1({impl_name}, {a})")
                 }
                 0 => format!("zz_call_native0({impl_name})"),
+                2 => {
+                    let a = &arg_items[0];
+                    let b = &arg_items[1];
+                    format!("zz_call_native2({impl_name}, {a}, {b})")
+                }
+                3 => {
+                    let a = &arg_items[0];
+                    let b = &arg_items[1];
+                    let c = &arg_items[2];
+                    format!("zz_call_native3({impl_name}, {a}, {b}, {c})")
+                }
                 _ => "zz_unit()".to_string(),
             };
         }
@@ -1065,12 +1564,16 @@ fn get_block(e: &Expr) -> &Block {
 /// C expression (int64_t / double / bool) rather than a wrapped zz_value.
 /// Used by Stmt::Assign to decide whether to emit a plain `cid = val;`
 /// or a `.i`/`.f`/`.b` field extraction on a boxed value.
-fn expr_is_pure_scalar(e: &Expr) -> bool {
+/// Returns true if `emit_expr` produces a raw C scalar (int64_t/double/bool)
+/// rather than a zz_value.  Used by assignment to decide whether to extract
+/// `.i`/`.f`/`.b` or assign directly.
+fn expr_emits_raw_scalar(e: &Expr) -> bool {
     match e {
-        Expr::Int { .. } | Expr::Float { .. } | Expr::Bool { .. } => true,
+        // Literals always emit zz_int()/zz_float()/zz_bool() → zz_value.
+        Expr::Int { .. } | Expr::Float { .. } | Expr::Bool { .. } => false,
         Expr::Ident { .. } | Expr::Path { .. } => true,
-        Expr::Paren { expr, .. } => expr_is_pure_scalar(expr),
-        Expr::Unary { expr, .. } => expr_is_pure_scalar(expr),
+        Expr::Paren { expr, .. } => expr_emits_raw_scalar(expr),
+        Expr::Unary { expr, .. } => expr_emits_raw_scalar(expr),
         Expr::Binary {
             left, right, op, ..
         } => {
@@ -1083,8 +1586,8 @@ fn expr_is_pure_scalar(e: &Expr) -> bool {
                     | zz_frontend::ast::BinOp::Mul
                     | zz_frontend::ast::BinOp::Div
                     | zz_frontend::ast::BinOp::Rem
-            ) && expr_is_pure_scalar(left)
-                && expr_is_pure_scalar(right)
+            ) && expr_emits_raw_scalar(left)
+                && expr_emits_raw_scalar(right)
         }
         _ => false,
     }
@@ -1121,8 +1624,58 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "println" | "io.println" | "std.io.println" => Some("zz_io_println"),
         "print" | "io.print" | "std.io.print" => Some("zz_io_print"),
         "input" | "io.read_line" | "main_io.input" => Some("zz_io_input"),
-        "math.pow" | "std.math.pow" => Some("zz_math_pow"),
-        "time.now_ms" | "std.time.now_ms" => Some("zz_time_now_ms"),
+        "len" => Some("zz_len"),
+        "typeof" => Some("zz_typeof"),
+        "int" => Some("zz_int_cast"),
+        "float" => Some("zz_float_cast"),
+        "bool" => Some("zz_bool_cast"),
+        "str" => Some("zz_str_cast"),
+        // vec methods — bare names for method dispatch
+        "vec.len" | "std.vec.len" | "vec_len" => Some("zz_vec_len"),
+        "vec.append" | "std.vec.append" => Some("zz_vec_append"),
+        "vec.push" | "std.vec.push" => Some("zz_vec_push"),
+        "vec.pop" | "std.vec.pop" => Some("zz_vec_pop"),
+        "vec.remove" | "std.vec.remove" => Some("zz_vec_remove"),
+        "vec.insert" | "std.vec.insert" => Some("zz_vec_insert"),
+        // str
+        "str.length" | "std.str.length" => Some("zz_str_length"),
+        "str.to_lower" | "std.str.to_lower" | "str.lower" | "std.str.lower" => Some("zz_str_lower"),
+        "str.to_upper" | "std.str.to_upper" | "str.upper" | "std.str.upper" => Some("zz_str_upper"),
+        "str.replace" | "std.str.replace" => Some("zz_str_replace"),
+        "str.contains" | "std.str.contains" => Some("zz_str_contains"),
+        "str.starts_with" | "std.str.starts_with" | "str.startswith" | "std.str.startswith" => {
+            Some("zz_str_startswith")
+        }
+        "str.ends_with" | "std.str.ends_with" | "str.endswith" | "std.str.endswith" => {
+            Some("zz_str_endswith")
+        }
+        // json
+        "json.parse" | "std.json.parse" => Some("zz_json_parse"),
+        "json.stringify" | "std.json.stringify" => Some("zz_json_stringify"),
+        "json.null" | "std.json.null" => Some("zz_json_null"),
+        // env
+        "env.get" | "std.env.get" | "envmod.get" | "std.envmod.get" => Some("zz_env_get"),
+        "env.args" | "std.env.args" | "envmod.args" | "std.envmod.args" => Some("zz_env_args"),
+        // dict
+        "dict.len" => Some("zz_dict_len_val"),
+        "dict.keys" => Some("zz_dict_keys"),
+        "dict.has" => Some("zz_dict_has"),
+        // fs
+        "fs.read" | "std.fs.read" => Some("zz_fs_read"),
+        "fs.write" | "std.fs.write" => Some("zz_fs_write"),
+        "fs.exists" | "std.fs.exists" => Some("zz_fs_exists"),
+        "fs.remove" | "std.fs.remove" => Some("zz_fs_remove"),
+        "fs.mkdir" | "std.fs.mkdir" => Some("zz_fs_mkdir"),
+        "fs.readdir" | "std.fs.readdir" => Some("zz_fs_readdir"),
+        // encoding
+        "encoding.url_encode" | "std.encoding.url_encode" => Some("zz_encoding_url_encode"),
+        "encoding.url_decode" | "std.encoding.url_decode" => Some("zz_encoding_url_decode"),
+        "encoding.base64_encode" | "std.encoding.base64_encode" => {
+            Some("zz_encoding_base64_encode")
+        }
+        "encoding.base64_decode" | "std.encoding.base64_decode" => {
+            Some("zz_encoding_base64_decode")
+        }
         _ => None,
     }
 }
