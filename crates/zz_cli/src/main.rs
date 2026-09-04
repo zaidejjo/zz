@@ -340,8 +340,8 @@ fn run_native(path: Option<&String>, script_args: &[String]) -> Result<(), Strin
             .to_string()
     })?;
     let p = std::path::Path::new(path);
-    // Use cache when possible (fast re-run).
-    let cached = build::build_native(p, build::BuildMode::Dev)?;
+    // Use release mode for native runs to get -O3 optimization (true native speed).
+    let cached = build::build_native(p, build::BuildMode::Release)?;
     let code = build::exec_binary(&cached, script_args)?;
     if code != 0 {
         return Err(format!(
