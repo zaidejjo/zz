@@ -683,6 +683,7 @@ mod tests {
 
     /// Helper: returns true if the token stream contains a `StmtEnd` between
     /// the first `Int` and the first `PipeGt`.
+    #[allow(dead_code)]
     fn has_stmt_end_before_pipe(src: &str) -> bool {
         let tokens = lex(src).tokens;
         let mut saw_int = false;

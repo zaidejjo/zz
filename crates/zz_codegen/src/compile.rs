@@ -1,7 +1,7 @@
 //! C compilation: turn generated C source into a native binary.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Error surfaced from a build.
 #[derive(Debug)]
@@ -145,6 +145,7 @@ pub fn build(
 pub fn run_binary(path: &Path, args: &[&str]) -> Result<(i32, String), BuildError> {
     let out = Command::new(path)
         .args(args)
+        .stdin(Stdio::inherit())
         .output()
         .map_err(BuildError::Io)?;
     Ok((

@@ -557,10 +557,11 @@ impl Interp {
                         match l {
                             Value::Option(Some(v)) => return Ok(Flow::Value(*v)),
                             Value::Option(None) => {}
-                            Value::Result(r) => match &*r {
-                                Ok(v) => return Ok(Flow::Value(v.clone())),
-                                Err(_) => {}
-                            },
+                            Value::Result(r) => {
+                                if let Ok(v) = &*r {
+                                    return Ok(Flow::Value(v.clone()));
+                                }
+                            }
 
                             other => {
                                 return Ok(Flow::Value(other));
@@ -988,10 +989,12 @@ impl Interp {
                 let inner = match (name.as_str(), value) {
                     ("some", Value::Option(Some(v))) => Some(v.as_ref()),
                     ("none", Value::Option(None)) => None,
+                    #[allow(clippy::manual_ok_err)]
                     ("ok", Value::Result(r)) => match &**r {
                         Ok(v) => Some(v),
                         Err(_) => None,
                     },
+                    #[allow(clippy::manual_ok_err)]
                     ("err", Value::Result(r)) => match &**r {
                         Err(e) => Some(e),
                         Ok(_) => None,

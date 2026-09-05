@@ -1,0 +1,13 @@
+[package]
+name = "zz_fmt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zz_frontend = { path = "../zz_frontend" }
+ignore = "0.4"
+rayon = "1"
+similar = "2"
+thiserror = "1"
+tracing = "0.1"

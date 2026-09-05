@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use zz_checker::{FuncSig, Type};
 
-use crate::callgraph::{build_callgraph, dce, reachable, ReachableSet};
+use crate::callgraph::{build_callgraph, dce, reachable};
 use crate::walk::walk_exprs;
 use crate::{build_source, is_dynamic, is_int};
 
@@ -171,8 +171,8 @@ fn single_node_per_span_map_lookup() {
     let tp = &res.program;
     let mut bin = None;
     walk_exprs(tp, &mut |te| {
-        if let zz_frontend::ast::Expr::Binary { op: _, .. } = te.expr {
-            bin = te.ty.map(|t| t.clone());
+        if let zz_frontend::ast::Expr::Binary { .. } = te.expr {
+            bin = te.ty.cloned();
         }
         true
     });

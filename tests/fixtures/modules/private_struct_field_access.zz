@@ -1,9 +1,10 @@
 // Test: private struct cannot be instantiated cross-module.
 // Full multi-file test is in loader/tests.rs (private_struct_not_instantiateable).
-pub struct PublicPoint { x: int, y: int }
-struct PrivatePoint { x: int, y: int }
+pub struct PublicPoint {x: int, y: int}
+
+struct PrivatePoint {x: int, y: int}
 
 func main() {
-    p := PublicPoint { x: 1, y: 2 }
+    p := PublicPoint{x: 1, y: 2}
     std.io.println(p.x + p.y)
 }

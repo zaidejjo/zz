@@ -1,7 +1,7 @@
 //! Expression parsing.
 
-use crate::ast::{BinOp, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, Ty, UnOp};
-use crate::diag::{error_at, RawDiag};
+use crate::ast::{BinOp, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, UnOp};
+use crate::diag::error_at;
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
@@ -47,15 +47,17 @@ impl Parser {
             }
             Expr::Ident { name, span } => Expr::Call {
                 callee: Box::new(Expr::Ident { name, span }),
-                args: vec![lhs],
+                args: vec![lhs.clone()],
                 named: vec![],
-                span,
+                // The span must cover the piped operand too, not just the
+                // rhs identifier.
+                span: lhs.span().join(span),
             },
             Expr::Path { parts, span } => Expr::Call {
                 callee: Box::new(Expr::Path { parts, span }),
-                args: vec![lhs],
+                args: vec![lhs.clone()],
                 named: vec![],
-                span,
+                span: lhs.span().join(span),
             },
             other => {
                 self.error_here("right side of `|>` must be a function call or name");
@@ -349,6 +351,7 @@ impl Parser {
         expr
     }
 
+    #[allow(dead_code)]
     pub(crate) fn parse_expr_list(&mut self) -> Vec<Expr> {
         let mut args = Vec::new();
         if self.at(TokenKind::RParen) {
@@ -998,19 +1001,22 @@ impl Parser {
         self.advance();
         let arg = if self.eat(TokenKind::LParen) {
             let e = self.parse_expr();
-            if !self.eat_close(TokenKind::RParen) {
+            let end = if self.eat_close(TokenKind::RParen) {
+                self.previous().span
+            } else {
                 self.error_here("expected `)` to close variant argument");
-            }
-            Some(Box::new(e))
+                e.span()
+            };
+            Some((Box::new(e), end))
         } else {
             None
         };
         let span = dot
             .span
-            .join(arg.as_ref().map(|e| e.span()).unwrap_or(name_tok.span));
+            .join(arg.as_ref().map(|(_, end)| *end).unwrap_or(name_tok.span));
         Expr::Variant {
             name: name_tok.text,
-            arg,
+            arg: arg.map(|(e, _)| e),
             span,
         }
     }
@@ -1082,19 +1088,22 @@ impl Parser {
                 self.advance();
                 let arg = if self.eat(TokenKind::LParen) {
                     let p = self.parse_pattern();
-                    if !self.eat_close(TokenKind::RParen) {
+                    let end = if self.eat_close(TokenKind::RParen) {
+                        self.previous().span
+                    } else {
                         self.error_here("expected `)` to close pattern");
-                    }
-                    Some(Box::new(p))
+                        p.span()
+                    };
+                    Some((Box::new(p), end))
                 } else {
                     None
                 };
                 let span = tok
                     .span
-                    .join(arg.as_ref().map(|p| p.span()).unwrap_or(name_tok.span));
+                    .join(arg.as_ref().map(|(_, end)| *end).unwrap_or(name_tok.span));
                 Pattern::Variant {
                     name: name_tok.text,
-                    arg,
+                    arg: arg.map(|(p, _)| p),
                     span,
                 }
             }

@@ -42,7 +42,7 @@ pub(crate) fn tcp_connect(
 pub(crate) fn tcp_listen(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let addr = expect_str(args, 0, "std.net.tcp_listen")?;
     match std::net::TcpListener::bind(&addr) {
@@ -279,7 +279,7 @@ pub(crate) fn set_read_timeout(
         }
     };
     let ms = expect_int(args, 1, "std.net.set_read_timeout")? as u64;
-    let mut lock = stream.lock().map_err(|e| {
+    let lock = stream.lock().map_err(|e| {
         EvalError::new(
             format!("std.net.set_read_timeout: lock poisoned: {e}"),
             span,
@@ -309,7 +309,7 @@ pub(crate) fn set_write_timeout(
         }
     };
     let ms = expect_int(args, 1, "std.net.set_write_timeout")? as u64;
-    let mut lock = stream.lock().map_err(|e| {
+    let lock = stream.lock().map_err(|e| {
         EvalError::new(
             format!("std.net.set_write_timeout: lock poisoned: {e}"),
             span,

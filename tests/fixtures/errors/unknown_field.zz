@@ -1,5 +1,5 @@
 // E2E: Unknown struct field access
-struct Point { x: int, y: int }
+struct Point {x: int, y: int}
 
-p := Point{ x: 1, y: 2 }
+p := Point{x: 1, y: 2}
 println(p.z)

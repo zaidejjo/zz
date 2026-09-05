@@ -1,6 +1,6 @@
 //! Expression AST nodes.
 
-use crate::ast::types::{Ty, TyKind};
+use crate::ast::types::Ty;
 use crate::span::Span;
 
 /// One piece of an interpolated string.

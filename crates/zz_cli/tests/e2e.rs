@@ -102,7 +102,7 @@ macro_rules! e2e_success_test {
 
             // Verify the last line contains a success marker.
             let last = stdout.lines().last().unwrap_or("");
-            let stem = path.file_stem().unwrap().to_string_lossy();
+            let _stem = path.file_stem().unwrap().to_string_lossy();
             assert!(
                 !last.is_empty(),
                 "fixture {} produced no output.\nstderr:\n{stderr}",
@@ -401,7 +401,7 @@ fn e2e_discover_all_error_fixtures() {
 
     let mut failures = Vec::new();
     for file in find_fixtures(&err_dir) {
-        let (exit, stdout, stderr) = run_zz(&file);
+        let (exit, stdout, _stderr) = run_zz(&file);
         if exit == 0 {
             failures.push(format!(
                 "FAIL {} — should error but exited 0\nstdout: {stdout}",

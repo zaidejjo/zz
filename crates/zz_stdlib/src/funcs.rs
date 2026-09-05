@@ -58,12 +58,18 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.io.println".into(),
         sig_t(vec![("v", t.clone())], Type::Unit),
     );
-    m.insert("std.io.read_line".into(), sig(vec![], Type::Str));
+    m.insert(
+        "std.io.read_line".into(),
+        sig_t(vec![("prompt", Type::Str)], Type::Str),
+    );
 
     // Top-level builtins — available without import.
     m.insert("print".into(), sig_t(vec![("v", t.clone())], Type::Unit));
     m.insert("println".into(), sig_t(vec![("v", t.clone())], Type::Unit));
-    m.insert("input".into(), sig(vec![], Type::Str));
+    m.insert(
+        "input".into(),
+        sig_t(vec![("prompt", Type::Str)], Type::Str),
+    );
 
     // Range and iterator builtins
     let range_t = Type::Range(Box::new(Type::Int));
@@ -595,7 +601,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
 
     // std.http — Phase 5B features
     let dict_str_str = Type::Dict(Box::new(Type::Str), Box::new(Type::Str));
-    let result_bool = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
+    let _result_bool = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
 
     m.insert(
         "std.http.log".into(),

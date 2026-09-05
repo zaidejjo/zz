@@ -1,4 +1,6 @@
 // E2E: Wrong arity error
-func add(a: int, b: int) -> int { a + b }
+func add(a: int, b: int) -> int {
+    a + b
+}
 
 x := add(1)

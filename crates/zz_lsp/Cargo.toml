@@ -11,6 +11,7 @@ path = "src/main.rs"
 zz_frontend = { path = "../zz_frontend" }
 zz_checker  = { path = "../zz_checker" }
 zz_stdlib   = { path = "../zz_stdlib" }
+zz_fmt      = { path = "../zz_fmt" }
 tower-lsp   = "0.20"
 tokio       = { version = "1", features = ["full"] }
 dashmap     = "6"

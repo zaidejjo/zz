@@ -73,7 +73,7 @@ impl Checker {
 
     /// Recursively check whether a block contains a `return` statement.
     pub(crate) fn block_has_return(block: &Block) -> bool {
-        block.stmts.iter().any(|s| Self::stmt_has_return(s))
+        block.stmts.iter().any(Self::stmt_has_return)
     }
 
     fn stmt_has_return(stmt: &Stmt) -> bool {
@@ -83,7 +83,7 @@ impl Checker {
             Stmt::Expr(Expr::While { body, .. }) => Self::block_has_return(body),
             Stmt::Expr(Expr::If { then, els, .. }) => {
                 Self::block_has_return(then)
-                    || els.as_ref().map_or(false, |e| Self::expr_has_return(e))
+                    || els.as_ref().is_some_and(|e| Self::expr_has_return(e))
             }
             _ => false,
         }
@@ -94,7 +94,7 @@ impl Checker {
             Expr::Block(b) => Self::block_has_return(b),
             Expr::If { then, els, .. } => {
                 Self::block_has_return(then)
-                    || els.as_ref().map_or(false, |e| Self::expr_has_return(e))
+                    || els.as_ref().is_some_and(|e| Self::expr_has_return(e))
             }
             _ => false,
         }

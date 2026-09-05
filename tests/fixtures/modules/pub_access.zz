@@ -1,13 +1,19 @@
 // Test: pub keyword on all declaration types.
 // Single-file — no imports needed.
 pub PI := 314
-pub func add(a: int, b: int) -> int { a + b }
-pub struct Point { x: int, y: int }
+pub func add(a: int, b: int) -> int {
+    a + b
+}
+
+pub struct Point {x: int, y: int}
 secret := 99
-func helper(x: int) -> int { x }
-struct Box { val: int }
+func helper(x: int) -> int {
+    x
+}
+
+struct Box {val: int}
 
 func main() {
-    p := Point { x: 1, y: 2 }
+    p := Point{x: 1, y: 2}
     std.io.println(PI + add(p.x, p.y))
 }

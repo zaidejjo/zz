@@ -10,15 +10,13 @@ match http.get("https://jsonplaceholder.typicode.com/posts/1", {}) {
     .ok(res) => {
         status := res.status() ?? 0
         println("   Status: {status}")
-
         body := res.text() ?? ""
         println("   Body length: {str.length(body)} chars")
-
         // Parse as JSON
         json_data := res.json() ?? json.null()
         println("   JSON type: {typeof(json_data)}")
-    },
-    .err(e) => println("   Error: {e}"),
+    }
+    .err(e) => println("   Error: {e}")
 }
 
 // POST request
@@ -29,8 +27,8 @@ match http.post("https://jsonplaceholder.typicode.com/posts", "{\"title\": \"foo
         println("   Status: {status}")
         body := res.text() ?? ""
         println("   Response length: {str.length(body)} chars")
-    },
-    .err(e) => println("   Error: {e}"),
+    }
+    .err(e) => println("   Error: {e}")
 }
 
 // GET with headers
@@ -41,8 +39,8 @@ match http.get("https://httpbin.org/headers", {"X-Custom": "zz-lang", "Accept": 
         println("   Status: {status}")
         headers := res.headers() ?? {}
         println("   Got response headers")
-    },
-    .err(e) => println("   Error: {e}"),
+    }
+    .err(e) => println("   Error: {e}")
 }
 
 println("weather_api_client_done")

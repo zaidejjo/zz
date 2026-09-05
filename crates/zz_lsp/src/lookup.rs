@@ -91,10 +91,7 @@ fn collect_stmt_defs(stmt: &Stmt, source: &str, defs: &mut HashMap<u32, Definiti
         Stmt::Impl { name, methods, .. } => {
             let type_name = name.join(".");
             for method in methods {
-                if let Stmt::Func {
-                    name: mname, span, ..
-                } = method
-                {
+                if let Stmt::Func { name: mname, .. } = method {
                     let full_name = format!("{}.{}", type_name, mname.join("."));
                     if let Some(s) = find_name_in_source(source, &full_name) {
                         defs.insert(

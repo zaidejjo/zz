@@ -34,7 +34,8 @@ USAGE:
     zz fmt [FLAGS] [PATH]         format ZZ source files in-place
 
 FLAGS:
-    --check, -c       check formatting without writing (exit 1 if changed)
+    --check, -c       with fmt, check formatting without writing (exit 1 if changed)
+    --stdin           with fmt, read source from stdin and write formatted to stdout
     --fix, -f          apply safe auto-fixes (typo replacements, field corrections)
     --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
     --interactive, -i  with --fix, prompt for ambiguous fixes interactively
@@ -58,6 +59,7 @@ EXAMPLES:
     zz check --fix -i src/           interactive mode for ambiguous fixes
     zz fmt .                         format all .zz files in current directory
     zz fmt -c src/                   check formatting without writing
+    zz fmt --stdin < file.zz         format a single file via stdin/stdout
 ";
 
 fn main() -> ExitCode {
@@ -150,7 +152,8 @@ fn main() -> ExitCode {
             let (path, flags) = parse_path_and_flags(rest);
             let check_only =
                 flags.contains(&"--check".to_string()) || flags.contains(&"-c".to_string());
-            match fmt_path(&path, check_only) {
+            let stdin = flags.contains(&"--stdin".to_string());
+            match fmt_command(path, check_only, stdin) {
                 Ok(changed) => {
                     if check_only && changed {
                         ExitCode::FAILURE
@@ -182,7 +185,7 @@ fn main() -> ExitCode {
 
 /// Split args into flags (--flag items) and path (last non-flag arg).
 /// Flags must precede the path: `zz check --fix src/`.
-/// Short aliases are normalized: `-i` → `--interactive`, `-f` → `--fix`.
+/// Short aliases are normalized: `-i` → `--interactive`, `-f` → `--fix`, `-c` → `--check`.
 fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
     let mut path = None;
     let mut flags = Vec::new();
@@ -191,7 +194,9 @@ fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
             flags.push("--interactive".to_string());
         } else if a == "-f" {
             flags.push("--fix".to_string());
-        } else if a.starts_with("--") {
+        } else if a == "-c" {
+            flags.push("--check".to_string());
+        } else if a.starts_with("--") || a.starts_with('-') {
             flags.push(a.clone());
         } else {
             // Last non-flag wins as path.
@@ -199,38 +204,6 @@ fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
         }
     }
     (path, flags)
-}
-
-/// Collect all `.zz` files from a path (file or directory, recursive).
-fn collect_zz_files(path: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String> {
-    if path.is_file() {
-        Ok(vec![path.to_path_buf()])
-    } else if path.is_dir() {
-        let mut files = Vec::new();
-        collect_zz_recursive(path, &mut files)?;
-        files.sort();
-        Ok(files)
-    } else {
-        Err(format!("path `{}` does not exist", path.display()))
-    }
-}
-
-fn collect_zz_recursive(
-    dir: &std::path::Path,
-    out: &mut Vec<std::path::PathBuf>,
-) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| format!("cannot read directory `{}`: {e}", dir.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("read_dir error: {e}"))?;
-        let p = entry.path();
-        if p.is_dir() {
-            collect_zz_recursive(&p, out)?;
-        } else if p.extension().and_then(|s| s.to_str()) == Some("zz") {
-            out.push(p);
-        }
-    }
-    Ok(())
 }
 
 fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String> {
@@ -373,7 +346,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let dest = p.with_file_name(format!("{stem}"));
+    let dest = p.with_file_name(&stem);
     std::fs::copy(&out, &dest).map_err(|e| format!("cannot write binary: {e}"))?;
     let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
     println!(
@@ -385,46 +358,124 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Format all `.zz` files under a path.  Returns `Ok(true)` when at
-/// least one file was changed (useful for `--check` mode).
-fn fmt_path(path_arg: &Option<String>, check_only: bool) -> Result<bool, String> {
+/// Top-level entry for `zz fmt`.
+///
+/// Modes:
+/// - `stdin=true`: read source from stdin, write formatted output to
+///   stdout. Honors `--check` by exiting 1 if stdin needs formatting
+///   without producing output.
+/// - `stdin=false`: format every `.zz` file under `path_arg` (or
+///   `.` if not given) in place, or print a unified diff for files
+///   that need formatting under `--check`.
+///
+/// Uses `zz_fmt::discover` for gitignore-aware file discovery and
+/// `zz_fmt::format_paths_parallel` for concurrent formatting via rayon.
+///
+/// Returns `Ok(true)` when at least one file (or stdin) needed
+/// formatting — the caller uses this to choose the exit code.
+fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Result<bool, String> {
+    use std::io::Read;
+
+    if stdin {
+        let mut source = String::new();
+        std::io::stdin()
+            .read_to_string(&mut source)
+            .map_err(|e| format!("cannot read stdin: {e}"))?;
+        let config = zz_fmt::FmtConfig::default();
+        return match zz_fmt::format_source(&source, &config) {
+            Ok(formatted) => {
+                if formatted != source {
+                    if check_only {
+                        // Emit the diff so callers can see what would change.
+                        let diff = zz_fmt::diff::unified_diff_plain("<stdin>", &source, &formatted)
+                            .unwrap_or_default();
+                        eprint!("{diff}");
+                    } else {
+                        print!("{formatted}");
+                    }
+                    Ok(true)
+                } else {
+                    if !check_only {
+                        print!("{formatted}");
+                    }
+                    Ok(false)
+                }
+            }
+            Err(e) => Err(format!("format error: {e}")),
+        };
+    }
+
+    // Discover .zz files using gitignore-aware walker.
     let raw = path_arg.as_deref().unwrap_or(".");
-    let base = std::path::Path::new(raw);
-    let files = collect_zz_files(base)?;
+    let base = std::path::PathBuf::from(raw);
+    let files = zz_fmt::discover(&[base]).map_err(|e| format!("file discovery failed: {e}"))?;
 
     if files.is_empty() {
         return Err(format!("no .zz files found in `{raw}`"));
     }
 
-    let config = zz_frontend::FormatConfig::default();
+    let config = zz_fmt::FmtConfig::default();
+
+    // Read all files into memory, then format in parallel (pure, no disk I/O).
+    // This avoids writing files when --check is active.
+    let sources: Vec<(std::path::PathBuf, String)> = files
+        .iter()
+        .filter_map(|p| {
+            std::fs::read_to_string(p)
+                .ok()
+                .map(|s| (p.clone(), s))
+                .filter(|(_, s)| !s.is_empty())
+        })
+        .collect();
+
+    let src_refs: Vec<(&std::path::PathBuf, &str)> =
+        sources.iter().map(|(p, s)| (p, s.as_str())).collect();
+    let results = zz_fmt::format_sources_parallel(&src_refs, &config);
+
     let mut changed_any = false;
+    let mut errors: Vec<String> = Vec::new();
 
-    for path in &files {
-        let path_str = path.display().to_string();
-        let source =
-            std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path_str}`: {e}"))?;
-
-        let parsed = zz_frontend::parse(&source);
-        let formatted = zz_frontend::format_program(&parsed.program, &source, &config);
-
-        if formatted != source {
-            changed_any = true;
-            if check_only {
-                eprintln!("would reformat: {path_str}");
-            } else {
-                std::fs::write(path, &formatted)
-                    .map_err(|e| format!("cannot write `{path_str}`: {e}"))?;
-                eprintln!("reformatted: {path_str}");
+    for (i, result) in results.into_iter().enumerate() {
+        let formatted = match result {
+            Ok(s) => s,
+            Err(e) => {
+                errors.push(format!("{e}"));
+                continue;
             }
+        };
+
+        let (path, original) = &sources[i];
+        let path_str = path.display().to_string();
+
+        if formatted == *original {
+            continue;
         }
+        changed_any = true;
+
+        if check_only {
+            eprintln!("--- {path_str} (would reformat) ---");
+            let diff = zz_fmt::diff::unified_diff_plain(&path_str, original, &formatted)
+                .unwrap_or_default();
+            print!("{diff}");
+        } else {
+            if let Err(e) = std::fs::write(path, &formatted) {
+                errors.push(format!("cannot write `{path_str}`: {e}"));
+                continue;
+            }
+            eprintln!("reformatted: {path_str}");
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(errors.join("\n"));
     }
 
     if check_only && changed_any {
         eprintln!(
-            "zz: {} file(s) need formatting (use `zz fmt` without --check to fix)",
+            "\nzz: {} file(s) need formatting (run `zz fmt` to fix)",
             files.len()
         );
-    } else if !changed_any {
+    } else if !changed_any && !check_only {
         eprintln!("zz: all files already formatted");
     }
 
@@ -441,8 +492,8 @@ fn check_or_fix_path(
     use zz_frontend::diag::{FixSafety, Severity};
 
     let raw = path_arg.as_deref().unwrap_or(".");
-    let base = std::path::Path::new(raw);
-    let files = collect_zz_files(base)?;
+    let base = std::path::PathBuf::from(raw);
+    let files = zz_fmt::discover(&[base]).map_err(|e| format!("file discovery failed: {e}"))?;
 
     if files.is_empty() {
         return Err(format!("no .zz files found in `{raw}`"));
@@ -587,7 +638,7 @@ fn check_or_fix_path(
         let mut applied = 0u32;
         if !approved.is_empty() {
             let mut new_source = source.clone();
-            approved.sort_by(|a, b| b.span.start.cmp(&a.span.start));
+            approved.sort_by_key(|b| std::cmp::Reverse(b.span.start));
             for fixit in &approved {
                 let start = fixit.span.start as usize;
                 let end = fixit.span.end as usize;

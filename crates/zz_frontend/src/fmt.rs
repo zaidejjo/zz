@@ -296,7 +296,7 @@ impl<'a> FmtCtx<'a> {
             TyKind::Str => self.write_str("str"),
             TyKind::Unit => self.write_str("()"),
             TyKind::Named(name, generics) => {
-                self.write_str(&name);
+                self.write_str(name);
                 if !generics.is_empty() {
                     self.write_str("[");
                     for (i, g) in generics.iter().enumerate() {

@@ -1,8 +1,11 @@
 // Test: pub struct and method together.
-pub struct Point { x: int, y: int }
-pub func dist(p: Point) -> int { p.x + p.y }
+pub struct Point {x: int, y: int}
+
+pub func dist(p: Point) -> int {
+    p.x + p.y
+}
 
 func main() {
-    p := Point { x: 3, y: 4 }
+    p := Point{x: 3, y: 4}
     std.io.println(dist(p))
 }

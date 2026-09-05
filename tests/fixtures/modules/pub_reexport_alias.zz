@@ -2,7 +2,9 @@
 // Full multi-file test is in loader/tests.rs (pub_reexport_alias_with_struct).
 import std.io as io
 
-pub func add(a: int, b: int) -> int { a + b }
+pub func add(a: int, b: int) -> int {
+    a + b
+}
 
 func main() {
     io.println(add(3, 4))
