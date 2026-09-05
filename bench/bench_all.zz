@@ -2,7 +2,9 @@ import std.time
 
 // Warmup
 s := 0
-for i in 0..100000 { s = s + i }
+for i in 0..100000 {
+    s = s + i
+}
 
 // Benchmark 1: add_to_1M
 t0 := time.now_ms()

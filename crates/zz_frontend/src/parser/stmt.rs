@@ -41,9 +41,9 @@ impl Parser {
     pub(crate) fn parse_stmt(&mut self) -> Stmt {
         match self.peek_kind() {
             TokenKind::Pub => {
-                let _pub_tok = self.advance();
+                let pub_tok = self.advance();
                 // `pub` must be followed by func, struct, import, or a declaration.
-                match self.peek_kind() {
+                let stmt = match self.peek_kind() {
                     TokenKind::Func => self.parse_func(true),
                     TokenKind::Struct => self.parse_struct(true),
                     TokenKind::Impl => self.parse_impl(true),
@@ -57,15 +57,16 @@ impl Parser {
                         let save_pos = self.pos;
                         let save_errs = self.errors.len();
                         if let Some(decl) = self.try_parse_explicit_decl(true) {
-                            return decl;
+                            decl
+                        } else {
+                            self.pos = save_pos;
+                            self.errors.truncate(save_errs);
+                            self.error_here(
+                                "expected `func`, `struct`, `import`, or declaration after `pub`",
+                            );
+                            // Recover by parsing the next statement as if `pub` wasn't there.
+                            self.parse_stmt()
                         }
-                        self.pos = save_pos;
-                        self.errors.truncate(save_errs);
-                        self.error_here(
-                            "expected `func`, `struct`, `import`, or declaration after `pub`",
-                        );
-                        // Recover by parsing the next statement as if `pub` wasn't there.
-                        self.parse_stmt()
                     }
                     _ => {
                         self.error_here(
@@ -73,7 +74,8 @@ impl Parser {
                         );
                         self.parse_stmt()
                     }
-                }
+                };
+                pub_started(stmt, pub_tok.span)
             }
             TokenKind::Import => self.parse_import(false),
             TokenKind::Func => self.parse_func(false),
@@ -546,5 +548,97 @@ fn dummy_ident(span: Span) -> Ident {
     Ident {
         name: String::new(),
         span,
+    }
+}
+
+/// Extend a statement's span to include the leading `pub` keyword so the
+/// `pub_` flag and the span always agree (the formatter relies on it when
+/// re-emitting `pub`).
+fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
+    let span = |s: &mut Span| {
+        if s.start > pub_span.start {
+            s.start = pub_span.start;
+        }
+    };
+    match stmt {
+        Stmt::Decl {
+            ty,
+            name,
+            value,
+            span: mut sp,
+            pub_,
+        } => {
+            span(&mut sp);
+            Stmt::Decl {
+                ty,
+                name,
+                value,
+                span: sp,
+                pub_,
+            }
+        }
+        Stmt::Import {
+            path,
+            alias,
+            span: mut sp,
+            pub_,
+        } => {
+            span(&mut sp);
+            Stmt::Import {
+                path,
+                alias,
+                span: sp,
+                pub_,
+            }
+        }
+        Stmt::Func {
+            name,
+            generics,
+            params,
+            ret,
+            body,
+            span: mut sp,
+            pub_,
+        } => {
+            span(&mut sp);
+            Stmt::Func {
+                name,
+                generics,
+                params,
+                ret,
+                body,
+                span: sp,
+                pub_,
+            }
+        }
+        Stmt::Struct {
+            name,
+            fields,
+            span: mut sp,
+            pub_,
+        } => {
+            span(&mut sp);
+            Stmt::Struct {
+                name,
+                fields,
+                span: sp,
+                pub_,
+            }
+        }
+        Stmt::Impl {
+            name,
+            methods,
+            span: mut sp,
+            pub_,
+        } => {
+            span(&mut sp);
+            Stmt::Impl {
+                name,
+                methods,
+                span: sp,
+                pub_,
+            }
+        }
+        other => other,
     }
 }

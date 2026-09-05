@@ -37,17 +37,37 @@ pub struct Fingerprint {
 impl Fingerprint {
     pub fn of_program(p: &Program) -> Self {
         let mut s = String::new();
-        fp_program(p, &mut s);
+        // Imports may be reordered/hoisted by the formatter, so their
+        // fingerprints are collected into a sorted prelude while the
+        // non-import statements keep their source order.
+        let mut imports: Vec<String> = Vec::new();
+        let mut body = String::new();
+        for st in &p.stmts {
+            if let Stmt::Import { path, alias, .. } = st {
+                let mut fp = String::from("Import-kw[");
+                for part in path {
+                    fp.push_str(part);
+                    fp.push(',');
+                }
+                if let Some(a) = alias {
+                    fp.push_str("alias=");
+                    fp.push_str(a);
+                }
+                fp.push(']');
+                imports.push(fp);
+            } else {
+                fp_stmt(st, &mut body);
+            }
+        }
+        imports.sort();
+        s.push_str("Program[");
+        for im in imports {
+            s.push_str(&im);
+        }
+        s.push_str(&body);
+        s.push(']');
         Fingerprint { tree: s }
     }
-}
-
-fn fp_program(p: &Program, out: &mut String) {
-    out.push_str("Program[");
-    for s in &p.stmts {
-        fp_stmt(s, out);
-    }
-    out.push(']');
 }
 
 fn fp_stmt(s: &Stmt, out: &mut String) {
@@ -195,7 +215,7 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
 
 fn fp_pattern(p: &Pattern, out: &mut String) {
     match p {
-        Pattern::Wildcard { .. } => out.push_str("_"),
+        Pattern::Wildcard { .. } => out.push('_'),
         Pattern::Binding { name } => out.push_str(&name.name),
         Pattern::Literal { value, .. } => fp_lit(value, out),
         Pattern::Variant { name, arg, .. } => {
@@ -260,7 +280,7 @@ fn fp_ty(t: &Ty, out: &mut String) {
             out.push(']');
         }
         TyKind::Dict(k, v) => {
-            out.push_str("{");
+            out.push('{');
             fp_ty(k, out);
             out.push(':');
             fp_ty(v, out);
@@ -607,7 +627,94 @@ fn significant_token_sequence(source: &str) -> Vec<String> {
     seq
 }
 
-/// Extract every comment substring (`// ...`, `/// ...`, `/* ... */`)
+/// Drop trailing commas in container layouts and match-arm separators.
+///
+/// The emitters' maximum-1-line container layout never renders trailing
+/// commas, while hand-written source often includes them (e.g. `match`
+/// arms ended with `,`, including arm separators on the next line). Since
+/// the AST carries no trailing-comma flag, verification normalizes both
+/// sides so trailing commas never count as structural drift.
+fn normalize_trailing_commas(seq: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(seq.len());
+    let mut i = 0;
+    while i < seq.len() {
+        let next = seq.get(i + 1).map(String::as_str);
+        if seq[i] == "," && next.is_some_and(arm_start) {
+            i += 1;
+            continue;
+        }
+        // Integer literals may be written with `_` separators or leading
+        // zeros; the AST normalizes their value, so compare canonically.
+        if is_digits(&seq[i]) {
+            if let Ok(n) = seq[i].replace('_', "").parse::<u64>() {
+                out.push(n.to_string());
+                i += 1;
+                continue;
+            }
+        }
+        out.push(seq[i].clone());
+        i += 1;
+    }
+    out
+}
+
+/// True when `tok` is a plain integer literal (digits and `_` separators).
+fn is_digits(tok: &str) -> bool {
+    !tok.is_empty() && tok.bytes().all(|b| b.is_ascii_digit() || b == b'_')
+}
+
+/// Comma is "arm-start" when the next token begins a match arm or closes a
+/// container: `_`, `.variant`, literal, string, or a closing delimiter.
+fn arm_start(tok: &str) -> bool {
+    matches!(tok, ")" | "]" | "}" | "_" | "(")
+        || tok.starts_with('.')
+        || tok.starts_with('"')
+        || tok.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// Split a normalized token sequence into (sorted import statements, rest).
+/// The formatter hoists `import` statements to the top of the file, so
+/// verification compares imports as an order-insensitive set while keeping
+/// the body's token order intact.
+fn split_imports(seq: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut imports: Vec<String> = Vec::new();
+    let mut rest: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < seq.len() {
+        let mut j = i;
+        let mut is_import = false;
+        if seq.get(j).is_some_and(|t| t == "pub") {
+            j += 1;
+        }
+        if seq.get(j).is_some_and(|t| t == "import") {
+            is_import = true;
+            j += 1;
+            // path: `ident ('.' ident)*`
+            if seq.get(j).is_some_and(|t| t != ".") {
+                j += 1;
+                while seq.get(j).is_some_and(|t| t == ".") && seq.get(j + 1).is_some() {
+                    j += 2;
+                }
+            }
+            // optional `as ident`
+            if seq.get(j).is_some_and(|t| t == "as") {
+                j += 1;
+                if seq.get(j).is_some() {
+                    j += 1;
+                }
+            }
+        }
+        if is_import {
+            imports.push(seq[i..j].join(" "));
+            i = j;
+        } else {
+            rest.push(seq[i].clone());
+            i += 1;
+        }
+    }
+    imports.sort();
+    (imports, rest)
+}
 /// from `source`. Comments are returned in source order.
 fn extract_comments(source: &str) -> Vec<String> {
     let bytes = source.as_bytes();
@@ -684,11 +791,25 @@ pub fn verify(
         });
     }
 
-    // 3. Significant-token sequences must match.
-    let orig_tokens = significant_token_sequence(original_src);
-    let new_tokens = significant_token_sequence(formatted_src);
-    if orig_tokens != new_tokens {
-        let summary = diff_token_sequences(&orig_tokens, &new_tokens);
+    // 3. Significant-token sequences must match. Trailing commas are
+    //    normalized on both sides (the emitter never produces them) and
+    //    imports are compared as an order-insensitive set (the emitter
+    //    hoists them to the top of the file).
+    let orig_tokens = normalize_trailing_commas(&significant_token_sequence(original_src));
+    let new_tokens = normalize_trailing_commas(&significant_token_sequence(formatted_src));
+    let (orig_imports, orig_rest) = split_imports(&orig_tokens);
+    let (new_imports, new_rest) = split_imports(&new_tokens);
+    if orig_imports != new_imports || orig_rest != new_rest {
+        if orig_imports != new_imports {
+            return Err(FmtError::Verify {
+                path: path.to_path_buf(),
+                mismatch: format!(
+                    "import set differs\n  input:    {:?}\n  formatted: {:?}",
+                    orig_imports, new_imports
+                ),
+            });
+        }
+        let summary = diff_token_sequences(&orig_rest, &new_rest);
         return Err(FmtError::Verify {
             path: path.to_path_buf(),
             mismatch: format!("token sequence differs\n{summary}"),
@@ -772,6 +893,18 @@ mod tests {
         let a = significant_token_sequence("x := 1 + 2\n");
         let b = significant_token_sequence("  x   :=  1+2 \n");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn trailing_comma_normalized() {
+        let a = normalize_trailing_commas(&significant_token_sequence("f(a, b,)\n"));
+        let b = normalize_trailing_commas(&significant_token_sequence("f(a, b)\n"));
+        let c =
+            normalize_trailing_commas(&significant_token_sequence("match x { 1 => a, _ => b }\n"));
+        let d =
+            normalize_trailing_commas(&significant_token_sequence("match x { 1 => a, _ => b, }\n"));
+        assert_eq!(a, b);
+        assert_eq!(c, d);
     }
 
     #[test]

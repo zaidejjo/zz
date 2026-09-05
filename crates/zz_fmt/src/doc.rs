@@ -15,9 +15,9 @@
 use std::borrow::Cow;
 
 /// A piece of the formatter IR.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum Doc<'src> {
-    /// Nothing.
+    #[default]
     Nil,
 
     /// Borrowed source text — zero allocation.
@@ -137,11 +137,5 @@ impl<'src> From<&'src str> for Doc<'src> {
 impl<'src> From<String> for Doc<'src> {
     fn from(s: String) -> Self {
         Doc::TextOwned(Cow::Owned(s))
-    }
-}
-
-impl<'src> Default for Doc<'src> {
-    fn default() -> Self {
-        Doc::Nil
     }
 }

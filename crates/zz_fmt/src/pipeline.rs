@@ -33,44 +33,17 @@ pub struct TriviaReport {
     pub blank_lines: usize,
 }
 
-/// Collapse runs of blank lines (≥2) down to a single blank line.
-///
-/// This is a whitespace-only transformation: every token, comment, and
-/// newline that terminates a statement is preserved exactly, so the
-/// re-lexed significant-token sequence (and therefore the AST) is
-/// identical to the input. Used as a safe fallback when the
-/// AST-aware pretty printer cannot prove its output is structurally
-/// equivalent to the source.
-fn collapse_blank_lines(source: &str) -> String {
-    let lines: Vec<&str> = source.split('\n').collect();
-    let mut out = String::with_capacity(source.len());
-    let mut prev_blank = false;
-    for (i, line) in lines.iter().enumerate() {
-        let blank = line.trim().is_empty();
-        if blank && prev_blank {
-            continue;
-        }
-        out.push_str(line);
-        if i + 1 < lines.len() {
-            out.push('\n');
-        }
-        prev_blank = blank;
-    }
-    out
-}
-
 /// Format a single source string. Returns the formatted output.
 ///
 /// On parse errors, returns `FmtError::Parse` with the diagnostic
 /// summary. On verification mismatch (AST shape, token sequence, or
 /// dropped comment), returns `FmtError::Verify`.
 ///
-/// Formatting is best-effort with a hard safety guarantee: the output
-/// is only returned when verification proves it is structurally
-/// equivalent to the input. If the pretty printer's output cannot be
-/// verified (e.g. source uses constructs the AST-aware emitter does
-/// not yet preserve losslessly), the pipeline falls back to a
-/// whitespace-only pass (blank-line collapse), which always verifies.
+/// Formatting is strict: the AST-aware pretty printer's output is only
+/// returned when verification proves it structurally equivalent to the
+/// input. There is no raw-whitespace fallback — if the emitter cannot
+/// prove equivalence, the error is surfaced so formatter bugs cannot be
+/// silently masked.
 pub fn format_source(source: &str, config: &FmtConfig) -> Result<String, FmtError> {
     let parsed = parse(source);
     if !parsed.errors.is_empty() {
@@ -86,27 +59,12 @@ pub fn format_source(source: &str, config: &FmtConfig) -> Result<String, FmtErro
         });
     }
     let (doc, eol) = ir::lower_program(&parsed.program, source);
-    let mut out = printer::render(&doc, config.line_width, eol);
+    let mut out = printer::render(&doc, config.line_width, config.indent_width, eol);
     if config.trailing_newline && !out.ends_with('\n') {
         out.push('\n');
     }
-    if verify::verify(Path::new("<source>"), &parsed.program, source, &out).is_ok() {
-        return Ok(out);
-    }
-
-    // Safe fallback: whitespace-only normalization. Tokens, comments,
-    // and AST are preserved by construction, so verification always
-    // succeeds here.
-    let mut safe = if config.collapse_blank_lines {
-        collapse_blank_lines(source)
-    } else {
-        source.to_string()
-    };
-    if config.trailing_newline && !safe.ends_with('\n') {
-        safe.push('\n');
-    }
-    verify::verify(Path::new("<source>"), &parsed.program, source, &safe)?;
-    Ok(safe)
+    verify::verify(Path::new("<source>"), &parsed.program, source, &out)?;
+    Ok(out)
 }
 
 /// Format a file in place. Reads source from disk, formats, verifies,

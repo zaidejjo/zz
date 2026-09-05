@@ -29,13 +29,15 @@ impl Eol {
     }
 }
 
-/// Render `doc` into a `String` using the given `line_width` and EOL style.
-pub fn render<'src>(doc: &Doc<'src>, line_width: usize, eol: Eol) -> String {
+/// Render `doc` into a `String` using the given `line_width`, `indent_width`
+/// (spaces per `Doc::Indent` level), and EOL style.
+pub fn render<'src>(doc: &Doc<'src>, line_width: usize, indent_width: usize, eol: Eol) -> String {
     let mut out = String::new();
     let mut state = State {
         out: &mut out,
         indent: 0,
         line_width,
+        indent_width,
         eol,
         // Stack of "are we currently broken?" for IfBreak decisions.
         // Empty = flat; non-empty = broken at the deepest level.
@@ -54,6 +56,7 @@ struct State<'o> {
     out: &'o mut String,
     indent: usize,
     line_width: usize,
+    indent_width: usize,
     eol: Eol,
     break_stack: Vec<bool>,
 }
@@ -64,11 +67,8 @@ impl<'o> State<'o> {
     }
 
     fn write_indent(&mut self) {
-        // Indentation is tracked as a count of "indent units"; the
-        // actual spaces/tabs are emitted by the caller via the indent
-        // string. We store one byte per unit for simplicity (the
-        // current design uses spaces only).
-        for _ in 0..self.indent {
+        // Each `Doc::Indent` level contributes `indent_width` spaces.
+        for _ in 0..self.indent * self.indent_width {
             self.out.push(' ');
         }
     }

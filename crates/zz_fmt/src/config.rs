@@ -1,9 +1,10 @@
 //! Formatter configuration.
 
 /// Line ending policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LineEnding {
     /// Detect from the first newline in the source; default `\n`.
+    #[default]
     Auto,
     /// Force `\n`.
     Lf,
@@ -11,42 +12,26 @@ pub enum LineEnding {
     Crlf,
 }
 
-impl Default for LineEnding {
-    fn default() -> Self {
-        LineEnding::Auto
-    }
-}
-
 /// Trailing-comma policy. Multi-line-only matches Prettier/Go: trailing
 /// comma appears when the group breaks across multiple lines, omitted
 /// when the group fits on one line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrailingComma {
     Never,
     /// Default. Trailing comma when the group breaks.
+    #[default]
     MultiLineOnly,
     Always,
 }
 
-impl Default for TrailingComma {
-    fn default() -> Self {
-        TrailingComma::MultiLineOnly
-    }
-}
-
 /// Semicolon policy. `Auto` preserves the source's choice; the other
 /// variants force a consistent style.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SemiStyle {
+    #[default]
     Auto,
     Always,
     Never,
-}
-
-impl Default for SemiStyle {
-    fn default() -> Self {
-        SemiStyle::Auto
-    }
 }
 
 /// Top-level configuration for the formatter. Cheap to clone (Copy soon).

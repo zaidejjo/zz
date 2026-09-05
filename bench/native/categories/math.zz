@@ -1,5 +1,7 @@
 import std.io
+
 // Math: 1M pow + sqrt iterations
+
 func main() {
     acc := 0
     for i in 0..1000000 {

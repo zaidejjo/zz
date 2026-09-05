@@ -19,14 +19,16 @@ use zz_frontend::token::{Trivia, TriviaKind};
 
 /// What kind of trivia a chunk represents.
 #[derive(Debug, Clone, PartialEq, Eq)]
-    /// A single newline (hard line).
+/// A single newline (hard line).
 pub enum ClassifiedKind {
     /// Whitespace run that may contain a single newline (infix space).
     /// Carry the original text for fidelity.
     Spacing(String),
     /// One or more blank lines between tokens.
     Newline,
-    BlankLine { count: usize },
+    BlankLine {
+        count: usize,
+    },
     /// `//` line comment (without the trailing newline).
     Line(String),
     /// `///` doc comment.

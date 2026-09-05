@@ -130,8 +130,8 @@ fn round_trip_syntax_fixtures() {
 #[test]
 fn round_trip_types_fixtures() {
     let config = zz_fmt::FmtConfig::default();
+    let mut failures = Vec::new();
     let mut total = 0;
-    let mut failures: Vec<String> = Vec::new();
     for path in fixtures_in("types") {
         total += 1;
         let src = match std::fs::read_to_string(&path) {
@@ -232,7 +232,7 @@ fn inline_idempotent() {
 fn inline_preserves_comments() {
     let config = zz_fmt::FmtConfig::default();
     let src = "// header\nx := 1 // trailing\n/// doc line\ny := 2\n";
-    let out = zz_fmt::format_source(&src, &config).unwrap();
+    let out = zz_fmt::format_source(src, &config).unwrap();
     println!("Formatted output: {:?}", out);
     assert!(out.contains("// header"));
     assert!(out.contains("// trailing"));
@@ -242,7 +242,7 @@ fn inline_preserves_comments() {
 fn inline_preserves_blank_lines() {
     let config = zz_fmt::FmtConfig::default();
     let src = "x := 1\n\n\ny := 2\n";
-    let out = zz_fmt::format_source(&src, &config).unwrap();
+    let out = zz_fmt::format_source(src, &config).unwrap();
     // Debug: print the actual output
     println!("Actual output: {:?}", out);
     println!("Actual output (escaped): {}", out.replace("\n", "\\n"));
