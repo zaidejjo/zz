@@ -2,11 +2,13 @@
 
 use crate::span::Span;
 
+#[allow(dead_code)]
 pub(crate) struct Cursor<'a> {
     src: &'a str,
     pos: usize,
 }
 
+#[allow(dead_code)]
 impl<'a> Cursor<'a> {
     pub(crate) fn new(src: &'a str) -> Self {
         Cursor { src, pos: 0 }

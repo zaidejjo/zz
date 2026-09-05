@@ -28,7 +28,7 @@ pub(crate) fn object_field(obj: &Value, name: &str, span: Span) -> Result<Value,
             }),
         Value::Dict(entries) => entries
             .iter()
-            .find(|(k, _)| matches!(k, Value::Str(s) if &**s == name))
+            .find(|(k, _)| matches!(k, Value::Str(s) if s.as_str() == name))
             .map(|(_, v)| v.clone())
             .ok_or_else(|| EvalError::new(format!("dict has no key `{name}`"), span)),
         other => Err(EvalError::new(

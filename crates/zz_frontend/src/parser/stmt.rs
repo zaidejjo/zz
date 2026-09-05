@@ -1,9 +1,9 @@
 //! Statement parsing.
 
-use crate::ast::{Block, Expr, Ident, Param, Pattern, Program, Stmt, Ty};
-use crate::diag::{error_at, RawDiag};
+use crate::ast::{Block, Ident, Param, Pattern, Stmt};
+use crate::diag::error_at;
 use crate::span::Span;
-use crate::token::{Token, TokenKind};
+use crate::token::TokenKind;
 
 use super::Parser;
 

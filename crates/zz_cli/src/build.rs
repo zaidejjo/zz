@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use zz_codegen::BuildOptions;
-use zz_frontend::diag::Files;
 use zz_frontend::span::Span;
 use zz_hir::TypedProgram;
 
@@ -154,6 +153,7 @@ pub fn build_native(path: &Path, mode: BuildMode) -> Result<PathBuf, String> {
 
 /// Transient: compile to a temp path, return (binary path, cleanup fn).
 /// Caller must invoke the closure to remove the artifact.
+#[allow(dead_code, clippy::type_complexity)]
 pub fn transient_build(path: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), String> {
     let entry_ns = path
         .file_stem()

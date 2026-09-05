@@ -103,7 +103,7 @@ fn vec_pop_removes_last() {
 
 #[test]
 fn vec_pop_empty_errors() {
-    let err = call("std.vec.pop", vec![Value::Array(Box::new(vec![]))]).unwrap_err();
+    let err = call("std.vec.pop", vec![Value::Array(Box::default())]).unwrap_err();
     assert!(err.message.contains("empty array"), "{}", err.message);
 }
 

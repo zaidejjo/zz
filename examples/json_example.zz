@@ -31,14 +31,14 @@ println("7. round trip: {roundtrip}")
 // ── error handling with match ──
 bad := json.parse("not json at all")
 match bad {
-    .ok(_) => println("8. should not happen"),
-    .err(msg) => println("8. parse error: {msg}"),
+    .ok(_) => println("8. should not happen")
+    .err(msg) => println("8. parse error: {msg}")
 }
 
 missing := json.get(j, "nonexistent")
 match missing {
-    .ok(_) => println("9. should not happen"),
-    .err(msg) => println("9. missing key: {msg}"),
+    .ok(_) => println("9. should not happen")
+    .err(msg) => println("9. missing key: {msg}")
 }
 
 println("json_example_done")

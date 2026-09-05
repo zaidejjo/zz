@@ -7,8 +7,8 @@ import std.time
 println("=== std.fs ===")
 fs.write("/tmp/zz_lib_test.txt", "Hello from ZZ!")
 match fs.read_to_string("/tmp/zz_lib_test.txt") {
-    .ok(c) => println("read: {c}"),
-    .err(e) => println("err: {e}"),
+    .ok(c) => println("read: {c}")
+    .err(e) => println("err: {e}")
 }
 println("exists: {fs.exists("/tmp/zz_lib_test.txt")}")
 fs.remove_file("/tmp/zz_lib_test.txt")
@@ -19,8 +19,8 @@ println("=== std.env ===")
 my_args := env.args()
 println("arg count: {len(my_args)}")
 match env.var("PATH") {
-    .ok(p) => println("PATH set ({len(p)} chars)"),
-    .err(e) => println("PATH: {e}"),
+    .ok(p) => println("PATH set ({len(p)} chars)")
+    .err(e) => println("PATH: {e}")
 }
 
 // ── time ──

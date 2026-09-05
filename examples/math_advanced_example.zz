@@ -27,12 +27,12 @@ println("root(8, 3) = {math.root(8, 3)}")
 println("gcd(12, 8) = {math.gcd(12, 8)}")
 println("lcm(4, 6)  = {math.lcm(4, 6)}")
 match math.factorial(10) {
-    .ok(v) => println("10! = {v}"),
-    .err(e) => println("err: {e}"),
+    .ok(v) => println("10! = {v}")
+    .err(e) => println("err: {e}")
 }
 match math.isqrt(144) {
-    .ok(v) => println("isqrt(144) = {v}"),
-    .err(e) => println("err: {e}"),
+    .ok(v) => println("isqrt(144) = {v}")
+    .err(e) => println("err: {e}")
 }
 
 // ── Trigonometry ──
@@ -56,8 +56,8 @@ println("sqrt(2)   = {math.sqrt(2.0)}")
 println("")
 println("=== Linear Algebra ===")
 match math.dot_product([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]) {
-    .ok(v) => println("[1,2,3] . [4,5,6] = {v}"),
-    .err(e) => println("err: {e}"),
+    .ok(v) => println("[1,2,3] . [4,5,6] = {v}")
+    .err(e) => println("err: {e}")
 }
 println("|[3, 4]| = {math.magnitude([3.0, 4.0])}")
 
@@ -66,12 +66,12 @@ println("")
 println("=== Statistics ===")
 data := [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
 match math.mean(data) {
-    .ok(v) => println("mean = {v}"),
-    .err(e) => println("err: {e}"),
+    .ok(v) => println("mean = {v}")
+    .err(e) => println("err: {e}")
 }
 match math.median(data) {
-    .ok(v) => println("median = {v}"),
-    .err(e) => println("err: {e}"),
+    .ok(v) => println("median = {v}")
+    .err(e) => println("err: {e}")
 }
 println("rand_range(1, 100) = {math.rand_range(1, 100)}")
 

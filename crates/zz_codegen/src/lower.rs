@@ -262,12 +262,10 @@ impl Lowerer {
             if let Some(base_type) = names.lookup_type(&parts[0]) {
                 // Walk the chain: r (Rect) -> origin (Point) -> x (int)
                 let mut current_type = base_type.to_string();
-                for i in 1..parts.len() - 1 {
+                for part in &parts[1..parts.len() - 1] {
                     if let Some(inner_name) = self.struct_name_from_c_type(&current_type) {
                         if let Some(sig) = self.tp.structs.get(inner_name) {
-                            if let Some((_, next_ty)) =
-                                sig.fields.iter().find(|(n, _)| n == &parts[i])
-                            {
+                            if let Some((_, next_ty)) = sig.fields.iter().find(|(n, _)| n == part) {
                                 current_type = self.type_to_c(next_ty);
                             }
                         }
@@ -316,7 +314,7 @@ impl Lowerer {
                     }
                 }
                 // Emit this struct.
-                preamble.push_str(&format!("typedef struct {{\n"));
+                preamble.push_str("typedef struct {\n");
                 for (field_name, field_type) in &sig.fields {
                     let c_type = match field_type {
                         zz_checker::Type::Int => "int64_t".to_string(),
@@ -456,22 +454,20 @@ impl Lowerer {
     /// becomes the implicit return value. Handles tail calls, plain
     /// expression tails, and tail if/else (returning from each branch).
     fn last_stmt_value(&self, block: &Block, names: &mut NameCtx, out: &mut String) -> Option<()> {
-        if let Some(last) = block.stmts.last() {
-            if let Stmt::Expr(e) = last {
-                if matches!(e, Expr::If { .. }) {
-                    self.emit_tail_expr(e, names, out);
-                    return Some(());
-                }
-                // Tail call/compound was captured into __tail by emit_block.
-                if let Some(tmp) = names.stack.get("__tail").and_then(|s| s.last()).cloned() {
-                    out.push_str(&format!("    return {};\n", tmp.0));
-                    return Some(());
-                }
-                // Pure leaf tail: emit directly (rarely reached).
-                let val = self.emit_expr(e, names, out);
-                out.push_str(&format!("    return {val};\n"));
+        if let Some(Stmt::Expr(e)) = block.stmts.last() {
+            if matches!(e, Expr::If { .. }) {
+                self.emit_tail_expr(e, names, out);
                 return Some(());
             }
+            // Tail call/compound was captured into __tail by emit_block.
+            if let Some(tmp) = names.stack.get("__tail").and_then(|s| s.last()).cloned() {
+                out.push_str(&format!("    return {};\n", tmp.0));
+                return Some(());
+            }
+            // Pure leaf tail: emit directly (rarely reached).
+            let val = self.emit_expr(e, names, out);
+            out.push_str(&format!("    return {val};\n"));
+            return Some(());
         }
         None
     }
@@ -690,7 +686,7 @@ impl Lowerer {
                                             };
                                             out.push_str(&format!(
                                                 "    ({base_cid}).{field_name} = {final_val};\n",
-                                                field_name = &parts[1]
+                                                field_name = parts[1]
                                             ));
                                             return;
                                         }
@@ -723,8 +719,8 @@ impl Lowerer {
                                                 };
                                                 out.push_str(&format!(
                                                     "    (({base_cid}).{f1}).{f2} = {final_val};\n",
-                                                    f1 = &parts[1],
-                                                    f2 = &parts[2]
+                                                    f1 = parts[1],
+                                                    f2 = parts[2]
                                                 ));
                                                 return;
                                             }
@@ -993,7 +989,7 @@ impl Lowerer {
                     // Check if the variable is a scalar type that can be used directly
                     if let Some(ctype) = names.lookup_type(name) {
                         match ctype {
-                            "int64_t" | "double" | "bool" => format!("{cid}"),
+                            "int64_t" | "double" | "bool" => cid.to_string(),
                             _ => format!("zz_clone({cid})"),
                         }
                     } else {
@@ -1038,8 +1034,8 @@ impl Lowerer {
                     // Check if the variable is a scalar type that can be used directly
                     if let Some(ctype) = names.lookup_type(&joined) {
                         match ctype {
-                            "int64_t" | "double" | "bool" => format!("{cid}"),
-                            _ if self.is_struct_type_str(ctype) => format!("{cid}"),
+                            "int64_t" | "double" | "bool" => cid.to_string(),
+                            _ if self.is_struct_type_str(ctype) => cid.to_string(),
                             _ => format!("zz_clone({cid})"),
                         }
                     } else {
@@ -1311,6 +1307,7 @@ impl Lowerer {
                 arr_var
             }
             Expr::Dict { .. } => "zz_dict_new()".to_string(),
+            #[allow(unreachable_patterns)]
             Expr::Fmt { parts, .. } => {
                 // Format string: build by concatenating parts as strings.
                 if parts.is_empty() {

@@ -601,7 +601,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
 
     // std.http — Phase 5B features
     let dict_str_str = Type::Dict(Box::new(Type::Str), Box::new(Type::Str));
-    let result_bool = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
+    let _result_bool = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
 
     m.insert(
         "std.http.log".into(),

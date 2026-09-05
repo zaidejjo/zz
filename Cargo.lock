@@ -2211,6 +2211,7 @@ dependencies = [
  "tokio",
  "tower-lsp",
  "zz_checker",
+ "zz_fmt",
  "zz_frontend",
  "zz_stdlib",
 ]

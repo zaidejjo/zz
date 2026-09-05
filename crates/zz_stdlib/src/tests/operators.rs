@@ -20,7 +20,7 @@ fn pow_int_large() {
 fn pow_float() {
     let v = run("2.0 ** 0.5").unwrap();
     match v {
-        Value::Float(f) => assert!((f - 1.4142135623730951).abs() < 1e-10),
+        Value::Float(f) => assert!((f - std::f64::consts::SQRT_2).abs() < 1e-10),
         other => panic!("expected float, got {other}"),
     }
 }

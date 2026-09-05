@@ -26,5 +26,5 @@ pub mod verify;
 pub use config::{FmtConfig, LineEnding, SemiStyle, TrailingComma};
 pub use error::FmtError;
 pub use fs::discover;
-pub use parallel::{format_paths, format_paths_parallel};
+pub use parallel::{format_paths, format_paths_parallel, format_sources_parallel};
 pub use pipeline::{format_file, format_source, FormattedFile, TriviaReport};

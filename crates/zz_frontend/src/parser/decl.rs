@@ -1,9 +1,9 @@
 //! Type declaration parsing.
 
 use crate::ast::{Ty, TyKind};
-use crate::diag::{error_at, RawDiag};
+use crate::diag::error_at;
 use crate::span::Span;
-use crate::token::{Token, TokenKind};
+use crate::token::TokenKind;
 
 use super::Parser;
 

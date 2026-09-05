@@ -198,11 +198,7 @@ impl Loader {
                             format!(
                                 "unknown standard library module `std.{module}`\n\
                                      hint: available modules are: {}",
-                                STDLIB_MODULES
-                                    .iter()
-                                    .cloned()
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
+                                STDLIB_MODULES.to_vec().join(", ")
                             ),
                             Span::new(0, 0),
                         )],
@@ -366,12 +362,10 @@ impl Loader {
                                 has_main_func = true;
                             }
                         }
-                        Stmt::Expr(expr) => {
-                            if let Expr::Call { callee, .. } = expr {
-                                if let Expr::Path { parts, .. } = callee.as_ref() {
-                                    if parts.last().map(|s| s.as_str()) == Some("main") {
-                                        has_main_call = true;
-                                    }
+                        Stmt::Expr(Expr::Call { callee, .. }) => {
+                            if let Expr::Path { parts, .. } = callee.as_ref() {
+                                if parts.last().map(|s| s.as_str()) == Some("main") {
+                                    has_main_call = true;
                                 }
                             }
                         }

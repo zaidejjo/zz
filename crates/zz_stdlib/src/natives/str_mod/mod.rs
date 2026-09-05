@@ -111,7 +111,7 @@ pub(crate) fn str_join(
         .iter()
         .map(|v| match v {
             Value::Str(s) => (**s).clone(),
-            other => other.to_string().into(),
+            other => other.to_string(),
         })
         .collect();
     Ok(Value::Str(strs.join(&sep).into()))

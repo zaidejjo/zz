@@ -1,7 +1,7 @@
 //! Expression parsing.
 
-use crate::ast::{BinOp, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, Ty, UnOp};
-use crate::diag::{error_at, RawDiag};
+use crate::ast::{BinOp, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, UnOp};
+use crate::diag::error_at;
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
@@ -351,6 +351,7 @@ impl Parser {
         expr
     }
 
+    #[allow(dead_code)]
     pub(crate) fn parse_expr_list(&mut self) -> Vec<Expr> {
         let mut args = Vec::new();
         if self.at(TokenKind::RParen) {

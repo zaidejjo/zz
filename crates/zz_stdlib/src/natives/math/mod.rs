@@ -1,4 +1,4 @@
-use crate::natives::{arg, expect_array};
+use crate::natives::arg;
 use zz_runtime::{EvalError, Interp, Span, Value};
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -167,7 +167,7 @@ pub(crate) fn math_trunc(
 pub(crate) fn math_clamp(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let val = expect_float(args, 0, "clamp")?;
     let min = expect_float(args, 1, "clamp")?;
@@ -197,7 +197,7 @@ pub(crate) fn math_signum(
 pub(crate) fn math_hypot(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let x = expect_float(args, 0, "hypot")?;
     let y = expect_float(args, 1, "hypot")?;
@@ -247,7 +247,7 @@ pub(crate) fn math_is_inf(
 pub(crate) fn math_root(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let x = expect_float(args, 0, "root")?;
     let n = expect_float(args, 1, "root")?;
@@ -325,7 +325,7 @@ pub(crate) fn math_factorial(
 pub(crate) fn math_gcd(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let a = expect_float(args, 0, "gcd")? as i64;
     let b = expect_float(args, 1, "gcd")? as i64;
@@ -341,7 +341,7 @@ pub(crate) fn math_gcd(
 pub(crate) fn math_lcm(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let a = expect_float(args, 0, "lcm")? as i64;
     let b = expect_float(args, 1, "lcm")? as i64;
@@ -366,7 +366,7 @@ fn gcd(mut a: i64, mut b: i64) -> i64 {
 pub(crate) fn math_sin(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let x = expect_float(args, 0, "sin")?;
     Ok(Value::Float(x.sin()))
@@ -375,7 +375,7 @@ pub(crate) fn math_sin(
 pub(crate) fn math_cos(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let x = expect_float(args, 0, "cos")?;
     Ok(Value::Float(x.cos()))
@@ -384,7 +384,7 @@ pub(crate) fn math_cos(
 pub(crate) fn math_tan(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let x = expect_float(args, 0, "tan")?;
     Ok(Value::Float(x.tan()))
@@ -393,7 +393,7 @@ pub(crate) fn math_tan(
 pub(crate) fn math_asin(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let x = expect_float(args, 0, "asin")?;
     Ok(Value::Float(x.asin()))
@@ -402,7 +402,7 @@ pub(crate) fn math_asin(
 pub(crate) fn math_acos(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let x = expect_float(args, 0, "acos")?;
     Ok(Value::Float(x.acos()))
@@ -411,7 +411,7 @@ pub(crate) fn math_acos(
 pub(crate) fn math_atan(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let x = expect_float(args, 0, "atan")?;
     Ok(Value::Float(x.atan()))
@@ -420,7 +420,7 @@ pub(crate) fn math_atan(
 pub(crate) fn math_sin_deg(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let x = expect_float(args, 0, "sin_deg")?;
     Ok(Value::Float(x.to_radians().sin()))
@@ -429,7 +429,7 @@ pub(crate) fn math_sin_deg(
 pub(crate) fn math_cos_deg(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let x = expect_float(args, 0, "cos_deg")?;
     Ok(Value::Float(x.to_radians().cos()))
@@ -438,7 +438,7 @@ pub(crate) fn math_cos_deg(
 pub(crate) fn math_tan_deg(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let x = expect_float(args, 0, "tan_deg")?;
     Ok(Value::Float(x.to_radians().tan()))
@@ -447,7 +447,7 @@ pub(crate) fn math_tan_deg(
 pub(crate) fn math_to_radians(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let deg = expect_float(args, 0, "to_radians")?;
     Ok(Value::Float(deg.to_radians()))
@@ -456,7 +456,7 @@ pub(crate) fn math_to_radians(
 pub(crate) fn math_to_degrees(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let rad = expect_float(args, 0, "to_degrees")?;
     Ok(Value::Float(rad.to_degrees()))
@@ -467,7 +467,7 @@ pub(crate) fn math_to_degrees(
 pub(crate) fn math_log(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let x = expect_float(args, 0, "log")?;
     Ok(Value::Float(x.ln()))
@@ -476,7 +476,7 @@ pub(crate) fn math_log(
 pub(crate) fn math_log10(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let x = expect_float(args, 0, "log10")?;
     Ok(Value::Float(x.log10()))
@@ -485,7 +485,7 @@ pub(crate) fn math_log10(
 pub(crate) fn math_exp(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let x = expect_float(args, 0, "exp")?;
     Ok(Value::Float(x.exp()))
@@ -596,7 +596,7 @@ pub(crate) fn math_dot_product(
     span: Span,
 ) -> Result<Value, EvalError> {
     let v1 = as_float_array(
-        args.get(0)
+        args.first()
             .ok_or_else(|| EvalError::new("missing argument `v1` for dot_product", span))?,
         "dot_product",
         span,
@@ -642,7 +642,7 @@ pub(crate) fn math_matrix_mul(
     span: Span,
 ) -> Result<Value, EvalError> {
     let m1_val = args
-        .get(0)
+        .first()
         .ok_or_else(|| EvalError::new("missing argument `m1` for matrix_mul", span))?;
     let m2_val = args
         .get(1)
@@ -761,7 +761,7 @@ pub(crate) fn math_median(
 pub(crate) fn math_rand_range(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let min = expect_float(args, 0, "rand_range")?;
     let max = expect_float(args, 1, "rand_range")?;

@@ -49,7 +49,7 @@ pub mod expr;
 pub mod recovery;
 pub mod stmt;
 
-use crate::ast::{Program, Stmt};
+use crate::ast::Program;
 use crate::diag::{error_at, RawDiag};
 use crate::lexer::lex;
 use crate::span::Span;

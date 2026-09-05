@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::time::Instant;
 
-use crate::natives::{arg, expect_int, expect_str};
+use crate::natives::{arg, expect_str};
 use zz_runtime::json::{parse_json, to_json_string, JsonValue};
 use zz_runtime::value::{HttpServer, Response};
 use zz_runtime::{EvalError, Interp, Span, Value};
@@ -217,10 +217,7 @@ pub(crate) fn http_get(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.get")?;
-    let headers = args
-        .get(1)
-        .cloned()
-        .unwrap_or(Value::Dict(Box::new(vec![])));
+    let headers = args.get(1).cloned().unwrap_or(Value::Dict(Box::default()));
     let client = build_client()?;
     let hdrs = dict_to_headers(&headers);
     let mut req = client.get(&url);
@@ -245,10 +242,7 @@ pub(crate) fn http_post(
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.post")?;
     let body = expect_str(args, 1, "std.http.post")?;
-    let headers = args
-        .get(2)
-        .cloned()
-        .unwrap_or(Value::Dict(Box::new(vec![])));
+    let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::default()));
     let client = build_client()?;
     let hdrs = dict_to_headers(&headers);
     let mut req = client.post(&url);
@@ -273,10 +267,7 @@ pub(crate) fn http_put(
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.put")?;
     let body = expect_str(args, 1, "std.http.put")?;
-    let headers = args
-        .get(2)
-        .cloned()
-        .unwrap_or(Value::Dict(Box::new(vec![])));
+    let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::default()));
     let client = build_client()?;
     let hdrs = dict_to_headers(&headers);
     let mut req = client.put(&url);
@@ -300,10 +291,7 @@ pub(crate) fn http_delete(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.delete")?;
-    let headers = args
-        .get(1)
-        .cloned()
-        .unwrap_or(Value::Dict(Box::new(vec![])));
+    let headers = args.get(1).cloned().unwrap_or(Value::Dict(Box::default()));
     let client = build_client()?;
     let hdrs = dict_to_headers(&headers);
     let mut req = client.delete(&url);
@@ -532,7 +520,7 @@ pub(crate) fn http_pipe(
 pub(crate) fn http_serve_dir(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let mut server = expect_server(args, 0, "std.http.serve_dir")?;
     let dir = expect_str(args, 1, "std.http.serve_dir")?;
@@ -687,7 +675,7 @@ pub(crate) fn http_param(
             if &**key == "params" {
                 for (pk, pv) in &**params {
                     if let (Value::Str(pname), Value::Str(pval)) = (pk, pv) {
-                        if &**pname == name.as_str() {
+                        if **pname == name.as_str() {
                             return Ok(Value::Result(Box::new(Ok(Value::Str(pval.clone())))));
                         }
                     }
@@ -722,12 +710,12 @@ fn extract_dict_field(
     };
     for (k, v) in &req {
         if let Value::Str(key) = k {
-            if &**key == field {
+            if **key == field {
                 return Ok(v.clone());
             }
         }
     }
-    Ok(Value::Dict(Box::new(vec![])))
+    Ok(Value::Dict(Box::default()))
 }
 
 fn extract_dict_field_str(
@@ -776,6 +764,7 @@ fn match_route_pattern(pattern: &str, actual: &str) -> Option<Vec<(String, Strin
 /// Dispatch result: (status, body, headers)
 type DispatchResult = Result<(u16, String, Vec<(String, String)>), EvalError>;
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_with_request(
     server: &HttpServer,
     method: &str,
@@ -797,7 +786,7 @@ fn dispatch_with_request(
             Value::Result(r) => match &*r {
                 Ok(val) => {
                     // Middleware passed — it may have modified the request dict
-                    if let Value::Dict(_) = &*val {
+                    if let Value::Dict(_) = val {
                         current_req = (*val).clone();
                     }
                 }
@@ -921,7 +910,7 @@ fn dispatch_with_request(
 }
 
 /// Serve a static file from the given directory.
-fn serve_static_file(dir: &str, path: &str, span: Span) -> DispatchResult {
+fn serve_static_file(dir: &str, path: &str, _span: Span) -> DispatchResult {
     let clean_path = if path.starts_with('/') {
         path.strip_prefix('/').unwrap_or(path)
     } else {

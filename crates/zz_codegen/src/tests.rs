@@ -60,6 +60,7 @@ fn vm_run(src: &str) -> (i32, String) {
     }
 }
 
+#[allow(dead_code)]
 fn out_path() -> PathBuf {
     std::env::temp_dir().join(format!("zz-e2e-{}", std::process::id()))
 }

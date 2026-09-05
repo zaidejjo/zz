@@ -8,7 +8,7 @@ use tower_lsp::LspService;
 use super::Backend;
 
 fn setup() -> (tower_lsp::LspService<Backend>, Arc<GlobalState>) {
-    let (service, _) = LspService::new(|client| Backend::new(client));
+    let (service, _) = LspService::new(Backend::new);
     let state = Arc::clone(&service.inner().state);
     (service, state)
 }

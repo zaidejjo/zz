@@ -40,7 +40,7 @@ pub fn levenshtein(a: &str, b: &str) -> u32 {
     let shorter_len = alen.min(blen);
     let threshold = max_distance_by_len(shorter_len);
     if len_diff > threshold {
-        return len_diff as u32;
+        return len_diff;
     }
 
     // Single-row DP.

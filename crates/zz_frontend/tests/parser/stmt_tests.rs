@@ -190,7 +190,7 @@ fn missing_expression_reports_error() {
 fn missing_close_paren_reports_error() {
     let parsed = zz_frontend::parse("(1 + 2");
     assert!(
-        parsed.errors.len() >= 1,
+        !parsed.errors.is_empty(),
         "expected at least 1 error for unclosed paren, got {}",
         parsed.errors.len()
     );
