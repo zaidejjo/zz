@@ -364,8 +364,15 @@ while s == "test" {
 // ---------------------------------------------------------------------------
 // Dynamic discovery: run every .zz under fixtures/success/
 // ---------------------------------------------------------------------------
+//
+// These tests are redundant with the individually-registered `e2e_*` tests
+// above (each fixture is run twice in `cargo test`). They exist as a safety
+// net to catch fixtures added without an explicit registration. Marked
+// `#[ignore]` so the default `cargo test` stays fast. Run explicitly with:
+//   cargo test -p zz_cli --test e2e -- --ignored
 
 #[test]
+#[ignore]
 fn e2e_discover_all_success_fixtures() {
     let fixtures = fixtures_dir();
     let success_dirs = ["syntax", "types", "stdlib"];
@@ -397,6 +404,7 @@ fn e2e_discover_all_success_fixtures() {
 }
 
 #[test]
+#[ignore]
 fn e2e_discover_all_error_fixtures() {
     let fixtures = fixtures_dir();
     let err_dir = fixtures.join("errors");
