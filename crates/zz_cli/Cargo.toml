@@ -15,4 +15,5 @@ zz_hir = { path = "../zz_hir" }
 zz_runtime = { path = "../zz_runtime" }
 zz_stdlib = { path = "../zz_stdlib" }
 zz_codegen = { path = "../zz_codegen" }
+zz_fmt = { path = "../zz_fmt" }
 codespan-reporting = "0.11"

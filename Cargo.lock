@@ -2153,6 +2153,7 @@ dependencies = [
  "codespan-reporting",
  "zz_checker",
  "zz_codegen",
+ "zz_fmt",
  "zz_frontend",
  "zz_hir",
  "zz_runtime",

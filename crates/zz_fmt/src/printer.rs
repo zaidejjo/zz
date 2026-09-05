@@ -11,7 +11,6 @@
 //! correct. A best-fit upgrade can land in a later milestone without
 //! changing the Doc IR or the IR lowering.
 
-use crate::config::LineEnding;
 use crate::doc::Doc;
 
 /// What to emit at end-of-line.
@@ -44,7 +43,7 @@ pub fn render<'src>(doc: &Doc<'src>, line_width: usize, eol: Eol) -> String {
     };
     // Measure the flat width to decide whether to break the outermost group.
     let flat_width = measure_flat(doc, 0);
-    let mut broken = flat_width > line_width;
+    let broken = flat_width > line_width;
     state.break_stack.push(broken);
     render_doc(&mut state, doc, broken);
     state.out.clone()

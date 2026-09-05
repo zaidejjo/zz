@@ -34,7 +34,8 @@ USAGE:
     zz fmt [FLAGS] [PATH]         format ZZ source files in-place
 
 FLAGS:
-    --check, -c       check formatting without writing (exit 1 if changed)
+    --check, -c       with fmt, check formatting without writing (exit 1 if changed)
+    --stdin           with fmt, read source from stdin and write formatted to stdout
     --fix, -f          apply safe auto-fixes (typo replacements, field corrections)
     --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
     --interactive, -i  with --fix, prompt for ambiguous fixes interactively
@@ -58,6 +59,7 @@ EXAMPLES:
     zz check --fix -i src/           interactive mode for ambiguous fixes
     zz fmt .                         format all .zz files in current directory
     zz fmt -c src/                   check formatting without writing
+    zz fmt --stdin < file.zz         format a single file via stdin/stdout
 ";
 
 fn main() -> ExitCode {
@@ -150,7 +152,8 @@ fn main() -> ExitCode {
             let (path, flags) = parse_path_and_flags(rest);
             let check_only =
                 flags.contains(&"--check".to_string()) || flags.contains(&"-c".to_string());
-            match fmt_path(&path, check_only) {
+            let stdin = flags.contains(&"--stdin".to_string());
+            match fmt_command(path, check_only, stdin) {
                 Ok(changed) => {
                     if check_only && changed {
                         ExitCode::FAILURE
@@ -385,9 +388,50 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Format all `.zz` files under a path.  Returns `Ok(true)` when at
-/// least one file was changed (useful for `--check` mode).
-fn fmt_path(path_arg: &Option<String>, check_only: bool) -> Result<bool, String> {
+/// Top-level entry for `zz fmt`.
+///
+/// Modes:
+/// - `stdin=true`: read source from stdin, write formatted output to
+///   stdout. Honors `--check` by exiting 1 if stdin needs formatting
+///   without producing output.
+/// - `stdin=false`: format every `.zz` file under `path_arg` (or
+///   `.` if not given) in place, or print a unified diff for files
+///   that need formatting under `--check`.
+///
+/// Returns `Ok(true)` when at least one file (or stdin) needed
+/// formatting — the caller uses this to choose the exit code.
+fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Result<bool, String> {
+    use std::io::Read;
+
+    if stdin {
+        let mut source = String::new();
+        std::io::stdin()
+            .read_to_string(&mut source)
+            .map_err(|e| format!("cannot read stdin: {e}"))?;
+        let config = zz_fmt::FmtConfig::default();
+        return match zz_fmt::format_source(&source, &config) {
+            Ok(formatted) => {
+                if formatted != source {
+                    if check_only {
+                        // Emit the diff so callers can see what would change.
+                        let diff = zz_fmt::diff::unified_diff_plain("<stdin>", &source, &formatted)
+                            .unwrap_or_default();
+                        eprint!("{diff}");
+                    } else {
+                        print!("{formatted}");
+                    }
+                    Ok(true)
+                } else {
+                    if !check_only {
+                        print!("{formatted}");
+                    }
+                    Ok(false)
+                }
+            }
+            Err(e) => Err(format!("format error: {e}")),
+        };
+    }
+
     let raw = path_arg.as_deref().unwrap_or(".");
     let base = std::path::Path::new(raw);
     let files = collect_zz_files(base)?;
@@ -396,35 +440,45 @@ fn fmt_path(path_arg: &Option<String>, check_only: bool) -> Result<bool, String>
         return Err(format!("no .zz files found in `{raw}`"));
     }
 
-    let config = zz_frontend::FormatConfig::default();
+    let config = zz_fmt::FmtConfig::default();
     let mut changed_any = false;
 
     for path in &files {
         let path_str = path.display().to_string();
-        let source =
-            std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path_str}`: {e}"))?;
+        let source = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => return Err(format!("cannot read `{path_str}`: {e}")),
+        };
 
-        let parsed = zz_frontend::parse(&source);
-        let formatted = zz_frontend::format_program(&parsed.program, &source, &config);
+        let formatted = match zz_fmt::format_source(&source, &config) {
+            Ok(s) => s,
+            Err(e) => return Err(format!("{path_str}: {e}")),
+        };
 
-        if formatted != source {
-            changed_any = true;
-            if check_only {
-                eprintln!("would reformat: {path_str}");
-            } else {
-                std::fs::write(path, &formatted)
-                    .map_err(|e| format!("cannot write `{path_str}`: {e}"))?;
-                eprintln!("reformatted: {path_str}");
+        if formatted == source {
+            continue;
+        }
+        changed_any = true;
+
+        if check_only {
+            eprintln!("--- {path_str} (would reformat) ---");
+            let diff = zz_fmt::diff::unified_diff_plain(&path_str, &source, &formatted)
+                .unwrap_or_default();
+            print!("{diff}");
+        } else {
+            if let Err(e) = std::fs::write(path, &formatted) {
+                return Err(format!("cannot write `{path_str}`: {e}"));
             }
+            eprintln!("reformatted: {path_str}");
         }
     }
 
     if check_only && changed_any {
         eprintln!(
-            "zz: {} file(s) need formatting (use `zz fmt` without --check to fix)",
+            "\nzz: {} file(s) need formatting (run `zz fmt` to fix)",
             files.len()
         );
-    } else if !changed_any {
+    } else if !changed_any && !check_only {
         eprintln!("zz: all files already formatted");
     }
 

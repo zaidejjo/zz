@@ -1,22 +1,31 @@
 //! AST structural-fingerprint verification.
 //!
-//! For M0/M1 we use a coarse but strong check: re-parse the formatted
-//! source and confirm the AST shape matches the input AST. The
-//! "shape" comparison is: walk both trees in lockstep, compare variant
-//! tags, child counts, identifier names, literal values, and
-//! operator variants. Spans are compared as character ranges (a
-//! different *byte* range is expected when the source changes length
-//! but a *character* range covering the same text is equivalent).
+//! M2 verifies three independent properties of the formatted output:
 //!
-//! This catches any formatter bug that changes semantics: dropped
-//! tokens, reordered operators, wrong field names, etc. Whitespace
-//! and comment placement don't affect the fingerprint (those are
-//! formatting details).
+//! 1. **AST fingerprint**: re-parse the formatted source and compare a
+//!    structural fingerprint of both ASTs (variant tags, child counts,
+//!    identifiers, literal values, operator kinds). Spans are ignored.
+//!
+//! 2. **Significant-token equivalence**: re-lex the formatted source
+//!    and compare the sequence of significant tokens (text content,
+//!    skipping trivia). This catches any formatter bug that altered
+//!    punctuation, identifier spelling, or token kinds even if the
+//!    AST shape still matched by coincidence.
+//!
+//! 3. **Trivia integrity**: every comment that appeared in the input
+//!    must appear, byte-identical, in the formatted output. This
+//!    catches accidental loss of comments.
+//!
+//! All three checks are required; if any fails, the formatter refuses
+//! to write the output. Together they implement **Zero Structural
+//! Drift**: the formatter can never silently change meaning.
 
 use crate::error::FmtError;
 use std::path::Path;
 use zz_frontend::ast::*;
+use zz_frontend::lexer::lex;
 use zz_frontend::parse;
+use zz_frontend::token::TokenKind;
 
 /// Fingerprint of an AST: a normalized structural summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +70,7 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
             out.push_str("Decl[");
             out.push_str(&name.name);
             if let Some(t) = ty {
-                out.push_str(":");
+                out.push(':');
                 fp_ty(t, out);
             }
             out.push('=');
@@ -576,8 +585,78 @@ fn fp_expr(e: &Expr, out: &mut String) {
     }
 }
 
-/// Verify the formatted source preserves the input's AST shape.
-pub fn verify(path: &Path, original: &Program, formatted_src: &str) -> Result<(), FmtError> {
+/// Lex `source` and return the sequence of significant-token texts
+/// (whitespace, comments, and StmtEnd newlines stripped).
+fn significant_token_sequence(source: &str) -> Vec<String> {
+    let lexed = lex(source);
+    let mut seq = Vec::new();
+    for t in &lexed.tokens {
+        match t.kind {
+            TokenKind::Eof => break,
+            // StmtEnd newlines are pure trivia for verification purposes.
+            TokenKind::StmtEnd => continue,
+            _ => {
+                let s = t.span.start as usize;
+                let e = (t.span.end as usize).min(source.len());
+                if e > s {
+                    seq.push(source[s..e].to_string());
+                }
+            }
+        }
+    }
+    seq
+}
+
+/// Extract every comment substring (`// ...`, `/// ...`, `/* ... */`)
+/// from `source`. Comments are returned in source order.
+fn extract_comments(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            // Line comment to end of line.
+            let start = i;
+            let mut j = i + 2;
+            while j < bytes.len() && bytes[j] != b'\n' {
+                j += 1;
+            }
+            out.push(source[start..j].to_string());
+            i = j;
+        } else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            let start = i;
+            let mut depth = 1u32;
+            let mut j = i + 2;
+            while j < bytes.len() && depth > 0 {
+                if j + 1 < bytes.len() && bytes[j] == b'/' && bytes[j + 1] == b'*' {
+                    depth += 1;
+                    j += 2;
+                } else if j + 1 < bytes.len() && bytes[j] == b'*' && bytes[j + 1] == b'/' {
+                    depth -= 1;
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            out.push(source[start..j].to_string());
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Strong verification: the formatted output must match the input on
+/// three independent axes — AST shape, significant-token sequence,
+/// and comment coverage. Returns `Ok(())` only when all three pass.
+pub fn verify(
+    path: &Path,
+    original: &Program,
+    original_src: &str,
+    formatted_src: &str,
+) -> Result<(), FmtError> {
+    // 1. Re-parse must succeed.
     let parsed = parse(formatted_src);
     if !parsed.errors.is_empty() {
         let summary = parsed
@@ -591,18 +670,82 @@ pub fn verify(path: &Path, original: &Program, formatted_src: &str) -> Result<()
             summary,
         });
     }
+
+    // 2. AST fingerprints must match.
     let a = Fingerprint::of_program(original);
     let b = Fingerprint::of_program(&parsed.program);
     if a != b {
         return Err(FmtError::Verify {
             path: path.to_path_buf(),
             mismatch: format!(
-                "fingerprint differs\n  input:    {}\n  formatted:{}",
+                "AST fingerprint differs\n  input:    {}\n  formatted:{}",
                 a.tree, b.tree
             ),
         });
     }
+
+    // 3. Significant-token sequences must match.
+    let orig_tokens = significant_token_sequence(original_src);
+    let new_tokens = significant_token_sequence(formatted_src);
+    if orig_tokens != new_tokens {
+        let summary = diff_token_sequences(&orig_tokens, &new_tokens);
+        return Err(FmtError::Verify {
+            path: path.to_path_buf(),
+            mismatch: format!("token sequence differs\n{summary}"),
+        });
+    }
+
+    // 4. Every comment in the original must appear in the formatted
+    //    output.
+    for c in extract_comments(original_src) {
+        if !formatted_src.contains(c.as_str()) {
+            return Err(FmtError::Verify {
+                path: path.to_path_buf(),
+                mismatch: format!("comment dropped: `{c}`"),
+            });
+        }
+    }
+
     Ok(())
+}
+
+/// Produce a short summary of where two token sequences diverge.
+fn diff_token_sequences(a: &[String], b: &[String]) -> String {
+    let mut out = String::new();
+    let n = a.len().min(b.len());
+    let mut first_diff: Option<usize> = None;
+    for i in 0..n {
+        if a[i] != b[i] {
+            first_diff = Some(i);
+            break;
+        }
+    }
+    match first_diff {
+        Some(i) => {
+            let lo = i.saturating_sub(2);
+            let hi = (i + 3).min(a.len()).min(b.len());
+            out.push_str(&format!(
+                "first divergence at token #{i}\n  input context:    {:?}\n  formatted context: {:?}",
+                &a[lo..hi],
+                &b[lo..hi],
+            ));
+            if a.len() != b.len() {
+                out.push_str(&format!(
+                    "\n  (input has {} tokens, formatted has {})",
+                    a.len(),
+                    b.len()
+                ));
+            }
+        }
+        None => {
+            out.push_str(&format!(
+                "length mismatch: input={}, formatted={}",
+                a.len(),
+                b.len()
+            ));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -622,5 +765,26 @@ mod tests {
         let a = parse("x := 1 + 2\n").program;
         let b = parse("x := 1 - 2\n").program;
         assert_ne!(Fingerprint::of_program(&a), Fingerprint::of_program(&b));
+    }
+
+    #[test]
+    fn significant_token_sequence_strips_whitespace_and_newlines() {
+        let a = significant_token_sequence("x := 1 + 2\n");
+        let b = significant_token_sequence("  x   :=  1+2 \n");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn significant_token_sequence_differs_on_operator_change() {
+        let a = significant_token_sequence("x := 1 + 2\n");
+        let b = significant_token_sequence("x := 1 - 2\n");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn extract_comments_finds_line_block_and_doc() {
+        let src = "// line\nx := 1 /* block */ + 2\n/// doc\n";
+        let cs = extract_comments(src);
+        assert_eq!(cs, vec!["// line", "/* block */", "/// doc"]);
     }
 }
