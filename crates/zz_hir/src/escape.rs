@@ -36,6 +36,10 @@ pub enum AllocClass {
 pub struct EscapeResult {
     /// span → allocation classification
     pub classes: HashMap<Span, AllocClass>,
+    /// For-loop spans whose body contains at least one non-escaping allocation.
+    /// Codegen uses this to inject `zz_arena_reset(&_arena)` at the end of
+    /// each iteration, preventing unbounded arena growth in tight loops.
+    pub loop_spans: HashSet<Span>,
 }
 
 /// Run escape analysis on a typed program.
@@ -202,18 +206,25 @@ fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &
             }
         }
         Stmt::Return { value: None, .. } => {}
-        Stmt::For { iter, body, .. } => {
+        Stmt::For {
+            iter, body, span, ..
+        } => {
             // Iter expression escapes (evaluated once).
             let cls = classify_expr(iter, tp, ctx);
             result.classes.insert(iter.span(), cls);
             analyze_expr(iter, tp, ctx, result);
-            // Loop body: allocations inside loops are conservatively
-            // escaping (loop body executes multiple times, and the
-            // arena reset would free them mid-loop if they escape the
-            // iteration). Exception: simple arithmetic/int values.
+            // Loop body: analyze normally. Allocations that escape the
+            // loop (returned, stored in outer scope, passed to functions
+            // that retain them) are marked escaping by the normal analysis.
+            // The per-iteration arena reset (injected by codegen when
+            // loop_spans contains this span) safely frees all arena-
+            // allocated objects at the end of each iteration.
             analyze_block(body, tp, ctx, result);
-            // Mark all non-scalar allocations in the loop body as escaping.
-            mark_loop_body_escaping(body, tp, result);
+            // If the loop body has any non-scalar allocation, record the
+            // loop span so codegen can inject a per-iteration arena reset.
+            if has_non_scalar_alloc(body, tp) {
+                result.loop_spans.insert(*span);
+            }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
         _ => {}
@@ -476,6 +487,61 @@ fn mark_loop_expr_escaping(e: &Expr, tp: &TypedProgram, result: &mut EscapeResul
             }
         }
         _ => {}
+    }
+}
+
+/// Check if a block contains any non-scalar allocation (array, dict, struct).
+/// Used to decide whether to inject a per-iteration arena reset in a loop.
+fn has_non_scalar_alloc(block: &crate::Block, tp: &TypedProgram) -> bool {
+    for stmt in &block.stmts {
+        if stmt_has_non_scalar_alloc(stmt, tp) {
+            return true;
+        }
+    }
+    false
+}
+
+fn stmt_has_non_scalar_alloc(stmt: &Stmt, tp: &TypedProgram) -> bool {
+    match stmt {
+        Stmt::Decl { value, .. } => expr_has_non_scalar_alloc(value, tp),
+        Stmt::Expr(e) => expr_has_non_scalar_alloc(e, tp),
+        Stmt::For { body, .. } => has_non_scalar_alloc(body, tp),
+        _ => false,
+    }
+}
+
+fn expr_has_non_scalar_alloc(e: &Expr, tp: &TypedProgram) -> bool {
+    if let Some(ty) = tp.type_at(e.span()) {
+        if !is_scalar_type(ty) {
+            return true;
+        }
+    }
+    match e {
+        Expr::Array { elems, .. } => elems.iter().any(|x| expr_has_non_scalar_alloc(x, tp)),
+        Expr::Dict { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| expr_has_non_scalar_alloc(k, tp) || expr_has_non_scalar_alloc(v, tp)),
+        Expr::StructInit { fields, .. } => {
+            fields.iter().any(|(_, f)| expr_has_non_scalar_alloc(f, tp))
+        }
+        Expr::Call { args, .. } => args.iter().any(|a| expr_has_non_scalar_alloc(a, tp)),
+        Expr::Binary { left, right, .. } => {
+            expr_has_non_scalar_alloc(left, tp) || expr_has_non_scalar_alloc(right, tp)
+        }
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            expr_has_non_scalar_alloc(cond, tp)
+                || has_non_scalar_alloc(then, tp)
+                || els
+                    .as_ref()
+                    .map_or(false, |e| expr_has_non_scalar_alloc(e, tp))
+        }
+        Expr::While { cond, body, .. } => {
+            expr_has_non_scalar_alloc(cond, tp) || has_non_scalar_alloc(body, tp)
+        }
+        Expr::Block(b) => b.stmts.iter().any(|s| stmt_has_non_scalar_alloc(s, tp)),
+        _ => false,
     }
 }
 

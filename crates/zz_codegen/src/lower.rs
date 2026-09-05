@@ -171,6 +171,9 @@ pub struct Lowerer {
     /// Result of escape analysis: maps spans to allocation classification.
     #[allow(dead_code)]
     escape: zz_hir::EscapeResult,
+    /// Stack of loop spans currently being emitted. Used to determine if
+    /// we're inside a loop body with an arena reset.
+    loop_stack: std::cell::RefCell<Vec<zz_frontend::span::Span>>,
 }
 
 impl Lowerer {
@@ -187,6 +190,7 @@ impl Lowerer {
             entry_main,
             tp,
             escape,
+            loop_stack: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -208,6 +212,47 @@ impl Lowerer {
             .get(&span)
             .map(|c| *c == zz_hir::AllocClass::Escaping)
             .unwrap_or(false)
+    }
+
+    /// Returns the C constructor call for an array, routing through the
+    /// arena variant when the expression is classified as non-escaping.
+    fn emit_array_new(&self, span: zz_frontend::span::Span) -> String {
+        if self.is_non_escaping(span) {
+            "zz_array_new_arena(&_arena)".to_string()
+        } else {
+            "zz_array_new()".to_string()
+        }
+    }
+
+    /// Returns the C constructor call for a dict, routing through the
+    /// arena variant when the expression is classified as non-escaping.
+    fn emit_dict_new(&self, span: zz_frontend::span::Span) -> String {
+        if self.is_non_escaping(span) {
+            "zz_dict_new_arena(&_arena)".to_string()
+        } else {
+            "zz_dict_new()".to_string()
+        }
+    }
+
+    /// Returns the C constructor call for a string literal, routing through
+    /// the arena variant when the expression is classified as non-escaping.
+    #[allow(dead_code)] // reserved for dynamic string allocation (concat results)
+    fn emit_str_new(&self, s: &str, len: usize, span: zz_frontend::span::Span) -> String {
+        if self.is_non_escaping(span) {
+            format!("zz_str_new_arena({s}, {len}, &_arena)")
+        } else {
+            format!("zz_str_new({s}, {len})")
+        }
+    }
+
+    /// Returns true if the current emission position is inside a loop body
+    /// that has an arena reset injected. Used to force arena allocation
+    /// for loop-local collections.
+    fn current_loop_has_arena_reset(&self) -> bool {
+        self.loop_stack
+            .borrow()
+            .iter()
+            .any(|span| self.escape.loop_spans.contains(span))
     }
 
     /// Check if a struct type is unboxed (all scalar or nested unboxed struct fields).
@@ -569,10 +614,15 @@ impl Lowerer {
                     }
                 }
                 // For scalar types, extract the underlying value from the zz_value
+                // UNLESS the emitted expression is already unboxed (e.g., a binary
+                // op on unboxed scalars produces a raw int64_t, not a zz_value).
+                let val_is_unboxed = val.starts_with("(int64_t)(")
+                    || val.starts_with("(double)(")
+                    || val.starts_with("(bool)(");
                 let final_val = match ctype.as_str() {
-                    "int64_t" => format!("({val}).i"),
-                    "double" => format!("({val}).f"),
-                    "bool" => format!("({val}).b"),
+                    "int64_t" if !val_is_unboxed => format!("({val}).i"),
+                    "double" if !val_is_unboxed => format!("({val}).f"),
+                    "bool" if !val_is_unboxed => format!("({val}).b"),
                     _ => val,
                 };
                 out.push_str(&format!("    {ctype} {cid} = {final_val};\n"));
@@ -825,9 +875,13 @@ impl Lowerer {
                 None => out.push_str("    return zz_unit();\n"),
             },
             Stmt::For {
-                vars, iter, body, ..
+                vars,
+                iter,
+                body,
+                span,
+                ..
             } => {
-                self.emit_for(vars, iter, body, names, out);
+                self.emit_for(vars, iter, body, *span, names, out);
             }
             Stmt::Break { .. } => out.push_str("    break;\n"),
             Stmt::Continue { .. } => out.push_str("    continue;\n"),
@@ -843,6 +897,7 @@ impl Lowerer {
         vars: &[zz_frontend::ast::Ident],
         iter: &Expr,
         body: &Block,
+        span: zz_frontend::span::Span,
         names: &mut NameCtx,
         out: &mut String,
     ) {
@@ -958,8 +1013,14 @@ impl Lowerer {
                 out.push_str(&s);
             }
             // Loop body is never a function tail.
+            self.loop_stack.borrow_mut().push(span);
             for bstmt in &body.stmts {
                 self.emit_stmt(bstmt, names, out, false);
+            }
+            self.loop_stack.borrow_mut().pop();
+            // Inject per-iteration arena reset if the loop body has allocations.
+            if self.escape.loop_spans.contains(&span) {
+                out.push_str("    zz_arena_reset(&_arena);\n");
             }
             out.push_str("    }\n");
             if !end_is_scalar {
@@ -1317,11 +1378,21 @@ impl Lowerer {
                 let obj_val = self.emit_expr(obj, names, out);
                 format!("({obj_val}).{name}")
             }
-            Expr::Array { elems, .. } => {
-                // Emit array literal: zz_array_new() then append each item.
+            Expr::Array { elems, span, .. } => {
+                // Emit array literal: arena-aware or heap-allocated.
                 let arr_var = format!("__arr{}", names.counter);
                 names.counter += 1;
-                out.push_str(&format!("    zz_value {arr_var} = zz_array_new();\n"));
+                // Force arena allocation if we're inside a loop body with
+                // an arena reset. This is safe because the per-iteration
+                // reset frees the object before any function call could
+                // observe it. Function calls that receive arena-allocated
+                // objects must not retain them across calls.
+                let ctor = if self.is_non_escaping(*span) || self.current_loop_has_arena_reset() {
+                    "zz_array_new_arena(&_arena)".to_string()
+                } else {
+                    "zz_array_new()".to_string()
+                };
+                out.push_str(&format!("    zz_value {arr_var} = {ctor};\n"));
                 for item in elems {
                     let item_val = self.emit_expr(item, names, out);
                     // Auto-box if needed
@@ -1336,7 +1407,7 @@ impl Lowerer {
                 }
                 arr_var
             }
-            Expr::Dict { .. } => "zz_dict_new()".to_string(),
+            Expr::Dict { span, .. } => self.emit_dict_new(*span),
             #[allow(unreachable_patterns)]
             Expr::Fmt { parts, .. } => {
                 // Format string: build by concatenating parts as strings.
@@ -1503,6 +1574,35 @@ impl Lowerer {
                 } else {
                     emitted
                 }
+            } else if let Expr::Binary { left, right, .. } = a {
+                // Binary op: result is unboxed only if the emitted C
+                // expression starts with `(int64_t)(` or `(double)(`.
+                // Otherwise it's already a zz_value.
+                let val_is_unboxed = emitted.starts_with("(int64_t)(")
+                    || emitted.starts_with("(double)(")
+                    || emitted.starts_with("(bool)(");
+                let boxed = if val_is_unboxed {
+                    // Determine the box type from the emitted cast.
+                    if emitted.starts_with("(double)(") {
+                        format!("zz_float({emitted})")
+                    } else {
+                        format!("zz_int({emitted})")
+                    }
+                } else {
+                    // Already a zz_value — but we may need to clone it
+                    // if it's a reference-counted type.
+                    if let Expr::Ident { name, .. } = a {
+                        // If the variable is a refcounted type, clone it.
+                        if let Some(_ty) = names.lookup_type(name) {
+                            format!("zz_clone({emitted})")
+                        } else {
+                            emitted
+                        }
+                    } else {
+                        emitted
+                    }
+                };
+                boxed
             } else {
                 emitted
             };

@@ -155,6 +155,29 @@ zz_value zz_str_static(const char *src) {
     return v;
 }
 
+// Arena-aware string constructor. The zz_str header is bump-allocated
+// when arena is non-NULL. The data payload still uses malloc (strings
+// are often used with slice operations that need stable memory).
+zz_value zz_str_new_arena(const char *src, size_t len, zz_arena *arena) {
+    zz_str *s;
+    if (arena) {
+        s = (zz_str *)zz_arena_alloc(arena, sizeof(zz_str) + len + 1, 8);
+        s->refs = 0;  // sentinel: arena-allocated
+        s->interned = 0;
+        s->cap = len;
+        s->len = len;
+        memcpy(s->data, src, len);
+        s->data[len] = '\0';
+    } else {
+        s = str_alloc(len);
+        memcpy(s->data, src, len);
+    }
+    zz_value v;
+    v.tag = ZZ_STR;
+    v.s = s;
+    return v;
+}
+
 // =====================================================================
 //  Arena allocator
 //
@@ -243,8 +266,18 @@ static void zz_retain_array(zz_array *a) {
 }
 
 static void zz_release_array(zz_array *a) {
-    if (a && __atomic_sub_fetch(&a->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-        // Free contained values.
+    if (!a) return;
+    // Arena-allocated arrays have refs==0 sentinel — skip atomic decrement.
+    // They're freed in bulk at arena reset, not individually.
+    if (a->refs == 0) {
+        // Still need to release contained values that may be heap-allocated.
+        for (size_t i = 0; i < a->len; i++) {
+            zz_release(&a->items[i]);
+        }
+        free(a->items);  // items buffer always uses malloc
+        return;
+    }
+    if (__atomic_sub_fetch(&a->refs, 1, __ATOMIC_ACQ_REL) == 0) {
         for (size_t i = 0; i < a->len; i++) {
             zz_release(&a->items[i]);
         }
@@ -258,8 +291,21 @@ static void zz_retain_dict(zz_dict *d) {
 }
 
 static void zz_release_dict(zz_dict *d) {
-    if (d && __atomic_sub_fetch(&d->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-        // Free contained entries.
+    if (!d) return;
+    // Arena-allocated dicts have refs==0 sentinel — skip atomic decrement.
+    if (d->refs == 0) {
+        for (size_t i = 0; i < d->len; i++) {
+            if (d->entries[i].key && !d->entries[i].key->interned) {
+                if (__atomic_sub_fetch(&d->entries[i].key->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+                    free(d->entries[i].key);
+                }
+            }
+            zz_release(&d->entries[i].val);
+        }
+        free(d->entries);  // entries buffer always uses malloc
+        return;
+    }
+    if (__atomic_sub_fetch(&d->refs, 1, __ATOMIC_ACQ_REL) == 0) {
         for (size_t i = 0; i < d->len; i++) {
             if (d->entries[i].key && !d->entries[i].key->interned) {
                 if (__atomic_sub_fetch(&d->entries[i].key->refs, 1, __ATOMIC_ACQ_REL) == 0) {
@@ -291,7 +337,7 @@ static void zz_release_func(zz_func *f) {
 void zz_retain_arc(zz_value *v) {
     switch (v->tag) {
     case ZZ_STR:
-        if (v->s && !v->s->interned) {
+        if (v->s && !v->s->interned && v->s->refs > 0) {
             __atomic_add_fetch(&v->s->refs, 1, __ATOMIC_RELAXED);
         }
         break;
@@ -312,9 +358,12 @@ void zz_retain_arc(zz_value *v) {
 void zz_release_arc(zz_value *v) {
     switch (v->tag) {
     case ZZ_STR:
-        if (v->s && !v->s->interned &&
-            __atomic_sub_fetch(&v->s->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-            free(v->s);
+        if (v->s && !v->s->interned) {
+            // Arena-allocated strings have refs==0 sentinel — skip free.
+            if (v->s->refs == 0) return;
+            if (__atomic_sub_fetch(&v->s->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+                free(v->s);
+            }
         }
         break;
     case ZZ_ARRAY:
@@ -359,7 +408,7 @@ zz_value zz_clone_arc(zz_value v) {
 void zz_retain(zz_value *v) {
     switch (v->tag) {
     case ZZ_STR:
-        if (v->s && !v->s->interned) {
+        if (v->s && !v->s->interned && v->s->refs > 0) {
             v->s->refs++;
         }
         break;
@@ -380,8 +429,15 @@ void zz_retain(zz_value *v) {
 void zz_release(zz_value *v) {
     switch (v->tag) {
     case ZZ_STR:
-        if (v->s && !v->s->interned && --v->s->refs == 0) {
-            free(v->s);
+        if (v->s && !v->s->interned) {
+            // Arena-allocated strings have refs==0 sentinel — skip free.
+            if (v->s->refs == 0) {
+                // Data is inline (flexible array), nothing to individually free.
+                return;
+            }
+            if (--v->s->refs == 0) {
+                free(v->s);
+            }
         }
         break;
     case ZZ_ARRAY:
@@ -595,6 +651,28 @@ zz_value zz_array_new(void) {
     return v;
 }
 
+// Arena-aware array constructor. When arena is non-NULL, the zz_array
+// header is bump-allocated (no malloc, O(1)). The items buffer still uses
+// malloc since it may realloc on growth.
+zz_value zz_array_new_arena(zz_arena *arena) {
+    zz_array *a;
+    if (arena) {
+        a = (zz_array *)zz_arena_alloc(arena, sizeof(zz_array), 8);
+        memset(a, 0, sizeof(zz_array));
+        // Arena-allocated objects don't need refcounting — they're freed
+        // in bulk at arena reset. Set refs to a sentinel so zz_release
+        // knows not to free them individually.
+        a->refs = 0;
+    } else {
+        a = (zz_array *)calloc(1, sizeof(zz_array));
+        a->refs = 1;
+    }
+    zz_value v;
+    v.tag = ZZ_ARRAY;
+    v.arr = a;
+    return v;
+}
+
 void zz_array_push(zz_array *a, zz_value item) {
     if (a->len == a->cap) {
         size_t nc = a->cap == 0 ? 4 : a->cap * 2;
@@ -668,6 +746,23 @@ zz_value zz_array_slice(const zz_array *a, zz_value start, zz_value end, int *er
 zz_value zz_dict_new(void) {
     zz_dict *d = (zz_dict *)calloc(1, sizeof(zz_dict));
     d->refs = 1;  // ARC: initial reference count
+    zz_value v;
+    v.tag = ZZ_DICT;
+    v.dict = d;
+    return v;
+}
+
+// Arena-aware dict constructor.
+zz_value zz_dict_new_arena(zz_arena *arena) {
+    zz_dict *d;
+    if (arena) {
+        d = (zz_dict *)zz_arena_alloc(arena, sizeof(zz_dict), 8);
+        memset(d, 0, sizeof(zz_dict));
+        d->refs = 0;  // sentinel: arena-allocated, don't individually free
+    } else {
+        d = (zz_dict *)calloc(1, sizeof(zz_dict));
+        d->refs = 1;
+    }
     zz_value v;
     v.tag = ZZ_DICT;
     v.dict = d;

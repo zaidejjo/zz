@@ -185,6 +185,17 @@ zz_value zz_array_new(void);
 zz_value zz_dict_new(void);
 zz_value zz_range(int64_t start, int64_t end, int64_t step);
 
+// ---- arena-aware constructors -------------------------------------------
+// When arena is non-NULL, the object header is bump-allocated on the arena
+// (O(1) alloc, freed in bulk at arena reset). When arena is NULL, falls
+// back to the standard malloc path (thread-safe ARC).
+//
+// The items/data buffers ALWAYS use malloc (they may realloc on growth).
+// Only the *header structs* (zz_array, zz_dict, zz_str) are arena-eligible.
+zz_value zz_array_new_arena(zz_arena *arena);
+zz_value zz_dict_new_arena(zz_arena *arena);
+zz_value zz_str_new_arena(const char *s, size_t len, zz_arena *arena);
+
 // ---- refcounting -------------------------------------------------------
 void zz_retain(zz_value *v);
 void zz_release(zz_value *v);
