@@ -19,3 +19,9 @@ bench/native/.bin
 bench/native/categories/*
 !bench/native/categories/*.zz
 benchmarks/arena_bench
+
+# performance_check build artifacts
+bench/performance_check/.bin
+bench/performance_check/.log
+bench/performance_check/rust/target
+bench/performance_check/go/bench_go

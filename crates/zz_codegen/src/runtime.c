@@ -311,7 +311,10 @@ static void zz_release_array(zz_array *a) {
 }
 
 static void zz_retain_dict(zz_dict *d) {
-    if (d) __atomic_add_fetch(&d->refs, 1, __ATOMIC_RELAXED);
+    // Arena-allocated dicts have refs==0 sentinel — skip atomic increment so
+    // a clone can never make a bulk-reset arena object look like it owns
+    // heap refcounts (which would later free() arena memory).
+    if (d && d->refs != 0) __atomic_add_fetch(&d->refs, 1, __ATOMIC_RELAXED);
 }
 
 static void zz_release_dict(zz_dict *d) {

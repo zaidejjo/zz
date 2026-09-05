@@ -234,6 +234,24 @@ fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &
 fn analyze_expr(e: &Expr, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &mut EscapeResult) {
     match e {
         Expr::Block(b) => analyze_block(b, tp, ctx, result),
+        Expr::While {
+            cond, body, span, ..
+        } => {
+            // The condition is evaluated once per iteration; it may itself
+            // allocate (e.g., a call returning a string).
+            analyze_expr(cond, tp, ctx, result);
+            // Loop body: analyzed like a For body. Allocations that escape
+            // the loop are marked escaping by the normal analysis; the
+            // per-iteration arena reset (injected by codegen when
+            // loop_spans contains this span) frees all arena-allocated
+            // objects at the end of each iteration.
+            analyze_block(body, tp, ctx, result);
+            // If the loop body has any non-scalar allocation, record the
+            // loop span so codegen can inject a per-iteration arena reset.
+            if has_non_scalar_alloc(body, tp) {
+                result.loop_spans.insert(*span);
+            }
+        }
         Expr::If {
             cond, then, els, ..
         } => {
@@ -243,13 +261,32 @@ fn analyze_expr(e: &Expr, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &mut
                 analyze_expr(el, tp, ctx, result);
             }
         }
-        Expr::Call { args, .. } => {
-            // Arguments to function calls escape (we can't track cross-function).
-            for a in args {
-                mark_escaping_recursive(a, tp, result);
-                // Track variable name if arg is an identifier.
-                if let Expr::Ident { name, .. } = a {
-                    ctx.escaped_names.insert(name.clone());
+        Expr::Call { callee, args, .. } => {
+            // Arguments to function calls escape (we can't track
+            // cross-function). Notably EXCEPT read-only builtins like
+            // `len(...)` / `vec.len(...)`, which never retain their
+            // argument — treating them as escaping forces every
+            // loop-local array/dict fed to `len()` onto the heap despite
+            // the per-iteration arena reset being available.
+            let is_read_only_builtin = matches!(
+                callee.as_ref(),
+                Expr::Ident { name, .. }
+                    if matches!(
+                        name.as_str(),
+                        "len" | "std.len" | "vec.len" | "std.vec.len" | "range" | "std.range"
+                    )
+            );
+            if is_read_only_builtin {
+                for a in args {
+                    analyze_expr(a, tp, ctx, result);
+                }
+            } else {
+                for a in args {
+                    mark_escaping_recursive(a, tp, result);
+                    // Track variable name if arg is an identifier.
+                    if let Expr::Ident { name, .. } = a {
+                        ctx.escaped_names.insert(name.clone());
+                    }
                 }
             }
         }
@@ -400,6 +437,14 @@ fn mark_escaping_recursive(e: &Expr, tp: &TypedProgram, result: &mut EscapeResul
                 }
             }
         }
+        Expr::While { cond, body, .. } => {
+            mark_escaping_recursive(cond, tp, result);
+            for stmt in &body.stmts {
+                if let Stmt::Expr(inner) = stmt {
+                    mark_escaping_recursive(inner, tp, result);
+                }
+            }
+        }
         Expr::If { then, els, .. } => {
             for stmt in &then.stmts {
                 if let Stmt::Expr(inner) = stmt {
@@ -430,59 +475,6 @@ fn mark_escaping_recursive(e: &Expr, tp: &TypedProgram, result: &mut EscapeResul
             for part in parts {
                 if let zz_frontend::ast::FmtPart::Expr(inner, _) = part {
                     mark_escaping_recursive(inner, tp, result);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Mark all non-scalar allocations inside a loop body as escaping.
-fn mark_loop_body_escaping(block: &crate::Block, tp: &TypedProgram, result: &mut EscapeResult) {
-    for stmt in &block.stmts {
-        match stmt {
-            Stmt::Decl { value, .. } => {
-                if let Some(ty) = tp.type_at(value.span()) {
-                    if !is_scalar_type(ty) {
-                        result.classes.insert(value.span(), AllocClass::Escaping);
-                    }
-                }
-                if is_allocating_expr(value) {
-                    result.classes.insert(value.span(), AllocClass::Escaping);
-                }
-            }
-            Stmt::Expr(e) => {
-                mark_loop_expr_escaping(e, tp, result);
-            }
-            Stmt::For { body: inner, .. } => {
-                mark_loop_body_escaping(inner, tp, result);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn mark_loop_expr_escaping(e: &Expr, tp: &TypedProgram, result: &mut EscapeResult) {
-    if let Some(ty) = tp.type_at(e.span()) {
-        if !is_scalar_type(ty) {
-            result.classes.insert(e.span(), AllocClass::Escaping);
-        }
-    }
-    match e {
-        Expr::Array { elems, .. } => {
-            for elem in elems {
-                mark_loop_expr_escaping(elem, tp, result);
-            }
-        }
-        Expr::StructInit { fields, .. } => {
-            for (_, f) in fields {
-                mark_loop_expr_escaping(f, tp, result);
-            }
-        }
-        Expr::Block(b) => {
-            for stmt in &b.stmts {
-                if let Stmt::Expr(inner) = stmt {
-                    mark_loop_expr_escaping(inner, tp, result);
                 }
             }
         }
@@ -535,7 +527,7 @@ fn expr_has_non_scalar_alloc(e: &Expr, tp: &TypedProgram) -> bool {
                 || has_non_scalar_alloc(then, tp)
                 || els
                     .as_ref()
-                    .map_or(false, |e| expr_has_non_scalar_alloc(e, tp))
+                    .is_some_and(|e| expr_has_non_scalar_alloc(e, tp))
         }
         Expr::While { cond, body, .. } => {
             expr_has_non_scalar_alloc(cond, tp) || has_non_scalar_alloc(body, tp)
