@@ -262,11 +262,35 @@ void zz_arena_destroy(zz_arena *a) {
 // drops to zero, the object is freed.
 
 static void zz_retain_array(zz_array *a) {
-    if (a) __atomic_add_fetch(&a->refs, 1, __ATOMIC_RELAXED);
+    if (!a) return;
+    // Stack-promoted (STACK_MAGIC) and fixed-literal (LIT_MAGIC) arrays
+    // are not refcounted, and arena-allocated arrays (refs==0) are freed
+    // in bulk at arena reset — skip the atomic increment entirely. This
+    // keeps tight loops calling zz_clone() on literals atomic-free.
+    if (a->refs == 0 || a->refs == ZZ_ARRAY_STACK_MAGIC || a->refs == ZZ_ARRAY_LIT_MAGIC) {
+        return;
+    }
+    __atomic_add_fetch(&a->refs, 1, __ATOMIC_RELAXED);
 }
 
 static void zz_release_array(zz_array *a) {
     if (!a) return;
+    // Stack-promoted arrays (codegen-set sentinel): header + items buffer
+    // both live on the C stack. Nothing to free, but contained values may
+    // still need releasing if they're heap-allocated refs.
+    if (a->refs == ZZ_ARRAY_STACK_MAGIC) {
+        for (size_t i = 0; i < a->len; i++) {
+            zz_release(&a->items[i]);
+        }
+        return;
+    }
+    // Fixed-size literal arrays: header AND items buffer are both on the
+    // arena (or a single pre-allocated heap block). Element stores bypassed
+    // zz_clone, so the array owns no reference counts to release — the
+    // bulk arena reset reclaims everything.
+    if (a->refs == ZZ_ARRAY_LIT_MAGIC) {
+        return;
+    }
     // Arena-allocated arrays have refs==0 sentinel — skip atomic decrement.
     // They're freed in bulk at arena reset, not individually.
     if (a->refs == 0) {
@@ -673,6 +697,39 @@ zz_value zz_array_new_arena(zz_arena *arena) {
     return v;
 }
 
+zz_value zz_array_new_lit(zz_arena *arena, size_t n) {
+    zz_array *a;
+    if (arena) {
+        // Header AND items buffer both bump-allocated: zero realloc, zero
+        // malloc. refs = LIT_MAGIC sentinel marks the no-op release path.
+        a = (zz_array *)zz_arena_alloc(arena, sizeof(zz_array), 8);
+        a->refs = ZZ_ARRAY_LIT_MAGIC;
+        a->len = 0;
+        a->cap = n;
+        a->items = (zz_value *)zz_arena_alloc(arena, n * sizeof(zz_value), 8);
+    } else {
+        // Escaping literal: single pre-allocated heap block, normal ARC.
+        a = (zz_array *)calloc(1, sizeof(zz_array));
+        a->refs = 1;
+        a->len = 0;
+        a->cap = n;
+        a->items = (zz_value *)malloc(n * sizeof(zz_value));
+    }
+    zz_value v;
+    v.tag = ZZ_ARRAY;
+    v.arr = a;
+    return v;
+}
+
+// Direct store into a fixed-capacity literal array. The caller guarantees:
+//   - the array has at least `len + 1` slots (`new_lit(arena, K)` with K
+//     equal to the literal's arity),
+//   - the item is a scalar (int/float/bool) needing no refcount.
+// Element stores intentionally skip zz_clone: the literal never escapes.
+void zz_array_push_lit(zz_array *a, zz_value item) {
+    a->items[a->len++] = item;
+}
+
 void zz_array_push(zz_array *a, zz_value item) {
     if (a->len == a->cap) {
         size_t nc = a->cap == 0 ? 4 : a->cap * 2;
@@ -767,6 +824,34 @@ zz_value zz_dict_new_arena(zz_arena *arena) {
     v.tag = ZZ_DICT;
     v.dict = d;
     return v;
+}
+
+// Index-expression dispatchers: `obj[idx]` read and `obj[idx] = v` write.
+// Arrays and dicts only; unsupported tags set *err = 1 and return unit.
+zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
+    switch (obj.tag) {
+    case ZZ_ARRAY:
+        return zz_array_get(obj.arr, idx, err);
+    case ZZ_DICT:
+        return zz_dict_get(obj.dict, idx, err);
+    default:
+        *err = 1;
+        return zz_unit();
+    }
+}
+
+void zz_index_set(zz_value obj, zz_value idx, zz_value item, int *err) {
+    switch (obj.tag) {
+    case ZZ_ARRAY:
+        zz_array_set(obj.arr, idx, item, err);
+        return;
+    case ZZ_DICT:
+        zz_dict_set(obj.dict, idx, item);
+        *err = 0;
+        return;
+    default:
+        *err = 1;
+    }
 }
 
 void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {

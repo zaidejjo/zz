@@ -16,11 +16,15 @@ pub struct LoweredC {
 }
 
 /// Scope-aware C identifier allocator (handles shadowing).
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct NameCtx {
     /// zz var name → stack of active (C identifier, C type) tuples (innermost last).
     stack: HashMap<String, Vec<(String, String)>>,
     counter: usize,
+    /// zz var name → statically-known length of the array literal it was
+    /// most recently bound to (straight-line code only). Used to fold
+    /// `len(v)` to a constant so tight loops lower to raw scalar arith.
+    array_lens: HashMap<String, usize>,
 }
 
 impl NameCtx {
@@ -28,6 +32,7 @@ impl NameCtx {
         NameCtx {
             stack: HashMap::new(),
             counter: 0,
+            array_lens: HashMap::new(),
         }
     }
 
@@ -77,11 +82,44 @@ impl NameCtx {
             .map(|(_, typ)| typ.as_str())
     }
 
+    /// Advance and return the next fresh counter value. Used by helpers
+    /// that emit a family of related identifiers (e.g., stack-promoted
+    /// arrays use three identifiers sharing one counter value).
+    fn bump_counter(&mut self) -> usize {
+        let c = self.counter;
+        self.counter += 1;
+        c
+    }
+
     /// Leave the current scope for `name`.
     fn leave(&mut self, name: &str) {
         if let Some(vec) = self.stack.get_mut(name) {
             vec.pop();
         }
+    }
+
+    /// Record that `name` currently holds an array literal of length `n`.
+    fn set_array_len(&mut self, name: &str, n: usize) {
+        self.array_lens.insert(name.to_string(), n);
+    }
+
+    /// Forget any statically-known literal length for `name`. Called when
+    /// `name` is reassigned with a non-literal value or aliased into a call.
+    fn invalidate_array_len(&mut self, name: &str) {
+        self.array_lens.remove(name);
+    }
+
+    /// Statically-known length of `name` if it was most recently bound to
+    /// an array literal in the current straight-line block.
+    fn array_len(&self, name: &str) -> Option<usize> {
+        self.array_lens.get(name).copied()
+    }
+
+    /// Drop all literal-length knowledge. Called at control-flow boundaries
+    /// (block/loop/branch entries) so a fold never reads a binding that a
+    /// merged path could have changed.
+    fn clear_array_lens(&mut self) {
+        self.array_lens.clear();
     }
 }
 
@@ -95,6 +133,118 @@ fn auto_box(expr: &str, ctype: Option<&str>) -> String {
         Some("double") => format!("zz_float({expr})"),
         Some("bool") => format!("zz_bool({expr})"),
         _ => expr.to_string(),
+    }
+}
+
+/// Classify a binary operand as a recognized scalar shape, returning its C
+/// type (`"int64_t"` / `"double"`) if so. Recognized shapes:
+///   - Int literal  → `"int64_t"`
+///   - Float literal (whole-number form, like `1.0` / `2.5`) → `"double"`
+///   - Ident mapped to `int64_t`/`double`/`bool` in NameCtx
+///   - Negation of any of the above
+///
+///   Used by the Binary emit path to detect when both sides are scalar and
+///   emit raw `lhs <op> rhs` instead of routing through the boxed `zz_binop`.
+fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static str> {
+    match e {
+        Expr::Int { .. } => Some("int64_t"),
+        Expr::Float { value, .. } => {
+            if value.is_finite() {
+                Some("double")
+            } else {
+                None
+            }
+        }
+        Expr::Ident { name, .. } => match names.lookup_type(name)? {
+            "int64_t" => Some("int64_t"),
+            "double" => Some("double"),
+            "bool" => Some("bool"),
+            _ => None,
+        },
+        Expr::Unary { op, expr, .. } => {
+            let inner = scalar_operand_type(expr, names)?;
+            match op {
+                zz_frontend::ast::UnOp::Neg => Some(inner),
+                zz_frontend::ast::UnOp::Pos => Some(inner),
+                zz_frontend::ast::UnOp::Not => Some("bool"),
+            }
+        }
+        Expr::Paren { expr, .. } => scalar_operand_type(expr, names),
+        _ => None,
+    }
+}
+
+/// Return the unboxed C scalar expression for a binary operand. Used
+/// after `scalar_operand_type` returns Some to build a raw C arithmetic
+/// expression without going through `zz_binop`.
+/// Wrap a binary operand — classified as a scalar by `scalar_operand_type`
+/// OR emitted as a raw C cast — into its boxed `zz_value` form for the
+/// `zz_binop` path. Uses the raw unboxed expression from
+/// `scalar_operand_c` (literal body, raw C variable, ...) instead of the
+/// already-emitted expression, so literals that emit as `zz_int(1)` never
+/// end up double-boxed as `zz_int(zz_int(1))`. Nested binary operands that
+/// lower to a raw C cast like `(int64_t)(2 * 3)` are recognized through the
+/// cast marker and boxed with the matching constructor.
+fn box_scalar_operand(e: &Expr, names: &NameCtx, emitted: &str) -> String {
+    match scalar_operand_type(e, names) {
+        Some("int64_t") => {
+            let raw = scalar_operand_c(e, names).unwrap_or_else(|| emitted.to_string());
+            format!("zz_int({raw})")
+        }
+        Some("double") => {
+            let raw = scalar_operand_c(e, names).unwrap_or_else(|| emitted.to_string());
+            format!("zz_float({raw})")
+        }
+        _ => {
+            // Not a recognized scalar shape directly, but the emitted
+            // expression may still be a raw C scalar (e.g., a nested
+            // binary op lowered to `(int64_t)(a * b)`).
+            if emitted.starts_with("(double)(") {
+                format!("zz_float({emitted})")
+            } else if emitted.starts_with("(int64_t)(") {
+                format!("zz_int({emitted})")
+            } else {
+                emitted.to_string()
+            }
+        }
+    }
+}
+
+/// Return the unboxed C scalar expression for a binary operand. Used
+/// after `scalar_operand_type` returns Some to build a raw C arithmetic
+/// expression without going through `zz_binop`.
+fn scalar_operand_c(e: &Expr, names: &NameCtx) -> Option<String> {
+    match e {
+        Expr::Int { value, .. } => Some(value.to_string()),
+        Expr::Float { value, .. } => {
+            if value.is_finite() {
+                let s = if *value == (*value).floor() && (*value).abs() < 1e15 {
+                    format!("{value:.1}")
+                } else {
+                    format!("{value}")
+                };
+                Some(s)
+            } else {
+                None
+            }
+        }
+        Expr::Ident { name, .. } => names.lookup(name).map(|s| s.to_string()),
+        Expr::Unary { op, expr, .. } => {
+            let inner = scalar_operand_c(expr, names)?;
+            match op {
+                zz_frontend::ast::UnOp::Neg => Some(format!("(-{inner})")),
+                zz_frontend::ast::UnOp::Pos => Some(inner),
+                zz_frontend::ast::UnOp::Not => {
+                    if scalar_operand_type(expr, names) == Some("bool") {
+                        Some(format!("(!{inner})"))
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+        Expr::Paren { expr, .. } => scalar_operand_c(expr, names),
+        _ => None,
     }
 }
 
@@ -358,6 +508,175 @@ impl Lowerer {
         emitted.to_string()
     }
 
+    /// Try to emit an array literal as a stack-promoted C struct:
+    ///   zz_value _items_<N>[K] = { ... };
+    ///   zz_array _arr_<N> = { ZZ_ARRAY_STACK_MAGIC, K, K, _items_<N> };
+    ///   zz_value _v<N> = (zz_value){ZZ_ARRAY, {.arr = &_arr_<N>}};
+    /// Returns Some(var_name) when stack promotion is safe (literal is
+    /// non-escaping, length ≤ 8, every element is a scalar literal/ident/
+    /// arithmetic op). Returns None to signal the caller to fall back to
+    /// the arena-allocated path.
+    ///
+    /// Stack-promoted arrays carry `refs = ZZ_ARRAY_STACK_MAGIC`; the
+    /// runtime recognizes this sentinel and skips `free()` paths so neither
+    /// the header nor the items buffer are touched at scope exit.
+    fn try_emit_stack_array(
+        &self,
+        elems: &[Expr],
+        span: zz_frontend::span::Span,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> Option<String> {
+        let non_esc = self.is_non_escaping(span);
+        let loop_arena = self.current_loop_has_arena_reset();
+        // Only promote when the array is provably non-escaping.
+        if !non_esc && !loop_arena {
+            return None;
+        }
+        // Skip empty literals — they have no items buffer to skip anyway
+        // and the arena path is already O(1).
+        if elems.is_empty() {
+            return None;
+        }
+        // Cap at 8 elements: above this, the stack footprint starts to
+        // hurt cache behavior and the arena path is already fast enough.
+        const MAX_STACK_LEN: usize = 8;
+        if elems.len() > MAX_STACK_LEN {
+            return None;
+        }
+
+        // Classify each element and pre-compute its C scalar initializer.
+        // Returns None if any element isn't a recognized scalar form.
+        let mut inits: Vec<String> = Vec::with_capacity(elems.len());
+        for e in elems {
+            let init = self.emit_scalar_init(e, names, out)?;
+            inits.push(init);
+        }
+
+        // Emit the three declarations.
+        let counter = names.bump_counter();
+        let items_var = format!("_items_{counter}");
+        let arr_var = format!("_arr_{counter}");
+        let v_var = format!("_v{counter}");
+        let n = inits.len();
+        out.push_str(&format!(
+            "    zz_value {items_var}[{n}] = {{\n        {},\n    }};\n",
+            inits.join(",\n        ")
+        ));
+        out.push_str(&format!(
+            "    zz_array {arr_var} = {{ ZZ_ARRAY_STACK_MAGIC, {n}, {n}, {items_var} }};\n"
+        ));
+        out.push_str(&format!(
+            "    zz_value {v_var} = (zz_value){{ZZ_ARRAY, {{.arr = &{arr_var}}}}};\n"
+        ));
+        Some(v_var)
+    }
+
+    /// Emit a C compound literal initializer for a scalar expression.
+    /// Returns `{.tag=ZZ_INT, {.i=<expr>}}` / `{.tag=ZZ_FLOAT, {.f=<expr>}}`
+    /// / `{.tag=ZZ_BOOL, {.b=<expr>}}` — or None for unsupported forms.
+    ///
+    /// Recognized shapes:
+    ///   - Int literal: `42`
+    ///   - Float literal: `3.5`
+    ///   - Bool literal: `true` / `false`
+    ///   - Ident mapped to `int64_t`/`double`/`bool` in NameCtx
+    ///   - Arithmetic Binary that already lowers to `(int64_t)(l op r)` /
+    ///     `(double)(l op r)` (i.e., scalar unboxed arithmetic on locals)
+    ///   - Negation of any of the above that yields a recognized scalar
+    fn emit_scalar_init(&self, e: &Expr, names: &mut NameCtx, out: &mut String) -> Option<String> {
+        match e {
+            Expr::Int { value, .. } => Some(format!("{{.tag=ZZ_INT, {{.i={value}}}}}")),
+            Expr::Float { value, .. } => {
+                let s = if *value == (*value).floor() && (*value).abs() < 1e15 {
+                    format!("{value:.1}")
+                } else {
+                    format!("{value}")
+                };
+                Some(format!("{{.tag=ZZ_FLOAT, {{.f={s}}}}}"))
+            }
+            Expr::Bool { value, .. } => {
+                let s = if *value { "true" } else { "false" };
+                Some(format!("{{.tag=ZZ_BOOL, {{.b={s}}}}}"))
+            }
+            Expr::Ident { name, .. } => {
+                let ty = names.lookup_type(name)?.to_string();
+                let cid = names.lookup(name)?.to_string();
+                match ty.as_str() {
+                    "int64_t" => Some(format!("{{.tag=ZZ_INT, {{.i={cid}}}}}")),
+                    "double" => Some(format!("{{.tag=ZZ_FLOAT, {{.f={cid}}}}}")),
+                    "bool" => Some(format!("{{.tag=ZZ_BOOL, {{.b={cid}}}}}")),
+                    _ => None,
+                }
+            }
+            Expr::Unary { op, expr, .. } => {
+                match op {
+                    zz_frontend::ast::UnOp::Neg => {
+                        // `-x` for any recognized scalar: produce a negated
+                        // int of the inner scalar.
+                        let inner = self.emit_scalar_init(expr, names, out)?;
+                        let stripped = if let Some(rest) = inner.strip_prefix("{.tag=ZZ_INT, {.i=")
+                        {
+                            rest.strip_suffix("}}").unwrap_or(rest)
+                        } else if let Some(rest) = inner.strip_prefix("{.tag=ZZ_FLOAT, {.f=") {
+                            rest.strip_suffix("}}").unwrap_or(rest)
+                        } else {
+                            return None;
+                        };
+                        Some(format!("{{.tag=ZZ_INT, {{.i=-({stripped})}}}}"))
+                    }
+                    zz_frontend::ast::UnOp::Pos => self.emit_scalar_init(expr, names, out),
+                    zz_frontend::ast::UnOp::Not => {
+                        let inner_b = self.emit_scalar_bool_init(expr, names)?;
+                        Some(format!("{{.tag=ZZ_BOOL, {{.b=!({inner_b})}}}}"))
+                    }
+                }
+            }
+            Expr::Paren { expr, .. } => self.emit_scalar_init(expr, names, out),
+            Expr::Binary { .. } => {
+                // Binary ops only lower to a raw scalar C expression when
+                // both operands are scalar locals. Emit via the regular
+                // path and inspect the leading cast. Use a scratch buffer
+                // so we don't pollute the caller's C output.
+                let mut scratch = String::new();
+                let emitted = self.emit_expr(e, names, &mut scratch);
+                if emitted.starts_with("(int64_t)(") {
+                    let inner = &emitted[10..emitted.len() - 1];
+                    return Some(format!("{{.tag=ZZ_INT, {{.i={inner}}}}}"));
+                }
+                if emitted.starts_with("(double)(") {
+                    let inner = &emitted[9..emitted.len() - 1];
+                    return Some(format!("{{.tag=ZZ_FLOAT, {{.f={inner}}}}}"));
+                }
+                if emitted.starts_with("(bool)(") {
+                    let inner = &emitted[7..emitted.len() - 1];
+                    return Some(format!("{{.tag=ZZ_BOOL, {{.b={inner}}}}}"));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Like `emit_scalar_init`, but forces a boolean-typed inner expression
+    /// (used for `!x` where x is a bool ident/literal).
+    fn emit_scalar_bool_init(&self, e: &Expr, names: &NameCtx) -> Option<String> {
+        match e {
+            Expr::Bool { value, .. } => {
+                let s = if *value { "true" } else { "false" };
+                Some(s.to_string())
+            }
+            Expr::Ident { name, .. } => {
+                let ty = names.lookup_type(name)?;
+                if ty == "bool" {
+                    return names.lookup(name).map(|cid| cid.to_string());
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// Generate C typedefs for all reachable structs, in dependency order.
     fn lower_structs_preamble(&self) -> String {
         let mut preamble = String::new();
@@ -518,6 +837,9 @@ impl Lowerer {
     }
 
     fn emit_block(&self, block: &Block, names: &mut NameCtx, out: &mut String) {
+        // Control-flow boundary: drop literal-length knowledge from the
+        // enclosing scope so `len(x)` folds never cross a merge point.
+        names.clear_array_lens();
         let n = block.stmts.len();
         for (i, stmt) in block.stmts.iter().enumerate() {
             let is_tail = i == n - 1;
@@ -626,6 +948,10 @@ impl Lowerer {
                     _ => val,
                 };
                 out.push_str(&format!("    {ctype} {cid} = {final_val};\n"));
+                // Track array literals so `len(v)` can fold to the arity.
+                if let Expr::Array { elems, .. } = value {
+                    names.set_array_len(&name.name, elems.len());
+                }
             }
             Stmt::Assign { target, value, .. } => {
                 // Fast-path: `s = s + <rhs>` where `s` is a string
@@ -639,6 +965,12 @@ impl Lowerer {
                 //   - target type must NOT be a scalar (int64_t/double/bool).
                 //   - For non-literal RHS, the RHS must itself be string-
                 //     typed (else the runtime gets a non-zz_value arg).
+                // Any reassignment breaks the literal-length association
+                // until proven otherwise (re-inserted below for array
+                // literals on the generic path).
+                if let Expr::Ident { name, .. } = target {
+                    names.invalidate_array_len(name);
+                }
                 if let Expr::Binary {
                     op: zz_frontend::ast::BinOp::Add,
                     left,
@@ -741,6 +1073,11 @@ impl Lowerer {
                             } else {
                                 out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
                             }
+                            // Re-associate the target with a fresh array
+                            // literal length when the RHS is one.
+                            if let Expr::Array { elems, .. } = value {
+                                names.set_array_len(name, elems.len());
+                            }
                         }
                     }
                     Expr::Path { parts, .. } => {
@@ -836,6 +1173,34 @@ impl Lowerer {
                                 out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
                             }
                         }
+                    }
+                    Expr::Index { obj, index, .. } => {
+                        // `obj[idx] = v` — runtime-dispatched write (arrays/dicts).
+                        let o = self.emit_expr(obj, names, out);
+                        let i = self.emit_expr(index, names, out);
+                        // Box a scalar index to a zz_value.
+                        let i_boxed = self.box_index_arg(index, i, names);
+                        // Box a raw-scalar RHS to a zz_value before storing.
+                        let boxed_val = if value_is_scalar {
+                            if let Expr::Ident { name, .. } = value {
+                                let name_str = name.clone();
+                                auto_box(&val, names.lookup_type(&name_str))
+                            } else if let Expr::Path { parts, .. } = value {
+                                let joined = parts.join(".");
+                                auto_box(&val, names.lookup_type(&joined))
+                            } else if val.starts_with("(double)(") {
+                                format!("zz_float({val})")
+                            } else if val.starts_with("(bool)(") {
+                                format!("zz_bool({val})")
+                            } else {
+                                format!("zz_int({val})")
+                            }
+                        } else {
+                            val.clone()
+                        };
+                        out.push_str(&format!(
+                            "    {{ int _e = 0; zz_index_set({o}, {i_boxed}, {boxed_val}, &_e); }}\n"
+                        ));
                     }
                     _ => {}
                 }
@@ -1182,17 +1547,12 @@ impl Lowerer {
                             zz_frontend::ast::BinOp::Ge => "ZZOP_GE",
                             _ => "ZZOP_ADD",
                         };
-                        // Check if either operand is a scalar variable
-                        let left_type = if let Expr::Ident { name, .. } = left.as_ref() {
-                            names.lookup_type(name)
-                        } else {
-                            None
-                        };
-                        let right_type = if let Expr::Ident { name, .. } = right.as_ref() {
-                            names.lookup_type(name)
-                        } else {
-                            None
-                        };
+                        // Check if either operand is a scalar. We treat both scalar-typed locals
+                        // AND Int/Float literals as scalar operands so that patterns like
+                        // `i + 1` or `count + n` unbox to raw C arithmetic instead of routing
+                        // through the boxed `zz_binop` path.
+                        let left_type = scalar_operand_type(left, names);
+                        let right_type = scalar_operand_type(right, names);
 
                         // Both operands are scalars of compatible type:
                         // emit a raw C arithmetic op instead of going
@@ -1210,6 +1570,7 @@ impl Lowerer {
                         );
                         if is_arith {
                             if left_type == Some("int64_t") && right_type == Some("int64_t") {
+                                // Both sides are int64 — emit raw C arith.
                                 let c_op = match op {
                                     zz_frontend::ast::BinOp::Add => "+",
                                     zz_frontend::ast::BinOp::Sub => "-",
@@ -1218,25 +1579,20 @@ impl Lowerer {
                                     zz_frontend::ast::BinOp::Rem => "%",
                                     _ => "+",
                                 };
-                                // Division/modulo by zero still needs a guard.
+                                let lc = scalar_operand_c(left, names).unwrap_or_else(|| l.clone());
+                                let rc =
+                                    scalar_operand_c(right, names).unwrap_or_else(|| r.clone());
+                                // Literal-zero divisor guard: a `*int` local
+                                // can't be statically proven nonzero, but a
+                                // literal zero would divide-by-zero at -O3.
                                 if matches!(
                                     op,
                                     zz_frontend::ast::BinOp::Div | zz_frontend::ast::BinOp::Rem
-                                ) && matches!(
-                                    right.as_ref(),
-                                    Expr::Int { value: 0, .. } | Expr::Ident { .. }
-                                ) {
-                                    // Only literal-zero check; variable
-                                    // divisor would need a runtime guard.
-                                    // Fall through to boxed path if divisor
-                                    // is a literal 0.
-                                    if matches!(right.as_ref(), Expr::Int { value: 0, .. }) {
-                                        format!("zz_binop({cop}, {l}, {r})")
-                                    } else {
-                                        format!("(int64_t)({l} {c_op} {r})")
-                                    }
+                                ) && matches!(right.as_ref(), Expr::Int { value: 0, .. })
+                                {
+                                    format!("zz_binop({cop}, {l}, {r})")
                                 } else {
-                                    format!("(int64_t)({l} {c_op} {r})")
+                                    format!("(int64_t)({lc} {c_op} {rc})")
                                 }
                             } else if left_type == Some("double") && right_type == Some("double") {
                                 let c_op = match op {
@@ -1244,40 +1600,26 @@ impl Lowerer {
                                     zz_frontend::ast::BinOp::Sub => "-",
                                     zz_frontend::ast::BinOp::Mul => "*",
                                     zz_frontend::ast::BinOp::Div => "/",
-                                    zz_frontend::ast::BinOp::Rem => "fmod",
                                     _ => "+",
                                 };
+                                let lc = scalar_operand_c(left, names).unwrap_or_else(|| l.clone());
+                                let rc =
+                                    scalar_operand_c(right, names).unwrap_or_else(|| r.clone());
                                 if matches!(op, zz_frontend::ast::BinOp::Rem) {
                                     format!("(double)(fmod({l}, {r}))")
                                 } else {
-                                    format!("(double)({l} {c_op} {r})")
+                                    format!("(double)({lc} {c_op} {rc})")
                                 }
                             } else if left_type == Some("int64_t") || right_type == Some("int64_t")
                             {
                                 // Mixed: one scalar, one boxed. Box both
                                 // sides and dispatch through zz_binop.
-                                let boxed_l = if left_type == Some("int64_t") {
-                                    format!("zz_int({l})")
-                                } else {
-                                    l
-                                };
-                                let boxed_r = if right_type == Some("int64_t") {
-                                    format!("zz_int({r})")
-                                } else {
-                                    r
-                                };
+                                let boxed_l = box_scalar_operand(left, names, &l);
+                                let boxed_r = box_scalar_operand(right, names, &r);
                                 format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                             } else if left_type == Some("double") || right_type == Some("double") {
-                                let boxed_l = if left_type == Some("double") {
-                                    format!("zz_float({l})")
-                                } else {
-                                    l
-                                };
-                                let boxed_r = if right_type == Some("double") {
-                                    format!("zz_float({r})")
-                                } else {
-                                    r
-                                };
+                                let boxed_l = box_scalar_operand(left, names, &l);
+                                let boxed_r = box_scalar_operand(right, names, &r);
                                 format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                             } else {
                                 format!("zz_binop({cop}, {l}, {r})")
@@ -1286,28 +1628,12 @@ impl Lowerer {
                             // Comparisons / pow / etc on scalars still
                             // use the boxed path (result must be zz_value).
                             if left_type == Some("int64_t") || right_type == Some("int64_t") {
-                                let boxed_l = if left_type == Some("int64_t") {
-                                    format!("zz_int({l})")
-                                } else {
-                                    l
-                                };
-                                let boxed_r = if right_type == Some("int64_t") {
-                                    format!("zz_int({r})")
-                                } else {
-                                    r
-                                };
+                                let boxed_l = box_scalar_operand(left, names, &l);
+                                let boxed_r = box_scalar_operand(right, names, &r);
                                 format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                             } else if left_type == Some("double") || right_type == Some("double") {
-                                let boxed_l = if left_type == Some("double") {
-                                    format!("zz_float({l})")
-                                } else {
-                                    l
-                                };
-                                let boxed_r = if right_type == Some("double") {
-                                    format!("zz_float({r})")
-                                } else {
-                                    r
-                                };
+                                let boxed_l = box_scalar_operand(left, names, &l);
+                                let boxed_r = box_scalar_operand(right, names, &r);
                                 format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                             } else {
                                 format!("zz_binop({cop}, {l}, {r})")
@@ -1341,6 +1667,14 @@ impl Lowerer {
                 let s = self.emit_expr(start, names, out);
                 let en = self.emit_expr(end, names, out);
                 format!("zz_range_build({s}, {en})")
+            }
+            Expr::Index { obj, index, .. } => {
+                // `obj[idx]` — runtime-dispatched read (arrays/dicts).
+                let o = self.emit_expr(obj, names, out);
+                let i = self.emit_expr(index, names, out);
+                // Box a scalar index (ident/raw-arith) to a zz_value.
+                let i_boxed = self.box_index_arg(index, i, names);
+                format!("zz_call_native2(zz_index_get, {o}, {i_boxed})")
             }
             Expr::StructInit { name, fields, .. } => {
                 // Check if this struct is unboxed
@@ -1379,14 +1713,60 @@ impl Lowerer {
                 format!("({obj_val}).{name}")
             }
             Expr::Array { elems, span, .. } => {
-                // Emit array literal: arena-aware or heap-allocated.
+                // Fast path: stack-promote when the literal is provably
+                // non-escaping AND every element is a scalar that lowers
+                // to a raw C scalar expression. This eliminates both the
+                // header bump-alloc and the per-iteration `realloc` of
+                // the items buffer, achieving Rust-level throughput on
+                // tight array-literal-in-loop benchmarks.
+                if let Some(v) = self.try_emit_stack_array(elems, *span, names, out) {
+                    return v;
+                }
+                // Fallback: arena-aware or heap-allocated construction.
                 let arr_var = format!("__arr{}", names.counter);
                 names.counter += 1;
-                // Force arena allocation if we're inside a loop body with
-                // an arena reset. This is safe because the per-iteration
-                // reset frees the object before any function call could
-                // observe it. Function calls that receive arena-allocated
-                // objects must not retain them across calls.
+                // Literal-literal path: pre-allocate the exact capacity —
+                // `zz_array_new_lit` bump-allocates the header AND the items
+                // buffer on the arena (or one heap block when escaping), so
+                // element stores never realloc and never touch atomic
+                // refcounts. Only applicable when every element lowers to a
+                // plain scalar (int/float/bool): scalars carry no refcount,
+                // so the clone-free direct store is perfectly safe.
+                let mut scalar_inits: Vec<String> = Vec::with_capacity(elems.len());
+                let mut all_scalar = true;
+                for item in elems {
+                    let mut scratch = String::new();
+                    match self.emit_scalar_init(item, names, &mut scratch) {
+                        Some(init) if scratch.is_empty() => scalar_inits.push(init),
+                        _ => {
+                            all_scalar = false;
+                            break;
+                        }
+                    }
+                }
+                if all_scalar {
+                    let arena_path =
+                        self.is_non_escaping(*span) || self.current_loop_has_arena_reset();
+                    let arena_arg = if arena_path { "&_arena" } else { "NULL" };
+                    out.push_str(&format!(
+                        "    zz_value {arr_var} = zz_array_new_lit({arena_arg}, {});\n",
+                        elems.len()
+                    ));
+                    for init in &scalar_inits {
+                        // init = `{.tag=ZZ_INT, {.i=42}}`; reuse its innards
+                        // inside the compound-literal wrapper.
+                        let inner = &init[1..init.len() - 1];
+                        out.push_str(&format!(
+                            "    zz_array_push_lit({arr_var}.arr, (zz_value){{{inner}}});\n"
+                        ));
+                    }
+                    return arr_var;
+                }
+                // Non-scalar fallback: force arena allocation if we're
+                // inside a loop body with an arena reset. This is safe
+                // because the per-iteration reset frees the object before
+                // any function call could observe it. Function calls that
+                // receive arena-allocated objects must not retain them.
                 let ctor = if self.is_non_escaping(*span) || self.current_loop_has_arena_reset() {
                     "zz_array_new_arena(&_arena)".to_string()
                 } else {
@@ -1537,6 +1917,55 @@ impl Lowerer {
             _ => return "zz_unit()".to_string(),
         };
 
+        // Peephole: `len(x)` where `x` is a variable bound to an array
+        // literal folds to the literal's arity (straight-line code only).
+        // This bypasses the runtime native call AND the boxed arithmetic,
+        // so `sum = sum + len(arr)` lowers to `sum += 3` — matching what
+        // Rust does for `[i, i+1, i+2].len()`. The literal construction is
+        // still emitted (side effects preserved); pure scalar stores are
+        // dead-code-eliminated by the C compiler.
+        if args.len() == 1 {
+            let is_len = matches!(
+                cname.as_str(),
+                "len" | "vec.len" | "std.vec.len" | "std.len"
+            );
+            if is_len {
+                match &args[0] {
+                    // `len([a(), 1])`: emit the literal construction so
+                    // element side effects run; only the arity is constant.
+                    Expr::Array { elems, .. } => {
+                        let _ = self.emit_expr(&args[0], names, out);
+                        return format!("zz_int({})", elems.len());
+                    }
+                    // `len(arr)`: reading a variable is side-effect free.
+                    Expr::Ident { name, .. } => {
+                        if let Some(n) = names.array_len(name.as_str()) {
+                            return format!("zz_int({n})");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Any other call may mutate or retain its array arguments — drop
+        // literal-length knowledge for every variable passed in (including
+        // the method receiver, e.g. `arr.push(4)`).
+        if let Some(recv) = &method_receiver {
+            if let Expr::Ident { name, .. } = recv {
+                names.invalidate_array_len(name);
+            }
+        }
+        for a in args {
+            match a {
+                Expr::Ident { name, .. } => names.invalidate_array_len(name),
+                Expr::Path { parts, .. } => {
+                    let joined = parts.join(".");
+                    names.invalidate_array_len(&joined);
+                }
+                _ => {}
+            }
+        }
+
         let mut arg_items: Vec<String> = Vec::new();
         // If this is a method call, emit and insert the receiver as first arg.
         if let Some(recv) = method_receiver {
@@ -1664,6 +2093,31 @@ impl Lowerer {
         }
 
         "zz_unit()".to_string()
+    }
+
+    /// Box an index expression to a `zz_value` for `idx` arguments. Scalar
+    /// locals (int64_t/double/bool) and raw arithmetic need an explicit box;
+    /// already-boxed expressions pass through unchanged.
+    fn box_index_arg(&self, e: &Expr, emitted: String, names: &NameCtx) -> String {
+        if let Expr::Ident { name, .. } = e {
+            return auto_box(&emitted, names.lookup_type(name));
+        }
+        if let Expr::Path { parts, .. } = e {
+            let joined = parts.join(".");
+            if let Some(ty) = names.lookup_type(&joined) {
+                return auto_box(&emitted, Some(ty));
+            }
+        }
+        if emitted.starts_with("(int64_t)(") || emitted.starts_with("(int64_t)") {
+            return format!("zz_int({emitted})");
+        }
+        if emitted.starts_with("(double)(") {
+            return format!("zz_float({emitted})");
+        }
+        if emitted.starts_with("(bool)(") {
+            return format!("zz_bool({emitted})");
+        }
+        emitted
     }
 
     fn emit_str_literal(&self, s: &str) -> String {
