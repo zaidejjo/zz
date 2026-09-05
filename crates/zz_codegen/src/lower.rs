@@ -321,9 +321,12 @@ pub struct Lowerer {
     /// Result of escape analysis: maps spans to allocation classification.
     #[allow(dead_code)]
     escape: zz_hir::EscapeResult,
-    /// Stack of loop spans currently being emitted. Used to determine if
-    /// we're inside a loop body with an arena reset.
-    loop_stack: std::cell::RefCell<Vec<zz_frontend::span::Span>>,
+    /// Stack of C arena identifiers for loop bodies that own a per-iteration
+    /// sub-arena (`_loop_arena<N>`). Non-escaping allocations emitted while a
+    /// sub-arena is active are routed to it, so the per-iteration reset can
+    /// only ever free objects created inside that iteration — never objects
+    /// allocated in an enclosing scope or by an outer loop iteration.
+    loop_arenas: std::cell::RefCell<Vec<String>>,
 }
 
 impl Lowerer {
@@ -340,7 +343,7 @@ impl Lowerer {
             entry_main,
             tp,
             escape,
-            loop_stack: std::cell::RefCell::new(Vec::new()),
+            loop_arenas: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -364,23 +367,47 @@ impl Lowerer {
             .unwrap_or(false)
     }
 
+    /// Choose the arena for an allocation site.
+    ///
+    /// Allocation strategy, in priority order:
+    ///   1. A span explicitly classified as `Escaping` must use the heap
+    ///      (ARC) — never an arena, since the object outlives the scope.
+    ///   2. Inside a loop body whose sub-arena is reset every iteration,
+    ///      non-escaping allocations go to that sub-arena so the buffer is
+    ///      reused across iterations with zero heap growth.
+    ///   3. A span classified `NonEscaping` goes on the function arena,
+    ///      freed in bulk at function exit.
+    ///
+    /// Returns the C arena identifier (without `&`) or None for heap.
+    fn arena_for(&self, span: zz_frontend::span::Span) -> Option<String> {
+        if self.is_escaping(span) {
+            return None;
+        }
+        if let Some(arena_name) = self.loop_arenas.borrow().last() {
+            return Some(arena_name.clone());
+        }
+        if self.is_non_escaping(span) {
+            return Some("_arena".to_string());
+        }
+        None
+    }
+
     /// Returns the C constructor call for an array, routing through the
     /// arena variant when the expression is classified as non-escaping.
+    #[allow(dead_code)] // used by experimental array-construction paths
     fn emit_array_new(&self, span: zz_frontend::span::Span) -> String {
-        if self.is_non_escaping(span) {
-            "zz_array_new_arena(&_arena)".to_string()
-        } else {
-            "zz_array_new()".to_string()
+        match self.arena_for(span) {
+            Some(arena) => format!("zz_array_new_arena(&{arena})"),
+            None => "zz_array_new()".to_string(),
         }
     }
 
     /// Returns the C constructor call for a dict, routing through the
     /// arena variant when the expression is classified as non-escaping.
     fn emit_dict_new(&self, span: zz_frontend::span::Span) -> String {
-        if self.is_non_escaping(span) {
-            "zz_dict_new_arena(&_arena)".to_string()
-        } else {
-            "zz_dict_new()".to_string()
+        match self.arena_for(span) {
+            Some(arena) => format!("zz_dict_new_arena(&{arena})"),
+            None => "zz_dict_new()".to_string(),
         }
     }
 
@@ -388,10 +415,9 @@ impl Lowerer {
     /// the arena variant when the expression is classified as non-escaping.
     #[allow(dead_code)] // reserved for dynamic string allocation (concat results)
     fn emit_str_new(&self, s: &str, len: usize, span: zz_frontend::span::Span) -> String {
-        if self.is_non_escaping(span) {
-            format!("zz_str_new_arena({s}, {len}, &_arena)")
-        } else {
-            format!("zz_str_new({s}, {len})")
+        match self.arena_for(span) {
+            Some(arena) => format!("zz_str_new_arena({s}, {len}, &{arena})"),
+            None => format!("zz_str_new({s}, {len})"),
         }
     }
 
@@ -399,10 +425,7 @@ impl Lowerer {
     /// that has an arena reset injected. Used to force arena allocation
     /// for loop-local collections.
     fn current_loop_has_arena_reset(&self) -> bool {
-        self.loop_stack
-            .borrow()
-            .iter()
-            .any(|span| self.escape.loop_spans.contains(span))
+        self.loop_arenas.borrow().last().is_some()
     }
 
     /// Check if a struct type is unboxed (all scalar or nested unboxed struct fields).
@@ -584,7 +607,7 @@ impl Lowerer {
     ///   - Arithmetic Binary that already lowers to `(int64_t)(l op r)` /
     ///     `(double)(l op r)` (i.e., scalar unboxed arithmetic on locals)
     ///   - Negation of any of the above that yields a recognized scalar
-    fn emit_scalar_init(&self, e: &Expr, names: &mut NameCtx, out: &mut String) -> Option<String> {
+    fn emit_scalar_init(&self, e: &Expr, names: &mut NameCtx, _out: &mut String) -> Option<String> {
         match e {
             Expr::Int { value, .. } => Some(format!("{{.tag=ZZ_INT, {{.i={value}}}}}")),
             Expr::Float { value, .. } => {
@@ -614,25 +637,21 @@ impl Lowerer {
                     zz_frontend::ast::UnOp::Neg => {
                         // `-x` for any recognized scalar: produce a negated
                         // int of the inner scalar.
-                        let inner = self.emit_scalar_init(expr, names, out)?;
-                        let stripped = if let Some(rest) = inner.strip_prefix("{.tag=ZZ_INT, {.i=")
-                        {
-                            rest.strip_suffix("}}").unwrap_or(rest)
-                        } else if let Some(rest) = inner.strip_prefix("{.tag=ZZ_FLOAT, {.f=") {
-                            rest.strip_suffix("}}").unwrap_or(rest)
-                        } else {
-                            return None;
-                        };
+                        let inner = self.emit_scalar_init(expr, names, _out)?;
+                        let stripped = inner
+                            .strip_prefix("{.tag=ZZ_INT, {.i=")
+                            .or_else(|| inner.strip_prefix("{.tag=ZZ_FLOAT, {.f="))?;
+                        let stripped = stripped.strip_suffix("}}").unwrap_or(stripped);
                         Some(format!("{{.tag=ZZ_INT, {{.i=-({stripped})}}}}"))
                     }
-                    zz_frontend::ast::UnOp::Pos => self.emit_scalar_init(expr, names, out),
+                    zz_frontend::ast::UnOp::Pos => self.emit_scalar_init(expr, names, _out),
                     zz_frontend::ast::UnOp::Not => {
                         let inner_b = self.emit_scalar_bool_init(expr, names)?;
                         Some(format!("{{.tag=ZZ_BOOL, {{.b=!({inner_b})}}}}"))
                     }
                 }
             }
-            Expr::Paren { expr, .. } => self.emit_scalar_init(expr, names, out),
+            Expr::Paren { expr, .. } => self.emit_scalar_init(expr, names, _out),
             Expr::Binary { .. } => {
                 // Binary ops only lower to a raw scalar C expression when
                 // both operands are scalar locals. Emit via the regular
@@ -1297,6 +1316,19 @@ impl Lowerer {
         };
 
         if let Some((start_expr, end_expr)) = bounds {
+            // Loop-scoped sub-arena: loops whose body contains non-escaping
+            // allocations get their own arena so the per-iteration reset can
+            // reuse the buffer without touching objects an enclosing scope or
+            // an outer loop iteration may have placed on the function arena.
+            let loop_arena: Option<String> = if self.escape.loop_spans.contains(&span) {
+                let ac = names.bump_counter();
+                let name = format!("_loop_arena{ac}");
+                out.push_str(&format!("    zz_arena {name};\n"));
+                out.push_str(&format!("    zz_arena_init(&{name}, 65536);\n"));
+                Some(name)
+            } else {
+                None
+            };
             // Check if end is an unboxed scalar variable (for fast path)
             let end_name_opt: Option<String> = match &end_expr {
                 Expr::Ident { name, .. } => Some(name.clone()),
@@ -1378,18 +1410,26 @@ impl Lowerer {
                 out.push_str(&s);
             }
             // Loop body is never a function tail.
-            self.loop_stack.borrow_mut().push(span);
+            if let Some(ref name) = loop_arena {
+                self.loop_arenas.borrow_mut().push(name.clone());
+            }
             for bstmt in &body.stmts {
                 self.emit_stmt(bstmt, names, out, false);
             }
-            self.loop_stack.borrow_mut().pop();
-            // Inject per-iteration arena reset if the loop body has allocations.
-            if self.escape.loop_spans.contains(&span) {
-                out.push_str("    zz_arena_reset(&_arena);\n");
+            if let Some(ref name) = loop_arena {
+                self.loop_arenas.borrow_mut().pop();
+                // Per-iteration reset: every arena allocation made inside this
+                // iteration is reclaimed in O(1), so the sub-arena's buffer is
+                // reused indefinitely without growing the heap footprint.
+                out.push_str(&format!("    zz_arena_reset(&{name});\n"));
             }
             out.push_str("    }\n");
             if !end_is_scalar {
                 out.push_str("    }\n}\n");
+            }
+            // Free the sub-arena's buffer once the loop completes.
+            if let Some(ref name) = loop_arena {
+                out.push_str(&format!("    zz_arena_destroy(&{name});\n"));
             }
             names.leave(v);
         } else {
@@ -1610,14 +1650,12 @@ impl Lowerer {
                                 } else {
                                     format!("(double)({lc} {c_op} {rc})")
                                 }
-                            } else if left_type == Some("int64_t") || right_type == Some("int64_t")
+                            } else if (left_type == Some("int64_t")
+                                || right_type == Some("int64_t"))
+                                || (left_type == Some("double") || right_type == Some("double"))
                             {
                                 // Mixed: one scalar, one boxed. Box both
                                 // sides and dispatch through zz_binop.
-                                let boxed_l = box_scalar_operand(left, names, &l);
-                                let boxed_r = box_scalar_operand(right, names, &r);
-                                format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
-                            } else if left_type == Some("double") || right_type == Some("double") {
                                 let boxed_l = box_scalar_operand(left, names, &l);
                                 let boxed_r = box_scalar_operand(right, names, &r);
                                 format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
@@ -1627,11 +1665,9 @@ impl Lowerer {
                         } else {
                             // Comparisons / pow / etc on scalars still
                             // use the boxed path (result must be zz_value).
-                            if left_type == Some("int64_t") || right_type == Some("int64_t") {
-                                let boxed_l = box_scalar_operand(left, names, &l);
-                                let boxed_r = box_scalar_operand(right, names, &r);
-                                format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
-                            } else if left_type == Some("double") || right_type == Some("double") {
+                            if (left_type == Some("int64_t") || right_type == Some("int64_t"))
+                                || (left_type == Some("double") || right_type == Some("double"))
+                            {
                                 let boxed_l = box_scalar_operand(left, names, &l);
                                 let boxed_r = box_scalar_operand(right, names, &r);
                                 format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
@@ -1643,6 +1679,42 @@ impl Lowerer {
                 }
             }
             Expr::Call { callee, args, .. } => self.emit_call(callee, args, names, out),
+            Expr::While {
+                cond, body, span, ..
+            } => {
+                // Loops whose body contains non-escaping allocations get a
+                // loop-scoped sub-arena, exactly like `for` loops: the buffer
+                // is reset at the end of every iteration so per-iteration
+                // allocations are reused instead of growing the heap.
+                let loop_arena: Option<String> = if self.escape.loop_spans.contains(span) {
+                    let ac = names.bump_counter();
+                    let name = format!("_loop_arena{ac}");
+                    out.push_str(&format!("    zz_arena {name};\n"));
+                    out.push_str(&format!("    zz_arena_init(&{name}, 65536);\n"));
+                    Some(name)
+                } else {
+                    None
+                };
+                if let Some(ref name) = loop_arena {
+                    self.loop_arenas.borrow_mut().push(name.clone());
+                }
+                out.push_str("    while (1) {\n");
+                let c = self.emit_expr(cond, names, out);
+                out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
+                // Loop body is never a function tail.
+                for bstmt in &body.stmts {
+                    self.emit_stmt(bstmt, names, out, false);
+                }
+                if let Some(ref name) = loop_arena {
+                    self.loop_arenas.borrow_mut().pop();
+                    out.push_str(&format!("        zz_arena_reset(&{name});\n"));
+                }
+                out.push_str("    }\n");
+                if let Some(ref name) = loop_arena {
+                    out.push_str(&format!("    zz_arena_destroy(&{name});\n"));
+                }
+                "zz_unit()".to_string()
+            }
             Expr::If {
                 cond, then, els, ..
             } => {
@@ -1745,9 +1817,10 @@ impl Lowerer {
                     }
                 }
                 if all_scalar {
-                    let arena_path =
-                        self.is_non_escaping(*span) || self.current_loop_has_arena_reset();
-                    let arena_arg = if arena_path { "&_arena" } else { "NULL" };
+                    let arena_arg = match self.arena_for(*span) {
+                        Some(arena) => format!("&{arena}"),
+                        None => "NULL".to_string(),
+                    };
                     out.push_str(&format!(
                         "    zz_value {arr_var} = zz_array_new_lit({arena_arg}, {});\n",
                         elems.len()
@@ -1762,15 +1835,14 @@ impl Lowerer {
                     }
                     return arr_var;
                 }
-                // Non-scalar fallback: force arena allocation if we're
-                // inside a loop body with an arena reset. This is safe
-                // because the per-iteration reset frees the object before
-                // any function call could observe it. Function calls that
-                // receive arena-allocated objects must not retain them.
-                let ctor = if self.is_non_escaping(*span) || self.current_loop_has_arena_reset() {
-                    "zz_array_new_arena(&_arena)".to_string()
-                } else {
-                    "zz_array_new()".to_string()
+                // Non-scalar fallback: force arena allocation inside a loop body with
+                // an arena reset or for a provably non-escaping literal. This
+                // is safe because the per-iteration reset frees the object
+                // before any function call could observe it. Function calls
+                // that receive arena-allocated objects must not retain them.
+                let ctor = match self.arena_for(*span) {
+                    Some(arena) => format!("zz_array_new_arena(&{arena})"),
+                    None => "zz_array_new()".to_string(),
                 };
                 out.push_str(&format!("    zz_value {arr_var} = {ctor};\n"));
                 for item in elems {
@@ -1950,10 +2022,8 @@ impl Lowerer {
         // Any other call may mutate or retain its array arguments — drop
         // literal-length knowledge for every variable passed in (including
         // the method receiver, e.g. `arr.push(4)`).
-        if let Some(recv) = &method_receiver {
-            if let Expr::Ident { name, .. } = recv {
-                names.invalidate_array_len(name);
-            }
+        if let Some(Expr::Ident { name, .. }) = &method_receiver {
+            names.invalidate_array_len(name);
         }
         for a in args {
             match a {
@@ -2003,7 +2073,7 @@ impl Lowerer {
                 } else {
                     emitted
                 }
-            } else if let Expr::Binary { left, right, .. } = a {
+            } else if let Expr::Binary { .. } = a {
                 // Binary op: result is unboxed only if the emitted C
                 // expression starts with `(int64_t)(` or `(double)(`.
                 // Otherwise it's already a zz_value.

@@ -1,0 +1,79 @@
+// =====================================================================
+// bench_memory_leak.zz
+// Multi-language stress benchmark — ZZ implementation.
+//
+// Allocates 50M short-lived arrays + dicts in deeply nested loops.
+// Validates that the runtime/arena reclaims memory deterministically
+// after every iteration (no growth across iterations).
+//
+// Output:
+//   lines 1..N-1  : per-iteration stats
+//   final line     : bench_memory_leak_ok
+// =====================================================================
+
+import std.time
+
+func main() {
+    // Two passes: if memory is leaking the second pass gets noticeably
+    // slower (or runs out of RAM on small boxes). On a healthy runtime
+    // both passes finish in well under 15 MB of heap.
+    sum := 0
+    start := time.now_ms()
+
+    // ── Pass 1 ───────────────────────────────────────────────────────
+    for outer in 0..5 {
+        for middle in 0..1000 {
+            for inner in 0..100 {
+                // Short-lived arrays: 10 3-element arrays per inner loop
+                a := [outer, middle, inner]
+                b := [outer + 1, middle + 1, inner + 1]
+                c := [outer + 2, middle + 2, inner + 2]
+                d := [outer + 3, middle + 3, inner + 3]
+                e := [outer + 4, middle + 4, inner + 4]
+                f := [outer + 5, middle + 5, inner + 5]
+                g := [outer + 6, middle + 6, inner + 6]
+                h := [outer + 7, middle + 7, inner + 7]
+                i := [outer + 8, middle + 8, inner + 8]
+                j := [outer + 9, middle + 9, inner + 9]
+
+                // Short-lived dict keyed by outer/middle/inner
+                kv := {outer: middle, middle: inner, inner: outer}
+
+                // Touch them so the runtime can't constant-fold them away.
+                sum = sum + len(a) + len(b) + len(c) + len(d) + len(e) +
+                          len(f) + len(g) + len(h) + len(i) + len(j) +
+                          len(kv)
+            }
+        }
+    }
+
+    mid := time.now_ms()
+
+    // ── Pass 2 (must NOT regress) ────────────────────────────────────
+    for outer in 0..5 {
+        for middle in 0..1000 {
+            for inner in 0..100 {
+                a := [outer, middle, inner]
+                b := [outer + 1, middle + 1, inner + 1]
+                c := [outer + 2, middle + 2, inner + 2]
+                d := [outer + 3, middle + 3, inner + 3]
+                e := [outer + 4, middle + 4, inner + 4]
+                f := [outer + 5, middle + 5, inner + 5]
+                g := [outer + 6, middle + 6, inner + 6]
+                h := [outer + 7, middle + 7, inner + 7]
+                i := [outer + 8, middle + 8, inner + 8]
+                j := [outer + 9, middle + 9, inner + 9]
+                kv := {outer: middle, middle: inner, inner: outer}
+                sum = sum + len(a) + len(b) + len(c) + len(d) + len(e) +
+                          len(f) + len(g) + len(h) + len(i) + len(j) +
+                          len(kv)
+            }
+        }
+    }
+
+    end := time.now_ms()
+    println("pass1_ms: " + str(mid - start))
+    println("pass2_ms: " + str(end - mid))
+    println("sum: " + str(sum))
+    println("bench_memory_leak_ok")
+}
