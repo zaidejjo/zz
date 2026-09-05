@@ -115,6 +115,13 @@ pub fn build(
     let src_path = tmpdir.join("prog.c");
     std::fs::write(&src_path, source)?;
 
+    // Debug aid: ZZ_DUMP_C=/some/path.c writes the generated C to that path
+    // before compilation. Used by perf investigations; no production code
+    // depends on it.
+    if let Ok(path) = std::env::var("ZZ_DUMP_C") {
+        let _ = std::fs::write(&path, source);
+    }
+
     let mut cmd = Command::new(&cc.path);
     if opts.optimize {
         cmd.arg("-O3").arg("-flto");

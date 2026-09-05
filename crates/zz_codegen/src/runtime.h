@@ -89,6 +89,23 @@ struct zz_array {
     zz_value *items;
 };
 
+// Sentinel value for `zz_array::refs` indicating the array (and its items
+// buffer) live on the C stack — emitted by codegen when it can prove the
+// array literal is non-escaping and all elements are scalar. Stack-promoted
+// arrays must NEVER be freed via free(): both the header struct and the
+// items buffer are part of the current C stack frame and are reclaimed
+// automatically when the function returns. zz_release_array checks for
+// this sentinel and skips the free paths accordingly.
+#define ZZ_ARRAY_STACK_MAGIC ((size_t)0xD0D0D0D0D0D0D0D0ULL)
+
+// Sentinel value for `zz_array::refs` on fixed-size array literals whose
+// header AND items buffer are both bump-allocated from the function arena
+// (`zz_array_new_lit`). The items buffer has the exact literal capacity, so
+// element stores never call realloc, and element values are stored directly
+// without `zz_clone` atomic bumps (scalar literal contents only). Release is
+// a no-op: both blocks die at the next arena reset.
+#define ZZ_ARRAY_LIT_MAGIC ((size_t)0xC0DEC0DEC0DEC0DEULL)
+
 struct zz_dict {
     size_t refs;     // atomic reference count (ARC)
     size_t len;
@@ -196,6 +213,19 @@ zz_value zz_array_new_arena(zz_arena *arena);
 zz_value zz_dict_new_arena(zz_arena *arena);
 zz_value zz_str_new_arena(const char *s, size_t len, zz_arena *arena);
 
+// Fixed-size array literal constructor. When `arena` is non-NULL, both the
+// header and the items buffer (exactly `n` slots) are bump-allocated on the
+// arena: `a->items = zz_arena_alloc(...)` pre-allocates capacity so appends
+// never hit realloc, and `zz_array_push_lit` stores elements directly
+// without `zz_clone` atomic refcount bumps. When `arena` is NULL, the
+// standard ARC heap path is used (calloc + one malloc, refs=1).
+zz_value zz_array_new_lit(zz_arena *arena, size_t n);
+
+// Store `item` into the next free slot of a fixed-capacity literal array.
+// No clone, no realloc, no bounds branch. Only valid on arrays built by
+// `zz_array_new_lit` (or newly heap-allocated literals) with spare capacity.
+void zz_array_push_lit(zz_array *a, zz_value item);
+
 // ---- refcounting -------------------------------------------------------
 void zz_retain(zz_value *v);
 void zz_release(zz_value *v);
@@ -227,6 +257,11 @@ zz_value zz_array_get(const zz_array *a, zz_value idx, int *err);
 void zz_array_set(zz_array *a, zz_value idx, zz_value v, int *err);
 size_t zz_array_len(const zz_array *a);
 zz_value zz_array_slice(const zz_array *a, zz_value start, zz_value end, int *err);
+
+// Index expression support (lowered from `obj[idx]`). Dispatch on the
+// object tag at runtime: arrays and dicts. Returns unit + *err=1 on unsupported.
+zz_value zz_index_get(zz_value obj, zz_value idx, int *err);
+void zz_index_set(zz_value obj, zz_value idx, zz_value item, int *err);
 
 void zz_dict_set(zz_dict *d, zz_value key, zz_value val);
 zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err);
