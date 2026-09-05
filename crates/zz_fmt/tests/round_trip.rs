@@ -232,17 +232,20 @@ fn inline_idempotent() {
 fn inline_preserves_comments() {
     let config = zz_fmt::FmtConfig::default();
     let src = "// header\nx := 1 // trailing\n/// doc line\ny := 2\n";
-    let out = zz_fmt::format_source(src, &config).unwrap();
+    let out = zz_fmt::format_source(&src, &config).unwrap();
+    println!("Formatted output: {:?}", out);
     assert!(out.contains("// header"));
     assert!(out.contains("// trailing"));
     assert!(out.contains("/// doc line"));
 }
-
 #[test]
 fn inline_preserves_blank_lines() {
     let config = zz_fmt::FmtConfig::default();
     let src = "x := 1\n\n\ny := 2\n";
-    let out = zz_fmt::format_source(src, &config).unwrap();
+    let out = zz_fmt::format_source(&src, &config).unwrap();
+    // Debug: print the actual output
+    println!("Actual output: {:?}", out);
+    println!("Actual output (escaped): {}", out.replace("\n", "\\n"));
     // After collapsing: exactly one blank line between top-level stmts.
     assert!(out.contains("x := 1\n\ny := 2"));
     // No three-newline run.

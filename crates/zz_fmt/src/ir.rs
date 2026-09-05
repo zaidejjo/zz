@@ -15,10 +15,10 @@
 //! trivia preserved. Width-aware wrapping is exercised via `Group` on
 //! call argument lists, struct fields, and array/dict literals.
 
-use std::borrow::Cow;
 use crate::doc::Doc;
 use crate::printer::Eol;
 use crate::trivia::{ClassifiedKind, ClassifiedTrivia};
+use std::borrow::Cow;
 use zz_frontend::ast::*;
 use zz_frontend::lexer::lex;
 use zz_frontend::span::Span;
@@ -42,11 +42,39 @@ struct Annotated {
 /// Build the annotated token stream from source.
 fn annotate(source: &str) -> Vec<Annotated> {
     let lexed = lex(source);
-    lexed
+    let annotated: Vec<Annotated> = lexed
         .tokens
         .into_iter()
         .map(|t: Token| {
+            println!(
+                "annotate: Token {:?} (text: {:?}) has {} leading trivia items",
+                t.kind,
+                t.text,
+                t.leading.len()
+            );
+            for (i, trivia) in t.leading.iter().enumerate() {
+                println!("  leading[{}]: {:?} = {}", i, trivia.kind, trivia.text);
+            }
             let leading = classify_leading(&t.leading);
+            println!(
+                "annotate: After classify_leading, leading has {} items",
+                leading.len()
+            );
+            for (i, c) in leading.iter().enumerate() {
+                println!("  leading[{}]: {:?}", i, c.kind);
+            }
+            // Debug: print if we have any comment trivia in leading
+            for c in &leading {
+                if matches!(
+                    c.kind,
+                    ClassifiedKind::Line(_) | ClassifiedKind::Doc(_) | ClassifiedKind::Block(_)
+                ) {
+                    println!(
+                        "annotate: Token {:?} has comment trivia: {:?}",
+                        t.kind, c.kind
+                    );
+                }
+            }
             Annotated {
                 tok: TokRef {
                     start: t.span.start,
@@ -56,7 +84,9 @@ fn annotate(source: &str) -> Vec<Annotated> {
                 leading,
             }
         })
-        .collect()
+        .collect();
+    println!("annotate: Total tokens: {}", annotated.len());
+    annotated
 }
 
 fn classify_leading(trivia: &[zz_frontend::token::Trivia]) -> Vec<ClassifiedTrivia> {
@@ -64,33 +94,47 @@ fn classify_leading(trivia: &[zz_frontend::token::Trivia]) -> Vec<ClassifiedTriv
     for t in trivia {
         match t.kind {
             TriviaKind::Whitespace => {
-                let newlines = t.text.bytes().filter(|b| *b == b'\n').count();
-                if newlines == 0 {
-                    if !t.text.is_empty() {
+                let mut space_buf = String::new();
+                for ch in t.text.chars() {
+                    if ch == '\n' {
+                        // flush any accumulated spaces as Spacing
+                        if !space_buf.is_empty() {
+                            out.push(ClassifiedTrivia {
+                                kind: ClassifiedKind::Spacing(space_buf.clone()),
+                                start: 0,
+                                end: 0,
+                            });
+                            space_buf.clear();
+                        }
                         out.push(ClassifiedTrivia {
-                            kind: ClassifiedKind::Spacing(t.text.clone()),
-                            start: t.span.start,
-                            end: t.span.end,
+                            kind: ClassifiedKind::BlankLine { count: 1 },
+                            start: 0,
+                            end: 0,
                         });
+                    } else if ch.is_ascii_whitespace() {
+                        space_buf.push(ch);
+                    } else {
+                        // Should not happen in whitespace, but ignore
                     }
-                } else {
+                }
+                // After processing all chars, if there are remaining spaces, emit as Spacing
+                if !space_buf.is_empty() {
                     out.push(ClassifiedTrivia {
-                        kind: ClassifiedKind::BlankLine {
-                            count: newlines.max(1),
-                        },
-                        start: t.span.start,
-                        end: t.span.end,
+                        kind: ClassifiedKind::Spacing(space_buf.clone()),
+                        start: 0,
+                        end: 0,
                     });
                 }
             }
             TriviaKind::Newline => {
                 out.push(ClassifiedTrivia {
                     kind: ClassifiedKind::BlankLine { count: 1 },
-                    start: t.span.start,
-                    end: t.span.end,
+                    start: 0,
+                    end: 0,
                 });
             }
             TriviaKind::Comment => {
+                println!("classify_leading: Found comment trivia: {}", t.text);
                 let text = &t.text;
                 let kind = if text.starts_with("///") {
                     let body = text.trim_start_matches("///").trim_start();
@@ -103,15 +147,14 @@ fn classify_leading(trivia: &[zz_frontend::token::Trivia]) -> Vec<ClassifiedTriv
                 };
                 out.push(ClassifiedTrivia {
                     kind,
-                    start: t.span.start,
-                    end: t.span.end,
+                    start: 0,
+                    end: 0,
                 });
             }
         }
     }
     out
 }
-
 /// Lower a parsed program to a Doc.
 ///
 /// Returns `(doc, eol_style)`. The caller renders the doc and uses
@@ -124,16 +167,11 @@ pub fn lower_program<'src>(program: &Program, source: &'src str) -> (Doc<'src>, 
         toks: &toks,
         pos: 0,
         collapse_blanks: true,
+        consecutive_line_endings: 0,
     };
     let mut parts: Vec<Doc<'src>> = Vec::new();
-    for (i, stmt) in program.stmts.iter().enumerate() {
-        // Emit blank line(s) between top-level items, but only one.
-        if i > 0 {
-            parts.push(Doc::hard_line());
-            parts.push(Doc::hard_line());
-        }
-        ctx.emit_stmt(stmt, &mut parts);
-    }
+    // Emit the entire token stream in one go to preserve all trivia exactly
+    ctx.emit_span(Span::new(0, source.len() as u32), &mut parts);
     (Doc::Concat(parts), eol)
 }
 
@@ -150,10 +188,11 @@ struct Ctx<'src, 'a> {
     toks: &'a [Annotated],
     pos: usize,
     collapse_blanks: bool,
+    consecutive_line_endings: usize,
 }
 
 impl<'src, 'a> Ctx<'src, 'a> {
-    fn emit_classified(&self, c: &ClassifiedTrivia, out: &mut Vec<Doc<'src>>) -> bool {
+    fn emit_classified(&mut self, c: &ClassifiedTrivia, out: &mut Vec<Doc<'src>>) -> bool {
         match &c.kind {
             ClassifiedKind::Spacing(_) => {
                 // Spacing emits spaces via Doc::Text (after fix), which is not a hard line.
@@ -171,6 +210,7 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 true
             }
             ClassifiedKind::Line(body) => {
+                println!("Emitting Line comment: {}", body);
                 out.push(Doc::Text("// "));
                 out.push(Doc::text_owned(body.clone()));
                 out.push(Doc::hard_line());
@@ -186,10 +226,19 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 out.push(Doc::Text("/* "));
                 out.push(Doc::text_owned(body.clone()));
                 out.push(Doc::Text(" */"));
-                false
+                true
             }
             ClassifiedKind::Newline => {
-                out.push(Doc::hard_line());
+                // Handle consecutive line endings for newline trivia
+                if self.consecutive_line_endings < 2 {
+                    out.push(Doc::hard_line());
+                    self.consecutive_line_endings += 1;
+                }
+                // If we've already seen 2 or more consecutive line endings, skip emitting this one
+                // but still increment the counter to track that we've seen it
+                else {
+                    self.consecutive_line_endings += 1;
+                }
                 true
             }
         }
@@ -202,6 +251,10 @@ impl<'src, 'a> Ctx<'src, 'a> {
         let mut line_start = true;
         // Track whether we have emitted at least one token in this span (for separator logic).
         let mut started = false;
+        // Track whether we emitted a hard line from trivia (to avoid double newlines)
+        let mut emitted_hard_line_from_trivia = false;
+        // Track consecutive newlines from token text to collapse excessive blank lines
+        let mut consecutive_token_newlines = 0;
         // The byte offset of the first character of the next thing we will emit.
         let mut cursor = span.start;
         while self.pos < self.toks.len() {
@@ -209,17 +262,32 @@ impl<'src, 'a> Ctx<'src, 'a> {
             if t.tok.start >= span.end {
                 break;
             }
+            // Debug: show which token we're processing and its leading trivia count
+            println!(
+                "emit_span: Processing token {:?} at pos {} with {} leading trivia items",
+                t.kind,
+                self.pos,
+                t.leading.len()
+            );
             // Emit the token's leading trivia, updating line_start as we go.
             for c in &t.leading {
+                println!(
+                    "emit_span: Processing leading trivia: {:?} = {}",
+                    c.kind,
+                    match &c.kind {
+                        ClassifiedKind::Spacing(s) => format!("Spacing(\"{}\")", s),
+                        ClassifiedKind::BlankLine { count } => format!("BlankLine({})", count),
+                        ClassifiedKind::Newline => "Newline".to_string(),
+                        ClassifiedKind::Line(s) => format!("Line(\"{}\")", s),
+                        ClassifiedKind::Doc(s) => format!("Doc(\"{}\")", s),
+                        ClassifiedKind::Block(s) => format!("Block(\"{}\")", s),
+                    }
+                );
                 match &c.kind {
                     ClassifiedKind::Spacing(text) => {
-                        if line_start {
-                            // Leading spaces of a line: emit exact text.
-                            out.push(Doc::TextOwned(Cow::Owned(text.clone())));
-                            line_start = false; // we just emitted non-newline text
-                        } else {
-                            // Intra-line spacing: drop (let printer handle via Doc::Line).
-                        }
+                        // Always emit spacing exactly as it is to preserve original whitespace
+                        out.push(Doc::TextOwned(Cow::Owned(text.clone())));
+                        line_start = false; // we just emitted non-newline text
                     }
                     ClassifiedKind::BlankLine { count } => {
                         let n = if self.collapse_blanks {
@@ -229,26 +297,25 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         };
                         for _ in 0..n {
                             out.push(Doc::hard_line());
-                            line_start = true; // after a hard line, we are at start of line
+                            emitted_hard_line_from_trivia = true;
                         }
                     }
                     ClassifiedKind::Newline => {
                         out.push(Doc::hard_line());
-                        line_start = true;
+                        emitted_hard_line_from_trivia = true;
                     }
                     ClassifiedKind::Line(body) => {
                         out.push(Doc::Text("// "));
                         out.push(Doc::text_owned(body.clone()));
-                        out.push(Doc::hard_line());
-                        line_start = true; // after a hard line from line comment
+                        // Don't emit hard line here - token text will provide newline if needed
                     }
                     ClassifiedKind::Doc(body) => {
                         out.push(Doc::Text("/// "));
                         out.push(Doc::text_owned(body.clone()));
-                        out.push(Doc::hard_line());
-                        line_start = true; // after a hard line from doc comment
+                        // Don't emit hard line here - token text will provide newline if needed
                     }
                     ClassifiedKind::Block(body) => {
+                        println!("emit_span: Emitting Block comment: {}", body);
                         out.push(Doc::Text("/* "));
                         out.push(Doc::text_owned(body.clone()));
                         out.push(Doc::Text(" */"));
@@ -260,29 +327,39 @@ impl<'src, 'a> Ctx<'src, 'a> {
             }
             // If this is not the first token of the span, decide what separator to insert
             // based on whether the gap between `cursor` and the start of this token contains a newline.
-            if started {
-                let gap_start = cursor as usize;
-                let gap_end = t.tok.start as usize;
-                if gap_end > gap_start && gap_end <= self.source.len() {
-                    let gap = &self.source[gap_start..gap_end];
-                    if gap.contains('\n') {
-                        out.push(Doc::hard_line());
-                        line_start = true;
-                    } else if !gap.is_empty() {
-                        // Original inline whitespace → normalize to a single space.
-                        out.push(Doc::Text(" "));
-                        line_start = false; // we just emitted a space
-                    }
-                }
-            }
+            // if started {
+            //     let gap_start = cursor as usize;
+            //     let gap_end = t.tok.start as usize;
+            //     if gap_end > gap_start && gap_end <= self.source.len() {
+            //         let gap = &self.source[gap_start..gap_end];
+            //         if gap.contains('\n') {
+            //             out.push(Doc::hard_line());
+            //             line_start = true;
+            //         } else if !gap.is_empty() {
+            //             // Original inline whitespace → normalize to a single space.
+            //             out.push(Doc::Text(" "));
+            //             line_start = false; // we just emitted a space
+            //         }
+            //     }
+            // }
             // Emit the token's own text.
             let start_idx = t.tok.start as usize;
             let end_idx = (t.tok.end as usize).min(self.source.len());
             if end_idx > start_idx {
-                out.push(Doc::Text(&self.source[start_idx..end_idx]));
-                started = true;
-                // If the token's text contains a newline, we are now at the start of a line.
-                line_start = self.source[start_idx..end_idx].contains('\n');
+                let text = &self.source[start_idx..end_idx];
+                // Track consecutive newlines from token text to collapse excessive blank lines
+                if text == "\n" {
+                    consecutive_token_newlines += 1;
+                    // Allow at most 2 consecutive newlines (one blank line)
+                    if consecutive_token_newlines <= 2 {
+                        out.push(Doc::Text(text));
+                    }
+                } else {
+                    // Non-newline text resets the consecutive newline counter
+                    consecutive_token_newlines = 0;
+                    out.push(Doc::Text(text));
+                }
+                line_start = !text.contains('\n');
             }
             cursor = t.tok.end;
             self.pos += 1;
