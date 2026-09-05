@@ -2180,7 +2180,6 @@ dependencies = [
  "similar",
  "thiserror 1.0.69",
  "tracing",
- "walkdir",
  "zz_frontend",
 ]
 

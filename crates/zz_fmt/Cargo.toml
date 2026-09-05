@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 zz_frontend = { path = "../zz_frontend" }
 ignore = "0.4"
-walkdir = "2"
 rayon = "1"
 similar = "2"
 thiserror = "1"

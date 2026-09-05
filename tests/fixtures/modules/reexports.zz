@@ -1,10 +1,10 @@
 // Test: pub import re-exports
 // This file demonstrates re-exporting items from a child module.
 // The full test is in loader/tests.rs (pub_reexport_works).
-//
+// 
 // Parent module:
 //   pub import shapes
-//
+// 
 // After this, importing the parent gives access to:
 //   parent.shapes.Point
 //   parent.shapes.dist

@@ -1,2 +1,2 @@
 // E2E: Type mismatch error
-x: int = "hello"
+x:int = "hello"
