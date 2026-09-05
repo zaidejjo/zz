@@ -379,3 +379,126 @@ println("done")
 
 #[allow(dead_code)]
 fn _type_marker(_: Type) {}
+
+// ---- Escape analysis integration tests ----------------------------------
+
+#[test]
+fn escape_analysis_local_array_non_escaping() {
+    let src = r#"
+func main() {
+    arr := [1, 2, 3]
+    io.println(len(arr))
+}
+"#;
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".into(),
+        pruned.clone(),
+    );
+    let lowered = lowerer.lower();
+    // Generated C must contain arena init/reset for main function.
+    assert!(
+        lowered.source.contains("zz_arena_init"),
+        "missing arena init"
+    );
+    assert!(
+        lowered.source.contains("zz_arena_reset"),
+        "missing arena reset"
+    );
+    // Must still compile and run correctly.
+    let (_, out) = native_run(src);
+    assert_eq!(out, "3\n");
+}
+
+#[test]
+fn escape_analysis_function_has_arena() {
+    let src = r#"
+func compute(n: int) {
+    result := 0
+    for i in 0..n {
+        result = result + i
+    }
+    io.println(result)
+}
+func main() {
+    compute(100)
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "4950\n");
+    // Verify arena is present in the generated function.
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".into(),
+        pruned.clone(),
+    );
+    let lowered = lowerer.lower();
+    // Both main and compute functions should have arena init/reset.
+    let arena_count = lowered.source.matches("zz_arena_init").count();
+    assert!(
+        arena_count >= 2,
+        "expected at least 2 arena inits (main + compute), got {arena_count}"
+    );
+}
+
+#[test]
+fn escape_analysis_scalar_vars_arena_safe() {
+    let src = r#"
+func main() {
+    x := 42
+    y := 3.14
+    z := true
+    io.println(x)
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "42\n");
+    // All scalar variables are arena-safe (non-escaping).
+    // The program should still compile and run correctly.
+}
+
+#[test]
+fn escape_analysis_string_concat_loop() {
+    let src = r#"
+func main() {
+    s := ""
+    for i in 0..5 {
+        s = s + "x"
+    }
+    io.println(s)
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "xxxxx\n");
+}
+
+#[test]
+fn generated_c_contains_arena_in_all_functions() {
+    let src = r#"
+func helper(x: int) -> int { x + 1 }
+func main() {
+    io.println(helper(41))
+}
+"#;
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".into(),
+        pruned.clone(),
+    );
+    let lowered = lowerer.lower();
+    // Arena init and reset must both appear in generated C.
+    assert!(
+        lowered.source.contains("zz_arena_init"),
+        "missing arena init in generated C"
+    );
+    assert!(
+        lowered.source.contains("zz_arena_reset"),
+        "missing arena reset in generated C"
+    );
+}

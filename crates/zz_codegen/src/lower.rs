@@ -168,6 +168,9 @@ pub struct Lowerer {
     reachable_natives: std::collections::HashSet<String>,
     entry_main: String,
     tp: zz_hir::TypedProgram,
+    /// Result of escape analysis: maps spans to allocation classification.
+    #[allow(dead_code)]
+    escape: zz_hir::EscapeResult,
 }
 
 impl Lowerer {
@@ -177,12 +180,34 @@ impl Lowerer {
         entry_main: String,
         tp: zz_hir::TypedProgram,
     ) -> Self {
+        let escape = zz_hir::escape_analyze(&tp);
         Lowerer {
             reachable_funcs,
             reachable_natives,
             entry_main,
             tp,
+            escape,
         }
+    }
+
+    /// Check if an expression span is classified as non-escaping (arena-safe).
+    #[allow(dead_code)]
+    fn is_non_escaping(&self, span: zz_frontend::span::Span) -> bool {
+        self.escape
+            .classes
+            .get(&span)
+            .map(|c| *c == zz_hir::AllocClass::NonEscaping)
+            .unwrap_or(false)
+    }
+
+    /// Check if an expression span is classified as escaping (needs ARC).
+    #[allow(dead_code)]
+    fn is_escaping(&self, span: zz_frontend::span::Span) -> bool {
+        self.escape
+            .classes
+            .get(&span)
+            .map(|c| *c == zz_hir::AllocClass::Escaping)
+            .unwrap_or(false)
     }
 
     /// Check if a struct type is unboxed (all scalar or nested unboxed struct fields).
@@ -387,7 +412,7 @@ impl Lowerer {
         let struct_preamble = self.lower_structs_preamble();
 
         let source = format!(
-            "{runtime_h}\n{runtime_c}\n\n// ---- struct definitions ----\n{struct_preamble}\n// ---- generated code ----\n{funcs}\nvoid zz_main(void) {{\n{body}}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
+            "{runtime_h}\n{runtime_c}\n\n// ---- struct definitions ----\n{struct_preamble}\n// ---- generated code ----\n{funcs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
             runtime_h = crate::RUNTIME_H,
             runtime_c = crate::RUNTIME_C,
             struct_preamble = struct_preamble,
@@ -426,6 +451,9 @@ impl Lowerer {
             "static zz_value {cname}(zz_value *args, size_t argc) {{\n"
         ));
         o.push_str("    (void)argc;\n");
+        // --- Arena allocator: init on function entry, reset on exit ---
+        o.push_str("    zz_arena _arena;\n");
+        o.push_str("    zz_arena_init(&_arena, 65536);\n"); // 64KB default
         let mut names = NameCtx::new();
         for (i, p) in params.iter().enumerate() {
             let cid = names.enter(&p.name.name);
@@ -438,6 +466,8 @@ impl Lowerer {
         if self.last_stmt_value(block, &mut names, &mut o).is_none() {
             o.push_str("    return zz_unit();\n");
         }
+        // --- Arena reset: O(1) cleanup of all non-escaping allocations ---
+        o.push_str("    zz_arena_reset(&_arena);\n");
         o.push_str("}\n\n");
         o
     }

@@ -1,0 +1,16 @@
+// Benchmark: arena-allocated short-lived objects in a tight loop.
+// E2E: stdlib bench_memory_arena
+import std.time
+
+func main() {
+    start := time.now_ms()
+    sum := 0
+    for i in 0..10000000 {
+        arr := [i, i + 1, i + 2]
+        sum = sum + len(arr)
+    }
+    end := time.now_ms()
+    println("sum: " + str(sum))
+    println("elapsed_ms: " + str(end - start))
+    println("bench_memory_arena_done")
+}

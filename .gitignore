@@ -18,3 +18,4 @@ bench/native/_go/main
 bench/native/.bin
 bench/native/categories/*
 !bench/native/categories/*.zz
+benchmarks/arena_bench

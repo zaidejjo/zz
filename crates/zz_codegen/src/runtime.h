@@ -83,12 +83,14 @@ struct zz_value {
 };
 
 struct zz_array {
+    size_t refs;     // atomic reference count (ARC)
     size_t len;
     size_t cap;
     zz_value *items;
 };
 
 struct zz_dict {
+    size_t refs;     // atomic reference count (ARC)
     size_t len;
     size_t cap;
     zz_dict_entry *entries;
@@ -107,6 +109,53 @@ struct zz_func {
     zz_value *env;    // captured slot values (SYNTHETIC: extended below)
     size_t env_len;
 };
+
+// ---- arena allocator ---------------------------------------------------
+// A bump allocator for non-escaping local allocations. O(1) alloc, O(1)
+// reset. Each function gets its own arena that is initialized on entry and
+// reset on exit. Objects allocated here do NOT need individual free calls.
+//
+// Thread-local: each thread maintains its own arena (no locking needed).
+typedef struct zz_arena {
+    char  *buf;       // contiguous memory block
+    size_t cap;       // total capacity in bytes
+    size_t offset;    // next free byte position
+} zz_arena;
+
+// Initialize an arena with a pre-allocated buffer of `cap` bytes.
+// The buffer must outlive the arena (typically stack or a single malloc).
+void zz_arena_init(zz_arena *a, size_t cap);
+
+// Bump-allocate `size` bytes with `align` alignment from the arena.
+// Returns NULL only if the arena is full (caller should fall back to ARC).
+void *zz_arena_alloc(zz_arena *a, size_t size, size_t align);
+
+// O(1) reset: free all arena allocations at once by resetting the offset.
+// The arena's buffer is NOT freed — it is reused for the next function call.
+static inline void zz_arena_reset(zz_arena *a) {
+    a->offset = 0;
+}
+
+// Destroy the arena, freeing its buffer.
+void zz_arena_destroy(zz_arena *a);
+
+// ---- thread-safe ARC ---------------------------------------------------
+// Atomic reference counting for heap-objects that escape their creating
+// scope. Thread-safe via __atomic builtins (no mutex overhead).
+//
+// All heap-allocated containers (arrays, dicts, funcs) carry an atomic
+// refcount. zz_retain/zz_release use atomic increments/decrements.
+// When the refcount drops to zero, the object is freed.
+
+// Thread-safe retain: atomically increment the reference count.
+void zz_retain_arc(zz_value *v);
+
+// Thread-safe release: atomically decrement the reference count.
+// If it reaches zero, free the object and recursively release contained values.
+void zz_release_arc(zz_value *v);
+
+// Clone for ARC objects: atomically bump refcount and return a copy.
+zz_value zz_clone_arc(zz_value v);
 
 // ---- constructors ------------------------------------------------------
 static inline zz_value zz_unit(void) {

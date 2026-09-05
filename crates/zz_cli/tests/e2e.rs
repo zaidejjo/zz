@@ -164,6 +164,11 @@ e2e_success_test!(
     "stdlib",
     "http_phase5b_test.zz"
 );
+e2e_success_test!(
+    e2e_stdlib_bench_memory_arena,
+    "stdlib",
+    "bench_memory_arena.zz"
+);
 
 // ---------------------------------------------------------------------------
 // Error fixtures: must exit 1
