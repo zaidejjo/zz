@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use zz_codegen::BuildOptions;
 use zz_frontend::diag::Files;
@@ -178,6 +178,7 @@ pub fn transient_build(path: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), Stri
 pub fn exec_binary(bin: &Path, script_args: &[String]) -> Result<i32, String> {
     let status = Command::new(bin)
         .args(script_args)
+        .stdin(Stdio::inherit())
         .status()
         .map_err(|e| format!("cannot run binary: {e}"))?;
     Ok(status.code().unwrap_or(-1))

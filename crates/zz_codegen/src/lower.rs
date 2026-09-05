@@ -31,6 +31,14 @@ impl NameCtx {
         }
     }
 
+    /// Generate a fresh C identifier without entering a scope.
+    /// Used for temporaries that need a unique name but aren't bound to a zz variable.
+    fn fresh(&mut self, prefix: &str) -> String {
+        let cid = format!("{prefix}{}", self.counter);
+        self.counter += 1;
+        cid
+    }
+
     /// Enter a new scope for `name`, returning the fresh C identifier.
     fn enter(&mut self, name: &str) -> String {
         let cid = format!("v{}", self.counter);
@@ -1064,7 +1072,12 @@ impl Lowerer {
                         format!("zz_bool(zz_truthy({l}) || zz_truthy({r}))")
                     }
                     zz_frontend::ast::BinOp::Elvis => {
-                        format!("(zz_truthy({l}) ? ({l}) : ({r}))")
+                        // Evaluate the left side once and store in a temp to avoid
+                        // double-evaluation (which would call side-effecting natives
+                        // like `input()` twice).
+                        let tmp = names.fresh("elvis");
+                        out.push_str(&format!("    zz_value {tmp} = {l};\n"));
+                        format!("(zz_truthy({tmp}) ? ({tmp}) : ({r}))")
                     }
                     _ => {
                         let cop = match op {
@@ -1676,6 +1689,8 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "encoding.base64_decode" | "std.encoding.base64_decode" => {
             Some("zz_encoding_base64_decode")
         }
+        // time
+        "time.now_ms" | "std.time.now_ms" => Some("zz_time_now_ms"),
         _ => None,
     }
 }

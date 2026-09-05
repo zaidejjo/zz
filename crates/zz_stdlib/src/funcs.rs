@@ -58,12 +58,18 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.io.println".into(),
         sig_t(vec![("v", t.clone())], Type::Unit),
     );
-    m.insert("std.io.read_line".into(), sig(vec![], Type::Str));
+    m.insert(
+        "std.io.read_line".into(),
+        sig_t(vec![("prompt", Type::Str)], Type::Str),
+    );
 
     // Top-level builtins — available without import.
     m.insert("print".into(), sig_t(vec![("v", t.clone())], Type::Unit));
     m.insert("println".into(), sig_t(vec![("v", t.clone())], Type::Unit));
-    m.insert("input".into(), sig(vec![], Type::Str));
+    m.insert(
+        "input".into(),
+        sig_t(vec![("prompt", Type::Str)], Type::Str),
+    );
 
     // Range and iterator builtins
     let range_t = Type::Range(Box::new(Type::Int));

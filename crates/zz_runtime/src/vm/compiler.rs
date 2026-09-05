@@ -1278,7 +1278,7 @@ impl Compiler {
                     let func_name = parts.join(".");
                     let is_input = parts.len() == 1
                         && parts[0] == "input"
-                        && args.is_empty()
+                        && args.len() <= 1
                         && named.is_empty();
                     let is_range = parts.len() == 1
                         && parts[0] == "range"
@@ -1329,7 +1329,7 @@ impl Compiler {
                                 self.compile_expr(a);
                             }
                         }
-                        if is_input {
+                        if is_input && args.is_empty() {
                             self.emit_const(Value::Str(String::new().into()));
                         }
                         self.emit(Op::Call {
