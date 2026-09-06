@@ -1037,6 +1037,169 @@ char *zz_value_to_string(const zz_value *v) {
     }
 }
 
+
+// =====================================================================
+//  Thread-safe channels (pthread-based)
+// =====================================================================
+
+zz_value zz_chan_new(int *err) {
+    (void)err;
+    zz_chan *ch = (zz_chan *)malloc(sizeof(zz_chan));
+    if (!ch) {
+        fprintf(stderr, "zz: out of memory (channel)\n");
+        exit(1);
+    }
+    pthread_mutex_init(&ch->lock, NULL);
+    pthread_cond_init(&ch->cond, NULL);
+    ch->len = 0;
+    ch->cap = 16;
+    ch->queue = (zz_value *)malloc(sizeof(zz_value) * ch->cap);
+    if (!ch->queue) {
+        fprintf(stderr, "zz: out of memory (channel buffer)\n");
+        exit(1);
+    }
+    zz_value v;
+    v.tag = ZZ_CHAN;
+    v.chan = ch;
+    return v;
+}
+
+zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
+    if (chan.tag != ZZ_CHAN) { *err = 1; return zz_unit(); }
+    zz_chan *ch = chan.chan;
+    pthread_mutex_lock(&ch->lock);
+    // Grow if needed.
+    if (ch->len == ch->cap) {
+        size_t new_cap = ch->cap * 2;
+        zz_value *new_queue = (zz_value *)realloc(ch->queue, sizeof(zz_value) * new_cap);
+        if (!new_queue) {
+            pthread_mutex_unlock(&ch->lock);
+            *err = 1;
+            return zz_unit();
+        }
+        ch->queue = new_queue;
+        ch->cap = new_cap;
+    }
+    ch->queue[ch->len++] = zz_clone(val);
+    pthread_cond_signal(&ch->cond);
+    pthread_mutex_unlock(&ch->lock);
+    return zz_unit();
+}
+
+zz_value zz_chan_recv(zz_value chan, int *err) {
+    (void)err;
+    if (chan.tag != ZZ_CHAN) { *err = 1; return zz_unit(); }
+    zz_chan *ch = chan.chan;
+    pthread_mutex_lock(&ch->lock);
+    while (ch->len == 0) {
+        pthread_cond_wait(&ch->cond, &ch->lock);
+    }
+    zz_value v = ch->queue[0];
+    // Shift remaining items left.
+    for (size_t i = 0; i < ch->len - 1; i++) {
+        ch->queue[i] = ch->queue[i + 1];
+    }
+    ch->len--;
+    pthread_mutex_unlock(&ch->lock);
+    return v;
+}
+
+zz_value zz_chan_try_recv(zz_value chan, int *err) {
+    if (chan.tag != ZZ_CHAN) { *err = 1; return zz_unit(); }
+    zz_chan *ch = chan.chan;
+    pthread_mutex_lock(&ch->lock);
+    if (ch->len == 0) {
+        pthread_mutex_unlock(&ch->lock);
+        *err = 1;  // No message available.
+        return zz_unit();
+    }
+    zz_value v = ch->queue[0];
+    for (size_t i = 0; i < ch->len - 1; i++) {
+        ch->queue[i] = ch->queue[i + 1];
+    }
+    ch->len--;
+    pthread_mutex_unlock(&ch->lock);
+    *err = 0;
+    return v;
+}
+
+// =====================================================================
+//  Spawn / task join (pthread-based)
+// =====================================================================
+
+// Thread trampoline: calls zz_call on the function and stores the result.
+typedef struct {
+    zz_value fn;
+    zz_task_join *join;
+} zz_spawn_ctx;
+
+static void *zz_spawn_trampoline(void *arg) {
+    zz_spawn_ctx *ctx = (zz_spawn_ctx *)arg;
+    zz_task_join *join = ctx->join;
+    // Call the function (zero args for now).
+    int err = 0;
+    zz_value result = zz_call(ctx->fn, NULL, 0, &err);
+    // Store result and signal completion.
+    pthread_mutex_lock(&join->lock);
+    join->result = result;
+    join->completed = 1;
+    pthread_cond_signal(&join->cond);
+    pthread_mutex_unlock(&join->lock);
+    // Free the context (fn was cloned into join->result via zz_clone at spawn time).
+    free(ctx);
+    return NULL;
+}
+
+zz_value zz_spawn(zz_value fn, int *err) {
+    if (fn.tag != ZZ_FUNC) { *err = 1; return zz_unit(); }
+    // Create task join handle.
+    zz_task_join *join = (zz_task_join *)malloc(sizeof(zz_task_join));
+    if (!join) {
+        fprintf(stderr, "zz: out of memory (task join)\n");
+        exit(1);
+    }
+    pthread_mutex_init(&join->lock, NULL);
+    pthread_cond_init(&join->cond, NULL);
+    join->result = zz_unit();
+    join->completed = 0;
+    // Create spawn context passed to trampoline.
+    zz_spawn_ctx *ctx = (zz_spawn_ctx *)malloc(sizeof(zz_spawn_ctx));
+    if (!ctx) {
+        fprintf(stderr, "zz: out of memory (spawn context)\n");
+        exit(1);
+    }
+    ctx->fn = zz_clone(fn);  // Keep a ref for the thread.
+    ctx->join = join;
+    // Create the thread.
+    if (pthread_create(&join->thread, NULL, zz_spawn_trampoline, ctx) != 0) {
+        free(ctx);
+        free(join);
+        *err = 1;
+        return zz_unit();
+    }
+    // Detach: thread frees its own resources.
+    pthread_detach(join->thread);
+    zz_value v;
+    v.tag = ZZ_TASK_JOIN;
+    v.task = join;
+    return v;
+}
+
+zz_value zz_task_join_recv(zz_value join_val, int *err) {
+    if (join_val.tag != ZZ_TASK_JOIN) { *err = 1; return zz_unit(); }
+    zz_task_join *join = join_val.task;
+    pthread_mutex_lock(&join->lock);
+    while (!join->completed) {
+        pthread_cond_wait(&join->cond, &join->lock);
+    }
+    zz_value result = join->result;
+    pthread_mutex_unlock(&join->lock);
+    // Note: join handle is intentionally not freed here to allow multiple recv.
+    // The handle is leaked at process exit (acceptable for now).
+    *err = 0;
+    return result;
+}
+
 // ---- entry --------------------------------------------------------------
 int zz_run(void) {
     zz_main();

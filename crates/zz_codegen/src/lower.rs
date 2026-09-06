@@ -2711,6 +2711,14 @@ fn native_impl(name: &str) -> Option<&'static str> {
         }
         // time
         "time.now_ms" | "std.time.now_ms" => Some("zz_time_now_ms"),
+        // channels
+        "chan" | "std.chan" => Some("zz_chan_new"),
+        "chan.send" | "std.chan.send" => Some("zz_chan_send"),
+        "chan.recv" | "std.chan.recv" => Some("zz_chan_recv"),
+        "chan.try_recv" | "std.chan.try_recv" => Some("zz_chan_try_recv"),
+        // spawn / task join
+        "spawn" | "std.spawn" => Some("zz_spawn"),
+        "task.recv" | "std.task.recv" => Some("zz_task_join_recv"),
         _ => None,
     }
 }
