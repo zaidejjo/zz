@@ -33,6 +33,10 @@ pub enum Type {
     TcpListener,
     /// Opaque HTTP response (produced by `std.http.get`, etc.).
     Response,
+    /// Thread-safe channel (produced by `chan()`).
+    Chan,
+    /// Task join handle (produced by `spawn`).
+    TaskJoin,
     /// A named struct type: `Point` from `struct Point { ... }`.
     Struct(String),
     /// `a..b` — an integer range (used by `for` loops).
@@ -99,6 +103,8 @@ impl fmt::Display for Type {
             Type::TcpStream => write!(f, "tcp.stream"),
             Type::TcpListener => write!(f, "tcp.listener"),
             Type::Response => write!(f, "http.response"),
+            Type::Chan => write!(f, "chan"),
+            Type::TaskJoin => write!(f, "task.join"),
             Type::Struct(n) => write!(f, "{n}"),
             Type::Range(t) => write!(f, "{t}.."),
             Type::Var(_) => write!(f, "_"),

@@ -1023,6 +1023,22 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("ms", Type::Int)], Type::Unit),
     );
 
+    // std.chan — concurrency primitives
+    let t = Type::Named("T".to_string());
+    m.insert("std.chan".into(), sig(vec![], Type::Chan));
+    m.insert(
+        "std.chan.send".into(),
+        sig_t(vec![("ch", Type::Chan), ("v", t.clone())], Type::Unit),
+    );
+    m.insert(
+        "std.chan.recv".into(),
+        sig_t(vec![("ch", Type::Chan)], t.clone()),
+    );
+    m.insert(
+        "std.chan.try_recv".into(),
+        sig_t(vec![("ch", Type::Chan)], Type::Option(Box::new(t.clone()))),
+    );
+
     m
 }
 
@@ -1093,7 +1109,7 @@ mod tests {
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
         assert!(funcs.contains_key("append"));
-        assert_eq!(funcs.len(), 157);
+        assert_eq!(funcs.len(), 161);
     }
 
     #[test]

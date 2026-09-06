@@ -1,12 +1,34 @@
 //! Runtime values for the Phase 1 tree-walker.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use zz_frontend::ast::{Expr, Param};
 
 use crate::env::Env;
+
+/// Inner state for a thread-safe channel (unbounded queue + condvar).
+/// The Condvar lives outside the Mutex so `wait_while` can be called cleanly.
+#[derive(Debug)]
+pub struct ChanInner {
+    pub queue: VecDeque<Value>,
+}
+
+/// Channel pair: the mutex-protected queue and its signaling condvar.
+#[derive(Debug)]
+pub struct ChanState {
+    pub inner: Mutex<ChanInner>,
+    pub cvar: Condvar,
+}
+
+/// Inner state for a task join handle.
+#[derive(Debug)]
+pub struct TaskJoinState {
+    pub result: Mutex<Option<Result<Value, String>>>,
+    pub cvar: Condvar,
+}
 
 /// A struct instance payload (boxed so `Value` stays small).
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +87,10 @@ pub enum Value {
     Range(Box<RangeValue>),
     /// `(v1, v2, ...)` — tuple value.
     Tuple(Box<Vec<Value>>),
+    /// Thread-safe channel (unbounded queue + condvar).
+    Chan(Arc<ChanState>),
+    /// Join handle from spawn — recv() blocks until task completes.
+    TaskJoin(Arc<TaskJoinState>),
 }
 
 /// A JSON value (see [`crate::json`]).
@@ -145,6 +171,8 @@ impl Value {
             Value::Object(o) => o.name.clone(),
             Value::Range(_) => "range".to_string(),
             Value::Tuple(_) => "tuple".to_string(),
+            Value::Chan(_) => "chan".to_string(),
+            Value::TaskJoin(_) => "task.join".to_string(),
         }
     }
 
@@ -160,6 +188,8 @@ impl Value {
             Value::TcpStream(_) => Some("net"),
             Value::TcpListener(_) => Some("net"),
             Value::Response(_) => Some("http"),
+            Value::Chan(_) => Some("chan"),
+            Value::TaskJoin(_) => None,
             Value::Object(o) => {
                 // Extract namespace from struct name (e.g., "shapes.Point" -> "shapes")
                 o.name
@@ -246,6 +276,8 @@ impl fmt::Display for Value {
                 }
                 write!(f, ")")
             }
+            Value::Chan(_) => write!(f, "<chan>"),
+            Value::TaskJoin(_) => write!(f, "<task.join>"),
         }
     }
 }
@@ -274,6 +306,9 @@ impl PartialEq for Value {
             (Value::Func(_), Value::Func(_)) => std::ptr::eq(self, other),
             (Value::Native(_), Value::Native(_)) => std::ptr::eq(self, other),
             (Value::Range(a), Value::Range(b)) => a == b,
+            // Chan and TaskJoin: compare by Arc pointer (identity)
+            (Value::Chan(a), Value::Chan(b)) => Arc::ptr_eq(a, b),
+            (Value::TaskJoin(a), Value::TaskJoin(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }

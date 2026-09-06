@@ -993,6 +993,8 @@ impl Checker {
                             sig = self.funcs.get(&format!("http.{method}")).cloned()
                         }
                         Type::Json => sig = self.funcs.get(&format!("json.{method}")).cloned(),
+                        Type::Chan => sig = self.funcs.get(&format!("chan.{method}")).cloned(),
+                        Type::TaskJoin => sig = self.funcs.get(&format!("task.{method}")).cloned(),
                         Type::Struct(sname) => {
                             // Try TypeName.method (impl block methods)
                             sig = self.funcs.get(&format!("{sname}.{method}")).cloned();
@@ -1177,6 +1179,12 @@ impl Checker {
                         }
                         Type::Json => {
                             sig = self.funcs.get(&format!("json.{method}")).cloned();
+                        }
+                        Type::Chan => {
+                            sig = self.funcs.get(&format!("chan.{method}")).cloned();
+                        }
+                        Type::TaskJoin => {
+                            sig = self.funcs.get(&format!("task.{method}")).cloned();
                         }
                         Type::Struct(sname) => {
                             // Try TypeName.method (impl block methods)

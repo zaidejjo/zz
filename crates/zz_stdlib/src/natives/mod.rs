@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use zz_runtime::{EvalError, NativeEntry, Value};
 
 pub(crate) mod builtins;
+pub(crate) mod concurrency;
 pub(crate) mod encoding;
 pub(crate) mod env;
 pub(crate) mod fs;
@@ -1043,6 +1044,36 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: time::time_sleep_ms,
+        },
+    );
+
+    // std.chan — concurrency primitives
+    m.insert(
+        "std.chan".into(),
+        NativeEntry {
+            arity: 0,
+            f: concurrency::chan_new,
+        },
+    );
+    m.insert(
+        "std.chan.send".into(),
+        NativeEntry {
+            arity: 2,
+            f: concurrency::chan_send,
+        },
+    );
+    m.insert(
+        "std.chan.recv".into(),
+        NativeEntry {
+            arity: 1,
+            f: concurrency::chan_recv,
+        },
+    );
+    m.insert(
+        "std.chan.try_recv".into(),
+        NativeEntry {
+            arity: 1,
+            f: concurrency::chan_try_recv,
         },
     );
 
