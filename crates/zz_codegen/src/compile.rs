@@ -38,8 +38,20 @@ pub struct CCompiler {
 }
 
 /// Probe PATH for a C compiler in preference order.
+/// For ThinLTO builds, prefers clang as GCC does not support `-flto=thin`.
 pub fn detect_cc() -> Option<CCompiler> {
-    for name in ["cc", "clang", "gcc", "tcc"] {
+    detect_cc_for_lto(false)
+}
+
+/// Probe PATH for a C compiler, optionally preferring clang for ThinLTO.
+pub fn detect_cc_for_lto(thin_lto: bool) -> Option<CCompiler> {
+    // If ThinLTO is requested, prefer clang (GCC doesn't support -flto=thin)
+    let preferred_order: Vec<&str> = if thin_lto {
+        vec!["clang", "cc", "gcc", "tcc"]
+    } else {
+        vec!["cc", "clang", "gcc", "tcc"]
+    };
+    for name in preferred_order {
         if let Some(path) = which(name) {
             return Some(CCompiler {
                 name: name.to_string(),
@@ -62,6 +74,18 @@ fn which(name: &str) -> Option<String> {
     None
 }
 
+/// PGO (Profile-Guided Optimization) mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum PgoMode {
+    /// No PGO - normal compilation.
+    #[default]
+    None,
+    /// Generate profile data (`-fprofile-generate`).
+    Generate,
+    /// Use collected profile data (`-fprofile-use`).
+    Use,
+}
+
 /// Build options.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BuildOptions {
@@ -73,6 +97,10 @@ pub struct BuildOptions {
     pub static_link: bool,
     /// Enable function-section + gc-sections (DCE at link level).
     pub gc_sections: bool,
+    /// Use ThinLTO (`-flto=thin`) instead of full LTO (`-flto`).
+    pub thin_lto: bool,
+    /// PGO mode for profile-guided optimization.
+    pub pgo: PgoMode,
 }
 
 impl BuildOptions {
@@ -83,17 +111,77 @@ impl BuildOptions {
             strip: false,
             static_link: false,
             gc_sections: true,
+            thin_lto: false,
+            pgo: PgoMode::None,
         }
     }
 
-    /// Release build: -O3 -flto, stripped, static, gc-sections.
+    /// Release build: -O3 -flto, stripped, dynamic (no static).
+    /// Use for dev/benchmarking where dynamic linking gives peak performance.
     pub fn release() -> Self {
+        BuildOptions {
+            optimize: true,
+            strip: true,
+            static_link: false, // dynamic - faster for dev/benchmark
+            gc_sections: true,
+            thin_lto: false,
+            pgo: PgoMode::None,
+        }
+    }
+
+    /// Static self-contained build: ThinLTO + DCE + strip.
+    /// Use for production Docker/Serverless deployments.
+    pub fn static_lto() -> Self {
         BuildOptions {
             optimize: true,
             strip: true,
             static_link: true,
             gc_sections: true,
+            thin_lto: true,
+            pgo: PgoMode::None,
         }
+    }
+
+    /// PGO build: generate profile data.
+    /// Phase 1: build with this, run the binary, then rebuild with `pgo_use()`.
+    pub fn pgo_generate() -> Self {
+        BuildOptions {
+            optimize: true,
+            strip: false, // keep symbols for PGO
+            static_link: true,
+            gc_sections: true,
+            thin_lto: true,
+            pgo: PgoMode::Generate,
+        }
+    }
+
+    /// PGO build: use collected profile data.
+    /// Phase 2: run after `pgo_generate()` collected profile data.
+    pub fn pgo_use() -> Self {
+        BuildOptions {
+            optimize: true,
+            strip: true,
+            static_link: true,
+            gc_sections: true,
+            thin_lto: true,
+            pgo: PgoMode::Use,
+        }
+    }
+}
+
+impl BuildOptions {
+    /// Compute a fingerprint hash of this BuildOptions for cache key generation.
+    /// Includes all flags that affect compilation output.
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.optimize.hash(&mut h);
+        self.strip.hash(&mut h);
+        self.static_link.hash(&mut h);
+        self.gc_sections.hash(&mut h);
+        self.thin_lto.hash(&mut h);
+        self.pgo.hash(&mut h);
+        h.finish()
     }
 }
 
@@ -106,7 +194,7 @@ pub fn build(
 ) -> Result<CCompiler, BuildError> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let cc = detect_cc().ok_or(BuildError::NoCompiler)?;
+    let cc = detect_cc_for_lto(opts.thin_lto).ok_or(BuildError::NoCompiler)?;
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
 
     // Write the source to a unique temp .c file (tests run in parallel).
@@ -124,7 +212,11 @@ pub fn build(
 
     let mut cmd = Command::new(&cc.path);
     if opts.optimize {
-        cmd.arg("-O3").arg("-flto");
+        if opts.thin_lto {
+            cmd.arg("-O3").arg("-flto=thin");
+        } else {
+            cmd.arg("-O3").arg("-flto");
+        }
     } else {
         cmd.arg("-O1");
     }
@@ -137,6 +229,16 @@ pub fn build(
     if opts.gc_sections {
         cmd.arg("-ffunction-sections").arg("-fdata-sections");
         cmd.arg("-Wl,--gc-sections");
+    }
+    match opts.pgo {
+        PgoMode::Generate => {
+            cmd.arg("-fprofile-generate");
+        }
+        PgoMode::Use => {
+            cmd.arg("-fprofile-use");
+            cmd.arg("-fno-peel-loops");
+        }
+        PgoMode::None => {}
     }
     cmd.arg("-o").arg(output_path).arg(&src_path).arg("-lm");
 

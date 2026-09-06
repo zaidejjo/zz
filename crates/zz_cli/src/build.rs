@@ -1,11 +1,13 @@
 //! Native AOT build / transient-run integration for the `zz` CLI.
 //!
-//! `zz build <file>`     — dev build (-O1)
-//! `zz build -p <file>`  — release build (-O3 -flto -static, DCE)
-//! `zz run --native`     — transient compile → exec → cleanup
+//! `zz build <file>`        — dev build (-O1, dynamic)
+//! `zz build -p <file>`     — release build (-O3 -flto, dynamic)
+//! `zz build --static`      — static self-contained (ThinLTO, DCE)
+//! `zz build --pgo`         — PGO instrumented build
+//! `zz run --native`        — transient compile → exec → cleanup
 //!
 //! Binaries are cached under `~/.zz/cache` keyed by source-hash + build
-//! mode, so unchanged files rebuild instantaneously.
+//! options, so unchanged files rebuild instantaneously.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,6 +24,8 @@ use crate::loader;
 pub enum BuildMode {
     Dev,
     Release,
+    Static,
+    Pgo,
 }
 
 /// The cache directory (`~/.zz/cache`).
@@ -33,24 +37,40 @@ pub fn cache_dir() -> PathBuf {
     home.join(".zz").join("cache")
 }
 
-/// Cache schema version — bump when codegen/runtime changes invalidate old
-/// binaries.
-const CACHE_VERSION: u32 = 16;
-
-/// Hash of the source + mode, used as the cache key.
-fn cache_key(src: &str, mode: BuildMode) -> String {
+/// Compute a cache key from source + build options.
+/// Uses BuildOptions fingerprint + runtime file mtimes for automatic cache invalidation.
+fn cache_key(src: &str, opts: BuildOptions) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     src.hash(&mut hasher);
-    mode_hash(mode).hash(&mut hasher);
-    CACHE_VERSION.hash(&mut hasher);
+    opts.fingerprint().hash(&mut hasher);
+    // Include runtime file mtimes for automatic cache invalidation
+    if let Some(runtime_mtime) = runtime_mtime() {
+        runtime_mtime.hash(&mut hasher);
+    }
     format!("{:016x}", hasher.finish())
 }
 
-fn mode_hash(mode: BuildMode) -> u8 {
-    match mode {
-        BuildMode::Dev => 1,
-        BuildMode::Release => 2,
+/// Get modification time of the C runtime files for cache invalidation.
+fn runtime_mtime() -> Option<u64> {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rt_c = base.join("src/runtime.c");
+    let rt_h = base.join("src/runtime.h");
+    let c_mtime = rt_c.metadata().and_then(|m| m.modified()).ok();
+    let h_mtime = rt_h.metadata().and_then(|m| m.modified()).ok();
+    match (c_mtime, h_mtime) {
+        (Some(ct), Some(ht)) => {
+            let ct_sys = ct
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs());
+            let ht_sys = ht
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs());
+            ct_sys.and_then(|c| ht_sys.map(|h| c.wrapping_mul(h)))
+        }
+        _ => None,
     }
 }
 
@@ -58,6 +78,8 @@ fn opts_for(mode: BuildMode) -> BuildOptions {
     match mode {
         BuildMode::Dev => BuildOptions::dev(),
         BuildMode::Release => BuildOptions::release(),
+        BuildMode::Static => BuildOptions::static_lto(),
+        BuildMode::Pgo => BuildOptions::pgo_generate(),
     }
 }
 
@@ -129,23 +151,19 @@ pub fn build_native(path: &Path, mode: BuildMode) -> Result<PathBuf, String> {
         .unwrap_or_default();
     let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
 
-    // Cache: reuse when the same source + mode was built before.
+    // Cache: reuse when the same source + build options were built before.
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create cache: {e}"))?;
     let source = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
-    let key = cache_key(&source, mode);
-    let cached = dir.join(if mode == BuildMode::Release {
-        format!("{key}-release")
-    } else {
-        format!("{key}-dev")
-    });
+    let opts = opts_for(mode);
+    let key = cache_key(&source, opts);
+    let cached = dir.join(format!("{key}-{mode:?}"));
 
     if cached.is_file() {
         // Reuse the cached binary.
         return Ok(cached);
     }
 
-    let opts = opts_for(mode);
     zz_codegen::build_native(&pruned, &reach, &main_key, opts, &cached)
         .map_err(|e| format!("{e}"))?;
     Ok(cached)
