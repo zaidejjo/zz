@@ -116,7 +116,9 @@ impl Unifier {
             | (Type::HttpServer, Type::HttpServer)
             | (Type::TcpStream, Type::TcpStream)
             | (Type::TcpListener, Type::TcpListener)
-            | (Type::Response, Type::Response) => Ok(()),
+            | (Type::Response, Type::Response)
+            | (Type::Chan, Type::Chan)
+            | (Type::TaskJoin, Type::TaskJoin) => Ok(()),
             (Type::Tuple(xs), Type::Tuple(ys)) => {
                 if xs.len() != ys.len() {
                     return Err(UnifyError {

@@ -198,5 +198,7 @@ pub(crate) fn value_to_json(v: &Value) -> Result<JsonValue, EvalError> {
             }
             Ok(JsonValue::Arr(items))
         }
+        Value::Chan(_) => Err(err("a channel")),
+        Value::TaskJoin(_) => Err(err("a task join handle")),
     }
 }
