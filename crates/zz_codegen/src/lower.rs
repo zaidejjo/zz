@@ -2729,7 +2729,6 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "http.pipe" | "std.http.pipe" => Some("zz_http_log"),
         "http.listen" | "std.http.listen" => Some("zz_http_listen"),
         "http.handle" | "std.http.handle" => Some("zz_http_handle"),
-        "http.server" | "std.http.server" => Some("zz_http_server"),
         _ => None,
     }
 }
