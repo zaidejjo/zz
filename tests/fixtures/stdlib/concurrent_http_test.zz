@@ -1,0 +1,9 @@
+import std.io
+import std.task
+import std.http
+s := http.server()
+s2 := http.route_get(s, "/ok", |_req| "ok")
+task.spawn(|_| {
+    http.listen(s2, 8099)
+})
+io.println("concurrent_http_ok")

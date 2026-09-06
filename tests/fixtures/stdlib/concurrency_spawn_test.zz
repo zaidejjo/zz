@@ -1,0 +1,16 @@
+// E2E: spawn — parallel execution across cores
+import std.io
+import std.task
+import std.chan
+
+results := std.chan()
+task.spawn(|_| {
+    std.chan.send(results, 1 + 1)
+})
+task.spawn(|_| {
+    std.chan.send(results, 2 * 3)
+})
+a : int = std.chan.recv(results)
+b : int = std.chan.recv(results)
+io.println("{a} {b}")
+io.println("spawn_ok")

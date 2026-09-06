@@ -169,6 +169,17 @@ e2e_success_test!(
     "stdlib",
     "bench_memory_arena.zz"
 );
+e2e_success_test!(
+    e2e_stdlib_concurrency_spawn_test,
+    "stdlib",
+    "concurrency_spawn_test.zz"
+);
+e2e_success_test!(e2e_stdlib_channel_test, "stdlib", "channel_test.zz");
+e2e_success_test!(
+    e2e_stdlib_concurrent_http_test,
+    "stdlib",
+    "concurrent_http_test.zz"
+);
 
 // ---------------------------------------------------------------------------
 // Error fixtures: must exit 1

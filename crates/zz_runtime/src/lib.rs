@@ -13,4 +13,6 @@ pub mod vm;
 pub use env::Env;
 pub use eval::{EvalError, Interp, NativeEntry, NativeFn};
 pub use value::{FuncValue, NativeFunc, ObjectValue, RangeValue, Value};
+pub use vm::Chunk;
+pub use zz_frontend::ast::{Expr, Param};
 pub use zz_frontend::span::Span;
