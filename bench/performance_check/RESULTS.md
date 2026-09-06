@@ -1,6 +1,6 @@
 # Comprehensive Multi-Scenario Benchmark — ZZ vs Go vs Rust
 
-**Machine:** `x86_64` · **Date:** 2026-09-06T21:01:11Z · **Best-of:** 1 runs
+**Machine:** `x86_64` · **Date:** 2026-09-06T23:01:14Z · **Best-of:** 3 runs
 
 ## Benchmarks
 
@@ -17,27 +17,27 @@
 
 | Benchmark | ZZ AOT MT | ZZ AOT ST | Go | Rust |
 |-----------|----------:|----------:|---:|-----:|
-| `bench_cpu_intensive   ` |      26 |      36 | 156 |  19 |
-| `bench_concurrency_stress` |       4 |       3 | 1009 | 213 |
-| `bench_memory_alloc    ` |     417 |     438 | 275 | 275 |
-| `bench_memory_leak     ` |      67 |      68 |  99 | 246 |
-| `bench_string_concats  ` |       8 |       6 | 554 |   3 |
+| `bench_cpu_intensive   ` |      12 |      16 |  74 |  12 |
+| `bench_concurrency_stress` |       0 |       2 | 808 | 183 |
+| `bench_memory_alloc    ` |     403 |     377 | 279 | 267 |
+| `bench_memory_leak     ` |      65 |      59 |  90 | 227 |
+| `bench_string_concats  ` |       2 |       4 | 408 |   1 |
 
 ## HTTP Throughput (higher is better, req/sec)
 
 | Benchmark | ZZ AOT MT | ZZ AOT ST | Go | Rust |
 |-----------|----------:|----------:|---:|-----:|
-| `bench_http_throughput ` |   7,509 |   5,492 | 26,402 | 10,343 |
+| `bench_http_throughput ` |  50,446 |  48,066 | 41,779 | 45,834 |
 
 ## Peak RSS — Non-HTTP benchmarks (lower is better; KiB / MB)
 
 | Benchmark | ZZ AOT MT | ZZ AOT ST | Go | Rust |
 |-----------|-----------|-----------|---:|-----:|
-| `bench_cpu_intensive   ` | 924 / 0.9 | 924 / 0.9 | 9548 / 9.3 | 3308 / 3.2 |
-| `bench_concurrency_stress` | 0 / 0.0 | 0 / 0.0 | 9552 / 9.3 | 27244 / 26.6 |
-| `bench_memory_alloc    ` | 136768 / 133.6 | 132824 / 129.7 | 12352 / 12.1 | 2484 / 2.4 |
-| `bench_memory_leak     ` | 916 / 0.9 | 908 / 0.9 | 6664 / 6.5 | 2456 / 2.4 |
-| `bench_string_concats  ` | 0 / 0.0 | 0 / 0.0 | 16316 / 15.9 | 0 / 0.0 |
+| `bench_cpu_intensive   ` | 924 / 0.9 | 924 / 0.9 | 6752 / 6.6 | 2404 / 2.3 |
+| `bench_concurrency_stress` | 0 / 0.0 | 0 / 0.0 | 9708 / 9.5 | 26540 / 25.9 |
+| `bench_memory_alloc    ` | 131004 / 127.9 | 145960 / 142.5 | 12036 / 11.8 | 2480 / 2.4 |
+| `bench_memory_leak     ` | 912 / 0.9 | 912 / 0.9 | 8132 / 7.9 | 2440 / 2.4 |
+| `bench_string_concats  ` | 0 / 0.0 | 0 / 0.0 | 13960 / 13.6 | 0 / 0.0 |
 
 ## Binary size (KiB)
 
