@@ -1,13 +1,15 @@
 //! `std.http` — HTTP client, web framework, middleware, and developer tools.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Write;
+use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::natives::{arg, expect_str};
 use zz_runtime::json::{parse_json, to_json_string, JsonValue};
-use zz_runtime::value::{HttpServer, Response};
-use zz_runtime::{EvalError, Interp, Span, Value};
+use zz_runtime::value::{snapshot_env, FuncValue, HttpServer, Response};
+use zz_runtime::{Chunk, Env, EvalError, Expr, Interp, NativeEntry, Param, Span, Value};
 
 // ===========================================================================
 // Helpers
@@ -970,7 +972,121 @@ pub(crate) fn http_handle(
     }
 }
 
-/// Blocking HTTP server loop. Handles one request at a time.
+// ===========================================================================
+// Multi-core server snapshot infrastructure
+// ===========================================================================
+
+/// A snapshot of a single route handler or middleware function, ready to be
+/// sent across thread boundaries.  Contains everything needed to reconstruct
+/// a `Value::Func` on the receiving thread.
+#[derive(Clone)]
+struct FuncSnapshot {
+    params: Vec<Param>,
+    body: Expr,
+    chunk: Option<Arc<Chunk>>,
+    env_snapshot: HashMap<String, Value>,
+}
+
+impl FuncSnapshot {
+    /// Reconstruct a `Value::Func` on the current thread with a fresh env.
+    fn reconstruct(&self) -> Value {
+        let env = Rc::new(std::cell::RefCell::new(Env::new()));
+        {
+            let mut e = env.borrow_mut();
+            for (k, v) in &self.env_snapshot {
+                e.define(k, v.clone());
+            }
+        }
+        Value::Func(Box::new(FuncValue {
+            params: self.params.clone(),
+            body: self.body.clone(),
+            env,
+            chunk: self.chunk.clone(),
+        }))
+    }
+}
+
+/// Thread-safe snapshot of the entire HTTP server, containing route and
+/// middleware handler snapshots plus the native function table and struct
+/// definitions needed to create a fresh `Interp` on each connection thread.
+#[derive(Clone)]
+struct ServerSnapshot {
+    routes: Vec<(String, String, FuncSnapshot)>,
+    middleware: Vec<FuncSnapshot>,
+    log_enabled: bool,
+    static_dir: Option<String>,
+    natives: HashMap<String, NativeEntry>,
+    structs: HashMap<String, Vec<String>>,
+}
+
+/// Snapshot a `Value::Func` handler into a thread-safe `FuncSnapshot`.
+fn snapshot_func(v: &Value) -> Option<FuncSnapshot> {
+    match v {
+        Value::Func(fv) => Some(FuncSnapshot {
+            params: fv.params.clone(),
+            body: fv.body.clone(),
+            chunk: fv.chunk.clone(),
+            env_snapshot: snapshot_env(&fv.env),
+        }),
+        _ => None,
+    }
+}
+
+impl ServerSnapshot {
+    /// Build a snapshot from the current `HttpServer` + `Interp`.
+    fn from_server(server: &HttpServer, interp: &Interp) -> Self {
+        let routes = server
+            .routes
+            .iter()
+            .filter_map(|(method, path, handler)| {
+                Some((method.clone(), path.clone(), snapshot_func(handler)?))
+            })
+            .collect();
+
+        let middleware = server
+            .middlewares
+            .iter()
+            .filter_map(snapshot_func)
+            .collect();
+
+        ServerSnapshot {
+            routes,
+            middleware,
+            log_enabled: server.log_enabled,
+            static_dir: server.static_dir.clone(),
+            natives: interp.natives.clone(),
+            structs: interp.structs.clone(),
+        }
+    }
+
+    /// Reconstruct an `HttpServer` on the current thread from the snapshot.
+    fn reconstruct_server(&self) -> HttpServer {
+        HttpServer {
+            routes: self
+                .routes
+                .iter()
+                .map(|(method, path, fs)| (method.clone(), path.clone(), fs.reconstruct()))
+                .collect(),
+            middlewares: self.middleware.iter().map(|fs| fs.reconstruct()).collect(),
+            log_enabled: self.log_enabled,
+            static_dir: self.static_dir.clone(),
+        }
+    }
+
+    /// Create a fresh `Interp` on the current thread with cloned natives
+    /// and structs but an empty environment.
+    fn fresh_interp(&self) -> Interp {
+        let mut interp = Interp::with_natives(self.natives.clone());
+        interp.structs = self.structs.clone();
+        interp
+    }
+}
+
+/// Blocking HTTP server loop.  Dispatches each incoming TCP connection to
+/// its own OS thread so route handlers execute in parallel across cores.
+///
+/// Each connection thread receives its own fresh `Interp` and a reconstructed
+/// `HttpServer` from a pre-computed snapshot, avoiding lock contention.
 pub(crate) fn http_listen(
     interp: &mut Interp,
     args: &mut Vec<Value>,
@@ -986,6 +1102,12 @@ pub(crate) fn http_listen(
             ))
         }
     };
+
+    // Snapshot the server + interp state before entering the accept loop.
+    // This is sent to each connection thread so they can reconstruct
+    // a fully independent server + interp without any cross-thread Rc.
+    let snapshot = Arc::new(ServerSnapshot::from_server(&server, interp));
+
     let listener = std::net::TcpListener::bind(("0.0.0.0", port as u16)).map_err(|e| {
         EvalError::new(
             format!("std.http.listen: cannot bind port {port}: {e}"),
@@ -993,52 +1115,64 @@ pub(crate) fn http_listen(
         )
     })?;
     if server.log_enabled {
-        eprintln!("[INFO] Server listening on 0.0.0.0:{port}");
+        eprintln!("[INFO] Server listening on 0.0.0.0:{port} (multi-core)");
     }
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
-        let response = handle_connection(&server, &mut stream, interp, span);
-        let _ = stream.write_all(response.as_bytes());
-        let _ = stream.flush();
+        let snap = Arc::clone(&snapshot);
+        std::thread::spawn(move || {
+            handle_connection_thread(&snap, &mut stream, span);
+        });
     }
     Ok(Value::Unit)
 }
 
-/// Read one HTTP request from the stream and produce a full response.
-fn handle_connection(
-    server: &HttpServer,
+/// Handle a single TCP connection on a dedicated thread.
+///
+/// Reconstructs the HTTP server and interpreter from the snapshot, parses
+/// the HTTP request, dispatches it through the route/middleware pipeline,
+/// and writes the response.
+fn handle_connection_thread(
+    snapshot: &ServerSnapshot,
     stream: &mut std::net::TcpStream,
-    interp: &mut Interp,
     span: Span,
-) -> String {
+) {
+    use std::io::Read;
+
     let start = Instant::now();
 
+    // ── Read the raw HTTP request ──
     let mut buf = [0u8; 8192];
     let n = match stream.read(&mut buf) {
         Ok(n) => n,
-        Err(_) => return format_response(500, "internal error"),
+        Err(_) => {
+            let _ = stream.write_all(format_response(500, "internal error").as_bytes());
+            let _ = stream.flush();
+            return;
+        }
     };
     let text = String::from_utf8_lossy(&buf[..n]).to_string();
     let mut lines = text.lines();
     let Some(request_line) = lines.next() else {
-        return format_response(400, "bad request");
+        let _ = stream.write_all(format_response(400, "bad request").as_bytes());
+        let _ = stream.flush();
+        return;
     };
     let mut parts = request_line.split_whitespace();
     let (Some(method), Some(raw_path)) = (parts.next(), parts.next()) else {
-        return format_response(400, "bad request");
+        let _ = stream.write_all(format_response(400, "bad request").as_bytes());
+        let _ = stream.flush();
+        return;
     };
 
-    // Split path and query string
     let (path, query_pairs) = if let Some((p, q)) = raw_path.split_once('?') {
         (p.to_string(), parse_query_string(q))
     } else {
         (raw_path.to_string(), Vec::new())
     };
 
-    // Extract headers
     let req_headers = extract_headers(&text);
 
-    // Extract body
     let mut body = String::new();
     let mut content_length = 0usize;
     for line in lines {
@@ -1058,16 +1192,20 @@ fn handle_connection(
         }
     }
 
-    // Dispatch with full request context
+    // ── Reconstruct server + interp from snapshot ──
+    let server = snapshot.reconstruct_server();
+    let mut interp = snapshot.fresh_interp();
+
+    // ── Dispatch ──
     let result = dispatch_with_request(
-        server,
+        &server,
         method,
         &path,
         &body,
         &req_headers,
         &query_pairs,
         &[],
-        interp,
+        &mut interp,
         span,
     );
 
@@ -1078,13 +1216,12 @@ fn handle_connection(
 
     let elapsed = start.elapsed();
 
-    // Feature 6: Structured logging
     if server.log_enabled {
         let color_start = match status {
-            200..=299 => "\x1b[32m", // green
-            300..=399 => "\x1b[33m", // yellow
-            400..=499 => "\x1b[31m", // red
-            500..=599 => "\x1b[35m", // magenta
+            200..=299 => "\x1b[32m",
+            300..=399 => "\x1b[33m",
+            400..=499 => "\x1b[31m",
+            500..=599 => "\x1b[35m",
             _ => "\x1b[0m",
         };
         let reset = "\x1b[0m";
@@ -1095,5 +1232,7 @@ fn handle_connection(
         );
     }
 
-    format_response_with_headers(status, &resp_headers, &resp_body)
+    let response = format_response_with_headers(status, &resp_headers, &resp_body);
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
 }
