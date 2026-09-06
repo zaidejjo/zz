@@ -25,3 +25,4 @@ bench/performance_check/.bin
 bench/performance_check/.log
 bench/performance_check/rust/target
 bench/performance_check/go/bench_go
+**/.zzbin/

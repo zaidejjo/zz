@@ -1,0 +1,122 @@
+{
+  "runs": 1,
+  "machine": "x86_64",
+  "date": "2026-09-06T17:41:05Z",
+  "engines": [
+    "zz_aot_mt",
+    "zz_aot_st",
+    "go",
+    "rust"
+  ],
+  "results": {
+    "cpu_intensive": {
+      "zz_aot_mt": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "zz_aot_st": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "go": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "rust": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      }
+    },
+    "concurrency_stress": {
+      "zz_aot_mt": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "zz_aot_st": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "go": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "rust": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      }
+    },
+    "memory_alloc": {
+      "zz_aot_mt": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "zz_aot_st": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "go": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "rust": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      }
+    },
+    "memory_leak": {
+      "zz_aot_mt": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "zz_aot_st": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "go": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "rust": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      }
+    },
+    "string_concats": {
+      "zz_aot_mt": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "zz_aot_st": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "go": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      },
+      "rust": {
+        "elapsed_ms": 0,
+        "peak_rss_kib": 0
+      }
+    },
+    "http_throughput": {
+      "zz_aot_mt": {
+        "rps": 0
+      },
+      "zz_aot_st": {
+        "rps": 0
+      },
+      "go": {
+        "rps": 0
+      },
+      "rust": {
+        "rps": 0
+      }
+    }
+  },
+  "binary_kib": {
+    "zz_aot": 0,
+    "go": 0,
+    "rust": 0
+  }
+}
