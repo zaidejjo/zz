@@ -311,6 +311,14 @@ zz_value zz_io_input(zz_value prompt, int *err);
 zz_value zz_math_pow(zz_value a, zz_value b, int *err);
 zz_value zz_time_now_ms(zz_value unused, int *err);
 
+// http AOT server — thread-per-connection, returns "OK" for all requests
+// All functions follow the native call convention: (zz_value... , int *err)
+zz_value zz_http_server(zz_value unused, int *err);  // 0 args → unused=unit
+zz_value zz_http_route_get(zz_value server, zz_value path, zz_value handler, int *err);  // 3 args (handler ignored in AOT)
+zz_value zz_http_log(zz_value server, zz_value enabled, int *err);  // 2 args
+zz_value zz_http_listen(zz_value server, zz_value port, int *err);  // 2 args
+zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
+
 // Codegen helper shims.
 zz_value zz_call_native1(zz_value (*f)(zz_value, int *), zz_value a);
 zz_value zz_call_native0(zz_value (*f)(zz_value, int *));

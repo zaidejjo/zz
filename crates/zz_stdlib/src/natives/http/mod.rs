@@ -1109,14 +1109,16 @@ pub(crate) fn http_listen(
     let snapshot = Arc::new(ServerSnapshot::from_server(&server, interp));
 
     let listener = std::net::TcpListener::bind(("0.0.0.0", port as u16)).map_err(|e| {
+        eprintln!("[ERROR] std.http.listen: cannot bind port {port}: {e}");
         EvalError::new(
             format!("std.http.listen: cannot bind port {port}: {e}"),
             span,
         )
     })?;
-    if server.log_enabled {
-        eprintln!("[INFO] Server listening on 0.0.0.0:{port} (multi-core)");
-    }
+    // Print SERVER_READY so benchmark runners know the port is listening.
+    // Use eprintln (stderr) since that's where zz programs write their
+    // stdout-equivalent in native contexts.
+    eprintln!("SERVER_READY");
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         let snap = Arc::clone(&snapshot);

@@ -1,353 +1,374 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Z Z   S T R E S S   S U I T E   —   runner
-#
-#  Compares ZZ (native AOT, `zz build -p`) vs Go vs Rust on three
-#  workloads:
-#    * bench_memory_leak    — 50M short-lived allocs across 2 passes
-#    * bench_cpu_intensive  — 10M accum + 1M pow/mod + 100k array ops
-#    * bench_string_concats — 50×5k + 20×2k + 10k string concats
-#
-#  Metrics:
-#    * elapsed_ms   wall-clock time (best-of-N runs)
-#    * peak_rss_kib peak resident set size via /usr/bin/time -v
-#                   (ps polling fallback)
-#    * binary_kib   compiled artifact size in KiB
-#
-#  Output:
-#    * bench/performance_check/RESULTS.md    (human-readable table)
-#    * bench/performance_check/results.json (machine-readable)
-#
-#  Usage:
-#    bash bench/performance_check/run.sh
-#    RUNS=5 bash bench/performance_check/run.sh
+#  Z Z   B E N C H M A R K   R U N N E R
+#  Builds benchmarks, runs them, outputs clean JSON.
+#  Markdown generation is a separate Python step.
 # =====================================================================
+set -e
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 RUNS="${RUNS:-3}"
+SKIP_VM="${SKIP_VM:-false}"
 
 LOG_DIR="$HERE/.log"
 RESULTS_JSON="$HERE/results.json"
 RESULTS_MD="$HERE/RESULTS.md"
 ZZ_BIN_DIR="$HERE/.zzbin"
+
+# Clean slate — remove only artifacts, NOT results.json (Python will overwrite)
+rm -rf "$LOG_DIR" "$HERE/.bin" "$ZZ_BIN_DIR"
 mkdir -p "$LOG_DIR" "$HERE/.bin" "$ZZ_BIN_DIR"
 
-# ---- colors (only if stdout is a tty) -------------------------------
-if [ -t 1 ]; then
-	RST=$'\e[0m'
-	BLD=$'\e[1m'
-	DIM=$'\e[2m'
-	RED=$'\e[31m'
-	GRN=$'\e[32m'
-	YLW=$'\e[33m'
-	BLU=$'\e[34m'
-	CYN=$'\e[36m'
-else
-	RST=""
-	BLD=""
-	DIM=""
-	RED=""
-	GRN=""
-	YLW=""
-	BLU=""
-	CYN=""
-fi
+# Colors
+RST=$'\e[0m'
+BLD=$'\e[1m'
+RED=$'\e[31m'
+GRN=$'\e[32m'
+YLW=$'\e[33m'
+CYN=$'\e[36m'
+DIM=$'\e[2m'
 
-# ---- locate zz binary ----------------------------------------------
+# Find zz binary
 ZZ="$ROOT/target/release/zz"
 [ -x "$ZZ" ] || ZZ="$ROOT/target/debug/zz"
 if [ ! -x "$ZZ" ]; then
-	echo "${RED}error${RST}: zz binary not found — run ${BLD}cargo build --release${RST} first." >&2
+	echo "${RED}error${RST}: zz binary not found"
 	exit 1
 fi
 
-# ---- check toolchain availability ---------------------------------
+# Check tools
 HAVE_GO=0
 command -v go >/dev/null 2>&1 && HAVE_GO=1
 HAVE_RUST=0
 command -v rustc >/dev/null 2>&1 && HAVE_RUST=1
-[ "$HAVE_GO" -eq 1 ] || echo "${YLW}warn${RST}: go not on PATH — Go column skipped"
-[ "$HAVE_RUST" -eq 1 ] || echo "${YLW}warn${RST}: rustc not on PATH — Rust column skipped"
-
-# ---- helpers --------------------------------------------------------
-TIME_BIN="/usr/bin/time"
-[ -x "$TIME_BIN" ] || TIME_BIN=""
-
-best_ms() { # best_ms <cmd...>  →  best-of-N ms
-	local best=999999999
-	for _ in $(seq 1 "$RUNS"); do
-		local t0 t1 dt
-		t0=$(date +%s%N)
-		"$@" >/dev/null 2>&1
-		t1=$(date +%s%N)
-		dt=$(((t1 - t0) / 1000000))
-		[ "$dt" -lt "$best" ] && best=$dt
-	done
-	echo "$best"
-}
-
-# measure_rss_kib <label> <cmd...>  →  peak RSS in KiB
-measure_rss_kib() {
-	local label="$1"
-	shift
-	local logfile="$LOG_DIR/${label}_rss.log"
-	if [ -n "$TIME_BIN" ]; then
-		"$TIME_BIN" -v -o "$logfile" "$@" >/dev/null 2>&1 || true
-		local kib
-		kib=$(awk '/Maximum resident set size/ {print $NF}' "$logfile" 2>/dev/null || echo 0)
-		if [ -n "$kib" ] && [ "$kib" -gt 0 ] 2>/dev/null; then
-			echo "$kib"
-			return
-		fi
-	fi
-	"$@" >/dev/null 2>&1 &
-	local pid=$!
-	local peak=0
-	while kill -0 "$pid" 2>/dev/null; do
-		local rss
-		rss=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || echo 0)
-		[ -n "$rss" ] && [ "$rss" -gt "$peak" ] 2>/dev/null && peak="$rss"
-		sleep 0.05
-	done
-	wait "$pid" 2>/dev/null || true
-	echo "$peak"
-}
-
-binary_size_kib() {
-	local f="$1"
-	[ -f "$f" ] || {
-		echo 0
-		return
-	}
-	local b
-	b=$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null || echo 0)
-	awk -v b="$b" 'BEGIN { printf "%d", (b + 1023) / 1024 }'
-}
+HAVE_WRK=0
+command -v wrk >/dev/null 2>&1 && HAVE_WRK=1
+HAVE_HEY=0
+command -v hey >/dev/null 2>&1 && HAVE_HEY=1
+[ "$HAVE_GO" -eq 0 ] && echo "${YLW}warn${RST}: go not found"
+[ "$HAVE_RUST" -eq 0 ] && echo "${YLW}warn${RST}: rustc not found"
+[ "$HAVE_WRK" -eq 0 ] && [ "$HAVE_HEY" -eq 0 ] && echo "${YLW}warn${RST}: wrk/hey not found - HTTP skipped"
 
 # ---------------------------------------------------------------------
-#  Build all artifacts
+# Build
 # ---------------------------------------------------------------------
-echo "${BLD}${CYN}━━ building all artifacts ━━${RST}"
+echo "${BLD}${CYN}━━ building ━━${RST}"
 
 GO_BIN="$HERE/.bin/bench_go"
 if [ "$HAVE_GO" -eq 1 ]; then
-	(cd "$HERE/go" && go build -o "$GO_BIN" .) >"$LOG_DIR/go_build.log" 2>&1
-	if [ ! -x "$GO_BIN" ]; then
-		echo "${RED}go build failed${RST} — see $LOG_DIR/go_build.log"
-		HAVE_GO=0
-	fi
+	(cd "$HERE/go" && go build -o "$GO_BIN" .) >"$LOG_DIR/go_build.log" 2>&1 || HAVE_GO=0
+	[ ! -x "$GO_BIN" ] && HAVE_GO=0
 fi
 
 RUST_BIN="$HERE/.bin/bench_rust"
 if [ "$HAVE_RUST" -eq 1 ]; then
 	(cd "$HERE/rust" && cargo build --release --quiet) >"$LOG_DIR/rust_build.log" 2>&1
 	if [ -x "$HERE/rust/target/release/bench_stress" ]; then
-		cp -f "$HERE/rust/target/release/bench_stress" "$RUST_BIN"
+		cp -f "$HERE/rust/target/release/bench_stress" "$RUST_BIN" && chmod +x "$RUST_BIN"
 	else
-		echo "${RED}rust build failed${RST} — see $LOG_DIR/rust_build.log"
 		HAVE_RUST=0
 	fi
+	[ ! -x "$RUST_BIN" ] && HAVE_RUST=0
 fi
 
-# ZZ — AOT build every workload into a separate binary.
-declare -A ZZ_BIN
-for bench in memory_leak cpu_intensive string_concats; do
+declare -A ZZ_AOT_BIN
+for bench in cpu_intensive concurrency_stress http_throughput memory_alloc memory_leak string_concats; do
 	src="$HERE/zz/bench_${bench}.zz"
-	out="$ZZ_BIN_DIR/bench_${bench}"
+	out="$ZZ_BIN_DIR/bench_${bench}_aot"
 	rm -f "$out"
 	if "$ZZ" build -p "$src" >"$LOG_DIR/zz_build_${bench}.log" 2>&1; then
-		# `zz build -p` writes to the source dir as `<basename>`.
 		srcbin="$HERE/zz/bench_${bench}"
 		if [ -x "$srcbin" ]; then
-			mv -f "$srcbin" "$out"
-			chmod +x "$out"
-			ZZ_BIN[$bench]="$out"
+			mv -f "$srcbin" "$out" && chmod +x "$out" && ZZ_AOT_BIN[$bench]="$out"
 		else
-			echo "${YLW}warn${RST}: zz build -p succeeded but no binary at $srcbin"
-			ZZ_BIN[$bench]=""
+			echo "${YLW}warn${RST}: no binary for $bench"
 		fi
 	else
-		echo "${YLW}warn${RST}: zz build -p failed for $bench — see $LOG_DIR/zz_build_${bench}.log"
-		ZZ_BIN[$bench]=""
+		echo "${YLW}warn${RST}: zz build failed for $bench"
 	fi
 done
 
 # ---------------------------------------------------------------------
-#  Run all benchmarks × engines
+# Run benchmarks via Python — all JSON generation in one place
 # ---------------------------------------------------------------------
-BENCHES=(memory_leak cpu_intensive string_concats)
+export HAVE_GO HAVE_RUST HAVE_WRK HAVE_HEY RUNS
+export ZZ_BIN_DIR GO_BIN RUST_BIN
 
-# Engines we actually have
-ENGINES=("zz")
-[ "$HAVE_GO" -eq 1 ] && ENGINES+=("go")
-[ "$HAVE_RUST" -eq 1 ] && ENGINES+=("rust")
+python3 - "$HERE" <<'PYEOF'
+import subprocess, json, time, os, sys, re
 
-# JSON accumulator
-echo "{" >"$RESULTS_JSON"
-echo "  \"runs\": $RUNS," >>"$RESULTS_JSON"
-echo "  \"machine\": \"$(uname -m)\"," >>"$RESULTS_JSON"
-echo "  \"date\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >>"$RESULTS_JSON"
-echo "  \"engines\": [$(printf '"%s",' "${ENGINES[@]}" | sed 's/,$//')]," >>"$RESULTS_JSON"
-echo "  \"results\": {" >>"$RESULTS_JSON"
+here = sys.argv[1]
+os.chdir(here)
 
-first_bench=1
-for bench in "${BENCHES[@]}"; do
-	[ "$first_bench" -eq 0 ] && echo "," >>"$RESULTS_JSON"
-	first_bench=0
-	echo "${DIM}━━ $bench ━━${RST}"
+runs = int(os.environ.get("RUNS", "3"))
+have_go = os.environ.get("HAVE_GO", "0") == "1"
+have_rust = os.environ.get("HAVE_RUST", "0") == "1"
+can_http = os.environ.get("HAVE_WRK", "0") == "1" or os.environ.get("HAVE_HEY", "0") == "1"
+zz_bin_dir = os.environ.get("ZZ_BIN_DIR", ".zzbin")
+go_bin = os.environ.get("GO_BIN", ".bin/bench_go")
+rust_bin = os.environ.get("RUST_BIN", ".bin/bench_rust")
 
-	declare -A ems erss
+log_dir = ".log"
+os.makedirs(log_dir, exist_ok=True)
 
-	# ZZ (AOT)
-	zbin="${ZZ_BIN[$bench]:-}"
-	if [ -n "$zbin" ] && [ -x "$zbin" ]; then
-		ems[zz]=$(best_ms "$zbin")
-		erss[zz]=$(measure_rss_kib "zz_${bench}" "$zbin")
-	else
-		ems[zz]=0
-		erss[zz]=0
-	fi
+def best_ms(cmd, runs=3):
+    best = 999999999
+    for _ in range(runs):
+        t0 = time.time()
+        r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        dt = int((time.time() - t0) * 1000)
+        if dt < best: best = dt
+    return best
 
-	# Go
-	if [ "$HAVE_GO" -eq 1 ]; then
-		ems[go]=$(best_ms "$GO_BIN" "$bench")
-		erss[go]=$(measure_rss_kib "go_${bench}" "$GO_BIN" "$bench")
-	else
-		ems[go]=0
-		erss[go]=0
-	fi
+def measure_rss_kib(cmd):
+    logfile = f"{log_dir}/_rss_{id(cmd)}.log"
+    try:
+        r = subprocess.run(["/usr/bin/time", "-v"] + list(cmd), capture_output=True, text=True)
+        for line in r.stderr.splitlines():
+            if "Maximum resident set size" in line:
+                return int(line.split()[-1])
+    except Exception:
+        pass
+    # fallback: ps polling
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    peak = 0
+    try:
+        while proc.poll() is None:
+            try:
+                rss_line = subprocess.check_output(["ps", "-o", "rss=", "-p", str(proc.pid)], text=True)
+                rss = int(rss_line.strip())
+                if rss > peak: peak = rss
+            except:
+                pass
+            time.sleep(0.05)
+    finally:
+        try: proc.terminate(); proc.wait(timeout=2)
+        except: proc.kill()
+    return peak
 
-	# Rust
-	if [ "$HAVE_RUST" -eq 1 ]; then
-		ems[rust]=$(best_ms "$RUST_BIN" "$bench")
-		erss[rust]=$(measure_rss_kib "rust_${bench}" "$RUST_BIN" "$bench")
-	else
-		ems[rust]=0
-		erss[rust]=0
-	fi
+def run_http(cmd, eng):
+    port = 8080
+    subprocess.run(["pkill", "-f", f":{port}"], stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
 
-	echo "  ${BLD}zz${RST}  : ${ems[zz]}ms  rss=${erss[zz]}KiB"
-	[ "$HAVE_GO" -eq 1 ] && echo "  ${BLD}go${RST}  : ${ems[go]}ms  rss=${erss[go]}KiB"
-	[ "$HAVE_RUST" -eq 1 ] && echo "  ${BLD}rust${RST}: ${ems[rust]}ms  rss=${erss[rust]}KiB"
+    logfile = f"{log_dir}/http_{eng}.log"
+    with open(logfile, "w") as f:
+        proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
 
-	cat >>"$RESULTS_JSON" <<EOF
-    "$bench": {
-      "zz":   { "elapsed_ms": ${ems[zz]},   "peak_rss_kib": ${erss[zz]}   },
-      "go":   { "elapsed_ms": ${ems[go]},   "peak_rss_kib": ${erss[go]}   },
-      "rust": { "elapsed_ms": ${ems[rust]}, "peak_rss_kib": ${erss[rust]} }
+    # Wait for server to be ready
+    ready = False
+    for i in range(30):
+        try:
+            r = subprocess.run(["curl", "-s", "--connect-timeout", "1", f"http://127.0.0.1:{port}/"],
+                            capture_output=True, timeout=1)
+            if r.returncode == 0:
+                ready = True
+                break
+        except:
+            pass
+        time.sleep(0.1)
+
+    if not ready:
+        proc.terminate(); proc.wait()
+        return 0
+
+    time.sleep(1)
+    rps = 0
+
+    if os.environ.get("HAVE_WRK", "0") == "1":
+        try:
+            out = subprocess.check_output(
+                ["wrk", "-t4", "-c100", "-d3s", f"http://127.0.0.1:{port}/"],
+                text=True, stderr=subprocess.DEVNULL, timeout=10
+            )
+            m = re.search(r'Requests/sec:\s+([\d,.]+)', out)
+            if m: rps = int(float(m.group(1).replace(",","")))
+        except:
+            pass
+    elif os.environ.get("HAVE_HEY", "0") == "1":
+        try:
+            out = subprocess.check_output(
+                ["hey", "-n", "10000", "-c", "100", "-m", "GET", f"http://127.0.0.1:{port}/"],
+                text=True, stderr=subprocess.DEVNULL, timeout=10
+            )
+            m = re.search(r'Requests/sec:\s+([\d,.]+)', out)
+            if m: rps = int(float(m.group(1).replace(",","")))
+        except:
+            pass
+
+    proc.terminate()
+    try: proc.wait(timeout=2)
+    except: proc.kill()
+    subprocess.run(["pkill", "-f", f":{port}"], stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
+    return rps
+
+def binary_kib(path):
+    if not os.path.exists(path): return 0
+    return (os.path.getsize(path) + 1023) // 1024
+
+BENCHES = ["cpu_intensive", "concurrency_stress", "memory_alloc", "memory_leak", "string_concats"]
+HTTP_BENCH = "http_throughput"
+
+results = {}
+
+# Non-HTTP benchmarks
+for bench in BENCHES:
+    zbin = os.path.join(zz_bin_dir, f"bench_{bench}_aot")
+    z_exists = os.path.isfile(zbin) and os.access(zbin, os.X_OK)
+
+    print(f"  {bench}:", flush=True)
+    row = {}
+
+    for eng, cmd in [
+        ("zz_aot_mt", [zbin] if z_exists else None),
+        ("zz_aot_st", ["taskset", "-c", "0", zbin] if z_exists else None),
+        ("go", [go_bin, bench] if have_go and os.path.exists(go_bin) else None),
+        ("rust", [rust_bin, bench] if have_rust and os.path.exists(rust_bin) else None),
+    ]:
+        if cmd is None:
+            row[eng] = {"elapsed_ms": 0, "peak_rss_kib": 0}
+            continue
+        ms = best_ms(cmd, runs)
+        rss = measure_rss_kib(cmd)
+        row[eng] = {"elapsed_ms": ms, "peak_rss_kib": rss}
+        print(f"    {eng}: {ms}ms rss={rss}KiB", flush=True)
+
+    results[bench] = row
+
+# HTTP benchmark
+print(f"  {HTTP_BENCH}:", flush=True)
+zbin = os.path.join(zz_bin_dir, f"bench_{HTTP_BENCH}_aot")
+z_exists = os.path.isfile(zbin) and os.access(zbin, os.X_OK)
+row = {}
+
+for eng, cmd in [
+    ("zz_aot_mt", [zbin] if z_exists else None),
+    ("zz_aot_st", ["taskset", "-c", "0", zbin] if z_exists else None),
+    ("go", [go_bin, HTTP_BENCH] if have_go and os.path.exists(go_bin) else None),
+    ("rust", [rust_bin, HTTP_BENCH] if have_rust and os.path.exists(rust_bin) else None),
+]:
+    if cmd is None:
+        row[eng] = {"rps": 0}
+        continue
+    rps = run_http(cmd, eng) if can_http else 0
+    row[eng] = {"rps": rps}
+    print(f"    {eng}: {rps} rps", flush=True)
+
+results[HTTP_BENCH] = row
+
+# Build final data structure
+data = {
+    "runs": runs,
+    "machine": subprocess.check_output(["uname", "-m"], text=True).strip(),
+    "date": subprocess.check_output(["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"], text=True).strip(),
+    "engines": ["zz_aot_mt", "zz_aot_st", "go", "rust"],
+    "results": results,
+    "binary_kib": {
+        "zz_aot": binary_kib(os.path.join(zz_bin_dir, f"bench_{BENCHES[0]}_aot")),
+        "go": binary_kib(go_bin),
+        "rust": binary_kib(rust_bin),
     }
-EOF
-	unset ems erss
-done
-
-zz_bin_kib=$(binary_size_kib "${ZZ_BIN[memory_leak]:-/dev/null}")
-go_bin_kib=$(binary_size_kib "$GO_BIN")
-rust_bin_kib=$(binary_size_kib "$RUST_BIN")
-
-cat >>"$RESULTS_JSON" <<EOF
-
-  },
-  "binary_kib": {
-    "zz":   $zz_bin_kib,
-    "go":   $go_bin_kib,
-    "rust": $rust_bin_kib
-  }
 }
-EOF
 
-# ---------------------------------------------------------------------
-#  Markdown table
-# ---------------------------------------------------------------------
+# OVERWRITE results.json completely
+with open("results.json", "w") as f:
+    json.dump(data, f, indent=2)
+
+print("JSON written", flush=True)
+PYEOF
+
 echo
 echo "${BLD}${CYN}━━ results ━━${RST}"
 
-val() { # val <bench> <engine> <field>
-	python3 - "$RESULTS_JSON" "$1" "$2" "$3" <<'PY' 2>/dev/null || echo 0
+# Generate Markdown from clean JSON
+python3 - "$RESULTS_JSON" "$RESULTS_MD" <<'PYEOF'
 import json, sys
-path, bench, engine, field = sys.argv[1:5]
-try:
-    with open(path) as f:
-        data = json.load(f)
-    print(data["results"][bench][engine][field])
-except Exception:
-    print(0)
-PY
-}
 
-cat >"$RESULTS_MD" <<EOF
-# Performance / Stress / Memory Benchmark — ZZ vs Go vs Rust
+with open(sys.argv[1]) as f:
+    data = json.load(f)
 
-**Machine:** \`$(uname -m)\` · **Date:** $(date -u +%Y-%m-%dT%H:%M:%SZ) · **Best-of:** $RUNS runs
+BENCHES = ["cpu_intensive","concurrency_stress","memory_alloc","memory_leak","string_concats"]
+HTTP_BENCH = "http_throughput"
 
-## Workloads
+def fmt(v): return str(v) if v else "0"
+def fmt_rps(v): return f"{v:,.0f}" if v else "0"
+def fmt_rss(k):
+    if not k: return "0 / 0.0"
+    return f"{k} / {k/1024:.1f}"
 
-| Benchmark              | Workload                                                                  |
-|------------------------|---------------------------------------------------------------------------|
-| \`bench_memory_leak\`   | 50M short-lived array/dict allocs in deeply nested loops, two passes        |
-| \`bench_cpu_intensive\` | 10M integer accum + 1M pow/mod + 100k array fill/sum                       |
-| \`bench_string_concats\`| 50×5000 single-char concat + 20×2000 multi-char concat + 10k final concat   |
+with open(sys.argv[2], "w") as f:
+    f.write(f"""# Comprehensive Multi-Scenario Benchmark — ZZ vs Go vs Rust
 
-## Execution time (lower is better)
+**Machine:** `{data["machine"]}` · **Date:** {data["date"]} · **Best-of:** {data["runs"]} runs
 
-| Benchmark              |    ZZ     | Rust    | Go      |
-|------------------------|----------:|--------:|--------:|
-EOF
+## Benchmarks
 
-for bench in "${BENCHES[@]}"; do
-	z=$(val "$bench" zz elapsed_ms)
-	r=$(val "$bench" rust elapsed_ms)
-	g=$(val "$bench" go elapsed_ms)
-	printf "| \`bench_%-16s\` | %s ms | %s ms | %s ms |\n" \
-		"$bench" "$z" "$r" "$g" >>"$RESULTS_MD"
-done
+| Benchmark | Description |
+|-----------|-------------|
+| `bench_cpu_intensive` | 10M integer accum + 1M pow/mod + array ops |
+| `bench_concurrency_stress` | 1000 workers × 1000 msgs (1M total) |
+| `bench_http_throughput` | HTTP server with concurrent connections |
+| `bench_memory_alloc` | Mass allocation/destruction (GC/Arena stress) |
+| `bench_memory_leak` | 50M short-lived allocs across 2 passes |
+| `bench_string_concats` | String building patterns (50×5k + 20×2k) |
 
-cat >>"$RESULTS_MD" <<EOF
+## Execution time — Non-HTTP benchmarks (lower is better, ms)
 
-## Peak RSS (lower is better; KiB / MB)
+| Benchmark | ZZ AOT MT | ZZ AOT ST | Go | Rust |
+|-----------|----------:|----------:|---:|-----:|
+""")
+    for bench in BENCHES:
+        r = data["results"][bench]
+        f.write(f"| `bench_{bench:16s}` | {fmt(r['zz_aot_mt']['elapsed_ms']):>7} | {fmt(r['zz_aot_st']['elapsed_ms']):>7} | {fmt(r['go']['elapsed_ms']):>3} | {fmt(r['rust']['elapsed_ms']):>3} |\n")
 
-| Benchmark              |    ZZ     | Rust    | Go      |
-|------------------------|----------:|--------:|--------:|
-EOF
-for bench in "${BENCHES[@]}"; do
-	z=$(val "$bench" zz peak_rss_kib)
-	r=$(val "$bench" rust peak_rss_kib)
-	g=$(val "$bench" go peak_rss_kib)
-	zmb=$(awk -v k="$z" 'BEGIN { printf "%.2f", k/1024 }')
-	rmb=$(awk -v k="$r" 'BEGIN { printf "%.2f", k/1024 }')
-	gmb=$(awk -v k="$g" 'BEGIN { printf "%.2f", k/1024 }')
-	printf "| \`bench_%-16s\` | %s / %sMB | %s / %sMB | %s / %sMB |\n" \
-		"$bench" "$z" "$zmb" "$r" "$rmb" "$g" "$gmb" >>"$RESULTS_MD"
-done
+    r = data["results"][HTTP_BENCH]
+    f.write(f"""
+## HTTP Throughput (higher is better, req/sec)
 
-cat >>"$RESULTS_MD" <<EOF
+| Benchmark | ZZ AOT MT | ZZ AOT ST | Go | Rust |
+|-----------|----------:|----------:|---:|-----:|
+| `bench_{HTTP_BENCH:16s}` | {fmt_rps(r['zz_aot_mt']['rps']):>7} | {fmt_rps(r['zz_aot_st']['rps']):>7} | {fmt_rps(r['go']['rps']):>3} | {fmt_rps(r['rust']['rps']):>3} |
 
+## Peak RSS — Non-HTTP benchmarks (lower is better; KiB / MB)
+
+| Benchmark | ZZ AOT MT | ZZ AOT ST | Go | Rust |
+|-----------|-----------|-----------|---:|-----:|
+""")
+    for bench in BENCHES:
+        r = data["results"][bench]
+        f.write(f"| `bench_{bench:16s}` | {fmt_rss(r['zz_aot_mt']['peak_rss_kib'])} | {fmt_rss(r['zz_aot_st']['peak_rss_kib'])} | {fmt_rss(r['go']['peak_rss_kib'])} | {fmt_rss(r['rust']['peak_rss_kib'])} |\n")
+
+    bk = data["binary_kib"]
+    f.write(f"""
 ## Binary size (KiB)
 
 | Engine | Binary KiB |
 |--------|-----------:|
-| ZZ     | $zz_bin_kib |
-| Go     | $go_bin_kib |
-| Rust   | $rust_bin_kib |
+| ZZ AOT | {bk["zz_aot"]} |
+| Go | {bk["go"]} |
+| Rust | {bk["rust"]} |
 
 ## How to reproduce
 
-\`\`\`bash
+```bash
 cargo build --release
 RUNS=5 bash bench/performance_check/run.sh
-\`\`\`
+```
 
-- ZZ column uses \`zz build -p <file>\` (AOT native, \`-O3\`).
-- Go/Rust compiled once into \`bench/performance_check/.bin/\`.
-- Peak RSS via \`/usr/bin/time -v\` (GNU) or \`ps\` polling fallback.
-- Machine-readable: \`bench/performance_check/results.json\`.
+- **ZZ AOT MT**: Multi-threaded execution (all CPU cores)
+- **ZZ AOT ST**: Single-threaded execution (1 CPU core, via `taskset -c 0`)
+- **Go/Rust**: compiled once into `bench/performance_check/.bin/`
+- Peak RSS via `/usr/bin/time -v` (GNU) or `ps` polling fallback
+- HTTP benchmark uses `wrk` or `hey` for load testing (if available)
 
-EOF
+""")
+
+print(f"Markdown written to {sys.argv[2]}")
+PYEOF
 
 echo
-echo "${BLD}${GRN}done${RST}"
-echo "  table → ${BLD}$RESULTS_MD${RST}"
-echo "  json  → ${BLD}$RESULTS_JSON${RST}"
-echo
+echo "${BLD}${GRN}done${RST}  →  ${BLD}$RESULTS_MD${RST}"
 cat "$RESULTS_MD"

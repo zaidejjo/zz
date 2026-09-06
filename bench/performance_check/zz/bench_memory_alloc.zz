@@ -1,0 +1,75 @@
+// =====================================================================
+// bench_memory_alloc.zz
+// Multi-language stress benchmark — ZZ implementation.
+// =====================================================================
+
+import std.time
+
+func main() {
+    t0 := time.now_ms()
+
+    // Wave 1: Small arrays (1M iterations)
+    sum1 := 0
+    wave1_start := time.now_ms()
+    for wave in 0..10 {
+        for i in 0..100000 {
+            arr := [i, i + 1, i + 2, i + 3, i + 4]
+            sum1 = sum1 + arr[0] + arr[4]
+        }
+    }
+    wave1_end := time.now_ms()
+    println("wave1_arrays_1M_ms: " + str(wave1_end - wave1_start))
+
+    // Wave 2: Dictionaries (500k iterations)
+    sum2 := 0
+    wave2_start := time.now_ms()
+    for wave in 0..5 {
+        for i in 0..100000 {
+            d := {"a": i, "b": i + 1, "c": i + 2}
+            sum2 = sum2 + d["a"] + d["c"]
+        }
+    }
+    wave2_end := time.now_ms()
+    println("wave2_dicts_500k_ms: " + str(wave2_end - wave2_start))
+
+    // Wave 3: Strings (500k iterations)
+    sum3 := 0
+    wave3_start := time.now_ms()
+    for wave in 0..5 {
+        for i in 0..100000 {
+            s := "item_" + str(i) + "_data"
+            sum3 = sum3 + len(s)
+        }
+    }
+    wave3_end := time.now_ms()
+    println("wave3_strings_500k_ms: " + str(wave3_end - wave3_start))
+
+    // Wave 4: Nested structures (200k iterations)
+    sum4 := 0
+    wave4_start := time.now_ms()
+    for wave in 0..2 {
+        for i in 0..100000 {
+            outer := [i, i + 1]
+            inner := {"x": outer[0], "y": outer[1]}
+            arr := [inner["x"], inner["y"], i]
+            sum4 = sum4 + arr[0] + arr[2]
+        }
+    }
+    wave4_end := time.now_ms()
+    println("wave4_nested_200k_ms: " + str(wave4_end - wave4_start))
+
+    // Baseline: Keep data alive (arrays only, no string keys in dicts)
+    baseline_start := time.now_ms()
+    big_arr := []
+    for i in 0..100000 {
+        big_arr.push([i, i * 2, i % 1000])
+    }
+    baseline_end := time.now_ms()
+    println("baseline_arr_len: " + str(len(big_arr)))
+    println("baseline_alloc_100k_ms: " + str(baseline_end - baseline_start))
+
+    t1 := time.now_ms()
+    println("total_ms: " + str(t1 - t0))
+    println("signature_sum: " + str(sum1 + sum2 + sum3 + sum4))
+    println("bench_memory_alloc_ok")
+}
