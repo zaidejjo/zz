@@ -32,15 +32,24 @@ USAGE:
     zz check [FLAGS] [PATH]       scan for errors/warnings (file or directory)
     zz fix [FLAGS] [PATH]         apply auto-fixes (shortcut for check --fix)
     zz fmt [FLAGS] [PATH]         format ZZ source files in-place
+    zz build [FLAGS] <file.zz>    compile a native binary (cached)
+
+BUILD MODES:
+    zz build <file.zz>           dev build (-O1, dynamic)
+    zz build -p <file.zz>        release build (-O3 -flto, dynamic)
+    zz build --static <file.zz>  static build (ThinLTO, DCE, self-contained)
+    zz build --pgo <file.zz>     PGO build (profile-guided optimization)
 
 FLAGS:
-    --check, -c       with fmt, check formatting without writing (exit 1 if changed)
-    --stdin           with fmt, read source from stdin and write formatted to stdout
+    --check, -c        with fmt, check formatting without writing (exit 1 if changed)
+    --stdin            with fmt, read source from stdin and write formatted to stdout
     --fix, -f          apply safe auto-fixes (typo replacements, field corrections)
     --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
     --interactive, -i  with --fix, prompt for ambiguous fixes interactively
     --native           with run, use the native AOT compiler instead of the VM
-    -p, --release      with build, full optimization (-O3 -flto, DCE, stripped)
+    -p, --release      with build, full optimization (-O3 -flto, dynamic, stripped)
+    --static           with build, static self-contained binary (ThinLTO, DCE)
+    --pgo              with build, profile-guided optimization build
     --help, -h         show this help
     --version, -V      show version
 
@@ -53,13 +62,16 @@ Defaults to `.` (current directory) if omitted.
 
 EXAMPLES:
     zz check .                       scan current directory
-    zz check src/ --fix              fix all safe issues in src/
+    zz check src/ --fix             fix all safe issues in src/
     zz fix hello.zz                  fix a single file
     zz check --fix --hard src/       force-apply all fixes, no prompts
     zz check --fix -i src/           interactive mode for ambiguous fixes
     zz fmt .                         format all .zz files in current directory
     zz fmt -c src/                   check formatting without writing
     zz fmt --stdin < file.zz         format a single file via stdin/stdout
+    zz build hello.zz                dev build (dynamic)
+    zz build -p hello.zz             release build (dynamic, optimized)
+    zz build --static hello.zz       static build (self-contained)
 ";
 
 fn main() -> ExitCode {
@@ -325,17 +337,23 @@ fn run_native(path: Option<&String>, script_args: &[String]) -> Result<(), Strin
     Ok(())
 }
 
-/// `zz build [-p] <file>`: compile a native binary (cached).
+/// `zz build [FLAGS] <file>`: compile a native binary (cached).
 fn build_cmd(args: &[String]) -> Result<(), String> {
     let release = args.iter().any(|a| a == "-p" || a == "--release");
+    let is_static = args.iter().any(|a| a == "--static");
+    let is_pgo = args.iter().any(|a| a == "--pgo");
     let path = args.iter().find(|a| !a.starts_with('-')).ok_or_else(|| {
         "missing file argument\n\n\
-             usage: zz build [-p] <file.zz>\n\
+             usage: zz build [-p|--static|--pgo] <file.zz>\n\
              hint: provide the path to a .zz file to build"
             .to_string()
     })?;
     let p = std::path::Path::new(path);
-    let mode = if release {
+    let mode = if is_pgo {
+        build::BuildMode::Pgo
+    } else if is_static {
+        build::BuildMode::Static
+    } else if release {
         build::BuildMode::Release
     } else {
         build::BuildMode::Dev
@@ -349,10 +367,16 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     let dest = p.with_file_name(&stem);
     std::fs::copy(&out, &dest).map_err(|e| format!("cannot write binary: {e}"))?;
     let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    let mode_str = match mode {
+        build::BuildMode::Dev => "dev",
+        build::BuildMode::Release => "release",
+        build::BuildMode::Static => "static",
+        build::BuildMode::Pgo => "pgo",
+    };
     println!(
         "built {} ({}, {:.1} KB)",
         dest.display(),
-        if release { "release" } else { "dev" },
+        mode_str,
         meta as f64 / 1024.0
     );
     Ok(())
