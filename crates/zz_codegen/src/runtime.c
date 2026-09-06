@@ -1219,6 +1219,7 @@ zz_value zz_task_join_recv(zz_value join_val, int *err) {
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <errno.h>
 #include <signal.h>
 #include <sys/epoll.h>
@@ -1324,18 +1325,39 @@ static void set_nonblock(int fd) {
 // ---- HTTP parsing ----
 
 static int parse_request_headers(Connection *c) {
-    // Scan for \r\n\r\n — end of headers
-    // Need at least 4 bytes (len >= 4)
+    // Find \r\n\r\n — end of headers
     if (c->read_pos < 4) return 0;
-    for (int i = 0; i <= c->read_pos - 4; i++) {
-        if (c->read_buf[i] == '\r' && c->read_buf[i+1] == '\n' &&
-            c->read_buf[i+2] == '\r' && c->read_buf[i+3] == '\n') {
-            // End of headers found at position i
-            c->keep_alive = 0;
-            return 1;
+    void *end = memmem(c->read_buf, c->read_pos, "\r\n\r\n", 4);
+    if (!end) return 0;
+
+    // HTTP/1.1 defaults to keep-alive, only disable if "close" is present
+    c->keep_alive = 1;
+
+    // Find "Connection:" header and check value
+    char *headers_end = (char *)end;
+    for (char *p = c->read_buf; p < headers_end - 12; p++) {
+        // Look for start of a header line (preceded by \r\n)
+        if (p > c->read_buf && p[-1] == '\n' && p[0] == '\r') {
+            p++; // skip the \r, now at start of header name
+            // Skip leading whitespace
+            while (*p == ' ' || *p == '\t') p++;
+            // Check for "Connection:" (case-insensitive)
+            if (strncasecmp(p, "connection:", 11) == 0) {
+                p += 11; // skip "connection:"
+                // Skip whitespace
+                while (*p == ' ' || *p == '\t') p++;
+                // Check if value starts with "close"
+                if (strncasecmp(p, "close", 5) == 0) {
+                    char *after = p + 5;
+                    // Must be at end or followed by \r\n or whitespace
+                    if (*after == '\r' || *after == '\n' || *after == ' ' || *after == '\0' || *after == ';') {
+                        c->keep_alive = 0;
+                    }
+                }
+            }
         }
     }
-    return 0; // incomplete
+    return 1;
 }
 
 static int parse_request_line(Connection *c) {
@@ -1511,7 +1533,7 @@ static void worker_loop(int listen_fd, int worker_id) {
 
     // Add listen_fd to epoll
     struct epoll_event ev;
-    ev.events = EPOLLIN;
+    ev.events = EPOLLIN | EPOLLET;
     ev.data.fd = listen_fd;
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
         fprintf(stderr, "worker %d: epoll_ctl ADD listen_fd failed: %s\n", worker_id, strerror(errno));
@@ -1540,9 +1562,10 @@ static void worker_loop(int listen_fd, int worker_id) {
                     int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
                     if (client_fd < 0) break;
 
-                    // Disable Nagle
+                    // Disable Nagle + enable keep-alive
                     int flag = 1;
                     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+                    setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
 
                     Connection *c = alloc_connection(client_fd);
                     if (!c) {
@@ -1552,7 +1575,7 @@ static void worker_loop(int listen_fd, int worker_id) {
 
                     set_nonblock(client_fd);
                     struct epoll_event cev;
-                    cev.events = EPOLLIN;
+                    cev.events = EPOLLIN | EPOLLET;
                     cev.data.fd = client_fd;
                     if (epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev) < 0) {
                         free_connection(c);
@@ -1578,17 +1601,20 @@ static void worker_loop(int listen_fd, int worker_id) {
                 }
 
                 if (revents & EPOLLIN) {
-
-                    if (!read_from_socket(c)) {
-
-                        connection_to_closed(c);
-                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-                        continue;
+                    // Edge-triggered: read all available data until EAGAIN
+                    while (read_from_socket(c)) {
+                        // Transition from keep-alive to reading when new data arrives
+                        if (c->state == CONN_KEEP_ALIVE) {
+                            connection_to_reading(c);
+                        }
+                        process_connection(c);
+                        if (c->state != CONN_READING && c->state != CONN_KEEP_ALIVE) {
+                            break;
+                        }
                     }
-
-                    process_connection(c);
-                    if (c->state == CONN_PARSED) {
-
+                    // If socket closed or error
+                    if (c->fd < 0) {
+                        continue;
                     }
                 }
 
@@ -1596,19 +1622,21 @@ static void worker_loop(int listen_fd, int worker_id) {
 
                     connection_to_writing(c);
                     struct epoll_event cev;
-                    cev.events = EPOLLOUT;
+                    cev.events = EPOLLOUT | EPOLLET;
                     cev.data.fd = fd;
                     epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &cev);
                 } else if (c->state == CONN_WRITING) {
-                    int written = write_to_socket(c);
-                    if (!written) {
-
-                        connection_to_closed(c);
-                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-                        continue;
+                    // Edge-triggered: write all data until EAGAIN
+                    while (c->write_pos < c->response_len) {
+                        int written = write_to_socket(c);
+                        if (!written) {
+                            connection_to_closed(c);
+                            epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                            break;
+                        }
                     }
                     // Check if write complete
-                    if (c->write_pos >= c->response_len) {
+                    if (c->fd >= 0 && c->write_pos >= c->response_len) {
 
                         if (!c->keep_alive) {
                             connection_to_closed(c);
@@ -1620,7 +1648,7 @@ static void worker_loop(int listen_fd, int worker_id) {
                             c->write_pos = 0;
                             c->response_len = 0;
                             struct epoll_event cev;
-                            cev.events = EPOLLIN;
+                            cev.events = EPOLLIN | EPOLLET;
                             cev.data.fd = fd;
                             epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &cev);
                         }

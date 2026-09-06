@@ -1,6 +1,6 @@
 # Comprehensive Multi-Scenario Benchmark — ZZ vs Go vs Rust
 
-**Machine:** `x86_64` · **Date:** 2026-09-06T22:13:05Z · **Best-of:** 3 runs
+**Machine:** `x86_64` · **Date:** 2026-09-06T23:01:14Z · **Best-of:** 3 runs
 
 ## Benchmarks
 
@@ -17,27 +17,27 @@
 
 | Benchmark | ZZ AOT MT | ZZ AOT ST | Go | Rust |
 |-----------|----------:|----------:|---:|-----:|
-| `bench_cpu_intensive   ` |      13 |      14 |  66 |  14 |
-| `bench_concurrency_stress` |       0 |       1 | 847 | 185 |
-| `bench_memory_alloc    ` |     393 |     397 | 273 | 273 |
-| `bench_memory_leak     ` |      66 |      67 |  89 | 227 |
-| `bench_string_concats  ` |       2 |       3 | 473 |   1 |
+| `bench_cpu_intensive   ` |      12 |      16 |  74 |  12 |
+| `bench_concurrency_stress` |       0 |       2 | 808 | 183 |
+| `bench_memory_alloc    ` |     403 |     377 | 279 | 267 |
+| `bench_memory_leak     ` |      65 |      59 |  90 | 227 |
+| `bench_string_concats  ` |       2 |       4 | 408 |   1 |
 
 ## HTTP Throughput (higher is better, req/sec)
 
 | Benchmark | ZZ AOT MT | ZZ AOT ST | Go | Rust |
 |-----------|----------:|----------:|---:|-----:|
-| `bench_http_throughput ` |  11,501 |  10,444 | 11,851 | 13,270 |
+| `bench_http_throughput ` |  50,446 |  48,066 | 41,779 | 45,834 |
 
 ## Peak RSS — Non-HTTP benchmarks (lower is better; KiB / MB)
 
 | Benchmark | ZZ AOT MT | ZZ AOT ST | Go | Rust |
 |-----------|-----------|-----------|---:|-----:|
-| `bench_cpu_intensive   ` | 2568 / 2.5 | 924 / 0.9 | 6668 / 6.5 | 4184 / 4.1 |
-| `bench_concurrency_stress` | 0 / 0.0 | 0 / 0.0 | 10432 / 10.2 | 25732 / 25.1 |
-| `bench_memory_alloc    ` | 131396 / 128.3 | 126584 / 123.6 | 14704 / 14.4 | 2532 / 2.5 |
-| `bench_memory_leak     ` | 912 / 0.9 | 916 / 0.9 | 10200 / 10.0 | 2464 / 2.4 |
-| `bench_string_concats  ` | 0 / 0.0 | 1480 / 1.4 | 13532 / 13.2 | 0 / 0.0 |
+| `bench_cpu_intensive   ` | 924 / 0.9 | 924 / 0.9 | 6752 / 6.6 | 2404 / 2.3 |
+| `bench_concurrency_stress` | 0 / 0.0 | 0 / 0.0 | 9708 / 9.5 | 26540 / 25.9 |
+| `bench_memory_alloc    ` | 131004 / 127.9 | 145960 / 142.5 | 12036 / 11.8 | 2480 / 2.4 |
+| `bench_memory_leak     ` | 912 / 0.9 | 912 / 0.9 | 8132 / 7.9 | 2440 / 2.4 |
+| `bench_string_concats  ` | 0 / 0.0 | 0 / 0.0 | 13960 / 13.6 | 0 / 0.0 |
 
 ## Binary size (KiB)
 
