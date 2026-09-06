@@ -1,0 +1,16 @@
+// =====================================================================
+// bench_http_throughput.zz
+// HTTP server benchmark — ZZ implementation.
+// =====================================================================
+
+import std.http
+
+func main() {
+    server := http.server()
+    server = http.route_get(server, "/", |_req| "OK")
+    server = http.route_get(server, "/ping", |_req| "pong")
+    server = http.route_get(server, "/json", |_req| "{\"status\":\"ok\"}")
+    server = http.log(server, false)
+
+    http.listen(server, 8080)
+}

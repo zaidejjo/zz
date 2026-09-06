@@ -2711,6 +2711,24 @@ fn native_impl(name: &str) -> Option<&'static str> {
         }
         // time
         "time.now_ms" | "std.time.now_ms" => Some("zz_time_now_ms"),
+        // channels
+        "chan" | "std.chan" => Some("zz_chan_new"),
+        "chan.send" | "std.chan.send" => Some("zz_chan_send"),
+        "chan.recv" | "std.chan.recv" => Some("zz_chan_recv"),
+        "chan.try_recv" | "std.chan.try_recv" => Some("zz_chan_try_recv"),
+        // spawn / task join
+        "spawn" | "std.spawn" => Some("zz_spawn"),
+        "task.recv" | "std.task.recv" => Some("zz_task_join_recv"),
+        // http (AOT: minimal thread-per-connection server returning OK)
+        "http.server" | "std.http.server" => Some("zz_http_server"),
+        "http.route_get" | "std.http.route_get" => Some("zz_http_route_get"),
+        "http.route_post" | "std.http.route_post" => Some("zz_http_route_get"),
+        "http.route_put" | "std.http.route_put" => Some("zz_http_route_get"),
+        "http.route_delete" | "std.http.route_delete" => Some("zz_http_route_get"),
+        "http.log" | "std.http.log" => Some("zz_http_log"),
+        "http.pipe" | "std.http.pipe" => Some("zz_http_log"),
+        "http.listen" | "std.http.listen" => Some("zz_http_listen"),
+        "http.handle" | "std.http.handle" => Some("zz_http_handle"),
         _ => None,
     }
 }

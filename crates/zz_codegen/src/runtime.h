@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,6 +40,8 @@ typedef enum {
     ZZ_RESULT_OK,
     ZZ_RESULT_ERR,
     ZZ_RANGE,
+    ZZ_CHAN,
+    ZZ_TASK_JOIN,
 } zz_tag;
 
 typedef struct zz_value zz_value;
@@ -47,6 +50,8 @@ typedef struct zz_value zz_value;
 typedef struct zz_array zz_array;
 typedef struct zz_dict zz_dict;
 typedef struct zz_dict_entry zz_dict_entry;
+typedef struct zz_chan zz_chan;
+typedef struct zz_task_join zz_task_join;
 
 // Refcounted string (null-terminated for C interop).
 //
@@ -79,6 +84,8 @@ struct zz_value {
         zz_array *arr;
         zz_dict *dict;
         zz_func *fn;
+        zz_chan *chan;
+        zz_task_join *task;
     };
 };
 
@@ -126,6 +133,35 @@ struct zz_func {
     zz_value *env;    // captured slot values (SYNTHETIC: extended below)
     size_t env_len;
 };
+
+// ---- thread-safe channels (pthread-based) ------------------------------
+// Thread-safe channel for inter-thread communication.
+struct zz_chan {
+    pthread_mutex_t lock;
+    pthread_cond_t  cond;
+    zz_value       *queue;   // ring buffer of zz_value
+    size_t          len;     // current number of items
+    size_t          cap;     // buffer capacity
+};
+
+// Task join handle for spawned threads.
+struct zz_task_join {
+    pthread_t       thread;
+    zz_value        result;
+    int             completed;
+    pthread_mutex_t lock;
+    pthread_cond_t  cond;
+};
+
+// Channel operations.
+zz_value zz_chan_new(int *err);
+zz_value zz_chan_send(zz_value chan, zz_value val, int *err);
+zz_value zz_chan_recv(zz_value chan, int *err);
+zz_value zz_chan_try_recv(zz_value chan, int *err);
+
+// Spawn / task join.
+zz_value zz_spawn(zz_value fn, int *err);
+zz_value zz_task_join_recv(zz_value join, int *err);
 
 // ---- arena allocator ---------------------------------------------------
 // A bump allocator for non-escaping local allocations. O(1) alloc, O(1)
@@ -274,6 +310,14 @@ zz_value zz_io_print(zz_value v, int *err);
 zz_value zz_io_input(zz_value prompt, int *err);
 zz_value zz_math_pow(zz_value a, zz_value b, int *err);
 zz_value zz_time_now_ms(zz_value unused, int *err);
+
+// http AOT server — thread-per-connection, returns "OK" for all requests
+// All functions follow the native call convention: (zz_value... , int *err)
+zz_value zz_http_server(zz_value unused, int *err);  // 0 args → unused=unit
+zz_value zz_http_route_get(zz_value server, zz_value path, zz_value handler, int *err);  // 3 args (handler ignored in AOT)
+zz_value zz_http_log(zz_value server, zz_value enabled, int *err);  // 2 args
+zz_value zz_http_listen(zz_value server, zz_value port, int *err);  // 2 args
+zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
 
 // Codegen helper shims.
 zz_value zz_call_native1(zz_value (*f)(zz_value, int *), zz_value a);
