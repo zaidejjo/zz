@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use zz_frontend::ast::{Block, Expr};
 use zz_frontend::span::Span;
@@ -17,7 +18,7 @@ use crate::value::{FuncValue, NativeFunc, ObjectValue, RangeValue, Value};
 
 /// One active call frame.
 struct Frame {
-    chunk: Rc<Chunk>,
+    chunk: Arc<Chunk>,
     ip: usize,
     /// Environment to restore when this frame returns.
     prev_env: Rc<RefCell<Env>>,
@@ -138,9 +139,9 @@ impl Vm {
     /// Run a chunk to completion. Returns the chunk's value, or a control
     /// flow signal (`Return`/`Break`/`Continue`) that escaped the program
     /// frame.
-    pub(crate) fn run_chunk(
+    pub fn run_chunk(
         &mut self,
-        chunk: &Rc<Chunk>,
+        chunk: &Arc<Chunk>,
         interp: &mut Interp,
     ) -> Result<Flow, EvalError> {
         self.run_chunk_with_base(chunk, interp, self.stack.len())
@@ -151,12 +152,12 @@ impl Vm {
     /// where args are already on the stack at index 0..n.
     pub(crate) fn run_chunk_with_base(
         &mut self,
-        chunk: &Rc<Chunk>,
+        chunk: &Arc<Chunk>,
         interp: &mut Interp,
         stack_base: usize,
     ) -> Result<Flow, EvalError> {
         self.frames.push(Frame {
-            chunk: Rc::clone(chunk),
+            chunk: Arc::clone(chunk),
             ip: 0,
             prev_env: Rc::clone(&interp.env),
             stack_base,
@@ -170,12 +171,12 @@ impl Vm {
         // to the Frame struct at frame-change points (Call/Return/defer).
         let mut cached_code: *const Vec<Op> = {
             let f = self.frames.last().unwrap();
-            let c = unsafe { &*Rc::as_ptr(&f.chunk) };
+            let c = unsafe { &*Arc::as_ptr(&f.chunk) };
             &c.code
         };
         let mut cached_constants: *const Vec<Value> = {
             let f = self.frames.last().unwrap();
-            let c = unsafe { &*Rc::as_ptr(&f.chunk) };
+            let c = unsafe { &*Arc::as_ptr(&f.chunk) };
             &c.constants
         };
         let mut ip: usize = 0;
@@ -184,7 +185,7 @@ impl Vm {
         macro_rules! re_cache {
             () => {{
                 let f = self.frames.last().unwrap();
-                let c = unsafe { &*Rc::as_ptr(&f.chunk) };
+                let c = unsafe { &*Arc::as_ptr(&f.chunk) };
                 cached_code = &c.code;
                 cached_constants = &c.constants;
                 ip = f.ip;
@@ -468,7 +469,7 @@ impl Vm {
                             span: Span::new(0, 0),
                         }),
                         env: Rc::clone(&interp.env),
-                        chunk: Some(Rc::clone(fchunk)),
+                        chunk: Some(Arc::clone(fchunk)),
                     };
                     interp.funcs.insert(name.clone(), fv.clone());
                     interp
@@ -860,7 +861,7 @@ impl Vm {
                             span: Span::new(0, 0),
                         }),
                         env: Rc::clone(&interp.env),
-                        chunk: Some(Rc::clone(chunk)),
+                        chunk: Some(Arc::clone(chunk)),
                     };
                     self.stack.push(Value::Func(Box::new(fv)));
                 }

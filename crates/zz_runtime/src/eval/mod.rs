@@ -6,6 +6,7 @@ mod tests;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use zz_frontend::ast::Program;
 use zz_frontend::span::Span;
@@ -55,7 +56,7 @@ impl Interp {
     }
 
     pub fn run(&mut self, program: &Program) -> Result<Value, EvalError> {
-        let chunk = Rc::new(crate::vm::Compiler::compile_program(program));
+        let chunk = Arc::new(crate::vm::Compiler::compile_program(program));
         let mut vm = crate::vm::Vm::new();
         match vm.run_chunk(&chunk, self)? {
             Flow::Value(v) => Ok(v),

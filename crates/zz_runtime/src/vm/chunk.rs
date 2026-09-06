@@ -1,3 +1,6 @@
+use std::rc::Rc;
+use std::sync::Arc;
+
 use zz_frontend::ast::Param;
 use zz_frontend::span::Span;
 
@@ -29,6 +32,16 @@ impl Chunk {
             params: Vec::new(),
             spans: Vec::new(),
             toplevel_slots: Vec::new(),
+        }
+    }
+
+    /// Convert an `Rc<Chunk>` into an `Arc<Chunk>` suitable for sending
+    /// across thread boundaries (e.g. for `spawn`).  Tries `try_unwrap`
+    /// first (zero-copy when refcount is 1); falls back to cloning.
+    pub fn into_arc(rc: Rc<Chunk>) -> Arc<Chunk> {
+        match Rc::try_unwrap(rc) {
+            Ok(chunk) => Arc::new(chunk),
+            Err(rc) => Arc::new((*rc).clone()),
         }
     }
 }

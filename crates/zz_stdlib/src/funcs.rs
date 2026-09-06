@@ -1039,6 +1039,19 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig_t(vec![("ch", Type::Chan)], Type::Option(Box::new(t.clone()))),
     );
 
+    // std.task — spawn and join
+    m.insert(
+        "std.task.spawn".into(),
+        sig_t(
+            vec![("f", Type::Func(vec![t.clone()], Box::new(t.clone())))],
+            Type::TaskJoin,
+        ),
+    );
+    m.insert(
+        "std.task.join".into(),
+        sig_t(vec![("handle", Type::TaskJoin)], t.clone()),
+    );
+
     m
 }
 
@@ -1109,7 +1122,9 @@ mod tests {
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
         assert!(funcs.contains_key("append"));
-        assert_eq!(funcs.len(), 161);
+        assert!(funcs.contains_key("std.task.spawn"));
+        assert!(funcs.contains_key("std.task.join"));
+        assert_eq!(funcs.len(), 163);
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub use natives::stdlib_natives;
 /// The set of known `std.*` module names (second path component).
 pub const STDLIB_MODULES: &[&str] = &[
     "io", "str", "vec", "json", "http", "fs", "env", "math", "time", "encoding", "net", "chan",
+    "task",
 ];
 
 /// Register a `std.*` module under a namespace name by copying its entries
