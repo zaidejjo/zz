@@ -35,7 +35,7 @@ pub fn cache_dir() -> PathBuf {
 
 /// Cache schema version — bump when codegen/runtime changes invalidate old
 /// binaries.
-const CACHE_VERSION: u32 = 3;
+const CACHE_VERSION: u32 = 16;
 
 /// Hash of the source + mode, used as the cache key.
 fn cache_key(src: &str, mode: BuildMode) -> String {

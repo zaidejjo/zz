@@ -128,6 +128,16 @@ impl NameCtx {
 /// `zz_value` or unknown), it is returned as-is. Otherwise, the appropriate
 /// boxing helper (`zz_int`, `zz_float`, `zz_bool`) is inserted.
 fn auto_box(expr: &str, ctype: Option<&str>) -> String {
+    // Idempotency guard: if the expression is already a boxed zz_value
+    // (e.g. from emit_expr boxing struct field access), do NOT re-wrap.
+    if expr.starts_with("zz_int(")
+        || expr.starts_with("zz_float(")
+        || expr.starts_with("zz_bool(")
+        || expr.starts_with("zz_clone(")
+        || expr.starts_with("zz_unit()")
+    {
+        return expr.to_string();
+    }
     match ctype {
         Some("int64_t") => format!("zz_int({expr})"),
         Some("double") => format!("zz_float({expr})"),
@@ -185,6 +195,11 @@ fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static str> {
 /// end up double-boxed as `zz_int(zz_int(1))`. Nested binary operands that
 /// lower to a raw C cast like `(int64_t)(2 * 3)` are recognized through the
 /// cast marker and boxed with the matching constructor.
+///
+/// `field_hint` optionally provides the C type of a struct field access
+/// expression (e.g. `"int64_t"`, `"double"`) when the caller already
+/// resolved it from the type system. This avoids the free function needing
+/// access to the Lowerer's struct registry.
 fn box_scalar_operand(e: &Expr, names: &NameCtx, emitted: &str) -> String {
     match scalar_operand_type(e, names) {
         Some("int64_t") => {
@@ -195,6 +210,10 @@ fn box_scalar_operand(e: &Expr, names: &NameCtx, emitted: &str) -> String {
             let raw = scalar_operand_c(e, names).unwrap_or_else(|| emitted.to_string());
             format!("zz_float({raw})")
         }
+        Some("bool") => {
+            let raw = scalar_operand_c(e, names).unwrap_or_else(|| emitted.to_string());
+            format!("zz_bool({raw})")
+        }
         _ => {
             // Not a recognized scalar shape directly, but the emitted
             // expression may still be a raw C scalar (e.g., a nested
@@ -203,6 +222,8 @@ fn box_scalar_operand(e: &Expr, names: &NameCtx, emitted: &str) -> String {
                 format!("zz_float({emitted})")
             } else if emitted.starts_with("(int64_t)(") {
                 format!("zz_int({emitted})")
+            } else if emitted.starts_with("(bool)(") {
+                format!("zz_bool({emitted})")
             } else {
                 emitted.to_string()
             }
@@ -455,7 +476,7 @@ impl Lowerer {
             zz_checker::Type::Bool => "bool".to_string(),
             zz_checker::Type::Struct(name) => {
                 if self.is_unboxed_struct(name) {
-                    format!("zz_struct_{}", name)
+                    format!("zz_struct_{}", mangle(name))
                 } else {
                     "zz_value".to_string()
                 }
@@ -464,9 +485,12 @@ impl Lowerer {
         }
     }
 
-    /// Get the C type name for a struct.
+    /// Get the C type name for a struct. Routes through `mangle()` so
+    /// namespaced structs (e.g. `mod.Rectangle`) become a single valid
+    /// C identifier (`zz_struct_mod__Rectangle`) instead of an invalid
+    /// `zz_struct_mod.Rectangle`.
     fn struct_c_type(&self, name: &str) -> String {
-        format!("zz_struct_{}", name)
+        format!("zz_struct_{}", mangle(name))
     }
 
     /// Check if a type string is a struct type.
@@ -482,7 +506,15 @@ impl Lowerer {
     /// Get the C type of a field from a struct type string.
     /// Returns the C type string (e.g., "int64_t", "zz_struct_Point") for the named field.
     fn field_type_from_struct(&self, base_c_type: &str, field_name: &str) -> Option<&str> {
-        let struct_name = self.struct_name_from_c_type(base_c_type)?;
+        let mangled_suffix = self.struct_name_from_c_type(base_c_type)?;
+        // The `tp.structs` keys are un-mangled (e.g. "structs.Rectangle"),
+        // but the C type uses mangled names (e.g. "structs__Rectangle").
+        // Find the key whose mangled form matches.
+        let struct_name = self
+            .tp
+            .structs
+            .keys()
+            .find(|k| mangle(k) == mangled_suffix)?;
         let sig = self.tp.structs.get(struct_name)?;
         let (_, field_ty) = sig.fields.iter().find(|(n, _)| n == field_name)?;
         match field_ty {
@@ -492,7 +524,9 @@ impl Lowerer {
             zz_checker::Type::Struct(name) if self.is_unboxed_struct(name) => {
                 // Return a static string — leak the Box for the 'static lifetime.
                 // This is fine for codegen: small number of struct types, process exits.
-                let s = format!("zz_struct_{}", name);
+                // Route through `mangle()` so a namespaced struct (e.g. `mod.Rect`)
+                // produces a single valid C identifier.
+                let s = format!("zz_struct_{}", mangle(name));
                 Some(Box::leak(s.into_boxed_str()) as &str)
             }
             _ => None, // non-scalar boxed type: caller handles
@@ -728,12 +762,18 @@ impl Lowerer {
                         zz_checker::Type::Int => "int64_t".to_string(),
                         zz_checker::Type::Float => "double".to_string(),
                         zz_checker::Type::Bool => "bool".to_string(),
-                        zz_checker::Type::Struct(n) if is_unboxed(n) => format!("zz_struct_{}", n),
+                        zz_checker::Type::Struct(n) if is_unboxed(n) => {
+                            format!("zz_struct_{}", mangle(n))
+                        }
                         _ => "zz_value".to_string(),
                     };
                     preamble.push_str(&format!("    {} {};\n", c_type, field_name));
                 }
-                preamble.push_str(&format!("}} zz_struct_{};\n\n", name));
+                // Mangle the struct's own C typedef name so namespaced
+                // structs (e.g. `mod.Rectangle`) emit a single valid
+                // identifier (`zz_struct_mod__Rectangle`) instead of
+                // `zz_struct_mod.Rectangle` (illegal in C).
+                preamble.push_str(&format!("}} zz_struct_{};\n\n", mangle(name)));
                 emitted.insert(name.to_string());
             }
         }
@@ -775,7 +815,30 @@ impl Lowerer {
                     }
                     funcs.push_str(&self.emit_function(&fname, params, b));
                 }
-                Stmt::Struct { .. } | Stmt::Impl { .. } | Stmt::Import { .. } => {}
+                Stmt::Impl { name, methods, .. } => {
+                    // `impl T { func m(...) ... }` — methods are stored
+                    // in `tp.funcs` under `<T>.m` (mirroring the
+                    // checker/funcmap registration). Emit each reachable
+                    // method as a C function with the same
+                    // `<T>__m` mangling that other funcs get.
+                    let tname = name.join(".");
+                    for m in methods {
+                        if let Stmt::Func {
+                            name: mname,
+                            params,
+                            body: b,
+                            ..
+                        } = m
+                        {
+                            let fname = format!("{tname}.{}", mname.join("."));
+                            if !self.reachable_funcs.contains(&fname) {
+                                continue;
+                            }
+                            funcs.push_str(&self.emit_function(&fname, params, b));
+                        }
+                    }
+                }
+                Stmt::Struct { .. } | Stmt::Import { .. } => {}
                 other => {
                     let mut out = String::new();
                     self.emit_stmt(other, &mut names, &mut out, false);
@@ -794,8 +857,47 @@ impl Lowerer {
         // Generate struct typedefs preamble
         let struct_preamble = self.lower_structs_preamble();
 
+        // Forward declarations: every reachable user-defined function (incl.
+        // `impl` methods) is `static` in the emitted C, so the order of
+        // definitions in `funcs` decides which callers see which callees.
+        // Emitting one prototype per reachable function up front lets any
+        // user fn call any other without forcing a topological sort of
+        // `funcs` (which would otherwise be needed when f_a() is defined
+        // before f_b() but calls into it). C is happy to take a redundant
+        // prototype for a same-TU `static` function.
+        //
+        // Impl methods have a different signature: they take a struct
+        // pointer as the first arg (the `self` receiver), so the prototype
+        // shape depends on the first param's type. Detect by inspecting
+        // `tp.funcs` for the first param being a `Type::Struct`.
+        let mut forward_decls = String::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for fname in &self.reachable_funcs {
+            if !seen.insert(fname.clone()) {
+                continue;
+            }
+            let first_struct_c = self
+                .tp
+                .funcs
+                .get(fname)
+                .and_then(|sig| sig.params.first().map(|(_, t)| t.clone()))
+                .filter(|t| matches!(t, zz_checker::Type::Struct(_)))
+                .map(|t| self.type_to_c(&t));
+            let proto = match first_struct_c {
+                Some(sct) => format!(
+                    "static zz_value zz_fn_{}({sct} *self, zz_value *args, size_t argc);\n",
+                    mangle(fname)
+                ),
+                None => format!(
+                    "static zz_value zz_fn_{}(zz_value *args, size_t argc);\n",
+                    mangle(fname)
+                ),
+            };
+            forward_decls.push_str(&proto);
+        }
+
         let source = format!(
-            "{runtime_h}\n{runtime_c}\n\n// ---- struct definitions ----\n{struct_preamble}\n// ---- generated code ----\n{funcs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
+            "{runtime_h}\n{runtime_c}\n\n// ---- struct definitions ----\n{struct_preamble}\n// ---- forward declarations ----\n{forward_decls}\n// ---- generated code ----\n{funcs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
             runtime_h = crate::RUNTIME_H,
             runtime_c = crate::RUNTIME_C,
             struct_preamble = struct_preamble,
@@ -828,19 +930,73 @@ impl Lowerer {
     }
 
     fn emit_function(&self, fname: &str, params: &[Param], block: &Block) -> String {
+        // Two function shapes:
+        //   - Regular funcs: `static zz_value zz_fn_<mangled>(zz_value*, size_t)`
+        //   - Impl methods:  `static zz_value zz_fn_<mangled>(<struct>* self, zz_value*, size_t)`
+        //     The struct-typed `self` is passed by pointer so unboxed
+        //     structs (no `zz_value` overhead) are passed efficiently and
+        //     field access in the body lowers to raw C `(self).field`.
+        let is_impl_method = self
+            .tp
+            .funcs
+            .get(fname)
+            .and_then(|sig| sig.params.first().map(|(_, t)| t.clone()))
+            .map(|t| matches!(&t, zz_checker::Type::Struct(_)))
+            .unwrap_or(false);
         let cname = format!("zz_fn_{}", mangle(fname));
         let mut o = String::new();
-        o.push_str(&format!(
-            "static zz_value {cname}(zz_value *args, size_t argc) {{\n"
-        ));
+        let first_struct_type = if is_impl_method {
+            self.tp
+                .funcs
+                .get(fname)
+                .and_then(|sig| sig.params.first().map(|(_, t)| self.type_to_c(t)))
+        } else {
+            None
+        };
+        let signature = if let Some(ref sct) = first_struct_type {
+            format!("static zz_value {cname}({sct} *self, zz_value *args, size_t argc) {{\n")
+        } else {
+            format!("static zz_value {cname}(zz_value *args, size_t argc) {{\n")
+        };
+        o.push_str(&signature);
         o.push_str("    (void)argc;\n");
         // --- Arena allocator: init on function entry, reset on exit ---
         o.push_str("    zz_arena _arena;\n");
         o.push_str("    zz_arena_init(&_arena, 65536);\n"); // 64KB default
         let mut names = NameCtx::new();
+        // Look up the function's parameter types from the type checker.
+        // Used to register each param under its actual C type so
+        // subsequent expression lowering (field access, binop, ...)
+        // produces the right shape.
+        let param_types: Vec<zz_checker::Type> = self
+            .tp
+            .funcs
+            .get(fname)
+            .map(|sig| sig.params.iter().map(|(_, t)| t.clone()).collect())
+            .unwrap_or_else(|| params.iter().map(|_| zz_checker::Type::Unit).collect());
+        let arg_offset: usize = if is_impl_method { 1 } else { 0 };
         for (i, p) in params.iter().enumerate() {
-            let cid = names.enter(&p.name.name);
-            o.push_str(&format!("    zz_value {cid} = args[{i}];\n"));
+            let pt = param_types
+                .get(i)
+                .cloned()
+                .unwrap_or(zz_checker::Type::Unit);
+            // The first param of an impl method is the struct receiver
+            // (passed as `*self`); the remaining params live in `args`.
+            if is_impl_method && i == 0 {
+                let ctype = self.type_to_c(&pt);
+                let cid = names.enter_with_type(&p.name.name, &ctype);
+                o.push_str(&format!("    {ctype} {cid} = *self;\n"));
+            } else {
+                // Non-self params always live in the `args[]` array
+                // which holds `zz_value`s. Keep them as `zz_value`
+                // (boxed) — scalar unboxing happens at point of use
+                // via `scalar_operand_type` / `box_scalar_operand`.
+                let cid = names.enter(&p.name.name);
+                o.push_str(&format!(
+                    "    zz_value {cid} = args[{idx}];\n",
+                    idx = i - arg_offset
+                ));
+            }
         }
         let mut body_out = String::new();
         self.emit_block(block, &mut names, &mut body_out);
@@ -1502,9 +1658,22 @@ impl Lowerer {
                         if let Some(base_type) = names.lookup_type(&parts[0]) {
                             // Check if base is a struct type
                             if self.is_struct_type_str(base_type) {
-                                // Extract field access
                                 let field_name = &parts[1];
-                                return format!("({base_name}).{field_name}");
+                                // Wrap scalar fields in the correct boxing
+                                // so the result is always a `zz_value`.
+                                // The `auto_box` idempotency guard prevents
+                                // double-boxing when callers also call auto_box.
+                                let field_c_type = self
+                                    .field_type_from_struct(base_type, field_name)
+                                    .unwrap_or("zz_value");
+                                let raw = format!("({base_name}).{field_name}");
+                                match field_c_type {
+                                    "int64_t" => return format!("zz_int({raw})"),
+                                    "double" => return format!("zz_float({raw})"),
+                                    "bool" => return format!("zz_bool({raw})"),
+                                    // Non-scalar field (boxed): clone.
+                                    _ => return format!("zz_clone({raw})"),
+                                }
                             }
                         }
                     }
@@ -1660,20 +1829,23 @@ impl Lowerer {
                                 let boxed_r = box_scalar_operand(right, names, &r);
                                 format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                             } else {
-                                format!("zz_binop({cop}, {l}, {r})")
-                            }
-                        } else {
-                            // Comparisons / pow / etc on scalars still
-                            // use the boxed path (result must be zz_value).
-                            if (left_type == Some("int64_t") || right_type == Some("int64_t"))
-                                || (left_type == Some("double") || right_type == Some("double"))
-                            {
+                                // Neither operand has a known scalar type in
+                                // NameCtx, but struct field accesses like
+                                // `(v0).width` are raw C scalars that need
+                                // boxing for `zz_binop`. Use `box_scalar_operand`
+                                // which recognizes the cast pattern.
                                 let boxed_l = box_scalar_operand(left, names, &l);
                                 let boxed_r = box_scalar_operand(right, names, &r);
                                 format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
-                            } else {
-                                format!("zz_binop({cop}, {l}, {r})")
                             }
+                        } else {
+                            // Comparisons / pow / etc: use the boxed path
+                            // (result must be zz_value). Also handles
+                            // struct field accesses that emit as raw C
+                            // scalars.
+                            let boxed_l = box_scalar_operand(left, names, &l);
+                            let boxed_r = box_scalar_operand(right, names, &r);
+                            format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                         }
                     }
                 }
@@ -1904,60 +2076,120 @@ impl Lowerer {
                 let method = &parts[1];
                 if names.lookup(obj_name).is_some() {
                     // obj_name is a LOCAL variable — this is a method call.
-                    // Try each known method namespace to find a registered native.
                     let first_ident_end = span.start + obj_name.len() as u32;
                     let first_ident_span =
                         zz_frontend::span::Span::new(span.start, first_ident_end);
-                    let namespaces = ["vec", "str", "dict", "option", "result"];
-                    let mut found_ns = "";
-                    for ns in &namespaces {
-                        let candidate = format!("{ns}.{method}");
-                        let std_candidate = format!("std.{ns}.{method}");
-                        if self.reachable_natives.contains(&candidate)
-                            || self.reachable_natives.contains(&std_candidate)
-                        {
-                            found_ns = ns;
-                            break;
-                        }
-                    }
-                    if found_ns.is_empty() {
-                        // Also try matching by native_impl — checks if there's
-                        // a C runtime function registered for this method under
-                        // any namespace.
+
+                    // Struct method dispatch: if the local's C type is a
+                    // struct (e.g. `zz_struct_mod__Rectangle`), look up
+                    // `<StructType>.<method>` in `reachable_funcs` (impl
+                    // methods are stored as `Type.method` using the
+                    // un-mangled struct name like `mod.Rectangle`). This
+                    // handles `rect.area()` regardless of whether `rect`
+                    // is bare or module-prefixed.
+                    let struct_dispatch: Option<(String, Expr)> =
+                        if let Some(recv_type) = names.lookup_type(obj_name) {
+                            self.struct_name_from_c_type(recv_type)
+                                .and_then(|mangled_name| {
+                                    // Find the un-mangled struct name (the
+                                    // key in `tp.structs`) whose mangled C
+                                    // form matches `mangled_name`.
+                                    self.tp
+                                        .structs
+                                        .keys()
+                                        .find(|k| mangle(k) == *mangled_name)
+                                        .cloned()
+                                })
+                                .and_then(|unmangled| {
+                                    let impl_name = format!("{unmangled}.{method}");
+                                    if self.reachable_funcs.contains(&impl_name) {
+                                        Some((
+                                            impl_name,
+                                            Expr::Ident {
+                                                name: obj_name.clone(),
+                                                span: first_ident_span,
+                                            },
+                                        ))
+                                    } else {
+                                        None
+                                    }
+                                })
+                        } else {
+                            None
+                        };
+                    if let Some((c, r)) = struct_dispatch {
+                        (c, Some(r))
+                    } else {
+                        let namespaces = ["vec", "str", "dict", "option", "result"];
+                        let mut found_ns = "";
                         for ns in &namespaces {
                             let candidate = format!("{ns}.{method}");
-                            if native_supported(&candidate) {
+                            let std_candidate = format!("std.{ns}.{method}");
+                            if self.reachable_natives.contains(&candidate)
+                                || self.reachable_natives.contains(&std_candidate)
+                            {
                                 found_ns = ns;
                                 break;
                             }
                         }
                         if found_ns.is_empty() {
-                            eprintln!("[codegen-warn] method {}.{}: no namespace found. reach_natives={:?}", obj_name, method, self.reachable_natives);
+                            // Also try matching by native_impl — checks if there's
+                            // a C runtime function registered for this method under
+                            // any namespace.
+                            for ns in &namespaces {
+                                let candidate = format!("{ns}.{method}");
+                                if native_supported(&candidate) {
+                                    found_ns = ns;
+                                    break;
+                                }
+                            }
+                            if found_ns.is_empty() {
+                                eprintln!("[codegen-warn] method {}.{}: no namespace found. reach_natives={:?}", obj_name, method, self.reachable_natives);
+                            }
                         }
-                    }
-                    if found_ns.is_empty() {
-                        // Also check if the bare method name is a native
-                        // (e.g. `len`, `println`).
-                        if self.reachable_natives.contains(method) {
-                            // Bare builtin — no receiver injection needed.
-                            (method.clone(), None)
+                        if found_ns.is_empty() {
+                            // Also check if the bare method name is a native
+                            // (e.g. `len`, `println`).
+                            if self.reachable_natives.contains(method) {
+                                // Bare builtin — no receiver injection needed.
+                                (method.clone(), None)
+                            } else {
+                                // Unknown — fall through
+                                (method.clone(), None)
+                            }
                         } else {
-                            // Unknown — fall through
-                            (method.clone(), None)
+                            let receiver = Expr::Ident {
+                                name: obj_name.clone(),
+                                span: first_ident_span,
+                            };
+                            (format!("{found_ns}.{method}"), Some(receiver))
                         }
-                    } else {
-                        let receiver = Expr::Ident {
-                            name: obj_name.clone(),
-                            span: first_ident_span,
-                        };
-                        (format!("{found_ns}.{method}"), Some(receiver))
                     }
                 } else {
                     // obj_name is NOT a local — it's a namespace like `vec`, `io`.
                     (parts.join("."), None)
                 }
             }
-            Expr::Path { parts, .. } => (parts.join("."), None),
+            Expr::Path { parts, .. } => {
+                // Multi-segment Path call. Try to resolve as a method
+                // dispatch on a struct/typed receiver. Examples that hit
+                // this branch:
+                //   - `mod.rect.area()` — receiver is the namespaced local
+                //     `mod.rect`; the AOT walks the path from the end
+                //     (longest matching local first) to find the local
+                //     and uses its struct type to look up
+                //     `<StructType>.<method>` in funcs.
+                if parts.len() >= 2 {
+                    if let Some((recv_cname, recv_expr)) = self.resolve_path_receiver(parts, names)
+                    {
+                        (recv_cname, Some(recv_expr))
+                    } else {
+                        (parts.join("."), None)
+                    }
+                } else {
+                    (parts.join("."), None)
+                }
+            }
             Expr::Field {
                 obj, name: method, ..
             } => {
@@ -2037,11 +2269,31 @@ impl Lowerer {
         }
 
         let mut arg_items: Vec<String> = Vec::new();
+        // Clone the method receiver up front; we may need it again in the
+        // impl-method call-site branch (which needs the original Expr
+        // to emit the unboxed-struct address).
+        let method_receiver_for_call = method_receiver.clone();
         // If this is a method call, emit and insert the receiver as first arg.
-        if let Some(recv) = method_receiver {
-            let recv_val = self.emit_expr(&recv, names, out);
-            let boxed = auto_box(&recv_val, None); // receiver is always zz_value
-            arg_items.push(boxed);
+        // For impl methods, the receiver is the unboxed struct (passed by
+        // pointer to the callee), so we DO NOT box it. For other method
+        // calls (e.g. vec.push, str.contains), the receiver is a
+        // refcounted `zz_value` and IS boxed via `zz_clone`.
+        // Detect struct receivers by checking the local's C type in NameCtx.
+        let recv_is_struct = match method_receiver.as_ref() {
+            Some(Expr::Ident { name, .. }) => names
+                .lookup_type(name)
+                .map(|t| t.starts_with("zz_struct_"))
+                .unwrap_or(false),
+            _ => false,
+        };
+        if let Some(ref recv) = method_receiver {
+            let recv_val = self.emit_expr(recv, names, out);
+            if recv_is_struct {
+                arg_items.push(recv_val);
+            } else {
+                let boxed = auto_box(&recv_val, None); // receiver is always zz_value
+                arg_items.push(boxed);
+            }
         }
         for a in args {
             let emitted = self.emit_expr(a, names, out);
@@ -2152,6 +2404,46 @@ impl Lowerer {
 
         if self.reachable_funcs.contains(&cname) {
             let cf = format!("zz_fn_{}", mangle(&cname));
+            // Impl methods: callee signature is
+            // `zz_fn_X(<struct>* self, zz_value* args, size_t argc)`.
+            // The receiver is passed as a pointer; the remaining args
+            // are boxed zz_values in the args array.
+            let is_impl_method = self
+                .tp
+                .funcs
+                .get(&cname)
+                .and_then(|sig| sig.params.first().map(|(_, t)| t.clone()))
+                .map(|t| matches!(&t, zz_checker::Type::Struct(_)))
+                .unwrap_or(false);
+            if is_impl_method {
+                if let Some(method_receiver) = method_receiver_for_call.as_ref() {
+                    // For struct receivers, use the raw C variable name
+                    // (no clone) so we can take its address for the
+                    // struct-pointer parameter. For non-struct receivers,
+                    // emit normally.
+                    let recv_val = if let Expr::Ident { name, .. } = method_receiver {
+                        if let Some(cid) = names.lookup(name) {
+                            cid.to_string()
+                        } else {
+                            self.emit_expr(method_receiver, names, out)
+                        }
+                    } else {
+                        self.emit_expr(method_receiver, names, out)
+                    };
+                    let rest_args: Vec<String> = arg_items.into_iter().skip(1).collect();
+                    let rest_n = rest_args.len();
+                    if rest_n == 0 {
+                        return format!("{cf}(&{recv_val}, NULL, 0)");
+                    }
+                    return format!(
+                        "{cf}(&{recv_val}, (zz_value[]){{ {joined} }}, {n})",
+                        joined = rest_args.join(", "),
+                        n = rest_n
+                    );
+                }
+                // No receiver (shouldn't happen for impl methods but
+                // fall through to the regular path defensively).
+            }
             if arg_items.is_empty() {
                 return format!("{cf}(NULL, 0)");
             }
@@ -2163,6 +2455,83 @@ impl Lowerer {
         }
 
         "zz_unit()".to_string()
+    }
+
+    /// Resolve a multi-segment `Path` callee into a method-dispatch pair
+    /// `(impl_method_full_name, receiver_expr)`. Returns `None` when the
+    /// path is not a recognized struct-method call (e.g. it's a static
+    /// helper like `mod.helper()` — those still go through the regular
+    /// `reachable_funcs` path).
+    ///
+    /// Algorithm:
+    ///   1. Walk the path from the end to find the longest prefix that
+    ///      names a registered local variable. This handles cases like
+    ///      `mod.rect.area()` where the local is `rect` (registered
+    ///      under the bare name, not the module-prefixed form).
+    ///   2. Once the local is found, look up its C type in `NameCtx`. If
+    ///      the type is a struct, build the impl-method name
+    ///      `<StructType>.<tail_method>` and look it up in
+    ///      `reachable_funcs`.
+    ///   3. As a fallback, if no local is found but the second-to-last
+    ///      path segment matches a struct type name (e.g. `mod.Rectangle
+    ///      .area()`), try `<StructType>.<method>`. This is uncommon
+    ///      but lets the static-form `Rectangle.area(...)` work in
+    ///      fixtures where the type name is used directly.
+    fn resolve_path_receiver(&self, parts: &[String], names: &NameCtx) -> Option<(String, Expr)> {
+        if parts.len() < 2 {
+            return None;
+        }
+        let method = parts.last().unwrap().clone();
+
+        // Strategy 1: longest-prefix local match.
+        // parts = ["mod", "rect", "area"] → try "mod.rect" (no), then
+        // "rect" (yes, since locals are registered under the bare name
+        // and not the module-prefixed form). The matched lookup key is
+        // either the joined prefix or the last segment of the prefix
+        // — whichever hits a registered local.
+        for split in (1..parts.len() - 1).rev() {
+            let recv_parts = &parts[..split];
+            let recv_joined = recv_parts.join(".");
+            let recv_tail = recv_parts.last().unwrap().clone();
+            let (matched_key, matched_tail) = if names.lookup(&recv_joined).is_some() {
+                (recv_joined, recv_tail)
+            } else if names.lookup(&recv_tail).is_some() {
+                (recv_tail.clone(), recv_tail)
+            } else {
+                continue;
+            };
+            let recv_type = names.lookup_type(&matched_key)?;
+            let struct_name = self.struct_name_from_c_type(recv_type)?;
+            let impl_name = format!("{struct_name}.{method}");
+            if self.reachable_funcs.contains(&impl_name) {
+                let span = zz_frontend::span::Span::new(0, 0);
+                let recv_expr = Expr::Ident {
+                    name: matched_tail,
+                    span,
+                };
+                return Some((impl_name, recv_expr));
+            }
+        }
+
+        // Strategy 2: type-name-as-receiver (static form).
+        // parts = ["mod", "Rectangle", "area"] → try "mod.Rectangle.area"
+        // and "Rectangle.area" against `reachable_funcs` directly. This
+        // is uncommon but lets the static-form `Rectangle.area(...)`
+        // work in fixtures where the type name is used directly.
+        for split in 1..parts.len() - 1 {
+            let recv_joined = parts[..split].join(".");
+            let impl_name = format!("{recv_joined}.{method}");
+            if self.reachable_funcs.contains(&impl_name) {
+                let span = zz_frontend::span::Span::new(0, 0);
+                let recv_expr = Expr::Ident {
+                    name: "self".to_string(),
+                    span,
+                };
+                return Some((impl_name, recv_expr));
+            }
+        }
+
+        None
     }
 
     /// Box an index expression to a `zz_value` for `idx` arguments. Scalar
