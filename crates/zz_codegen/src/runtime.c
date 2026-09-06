@@ -1221,79 +1221,454 @@ zz_value zz_task_join_recv(zz_value join_val, int *err) {
 #include <string.h>
 #include <errno.h>
 #include <signal.h>
+#include <sys/epoll.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/syscall.h>
+#include <sched.h>
+
+// =====================================================================
+//  Epoll HTTP Server — SO_REUSEPORT Multi-Core Event Loop
+// =====================================================================
+//
+//  Architecture:
+//    - SO_REUSEPORT: multiple forked workers share the same port
+//    - Each worker: own epoll_create1() + epoll_wait() loop
+//    - Level-triggered EPOLLIN/EPOLLOUT (not edge-triggered)
+//    - Pre-allocated Connection array — no malloc per request
+//
+//  Connection state machine:
+//    CONN_CONNECTED → CONN_READING → CONN_PARSED → CONN_WRITING → CONN_KEEP_ALIVE/CONN_CLOSED
+
+#define MAX_CONNECTIONS 1024
+#define READ_BUF_SIZE   8192
+#define WRITE_BUF_SIZE  16384
+#define MAX_EVENTS      64
+
+typedef enum {
+    CONN_CONNECTED  = 0,
+    CONN_READING    = 1,
+    CONN_PARSED     = 2,
+    CONN_WRITING    = 3,
+    CONN_KEEP_ALIVE = 4,
+    CONN_CLOSED     = 5,
+} ConnState;
+
+typedef struct {
+    int     fd;
+    int     state;
+    char    read_buf[READ_BUF_SIZE];
+    char    write_buf[WRITE_BUF_SIZE];
+    int     read_pos;
+    int     write_pos;
+    int     response_len;
+    int     keep_alive;
+} Connection;
+
+static Connection g_connections[MAX_CONNECTIONS];
+static int g_http_server_running = 0;
+
+// ---- Connection slot management (no malloc) ----
+
+static int find_free_slot(void) {
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+        if (g_connections[i].fd == -1) return i;
+    }
+    return -1;
+}
+
+static Connection* alloc_connection(int fd) {
+    int idx = find_free_slot();
+    if (idx < 0) return NULL;
+    Connection *c = &g_connections[idx];
+    c->fd = fd;
+    c->state = CONN_READING;  // Start in READING state
+    c->read_pos = 0;
+    c->write_pos = 0;
+    c->response_len = 0;
+    c->keep_alive = 0;
+    return c;
+}
+
+static void free_connection(Connection *c) {
+    if (c->fd >= 0) {
+        // fprintf(stderr, "closing fd=%d\n", c->fd);
+        close(c->fd);
+        c->fd = -1;
+    }
+    c->state = CONN_CLOSED;
+    c->read_pos = 0;
+    c->write_pos = 0;
+    c->response_len = 0;
+}
+
+static void init_connections(void) {
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+        g_connections[i].fd = -1;
+        g_connections[i].state = CONN_CLOSED;
+        g_connections[i].read_pos = 0;
+        g_connections[i].write_pos = 0;
+        g_connections[i].response_len = 0;
+        g_connections[i].keep_alive = 0;
+    }
+}
+
+// ---- Non-blocking helpers ----
+
+static void set_nonblock(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+// ---- HTTP parsing ----
+
+static int parse_request_headers(Connection *c) {
+    // Scan for \r\n\r\n — end of headers
+    // Need at least 4 bytes (len >= 4)
+    if (c->read_pos < 4) return 0;
+    for (int i = 0; i <= c->read_pos - 4; i++) {
+        if (c->read_buf[i] == '\r' && c->read_buf[i+1] == '\n' &&
+            c->read_buf[i+2] == '\r' && c->read_buf[i+3] == '\n') {
+            // End of headers found at position i
+            c->keep_alive = 0;
+            return 1;
+        }
+    }
+    return 0; // incomplete
+}
+
+static int parse_request_line(Connection *c) {
+    // Request line: "METHOD URI HTTP/1.1\r\n"
+    // Find first \r\n
+    if (c->read_pos < 2) return 0;
+    int crlf_pos = -1;
+    for (int i = 0; i <= c->read_pos - 2; i++) {
+        if (c->read_buf[i] == '\r' && c->read_buf[i+1] == '\n') {
+            crlf_pos = i;
+            break;
+        }
+    }
+    if (crlf_pos < 0) return 0;
+
+    // Look for " HTTP/" before the crlf
+    for (int j = 0; j < crlf_pos - 6; j++) {
+        if (memcmp(c->read_buf + j, " HTTP/", 6) == 0) {
+            // Found " HTTP/" at position j
+            // The space before "HTTP/" is at position j
+            // Find the space that separates METHOD from URI (search backward from j)
+            int space_pos = -1;
+            for (int sp = j - 1; sp >= 0; sp--) {
+                if (c->read_buf[sp] == ' ') {
+                    space_pos = sp;
+                    break;
+                }
+            }
+            if (space_pos < 0) continue;
+            // Validate method (everything before space_pos)
+            int valid = 1;
+            for (int k = 0; k < space_pos; k++) {
+                if (c->read_buf[k] < 'A' || c->read_buf[k] > 'Z') {
+                    valid = 0;
+                    break;
+                }
+            }
+            if (valid) return 1;
+        }
+    }
+    return 0;
+}
+
+// ---- Response builder ----
+
+static void build_response(Connection *c, int status, const char *body, int body_len) {
+    const char *status_line;
+    if (status == 200) status_line = "200 OK";
+    else if (status == 404) status_line = "404 Not Found";
+    else if (status == 400) status_line = "400 Bad Request";
+    else status_line = "500 Internal Server Error";
+
+    char headers[512];
+    int hl = snprintf(headers, sizeof(headers),
+        "HTTP/1.1 %s\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: %s\r\n"
+        "\r\n",
+        status_line, body_len,
+        c->keep_alive ? "keep-alive" : "close");
+
+    memcpy(c->write_buf, headers, hl);
+    if (body && body_len > 0) {
+        memcpy(c->write_buf + hl, body, body_len);
+    }
+    c->write_pos = hl + body_len;
+    c->response_len = c->write_pos;
+    c->write_pos = 0; // reset write position for actual send
+}
+
+// ---- Connection state machine ----
+
+static void connection_to_reading(Connection *c) {
+    c->state = CONN_READING;
+}
+
+static void connection_to_parsed(Connection *c) {
+    c->state = CONN_PARSED;
+    build_response(c, 200, "OK", 2);
+}
+
+static void connection_to_writing(Connection *c) {
+    c->state = CONN_WRITING;
+}
+
+static void connection_to_keep_alive(Connection *c) {
+    c->state = CONN_KEEP_ALIVE;
+    c->read_pos = 0;
+    c->write_pos = 0;
+}
+
+static void connection_to_closed(Connection *c) {
+    free_connection(c);
+}
+
+// ---- Process connection in current state ----
+
+static void process_connection(Connection *c) {
+    switch (c->state) {
+        case CONN_READING: {
+            if (parse_request_headers(c)) {
+                if (parse_request_line(c)) {
+                    connection_to_parsed(c);
+                } else {
+                    build_response(c, 400, "Bad Request", 11);
+                    connection_to_writing(c);
+                }
+            }
+            break;
+        }
+        case CONN_WRITING:
+        case CONN_KEEP_ALIVE:
+            // Handled in main loop write phase
+            break;
+        default:
+            break;
+    }
+}
+
+// ---- Read from socket ----
+
+static int read_from_socket(Connection *c) {
+    if (c->read_pos >= READ_BUF_SIZE - 1) return 0; // buffer full
+
+    ssize_t n = read(c->fd, c->read_buf + c->read_pos, READ_BUF_SIZE - c->read_pos - 1);
+    if (n > 0) {
+        c->read_pos += (int)n;
+        c->read_buf[c->read_pos] = '\0';
+        return 1;
+    } else if (n == 0) {
+        // Client closed
+        return 0;
+    } else {
+        // EAGAIN / EWOULDBLOCK — no more data
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
+        return 0;
+    }
+}
+
+// ---- Write to socket ----
+
+static int write_to_socket(Connection *c) {
+    int remaining = c->response_len - c->write_pos;
+    if (remaining <= 0) return 1;
+    ssize_t n = write(c->fd, c->write_buf + c->write_pos, remaining);
+    if (n > 0) {
+        c->write_pos += (int)n;
+        return 1;
+    } else if (n == 0) {
+        return 0;
+    } else {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
+        return 0;
+    }
+}
+
+// ---- Get CPU core count ----
+
+static int get_cpu_count(void) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return (n > 0) ? (int)n : 4;
+}
+
+// ---- Epoll worker loop (runs in each forked process) ----
+
+static void worker_loop(int listen_fd, int worker_id) {
+    int epfd = epoll_create1(EPOLL_CLOEXEC);
+    if (epfd < 0) {
+        fprintf(stderr, "worker %d: epoll_create1 failed: %s\n", worker_id, strerror(errno));
+        return;
+    }
+
+    // Add listen_fd to epoll
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = listen_fd;
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
+        fprintf(stderr, "worker %d: epoll_ctl ADD listen_fd failed: %s\n", worker_id, strerror(errno));
+        close(epfd);
+        return;
+    }
+
+    struct epoll_event events[MAX_EVENTS];
+
+    while (g_http_server_running) {
+        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
+        if (nfds < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        for (int i = 0; i < nfds; i++) {
+            int fd = events[i].data.fd;
+            uint32_t revents = events[i].events;
+
+            if (fd == listen_fd) {
+                // Accept all pending connections
+                while (1) {
+                    struct sockaddr_in client_addr;
+                    socklen_t client_len = sizeof(client_addr);
+                    int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
+                    if (client_fd < 0) break;
+
+                    // Disable Nagle
+                    int flag = 1;
+                    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+
+                    Connection *c = alloc_connection(client_fd);
+                    if (!c) {
+                        close(client_fd);
+                        continue;
+                    }
+
+                    set_nonblock(client_fd);
+                    struct epoll_event cev;
+                    cev.events = EPOLLIN;
+                    cev.data.fd = client_fd;
+                    if (epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev) < 0) {
+                        free_connection(c);
+                        continue;
+                    }
+
+                }
+            } else {
+                // Client socket event
+                Connection *c = NULL;
+                for (int j = 0; j < MAX_CONNECTIONS; j++) {
+                    if (g_connections[j].fd == fd) {
+                        c = &g_connections[j];
+                        break;
+                    }
+                }
+                if (!c) continue;
+
+                if (revents & (EPOLLERR | EPOLLHUP)) {
+                    connection_to_closed(c);
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                    continue;
+                }
+
+                if (revents & EPOLLIN) {
+
+                    if (!read_from_socket(c)) {
+
+                        connection_to_closed(c);
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                        continue;
+                    }
+
+                    process_connection(c);
+                    if (c->state == CONN_PARSED) {
+
+                    }
+                }
+
+                if (c->state == CONN_PARSED) {
+
+                    connection_to_writing(c);
+                    struct epoll_event cev;
+                    cev.events = EPOLLOUT;
+                    cev.data.fd = fd;
+                    epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &cev);
+                } else if (c->state == CONN_WRITING) {
+                    int written = write_to_socket(c);
+                    if (!written) {
+
+                        connection_to_closed(c);
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                        continue;
+                    }
+                    // Check if write complete
+                    if (c->write_pos >= c->response_len) {
+
+                        if (!c->keep_alive) {
+                            connection_to_closed(c);
+                            epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                        } else {
+                            // Reset for keep-alive
+                            c->state = CONN_KEEP_ALIVE;
+                            c->read_pos = 0;
+                            c->write_pos = 0;
+                            c->response_len = 0;
+                            struct epoll_event cev;
+                            cev.events = EPOLLIN;
+                            cev.data.fd = fd;
+                            epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &cev);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    close(epfd);
+}
+
+// ---- Main server startup with SO_REUSEPORT + fork ----
+
+static int spawn_workers(int listen_fd, int port) {
+    int workers = get_cpu_count();
+
+    for (int w = 0; w < workers; w++) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            return -1;
+        }
+        if (pid == 0) {
+            // Child worker
+            worker_loop(listen_fd, w);
+            close(listen_fd);
+            exit(0);
+        }
+        // Parent continues forking
+    }
+
+    // Parent waits for children
+    while (g_http_server_running) {
+        sleep(1);
+    }
+
+    // Reap children
+    while (wait(NULL) > 0) {}
+
+    return 0;
+}
+
+// ---- HTTP AOT stub implementations ----
 
 // Max number of route patterns we track (for debug/future use)
 #define MAX_ROUTES 32
 static char *g_http_routes[MAX_ROUTES];
 static int g_http_route_count = 0;
-static volatile int g_http_server_running = 0;
-
-// Per-thread connection handler
-static void *zz_http_conn_thread(void *arg) {
-    int fd = *(int *)arg;
-    free(arg);
-
-    // Read HTTP request (peek first line)
-    char buf[1024];
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
-    if (n <= 0) { close(fd); return NULL; }
-    buf[n] = '\0';
-
-    // Check for HTTP/1.1 or HTTP/1.0
-    int is_http11 = 0;
-    char *method = buf;
-    char *uri = NULL;
-    char *version = NULL;
-    char *crlf = strstr(buf, "\r\n");
-    if (crlf) {
-        *crlf = '\0';
-        // Parse request line: "GET /path HTTP/1.1"
-        version = strstr(buf, " HTTP/");
-        if (version) { *version = '\0'; version += 6; is_http11 = (strncmp(version, "1.1", 3) == 0); }
-        uri = strchr(buf, ' ');
-        if (uri) { *uri = '\0'; uri++; }
-    }
-
-    // Compose response
-    const char *response =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/plain\r\n"
-        "Content-Length: 2\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "OK";
-
-    write(fd, response, strlen(response));
-    close(fd);
-    return NULL;
-}
-
-// Main accept loop — runs in a detached thread so http.listen returns immediately
-static void *zz_http_accept_thread(void *arg) {
-    int listen_fd = *(int *)arg;
-    free(arg);
-
-    while (g_http_server_running) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
-        int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
-        if (client_fd < 0) {
-            if (g_http_server_running) usleep(10000); // retry
-            continue;
-        }
-        // Disable Nagle — good for benchmarks
-        int flag = 1;
-        setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-
-        pthread_t th;
-        int *client_fd_alloc = malloc(sizeof(int));
-        *client_fd_alloc = client_fd;
-        pthread_create(&th, NULL, zz_http_conn_thread, client_fd_alloc);
-        pthread_detach(th);
-    }
-    close(listen_fd);
-    return NULL;
-}
 
 // zz_http_server(unused, err) — creates an HTTP server handle (AOT stub)
 zz_value zz_http_server(zz_value unused, int *err) {
@@ -1330,6 +1705,9 @@ zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
     // Ignore SIGPIPE to avoid crash on closed connections
     signal(SIGPIPE, SIG_IGN);
 
+    // Initialize connection pool
+    init_connections();
+
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
         fprintf(stderr, "zz_http_listen: socket() failed: %s\n", strerror(errno));
@@ -1338,6 +1716,10 @@ zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
 
     int opt = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    // SO_REUSEPORT for multi-core scaling
+    int reuseport = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &reuseport, sizeof(reuseport));
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -1357,36 +1739,17 @@ zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
         return zz_unit();
     }
 
+    // Set listen_fd non-blocking
+    set_nonblock(listen_fd);
+
     // Print SERVER_READY so benchmark runners know the port is open
     fprintf(stdout, "SERVER_READY\n");
     fflush(stdout);
 
     g_http_server_running = 1;
 
-    // Accept loop — runs in the calling thread (blocking).
-    // Each connection is handled in a detached pthread.
-    while (g_http_server_running) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
-        int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
-        if (client_fd < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-
-        int flag = 1;
-        setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-
-        pthread_t th;
-        int *client_fd_alloc = malloc(sizeof(int));
-        *client_fd_alloc = client_fd;
-        if (pthread_create(&th, NULL, zz_http_conn_thread, client_fd_alloc) == 0) {
-            pthread_detach(th);
-        } else {
-            free(client_fd_alloc);
-            close(client_fd);
-        }
-    }
+    // Spawn workers and wait
+    spawn_workers(listen_fd, p);
 
     g_http_server_running = 0;
     close(listen_fd);
