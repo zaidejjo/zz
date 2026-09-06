@@ -1,13 +1,15 @@
 //! Channel concurrency primitives for ZZ.
 //!
-//! Provides `chan()`, `chan.send()`, `chan.recv()`, and `chan.try_recv()`.
+//! Provides `chan()`, `chan.send()`, `chan.recv()`, `chan.try_recv()`,
+//! `spawn()`, and `task.join()`.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 
 use zz_runtime::{EvalError, Interp, Span, Value};
 
-use zz_runtime::value::{ChanInner, ChanState};
+use zz_runtime::value::snapshot_env;
+use zz_runtime::value::{ChanInner, ChanState, TaskJoinState};
 
 /// `chan()` — create a new unbounded channel.
 pub(crate) fn chan_new(
@@ -120,9 +122,83 @@ pub(crate) fn chan_try_recv(
 
 // ── TaskJoin methods ────────────────────────────────────────────────────────
 
+/// `spawn(closure)` — spawn a closure on a new OS thread.
+///
+/// The closure's captured environment is deep-cloned (snapshot) so the
+/// spawned thread gets its own independent copy of all captured variables.
+/// Returns a `TaskJoin` handle whose `.recv()` method blocks until the
+/// task completes and yields the closure's return value.
+pub(crate) fn spawn(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let fv = match args.first() {
+        Some(Value::Func(f)) => (**f).clone(),
+        Some(other) => {
+            return Err(EvalError::new(
+                format!("spawn: expected a closure, found `{other}`"),
+                span,
+            ))
+        }
+        None => {
+            return Err(EvalError::new(
+                "spawn: expected a closure, found nothing",
+                span,
+            ))
+        }
+    };
+
+    let chunk = fv.chunk.ok_or_else(|| {
+        EvalError::new(
+            "spawn: closure has no compiled chunk (tree-walker closures cannot be spawned)",
+            span,
+        )
+    })?;
+
+    // 1. Snapshot captured env → self-contained flat map.
+    let snapshot = snapshot_env(&fv.env);
+
+    // 2. Clone read-only globals.
+    let natives = interp.natives.clone();
+    let structs = interp.structs.clone();
+
+    // 3. Prepare shared result slot.
+    let result = Arc::new(Mutex::new(None));
+    let handle_for_thread = Arc::clone(&result);
+    let handle_for_join = Arc::clone(&result);
+
+    // 4. Spawn OS thread.
+    std::thread::spawn(move || {
+        let mut new_interp = Interp::with_natives(natives);
+        new_interp.structs = structs;
+
+        // Seed env from snapshot.
+        {
+            let mut env = new_interp.env.borrow_mut();
+            for (name, val) in snapshot {
+                env.define(&name, val);
+            }
+        }
+
+        let mut vm = zz_runtime::vm::Vm::new();
+        let outcome = match vm.run_chunk(&chunk, &mut new_interp) {
+            Ok(zz_runtime::runtime::Flow::Value(v)) => Ok(v),
+            Ok(_) => Ok(Value::Unit),
+            Err(e) => Err(e.message),
+        };
+        *handle_for_thread.lock().unwrap() = Some(outcome);
+    });
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    Ok(Value::TaskJoin(Arc::new(TaskJoinState {
+        result: handle_for_join,
+        cvar: Condvar::new(),
+    })))
+}
+
 /// `task.join(handle)` — blocking receive on a task join handle.
 /// Returns the task's result, or `.err(msg)` if the task panicked.
-#[allow(dead_code)]
 pub(crate) fn task_join(
     _interp: &mut Interp,
     args: &mut Vec<Value>,

@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::sync::Arc;
 
 use zz_frontend::ast::{BinOp, Block, Expr, Ident, Param};
 use zz_frontend::parse;
@@ -361,7 +362,7 @@ fn vm_method_call_and_cross_module() {
             span: Span::new(0, 0),
         }),
         env: Rc::clone(&interp.env),
-        chunk: Some(Rc::new(chunk)),
+        chunk: Some(Arc::new(chunk)),
     };
     interp.funcs.insert("shapes.dist".into(), fv);
     let v = interp.run(&parsed.program).unwrap();

@@ -48,7 +48,7 @@ impl EvalError {
 /// call stack until the enclosing function call catches it; `Break` and
 /// `Continue` unwind to the enclosing loop.
 #[derive(Debug)]
-pub(crate) enum Flow {
+pub enum Flow {
     Value(Value),
     Return(Value),
     Break(Span),

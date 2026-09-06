@@ -1077,6 +1077,22 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
+    // std.task — spawn and join
+    m.insert(
+        "std.task.spawn".into(),
+        NativeEntry {
+            arity: 1,
+            f: concurrency::spawn,
+        },
+    );
+    m.insert(
+        "std.task.join".into(),
+        NativeEntry {
+            arity: 1,
+            f: concurrency::task_join,
+        },
+    );
+
     // std.net — TCP networking
     m.insert(
         "std.net.tcp_connect".into(),

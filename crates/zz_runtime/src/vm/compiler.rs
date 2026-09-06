@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::sync::Arc;
 
 use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Param, Pattern, Program, Stmt};
 use zz_frontend::span::Span;
@@ -1108,7 +1108,7 @@ impl Compiler {
         self.locals.truncate(scope_base);
     }
 
-    fn compile_func_body(&mut self, block: &Block, params: &[Param]) -> Rc<Chunk> {
+    fn compile_func_body(&mut self, block: &Block, params: &[Param]) -> Arc<Chunk> {
         let mut sub = Compiler::new();
         sub.chunk.params = params.to_vec();
         sub.captured = scan_block_captured(block, params);
@@ -1139,7 +1139,7 @@ impl Compiler {
         if needs_env {
             sub.emit(Op::ExitScope);
         }
-        Rc::new(sub.chunk)
+        Arc::new(sub.chunk)
     }
 
     fn compile_reordered_args(&mut self, func_name: &str, args: &[Expr], named: &[(String, Expr)]) {
@@ -1181,7 +1181,7 @@ impl Compiler {
         }
     }
 
-    fn compile_closure_body(&mut self, body: &Expr, params: &[Param]) -> Rc<Chunk> {
+    fn compile_closure_body(&mut self, body: &Expr, params: &[Param]) -> Arc<Chunk> {
         let mut sub = Compiler::new();
         sub.chunk.params = params.to_vec();
         sub.captured = scan_closure_captured(body, params);
@@ -1211,7 +1211,7 @@ impl Compiler {
         if needs_env {
             sub.emit(Op::ExitScope);
         }
-        Rc::new(sub.chunk)
+        Arc::new(sub.chunk)
     }
 
     fn compile_expr(&mut self, expr: &Expr) {

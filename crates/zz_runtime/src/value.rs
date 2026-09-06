@@ -1,11 +1,15 @@
 //! Runtime values for the Phase 1 tree-walker.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt;
 use std::net::{TcpListener, TcpStream};
+use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 
-use zz_frontend::ast::{Expr, Param};
+use zz_frontend::ast::{Block, Expr, Param};
+use zz_frontend::span::Span;
 
 use crate::env::Env;
 
@@ -26,7 +30,7 @@ pub struct ChanState {
 /// Inner state for a task join handle.
 #[derive(Debug)]
 pub struct TaskJoinState {
-    pub result: Mutex<Option<Result<Value, String>>>,
+    pub result: Arc<Mutex<Option<Result<Value, String>>>>,
     pub cvar: Condvar,
 }
 
@@ -51,6 +55,13 @@ pub struct RangeValue {
 /// in 16 bytes (including its discriminant byte and padding). This keeps
 /// `LoadSlot`/`StoreSlot`/stack-push copies to a single 16-byte memcpy
 /// instead of copying large strings, vectors, or environments inline.
+///
+/// # Thread safety
+///
+/// `Value` is `Send` because all cross-thread usage (via `spawn`) operates
+/// on deep-cloned, self-contained snapshots where every `FuncValue` carries
+/// its own copy of the captured env (no `Rc` back-references). The compiler
+/// cannot verify this structurally, so we assert it manually.
 #[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
@@ -93,6 +104,133 @@ pub enum Value {
     TaskJoin(Arc<TaskJoinState>),
 }
 
+// SAFETY: `Value` is safe to send across threads when used with
+// deep-cloned snapshots (see `snapshot_env`). The compiler cannot
+// verify this structurally because `FuncValue` contains `Rc<RefCell<Env>>`,
+// but all cross-thread usage operates on self-contained copies.
+unsafe impl Send for Value {}
+unsafe impl Sync for Value {}
+
+/// Flatten a captured environment into a self-contained `HashMap`.
+///
+/// Walks the scope chain root→leaf, deep-clones every value, and rewrites
+/// nested closures so they carry their own copy of the captured env (no
+/// dangling `Rc` references to the original scope chain).  This makes the
+/// result safe to move across thread boundaries.
+pub fn snapshot_env(env: &Rc<RefCell<crate::env::Env>>) -> HashMap<String, Value> {
+    let flat = env.borrow().flatten();
+    flat.into_iter()
+        .map(|(k, v)| (k, deep_clone_value(v, &mut HashMap::new())))
+        .collect()
+}
+
+/// Snapshot a function table so it is safe to send across thread boundaries.
+/// Each `FuncValue`'s captured env is flattened into a self-contained copy.
+pub fn snapshot_funcs(funcs: &HashMap<String, FuncValue>) -> HashMap<String, FuncValue> {
+    let mut out = HashMap::new();
+    for (name, fv) in funcs {
+        let flat = fv.env.borrow().flatten();
+        let new_env = Rc::new(RefCell::new(crate::env::Env::new()));
+        {
+            let mut e = new_env.borrow_mut();
+            for (k, v) in flat {
+                e.define(&k, deep_clone_value(v, &mut HashMap::new()));
+            }
+        }
+        out.insert(
+            name.clone(),
+            FuncValue {
+                params: fv.params.clone(),
+                body: Expr::Block(Block {
+                    stmts: Vec::new(),
+                    span: Span::new(0, 0),
+                }),
+                env: new_env,
+                chunk: fv.chunk.clone(),
+            },
+        );
+    }
+    out
+}
+
+/// Deep-clone a value, rewriting any `Value::Func` so its captured env is
+/// self-contained (no `Rc` back-references to the original scope chain).
+fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
+    match v {
+        Value::Func(fv) => {
+            // Use pointer address as the dedup key to prevent infinite recursion
+            // on cyclic closure references.
+            let key = Rc::as_ptr(&fv.env) as *const () as usize;
+            if let Some(cloned) = seen.get(&key) {
+                return cloned.clone();
+            }
+            // Seed with a placeholder so recursive calls return the same Arc.
+            let placeholder = FuncValue {
+                params: fv.params.clone(),
+                body: Expr::Block(Block {
+                    stmts: Vec::new(),
+                    span: Span::new(0, 0),
+                }),
+                env: Rc::new(RefCell::new(crate::env::Env::new())),
+                chunk: fv.chunk.clone(),
+            };
+            let placeholder_val = Value::Func(Box::new(placeholder));
+            seen.insert(key, placeholder_val.clone());
+
+            // Flatten the captured env and create a self-contained version.
+            let flat = fv.env.borrow().flatten();
+            let new_env = Rc::new(RefCell::new(crate::env::Env::new()));
+            {
+                let mut e = new_env.borrow_mut();
+                for (name, val) in flat {
+                    e.define(&name, deep_clone_value(val, seen));
+                }
+            }
+            let cloned = Value::Func(Box::new(FuncValue {
+                params: fv.params,
+                body: Expr::Block(Block {
+                    stmts: Vec::new(),
+                    span: Span::new(0, 0),
+                }),
+                env: new_env,
+                chunk: fv.chunk,
+            }));
+            seen.insert(key, cloned.clone());
+            cloned
+        }
+        Value::Array(arr) => Value::Array(Box::new(
+            arr.into_iter().map(|v| deep_clone_value(v, seen)).collect(),
+        )),
+        Value::Dict(pairs) => Value::Dict(Box::new(
+            pairs
+                .into_iter()
+                .map(|(k, v)| (deep_clone_value(k, seen), deep_clone_value(v, seen)))
+                .collect(),
+        )),
+        Value::Option(opt) => Value::Option(opt.map(|v| Box::new(deep_clone_value(*v, seen)))),
+        Value::Result(res) => Value::Result(Box::new(match *res {
+            Ok(v) => Ok(deep_clone_value(v, seen)),
+            Err(e) => Err(deep_clone_value(e, seen)),
+        })),
+        Value::Tuple(items) => Value::Tuple(Box::new(
+            items
+                .into_iter()
+                .map(|v| deep_clone_value(v, seen))
+                .collect(),
+        )),
+        Value::Object(obj) => Value::Object(Box::new(ObjectValue {
+            name: obj.name,
+            fields: obj
+                .fields
+                .into_iter()
+                .map(|(n, v)| (n, deep_clone_value(v, seen)))
+                .collect(),
+        })),
+        // Primitives and opaque Arc-wrapped types: cheap clone is fine.
+        other => other,
+    }
+}
+
 /// A JSON value (see [`crate::json`]).
 pub use crate::json::JsonValue;
 
@@ -130,7 +268,7 @@ pub struct FuncValue {
     pub env: std::rc::Rc<std::cell::RefCell<Env>>,
     /// Pre-compiled bytecode body, when the function was defined through the
     /// Phase 6 compiler. `None` for tree-walker-created closures.
-    pub chunk: Option<std::rc::Rc<crate::vm::Chunk>>,
+    pub chunk: Option<std::sync::Arc<crate::vm::Chunk>>,
 }
 
 impl Value {

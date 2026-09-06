@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::sync::Arc;
 
 use zz_frontend::ast::{BinOp, Param, Pattern, UnOp};
 use zz_frontend::span::Span;
@@ -79,7 +79,7 @@ pub enum Op {
     MakeFunc {
         name: String,
         params: Vec<Param>,
-        chunk: Rc<Chunk>,
+        chunk: Arc<Chunk>,
     },
     /// Register a struct definition (name -> ordered field names).
     RegisterStruct { name: String, fields: Vec<String> },
@@ -172,7 +172,7 @@ pub enum Op {
     /// current environment.
     MakeClosure {
         params: Vec<Param>,
-        chunk: Rc<Chunk>,
+        chunk: Arc<Chunk>,
     },
     /// Pop an optional argument and push an Option/Result variant.
     MakeVariant {

@@ -65,6 +65,31 @@ impl Env {
             None => false,
         }
     }
+
+    /// Flatten the scope chain root→leaf into a `HashMap`. Leaf values shadow
+    /// root values, matching normal scope semantics.
+    pub fn flatten(&self) -> HashMap<String, Value> {
+        // Walk root→leaf, collecting each scope's bindings into layers.
+        let mut layers: Vec<HashMap<String, Value>> = Vec::new();
+        layers.push(self.vars.clone());
+        let mut cur = self.parent.clone();
+        while let Some(rc) = cur {
+            let parent_opt = {
+                let env = rc.borrow();
+                layers.push(env.vars.clone());
+                env.parent.clone()
+            };
+            cur = parent_opt;
+        }
+        // Walk root→leaf so leaf values override root values.
+        let mut flat = HashMap::new();
+        for layer in layers.iter().rev() {
+            for (k, v) in layer {
+                flat.insert(k.clone(), v.clone());
+            }
+        }
+        flat
+    }
 }
 
 #[cfg(test)]
@@ -90,5 +115,29 @@ mod tests {
         let inner = Env::with_parent(&outer);
         assert!(inner.borrow_mut().assign("a", Value::Int(99)));
         assert_eq!(outer.borrow().get("a"), Some(Value::Int(99)));
+    }
+
+    #[test]
+    fn flatten_collects_root_to_leaf() {
+        let root = Rc::new(RefCell::new(Env::new()));
+        root.borrow_mut().define("a", Value::Int(1));
+        root.borrow_mut().define("b", Value::Int(10));
+        let mid = Env::with_parent(&root);
+        mid.borrow_mut().define("b", Value::Int(2));
+        mid.borrow_mut().define("c", Value::Int(3));
+        let leaf = Env::with_parent(&mid);
+        leaf.borrow_mut().define("c", Value::Int(30));
+        leaf.borrow_mut().define("d", Value::Int(4));
+        let flat = leaf.borrow().flatten();
+        assert_eq!(flat.get("a"), Some(&Value::Int(1))); // root only
+        assert_eq!(flat.get("b"), Some(&Value::Int(2))); // mid shadows root
+        assert_eq!(flat.get("c"), Some(&Value::Int(30))); // leaf shadows mid
+        assert_eq!(flat.get("d"), Some(&Value::Int(4))); // leaf only
+    }
+
+    #[test]
+    fn flatten_empty_env() {
+        let env = Env::new();
+        assert!(env.flatten().is_empty());
     }
 }
