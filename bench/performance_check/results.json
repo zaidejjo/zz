@@ -1,30 +1,30 @@
 {
   "runs": 3,
   "machine": "x86_64",
-  "date": "2026-09-05T17:03:06Z",
+  "date": "2026-09-06T15:23:01Z",
   "engines": ["zz","go","rust"],
   "results": {
     "memory_leak": {
-      "zz":   { "elapsed_ms": 55,   "peak_rss_kib": 780   },
-      "go":   { "elapsed_ms": 89,   "peak_rss_kib": 5828   },
-      "rust": { "elapsed_ms": 160, "peak_rss_kib": 2444 }
+      "zz":   { "elapsed_ms": 55,   "peak_rss_kib": 912   },
+      "go":   { "elapsed_ms": 87,   "peak_rss_kib": 5828   },
+      "rust": { "elapsed_ms": 178, "peak_rss_kib": 2444 }
     }
 ,
     "cpu_intensive": {
-      "zz":   { "elapsed_ms": 163,   "peak_rss_kib": 804   },
-      "go":   { "elapsed_ms": 57,   "peak_rss_kib": 4012   },
-      "rust": { "elapsed_ms": 13, "peak_rss_kib": 2800 }
+      "zz":   { "elapsed_ms": 15,   "peak_rss_kib": 924   },
+      "go":   { "elapsed_ms": 56,   "peak_rss_kib": 3780   },
+      "rust": { "elapsed_ms": 11, "peak_rss_kib": 2344 }
     }
 ,
     "string_concats": {
-      "zz":   { "elapsed_ms": 5,   "peak_rss_kib": 0   },
-      "go":   { "elapsed_ms": 367,   "peak_rss_kib": 9708   },
+      "zz":   { "elapsed_ms": 4,   "peak_rss_kib": 0   },
+      "go":   { "elapsed_ms": 374,   "peak_rss_kib": 12116   },
       "rust": { "elapsed_ms": 3, "peak_rss_kib": 0 }
     }
 
   },
   "binary_kib": {
-    "zz":   759,
+    "zz":   883,
     "go":   2393,
     "rust": 468
   }

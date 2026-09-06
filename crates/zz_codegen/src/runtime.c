@@ -709,7 +709,12 @@ zz_value zz_array_new_lit(zz_arena *arena, size_t n) {
         a->refs = ZZ_ARRAY_LIT_MAGIC;
         a->len = 0;
         a->cap = n;
-        a->items = (zz_value *)zz_arena_alloc(arena, n * sizeof(zz_value), 8);
+        // NOTE: when n==0 the items buffer would be a zero-size arena
+        // allocation. Passing such a pointer to realloc() later (in
+        // zz_vec_append) is invalid — realloc only works with malloc-allocated
+        // memory. Set items=NULL instead so zz_vec_append correctly calls
+        // realloc(NULL, ...) which is defined as malloc.
+        a->items = n > 0 ? (zz_value *)zz_arena_alloc(arena, n * sizeof(zz_value), 8) : NULL;
     } else {
         // Escaping literal: single pre-allocated heap block, normal ARC.
         a = (zz_array *)calloc(1, sizeof(zz_array));
@@ -1366,7 +1371,21 @@ zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
     zz_array *a = arr.arr;
     if (a->len >= a->cap) {
         size_t new_cap = a->cap ? a->cap * 2 : 8;
-        a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
+        // LIT_MAGIC arrays have items from arena — realloc() on arena memory
+        // is invalid. Also handle n=0 case where items is NULL.
+        // Migrate to malloc, switch to refs=0 (arena-allocated sentinel) so
+        // zz_release knows items is malloc'd but header is still arena.
+        if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->items == NULL) {
+            zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
+            // Copy existing elements if any.
+            for (size_t i = 0; i < a->len; i++) {
+                new_items[i] = a->items[i];
+            }
+            a->items = new_items;
+            a->refs = 0;  // Arena-allocated header, malloc'd items
+        } else {
+            a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
+        }
         a->cap = new_cap;
     }
     a->items[a->len++] = zz_clone(item);

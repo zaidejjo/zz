@@ -1,6 +1,6 @@
 # Performance / Stress / Memory Benchmark — ZZ vs Go vs Rust
 
-**Machine:** `x86_64` · **Date:** 2026-09-05T17:03:10Z · **Best-of:** 3 runs
+**Machine:** `x86_64` · **Date:** 2026-09-06T15:23:05Z · **Best-of:** 3 runs
 
 ## Workloads
 
@@ -14,23 +14,23 @@
 
 | Benchmark              |    ZZ     | Rust    | Go      |
 |------------------------|----------:|--------:|--------:|
-| `bench_memory_leak     ` | 55 ms | 160 ms | 89 ms |
-| `bench_cpu_intensive   ` | 163 ms | 13 ms | 57 ms |
-| `bench_string_concats  ` | 5 ms | 3 ms | 367 ms |
+| `bench_memory_leak     ` | 55 ms | 178 ms | 87 ms |
+| `bench_cpu_intensive   ` | 15 ms | 11 ms | 56 ms |
+| `bench_string_concats  ` | 4 ms | 3 ms | 374 ms |
 
 ## Peak RSS (lower is better; KiB / MB)
 
 | Benchmark              |    ZZ     | Rust    | Go      |
 |------------------------|----------:|--------:|--------:|
-| `bench_memory_leak     ` | 780 / 0.76MB | 2444 / 2.39MB | 5828 / 5.69MB |
-| `bench_cpu_intensive   ` | 804 / 0.79MB | 2800 / 2.73MB | 4012 / 3.92MB |
-| `bench_string_concats  ` | 0 / 0.00MB | 0 / 0.00MB | 9708 / 9.48MB |
+| `bench_memory_leak     ` | 912 / 0.89MB | 2444 / 2.39MB | 5828 / 5.69MB |
+| `bench_cpu_intensive   ` | 924 / 0.90MB | 2344 / 2.29MB | 3780 / 3.69MB |
+| `bench_string_concats  ` | 0 / 0.00MB | 0 / 0.00MB | 12116 / 11.83MB |
 
 ## Binary size (KiB)
 
 | Engine | Binary KiB |
 |--------|-----------:|
-| ZZ     | 759 |
+| ZZ     | 883 |
 | Go     | 2393 |
 | Rust   | 468 |
 
