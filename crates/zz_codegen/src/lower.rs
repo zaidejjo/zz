@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use zz_frontend::ast::{Block, Expr, FmtPart, Param, Stmt};
+use zz_frontend::ast::{Block, Expr, FmtPart, Param, Pattern, Stmt};
 
 /// Result of lowering.
 #[derive(Debug)]
@@ -200,6 +200,10 @@ fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static str> {
 /// expression (e.g. `"int64_t"`, `"double"`) when the caller already
 /// resolved it from the type system. This avoids the free function needing
 /// access to the Lowerer's struct registry.
+fn is_simple_ident(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') && !s.starts_with("zz_")
+}
+
 fn box_scalar_operand(e: &Expr, names: &NameCtx, emitted: &str) -> String {
     match scalar_operand_type(e, names) {
         Some("int64_t") => {
@@ -225,9 +229,111 @@ fn box_scalar_operand(e: &Expr, names: &NameCtx, emitted: &str) -> String {
             } else if emitted.starts_with("(bool)(") {
                 format!("zz_bool({emitted})")
             } else {
+                // Last-resort fallback: if the emitted expression is a
+                // simple C identifier (e.g., "v0") whose name maps to a
+                // scalar-typed local in NameCtx, box it accordingly.
+                // Without this, an int64_t local gets passed unboxed to
+                // `zz_binop` and the C compiler rejects the call with
+                // "incompatible type for argument".
+                //
+                // `names.lookup_type` takes the original ZZ name, but we
+                // only have the emitted C identifier here. The emitted
+                // identifier is unique, so we scan the stack for any entry
+                // whose C identifier matches `emitted` and whose type is
+                // a scalar.
+                if is_simple_ident(emitted) {
+                    for (_zzname, entries) in names.stack.iter() {
+                        if let Some((cid, ty)) = entries.last() {
+                            if cid == emitted {
+                                match ty.as_str() {
+                                    "int64_t" => return format!("zz_int({emitted})"),
+                                    "double" => return format!("zz_float({emitted})"),
+                                    "bool" => return format!("zz_bool({emitted})"),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
                 emitted.to_string()
             }
         }
+    }
+}
+
+/// Emit a guard expression using raw C scalar values (no zz_value boxing).
+/// Guard comparisons (e.g., `n < 0`) need raw int64_t/double/bool, not
+/// boxed zz_value structs. The `scrut_tmp` is the scrutinee's C zz_value
+/// identifier — for the primary bound variable (same as pattern name), we
+/// unbox scrut_tmp directly instead of looking up the potentially-stale
+/// names stack. Other identifiers are looked up normally.
+fn emit_guard_expr(e: &Expr, names: &NameCtx, scrut_tmp: &str, scrut_type: Option<&str>) -> String {
+    match e {
+        Expr::Ident { name, .. } => {
+            // Look up the C identifier in the names stack. If found with a
+            // scalar type, use it directly. Otherwise, fall back to unboxing
+            // scrut_tmp based on scrut_type.
+            if let Some((cid, ty)) = names.stack.get(name).and_then(|v| v.last()) {
+                match ty.as_str() {
+                    "int64_t" => format!("({cid}).i"),
+                    "double" => format!("({cid}).f"),
+                    "bool" => format!("({cid}).b"),
+                    _ => scrut_tmp.to_string(),
+                }
+            } else {
+                // Fallback: use scrut_tmp's raw form based on its type
+                match scrut_type {
+                    Some("int64_t") => format!("({scrut_tmp}).i"),
+                    Some("double") => format!("({scrut_tmp}).f"),
+                    Some("bool") => format!("({scrut_tmp}).b"),
+                    _ => format!("({scrut_tmp}).i"), // default int
+                }
+            }
+        }
+        Expr::Int { value, .. } => value.to_string(),
+        Expr::Float { value, .. } => {
+            if *value == value.floor() && value.abs() < 1e15 {
+                format!("{value:.1}")
+            } else {
+                format!("{value}")
+            }
+        }
+        Expr::Bool { value, .. } => if *value { "1" } else { "0" }.to_string(),
+        Expr::Binary {
+            op, left, right, ..
+        } => {
+            let l = emit_guard_expr(left, names, scrut_tmp, scrut_type);
+            let r = emit_guard_expr(right, names, scrut_tmp, scrut_type);
+            let op_str = match op {
+                zz_frontend::ast::BinOp::Add => "+",
+                zz_frontend::ast::BinOp::Sub => "-",
+                zz_frontend::ast::BinOp::Mul => "*",
+                zz_frontend::ast::BinOp::Div => "/",
+                zz_frontend::ast::BinOp::Rem => "%",
+                zz_frontend::ast::BinOp::Lt => "<",
+                zz_frontend::ast::BinOp::Le => "<=",
+                zz_frontend::ast::BinOp::Gt => ">",
+                zz_frontend::ast::BinOp::Ge => ">=",
+                zz_frontend::ast::BinOp::Eq => "==",
+                zz_frontend::ast::BinOp::Ne => "!=",
+                zz_frontend::ast::BinOp::And => "&&",
+                zz_frontend::ast::BinOp::Or => "||",
+                _ => "??",
+            };
+            format!("({l} {op_str} {r})")
+        }
+        Expr::Unary { op, expr, .. } => {
+            let inner = emit_guard_expr(expr, names, scrut_tmp, scrut_type);
+            match op {
+                zz_frontend::ast::UnOp::Neg => format!("(-{inner})"),
+                zz_frontend::ast::UnOp::Pos => format!("(+{inner})"),
+                zz_frontend::ast::UnOp::Not => format!("(!{inner})"),
+            }
+        }
+        Expr::Paren { expr, .. } => {
+            format!("({})", emit_guard_expr(expr, names, scrut_tmp, scrut_type))
+        }
+        _ => "1".to_string(),
     }
 }
 
@@ -1221,7 +1327,18 @@ impl Lowerer {
                 // scalar (int64_t/double/bool), don't try to extract
                 // .i/.f/.b — just assign directly. Otherwise the boxed
                 // form `(...).i` is invalid C.
-                let value_is_scalar = expr_emits_raw_scalar(value);
+                //
+                // `expr_emits_raw_scalar` only inspects the AST, so it can
+                // disagree with the actual emitted form (e.g. when the
+                // fast-path is bypassed and `zz_binop` is emitted instead
+                // of raw arithmetic). Cross-check against the emitted
+                // string to avoid assigning a zz_value to an int64_t.
+                let ast_says_scalar = expr_emits_raw_scalar(value);
+                let val_is_actually_scalar = val.starts_with("(int64_t)(")
+                    || val.starts_with("(double)(")
+                    || val.starts_with("(bool)(");
+                let value_is_scalar = ast_says_scalar || val_is_actually_scalar;
+                let value_needs_unbox = !val_is_actually_scalar;
                 match target {
                     Expr::Ident { name, .. } => {
                         if let Some(cid) = names.lookup(name.as_str()) {
@@ -1229,7 +1346,7 @@ impl Lowerer {
                             if let Some(ctype) = names.lookup_type(name.as_str()) {
                                 match ctype {
                                     "int64_t" | "double" | "bool" => {
-                                        if value_is_scalar {
+                                        if value_is_scalar && !value_needs_unbox {
                                             out.push_str(&format!("    {cid} = {val};\n"));
                                         } else {
                                             let field = match ctype {
@@ -1328,7 +1445,7 @@ impl Lowerer {
                             if let Some(ctype) = names.lookup_type(&joined) {
                                 match ctype {
                                     "int64_t" | "double" | "bool" => {
-                                        if value_is_scalar {
+                                        if value_is_scalar && !value_needs_unbox {
                                             out.push_str(&format!("    {cid} = {val};\n"));
                                         } else {
                                             let field = match ctype {
@@ -1589,7 +1706,73 @@ impl Lowerer {
             }
             names.leave(v);
         } else {
-            out.push_str("    // for over non-range unsupported\n");
+            // For-in over an array or dict: evaluate the iterable, then
+            // dispatch based on the runtime tag.
+            let iter_val = self.emit_expr(iter, names, out);
+            let iter_tmp = names.fresh("_iter");
+            out.push_str(&format!("    zz_value {iter_tmp} = {iter_val};\n"));
+
+            if vars.len() == 1 {
+                // for x in <array>: iterate array elements by index.
+                let v = &vars[0].name;
+                let cid = names.enter(v);
+                // Update type to zz_value (array elements are boxed)
+                if let Some(vec) = names.stack.get_mut(v) {
+                    if let Some((_, existing_ty)) = vec.last_mut() {
+                        *existing_ty = "zz_value".to_string();
+                    }
+                }
+                let idx = names.fresh("_idx");
+                let len = names.fresh("_len");
+                out.push_str(&format!("    int64_t {idx} = 0;\n"));
+                out.push_str(&format!(
+                    "    int64_t {len} = ({iter_tmp}.tag == ZZ_ARRAY) ? (int64_t){iter_tmp}.arr->len : 0;\n"
+                ));
+                out.push_str(&format!("    for (; {idx} < {len}; {idx}++) {{\n"));
+                out.push_str(&format!(
+                    "        zz_value {cid} = zz_clone({iter_tmp}.arr->items[{idx}]);\n"
+                ));
+                for bstmt in &body.stmts {
+                    self.emit_stmt(bstmt, names, out, false);
+                }
+                out.push_str("    }\n");
+                names.leave(v);
+            } else if vars.len() == 2 {
+                // for k, v in <dict>: iterate dict entries (key, value).
+                let k_name = &vars[0].name;
+                let v_name = &vars[1].name;
+                let k_cid = names.enter(k_name);
+                let v_cid = names.enter(v_name);
+                if let Some(vec) = names.stack.get_mut(k_name) {
+                    if let Some((_, ty)) = vec.last_mut() {
+                        *ty = "zz_value".to_string();
+                    }
+                }
+                if let Some(vec) = names.stack.get_mut(v_name) {
+                    if let Some((_, ty)) = vec.last_mut() {
+                        *ty = "zz_value".to_string();
+                    }
+                }
+                let idx = names.fresh("_idx");
+                let len = names.fresh("_len");
+                out.push_str(&format!("    int64_t {idx} = 0;\n"));
+                out.push_str(&format!(
+                    "    int64_t {len} = ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
+                ));
+                out.push_str(&format!("    for (; {idx} < {len}; {idx}++) {{\n"));
+                out.push_str(&format!(
+                    "        zz_value {k_cid} = (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}};\n"
+                ));
+                out.push_str(&format!(
+                    "        zz_value {v_cid} = zz_clone({iter_tmp}.dict->entries[{idx}].val);\n"
+                ));
+                for bstmt in &body.stmts {
+                    self.emit_stmt(bstmt, names, out, false);
+                }
+                out.push_str("    }\n");
+                names.leave(k_name);
+                names.leave(v_name);
+            }
         }
     }
 
@@ -1618,7 +1801,7 @@ impl Lowerer {
                             let lit = self.emit_str_literal(t);
                             acc = format!("zz_binop_cat({acc}, {lit})");
                         }
-                        FmtPart::Expr(inner, _) => {
+                        FmtPart::Expr(inner, spec) => {
                             let v = self.emit_expr(inner, names, out);
                             // Auto-box if the embedded expression is an unboxed scalar
                             let boxed_v = if let Expr::Ident { name, .. } = inner.as_ref() {
@@ -1630,7 +1813,13 @@ impl Lowerer {
                             } else {
                                 v
                             };
-                            acc = format!("zz_binop_cat_str({acc}, {boxed_v})");
+                            // If format spec is present, use zz_to_str_fmt
+                            if let Some(ref s) = spec {
+                                acc = format!("zz_binop_cat({acc}, zz_str_owned(zz_to_str_fmt({boxed_v}, {spec_str})))",
+                                    spec_str = format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")));
+                            } else {
+                                acc = format!("zz_binop_cat_str({acc}, {boxed_v})");
+                            }
                         }
                     }
                 }
@@ -1674,6 +1863,13 @@ impl Lowerer {
                                     // Non-scalar field (boxed): clone.
                                     _ => return format!("zz_clone({raw})"),
                                 }
+                            } else if base_type == "zz_value" {
+                                // Boxed object field access: u.name where u is a boxed struct
+                                // Use runtime function to get the field value.
+                                let field_name = &parts[1];
+                                return format!(
+                                    "zz_object_get_field(&{base_name}, \"{field_name}\")"
+                                );
                             }
                         }
                     }
@@ -1738,7 +1934,7 @@ impl Lowerer {
                         // like `input()` twice).
                         let tmp = names.fresh("elvis");
                         out.push_str(&format!("    zz_value {tmp} = {l};\n"));
-                        format!("(zz_truthy({tmp}) ? ({tmp}) : ({r}))")
+                        format!("zz_elvis({tmp}, {r})")
                     }
                     _ => {
                         let cop = match op {
@@ -1850,7 +2046,12 @@ impl Lowerer {
                     }
                 }
             }
-            Expr::Call { callee, args, .. } => self.emit_call(callee, args, names, out),
+            Expr::Call {
+                callee,
+                args,
+                named,
+                ..
+            } => self.emit_call(callee, args, named, names, out),
             Expr::While {
                 cond, body, span, ..
             } => {
@@ -1948,13 +2149,75 @@ impl Lowerer {
                     }
                     format!("({c_type}){{ {}}}", field_inits.join(", "))
                 } else {
-                    "zz_unit()".to_string()
+                    // Boxed struct: use zz_object_new + zz_object_set_field
+                    let sig = match self.tp.structs.get(name) {
+                        Some(s) => s,
+                        None => return "zz_unit()".to_string(),
+                    };
+                    let n = sig.fields.len();
+                    let obj_tmp = names.fresh("__obj");
+                    // Build field_names array: interned strings for each field name
+                    let names_arr_tmp = names.fresh("__field_names");
+                    out.push_str(&format!("    zz_value {names_arr_tmp}[{n}];\n"));
+                    for (i, (fname, _)) in sig.fields.iter().enumerate() {
+                        out.push_str(&format!(
+                            "    {names_arr_tmp}[{i}] = zz_str_static(\"{fname}\");\n",
+                        ));
+                    }
+                    // Create the object
+                    out.push_str(&format!(
+                        "    zz_value {obj_tmp} = zz_object_new(\"{name}\", {names_arr_tmp}, {n});\n",
+                    ));
+                    // Set each field from the StructInit's fields list
+                    for (fname, fexpr) in fields {
+                        let fval = self.emit_expr(fexpr, names, out);
+                        // Box the field value if it's a scalar type
+                        let boxed_fval = if let Some((_, field_type)) =
+                            sig.fields.iter().find(|(n, _)| n == fname)
+                        {
+                            match field_type {
+                                zz_checker::Type::Int => format!("zz_int({fval})"),
+                                zz_checker::Type::Float => format!("zz_float({fval})"),
+                                zz_checker::Type::Bool => format!("zz_bool({fval})"),
+                                _ => fval,
+                            }
+                        } else {
+                            fval
+                        };
+                        out.push_str(&format!(
+                            "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed_fval});\n",
+                        ));
+                    }
+                    obj_tmp
                 }
             }
             Expr::Field { obj, name, .. } => {
-                // For now, just emit the object and append the field access
+                // Determine if the object is boxed (zz_value) or unboxed (C struct).
+                // For unboxed: emit C struct field access (e.g., "obj.field").
+                // For boxed: emit zz_object_get_field(&obj, "field").
                 let obj_val = self.emit_expr(obj, names, out);
-                format!("({obj_val}).{name}")
+                // Try to determine if the object type is an unboxed struct.
+                let is_unboxed = if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                    names
+                        .lookup_type(obj_name)
+                        .map(|t| t.starts_with("zz_struct_"))
+                        .unwrap_or(false)
+                } else if let Some(obj_span) = self.tp.types.get(&obj.span()) {
+                    if let zz_checker::Type::Struct(sname) = obj_span {
+                        self.is_unboxed_struct(sname)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if is_unboxed {
+                    // Unboxed struct: direct C field access
+                    format!("({obj_val}).{name}")
+                } else {
+                    // Boxed object: use runtime function
+                    format!("zz_object_get_field(&{obj_val}, \"{name}\")")
+                }
             }
             Expr::Array { elems, span, .. } => {
                 // Fast path: stack-promote when the literal is provably
@@ -2031,7 +2294,23 @@ impl Lowerer {
                 }
                 arr_var
             }
-            Expr::Dict { span, .. } => self.emit_dict_new(*span),
+            Expr::Dict { entries, span, .. } => {
+                // Create a temp to hold the dict, populate entries, return the temp.
+                let dv = names.fresh("__dict");
+                let arena_code = match self.arena_for(*span) {
+                    Some(arena) => format!("zz_dict_new_arena(&{arena})"),
+                    None => "zz_dict_new()".to_string(),
+                };
+                out.push_str(&format!("    zz_value {dv} = {arena_code};\n"));
+                for (k, v) in entries {
+                    let key = self.emit_expr(k, names, out);
+                    let val = self.emit_expr(v, names, out);
+                    out.push_str(&format!(
+                        "    {{ int _de = 0; zz_index_set({dv}, {key}, {val}, &_de); }}\n"
+                    ));
+                }
+                dv
+            }
             #[allow(unreachable_patterns)]
             Expr::Fmt { parts, .. } => {
                 // Format string: build by concatenating parts as strings.
@@ -2047,13 +2326,193 @@ impl Lowerer {
                             let lit = self.emit_str_literal(value);
                             out.push_str(&format!("    {{ zz_value _r = zz_to_str({lit}, &(int){{0}}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
                         }
-                        zz_frontend::ast::FmtPart::Expr(expr, _spec) => {
+                        zz_frontend::ast::FmtPart::Expr(expr, spec) => {
                             let val = self.emit_expr(expr, names, out);
-                            out.push_str(&format!("    {{ zz_value _r = zz_to_str({val}, &(int){{0}}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
+                            if let Some(ref s) = spec {
+                                let spec_str =
+                                    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+                                out.push_str(&format!("    {{ zz_value _r = zz_str_owned(zz_to_str_fmt({val}, {spec_str})); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
+                            } else {
+                                out.push_str(&format!("    {{ zz_value _r = zz_to_str({val}, &(int){{0}}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
+                            }
                         }
                     }
                 }
                 fvar
+            }
+            Expr::Variant { name, arg, .. } => {
+                // `.ok(x)`, `.err(e)`, `.some(x)`, `.none`
+                match name.as_str() {
+                    "some" => {
+                        if let Some(a) = arg {
+                            let inner = self.emit_expr(a, names, out);
+                            format!("zz_variant_some({inner})")
+                        } else {
+                            "(zz_value){ZZ_OPTION_NONE, {0}}".to_string()
+                        }
+                    }
+                    "none" => "(zz_value){ZZ_OPTION_NONE, {0}}".to_string(),
+                    "ok" => {
+                        if let Some(a) = arg {
+                            let inner = self.emit_expr(a, names, out);
+                            format!("zz_variant_ok({inner})")
+                        } else {
+                            "(zz_value){ZZ_RESULT_OK, {0}}".to_string()
+                        }
+                    }
+                    "err" => {
+                        if let Some(a) = arg {
+                            let inner = self.emit_expr(a, names, out);
+                            format!("zz_variant_err({inner})")
+                        } else {
+                            "(zz_value){ZZ_RESULT_ERR, {0}}".to_string()
+                        }
+                    }
+                    _ => "zz_unit()".to_string(),
+                }
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                // Lower match as: evaluate scrutinee once, then if/else chain
+                // on the tag, binding the payload in each arm.
+                let scrut_val = self.emit_expr(scrutinee, names, out);
+                let scrut_tmp = names.fresh("_match");
+                // Box the scrutinee so it's always a zz_value, even for
+                // raw scalar variables (int64_t/double/bool).
+                let boxed = box_scalar_operand(scrutinee, names, &scrut_val);
+                out.push_str(&format!("    zz_value {scrut_tmp} = {boxed};\n"));
+
+                // Determine the scrutinee's scalar type and raw C identifier
+                // for guard expressions (guards need raw C values, not zz_value).
+                let scrut_type = scalar_operand_type(scrutinee, names);
+                let scrut_raw =
+                    scalar_operand_c(scrutinee, names).unwrap_or_else(|| scrut_val.clone());
+
+                let result_tmp = names.fresh("_mresult");
+                out.push_str(&format!("    zz_value {result_tmp} = zz_unit();\n"));
+
+                for (i, arm) in arms.iter().enumerate() {
+                    // For arms that transition to the next arm (i < n-1 and arm has
+                    // no guard OR has guard), we DON'T emit the arm's closing brace
+                    // because the next arm's "} else {" prefix serves as the closing
+                    // brace for this arm. Arms that are the last with no guard emit
+                    // the final "} else {" (not a bare "}").
+                    let is_last_arm = i == arms.len() - 1;
+                    let arm_needs_else_prefix = i > 0; // arms after first get "} else {"
+                                                       // Guard arms never emit a closing brace — the next arm's
+                                                       // "} else {" or "} else if" serves as the closing brace for
+                                                       // this arm's if-block. Non-guard last arm emits "} else {"
+                                                       // and its own closing brace.
+                    let arm_closes_block = match &arm.pat {
+                        Pattern::Binding { .. }
+                        | Pattern::Wildcard { .. }
+                        | Pattern::Variant { .. } => arm.guard.is_none() && is_last_arm,
+                        _ => false,
+                    };
+
+                    match &arm.pat {
+                        Pattern::Variant { name, arg, .. } => {
+                            let tag_check = match name.as_str() {
+                                "ok" => "ZZ_RESULT_OK",
+                                "err" => "ZZ_RESULT_ERR",
+                                "some" => "ZZ_OPTION_SOME",
+                                "none" => "ZZ_OPTION_NONE",
+                                _ => continue,
+                            };
+                            let extractor = match name.as_str() {
+                                "ok" => "zz_match_ok",
+                                "err" => "zz_match_err",
+                                "some" => "zz_match_some",
+                                _ => "",
+                            };
+
+                            let cond = format!("{scrut_tmp}.tag == {tag_check}");
+                            let full_cond = if let Some(guard_expr) = &arm.guard {
+                                let guard_c =
+                                    emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
+                                format!("{cond} && zz_truthy({guard_c})")
+                            } else {
+                                cond
+                            };
+
+                            if arm_needs_else_prefix {
+                                out.push_str(&format!("    }} else if ({full_cond}) {{\n"));
+                            } else {
+                                out.push_str(&format!("    if ({full_cond}) {{\n"));
+                            }
+
+                            if let Some(arg_pat) = arg {
+                                if let Pattern::Binding { name: var_name } = arg_pat.as_ref() {
+                                    let payload_tmp = names.fresh("_payload");
+                                    out.push_str(&format!(
+                                        "        zz_value {payload_tmp} = {extractor}({scrut_tmp});\n"
+                                    ));
+                                    let cid = names.enter(&var_name.name);
+                                    out.push_str(&format!(
+                                        "        zz_value {cid} = {payload_tmp};\n"
+                                    ));
+                                }
+                            }
+                            let arm_val = self.emit_expr(&arm.body, names, out);
+                            out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
+                            if arm_closes_block {
+                                out.push_str("    }\n");
+                            }
+                        }
+                        Pattern::Binding { name } => {
+                            let cid = names.enter(&name.name);
+                            out.push_str(&format!("        zz_value {cid} = {scrut_tmp};\n"));
+
+                            if let Some(guard_expr) = &arm.guard {
+                                let guard_c =
+                                    emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
+                                if arm_needs_else_prefix {
+                                    out.push_str(&format!("    }} else if ({guard_c}) {{\n"));
+                                } else {
+                                    out.push_str(&format!("    if ({guard_c}) {{\n"));
+                                }
+                            } else {
+                                if arm_needs_else_prefix {
+                                    out.push_str("    } else {\n");
+                                } else {
+                                    out.push_str("    {\n");
+                                }
+                            }
+                            let arm_val = self.emit_expr(&arm.body, names, out);
+                            out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
+                            if arm_closes_block {
+                                out.push_str("    }\n");
+                            }
+                        }
+                        Pattern::Wildcard { .. } => {
+                            if let Some(guard_expr) = &arm.guard {
+                                let guard_c =
+                                    emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
+                                if arm_needs_else_prefix {
+                                    out.push_str(&format!("    }} else if ({guard_c}) {{\n"));
+                                } else {
+                                    out.push_str(&format!("    if ({guard_c}) {{\n"));
+                                }
+                            } else {
+                                if arm_needs_else_prefix {
+                                    out.push_str("    } else {\n");
+                                } else {
+                                    out.push_str("    {\n");
+                                }
+                            }
+                            let arm_val = self.emit_expr(&arm.body, names, out);
+                            out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
+                            if arm_closes_block {
+                                out.push_str("    }\n");
+                            }
+                        }
+                        _ => {
+                            out.push_str(&format!("    // unsupported match pattern\n"));
+                        }
+                    }
+                }
+                result_tmp
             }
             _ => "zz_unit()".to_string(),
         }
@@ -2063,6 +2522,7 @@ impl Lowerer {
         &self,
         callee: &Expr,
         args: &[Expr],
+        named: &[(String, Expr)],
         names: &mut NameCtx,
         out: &mut String,
     ) -> String {
@@ -2120,7 +2580,7 @@ impl Lowerer {
                     if let Some((c, r)) = struct_dispatch {
                         (c, Some(r))
                     } else {
-                        let namespaces = ["vec", "str", "dict", "option", "result"];
+                        let namespaces = ["vec", "str", "dict", "option", "result", "http"];
                         let mut found_ns = "";
                         for ns in &namespaces {
                             let candidate = format!("{ns}.{method}");
@@ -2268,6 +2728,38 @@ impl Lowerer {
             }
         }
 
+        // Build the ordered argument list, handling named args by reordering
+        // them to match the function's parameter positions (mirrors the VM's
+        // compile_reordered_args). When named args are present, we look up
+        // the FuncSig and reorder all args accordingly.
+        let ordered_args: Vec<&Expr> = if !named.is_empty() {
+            if let Some(sig) = self.tp.funcs.get(&cname) {
+                let n = sig.params.len();
+                let mut slots: Vec<Option<&Expr>> = vec![None; n];
+                // Fill positional args by index
+                for (i, arg) in args.iter().enumerate() {
+                    if i < n {
+                        slots[i] = Some(arg);
+                    }
+                }
+                // Fill named args by param name
+                for (name, val) in named {
+                    if let Some(idx) = sig.params.iter().position(|(pn, _)| pn == name) {
+                        if slots[idx].is_none() {
+                            slots[idx] = Some(val);
+                        }
+                    }
+                }
+                // Collect non-None slots in order
+                slots.into_iter().flatten().collect()
+            } else {
+                // Function sig not found — fall back to positional then named
+                args.iter().chain(named.iter().map(|(_, v)| v)).collect()
+            }
+        } else {
+            args.iter().collect()
+        };
+
         let mut arg_items: Vec<String> = Vec::new();
         // Clone the method receiver up front; we may need it again in the
         // impl-method call-site branch (which needs the original Expr
@@ -2295,7 +2787,7 @@ impl Lowerer {
                 arg_items.push(boxed);
             }
         }
-        for a in args {
+        for a in ordered_args {
             let emitted = self.emit_expr(a, names, out);
             // Auto-box if this argument is a scalar variable or struct field
             let boxed = if let Expr::Ident { name, .. } = a {
@@ -2450,7 +2942,7 @@ impl Lowerer {
             return format!(
                 "({cf}((zz_value[]){{ {joined} }}, {n}))",
                 joined = arg_items.join(", "),
-                n = args.len()
+                n = arg_items.len()
             );
         }
 
@@ -2656,6 +3148,7 @@ fn native_impl(name: &str) -> Option<&'static str> {
         // Bare builtins (no namespace) registered by stdlib at top level.
         "println" | "io.println" | "std.io.println" => Some("zz_io_println"),
         "print" | "io.print" | "std.io.print" => Some("zz_io_print"),
+        "printz" | "io.printz" | "std.io.printz" => Some("zz_io_print"),
         "input" | "io.read_line" | "main_io.input" => Some("zz_io_input"),
         "len" => Some("zz_len"),
         "typeof" => Some("zz_typeof"),
@@ -2670,6 +3163,10 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "vec.pop" | "std.vec.pop" => Some("zz_vec_pop"),
         "vec.remove" | "std.vec.remove" => Some("zz_vec_remove"),
         "vec.insert" | "std.vec.insert" => Some("zz_vec_insert"),
+        "vec.join" | "std.vec.join" => Some("zz_str_join"), // join is a str function called on arrays
+        "vec.contains" | "std.vec.contains" => Some("zz_vec_contains"),
+        "vec.sort" | "std.vec.sort" => Some("zz_vec_sort"),
+        "vec.reverse" | "std.vec.reverse" => Some("zz_vec_reverse"),
         // str
         "str.length" | "std.str.length" => Some("zz_str_length"),
         "str.to_lower" | "std.str.to_lower" | "str.lower" | "std.str.lower" => Some("zz_str_lower"),
@@ -2682,22 +3179,80 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "str.ends_with" | "std.str.ends_with" | "str.endswith" | "std.str.endswith" => {
             Some("zz_str_endswith")
         }
+        "str.trim" | "std.str.trim" => Some("zz_str_trim"),
+        "str.trim_start" | "std.str.trim_start" => Some("zz_str_trim_start"),
+        "str.trim_end" | "std.str.trim_end" => Some("zz_str_trim_end"),
+        "str.join" | "std.str.join" => Some("zz_str_join"),
+        "str.split" | "std.str.split" => Some("zz_str_split"),
+        // math
+        "math.abs" | "std.math.abs" => Some("zz_math_abs"),
+        "math.sqrt" | "std.math.sqrt" => Some("zz_math_sqrt"),
+        "math.pow" | "std.math.pow" => Some("zz_math_pow"),
+        "math.floor" | "std.math.floor" => Some("zz_math_floor"),
+        "math.ceil" | "std.math.ceil" => Some("zz_math_ceil"),
+        "math.round" | "std.math.round" => Some("zz_math_round"),
+        "math.trunc" | "std.math.trunc" => Some("zz_math_trunc"),
+        "math.signum" | "std.math.signum" => Some("zz_math_signum"),
+        "math.hypot" | "std.math.hypot" => Some("zz_math_hypot"),
+        "math.clamp" | "std.math.clamp" => Some("zz_math_clamp"),
+        "math.root" | "std.math.root" => Some("zz_math_root"),
+        "math.factorial" | "std.math.factorial" => Some("zz_math_factorial"),
+        "math.gcd" | "std.math.gcd" => Some("zz_math_gcd"),
+        "math.lcm" | "std.math.lcm" => Some("zz_math_lcm"),
+        "math.sin" | "std.math.sin" => Some("zz_math_sin"),
+        "math.cos" | "std.math.cos" => Some("zz_math_cos"),
+        "math.tan" | "std.math.tan" => Some("zz_math_tan"),
+        "math.asin" | "std.math.asin" => Some("zz_math_asin"),
+        "math.acos" | "std.math.acos" => Some("zz_math_acos"),
+        "math.atan" | "std.math.atan" => Some("zz_math_atan"),
+        "math.sin_deg" | "std.math.sin_deg" => Some("zz_math_sin_deg"),
+        "math.cos_deg" | "std.math.cos_deg" => Some("zz_math_cos_deg"),
+        "math.tan_deg" | "std.math.tan_deg" => Some("zz_math_tan_deg"),
+        "math.to_radians" | "std.math.to_radians" => Some("zz_math_to_radians"),
+        "math.to_degrees" | "std.math.to_degrees" => Some("zz_math_to_degrees"),
+        "math.log" | "std.math.log" => Some("zz_math_log"),
+        "math.log10" | "std.math.log10" => Some("zz_math_log10"),
+        "math.exp" | "std.math.exp" => Some("zz_math_exp"),
+        "math.random" | "std.math.random" => Some("zz_math_random"),
+        "math.is_nan" | "std.math.is_nan" => Some("zz_math_is_nan"),
+        "math.is_inf" | "std.math.is_inf" => Some("zz_math_is_inf"),
+        "math.PI" | "std.math.PI" => Some("zz_math_pi"),
+        "math.E" | "std.math.E" => Some("zz_math_e"),
+        "math.TAU" | "std.math.TAU" => Some("zz_math_tau"),
+        "math.INF" | "std.math.INF" => Some("zz_math_inf"),
+        "math.NAN" | "std.math.NAN" => Some("zz_math_nan"),
+        "math.isqrt" | "std.math.isqrt" => Some("zz_math_isqrt"),
+        "math.mean" | "std.math.mean" => Some("zz_math_mean"),
+        "math.median" | "std.math.median" => Some("zz_math_median"),
+        "math.rand_range" | "std.math.rand_range" => Some("zz_math_rand_range"),
+        "math.dot_product" | "std.math.dot_product" => Some("zz_math_dot_product"),
+        "math.magnitude" | "std.math.magnitude" => Some("zz_math_magnitude"),
         // json
         "json.parse" | "std.json.parse" => Some("zz_json_parse"),
         "json.stringify" | "std.json.stringify" => Some("zz_json_stringify"),
         "json.null" | "std.json.null" => Some("zz_json_null"),
         // env
         "env.get" | "std.env.get" | "envmod.get" | "std.envmod.get" => Some("zz_env_get"),
+        "env.get_var" | "std.env.get_var" | "envmod.get_var" | "std.envmod.get_var" => {
+            Some("zz_env_get")
+        }
+        "env.var" | "std.env.var" | "envmod.var" | "std.envmod.var" => Some("zz_env_var"),
         "env.args" | "std.env.args" | "envmod.args" | "std.envmod.args" => Some("zz_env_args"),
         // dict
         "dict.len" => Some("zz_dict_len_val"),
         "dict.keys" => Some("zz_dict_keys"),
         "dict.has" => Some("zz_dict_has"),
+        // option / result
+        "option.expect" | "std.option.expect" => Some("zz_option_expect"),
+        "result.expect" | "std.result.expect" => Some("zz_result_expect"),
         // fs
         "fs.read" | "std.fs.read" => Some("zz_fs_read"),
+        "fs.read_to_string" | "std.fs.read_to_string" => Some("zz_fs_read"),
         "fs.write" | "std.fs.write" => Some("zz_fs_write"),
         "fs.exists" | "std.fs.exists" => Some("zz_fs_exists"),
-        "fs.remove" | "std.fs.remove" => Some("zz_fs_remove"),
+        "fs.remove" | "std.fs.remove" | "fs.remove_file" | "std.fs.remove_file" => {
+            Some("zz_fs_remove")
+        }
         "fs.mkdir" | "std.fs.mkdir" => Some("zz_fs_mkdir"),
         "fs.readdir" | "std.fs.readdir" => Some("zz_fs_readdir"),
         // encoding
@@ -2709,8 +3264,11 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "encoding.base64_decode" | "std.encoding.base64_decode" => {
             Some("zz_encoding_base64_decode")
         }
+        "encoding.hex_encode" | "std.encoding.hex_encode" => Some("zz_encoding_hex_encode"),
+        "encoding.hex_decode" | "std.encoding.hex_decode" => Some("zz_encoding_hex_decode"),
         // time
         "time.now_ms" | "std.time.now_ms" => Some("zz_time_now_ms"),
+        "time.sleep_ms" | "std.time.sleep_ms" => Some("zz_time_sleep_ms"),
         // channels
         "chan" | "std.chan" => Some("zz_chan_new"),
         "chan.send" | "std.chan.send" => Some("zz_chan_send"),
@@ -2729,6 +3287,14 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "http.pipe" | "std.http.pipe" => Some("zz_http_log"),
         "http.listen" | "std.http.listen" => Some("zz_http_listen"),
         "http.handle" | "std.http.handle" => Some("zz_http_handle"),
+        // http Response methods
+        "http.status" | "std.http.status" => Some("zz_http_response_status"),
+        "http.text" | "std.http.text" => Some("zz_http_response_text"),
+        "http.json" | "std.http.json" => Some("zz_http_response_json"),
+        "http.headers" | "std.http.headers" => Some("zz_http_response_headers"),
+        // http request functions
+        "http.get" | "std.http.get" => Some("zz_http_get"),
+        "http.post" | "std.http.post" => Some("zz_http_post"),
         _ => None,
     }
 }
