@@ -1863,6 +1863,13 @@ impl Lowerer {
                                     // Non-scalar field (boxed): clone.
                                     _ => return format!("zz_clone({raw})"),
                                 }
+                            } else if base_type == "zz_value" {
+                                // Boxed object field access: u.name where u is a boxed struct
+                                // Use runtime function to get the field value.
+                                let field_name = &parts[1];
+                                return format!(
+                                    "zz_object_get_field(&{base_name}, \"{field_name}\")"
+                                );
                             }
                         }
                     }
@@ -2142,13 +2149,75 @@ impl Lowerer {
                     }
                     format!("({c_type}){{ {}}}", field_inits.join(", "))
                 } else {
-                    "zz_unit()".to_string()
+                    // Boxed struct: use zz_object_new + zz_object_set_field
+                    let sig = match self.tp.structs.get(name) {
+                        Some(s) => s,
+                        None => return "zz_unit()".to_string(),
+                    };
+                    let n = sig.fields.len();
+                    let obj_tmp = names.fresh("__obj");
+                    // Build field_names array: interned strings for each field name
+                    let names_arr_tmp = names.fresh("__field_names");
+                    out.push_str(&format!("    zz_value {names_arr_tmp}[{n}];\n"));
+                    for (i, (fname, _)) in sig.fields.iter().enumerate() {
+                        out.push_str(&format!(
+                            "    {names_arr_tmp}[{i}] = zz_str_static(\"{fname}\");\n",
+                        ));
+                    }
+                    // Create the object
+                    out.push_str(&format!(
+                        "    zz_value {obj_tmp} = zz_object_new(\"{name}\", {names_arr_tmp}, {n});\n",
+                    ));
+                    // Set each field from the StructInit's fields list
+                    for (fname, fexpr) in fields {
+                        let fval = self.emit_expr(fexpr, names, out);
+                        // Box the field value if it's a scalar type
+                        let boxed_fval = if let Some((_, field_type)) =
+                            sig.fields.iter().find(|(n, _)| n == fname)
+                        {
+                            match field_type {
+                                zz_checker::Type::Int => format!("zz_int({fval})"),
+                                zz_checker::Type::Float => format!("zz_float({fval})"),
+                                zz_checker::Type::Bool => format!("zz_bool({fval})"),
+                                _ => fval,
+                            }
+                        } else {
+                            fval
+                        };
+                        out.push_str(&format!(
+                            "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed_fval});\n",
+                        ));
+                    }
+                    obj_tmp
                 }
             }
             Expr::Field { obj, name, .. } => {
-                // For now, just emit the object and append the field access
+                // Determine if the object is boxed (zz_value) or unboxed (C struct).
+                // For unboxed: emit C struct field access (e.g., "obj.field").
+                // For boxed: emit zz_object_get_field(&obj, "field").
                 let obj_val = self.emit_expr(obj, names, out);
-                format!("({obj_val}).{name}")
+                // Try to determine if the object type is an unboxed struct.
+                let is_unboxed = if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                    names
+                        .lookup_type(obj_name)
+                        .map(|t| t.starts_with("zz_struct_"))
+                        .unwrap_or(false)
+                } else if let Some(obj_span) = self.tp.types.get(&obj.span()) {
+                    if let zz_checker::Type::Struct(sname) = obj_span {
+                        self.is_unboxed_struct(sname)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if is_unboxed {
+                    // Unboxed struct: direct C field access
+                    format!("({obj_val}).{name}")
+                } else {
+                    // Boxed object: use runtime function
+                    format!("zz_object_get_field(&{obj_val}, \"{name}\")")
+                }
             }
             Expr::Array { elems, span, .. } => {
                 // Fast path: stack-promote when the literal is provably

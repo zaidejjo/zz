@@ -42,6 +42,7 @@ typedef enum {
     ZZ_RANGE,
     ZZ_CHAN,
     ZZ_TASK_JOIN,
+    ZZ_OBJECT,
 } zz_tag;
 
 typedef struct zz_value zz_value;
@@ -52,6 +53,7 @@ typedef struct zz_dict zz_dict;
 typedef struct zz_dict_entry zz_dict_entry;
 typedef struct zz_chan zz_chan;
 typedef struct zz_task_join zz_task_join;
+typedef struct zz_object zz_object;
 
 // Refcounted string (null-terminated for C interop).
 //
@@ -87,6 +89,7 @@ struct zz_value {
         zz_chan *chan;
         zz_task_join *task;
         zz_value *payload;   // Option/Result inner value (heap-allocated)
+        zz_object *obj;      // boxed struct instance
     };
 };
 
@@ -124,6 +127,16 @@ struct zz_dict {
 struct zz_dict_entry {
     zz_str *key;
     zz_value val;
+};
+
+// Boxed struct instance (reference-counted).
+// Fields are stored as alternating name/value pairs (zz_value) for
+// runtime field access by name. Field names are interned strings.
+struct zz_object {
+    size_t refs;
+    const char *type_name;  // struct type name for method dispatch
+    size_t len;             // number of fields (pairs count = len * 2)
+    zz_value fields[];      // alternating: name (str), value, name, value, ...
 };
 
 typedef zz_value (*zz_native_fn)(zz_value *args, size_t argc);
@@ -399,6 +412,11 @@ zz_value zz_encoding_hex_decode(zz_value s, int *err);
 zz_value zz_variant_some(zz_value inner);
 zz_value zz_variant_ok(zz_value inner);
 zz_value zz_variant_err(zz_value inner);
+
+// Boxed struct constructors and accessors.
+zz_value zz_object_new(const char *type_name, zz_value *field_names, size_t n);
+void zz_object_set_field(zz_value *obj, const char *name, zz_value val);
+zz_value zz_object_get_field(zz_value *obj, const char *name);
 
 // Match extraction helpers.
 zz_value zz_match_ok(zz_value v);

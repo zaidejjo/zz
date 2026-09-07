@@ -363,6 +363,8 @@ static void zz_release_func(zz_func *f) {
 
 // Forward declaration for variant payload release.
 static void zz_release_variant(zz_value *v);
+// Forward declaration for boxed object release.
+static void zz_release_object(zz_value *v);
 
 void zz_retain_arc(zz_value *v) {
     switch (v->tag) {
@@ -504,6 +506,9 @@ void zz_release(zz_value *v) {
     case ZZ_RESULT_ERR:
         zz_release_variant(v);
         break;
+    case ZZ_OBJECT:
+        zz_release_object(v);
+        break;
     default:
         break;
     }
@@ -512,7 +517,7 @@ void zz_release(zz_value *v) {
 void zz_assign(zz_value *dst, zz_value src) {
     // Release old value if it's a refcounted type.
     if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY ||
-        dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC) {
+        dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC || dst->tag == ZZ_OBJECT) {
         zz_release(dst);
     }
     *dst = src;
@@ -2112,6 +2117,67 @@ static void zz_release_variant(zz_value *v) {
         free(v->payload);
         v->payload = NULL;
     }
+}
+
+// ---- boxed struct (object) constructors and accessors --------------------
+
+zz_value zz_object_new(const char *type_name, zz_value *field_names, size_t n) {
+    // Allocate: refs + type_name + len + (n * 2 fields: name, value pairs)
+    zz_object *obj = (zz_object *)malloc(sizeof(zz_object) + n * 2 * sizeof(zz_value));
+    obj->refs = 1;
+    obj->type_name = type_name;
+    obj->len = n;
+    // Initialize all field slots to unit
+    for (size_t i = 0; i < n * 2; i++) {
+        obj->fields[i] = (zz_value){ZZ_UNIT, {.i = 0}};
+    }
+    // Store field names in the alternating slots
+    for (size_t i = 0; i < n; i++) {
+        obj->fields[i * 2] = field_names[i]; // name (zz_value, should be str)
+        // fields[i * 2 + 1] is the value slot (initialized to unit above)
+    }
+    return (zz_value){ZZ_OBJECT, {.obj = obj}};
+}
+
+void zz_object_set_field(zz_value *obj, const char *name, zz_value val) {
+    if (obj->tag != ZZ_OBJECT || !obj->obj) return;
+    zz_object *o = obj->obj;
+    for (size_t i = 0; i < o->len; i++) {
+        zz_value *fname = &o->fields[i * 2];
+        if (fname->tag == ZZ_STR && strcmp(fname->s->data, name) == 0) {
+            zz_value *slot = &o->fields[i * 2 + 1];
+            zz_release(slot);
+            *slot = zz_clone(val);
+            return;
+        }
+    }
+}
+
+zz_value zz_object_get_field(zz_value *obj, const char *name) {
+    if (obj->tag != ZZ_OBJECT || !obj->obj) return zz_unit();
+    zz_object *o = obj->obj;
+    for (size_t i = 0; i < o->len; i++) {
+        zz_value *fname = &o->fields[i * 2];
+        if (fname->tag == ZZ_STR && strcmp(fname->s->data, name) == 0) {
+            return zz_clone(o->fields[i * 2 + 1]);
+        }
+    }
+    return zz_unit();
+}
+
+// Release helper for boxed objects.
+static void zz_release_object(zz_value *v) {
+    if (v->tag != ZZ_OBJECT || !v->obj) return;
+    zz_object *o = v->obj;
+    if (o->refs == 0) return; // already freed
+    if (--o->refs == 0) {
+        for (size_t i = 0; i < o->len; i++) {
+            zz_release(&o->fields[i * 2]);     // name (str)
+            zz_release(&o->fields[i * 2 + 1]); // value
+        }
+        free(o);
+    }
+    v->obj = NULL;
 }
 
 // ---- match extraction helpers ------------------------------------------
