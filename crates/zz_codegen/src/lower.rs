@@ -2405,10 +2405,9 @@ impl Lowerer {
                                                        // this arm's if-block. Non-guard last arm emits "} else {"
                                                        // and its own closing brace.
                     let arm_closes_block = match &arm.pat {
-                        Pattern::Binding { .. } | Pattern::Wildcard { .. } => {
-                            arm.guard.is_none() && is_last_arm
-                        }
-                        Pattern::Variant { .. } => false,
+                        Pattern::Binding { .. }
+                        | Pattern::Wildcard { .. }
+                        | Pattern::Variant { .. } => arm.guard.is_none() && is_last_arm,
                         _ => false,
                     };
 
