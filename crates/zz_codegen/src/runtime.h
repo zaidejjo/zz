@@ -86,6 +86,7 @@ struct zz_value {
         zz_func *fn;
         zz_chan *chan;
         zz_task_join *task;
+        zz_value *payload;   // Option/Result inner value (heap-allocated)
     };
 };
 
@@ -308,8 +309,51 @@ zz_value zz_call(zz_value fn, zz_value *args, size_t argc, int *err);
 zz_value zz_io_println(zz_value v, int *err);
 zz_value zz_io_print(zz_value v, int *err);
 zz_value zz_io_input(zz_value prompt, int *err);
+zz_value zz_math_abs(zz_value v, int *err);
+zz_value zz_math_sqrt(zz_value v, int *err);
 zz_value zz_math_pow(zz_value a, zz_value b, int *err);
+zz_value zz_math_floor(zz_value v, int *err);
+zz_value zz_math_ceil(zz_value v, int *err);
+zz_value zz_math_round(zz_value v, int *err);
+zz_value zz_math_trunc(zz_value v, int *err);
+zz_value zz_math_signum(zz_value v, int *err);
+zz_value zz_math_hypot(zz_value x, zz_value y, int *err);
+zz_value zz_math_clamp(zz_value val, zz_value min, zz_value max, int *err);
+zz_value zz_math_root(zz_value x, zz_value n, int *err);
+zz_value zz_math_factorial(zz_value n, int *err);
+zz_value zz_math_gcd(zz_value a, zz_value b, int *err);
+zz_value zz_math_lcm(zz_value a, zz_value b, int *err);
+zz_value zz_math_sin(zz_value x, int *err);
+zz_value zz_math_cos(zz_value x, int *err);
+zz_value zz_math_tan(zz_value x, int *err);
+zz_value zz_math_asin(zz_value x, int *err);
+zz_value zz_math_acos(zz_value x, int *err);
+zz_value zz_math_atan(zz_value x, int *err);
+zz_value zz_math_sin_deg(zz_value x, int *err);
+zz_value zz_math_cos_deg(zz_value x, int *err);
+zz_value zz_math_tan_deg(zz_value x, int *err);
+zz_value zz_math_to_radians(zz_value deg, int *err);
+zz_value zz_math_to_degrees(zz_value rad, int *err);
+zz_value zz_math_log(zz_value x, int *err);
+zz_value zz_math_log10(zz_value x, int *err);
+zz_value zz_math_exp(zz_value x, int *err);
+zz_value zz_math_random(zz_value unused, int *err);
+zz_value zz_math_is_nan(zz_value x, int *err);
+zz_value zz_math_is_inf(zz_value x, int *err);
+zz_value zz_math_pi(zz_value unused, int *err);
+zz_value zz_math_e(zz_value unused, int *err);
+zz_value zz_math_tau(zz_value unused, int *err);
+zz_value zz_math_inf(zz_value unused, int *err);
+zz_value zz_math_nan(zz_value unused, int *err);
+zz_value zz_math_isqrt(zz_value n, int *err);
+zz_value zz_math_mean(zz_value list, int *err);
+zz_value zz_math_median(zz_value list, int *err);
+zz_value zz_math_rand_range(zz_value min, zz_value max, int *err);
+zz_value zz_math_dot_product(zz_value v1, zz_value v2, int *err);
+zz_value zz_math_magnitude(zz_value v, int *err);
+zz_value zz_math_matrix_mul(zz_value m1, zz_value m2, int *err);
 zz_value zz_time_now_ms(zz_value unused, int *err);
+zz_value zz_time_sleep_ms(zz_value ms, int *err);
 
 // http AOT server — thread-per-connection, returns "OK" for all requests
 // All functions follow the native call convention: (zz_value... , int *err)
@@ -322,6 +366,8 @@ zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_valu
 // Codegen helper shims.
 zz_value zz_call_native1(zz_value (*f)(zz_value, int *), zz_value a);
 zz_value zz_call_native0(zz_value (*f)(zz_value, int *));
+zz_value zz_call_native2(zz_value (*f)(zz_value, zz_value, int *), zz_value a, zz_value b);
+zz_value zz_call_native3(zz_value (*f)(zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c);
 zz_value zz_binop_cat(zz_value a, zz_value b);       // str concat
 zz_value zz_binop_cat_str(zz_value a, zz_value b);   // str + Display(b)
 // In-place append: reuses *a->s buffer if refs==1 and capacity allows.
@@ -329,10 +375,40 @@ zz_value zz_binop_cat_str(zz_value a, zz_value b);   // str + Display(b)
 void zz_str_append_str(zz_value *a, zz_value b);
 void zz_str_append_lit(zz_value *a, const char *lit, size_t len);
 zz_value zz_range_build(zz_value start, zz_value end);
+zz_value zz_elvis(zz_value left, zz_value right);
+
+// str functions
+zz_value zz_str_trim(zz_value s, int *err);
+zz_value zz_str_trim_start(zz_value s, int *err);
+zz_value zz_str_trim_end(zz_value s, int *err);
+zz_value zz_str_join(zz_value items, zz_value sep, int *err);
+zz_value zz_str_split(zz_value s, zz_value sep, int *err);
+
+// env functions
+zz_value zz_env_var(zz_value name, int *err);
+
+// option/result
+zz_value zz_option_expect(zz_value opt, zz_value msg, int *err);
+zz_value zz_result_expect(zz_value res, zz_value msg, int *err);
+
+// encoding functions
+zz_value zz_encoding_hex_encode(zz_value s, int *err);
+zz_value zz_encoding_hex_decode(zz_value s, int *err);
+
+// Variant constructors (Option / Result).
+zz_value zz_variant_some(zz_value inner);
+zz_value zz_variant_ok(zz_value inner);
+zz_value zz_variant_err(zz_value inner);
+
+// Match extraction helpers.
+zz_value zz_match_ok(zz_value v);
+zz_value zz_match_err(zz_value v);
+zz_value zz_match_some(zz_value v);
 
 // ---- formatting --------------------------------------------------------
 void zz_print_value(FILE *out, const zz_value *v);
 char *zz_value_to_string(const zz_value *v);  // malloc'd
+char *zz_to_str_fmt(zz_value v, const char *spec);  // malloc'd
 
 // ---- runtime glue ------------------------------------------------------
 // Generated code calls zz_main (top-level statements) then zz_call_main.

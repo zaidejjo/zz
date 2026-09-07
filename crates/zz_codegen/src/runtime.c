@@ -361,6 +361,9 @@ static void zz_release_func(zz_func *f) {
     }
 }
 
+// Forward declaration for variant payload release.
+static void zz_release_variant(zz_value *v);
+
 void zz_retain_arc(zz_value *v) {
     switch (v->tag) {
     case ZZ_STR:
@@ -376,6 +379,11 @@ void zz_retain_arc(zz_value *v) {
         break;
     case ZZ_FUNC:
         zz_retain_func(v->fn);
+        break;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+        if (v->payload) zz_retain(v->payload);
         break;
     default:
         break;
@@ -402,6 +410,11 @@ void zz_release_arc(zz_value *v) {
     case ZZ_FUNC:
         zz_release_func(v->fn);
         break;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+        zz_release_variant(v);
+        break;
     default:
         break;
     }
@@ -422,6 +435,11 @@ zz_value zz_clone_arc(zz_value v) {
         break;
     case ZZ_FUNC:
         zz_retain_func(v.fn);
+        break;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+        if (v.payload) zz_retain(v.payload);
         break;
     default:
         break;
@@ -447,6 +465,11 @@ void zz_retain(zz_value *v) {
         break;
     case ZZ_FUNC:
         zz_retain_func(v->fn);
+        break;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+        if (v->payload) zz_retain(v->payload);
         break;
     default:
         break;
@@ -475,6 +498,11 @@ void zz_release(zz_value *v) {
         break;
     case ZZ_FUNC:
         zz_release_func(v->fn);
+        break;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+        zz_release_variant(v);
         break;
     default:
         break;
@@ -509,6 +537,11 @@ zz_value zz_clone(zz_value v) {
         break;
     case ZZ_FUNC:
         zz_retain_func(v.fn);
+        break;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+        if (v.payload) zz_retain(v.payload);
         break;
     default:
         break;
@@ -929,10 +962,13 @@ void zz_print_value(FILE *out, const zz_value *v) {
         break;
     case ZZ_FLOAT: {
         double x = v->f;
+        if (x != x) { fputs("nan", out); break; }
+        if (x == 1.0/0.0) { fputs("inf", out); break; }
+        if (x == -1.0/0.0) { fputs("-inf", out); break; }
         if (x == (int64_t)x && x < 1e15 && x > -1e15) {
             fprintf(out, "%.1f", x);
         } else {
-            fprintf(out, "%.17g", x);
+            fprintf(out, "%.15g", x);
         }
         break;
     }
@@ -942,11 +978,59 @@ void zz_print_value(FILE *out, const zz_value *v) {
     case ZZ_STR:
         fwrite(v->s->data, 1, v->s->len, out);
         break;
-    case ZZ_OPTION_SOME: {
-        // payload printed as .some(...) — not supported inline; fallthrough
-        fputs(".? ", out);
+    case ZZ_ARRAY:
+        fputs("[", out);
+        if (v->arr) {
+            for (size_t i = 0; i < v->arr->len; i++) {
+                if (i > 0) fputs(", ", out);
+                zz_print_value(out, &v->arr->items[i]);
+            }
+        }
+        fputs("]", out);
         break;
-    }
+    case ZZ_DICT:
+        fputs("{", out);
+        if (v->dict) {
+            for (size_t i = 0; i < v->dict->len; i++) {
+                if (i > 0) fputs(", ", out);
+                fwrite(v->dict->entries[i].key->data, 1,
+                       v->dict->entries[i].key->len, out);
+                fputs(": ", out);
+                zz_print_value(out, &v->dict->entries[i].val);
+            }
+        }
+        fputs("}", out);
+        break;
+    case ZZ_OPTION_SOME:
+        fputs(".some(", out);
+        if (v->payload) zz_print_value(out, v->payload);
+        fputs(")", out);
+        break;
+    case ZZ_OPTION_NONE:
+        fputs(".none", out);
+        break;
+    case ZZ_RESULT_OK:
+        fputs(".ok(", out);
+        if (v->payload) zz_print_value(out, v->payload);
+        fputs(")", out);
+        break;
+    case ZZ_RESULT_ERR:
+        fputs(".err(", out);
+        if (v->payload) zz_print_value(out, v->payload);
+        fputs(")", out);
+        break;
+    case ZZ_RANGE:
+        fprintf(out, "%lld..%lld", (long long)v->i, (long long)v->i);
+        break;
+    case ZZ_FUNC:
+        fputs("<func>", out);
+        break;
+    case ZZ_CHAN:
+        fputs("<chan>", out);
+        break;
+    case ZZ_TASK_JOIN:
+        fputs("<task.join>", out);
+        break;
     default:
         fputs("<value>", out);
         break;
@@ -957,6 +1041,7 @@ zz_value zz_io_println(zz_value v, int *err) {
     (void)err;
     zz_print_value(stdout, &v);
     fputc('\n', stdout);
+    fflush(stdout);
     return zz_unit();
 }
 
@@ -990,10 +1075,9 @@ zz_value zz_io_input(zz_value prompt, int *err) {
 
 zz_value zz_math_pow(zz_value a, zz_value b, int *err) {
     (void)err;
-    if (a.tag == ZZ_INT && b.tag == ZZ_INT)
-        return zz_int((int64_t)dpow((double)a.i, (double)b.i));
-    double x = a.tag == ZZ_FLOAT ? a.f : (double)a.i;
-    double y = b.tag == ZZ_FLOAT ? b.f : (double)b.i;
+    // Always return float to match VM behavior.
+    double x = a.tag == ZZ_FLOAT ? a.f : (a.tag == ZZ_INT ? (double)a.i : 0.0);
+    double y = b.tag == ZZ_FLOAT ? b.f : (b.tag == ZZ_INT ? (double)b.i : 0.0);
     return zz_float(dpow(x, y));
 }
 
@@ -1009,6 +1093,19 @@ zz_value zz_time_now_ms(zz_value unused, int *err) {
     return zz_int(ms);
 }
 
+/// `time.sleep_ms(ms)` — sleep for the given number of milliseconds.
+zz_value zz_time_sleep_ms(zz_value ms, int *err) {
+    (void)err;
+    int64_t m = ms.tag == ZZ_INT ? ms.i : 0;
+    if (m > 0) {
+        struct timespec ts;
+        ts.tv_sec = m / 1000;
+        ts.tv_nsec = (m % 1000) * 1000000;
+        nanosleep(&ts, NULL);
+    }
+    return zz_unit();
+}
+
 // ---- formatting (malloc'd, caller frees) --------------------------------
 static char *strdup_len(const char *s, size_t len) {
     char *o = (char *)malloc(len + 1);
@@ -1017,29 +1114,179 @@ static char *strdup_len(const char *s, size_t len) {
     return o;
 }
 
-char *zz_value_to_string(const zz_value *v) {
+// Simple growable buffer for value_to_string.
+typedef struct {
+    char  *data;
+    size_t len;
+    size_t cap;
+} strbuf;
+
+static void sb_init(strbuf *sb) {
+    sb->cap  = 64;
+    sb->len  = 0;
+    sb->data = (char *)malloc(sb->cap);
+    sb->data[0] = '\0';
+}
+
+static void sb_append(strbuf *sb, const char *s, size_t slen) {
+    while (sb->len + slen + 1 > sb->cap) {
+        sb->cap *= 2;
+        sb->data = (char *)realloc(sb->data, sb->cap);
+    }
+    memcpy(sb->data + sb->len, s, slen);
+    sb->len += slen;
+    sb->data[sb->len] = '\0';
+}
+
+static void sb_append_str(strbuf *sb, const char *s) {
+    sb_append(sb, s, strlen(s));
+}
+
+static void sb_append_c(strbuf *sb, char c) {
+    sb_append(sb, &c, 1);
+}
+
+static void zz_value_to_strbuf(strbuf *sb, const zz_value *v) {
     char buf[128];
     switch (v->tag) {
+    case ZZ_UNIT:
+        break;
     case ZZ_INT:
         snprintf(buf, sizeof buf, "%lld", (long long)v->i);
-        return strdup_len(buf, strlen(buf));
+        sb_append_str(sb, buf);
+        break;
     case ZZ_FLOAT: {
         double x = v->f;
+        if (x != x) { sb_append_str(sb, "nan"); break; }
+        if (x == 1.0/0.0) { sb_append_str(sb, "inf"); break; }
+        if (x == -1.0/0.0) { sb_append_str(sb, "-inf"); break; }
         if (x == (int64_t)x && x < 1e15 && x > -1e15)
             snprintf(buf, sizeof buf, "%.1f", x);
         else
-            snprintf(buf, sizeof buf, "%.17g", x);
-        return strdup_len(buf, strlen(buf));
+            snprintf(buf, sizeof buf, "%.15g", x);
+        sb_append_str(sb, buf);
+        break;
     }
     case ZZ_BOOL:
-        return strdup_len(v->b ? "true" : "false", v->b ? 4 : 5);
+        sb_append_str(sb, v->b ? "true" : "false");
+        break;
     case ZZ_STR:
-        return strdup_len(v->s->data, v->s->len);
-    case ZZ_UNIT:
-        return strdup_len("", 0);
+        sb_append(sb, v->s->data, v->s->len);
+        break;
+    case ZZ_ARRAY:
+        sb_append_c(sb, '[');
+        if (v->arr) {
+            for (size_t i = 0; i < v->arr->len; i++) {
+                if (i > 0) sb_append_str(sb, ", ");
+                zz_value_to_strbuf(sb, &v->arr->items[i]);
+            }
+        }
+        sb_append_c(sb, ']');
+        break;
+    case ZZ_DICT:
+        sb_append_c(sb, '{');
+        if (v->dict) {
+            for (size_t i = 0; i < v->dict->len; i++) {
+                if (i > 0) sb_append_str(sb, ", ");
+                sb_append(sb, v->dict->entries[i].key->data,
+                          v->dict->entries[i].key->len);
+                sb_append_str(sb, ": ");
+                zz_value_to_strbuf(sb, &v->dict->entries[i].val);
+            }
+        }
+        sb_append_c(sb, '}');
+        break;
+    case ZZ_OPTION_SOME:
+        sb_append_str(sb, ".some(");
+        if (v->payload) zz_value_to_strbuf(sb, v->payload);
+        sb_append_c(sb, ')');
+        break;
+    case ZZ_OPTION_NONE:
+        sb_append_str(sb, ".none");
+        break;
+    case ZZ_RESULT_OK:
+        sb_append_str(sb, ".ok(");
+        if (v->payload) zz_value_to_strbuf(sb, v->payload);
+        sb_append_c(sb, ')');
+        break;
+    case ZZ_RESULT_ERR:
+        sb_append_str(sb, ".err(");
+        if (v->payload) zz_value_to_strbuf(sb, v->payload);
+        sb_append_c(sb, ')');
+        break;
+    case ZZ_RANGE:
+        snprintf(buf, sizeof buf, "%lld..%lld", (long long)v->i, (long long)v->i);
+        sb_append_str(sb, buf);
+        break;
+    case ZZ_FUNC:
+        sb_append_str(sb, "<func>");
+        break;
+    case ZZ_CHAN:
+        sb_append_str(sb, "<chan>");
+        break;
+    case ZZ_TASK_JOIN:
+        sb_append_str(sb, "<task.join>");
+        break;
     default:
-        return strdup_len("<value>", 7);
+        sb_append_str(sb, "<value>");
+        break;
     }
+}
+
+char *zz_value_to_string(const zz_value *v) {
+    strbuf sb;
+    sb_init(&sb);
+    zz_value_to_strbuf(&sb, v);
+    return sb.data;
+}
+
+// zz_to_str_fmt(val, spec) — format a value using a format spec string.
+// The spec is the part after `:` in f-strings, e.g. ".2f", "x", "X", "o", "b".
+// If spec is NULL or empty, falls back to zz_value_to_string.
+char *zz_to_str_fmt(zz_value v, const char *spec) {
+    if (!spec || spec[0] == '\0') return zz_value_to_string(&v);
+    // Float format: .Nf, .Ne, .Ng, etc.
+    if (v.tag == ZZ_FLOAT || (v.tag == ZZ_INT && spec[0] == '.')) {
+        double d = v.tag == ZZ_FLOAT ? v.f : (double)v.i;
+        char fmt[32];
+        snprintf(fmt, sizeof fmt, "%%%s", spec);
+        char buf[256];
+        snprintf(buf, sizeof buf, fmt, d);
+        return strdup_len(buf, strlen(buf));
+    }
+    // Integer format: x, X, o, b, d
+    if (v.tag == ZZ_INT) {
+        int64_t i = v.i;
+        char buf[128];
+        if (strcmp(spec, "x") == 0) { snprintf(buf, sizeof buf, "%llx", (unsigned long long)i); }
+        else if (strcmp(spec, "X") == 0) { snprintf(buf, sizeof buf, "%llX", (unsigned long long)i); }
+        else if (strcmp(spec, "o") == 0) { snprintf(buf, sizeof buf, "%llo", (unsigned long long)i); }
+        else if (strcmp(spec, "b") == 0) {
+            // Binary
+            if (i == 0) { buf[0] = '0'; buf[1] = '\0'; }
+            else {
+                int pos = 0;
+                unsigned long long u = (unsigned long long)i;
+                char tmp[64];
+                while (u > 0) { tmp[pos++] = '0' + (u & 1); u >>= 1; }
+                for (int j = 0; j < pos; j++) buf[j] = tmp[pos - 1 - j];
+                buf[pos] = '\0';
+            }
+        }
+        else if (strcmp(spec, "d") == 0) { snprintf(buf, sizeof buf, "%lld", (long long)i); }
+        else { snprintf(buf, sizeof buf, "%lld", (long long)i); }
+        return strdup_len(buf, strlen(buf));
+    }
+    // Float with .Nf etc. when value is int
+    if (v.tag == ZZ_INT && spec[0] == '.') {
+        double d = (double)v.i;
+        char fmt[32];
+        snprintf(fmt, sizeof fmt, "%%%s", spec);
+        char buf[256];
+        snprintf(buf, sizeof buf, fmt, d);
+        return strdup_len(buf, strlen(buf));
+    }
+    return zz_value_to_string(&v);
 }
 
 
@@ -1829,6 +2076,54 @@ zz_value zz_call_native3(zz_value (*f)(zz_value, zz_value, zz_value, int *), zz_
     return r;
 }
 
+// ---- variant constructors (Option / Result) ---------------------------
+// Store the inner value on the heap so match can extract it via payload pointer.
+
+zz_value zz_variant_some(zz_value inner) {
+    zz_value *p = (zz_value *)malloc(sizeof(zz_value));
+    *p = inner;
+    return (zz_value){ZZ_OPTION_SOME, {.payload = p}};
+}
+
+zz_value zz_variant_ok(zz_value inner) {
+    zz_value *p = (zz_value *)malloc(sizeof(zz_value));
+    *p = inner;
+    return (zz_value){ZZ_RESULT_OK, {.payload = p}};
+}
+
+zz_value zz_variant_err(zz_value inner) {
+    zz_value *p = (zz_value *)malloc(sizeof(zz_value));
+    *p = inner;
+    return (zz_value){ZZ_RESULT_ERR, {.payload = p}};
+}
+
+// Release helper for variant payloads.
+static void zz_release_variant(zz_value *v) {
+    if (v->payload) {
+        zz_release(v->payload);
+        free(v->payload);
+        v->payload = NULL;
+    }
+}
+
+// ---- match extraction helpers ------------------------------------------
+// Returns the payload of a variant, or unit if tag doesn't match.
+
+zz_value zz_match_ok(zz_value v) {
+    if (v.tag == ZZ_RESULT_OK && v.payload) return zz_clone(*v.payload);
+    return zz_unit();
+}
+
+zz_value zz_match_err(zz_value v) {
+    if (v.tag == ZZ_RESULT_ERR && v.payload) return zz_clone(*v.payload);
+    return zz_unit();
+}
+
+zz_value zz_match_some(zz_value v) {
+    if (v.tag == ZZ_OPTION_SOME && v.payload) return zz_clone(*v.payload);
+    return zz_unit();
+}
+
 zz_value zz_binop_cat(zz_value a, zz_value b) {
     if (a.tag == ZZ_STR && b.tag == ZZ_STR) {
         size_t la = a.s->len, lb = b.s->len;
@@ -1927,6 +2222,23 @@ zz_value zz_range_build(zz_value start, zz_value end) {
     zz_value v = {ZZ_RANGE, {0}};
     v.i = start.tag == ZZ_INT ? start.i : 0;
     return v;
+}
+
+// zz_elvis(left, right) — unwrap Option/Result on the left, else return right.
+// Mirrors the VM's `??` operator which unwraps .some(v) and .ok(v).
+zz_value zz_elvis(zz_value left, zz_value right) {
+    if (left.tag == ZZ_OPTION_SOME && left.payload)
+        return zz_clone(*left.payload);
+    if (left.tag == ZZ_OPTION_NONE)
+        return zz_clone(right);
+    if (left.tag == ZZ_RESULT_OK && left.payload)
+        return zz_clone(*left.payload);
+    if (left.tag == ZZ_RESULT_ERR)
+        return zz_clone(right);
+    // For non-optional/result types, fall back to truthiness check.
+    if (zz_truthy(left))
+        return zz_clone(left);
+    return zz_clone(right);
 }
 
 // =====================================================================
@@ -2028,6 +2340,55 @@ zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err) {
     return zz_unit();
 }
 
+// vec.contains(arr, item) → bool
+zz_value zz_vec_contains(zz_value arr, zz_value item, int *err) {
+    (void)err;
+    if (arr.tag != ZZ_ARRAY || !arr.arr) return (zz_value){ZZ_BOOL, {.b = false}};
+    for (size_t i = 0; i < arr.arr->len; i++) {
+        if (zz_truthy(zz_binop(ZZOP_EQ, zz_clone(arr.arr->items[i]), zz_clone(item))))
+            return (zz_value){ZZ_BOOL, {.b = true}};
+    }
+    return (zz_value){ZZ_BOOL, {.b = false}};
+}
+
+// vec.sort(arr) → sorted array (new array, original unchanged)
+zz_value zz_vec_sort(zz_value arr, int *err) {
+    (void)err;
+    if (arr.tag != ZZ_ARRAY || !arr.arr) return arr;
+    size_t n = arr.arr->len;
+    if (n <= 1) return zz_clone(arr);
+    // Create a new array with cloned elements.
+    zz_value sorted = zz_array_new();
+    for (size_t i = 0; i < n; i++) {
+        int sub_err = 0;
+        zz_vec_append(sorted, zz_clone(arr.arr->items[i]), &sub_err);
+    }
+    // Simple insertion sort (fine for small arrays; larger ones use qsort).
+    for (size_t i = 1; i < n; i++) {
+        zz_value key = sorted.arr->items[i];
+        size_t j = i;
+        while (j > 0 && zz_truthy(zz_binop(ZZOP_LT, zz_clone(key), zz_clone(sorted.arr->items[j-1])))) {
+            sorted.arr->items[j] = sorted.arr->items[j-1];
+            j--;
+        }
+        sorted.arr->items[j] = key;
+    }
+    return sorted;
+}
+
+// vec.reverse(arr) → reversed array (new array, original unchanged)
+zz_value zz_vec_reverse(zz_value arr, int *err) {
+    (void)err;
+    if (arr.tag != ZZ_ARRAY || !arr.arr) return arr;
+    size_t n = arr.arr->len;
+    zz_value rev = zz_array_new();
+    for (size_t i = n; i > 0; i--) {
+        int sub_err = 0;
+        zz_vec_append(rev, zz_clone(arr.arr->items[i-1]), &sub_err);
+    }
+    return rev;
+}
+
 // str.length(s) — string length in bytes.
 zz_value zz_str_length(zz_value s, int *err) {
     (void)err;
@@ -2127,6 +2488,99 @@ zz_value zz_str_endswith(zz_value s, zz_value suffix, int *err) {
     if (s.tag != ZZ_STR || suffix.tag != ZZ_STR) return (zz_value){ZZ_BOOL, {.b = false}};
     if (suffix.s->len > s.s->len) return (zz_value){ZZ_BOOL, {.b = false}};
     return (zz_value){ZZ_BOOL, {.b = memcmp(s.s->data + s.s->len - suffix.s->len, suffix.s->data, suffix.s->len) == 0}};
+}
+
+// str.trim(s) — strip leading/trailing whitespace
+zz_value zz_str_trim(zz_value s, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR) return s;
+    const char *d = s.s->data;
+    size_t len = s.s->len;
+    size_t start = 0, end = len;
+    while (start < end && (d[start] == ' ' || d[start] == '\t' || d[start] == '\n' || d[start] == '\r')) start++;
+    while (end > start && (d[end-1] == ' ' || d[end-1] == '\t' || d[end-1] == '\n' || d[end-1] == '\r')) end--;
+    return zz_str_new(d + start, end - start);
+}
+
+// str.trim_start(s) — strip leading whitespace
+zz_value zz_str_trim_start(zz_value s, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR) return s;
+    const char *d = s.s->data;
+    size_t len = s.s->len;
+    size_t start = 0;
+    while (start < len && (d[start] == ' ' || d[start] == '\t' || d[start] == '\n' || d[start] == '\r')) start++;
+    return zz_str_new(d + start, len - start);
+}
+
+// str.trim_end(s) — strip trailing whitespace
+zz_value zz_str_trim_end(zz_value s, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR) return s;
+    const char *d = s.s->data;
+    size_t len = s.s->len;
+    size_t end = len;
+    while (end > 0 && (d[end-1] == ' ' || d[end-1] == '\t' || d[end-1] == '\n' || d[end-1] == '\r')) end--;
+    return zz_str_new(d, end);
+}
+
+// str.join(items, sep) — join array of strings with separator
+zz_value zz_str_join(zz_value items, zz_value sep, int *err) {
+    (void)err;
+    if (items.tag != ZZ_ARRAY || !items.arr) return zz_str_static("");
+    const char *sep_d = "";
+    size_t sep_len = 0;
+    if (sep.tag == ZZ_STR) { sep_d = sep.s->data; sep_len = sep.s->len; }
+    // Calculate total length.
+    size_t total = 0;
+    for (size_t i = 0; i < items.arr->len; i++) {
+        zz_value v = items.arr->items[i];
+        if (v.tag == ZZ_STR) total += v.s->len;
+        if (i > 0) total += sep_len;
+    }
+    char *buf = (char *)malloc(total + 1);
+    size_t pos = 0;
+    for (size_t i = 0; i < items.arr->len; i++) {
+        if (i > 0) { memcpy(buf + pos, sep_d, sep_len); pos += sep_len; }
+        zz_value v = items.arr->items[i];
+        if (v.tag == ZZ_STR) { memcpy(buf + pos, v.s->data, v.s->len); pos += v.s->len; }
+    }
+    buf[pos] = '\0';
+    return zz_str_owned(buf);
+}
+
+// str.split(s, sep) — split string by separator
+zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR) return zz_array_new();
+    const char *d = s.s->data;
+    size_t len = s.s->len;
+    const char *sd = ""; size_t slen = 0;
+    if (sep.tag == ZZ_STR) { sd = sep.s->data; slen = sep.s->len; }
+    zz_value arr = zz_array_new();
+    if (slen == 0) {
+        // Split into individual characters.
+        for (size_t i = 0; i < len; i++) {
+            zz_value item = zz_str_new(d + i, 1);
+            int sub_err = 0;
+            zz_vec_append(arr, item, &sub_err);
+        }
+        return arr;
+    }
+    size_t pos = 0;
+    while (pos <= len) {
+        size_t next = pos;
+        while (next + slen <= len) {
+            if (memcmp(d + next, sd, slen) == 0) break;
+            next++;
+        }
+        zz_value item = zz_str_new(d + pos, next - pos);
+        int sub_err = 0;
+        zz_vec_append(arr, item, &sub_err);
+        if (next + slen > len) break;
+        pos = next + slen;
+    }
+    return arr;
 }
 
 // typeof(v) — return type name as string.
@@ -2363,6 +2817,14 @@ zz_value zz_json_null(zz_value unused, int *err) {
     return zz_unit();
 }
 
+// math.abs(v)
+zz_value zz_math_abs(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_INT) return (zz_value){ZZ_INT, {.i = v.i < 0 ? -v.i : v.i}};
+    if (v.tag == ZZ_FLOAT) return (zz_value){ZZ_FLOAT, {.f = fabs(v.f)}};
+    return v;
+}
+
 // math.sqrt(v)
 zz_value zz_math_sqrt(zz_value v, int *err) {
     (void)err;
@@ -2370,18 +2832,379 @@ zz_value zz_math_sqrt(zz_value v, int *err) {
     return (zz_value){ZZ_FLOAT, {.f = sqrt(d)}};
 }
 
-// env.get(name)
-zz_value zz_env_get(zz_value name, int *err) {
+// math.floor(v) → int
+zz_value zz_math_floor(zz_value v, int *err) {
     (void)err;
-    if (name.tag != ZZ_STR) return zz_unit();
-    const char *val = getenv(name.s->data);
-    if (!val) { *err = 1; return zz_unit(); }
-    return zz_str_static(val);
+    double d = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
+    return (zz_value){ZZ_INT, {.i = (int64_t)floor(d)}};
 }
 
-// env.args()
+// math.ceil(v) → int
+zz_value zz_math_ceil(zz_value v, int *err) {
+    (void)err;
+    double d = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
+    return (zz_value){ZZ_INT, {.i = (int64_t)ceil(d)}};
+}
+
+// math.round(v) → float
+zz_value zz_math_round(zz_value v, int *err) {
+    (void)err;
+    double d = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = round(d)}};
+}
+
+// math.trunc(v) → float
+zz_value zz_math_trunc(zz_value v, int *err) {
+    (void)err;
+    double d = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = trunc(d)}};
+}
+
+// math.signum(v) → same type
+zz_value zz_math_signum(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_INT) {
+        int64_t s = (v.i > 0) - (v.i < 0);
+        return (zz_value){ZZ_INT, {.i = s}};
+    }
+    if (v.tag == ZZ_FLOAT) {
+        double s = (v.f > 0.0) - (v.f < 0.0);
+        return (zz_value){ZZ_FLOAT, {.f = s}};
+    }
+    return v;
+}
+
+// math.hypot(x, y) → float
+zz_value zz_math_hypot(zz_value x, zz_value y, int *err) {
+    (void)err;
+    double dx = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
+    double dy = y.tag == ZZ_FLOAT ? y.f : (y.tag == ZZ_INT ? (double)y.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = hypot(dx, dy)}};
+}
+
+// math.clamp(val, min, max) → float
+zz_value zz_math_clamp(zz_value val, zz_value min, zz_value max, int *err) {
+    (void)err;
+    double dv = val.tag == ZZ_FLOAT ? val.f : (val.tag == ZZ_INT ? (double)val.i : 0.0);
+    double dmin = min.tag == ZZ_FLOAT ? min.f : (min.tag == ZZ_INT ? (double)min.i : 0.0);
+    double dmax = max.tag == ZZ_FLOAT ? max.f : (max.tag == ZZ_INT ? (double)max.i : 0.0);
+    if (dv < dmin) dv = dmin;
+    if (dv > dmax) dv = dmax;
+    return (zz_value){ZZ_FLOAT, {.f = dv}};
+}
+
+// math.root(x, n) → float (nth root)
+zz_value zz_math_root(zz_value x, zz_value n, int *err) {
+    (void)err;
+    double dx = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
+    double dn = n.tag == ZZ_FLOAT ? n.f : (n.tag == ZZ_INT ? (double)n.i : 0.0);
+    if (dn == 0.0) return (zz_value){ZZ_FLOAT, {.f = 1.0}};
+    return (zz_value){ZZ_FLOAT, {.f = pow(dx, 1.0/dn)}};
+}
+
+// math.factorial(n) → .ok(int) or .err(str)
+zz_value zz_math_factorial(zz_value n, int *err) {
+    (void)err;
+    if (n.tag != ZZ_INT || n.i < 0 || n.i > 20)
+        return zz_variant_err(zz_str_static("factorial: input out of range"));
+    int64_t r = 1;
+    for (int64_t i = 2; i <= n.i; i++) r *= i;
+    return zz_variant_ok((zz_value){ZZ_INT, {.i = r}});
+}
+
+// math.gcd(a, b) → int
+zz_value zz_math_gcd(zz_value a, zz_value b, int *err) {
+    (void)err;
+    int64_t x = a.tag == ZZ_INT ? a.i : 0;
+    int64_t y = b.tag == ZZ_INT ? b.i : 0;
+    while (y != 0) { int64_t t = y; y = x % y; x = t; }
+    return (zz_value){ZZ_INT, {.i = x < 0 ? -x : x}};
+}
+
+// math.lcm(a, b) → int
+zz_value zz_math_lcm(zz_value a, zz_value b, int *err) {
+    (void)err;
+    int64_t x = a.tag == ZZ_INT ? a.i : 0;
+    int64_t y = b.tag == ZZ_INT ? b.i : 0;
+    if (x == 0 || y == 0) return (zz_value){ZZ_INT, {.i = 0}};
+    int64_t g = x; int64_t t = y;
+    while (t != 0) { int64_t tmp = t; t = g % t; g = tmp; }
+    return (zz_value){ZZ_INT, {.i = (x / g) * y < 0 ? -((x / g) * y) : (x / g) * y}};
+}
+
+// math.sin(x) → float
+zz_value zz_math_sin(zz_value x, int *err) {
+    (void)err;
+    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = sin(d)}};
+}
+
+// math.cos(x) → float
+zz_value zz_math_cos(zz_value x, int *err) {
+    (void)err;
+    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = cos(d)}};
+}
+
+// math.tan(x) → float
+zz_value zz_math_tan(zz_value x, int *err) {
+    (void)err;
+    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = tan(d)}};
+}
+
+// math.asin(x) → float
+zz_value zz_math_asin(zz_value x, int *err) {
+    (void)err;
+    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = asin(d)}};
+}
+
+// math.acos(x) → float
+zz_value zz_math_acos(zz_value x, int *err) {
+    (void)err;
+    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = acos(d)}};
+}
+
+// math.atan(x) → float
+zz_value zz_math_atan(zz_value x, int *err) {
+    (void)err;
+    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = atan(d)}};
+}
+
+// math.sin_deg(x) → float
+zz_value zz_math_sin_deg(zz_value x, int *err) {
+    (void)err;
+    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = sin(d * M_PI / 180.0)}};
+}
+
+// math.cos_deg(x) → float
+zz_value zz_math_cos_deg(zz_value x, int *err) {
+    (void)err;
+    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = cos(d * M_PI / 180.0)}};
+}
+
+// math.tan_deg(x) → float
+zz_value zz_math_tan_deg(zz_value x, int *err) {
+    (void)err;
+    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = tan(d * M_PI / 180.0)}};
+}
+
+// math.to_radians(deg) → float
+zz_value zz_math_to_radians(zz_value deg, int *err) {
+    (void)err;
+    double d = deg.tag == ZZ_FLOAT ? deg.f : (deg.tag == ZZ_INT ? (double)deg.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = d * M_PI / 180.0}};
+}
+
+// math.to_degrees(rad) → float
+zz_value zz_math_to_degrees(zz_value rad, int *err) {
+    (void)err;
+    double d = rad.tag == ZZ_FLOAT ? rad.f : (rad.tag == ZZ_INT ? (double)rad.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = d * 180.0 / M_PI}};
+}
+
+// math.log(x) → float (natural log)
+zz_value zz_math_log(zz_value x, int *err) {
+    (void)err;
+    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = log(d)}};
+}
+
+// math.log10(x) → float
+zz_value zz_math_log10(zz_value x, int *err) {
+    (void)err;
+    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = log10(d)}};
+}
+
+// math.exp(x) → float
+zz_value zz_math_exp(zz_value x, int *err) {
+    (void)err;
+    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
+    return (zz_value){ZZ_FLOAT, {.f = exp(d)}};
+}
+
+// math.random() → float in [0, 1)
+zz_value zz_math_random(zz_value unused, int *err) {
+    (void)unused; (void)err;
+    return (zz_value){ZZ_FLOAT, {.f = (double)rand() / (double)RAND_MAX}};
+}
+
+// math.is_nan(x) → bool
+zz_value zz_math_is_nan(zz_value x, int *err) {
+    (void)err;
+    double d = x.tag == ZZ_FLOAT ? x.f : 0.0;
+    return (zz_value){ZZ_BOOL, {.b = d != d}};
+}
+
+// math.is_inf(x) → bool
+zz_value zz_math_is_inf(zz_value x, int *err) {
+    (void)err;
+    double d = x.tag == ZZ_FLOAT ? x.f : 0.0;
+    return (zz_value){ZZ_BOOL, {.b = d == 1.0/0.0 || d == -1.0/0.0}};
+}
+
+// math constants
+zz_value zz_math_pi(zz_value unused, int *err) {
+    (void)unused; (void)err;
+    return (zz_value){ZZ_FLOAT, {.f = M_PI}};
+}
+zz_value zz_math_e(zz_value unused, int *err) {
+    (void)unused; (void)err;
+    return (zz_value){ZZ_FLOAT, {.f = M_E}};
+}
+zz_value zz_math_tau(zz_value unused, int *err) {
+    (void)unused; (void)err;
+    return (zz_value){ZZ_FLOAT, {.f = 2.0 * M_PI}};
+}
+zz_value zz_math_inf(zz_value unused, int *err) {
+    (void)unused; (void)err;
+    return (zz_value){ZZ_FLOAT, {.f = 1.0/0.0}};
+}
+zz_value zz_math_nan(zz_value unused, int *err) {
+    (void)unused; (void)err;
+    return (zz_value){ZZ_FLOAT, {.f = 0.0/0.0}};
+}
+
+// math.isqrt(n) → .ok(int) or .err(str)
+zz_value zz_math_isqrt(zz_value n, int *err) {
+    (void)err;
+    if (n.tag != ZZ_INT || n.i < 0)
+        return zz_variant_err(zz_str_static("isqrt: non-negative integer required"));
+    int64_t x = n.i, y = (x + 1) / 2;
+    while (y < x) { x = y; y = (x + n.i / x) / 2; }
+    return zz_variant_ok((zz_value){ZZ_INT, {.i = x}});
+}
+
+// math.mean(list) → .ok(float) or .err(str)
+zz_value zz_math_mean(zz_value list, int *err) {
+    (void)err;
+    if (list.tag != ZZ_ARRAY || !list.arr || list.arr->len == 0)
+        return zz_variant_err(zz_str_static("mean: empty list"));
+    double sum = 0.0;
+    for (size_t i = 0; i < list.arr->len; i++) {
+        zz_value v = list.arr->items[i];
+        sum += v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
+    }
+    return zz_variant_ok((zz_value){ZZ_FLOAT, {.f = sum / (double)list.arr->len}});
+}
+
+// math.median(list) → .ok(float) or .err(str)
+zz_value zz_math_median(zz_value list, int *err) {
+    (void)err;
+    if (list.tag != ZZ_ARRAY || !list.arr || list.arr->len == 0)
+        return zz_variant_err(zz_str_static("median: empty list"));
+    // Copy to temp array, sort, find median.
+    size_t n = list.arr->len;
+    double *vals = (double *)malloc(n * sizeof(double));
+    for (size_t i = 0; i < n; i++) {
+        zz_value v = list.arr->items[i];
+        vals[i] = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
+    }
+    // Simple insertion sort (median lists are typically small).
+    for (size_t i = 1; i < n; i++) {
+        double key = vals[i];
+        size_t j = i;
+        while (j > 0 && vals[j-1] > key) { vals[j] = vals[j-1]; j--; }
+        vals[j] = key;
+    }
+    double result;
+    if (n % 2 == 1)
+        result = vals[n / 2];
+    else
+        result = (vals[n/2 - 1] + vals[n/2]) / 2.0;
+    free(vals);
+    return zz_variant_ok((zz_value){ZZ_FLOAT, {.f = result}});
+}
+
+// math.rand_range(min, max) → float
+zz_value zz_math_rand_range(zz_value min, zz_value max, int *err) {
+    (void)err;
+    double lo = min.tag == ZZ_FLOAT ? min.f : (min.tag == ZZ_INT ? (double)min.i : 0.0);
+    double hi = max.tag == ZZ_FLOAT ? max.f : (max.tag == ZZ_INT ? (double)max.i : 0.0);
+    double r = (double)rand() / (double)RAND_MAX;
+    return (zz_value){ZZ_FLOAT, {.f = lo + r * (hi - lo)}};
+}
+
+// math.dot_product(v1, v2) → .ok(float) or .err(str)
+zz_value zz_math_dot_product(zz_value v1, zz_value v2, int *err) {
+    (void)err;
+    if (v1.tag != ZZ_ARRAY || v2.tag != ZZ_ARRAY || !v1.arr || !v2.arr)
+        return zz_variant_err(zz_str_static("dot_product: expected two arrays"));
+    if (v1.arr->len != v2.arr->len)
+        return zz_variant_err(zz_str_static("dot_product: arrays must have same length"));
+    double sum = 0.0;
+    for (size_t i = 0; i < v1.arr->len; i++) {
+        double a = v1.arr->items[i].tag == ZZ_FLOAT ? v1.arr->items[i].f :
+                   (v1.arr->items[i].tag == ZZ_INT ? (double)v1.arr->items[i].i : 0.0);
+        double b = v2.arr->items[i].tag == ZZ_FLOAT ? v2.arr->items[i].f :
+                   (v2.arr->items[i].tag == ZZ_INT ? (double)v2.arr->items[i].i : 0.0);
+        sum += a * b;
+    }
+    return zz_variant_ok((zz_value){ZZ_FLOAT, {.f = sum}});
+}
+
+// math.magnitude(v) → float
+zz_value zz_math_magnitude(zz_value v, int *err) {
+    (void)err;
+    if (v.tag != ZZ_ARRAY || !v.arr) return (zz_value){ZZ_FLOAT, {.f = 0.0}};
+    double sum = 0.0;
+    for (size_t i = 0; i < v.arr->len; i++) {
+        double d = v.arr->items[i].tag == ZZ_FLOAT ? v.arr->items[i].f :
+                   (v.arr->items[i].tag == ZZ_INT ? (double)v.arr->items[i].i : 0.0);
+        sum += d * d;
+    }
+    return (zz_value){ZZ_FLOAT, {.f = sqrt(sum)}};
+}
+
+// math.matrix_mul(m1, m2) → .ok(array) or .err(str)
+zz_value zz_math_matrix_mul(zz_value m1, zz_value m2, int *err) {
+    (void)err;
+    (void)m1; (void)m2;
+    return zz_variant_err(zz_str_static("matrix_mul: not yet implemented in native"));
+}
+
+// env.get(name) — returns .some(val) or .none
+zz_value zz_env_get(zz_value name, int *err) {
+    (void)err;
+    if (name.tag != ZZ_STR) return (zz_value){ZZ_OPTION_NONE, {0}};
+    const char *val = getenv(name.s->data);
+    if (!val) return (zz_value){ZZ_OPTION_NONE, {0}};
+    return zz_variant_some(zz_str_static(val));
+}
+
+// env.var(name) — returns .ok(val) or .err(msg)
+zz_value zz_env_var(zz_value name, int *err) {
+    (void)err;
+    if (name.tag != ZZ_STR) return zz_variant_err(zz_str_static("env.var: expected string name"));
+    const char *val = getenv(name.s->data);
+    if (!val) {
+        // Build error message: "environment variable `NAME` not set"
+        size_t nlen = name.s->len;
+        const char *prefix = "environment variable `";
+        const char *suffix = "` not set";
+        size_t total = strlen(prefix) + nlen + strlen(suffix);
+        char *msg = (char *)malloc(total + 1);
+        memcpy(msg, prefix, strlen(prefix));
+        memcpy(msg + strlen(prefix), name.s->data, nlen);
+        memcpy(msg + strlen(prefix) + nlen, suffix, strlen(suffix));
+        msg[total] = '\0';
+        return zz_variant_err(zz_str_owned(msg));
+    }
+    return zz_variant_ok(zz_str_static(val));
+}
+
+// env.args() — returns command-line arguments (excludes argv[0] binary name)
 zz_value zz_env_args(zz_value unused, int *err) {
     (void)unused; (void)err;
+    // C main() in generated code doesn't receive argc/argv yet.
+    // Return an empty array for now.
     return zz_array_new();
 }
 
@@ -2413,6 +3236,35 @@ zz_value zz_dict_has(zz_value d, zz_value key, int *err) {
             return (zz_value){ZZ_BOOL, {.b = true}};
     }
     return (zz_value){ZZ_BOOL, {.b = false}};
+}
+
+// option.expect(opt, msg) — unwrap .some(v) or panic with msg
+zz_value zz_option_expect(zz_value opt, zz_value msg, int *err) {
+    (void)err;
+    if (opt.tag == ZZ_OPTION_SOME && opt.payload)
+        return zz_clone(*opt.payload);
+    // Panic: print error message and exit.
+    const char *m = (msg.tag == ZZ_STR) ? msg.s->data : "expect failed";
+    fprintf(stderr, "error: %s\n", m);
+    exit(1);
+}
+
+// result.expect(res, msg) — unwrap .ok(v) or panic with msg
+zz_value zz_result_expect(zz_value res, zz_value msg, int *err) {
+    (void)err;
+    if (res.tag == ZZ_RESULT_OK && res.payload)
+        return zz_clone(*res.payload);
+    // If it's a .err, print the error value too.
+    if (res.tag == ZZ_RESULT_ERR && res.payload) {
+        char *estr = zz_value_to_string(res.payload);
+        fprintf(stderr, "error: %s: %s\n",
+                (msg.tag == ZZ_STR) ? msg.s->data : "expect failed", estr);
+        free(estr);
+    } else {
+        fprintf(stderr, "error: %s\n",
+                (msg.tag == ZZ_STR) ? msg.s->data : "expect failed");
+    }
+    exit(1);
 }
 
 // fs.read(path)
@@ -2576,4 +3428,36 @@ zz_value zz_encoding_base64_decode(zz_value s, int *err) {
     out->data[j] = '\0';
     out->len = j;
     return (zz_value){ZZ_STR, {.s = out}};
+}
+
+// encoding.hex_encode(data) → hex string
+zz_value zz_encoding_hex_encode(zz_value s, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR) return zz_str_static("");
+    const unsigned char *d = (const unsigned char *)s.s->data;
+    size_t len = s.s->len;
+    char *hex = (char *)malloc(len * 2 + 1);
+    for (size_t i = 0; i < len; i++) {
+        snprintf(hex + i*2, 3, "%02x", d[i]);
+    }
+    hex[len * 2] = '\0';
+    return zz_str_owned(hex);
+}
+
+// encoding.hex_decode(hex_str) → .ok(data) or .err(str)
+zz_value zz_encoding_hex_decode(zz_value s, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR)
+        return zz_variant_err(zz_str_static("hex_decode: expected string"));
+    size_t len = s.s->len;
+    if (len % 2 != 0)
+        return zz_variant_err(zz_str_static("hex_decode: odd-length hex string"));
+    char *out = (char *)malloc(len / 2 + 1);
+    for (size_t i = 0; i < len; i += 2) {
+        char byte_str[3] = { s.s->data[i], s.s->data[i+1], '\0' };
+        unsigned long val = strtoul(byte_str, NULL, 16);
+        out[i/2] = (char)val;
+    }
+    out[len/2] = '\0';
+    return zz_variant_ok(zz_str_new(out, len / 2));
 }
