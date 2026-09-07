@@ -423,6 +423,10 @@ zz_value zz_match_ok(zz_value v);
 zz_value zz_match_err(zz_value v);
 zz_value zz_match_some(zz_value v);
 
+// HTTP client stubs (native mode — returns mock responses)
+zz_value zz_http_get(zz_value url, zz_value headers, int *err);
+zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err);
+
 // ---- formatting --------------------------------------------------------
 void zz_print_value(FILE *out, const zz_value *v);
 char *zz_value_to_string(const zz_value *v);  // malloc'd

@@ -2,6 +2,7 @@
 #include <math.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <curl/curl.h>
 #include "runtime.h"
 
 // =====================================================================
@@ -3541,6 +3542,286 @@ zz_value zz_encoding_hex_decode(zz_value s, int *err) {
     }
     out[len/2] = '\0';
     return zz_variant_ok(zz_str_new(out, len / 2));
+}
+
+// =====================================================================
+//  HTTP client — libcurl-based implementation
+// =====================================================================
+
+// Helper struct for curl body accumulation (avoids flexible-array-member issues)
+typedef struct {
+    char *data;
+    size_t cap;
+    size_t len;
+} curl_buf;
+
+// Callback for curl to write response body into a growing memory buffer.
+static size_t curl_write_cb(void *data, size_t size, size_t nmemb, void *userp) {
+    size_t realsize = size * nmemb;
+    curl_buf *buf = (curl_buf *)userp;
+    size_t new_len = buf->len + realsize;
+    if (buf->cap <= new_len) {
+        size_t new_cap = buf->cap == 0 ? 256 : buf->cap * 2;
+        while (new_cap < new_len + 1) new_cap *= 2;
+        buf->data = (char *)realloc(buf->data, new_cap);
+        buf->cap = new_cap;
+    }
+    memcpy(buf->data + buf->len, data, realsize);
+    buf->len = new_len;
+    buf->data[buf->len] = '\0';
+    return realsize;
+}
+
+// Callback for curl to read headers into a dict.
+static size_t curl_header_cb(void *data, size_t size, size_t nmemb, void *userp) {
+    size_t realsize = size * nmemb;
+    const char *line = (const char *)data;
+    const char *colon = strchr(line, ':');
+    if (!colon || colon >= line + realsize) return realsize;
+
+    size_t key_len = colon - line;
+    const char *val = colon + 1;
+    while (*val == ' ' || *val == '\t') val++;
+    size_t val_len = realsize - (val - line);
+    if (val_len > 0 && val[val_len-1] == '\r') val_len--;
+    if (val_len > 0 && val[val_len-1] == '\n') val_len--;
+
+    zz_value *hdrs_val = (zz_value *)userp;
+    if (hdrs_val->tag != ZZ_DICT) return realsize;
+
+    zz_str *key = str_alloc(key_len);
+    memcpy(key->data, line, key_len);
+    key->data[key_len] = '\0';
+    key->len = key_len;
+
+    zz_str *value_str = str_alloc(val_len);
+    memcpy(value_str->data, val, val_len);
+    value_str->data[val_len] = '\0';
+    value_str->len = val_len;
+
+    zz_dict_set(hdrs_val->dict, (zz_value){ZZ_STR, {.s = key}}, (zz_value){ZZ_STR, {.s = value_str}});
+    return realsize;
+}
+
+// http.get(url, headers) → .ok(HttpResponse) or .err(str)
+zz_value zz_http_get(zz_value url, zz_value headers, int *err) {
+    if (url.tag != ZZ_STR) { *err = 1; return zz_variant_err(zz_str_static("http.get: url must be string")); }
+    *err = 0;
+
+    CURL *curl = curl_easy_init();
+    if (!curl) { *err = 1; return zz_variant_err(zz_str_static("http.get: curl_easy_init failed")); }
+
+    curl_buf body_buf = {0};
+    zz_value headers_dict = zz_dict_new();
+
+    curl_easy_setopt(curl, CURLOPT_URL, (char *)url.s->data);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body_buf);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, curl_header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &headers_dict);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    struct curl_slist *header_list = NULL;
+    if (headers.tag == ZZ_DICT && headers.dict && headers.dict->len > 0) {
+        for (size_t i = 0; i < headers.dict->len; i++) {
+            zz_str *k = headers.dict->entries[i].key;
+            zz_value *v = &headers.dict->entries[i].val;
+            if (k && v->tag == ZZ_STR) {
+                size_t hlen = k->len + 2 + v->s->len + 2;
+                char *h = (char *)malloc(hlen + 1);
+                memcpy(h, k->data, k->len);
+                h[k->len] = ':';
+                h[k->len + 1] = ' ';
+                memcpy(h + k->len + 2, v->s->data, v->s->len);
+                h[k->len + 2 + v->s->len] = '\r';
+                h[k->len + 2 + v->s->len + 1] = '\n';
+                h[k->len + 2 + v->s->len + 2] = '\0';
+                header_list = curl_slist_append(header_list, h);
+                free(h);
+            }
+        }
+        if (header_list) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    if (header_list) curl_slist_free_all(header_list);
+
+    if (res != CURLE_OK) {
+        char errbuf[256];
+        snprintf(errbuf, sizeof(errbuf), "http.get: %s", curl_easy_strerror(res));
+        curl_easy_cleanup(curl);
+        if (body_buf.data) free(body_buf.data);
+        zz_release(&headers_dict);
+        *err = 1;
+        return zz_variant_err(zz_str_static(errbuf));
+    }
+
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+
+    // Adopt body_buf into a proper zz_str (flexible array requires full struct alloc)
+    zz_str *body_str;
+    if (body_buf.data && body_buf.len > 0) {
+        body_str = (zz_str *)malloc(sizeof(zz_str) + body_buf.cap + 1);
+        body_str->refs = 1;
+        body_str->interned = 0;
+        body_str->cap = body_buf.cap;
+        body_str->len = body_buf.len;
+        memcpy(body_str->data, body_buf.data, body_buf.len + 1);
+        free(body_buf.data);
+    } else {
+        body_str = str_alloc(0);
+    }
+
+    // Build response object
+    const char *field_names_str[] = {"status", "body", "headers", "text", "json"};
+    zz_value field_names[5];
+    for (int i = 0; i < 5; i++) {
+        field_names[i] = zz_str_static(field_names_str[i]);
+    }
+    zz_value resp_val = zz_object_new("http.response", field_names, 5);
+    zz_object_set_field(&resp_val, "status", (zz_value){ZZ_INT, {.i = http_code}});
+    zz_object_set_field(&resp_val, "body", (zz_value){ZZ_STR, {.s = body_str}});
+    zz_object_set_field(&resp_val, "text", (zz_value){ZZ_STR, {.s = body_str}});
+    zz_object_set_field(&resp_val, "headers", zz_clone(headers_dict));
+
+    zz_value json_val = zz_unit();
+    if (body_str->len > 0) {
+        int jerr = 0;
+        json_val = zz_json_parse((zz_value){ZZ_STR, {.s = body_str}}, &jerr);
+        if (jerr) json_val = zz_unit();
+    }
+    zz_object_set_field(&resp_val, "json", json_val);
+
+    zz_release(&headers_dict);
+    return zz_variant_ok(resp_val);
+}
+
+// http.post(url, body, headers) → .ok(HttpResponse) or .err(str)
+zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
+    if (url.tag != ZZ_STR) { *err = 1; return zz_variant_err(zz_str_static("http.post: url must be string")); }
+    *err = 0;
+
+    CURL *curl = curl_easy_init();
+    if (!curl) { *err = 1; return zz_variant_err(zz_str_static("http.post: curl_easy_init failed")); }
+
+    curl_buf body_buf = {0};
+    zz_value headers_dict = zz_dict_new();
+
+    curl_easy_setopt(curl, CURLOPT_URL, (char *)url.s->data);
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body_buf);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, curl_header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &headers_dict);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    if (body.tag == ZZ_STR && body.s && body.s->len > 0) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, (char *)body.s->data);
+    }
+
+    struct curl_slist *header_list = NULL;
+    if (headers.tag == ZZ_DICT && headers.dict && headers.dict->len > 0) {
+        for (size_t i = 0; i < headers.dict->len; i++) {
+            zz_str *k = headers.dict->entries[i].key;
+            zz_value *v = &headers.dict->entries[i].val;
+            if (k && v->tag == ZZ_STR) {
+                size_t hlen = k->len + 2 + v->s->len + 2;
+                char *h = (char *)malloc(hlen + 1);
+                memcpy(h, k->data, k->len);
+                h[k->len] = ':';
+                h[k->len + 1] = ' ';
+                memcpy(h + k->len + 2, v->s->data, v->s->len);
+                h[k->len + 2 + v->s->len] = '\r';
+                h[k->len + 2 + v->s->len + 1] = '\n';
+                h[k->len + 2 + v->s->len + 2] = '\0';
+                header_list = curl_slist_append(header_list, h);
+                free(h);
+            }
+        }
+        if (header_list) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    if (header_list) curl_slist_free_all(header_list);
+
+    if (res != CURLE_OK) {
+        char errbuf[256];
+        snprintf(errbuf, sizeof(errbuf), "http.post: %s", curl_easy_strerror(res));
+        curl_easy_cleanup(curl);
+        if (body_buf.data) free(body_buf.data);
+        zz_release(&headers_dict);
+        *err = 1;
+        return zz_variant_err(zz_str_static(errbuf));
+    }
+
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+
+    zz_str *body_str;
+    if (body_buf.data && body_buf.len > 0) {
+        body_str = (zz_str *)malloc(sizeof(zz_str) + body_buf.cap + 1);
+        body_str->refs = 1;
+        body_str->interned = 0;
+        body_str->cap = body_buf.cap;
+        body_str->len = body_buf.len;
+        memcpy(body_str->data, body_buf.data, body_buf.len + 1);
+        free(body_buf.data);
+    } else {
+        body_str = str_alloc(0);
+    }
+
+    const char *field_names_str[] = {"status", "body", "headers", "text", "json"};
+    zz_value field_names[5];
+    for (int i = 0; i < 5; i++) {
+        field_names[i] = zz_str_static(field_names_str[i]);
+    }
+    zz_value resp_val = zz_object_new("http.response", field_names, 5);
+    zz_object_set_field(&resp_val, "status", (zz_value){ZZ_INT, {.i = http_code}});
+    zz_object_set_field(&resp_val, "body", (zz_value){ZZ_STR, {.s = body_str}});
+    zz_object_set_field(&resp_val, "text", (zz_value){ZZ_STR, {.s = body_str}});
+    zz_object_set_field(&resp_val, "headers", zz_clone(headers_dict));
+
+    zz_value json_val = zz_unit();
+    if (body_str->len > 0) {
+        int jerr = 0;
+        json_val = zz_json_parse((zz_value){ZZ_STR, {.s = body_str}}, &jerr);
+        if (jerr) json_val = zz_unit();
+    }
+    zz_object_set_field(&resp_val, "json", json_val);
+
+    zz_release(&headers_dict);
+    return zz_variant_ok(resp_val);
+}
+
+// http.response.status(response) → int
+zz_value zz_http_response_status(zz_value resp, int *err) {
+    (void)err;
+    return zz_object_get_field(&resp, "status");
+}
+
+// http.response.text(response) → str
+zz_value zz_http_response_text(zz_value resp, int *err) {
+    (void)err;
+    return zz_object_get_field(&resp, "text");
+}
+
+// http.response.json(response) → json
+zz_value zz_http_response_json(zz_value resp, int *err) {
+    (void)err;
+    return zz_object_get_field(&resp, "json");
+}
+
+// http.response.headers(response) → dict
+zz_value zz_http_response_headers(zz_value resp, int *err) {
+    (void)err;
+    return zz_object_get_field(&resp, "headers");
 }
 
 // =====================================================================

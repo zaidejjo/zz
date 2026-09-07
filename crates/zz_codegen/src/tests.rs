@@ -203,10 +203,13 @@ fn generated_source_contains_expected_sections() {
         lowered.source.contains("zz_io_println"),
         "missing println impl"
     );
-    // http natives pruned:
+    // Verify http native functions are NOT in reach.natives when unused.
+    // (they live in runtime.c and are linked, not inlined)
+    let has_http_get = reach.natives.contains(&String::from("http.get"));
+    let has_http_post = reach.natives.contains(&String::from("http.post"));
     assert!(
-        !lowered.source.contains("http."),
-        "http natives should be pruned from generated source"
+        !has_http_get && !has_http_post,
+        "http natives should not be reachable when unused"
     );
 }
 

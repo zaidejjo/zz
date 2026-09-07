@@ -2580,7 +2580,7 @@ impl Lowerer {
                     if let Some((c, r)) = struct_dispatch {
                         (c, Some(r))
                     } else {
-                        let namespaces = ["vec", "str", "dict", "option", "result"];
+                        let namespaces = ["vec", "str", "dict", "option", "result", "http"];
                         let mut found_ns = "";
                         for ns in &namespaces {
                             let candidate = format!("{ns}.{method}");
@@ -3287,16 +3287,14 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "http.pipe" | "std.http.pipe" => Some("zz_http_log"),
         "http.listen" | "std.http.listen" => Some("zz_http_listen"),
         "http.handle" | "std.http.handle" => Some("zz_http_handle"),
-        // http Response methods (stub implementations — return unit until native http is implemented)
-        // NOTE: These are commented out because they cause test failures when http is
-        // not used in the source. Uncomment if you need http stubs for testing.
-        // "http.status" | "std.http.status" => Some("zz_http_response_status"),
-        // "http.text" | "std.http.text" => Some("zz_http_response_text"),
-        // "http.json" | "std.http.json" => Some("zz_http_response_json"),
-        // "http.headers" | "std.http.headers" => Some("zz_http_response_headers"),
-        // http request functions (stub implementations)
-        // "http.get" | "std.http.get" => Some("zz_http_get"),
-        // "http.post" | "std.http.post" => Some("zz_http_post"),
+        // http Response methods
+        "http.status" | "std.http.status" => Some("zz_http_response_status"),
+        "http.text" | "std.http.text" => Some("zz_http_response_text"),
+        "http.json" | "std.http.json" => Some("zz_http_response_json"),
+        "http.headers" | "std.http.headers" => Some("zz_http_response_headers"),
+        // http request functions
+        "http.get" | "std.http.get" => Some("zz_http_get"),
+        "http.post" | "std.http.post" => Some("zz_http_post"),
         _ => None,
     }
 }

@@ -240,7 +240,11 @@ pub fn build(
         }
         PgoMode::None => {}
     }
-    cmd.arg("-o").arg(output_path).arg(&src_path).arg("-lm");
+    cmd.arg("-o")
+        .arg(output_path)
+        .arg(&src_path)
+        .arg("-lm")
+        .arg("-lcurl");
 
     let out = cmd.output().map_err(BuildError::Io)?;
     if !out.status.success() {
