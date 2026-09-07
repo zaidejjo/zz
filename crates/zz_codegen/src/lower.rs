@@ -261,6 +261,82 @@ fn box_scalar_operand(e: &Expr, names: &NameCtx, emitted: &str) -> String {
     }
 }
 
+/// Emit a guard expression using raw C scalar values (no zz_value boxing).
+/// Guard comparisons (e.g., `n < 0`) need raw int64_t/double/bool, not
+/// boxed zz_value structs. The `scrut_tmp` is the scrutinee's C zz_value
+/// identifier — for the primary bound variable (same as pattern name), we
+/// unbox scrut_tmp directly instead of looking up the potentially-stale
+/// names stack. Other identifiers are looked up normally.
+fn emit_guard_expr(e: &Expr, names: &NameCtx, scrut_tmp: &str, scrut_type: Option<&str>) -> String {
+    match e {
+        Expr::Ident { name, .. } => {
+            // Look up the C identifier in the names stack. If found with a
+            // scalar type, use it directly. Otherwise, fall back to unboxing
+            // scrut_tmp based on scrut_type.
+            if let Some((cid, ty)) = names.stack.get(name).and_then(|v| v.last()) {
+                match ty.as_str() {
+                    "int64_t" => format!("({cid}).i"),
+                    "double" => format!("({cid}).f"),
+                    "bool" => format!("({cid}).b"),
+                    _ => scrut_tmp.to_string(),
+                }
+            } else {
+                // Fallback: use scrut_tmp's raw form based on its type
+                match scrut_type {
+                    Some("int64_t") => format!("({scrut_tmp}).i"),
+                    Some("double") => format!("({scrut_tmp}).f"),
+                    Some("bool") => format!("({scrut_tmp}).b"),
+                    _ => format!("({scrut_tmp}).i"), // default int
+                }
+            }
+        }
+        Expr::Int { value, .. } => value.to_string(),
+        Expr::Float { value, .. } => {
+            if *value == value.floor() && value.abs() < 1e15 {
+                format!("{value:.1}")
+            } else {
+                format!("{value}")
+            }
+        }
+        Expr::Bool { value, .. } => if *value { "1" } else { "0" }.to_string(),
+        Expr::Binary {
+            op, left, right, ..
+        } => {
+            let l = emit_guard_expr(left, names, scrut_tmp, scrut_type);
+            let r = emit_guard_expr(right, names, scrut_tmp, scrut_type);
+            let op_str = match op {
+                zz_frontend::ast::BinOp::Add => "+",
+                zz_frontend::ast::BinOp::Sub => "-",
+                zz_frontend::ast::BinOp::Mul => "*",
+                zz_frontend::ast::BinOp::Div => "/",
+                zz_frontend::ast::BinOp::Rem => "%",
+                zz_frontend::ast::BinOp::Lt => "<",
+                zz_frontend::ast::BinOp::Le => "<=",
+                zz_frontend::ast::BinOp::Gt => ">",
+                zz_frontend::ast::BinOp::Ge => ">=",
+                zz_frontend::ast::BinOp::Eq => "==",
+                zz_frontend::ast::BinOp::Ne => "!=",
+                zz_frontend::ast::BinOp::And => "&&",
+                zz_frontend::ast::BinOp::Or => "||",
+                _ => "??",
+            };
+            format!("({l} {op_str} {r})")
+        }
+        Expr::Unary { op, expr, .. } => {
+            let inner = emit_guard_expr(expr, names, scrut_tmp, scrut_type);
+            match op {
+                zz_frontend::ast::UnOp::Neg => format!("(-{inner})"),
+                zz_frontend::ast::UnOp::Pos => format!("(+{inner})"),
+                zz_frontend::ast::UnOp::Not => format!("(!{inner})"),
+            }
+        }
+        Expr::Paren { expr, .. } => {
+            format!("({})", emit_guard_expr(expr, names, scrut_tmp, scrut_type))
+        }
+        _ => "1".to_string(),
+    }
+}
+
 /// Return the unboxed C scalar expression for a binary operand. Used
 /// after `scalar_operand_type` returns Some to build a raw C arithmetic
 /// expression without going through `zz_binop`.
@@ -1963,7 +2039,12 @@ impl Lowerer {
                     }
                 }
             }
-            Expr::Call { callee, args, .. } => self.emit_call(callee, args, names, out),
+            Expr::Call {
+                callee,
+                args,
+                named,
+                ..
+            } => self.emit_call(callee, args, named, names, out),
             Expr::While {
                 cond, body, span, ..
             } => {
@@ -2228,12 +2309,40 @@ impl Lowerer {
                 // on the tag, binding the payload in each arm.
                 let scrut_val = self.emit_expr(scrutinee, names, out);
                 let scrut_tmp = names.fresh("_match");
-                out.push_str(&format!("    zz_value {scrut_tmp} = {scrut_val};\n"));
+                // Box the scrutinee so it's always a zz_value, even for
+                // raw scalar variables (int64_t/double/bool).
+                let boxed = box_scalar_operand(scrutinee, names, &scrut_val);
+                out.push_str(&format!("    zz_value {scrut_tmp} = {boxed};\n"));
+
+                // Determine the scrutinee's scalar type and raw C identifier
+                // for guard expressions (guards need raw C values, not zz_value).
+                let scrut_type = scalar_operand_type(scrutinee, names);
+                let scrut_raw =
+                    scalar_operand_c(scrutinee, names).unwrap_or_else(|| scrut_val.clone());
 
                 let result_tmp = names.fresh("_mresult");
                 out.push_str(&format!("    zz_value {result_tmp} = zz_unit();\n"));
 
                 for (i, arm) in arms.iter().enumerate() {
+                    // For arms that transition to the next arm (i < n-1 and arm has
+                    // no guard OR has guard), we DON'T emit the arm's closing brace
+                    // because the next arm's "} else {" prefix serves as the closing
+                    // brace for this arm. Arms that are the last with no guard emit
+                    // the final "} else {" (not a bare "}").
+                    let is_last_arm = i == arms.len() - 1;
+                    let arm_needs_else_prefix = i > 0; // arms after first get "} else {"
+                                                       // Guard arms never emit a closing brace — the next arm's
+                                                       // "} else {" or "} else if" serves as the closing brace for
+                                                       // this arm's if-block. Non-guard last arm emits "} else {"
+                                                       // and its own closing brace.
+                    let arm_closes_block = match &arm.pat {
+                        Pattern::Binding { .. } | Pattern::Wildcard { .. } => {
+                            arm.guard.is_none() && is_last_arm
+                        }
+                        Pattern::Variant { .. } => false,
+                        _ => false,
+                    };
+
                     match &arm.pat {
                         Pattern::Variant { name, arg, .. } => {
                             let tag_check = match name.as_str() {
@@ -2251,8 +2360,19 @@ impl Lowerer {
                             };
 
                             let cond = format!("{scrut_tmp}.tag == {tag_check}");
-                            let prefix = if i == 0 { "    if" } else { " else if" };
-                            out.push_str(&format!("{prefix} ({cond}) {{\n"));
+                            let full_cond = if let Some(guard_expr) = &arm.guard {
+                                let guard_c =
+                                    emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
+                                format!("{cond} && zz_truthy({guard_c})")
+                            } else {
+                                cond
+                            };
+
+                            if arm_needs_else_prefix {
+                                out.push_str(&format!("    }} else if ({full_cond}) {{\n"));
+                            } else {
+                                out.push_str(&format!("    if ({full_cond}) {{\n"));
+                            }
 
                             if let Some(arg_pat) = arg {
                                 if let Pattern::Binding { name: var_name } = arg_pat.as_ref() {
@@ -2268,23 +2388,56 @@ impl Lowerer {
                             }
                             let arm_val = self.emit_expr(&arm.body, names, out);
                             out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
-                            out.push_str("    }\n");
+                            if arm_closes_block {
+                                out.push_str("    }\n");
+                            }
                         }
                         Pattern::Binding { name } => {
-                            let prefix = if i == 0 { "    {" } else { " else {" };
-                            out.push_str(&format!("{prefix}\n"));
                             let cid = names.enter(&name.name);
                             out.push_str(&format!("        zz_value {cid} = {scrut_tmp};\n"));
+
+                            if let Some(guard_expr) = &arm.guard {
+                                let guard_c =
+                                    emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
+                                if arm_needs_else_prefix {
+                                    out.push_str(&format!("    }} else if ({guard_c}) {{\n"));
+                                } else {
+                                    out.push_str(&format!("    if ({guard_c}) {{\n"));
+                                }
+                            } else {
+                                if arm_needs_else_prefix {
+                                    out.push_str("    } else {\n");
+                                } else {
+                                    out.push_str("    {\n");
+                                }
+                            }
                             let arm_val = self.emit_expr(&arm.body, names, out);
                             out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
-                            out.push_str("    }\n");
+                            if arm_closes_block {
+                                out.push_str("    }\n");
+                            }
                         }
                         Pattern::Wildcard { .. } => {
-                            let prefix = if i == 0 { "    {" } else { " else {" };
-                            out.push_str(&format!("{prefix}\n"));
+                            if let Some(guard_expr) = &arm.guard {
+                                let guard_c =
+                                    emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
+                                if arm_needs_else_prefix {
+                                    out.push_str(&format!("    }} else if ({guard_c}) {{\n"));
+                                } else {
+                                    out.push_str(&format!("    if ({guard_c}) {{\n"));
+                                }
+                            } else {
+                                if arm_needs_else_prefix {
+                                    out.push_str("    } else {\n");
+                                } else {
+                                    out.push_str("    {\n");
+                                }
+                            }
                             let arm_val = self.emit_expr(&arm.body, names, out);
                             out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
-                            out.push_str("    }\n");
+                            if arm_closes_block {
+                                out.push_str("    }\n");
+                            }
                         }
                         _ => {
                             out.push_str(&format!("    // unsupported match pattern\n"));
@@ -2301,6 +2454,7 @@ impl Lowerer {
         &self,
         callee: &Expr,
         args: &[Expr],
+        named: &[(String, Expr)],
         names: &mut NameCtx,
         out: &mut String,
     ) -> String {
@@ -2506,6 +2660,38 @@ impl Lowerer {
             }
         }
 
+        // Build the ordered argument list, handling named args by reordering
+        // them to match the function's parameter positions (mirrors the VM's
+        // compile_reordered_args). When named args are present, we look up
+        // the FuncSig and reorder all args accordingly.
+        let ordered_args: Vec<&Expr> = if !named.is_empty() {
+            if let Some(sig) = self.tp.funcs.get(&cname) {
+                let n = sig.params.len();
+                let mut slots: Vec<Option<&Expr>> = vec![None; n];
+                // Fill positional args by index
+                for (i, arg) in args.iter().enumerate() {
+                    if i < n {
+                        slots[i] = Some(arg);
+                    }
+                }
+                // Fill named args by param name
+                for (name, val) in named {
+                    if let Some(idx) = sig.params.iter().position(|(pn, _)| pn == name) {
+                        if slots[idx].is_none() {
+                            slots[idx] = Some(val);
+                        }
+                    }
+                }
+                // Collect non-None slots in order
+                slots.into_iter().flatten().collect()
+            } else {
+                // Function sig not found — fall back to positional then named
+                args.iter().chain(named.iter().map(|(_, v)| v)).collect()
+            }
+        } else {
+            args.iter().collect()
+        };
+
         let mut arg_items: Vec<String> = Vec::new();
         // Clone the method receiver up front; we may need it again in the
         // impl-method call-site branch (which needs the original Expr
@@ -2533,7 +2719,7 @@ impl Lowerer {
                 arg_items.push(boxed);
             }
         }
-        for a in args {
+        for a in ordered_args {
             let emitted = self.emit_expr(a, names, out);
             // Auto-box if this argument is a scalar variable or struct field
             let boxed = if let Expr::Ident { name, .. } = a {
@@ -2688,7 +2874,7 @@ impl Lowerer {
             return format!(
                 "({cf}((zz_value[]){{ {joined} }}, {n}))",
                 joined = arg_items.join(", "),
-                n = args.len()
+                n = arg_items.len()
             );
         }
 
