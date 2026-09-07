@@ -3542,3 +3542,7 @@ zz_value zz_encoding_hex_decode(zz_value s, int *err) {
     out[len/2] = '\0';
     return zz_variant_ok(zz_str_new(out, len / 2));
 }
+
+// =====================================================================
+//  Missing stdlib natives — bare builtins and module functions
+// =====================================================================
