@@ -774,7 +774,15 @@ void zz_array_push_lit(zz_array *a, zz_value item) {
 void zz_array_push(zz_array *a, zz_value item) {
     if (a->len == a->cap) {
         size_t nc = a->cap == 0 ? 4 : a->cap * 2;
-        a->items = (zz_value *)realloc(a->items, nc * sizeof(zz_value));
+        // Stack/lit/arena arrays need migration to malloc before realloc.
+        if (a->refs == ZZ_ARRAY_STACK_MAGIC || a->refs == ZZ_ARRAY_LIT_MAGIC || a->items == NULL) {
+            zz_value *new_items = (zz_value *)malloc(nc * sizeof(zz_value));
+            for (size_t i = 0; i < a->len; i++) new_items[i] = a->items[i];
+            a->items = new_items;
+            a->refs = 0;
+        } else {
+            a->items = (zz_value *)realloc(a->items, nc * sizeof(zz_value));
+        }
         a->cap = nc;
     }
     a->items[a->len++] = item;
@@ -2273,7 +2281,7 @@ zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
         // is invalid. Also handle n=0 case where items is NULL.
         // Migrate to malloc, switch to refs=0 (arena-allocated sentinel) so
         // zz_release knows items is malloc'd but header is still arena.
-        if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->items == NULL) {
+        if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC || a->items == NULL) {
             zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
             // Copy existing elements if any.
             for (size_t i = 0; i < a->len; i++) {
@@ -2329,7 +2337,14 @@ zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err) {
     if (i < 0 || (size_t)i > a->len) return zz_unit();
     if (a->len >= a->cap) {
         size_t new_cap = a->cap ? a->cap * 2 : 8;
-        a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
+        if (a->refs == ZZ_ARRAY_STACK_MAGIC || a->refs == ZZ_ARRAY_LIT_MAGIC || a->items == NULL) {
+            zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
+            for (size_t j = 0; j < a->len; j++) new_items[j] = a->items[j];
+            a->items = new_items;
+            a->refs = 0;
+        } else {
+            a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
+        }
         a->cap = new_cap;
     }
     for (size_t j = a->len; j > (size_t)i; j--) {
