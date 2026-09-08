@@ -673,9 +673,8 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
             return zz_bool(x >= y);
         }
     }
-    // string concat
-    if ((op == ZZOP_ADD || op == ZZOP_EQ || op == ZZOP_NE) && a.tag == ZZ_STR &&
-        b.tag == ZZ_STR) {
+    // string ops
+    if (a.tag == ZZ_STR && b.tag == ZZ_STR) {
         if (op == ZZOP_ADD) {
             zz_str *out = str_alloc(a.s->len + b.s->len);
             memcpy(out->data, a.s->data, a.s->len);
@@ -684,12 +683,30 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
             v.tag = ZZ_STR;
             v.s = out;
             return v;
-        } else if (op == ZZOP_EQ) {
+        }
+        int cmp = memcmp(a.s->data, b.s->data,
+                         a.s->len < b.s->len ? a.s->len : b.s->len);
+        // If common prefix matches, shorter string is "less than"
+        if (cmp == 0 && a.s->len != b.s->len) {
+            cmp = (a.s->len < b.s->len) ? -1 : 1;
+        }
+        switch (op) {
+        case ZZOP_EQ:
             return zz_bool(a.s->len == b.s->len &&
                            memcmp(a.s->data, b.s->data, a.s->len) == 0);
-        } else {
+        case ZZOP_NE:
             return zz_bool(!(a.s->len == b.s->len &&
                              memcmp(a.s->data, b.s->data, a.s->len) == 0));
+        case ZZOP_LT:
+            return zz_bool(cmp < 0);
+        case ZZOP_GT:
+            return zz_bool(cmp > 0);
+        case ZZOP_LE:
+            return zz_bool(cmp <= 0);
+        case ZZOP_GE:
+            return zz_bool(cmp >= 0);
+        default:
+            break;
         }
     }
     // bool AND/OR handled by control flow in generated code; comparison

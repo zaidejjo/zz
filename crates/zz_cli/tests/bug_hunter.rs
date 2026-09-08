@@ -304,7 +304,7 @@ func main() {
 
 #[test]
 fn bh_bool_as_value() {
-    // NATIVE BUG: bool value passed to zz_truthy() which expects zz_value.
+    // FIXED: bool value was passed raw to zz_truthy() — now boxed.
     let src = r#"
 func main() {
     t := true
@@ -319,7 +319,7 @@ func main() {
     }
 }
 "#;
-    assert_native_known_bug("bool_as_value (bool→zz_value type mismatch)", src);
+    assert_parity("bool_as_value", src);
 }
 
 #[test]
@@ -481,19 +481,19 @@ func main() {
 
 #[test]
 fn bh_large_match() {
-    // NATIVE BUG: match with many arms emits else outside function scope.
+    // FIXED: match with many arms now emits correct C.
     let mut src = String::from("func main() {\n  x := 5\n  match x {\n");
     for i in 0..20 {
         src.push_str(&format!("    {i} => println(\"case {i}\"),\n"));
     }
     src.push_str("    _ => println(\"default\"),\n");
     src.push_str("  }\n}\n");
-    assert_native_known_bug("large_match (else scope error in codegen)", &src);
+    assert_parity("large_match", &src);
 }
 
 #[test]
 fn bh_triple_nested_match() {
-    // NATIVE BUG: triple-nested match on Option returns empty in native.
+    // FIXED: nested match on Option now works correctly.
     let src = r#"
 func main() {
     x: Option<Option<int>> = .some(.some(42))
@@ -513,12 +513,12 @@ func main() {
     }
 }
 "#;
-    assert_native_known_bug("triple_nested_match (nested match broken in native)", src);
+    assert_parity("triple_nested_match", src);
 }
 
 #[test]
 fn bh_for_with_early_return() {
-    // NATIVE BUG: return in for-loop emits int64_t instead of zz_value.
+    // FIXED: return in for-loop now emits boxed zz_value.
     let src = r#"
 func find_first() -> int {
     for i in 0..100 {
@@ -533,10 +533,7 @@ func main() {
     println(find_first())
 }
 "#;
-    assert_native_known_bug(
-        "for_with_early_return (return type mismatch in codegen)",
-        src,
-    );
+    assert_parity("for_with_early_return", src);
 }
 
 #[test]
@@ -592,7 +589,8 @@ func main() {
 
 #[test]
 fn bh_string_contains() {
-    // NATIVE BUG: str.contains() always returns false in native.
+    // NATIVE BUG: method dispatch resolves .contains() to vec.contains instead
+    // of str.contains. The receiver type isn't in tp.bindings for locals.
     let src = r#"
 func main() {
     s := "Hello, World!"
@@ -601,7 +599,10 @@ func main() {
     println(s.contains(""))
 }
 "#;
-    assert_native_known_bug("string_contains (str.contains broken in native)", src);
+    assert_native_known_bug(
+        "string_contains (method dispatch: vec.contains instead of str.contains)",
+        src,
+    );
 }
 
 #[test]
@@ -617,7 +618,7 @@ func main() {
 
 #[test]
 fn bh_string_comparison() {
-    // NATIVE BUG: `<` operator on strings returns empty output.
+    // FIXED: string comparison operators now work in native.
     let src = r#"
 func main() {
     a := "abc"
@@ -629,8 +630,5 @@ func main() {
     println(a < b)
 }
 "#;
-    assert_native_known_bug(
-        "string_comparison (string < operator broken in native)",
-        src,
-    );
+    assert_parity("string_comparison", src);
 }

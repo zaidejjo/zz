@@ -380,6 +380,71 @@ println("done")
     }
 }
 
+fn debug_generated_c(label: &str, src: &str) {
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".to_string(),
+        pruned.clone(),
+    );
+    let lowered = lowerer.lower();
+    let mut in_main = false;
+    let mut brace_depth = 0;
+    eprintln!("=== {label} ===");
+    for line in lowered.source.lines() {
+        if line.starts_with("void zz_main(") {
+            in_main = true;
+        }
+        if in_main {
+            eprintln!("C: {}", line);
+            brace_depth += line.matches('{').count();
+            brace_depth = brace_depth.saturating_sub(line.matches('}').count());
+            if brace_depth == 0 && line.contains('}') && !line.starts_with("void zz_main") {
+                break;
+            }
+        }
+    }
+}
+
+#[test]
+fn debug_string_contains_func_main_c() {
+    debug_generated_c(
+        "string contains func main",
+        r#"
+func main() {
+    s := "Hello, World!"
+    r := s.contains("World")
+    println(r)
+}
+"#,
+    );
+}
+
+#[test]
+fn debug_triple_nested_match_c() {
+    debug_generated_c(
+        "triple nested match",
+        r#"
+x: Option<Option<int>> = .some(.some(42))
+match x {
+    .some(inner) => {
+        match inner {
+            .some(v) => {
+                match v {
+                    42 => println("found 42"),
+                    _ => println("other"),
+                    }
+                },
+                .none => println("inner none"),
+            }
+        },
+        .none => println("outer none"),
+    }
+"#,
+    );
+}
+
 #[allow(dead_code)]
 fn _type_marker(_: Type) {}
 
