@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use zz_codegen::BuildOptions;
 use zz_frontend::span::Span;
@@ -144,6 +145,28 @@ fn typed_program_for(
     Ok((pruned, reach, main_key))
 }
 
+/// True when `p` is a file that can be executed: present, non-empty, and
+/// (on unix) carrying at least one execute bit. Protects the cache from
+/// stale artifacts left by interrupted builds, which clang may leave as
+/// a complete-but-non-executable (0644) file.
+fn is_usable_cache_binary(p: &Path) -> bool {
+    let Ok(meta) = p.metadata() else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 /// Build a native binary for `path`. Returns the output binary path.
 pub fn build_native(path: &Path, mode: BuildMode) -> Result<PathBuf, String> {
     let entry_ns = path
@@ -160,13 +183,49 @@ pub fn build_native(path: &Path, mode: BuildMode) -> Result<PathBuf, String> {
     let key = cache_key(&source, opts);
     let cached = dir.join(format!("{key}-{mode:?}"));
 
-    if cached.is_file() {
+    if is_usable_cache_binary(&cached) {
         // Reuse the cached binary.
         return Ok(cached);
     }
+    // Stale artifact (interrupted build, missing exec bit, empty file):
+    // drop it so the fresh build below replaces it.
+    let _ = std::fs::remove_file(&cached);
 
-    zz_codegen::build_native(&pruned, &reach, &main_key, opts, &cached)
-        .map_err(|e| format!("{e}"))?;
+    // Build to a unique temp path in the same directory, then atomically
+    // rename into place. Concurrent builds of the same key (parallel tests,
+    // parallel `zz` invocations) each produce a complete, executable file;
+    // observers never see a partially-written or non-executable binary.
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let tmp = dir.join(format!(
+        "{key}-{mode:?}.{}.{}.tmp",
+        std::process::id(),
+        TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    if let Err(e) = zz_codegen::build_native(&pruned, &reach, &main_key, opts, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    // Some compilers create the output without the exec bit when writing a
+    // fresh file; force it so the rename only ever publishes runnable code.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let res = std::fs::metadata(&tmp)
+            .and_then(|m| {
+                let mut perms = m.permissions();
+                perms.set_mode(perms.mode() | 0o111);
+                std::fs::set_permissions(&tmp, perms)
+            })
+            .map_err(|e| format!("cannot set exec bit: {e}"));
+        if let Err(e) = res {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    }
+    if let Err(e) = std::fs::rename(&tmp, &cached) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("cannot publish cache entry: {e}"));
+    }
     Ok(cached)
 }
 
