@@ -11,7 +11,7 @@ func main() {
     // Wave 1: Small arrays (1M iterations)
     sum1 := 0
     wave1_start := time.now_ms()
-    for wave in 0..10 {
+    for _wave in 0..10 {
         for i in 0..100000 {
             arr := [i, i + 1, i + 2, i + 3, i + 4]
             sum1 = sum1 + arr[0] + arr[4]
@@ -23,7 +23,7 @@ func main() {
     // Wave 2: Dictionaries (500k iterations)
     sum2 := 0
     wave2_start := time.now_ms()
-    for wave in 0..5 {
+    for _wave in 0..5 {
         for i in 0..100000 {
             d := {"a": i, "b": i + 1, "c": i + 2}
             sum2 = sum2 + d["a"] + d["c"]
@@ -35,7 +35,7 @@ func main() {
     // Wave 3: Strings (500k iterations)
     sum3 := 0
     wave3_start := time.now_ms()
-    for wave in 0..5 {
+    for _wave in 0..5 {
         for i in 0..100000 {
             s := "item_" + str(i) + "_data"
             sum3 = sum3 + len(s)
@@ -47,7 +47,7 @@ func main() {
     // Wave 4: Nested structures (200k iterations)
     sum4 := 0
     wave4_start := time.now_ms()
-    for wave in 0..2 {
+    for _wave in 0..2 {
         for i in 0..100000 {
             outer := [i, i + 1]
             inner := {"x": outer[0], "y": outer[1]}
