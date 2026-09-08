@@ -129,6 +129,25 @@ e2e_success_test!(e2e_syntax_return_in_loops, "syntax", "return_in_loops.zz");
 e2e_success_test!(e2e_syntax_dict_iteration, "syntax", "dict_iteration.zz");
 e2e_success_test!(e2e_syntax_pipe_elvis, "syntax", "pipe_elvis.zz");
 e2e_success_test!(e2e_syntax_empty_infer, "syntax", "empty_infer.zz");
+e2e_success_test!(
+    e2e_syntax_closure_annotations,
+    "syntax",
+    "closure_annotations.zz"
+);
+e2e_success_test!(e2e_syntax_destructuring, "syntax", "destructuring.zz");
+e2e_success_test!(e2e_syntax_main_entrypoint, "syntax", "main_entrypoint.zz");
+e2e_success_test!(e2e_syntax_match_guards, "syntax", "match_guards.zz");
+e2e_success_test!(
+    e2e_syntax_question_operator_newline,
+    "syntax",
+    "question_operator_newline.zz"
+);
+e2e_success_test!(
+    e2e_syntax_struct_array_push,
+    "syntax",
+    "struct_array_push.zz"
+);
+e2e_success_test!(e2e_syntax_struct_impl, "syntax", "struct_impl.zz");
 
 // Type fixtures
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
@@ -218,6 +237,7 @@ e2e_error_test!(e2e_err_parse_error, "parse_error.zz");
 e2e_error_test!(e2e_err_div_by_zero, "div_by_zero.zz");
 e2e_error_test!(e2e_err_unknown_field, "unknown_field.zz");
 e2e_error_test!(e2e_err_struct_init_assign, "struct_init_assign_error.zz");
+e2e_error_test!(e2e_err_int_float_cmp, "int_float_cmp.zz");
 
 // ---------------------------------------------------------------------------
 // Eval tests: inline code via `zz eval`

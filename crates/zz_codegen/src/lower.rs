@@ -25,6 +25,10 @@ pub struct NameCtx {
     /// most recently bound to (straight-line code only). Used to fold
     /// `len(v)` to a constant so tight loops lower to raw scalar arith.
     array_lens: HashMap<String, usize>,
+    /// zz var name → checker type from the type system. Used by method
+    /// dispatch to select the correct namespace (e.g., `"str"` for strings
+    /// vs `"vec"` for arrays) when multiple natives share a method name.
+    checker_types: HashMap<String, zz_checker::Type>,
 }
 
 impl NameCtx {
@@ -33,6 +37,7 @@ impl NameCtx {
             stack: HashMap::new(),
             counter: 0,
             array_lens: HashMap::new(),
+            checker_types: HashMap::new(),
         }
     }
 
@@ -436,6 +441,7 @@ fn needs_temp(e: &Expr) -> bool {
             | Expr::Field { .. }
             | Expr::Index { .. }
             | Expr::Slice { .. }
+            | Expr::Match { .. }
     )
 }
 
@@ -1105,7 +1111,7 @@ impl Lowerer {
             }
         }
         let mut body_out = String::new();
-        self.emit_block(block, &mut names, &mut body_out);
+        self.emit_func_block(block, &mut names, &mut body_out);
         o.push_str(&body_out);
         // Implicit return: last statement expression is the function value.
         if self.last_stmt_value(block, &mut names, &mut o).is_none() {
@@ -1120,6 +1126,23 @@ impl Lowerer {
     fn emit_block(&self, block: &Block, names: &mut NameCtx, out: &mut String) {
         // Control-flow boundary: drop literal-length knowledge from the
         // enclosing scope so `len(x)` folds never cross a merge point.
+        names.clear_array_lens();
+        // Scope `__tail` so inner block tail captures don't leak to outer scopes.
+        let tail_saved = names.stack.get("__tail").map(|v| v.len()).unwrap_or(0);
+        let n = block.stmts.len();
+        for (i, stmt) in block.stmts.iter().enumerate() {
+            let is_tail = i == n - 1;
+            self.emit_stmt(stmt, names, out, is_tail);
+        }
+        // Restore `__tail` stack to pre-block depth.
+        if let Some(v) = names.stack.get_mut("__tail") {
+            v.truncate(tail_saved);
+        }
+    }
+
+    /// Emit the function body block. Unlike `emit_block`, this preserves
+    /// `__tail` entries so `last_stmt_value` can use them for implicit returns.
+    fn emit_func_block(&self, block: &Block, names: &mut NameCtx, out: &mut String) {
         names.clear_array_lens();
         let n = block.stmts.len();
         for (i, stmt) in block.stmts.iter().enumerate() {
@@ -1144,6 +1167,7 @@ impl Lowerer {
             }
             // Pure leaf tail: emit directly (rarely reached).
             let val = self.emit_expr(e, names, out);
+            let val = box_scalar_operand(e, names, &val);
             out.push_str(&format!("    return {val};\n"));
             return Some(());
         }
@@ -1158,6 +1182,7 @@ impl Lowerer {
                 cond, then, els, ..
             } => {
                 let c = self.emit_expr(cond, names, out);
+                let c = box_scalar_operand(cond, names, &c);
                 out.push_str(&format!("    if (zz_truthy({c})) {{\n"));
                 if self.last_stmt_value(then, names, out).is_none() {
                     out.push_str("        return zz_unit();\n");
@@ -1188,11 +1213,16 @@ impl Lowerer {
         match stmt {
             Stmt::Decl { name, value, .. } => {
                 // Look up the type of the initializer expression
-                let ctype = if let Some(ty) = self.tp.types.get(&value.span()) {
-                    ty_to_ctype(ty)
+                let (ctype, checker_ty) = if let Some(ty) = self.tp.types.get(&value.span()) {
+                    (ty_to_ctype(ty), Some(ty.clone()))
                 } else {
-                    "zz_value".to_string() // fallback
+                    ("zz_value".to_string(), None) // fallback
                 };
+                // Store the checker type for method dispatch (e.g., to distinguish
+                // str.contains from vec.contains when the receiver is a local).
+                if let Some(ct) = checker_ty {
+                    names.checker_types.insert(name.name.clone(), ct);
+                }
 
                 // Check if this is a struct initialization
                 if let Expr::StructInit {
@@ -1336,7 +1366,8 @@ impl Lowerer {
                 let ast_says_scalar = expr_emits_raw_scalar(value);
                 let val_is_actually_scalar = val.starts_with("(int64_t)(")
                     || val.starts_with("(double)(")
-                    || val.starts_with("(bool)(");
+                    || val.starts_with("(bool)(")
+                    || (ast_says_scalar && !val.starts_with("zz_"));
                 let value_is_scalar = ast_says_scalar || val_is_actually_scalar;
                 let value_needs_unbox = !val_is_actually_scalar;
                 match target {
@@ -1527,6 +1558,7 @@ impl Lowerer {
             Stmt::Return { value, .. } => match value {
                 Some(v) => {
                     let val = self.emit_expr(v, names, out);
+                    let val = box_scalar_operand(v, names, &val);
                     out.push_str(&format!("    return {val};\n"));
                 }
                 None => out.push_str("    return zz_unit();\n"),
@@ -2073,6 +2105,7 @@ impl Lowerer {
                 }
                 out.push_str("    while (1) {\n");
                 let c = self.emit_expr(cond, names, out);
+                let c = box_scalar_operand(cond, names, &c);
                 out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
                 // Loop body is never a function tail.
                 for bstmt in &body.stmts {
@@ -2092,6 +2125,7 @@ impl Lowerer {
                 cond, then, els, ..
             } => {
                 let c = self.emit_expr(cond, names, out);
+                let c = box_scalar_operand(cond, names, &c);
                 out.push_str(&format!("    if (zz_truthy({c})) {{\n"));
                 self.emit_block(then, names, out);
                 if let Some(el) = els {
@@ -2106,7 +2140,14 @@ impl Lowerer {
             }
             Expr::Block(b) => {
                 self.emit_block(b, names, out);
-                "zz_unit()".to_string()
+                // If the block's last statement was captured into a __tail
+                // temp (e.g. a match expression inside a match arm body),
+                // return that value instead of unit.
+                if let Some((tmp, _)) = names.stack.get("__tail").and_then(|s| s.last()) {
+                    tmp.clone()
+                } else {
+                    "zz_unit()".to_string()
+                }
             }
             Expr::Range { start, end, .. } => {
                 let s = self.emit_expr(start, names, out);
@@ -2507,8 +2548,50 @@ impl Lowerer {
                                 out.push_str("    }\n");
                             }
                         }
-                        _ => {
-                            out.push_str(&format!("    // unsupported match pattern\n"));
+                        Pattern::Literal { value, .. } => {
+                            // Integer/float/bool/string literal patterns:
+                            // compare the scrutinee with the literal value
+                            // using ZZOP_EQ.
+                            let lit_c = match value {
+                                zz_frontend::ast::Lit::Int(v) => {
+                                    format!("zz_int({v})")
+                                }
+                                zz_frontend::ast::Lit::Float(v) => {
+                                    let s = if *v == v.floor() && v.abs() < 1e15 {
+                                        format!("{v:.1}")
+                                    } else {
+                                        format!("{v}")
+                                    };
+                                    format!("zz_float({s})")
+                                }
+                                zz_frontend::ast::Lit::Bool(v) => {
+                                    format!("zz_bool({})", if *v { "true" } else { "false" })
+                                }
+                                zz_frontend::ast::Lit::Str(v) => self.emit_str_literal(v),
+                            };
+                            let cond =
+                                format!("zz_truthy(zz_binop(ZZOP_EQ, {scrut_tmp}, {lit_c}))");
+                            let full_cond = if let Some(guard_expr) = &arm.guard {
+                                let guard_c =
+                                    emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
+                                format!("{cond} && zz_truthy({guard_c})")
+                            } else {
+                                cond
+                            };
+                            if arm_needs_else_prefix {
+                                out.push_str(&format!("    }} else if ({full_cond}) {{\n"));
+                            } else {
+                                out.push_str(&format!("    if ({full_cond}) {{\n"));
+                            }
+                            let arm_val = self.emit_expr(&arm.body, names, out);
+                            out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
+                            if arm_closes_block {
+                                out.push_str("    }\n");
+                            }
+                        }
+                        Pattern::Tuple { .. } => {
+                            // Tuple patterns not yet supported in codegen.
+                            out.push_str("    // unsupported match pattern (tuple)\n");
                         }
                     }
                 }
@@ -2580,22 +2663,70 @@ impl Lowerer {
                     if let Some((c, r)) = struct_dispatch {
                         (c, Some(r))
                     } else {
-                        let namespaces = ["vec", "str", "dict", "option", "result", "http"];
+                        // Use the receiver's type from the type checker to
+                        // select the correct namespace. Without this, the
+                        // generic loop picks "vec" before "str" for methods
+                        // like `.contains()` that exist on multiple types.
                         let mut found_ns = "";
-                        for ns in &namespaces {
-                            let candidate = format!("{ns}.{method}");
-                            let std_candidate = format!("std.{ns}.{method}");
+                        // Try type-based dispatch: check NameCtx's checker_types
+                        // (populated at Decl) for the receiver variable's resolved
+                        // type, then map to the matching namespace.
+                        let recv_type_ns =
+                            names.checker_types.get(obj_name).and_then(|ty| match ty {
+                                zz_checker::Type::Str => Some("str"),
+                                zz_checker::Type::Array(_) => Some("vec"),
+                                zz_checker::Type::Dict(_, _) => Some("dict"),
+                                zz_checker::Type::Option(_) => Some("option"),
+                                zz_checker::Type::Result(_, _) => Some("result"),
+                                _ => None,
+                            });
+                        // Also check the type checker's span_types map
+                        // using the receiver's source span.
+                        let span_type_ns = if let Some(zzty) = self.tp.types.get(&first_ident_span)
+                        {
+                            match zzty {
+                                zz_checker::Type::Str => Some("str"),
+                                zz_checker::Type::Array(_) => Some("vec"),
+                                zz_checker::Type::Dict(_, _) => Some("dict"),
+                                zz_checker::Type::Option(_) => Some("option"),
+                                zz_checker::Type::Result(_, _) => Some("result"),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        let type_ns = recv_type_ns.or(span_type_ns).unwrap_or("");
+                        if !type_ns.is_empty() {
+                            let candidate = format!("{type_ns}.{method}");
+                            let std_candidate = format!("std.{type_ns}.{method}");
                             if self.reachable_natives.contains(&candidate)
                                 || self.reachable_natives.contains(&std_candidate)
                             {
-                                found_ns = ns;
-                                break;
+                                found_ns = type_ns;
+                            } else if native_supported(&candidate) {
+                                found_ns = type_ns;
+                            }
+                        }
+                        // Fallback: generic namespace search (untyped
+                        // receivers, e.g. variables without type annotations).
+                        if found_ns.is_empty() {
+                            let namespaces = ["vec", "str", "dict", "option", "result", "http"];
+                            for ns in &namespaces {
+                                let candidate = format!("{ns}.{method}");
+                                let std_candidate = format!("std.{ns}.{method}");
+                                if self.reachable_natives.contains(&candidate)
+                                    || self.reachable_natives.contains(&std_candidate)
+                                {
+                                    found_ns = ns;
+                                    break;
+                                }
                             }
                         }
                         if found_ns.is_empty() {
                             // Also try matching by native_impl — checks if there's
                             // a C runtime function registered for this method under
                             // any namespace.
+                            let namespaces = ["vec", "str", "dict", "option", "result", "http"];
                             for ns in &namespaces {
                                 let candidate = format!("{ns}.{method}");
                                 if native_supported(&candidate) {
