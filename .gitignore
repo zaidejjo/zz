@@ -27,3 +27,4 @@ bench/performance_check/rust/target
 bench/performance_check/go/bench_go
 **/.zzbin/
 bench/performance_check/results.json
+bench/performance_check/RESULTS.md
