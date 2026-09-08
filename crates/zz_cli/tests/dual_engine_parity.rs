@@ -101,7 +101,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
     let stem = file.file_stem()?.to_str()?;
     match stem {
         // --- C codegen compile errors (not yet fixed) ---
-        "control_flow" => Some("C codegen: member access (.i) on non-struct type"),
         "empty_infer" => Some("C codegen: type mismatch in zz_clone (int64_t vs zz_value)"),
         "structs" => Some("C codegen: nested field access emits int64_t instead of zz_value"),
         "variants" => Some("C codegen: undeclared variable in match + else scope error"),
@@ -373,8 +372,10 @@ parity_strict!(
     "return_in_loops.zz"
 );
 
+// --- control_flow: fixed (member access on non-struct type) ---
+parity_strict!(parity_syntax_control_flow, "syntax", "control_flow.zz");
+
 // --- Still broken: C codegen compile errors (not yet fixed) ---
-parity_known_failure!(parity_syntax_control_flow, "syntax", "control_flow.zz");
 parity_known_failure!(parity_syntax_empty_infer, "syntax", "empty_infer.zz");
 parity_known_failure!(parity_types_structs, "types", "structs.zz");
 parity_known_failure!(parity_types_variants, "types", "variants.zz");

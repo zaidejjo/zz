@@ -589,8 +589,8 @@ func main() {
 
 #[test]
 fn bh_string_contains() {
-    // NATIVE BUG: method dispatch resolves .contains() to vec.contains instead
-    // of str.contains. The receiver type isn't in tp.bindings for locals.
+    // FIXED: method dispatch now uses checker_types from NameCtx to resolve
+    // .contains() to str.contains instead of vec.contains.
     let src = r#"
 func main() {
     s := "Hello, World!"
@@ -599,10 +599,7 @@ func main() {
     println(s.contains(""))
 }
 "#;
-    assert_native_known_bug(
-        "string_contains (method dispatch: vec.contains instead of str.contains)",
-        src,
-    );
+    assert_parity("string_contains", src);
 }
 
 #[test]

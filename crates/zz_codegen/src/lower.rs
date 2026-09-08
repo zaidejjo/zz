@@ -1213,11 +1213,16 @@ impl Lowerer {
         match stmt {
             Stmt::Decl { name, value, .. } => {
                 // Look up the type of the initializer expression
-                let ctype = if let Some(ty) = self.tp.types.get(&value.span()) {
-                    ty_to_ctype(ty)
+                let (ctype, checker_ty) = if let Some(ty) = self.tp.types.get(&value.span()) {
+                    (ty_to_ctype(ty), Some(ty.clone()))
                 } else {
-                    "zz_value".to_string() // fallback
+                    ("zz_value".to_string(), None) // fallback
                 };
+                // Store the checker type for method dispatch (e.g., to distinguish
+                // str.contains from vec.contains when the receiver is a local).
+                if let Some(ct) = checker_ty {
+                    names.checker_types.insert(name.name.clone(), ct);
+                }
 
                 // Check if this is a struct initialization
                 if let Expr::StructInit {
@@ -1361,7 +1366,8 @@ impl Lowerer {
                 let ast_says_scalar = expr_emits_raw_scalar(value);
                 let val_is_actually_scalar = val.starts_with("(int64_t)(")
                     || val.starts_with("(double)(")
-                    || val.starts_with("(bool)(");
+                    || val.starts_with("(bool)(")
+                    || (ast_says_scalar && !val.starts_with("zz_"));
                 let value_is_scalar = ast_says_scalar || val_is_actually_scalar;
                 let value_needs_unbox = !val_is_actually_scalar;
                 match target {
@@ -2662,17 +2668,18 @@ impl Lowerer {
                         // generic loop picks "vec" before "str" for methods
                         // like `.contains()` that exist on multiple types.
                         let mut found_ns = "";
-                        // Try type-based dispatch: check bindings for the
-                        // receiver variable's resolved type, then map to
-                        // the matching namespace.
-                        let recv_type_ns = self.tp.bindings.get(obj_name).and_then(|ty| match ty {
-                            zz_checker::Type::Str => Some("str"),
-                            zz_checker::Type::Array(_) => Some("vec"),
-                            zz_checker::Type::Dict(_, _) => Some("dict"),
-                            zz_checker::Type::Option(_) => Some("option"),
-                            zz_checker::Type::Result(_, _) => Some("result"),
-                            _ => None,
-                        });
+                        // Try type-based dispatch: check NameCtx's checker_types
+                        // (populated at Decl) for the receiver variable's resolved
+                        // type, then map to the matching namespace.
+                        let recv_type_ns =
+                            names.checker_types.get(obj_name).and_then(|ty| match ty {
+                                zz_checker::Type::Str => Some("str"),
+                                zz_checker::Type::Array(_) => Some("vec"),
+                                zz_checker::Type::Dict(_, _) => Some("dict"),
+                                zz_checker::Type::Option(_) => Some("option"),
+                                zz_checker::Type::Result(_, _) => Some("result"),
+                                _ => None,
+                            });
                         // Also check the type checker's span_types map
                         // using the receiver's source span.
                         let span_type_ns = if let Some(zzty) = self.tp.types.get(&first_ident_span)
