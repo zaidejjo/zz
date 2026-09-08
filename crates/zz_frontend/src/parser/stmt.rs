@@ -46,7 +46,15 @@ impl Parser {
                 let stmt = match self.peek_kind() {
                     TokenKind::Func => self.parse_func(true),
                     TokenKind::Struct => self.parse_struct(true),
-                    TokenKind::Impl => self.parse_impl(true),
+                    TokenKind::Impl => {
+                        // `pub impl` is not allowed: impl methods are always
+                        // public. Recover by treating the impl as non-pub.
+                        self.error_here(
+                            "cannot use `pub` on `impl`\n\
+                             hint: impl methods are always public, remove the `pub` keyword",
+                        );
+                        self.parse_impl(false)
+                    }
                     TokenKind::Import => self.parse_import(true),
                     // `pub x := expr` or `pub x: type = expr`
                     TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {

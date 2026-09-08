@@ -1,0 +1,6 @@
+// E2E: `pub` is not allowed before `impl` — impl methods are always public.
+struct Point { x: int, y: int }
+
+pub impl Point {
+    func dist(self) -> int { self.x }
+}

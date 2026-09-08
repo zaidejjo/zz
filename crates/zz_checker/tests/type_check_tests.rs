@@ -936,6 +936,114 @@ fn mismatched_delimiter_in_parser() {
 }
 
 #[test]
+fn struct_init_marks_import_used() {
+    // Regression: `ml.Circle{...}` must count as a use of `ml`, so a
+    // namespaced struct init does not trigger a spurious unused-import warning.
+    let r = check_src_with_funcs_and_structs(
+        "import math_lib as ml\nc := ml.Circle{rad: 10}\nc",
+        HashMap::new(),
+        {
+            let mut s = HashMap::new();
+            s.insert(
+                "ml.Circle".to_string(),
+                StructSig {
+                    fields: vec![("rad".to_string(), Type::Int)],
+                },
+            );
+            s
+        },
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        !warns.iter().any(|m| m.contains("unused import")),
+        "unused import should not be warned: {warns:?}"
+    );
+}
+
+#[test]
+fn pub_before_impl_is_parse_error() {
+    // `pub impl` is rejected with a hint to remove `pub` — impl methods are
+    // always public.
+    let parsed = zz_frontend::parse("pub impl Point {\n    func dist(self) -> int { self.x }\n}");
+    let msgs: Vec<String> = parsed
+        .errors
+        .iter()
+        .map(|e| format!("{}\n{}", e.message, e.notes.join("\n")))
+        .collect();
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("cannot use `pub` on `impl`")),
+        "expected `pub` on `impl` error, got: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("remove the `pub` keyword")),
+        "expected hint to remove `pub`, got: {msgs:?}"
+    );
+}
+
+#[test]
+fn pub_func_inside_impl_is_allowed() {
+    // `pub func` inside an `impl` block is the supported way to export a
+    // method cross-module.
+    let parsed = zz_frontend::parse("impl Point {\n    pub func dist(self) -> int { self.x }\n}");
+    assert!(
+        parsed.errors.is_empty(),
+        "expected pub func inside impl to parse, got: {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
+fn impl_method_without_pub_checkable() {
+    // Plain `impl` (no `pub` keyword) with struct methods must type-check.
+    let r = check_src(
+        "struct Point { x: int, y: int }\n\
+         impl Point {\n\
+         \x20   func dist(self) -> int { self.x + self.y }\n\
+         }\n\
+         p := Point{ x: 1, y: 2 }\n\
+         z := p.dist()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn impl_method_export_requires_pub() {
+    // Only `pub` methods are exported to the cross-module seed. Non-pub
+    // methods stay visible within the module but absent from `pub_funcs`.
+    let r = check_src(
+        "struct Point { x: int, y: int }\n\
+         impl Point {\n\
+         \x20   func priv_m(self) -> int { self.x }\n\
+         \x20   pub func pub_m(self) -> int { self.y }\n\
+         }\n\
+         p := Point{ x: 1, y: 2 }\n\
+         a := p.priv_m()\n\
+         b := p.pub_m()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        r.funcs.contains_key("Point.priv_m"),
+        "private method must be registered for in-module calls"
+    );
+    assert!(
+        !r.pub_funcs.contains_key("Point.priv_m"),
+        "private method must not be exported"
+    );
+    assert!(
+        r.pub_funcs.contains_key("Point.pub_m"),
+        "pub method must be exported"
+    );
+}
+
+#[test]
 fn fixit_structure_is_populated() {
     use zz_frontend::diag::FixIt;
     let fixit = FixIt::safe(Span::new(0, 5), "_x", "rename to");

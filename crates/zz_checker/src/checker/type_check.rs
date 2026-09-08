@@ -526,6 +526,7 @@ impl Checker {
                 Type::Range(Box::new(Type::Int))
             }
             Expr::StructInit { name, fields, span } => {
+                self.used_names.insert(name.clone());
                 let Some(sig) = self.structs.get(name).cloned() else {
                     self.errors
                         .push(error_at(format!("unknown struct `{name}`"), *span));

@@ -128,6 +128,33 @@ fn module_ns(alias: Option<&str>, path: &Path) -> String {
     })
 }
 
+/// If `msg` is `prefix``name`` (a backtick-quoted name immediately after a
+/// known prefix), return `name`. Used to lift names out of checker messages
+/// (`undefined variable `b.helper``) for private-item detection.
+fn quoted_name_after<'a>(msg: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = msg.strip_prefix(prefix)?;
+    let rest = rest.strip_prefix('`')?;
+    let end = rest.find('`')?;
+    Some(&rest[..end])
+}
+
+/// From `struct `T` has no field `f``, extract (`T`, `f`).
+fn struct_no_field(msg: &str) -> Option<(&str, &str)> {
+    let rest = msg.strip_prefix("struct `")?;
+    let end = rest.find('`')?;
+    let sname = &rest[..end];
+    let rest = rest[end + 1..].strip_prefix(" has no field ")?;
+    let rest = rest.strip_prefix('`')?;
+    let end = rest.find('`')?;
+    Some((sname, &rest[..end]))
+}
+
+/// Push the standard "it's private — add `pub`" note onto a diagnostic.
+fn push_private_note(d: &mut RawDiag, name: &str, template: &str) {
+    let last = name.rsplit('.').next().unwrap_or(name);
+    d.notes.push(template.replace("{}", last));
+}
+
 impl Loader {
     /// Parse a file and recursively load its imports (DFS post-order, so
     /// dependencies land in `order` before their dependents).
@@ -333,6 +360,72 @@ impl Loader {
         true
     }
 
+    /// Rewrite a diagnostic that references an item which exists but was not
+    /// exported (it is private to its module) into a targeted error with a
+    /// hint to add `pub`. This is a DX upgrade over the generic
+    /// "undefined variable" / "unknown struct" / "no such field" messages.
+    ///
+    /// Returns the fully-qualified private name when the diagnostic was
+    /// rewritten, so the caller can prune cascading noise for that namespace.
+    fn enrich_private(&self, d: &mut RawDiag) -> Option<String> {
+        let msg = d.message.clone();
+
+        // `undefined variable `ns.item`` — private function/variable/struct.
+        if let Some(name) = quoted_name_after(&msg, "undefined variable ") {
+            if let Some(kind) = self.private_item_kind(name) {
+                d.message = format!("{kind} `{name}` is private");
+                push_private_note(
+                    d,
+                    name,
+                    "add `pub` to `{}` to make it visible outside its module",
+                );
+                return Some(name.to_string());
+            }
+        }
+
+        // `unknown struct `ns.name`` — private struct.
+        if let Some(name) = quoted_name_after(&msg, "unknown struct ") {
+            if let Some(kind) = self.private_item_kind(name) {
+                d.message = format!("{kind} `{name}` is private");
+                push_private_note(
+                    d,
+                    name,
+                    "add `pub` to `{}` to make it visible outside its module",
+                );
+                return Some(name.to_string());
+            }
+        }
+
+        // `struct `T` has no field `f`` where `T.f` is a private method from
+        // an `impl` block.
+        if let Some((sname, field)) = struct_no_field(&msg) {
+            let key = format!("{sname}.{field}");
+            if self.all_funcs.contains_key(&key) && !self.funcs.contains_key(&key) {
+                d.message = format!("method `{field}` on struct `{sname}` is private");
+                d.notes.push(format!(
+                    "add `pub` to `{field}` inside `impl {sname}` to make it callable from other modules"
+                ));
+                return Some(key);
+            }
+        }
+        None
+    }
+
+    /// The item kind if `name` exists in the private universe (all items of
+    /// already-loaded modules) but is missing from the pub export seed.
+    fn private_item_kind(&self, name: &str) -> Option<&'static str> {
+        if self.all_funcs.contains_key(name) && !self.funcs.contains_key(name) {
+            return Some("function");
+        }
+        if self.all_structs.contains_key(name) && !self.structs.contains_key(name) {
+            return Some("struct");
+        }
+        if self.all_bindings.contains_key(name) && !self.bindings.contains_key(name) {
+            return Some("variable");
+        }
+        None
+    }
+
     /// Type-check every module in dependency order, accumulating the checker
     /// seed. Modules with errors do not contribute their definitions.
     fn finish(mut self) -> LoadResult {
@@ -396,20 +489,44 @@ impl Loader {
                 .errors
                 .iter()
                 .any(|e| e.severity == zz_frontend::diag::Severity::Error);
+            let mut diags = checked.errors;
             if has_errors {
+                // Upgrade generic "undefined variable / unknown struct / no
+                // field" errors into targeted "this item is private — add
+                // `pub`" diagnostics whenever the reference hits an item that
+                // exists but was not exported.
+                let private_names: Vec<String> = diags
+                    .iter_mut()
+                    .filter_map(|d| self.enrich_private(d))
+                    .collect();
+                // When the root cause is a private item, prune cascading
+                // noise: the `undefined variable `ns`` hop and the
+                // "unused import" warning for the same namespace.
+                if !private_names.is_empty() {
+                    let prefixes: HashSet<String> = private_names
+                        .iter()
+                        .filter_map(|n| n.split('.').next().map(str::to_string))
+                        .collect();
+                    diags.retain(|d| {
+                        !prefixes.iter().any(|ns| {
+                            d.message == format!("undefined variable `{ns}`")
+                                || d.message == format!("unused import `{ns}`")
+                        })
+                    });
+                }
                 self.errors.push(LoadError {
                     name: name.clone(),
                     source: source.clone(),
-                    diags: checked.errors,
+                    diags,
                 });
             } else {
                 // Propagate warnings (even if there are no hard errors)
                 // so they can be displayed to the user.
-                if !checked.errors.is_empty() {
+                if !diags.is_empty() {
                     self.errors.push(LoadError {
                         name: name.clone(),
                         source: source.clone(),
-                        diags: checked.errors,
+                        diags,
                     });
                 }
                 // Only propagate pub items to the cross-module seed.

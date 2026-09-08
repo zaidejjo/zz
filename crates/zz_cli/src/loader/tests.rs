@@ -26,6 +26,22 @@ fn no_errors(result: &LoadResult) -> bool {
     })
 }
 
+/// Flatten all diagnostic messages + notes (used to assert on both a message
+/// and its `add pub` hint note).
+fn diag_texts(result: &LoadResult) -> Vec<String> {
+    result
+        .errors
+        .iter()
+        .flat_map(|e| {
+            e.diags.iter().flat_map(|d| {
+                let mut parts = vec![d.message.clone()];
+                parts.extend(d.notes.clone());
+                parts
+            })
+        })
+        .collect()
+}
+
 #[test]
 fn loads_relative_import() {
     let dir = temp_project(&[
@@ -317,37 +333,43 @@ fn multi_level_pub_chain_runtime() {
 
 #[test]
 fn private_item_not_visible_cross_module() {
-    // Private binding in module B is NOT accessible from A.
+    // Private binding in module B is NOT accessible from A. The diagnostic
+    // must say the item is private and tell the user to add `pub`.
     let dir = temp_project(&[
         ("main.zz", "import b\nz := b.secret"),
         ("b.zz", "secret := 42"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
+    let msgs = diag_texts(&result);
     assert!(
-        result.errors.iter().any(|e| e
-            .diags
-            .iter()
-            .any(|d| d.severity == zz_frontend::diag::Severity::Error)),
-        "expected error for private binding, got: {:?}",
-        result.errors
+        msgs.iter()
+            .any(|m| m.contains("variable `b.secret` is private")),
+        "expected private-variable error, got: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("add `pub` to `secret`")),
+        "expected `add pub` hint, got: {msgs:?}"
     );
 }
 
 #[test]
 fn private_func_not_visible_cross_module() {
-    // Private function in module B is NOT accessible from A.
+    // Private function in module B is NOT accessible from A. The diagnostic
+    // must say the function is private and tell the user to add `pub`.
     let dir = temp_project(&[
         ("main.zz", "import b\nz := b.helper(1)"),
         ("b.zz", "func helper(x: int) -> int { x }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
+    let msgs = diag_texts(&result);
     assert!(
-        result.errors.iter().any(|e| e
-            .diags
-            .iter()
-            .any(|d| d.severity == zz_frontend::diag::Severity::Error)),
-        "expected error for private function, got: {:?}",
-        result.errors
+        msgs.iter()
+            .any(|m| m.contains("function `b.helper` is private")),
+        "expected private-function error, got: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("add `pub` to `helper`")),
+        "expected `add pub` hint, got: {msgs:?}"
     );
 }
 
@@ -368,19 +390,22 @@ fn pub_struct_accessible_cross_module() {
 
 #[test]
 fn private_struct_not_instantiateable() {
-    // Private struct from imported module cannot be instantiated.
+    // Private struct from imported module cannot be instantiated. The
+    // diagnostic must say the struct is private and tell the user to add `pub`.
     let dir = temp_project(&[
         ("main.zz", "import shapes\np := shapes.Secret { x: 1 }"),
         ("shapes.zz", "struct Secret { x: int }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
+    let msgs = diag_texts(&result);
     assert!(
-        result.errors.iter().any(|e| e
-            .diags
-            .iter()
-            .any(|d| d.severity == zz_frontend::diag::Severity::Error)),
-        "expected error for private struct, got: {:?}",
-        result.errors
+        msgs.iter()
+            .any(|m| m.contains("struct `shapes.Secret` is private")),
+        "expected private-struct error, got: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("add `pub` to `Secret`")),
+        "expected `add pub` hint, got: {msgs:?}"
     );
 }
 
@@ -892,6 +917,60 @@ fn cross_module_dotted_func_def() {
         last = interp.run(p).unwrap();
     }
     assert_eq!(last, Value::Int(10));
+}
+
+#[test]
+fn impl_method_without_pub_is_private_cross_module() {
+    // An impl method without `pub` must NOT be callable cross-module, and the
+    // diagnostic must say it's private and tell the user to add `pub`.
+    let dir = temp_project(&[
+        (
+            "main.zz",
+            "import shapes as s\np := s.Point{ x: 5, y: 12 }\nz := p.dist()",
+        ),
+        (
+            "shapes.zz",
+            "pub struct Point { x: int, y: int }\nimpl Point {\n    func dist(self) -> int { self.x + self.y }\n}",
+        ),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    let msgs = diag_texts(&result);
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("`dist` on struct `s.Point` is private")),
+        "expected private-method error, got: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("add `pub`")),
+        "expected `add pub` hint, got: {msgs:?}"
+    );
+}
+
+#[test]
+fn impl_method_with_pub_is_public_cross_module() {
+    // A method marked `pub` inside the impl is callable cross-module.
+    use zz_runtime::{Interp, Value};
+
+    let dir = temp_project(&[
+        (
+            "main.zz",
+            "import shapes as s\np := s.Point{ x: 5, y: 12 }\nz := p.dist()",
+        ),
+        (
+            "shapes.zz",
+            "pub struct Point { x: int, y: int }\nimpl Point {\n    pub func dist(self) -> int { self.x + self.y }\n}",
+        ),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.z"], Type::Int);
+
+    let mut interp = Interp::with_natives(result.natives.clone());
+    let mut last = Value::Unit;
+    for p in &result.programs {
+        last = interp.run(p).unwrap();
+    }
+    assert_eq!(last, Value::Int(17));
 }
 
 #[test]

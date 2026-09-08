@@ -118,13 +118,7 @@ fn check_program_impl(
     // `self` typed as the struct type.
     let mut seen = HashMap::new();
     for stmt in &program.stmts {
-        if let Stmt::Impl {
-            name,
-            methods,
-            pub_,
-            ..
-        } = stmt
-        {
+        if let Stmt::Impl { name, methods, .. } = stmt {
             let type_name = name.join(".");
             for method in methods {
                 if let Stmt::Func {
@@ -132,6 +126,7 @@ fn check_program_impl(
                     params,
                     ret,
                     generics,
+                    pub_: m_pub,
                     ..
                 } = method
                 {
@@ -178,7 +173,9 @@ fn check_program_impl(
                             ret: sig_ret,
                         },
                     );
-                    if *pub_ {
+                    // Only `pub` methods are visible cross-module. `pub impl`
+                    // is rejected by the parser, so `pub` goes on the method.
+                    if *m_pub {
                         pub_funcs_set.insert(full_name);
                     }
                 }
