@@ -43,6 +43,7 @@ typedef enum {
     ZZ_CHAN,
     ZZ_TASK_JOIN,
     ZZ_OBJECT,
+    ZZ_JSON,
 } zz_tag;
 
 typedef struct zz_value zz_value;

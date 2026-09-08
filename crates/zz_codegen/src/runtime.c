@@ -386,6 +386,7 @@ void zz_retain_arc(zz_value *v) {
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
+    case ZZ_JSON:
         if (v->payload) zz_retain(v->payload);
         break;
     default:
@@ -416,6 +417,7 @@ void zz_release_arc(zz_value *v) {
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
+    case ZZ_JSON:
         zz_release_variant(v);
         break;
     default:
@@ -442,6 +444,7 @@ zz_value zz_clone_arc(zz_value v) {
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
+    case ZZ_JSON:
         if (v.payload) zz_retain(v.payload);
         break;
     default:
@@ -472,6 +475,7 @@ void zz_retain(zz_value *v) {
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
+    case ZZ_JSON:
         if (v->payload) zz_retain(v->payload);
         break;
     default:
@@ -505,6 +509,7 @@ void zz_release(zz_value *v) {
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
+    case ZZ_JSON:
         zz_release_variant(v);
         break;
     case ZZ_OBJECT:
@@ -518,12 +523,16 @@ void zz_release(zz_value *v) {
 void zz_assign(zz_value *dst, zz_value src) {
     // Release old value if it's a refcounted type.
     if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY ||
-        dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC || dst->tag == ZZ_OBJECT) {
+        dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC || dst->tag == ZZ_OBJECT ||
+        dst->tag == ZZ_OPTION_SOME || dst->tag == ZZ_RESULT_OK ||
+        dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON) {
         zz_release(dst);
     }
     *dst = src;
     // Retain the new value for refcounted types.
-    if (src.tag == ZZ_ARRAY || src.tag == ZZ_DICT || src.tag == ZZ_FUNC) {
+    if (src.tag == ZZ_ARRAY || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
+        src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
+        src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON) {
         zz_retain(dst);
     }
 }
@@ -547,6 +556,7 @@ zz_value zz_clone(zz_value v) {
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
+    case ZZ_JSON:
         if (v.payload) zz_retain(v.payload);
         break;
     default:
@@ -568,6 +578,8 @@ bool zz_truthy(zz_value v) {
         return v.s->len > 0;
     case ZZ_UNIT:
         return false;
+    case ZZ_JSON:
+        return v.payload && zz_truthy(*v.payload);
     default:
         return true;
     }
@@ -719,6 +731,12 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
             return zz_bool(a.b != b.b);
         default:
             break;
+        }
+    }
+    // JSON equality: compare the wrapped payloads (mirrors VM's Json == Json).
+    if (a.tag == ZZ_JSON && b.tag == ZZ_JSON && a.payload && b.payload) {
+        if (op == ZZOP_EQ || op == ZZOP_NE) {
+            return zz_binop(op, *a.payload, *b.payload);
         }
     }
     return zz_unit();
@@ -1062,6 +1080,9 @@ void zz_print_value(FILE *out, const zz_value *v) {
     case ZZ_TASK_JOIN:
         fputs("<task.join>", out);
         break;
+    case ZZ_JSON:
+        if (v->payload) zz_print_value(out, v->payload);
+        break;
     default:
         fputs("<value>", out);
         break;
@@ -1257,6 +1278,9 @@ static void zz_value_to_strbuf(strbuf *sb, const zz_value *v) {
         break;
     case ZZ_TASK_JOIN:
         sb_append_str(sb, "<task.join>");
+        break;
+    case ZZ_JSON:
+        if (v->payload) zz_value_to_strbuf(sb, v->payload);
         break;
     default:
         sb_append_str(sb, "<value>");
@@ -2701,6 +2725,7 @@ zz_value zz_typeof(zz_value v, int *err) {
         case ZZ_RESULT_OK: name = "result"; break;
         case ZZ_RESULT_ERR: name = "result"; break;
         case ZZ_RANGE: name = "range"; break;
+        case ZZ_JSON: name = "json"; break;
         default: name = "unknown"; break;
     }
     return zz_str_static(name);
@@ -2768,8 +2793,18 @@ zz_value zz_to_str(zz_value v, int *err) {
     return zz_str_owned(s);
 }
 
-// json.parse(s) — parse JSON string to value (simplified).
-zz_value zz_json_parse(zz_value s, int *err) {
+// Wrap a raw value as a JSON value (mirrors the VM's `Value::Json`).
+// The payload is heap-allocated and refcounted via the same path as
+// Option/Result variants.
+zz_value zz_json_wrap(zz_value inner) {
+    zz_value *p = (zz_value *)malloc(sizeof(zz_value));
+    *p = inner;
+    return (zz_value){ZZ_JSON, {.payload = p}};
+}
+
+// Internal raw JSON parser: returns plain zz_values (dict/array/scalar).
+// Recursive calls use this so nested values stay unwrapped.
+static zz_value zz_json_parse_raw(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) { *err = 1; return zz_unit(); }
     // Minimal JSON parser: support null, bool, int, float, string, array, object.
@@ -2820,7 +2855,7 @@ zz_value zz_json_parse(zz_value s, int *err) {
             tmps->data[remain] = '\0';
             zz_value sub = {ZZ_STR, {.s = tmps}};
             int sub_err = 0;
-            zz_value item = zz_json_parse(sub, &sub_err);
+            zz_value item = zz_json_parse_raw(sub, &sub_err);
             { zz_value to_release = {ZZ_STR, {.s = tmps}}; zz_release(&to_release); }
             // Advance past parsed value.
             if (item.tag == ZZ_STR) {
@@ -2866,7 +2901,7 @@ zz_value zz_json_parse(zz_value s, int *err) {
             tmps->data[remain] = '\0';
             zz_value sub = {ZZ_STR, {.s = tmps}};
             int sub_err = 0;
-            zz_value val = zz_json_parse(sub, &sub_err);
+            zz_value val = zz_json_parse_raw(sub, &sub_err);
             { zz_value to_release = {ZZ_STR, {.s = tmps}}; zz_release(&to_release); }
             if (val.tag == ZZ_STR) {
                 while (p < end && *p != '"') p++;
@@ -2903,9 +2938,17 @@ zz_value zz_json_parse(zz_value s, int *err) {
     return zz_unit();
 }
 
+// json.parse(s) — parse JSON string to value (simplified).
+zz_value zz_json_parse(zz_value s, int *err) {
+    zz_value raw = zz_json_parse_raw(s, err);
+    if (*err) return zz_unit();
+    return zz_json_wrap(raw);
+}
+
 // json.stringify(v) — value to JSON string (simplified).
 zz_value zz_json_stringify(zz_value v, int *err) {
     (void)err;
+    if (v.tag == ZZ_JSON && v.payload) v = *v.payload;
     char *s = zz_value_to_string(&v);
     return zz_str_owned(s);
 }
@@ -2913,7 +2956,7 @@ zz_value zz_json_stringify(zz_value v, int *err) {
 // json.null() — null value.
 zz_value zz_json_null(zz_value unused, int *err) {
     (void)unused; (void)err;
-    return zz_unit();
+    return zz_json_wrap(zz_unit());
 }
 
 // math.abs(v)
@@ -3646,15 +3689,16 @@ zz_value zz_http_get(zz_value url, zz_value headers, int *err) {
             zz_str *k = headers.dict->entries[i].key;
             zz_value *v = &headers.dict->entries[i].val;
             if (k && v->tag == ZZ_STR) {
-                size_t hlen = k->len + 2 + v->s->len + 2;
+                // NOTE: no trailing CRLF — curl treats a trailing CRLF as an
+                // empty header line, which terminates the header block early
+                // and swallows the request body into the headers.
+                size_t hlen = k->len + 2 + v->s->len;
                 char *h = (char *)malloc(hlen + 1);
                 memcpy(h, k->data, k->len);
                 h[k->len] = ':';
                 h[k->len + 1] = ' ';
                 memcpy(h + k->len + 2, v->s->data, v->s->len);
-                h[k->len + 2 + v->s->len] = '\r';
-                h[k->len + 2 + v->s->len + 1] = '\n';
-                h[k->len + 2 + v->s->len + 2] = '\0';
+                h[k->len + 2 + v->s->len] = '\0';
                 header_list = curl_slist_append(header_list, h);
                 free(h);
             }
@@ -3740,6 +3784,9 @@ zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
 
     if (body.tag == ZZ_STR && body.s && body.s->len > 0) {
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, (char *)body.s->data);
+        // Explicit size: CURLOPT_POSTFIELDS alone uses strlen(), which is
+        // wrong if the payload ever contains NUL bytes.
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body.s->len);
     }
 
     struct curl_slist *header_list = NULL;
@@ -3748,15 +3795,16 @@ zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
             zz_str *k = headers.dict->entries[i].key;
             zz_value *v = &headers.dict->entries[i].val;
             if (k && v->tag == ZZ_STR) {
-                size_t hlen = k->len + 2 + v->s->len + 2;
+                // NOTE: no trailing CRLF — curl treats a trailing CRLF as an
+                // empty header line, which terminates the header block early
+                // and swallows the request body into the headers.
+                size_t hlen = k->len + 2 + v->s->len;
                 char *h = (char *)malloc(hlen + 1);
                 memcpy(h, k->data, k->len);
                 h[k->len] = ':';
                 h[k->len + 1] = ' ';
                 memcpy(h + k->len + 2, v->s->data, v->s->len);
-                h[k->len + 2 + v->s->len] = '\r';
-                h[k->len + 2 + v->s->len + 1] = '\n';
-                h[k->len + 2 + v->s->len + 2] = '\0';
+                h[k->len + 2 + v->s->len] = '\0';
                 header_list = curl_slist_append(header_list, h);
                 free(h);
             }

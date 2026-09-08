@@ -52,8 +52,9 @@ fn cache_key(src: &str, opts: BuildOptions) -> String {
 }
 
 /// Get modification time of the C runtime files for cache invalidation.
+/// The runtime lives in the zz_codegen crate, one level up from zz_cli.
 fn runtime_mtime() -> Option<u64> {
-    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../zz_codegen");
     let rt_c = base.join("src/runtime.c");
     let rt_h = base.join("src/runtime.h");
     let c_mtime = rt_c.metadata().and_then(|m| m.modified()).ok();
