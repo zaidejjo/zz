@@ -2344,8 +2344,12 @@ impl Lowerer {
                 };
                 out.push_str(&format!("    zz_value {dv} = {arena_code};\n"));
                 for (k, v) in entries {
-                    let key = self.emit_expr(k, names, out);
-                    let val = self.emit_expr(v, names, out);
+                    let raw_key = self.emit_expr(k, names, out);
+                    let raw_val = self.emit_expr(v, names, out);
+                    // Box raw-scalar keys/values (loop vars, arithmetic)
+                    // so every `zz_index_set` argument is a real zz_value.
+                    let key = box_scalar_operand(k, names, &raw_key);
+                    let val = box_scalar_operand(v, names, &raw_val);
                     out.push_str(&format!(
                         "    {{ int _de = 0; zz_index_set({dv}, {key}, {val}, &_de); }}\n"
                     ));
