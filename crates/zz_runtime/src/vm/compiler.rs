@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Param, Pattern, Program, Stmt};
@@ -69,6 +70,10 @@ pub struct Compiler {
     promoted_slots: std::collections::HashMap<String, usize>,
     /// Known function signatures for named-arg reordering.
     func_info: std::collections::HashMap<String, FuncInfo>,
+    /// Resolved type per expression span, shared from the HIR.
+    /// When present, the compiler can make type-driven decisions (e.g.
+    /// integer-specific bytecode, direct field access).
+    types: Option<Arc<HashMap<Span, zz_checker::Type>>>,
 }
 
 enum JumpKind {
@@ -107,6 +112,7 @@ impl Compiler {
             captured_at_top: std::collections::HashSet::new(),
             promoted_slots: std::collections::HashMap::new(),
             func_info: std::collections::HashMap::new(),
+            types: None,
         }
     }
 
@@ -181,6 +187,99 @@ impl Compiler {
         // promotable top-level decl, in declaration order. Statement code
         // runs above this region, so top-level slot indices are stable and
         // independent of transient stack activity (short-circuit joins etc).
+        let mut promoted_index = 0usize;
+        let mut promoted_slots: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for stmt in &program.stmts {
+            if let Stmt::Decl { name, .. } = stmt {
+                if !c.captured_at_top.contains(&name.name) {
+                    promoted_slots.insert(name.name.clone(), promoted_index);
+                    promoted_index += 1;
+                }
+            }
+        }
+        for _ in 0..promoted_index {
+            c.emit_const(Value::Unit);
+        }
+        c.promoted_slots = promoted_slots;
+        c.stack_height = promoted_index;
+        for (i, stmt) in program.stmts.iter().enumerate() {
+            let v = c.compile_stmt(stmt);
+            if i < program.stmts.len() - 1 && matches!(v, StmtValue::Discard) {
+                c.emit(Op::Pop);
+            }
+        }
+        if program.stmts.is_empty() {
+            c.emit_const(Value::Unit);
+        }
+        c.chunk
+    }
+
+    /// Compile a whole program with type information from the HIR.
+    ///
+    /// Behaves identically to [`compile_program`] but threads the resolved
+    /// type map into the compiler and all sub-compilers (functions, closures).
+    /// The type map enables type-driven optimizations in future phases; in
+    /// this phase it is stored but not yet consumed by the bytecode emitter.
+    pub fn compile_program_typed(
+        program: &Program,
+        types: Arc<HashMap<Span, zz_checker::Type>>,
+    ) -> Chunk {
+        let mut c = Compiler::new();
+        c.is_main = true;
+        c.types = Some(types);
+        // Collect top-level declared names (post-rewrite, so namespaced).
+        let mut top_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Decl { name, pub_, .. } => {
+                    top_names.insert(name.name.clone());
+                    if *pub_ {
+                        c.captured_at_top.insert(name.name.clone());
+                    }
+                }
+                Stmt::Func { name, .. } => {
+                    top_names.insert(name.join("."));
+                }
+                _ => {}
+            }
+        }
+        // Pre-scan: names referenced by nested closures/functions must stay
+        // in the environment so closures can capture them by reference.
+        let mut defined: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut free: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in &program.stmts {
+            super::capture::scan_stmt_captured(stmt, &mut defined, &mut free);
+        }
+        let mut captured: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for name in &free {
+            if top_names.contains(name) {
+                captured.insert(name.clone());
+            } else {
+                let parts: Vec<&str> = name.split('.').collect();
+                for end in (1..parts.len()).rev() {
+                    let prefix = parts[..end].join(".");
+                    if top_names.contains(&prefix) {
+                        captured.insert(prefix);
+                        break;
+                    }
+                }
+            }
+        }
+        c.captured_at_top = captured;
+        for stmt in &program.stmts {
+            if let Stmt::Func { name, params, .. } = stmt {
+                let full = name.join(".");
+                c.func_info.insert(
+                    full,
+                    FuncInfo {
+                        param_names: params.iter().map(|p| p.name.name.clone()).collect(),
+                        has_default: params.iter().map(|p| p.default.is_some()).collect(),
+                        defaults: params.iter().map(|p| p.default.clone()).collect(),
+                    },
+                );
+            }
+        }
         let mut promoted_index = 0usize;
         let mut promoted_slots: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
@@ -1110,6 +1209,7 @@ impl Compiler {
 
     fn compile_func_body(&mut self, block: &Block, params: &[Param]) -> Arc<Chunk> {
         let mut sub = Compiler::new();
+        sub.types = self.types.clone();
         sub.chunk.params = params.to_vec();
         sub.captured = scan_block_captured(block, params);
         let needs_env = params.iter().any(|p| sub.captured.contains(&p.name.name))
@@ -1183,6 +1283,7 @@ impl Compiler {
 
     fn compile_closure_body(&mut self, body: &Expr, params: &[Param]) -> Arc<Chunk> {
         let mut sub = Compiler::new();
+        sub.types = self.types.clone();
         sub.chunk.params = params.to_vec();
         sub.captured = scan_closure_captured(body, params);
         let needs_env = params.iter().any(|p| sub.captured.contains(&p.name.name));

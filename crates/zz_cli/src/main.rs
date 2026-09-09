@@ -245,11 +245,40 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
             .to_string());
     }
 
+    // Build the typed program (HIR) to get the resolved type map.
+    // The merged program is only used for type checking; execution still
+    // runs each module's original program so top-level side effects
+    // (imports, struct registrations) happen in dependency order.
+    let merged_stmts: Vec<_> = loaded
+        .programs
+        .iter()
+        .flat_map(|p| p.stmts.iter().cloned())
+        .collect();
+    let merged_span = loaded
+        .programs
+        .last()
+        .map(|p| p.span)
+        .unwrap_or(Span::new(0, 0));
+    let merged = zz_frontend::ast::Program {
+        stmts: merged_stmts,
+        span: merged_span,
+    };
+    let types = std::sync::Arc::new(
+        zz_hir::build_program(
+            &merged,
+            std::collections::HashMap::new(),
+            loaded.funcs.clone(),
+            loaded.structs.clone(),
+        )
+        .program
+        .types,
+    );
+
     let mut interp = Interp::with_natives(loaded.natives.clone());
     interp.args = script_args.to_vec();
     let mut last = Value::Unit;
     for (i, program) in loaded.programs.iter().enumerate() {
-        match interp.run(program) {
+        match interp.run_typed(program, types.clone()) {
             Ok(v) => last = v,
             Err(e) => {
                 let (name, source) = loaded
