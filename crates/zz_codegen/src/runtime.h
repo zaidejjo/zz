@@ -133,6 +133,13 @@ struct zz_array {
 // and dies at arena reset. Release is a no-op.
 #define ZZ_DICT_ARENA_MAGIC ((size_t)0xA1A2A3A4A5A6A7A8ULL)
 
+// Sentinel for arena-allocated arrays with pre-sized items buffer.
+// Items are bump-allocated on the arena. If zz_vec_append needs to grow
+// beyond the pre-sized capacity, it migrates to heap (malloc) and resets
+// refs to 0 (arena-header sentinel). Release frees items (if heap-migrated)
+// but skips free(header) since the header stays on the arena.
+#define ZZ_ARRAY_ARENA_MAGIC ((size_t)0xB3B4B5B6B7B8B9B0ULL)
+
 struct zz_dict {
     size_t refs;     // atomic reference count (ARC)
     size_t len;
@@ -286,6 +293,7 @@ static inline zz_value zz_bool(bool b) {
 
 zz_value zz_str_new(const char *s, size_t len);
 zz_value zz_str_owned(char *s);            // takes ownership
+zz_value zz_str_cast_arena(zz_value v, int *err, zz_arena *arena); // arena str cast
 zz_value zz_str_static(const char *s);     // copy of a C literal
 zz_value zz_array_new(void);
 zz_value zz_dict_new(void);
@@ -299,6 +307,7 @@ zz_value zz_range(int64_t start, int64_t end, int64_t step);
 // The items/data buffers ALWAYS use malloc (they may realloc on growth).
 // Only the *header structs* (zz_array, zz_dict, zz_str) are arena-eligible.
 zz_value zz_array_new_arena(zz_arena *arena);
+zz_value zz_array_new_arena_sized(zz_arena *arena, size_t cap);
 zz_value zz_dict_new_arena(zz_arena *arena);
 zz_value zz_dict_new_arena_sized(zz_arena *arena, size_t hint);
 zz_value zz_str_new_arena(const char *s, size_t len, zz_arena *arena);
@@ -443,6 +452,7 @@ zz_value zz_call_native0(zz_value (*f)(zz_value, int *));
 zz_value zz_call_native2(zz_value (*f)(zz_value, zz_value, int *), zz_value a, zz_value b);
 zz_value zz_call_native3(zz_value (*f)(zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c);
 zz_value zz_binop_cat(zz_value a, zz_value b);       // str concat
+zz_value zz_binop_cat_arena(zz_value a, zz_value b, zz_arena *arena); // arena str concat
 zz_value zz_binop_cat_str(zz_value a, zz_value b);   // str + Display(b)
 // In-place append: reuses *a->s buffer if refs==1 and capacity allows.
 // Returns void; *a is mutated. Generated for hot `s = s + literal` loops.
