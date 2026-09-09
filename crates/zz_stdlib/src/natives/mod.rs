@@ -591,6 +591,13 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "http.log".into(),
+        NativeEntry {
+            arity: 2,
+            f: http::http_log,
+        },
+    );
+    m.insert(
         "std.http.pipe".into(),
         NativeEntry {
             arity: 2,
@@ -598,7 +605,21 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "http.pipe".into(),
+        NativeEntry {
+            arity: 2,
+            f: http::http_pipe,
+        },
+    );
+    m.insert(
         "std.http.serve_dir".into(),
+        NativeEntry {
+            arity: 2,
+            f: http::http_serve_dir,
+        },
+    );
+    m.insert(
+        "http.serve_dir".into(),
         NativeEntry {
             arity: 2,
             f: http::http_serve_dir,

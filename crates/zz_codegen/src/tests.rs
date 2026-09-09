@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use zz_checker::{FuncSig, Type};
 use zz_hir::{ReachableSet, TypedProgram};
 
-use crate::{build_native, compile, BuildOptions};
+use crate::{build_native, compile, native_supported, BuildOptions};
 
 /// Seed the real stdlib signatures for typed building.
 use zz_stdlib::stdlib_funcs;
@@ -63,6 +63,63 @@ fn vm_run(src: &str) -> (i32, String) {
 #[allow(dead_code)]
 fn out_path() -> PathBuf {
     std::env::temp_dir().join(format!("zz-e2e-{}", std::process::id()))
+}
+
+/// Intentional, tracked gaps: stdlib funcs the AOT runtime does not implement
+/// natively. Each entry names the Phase 2 work item / tracked parity fixture
+/// that will remove it. A gap that is no longer missing (the C impl landed)
+/// fails the test so the list cannot rot.
+const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
+    // Phase 2.7 variants — option/result unwrap
+    ("option.unwrap", "option unwrap"),
+    ("option.unwrap_or", "option unwrap_or"),
+    ("result.unwrap", "result unwrap"),
+    ("result.unwrap_or", "result unwrap_or"),
+    // Non-reachable from parity fixtures (no fixture uses them):
+    ("std.math.matrix_mul", "no fixture; niche math"),
+    // Parity-skipped modules (non-deterministic output):
+    ("std.http.serve_dir", "http fixtures skipped in parity"),
+    ("http.serve_dir", "http fixtures skipped in parity"),
+    ("std.http.body_form", "http fixtures skipped in parity"),
+    ("std.http.body_json", "http fixtures skipped in parity"),
+    ("std.http.delete", "http fixtures skipped in parity"),
+    ("std.http.header", "http fixtures skipped in parity"),
+    ("std.http.param", "http fixtures skipped in parity"),
+    ("std.http.put", "http fixtures skipped in parity"),
+    ("std.http.query", "http fixtures skipped in parity"),
+    ("std.http.test", "http fixtures skipped in parity"),
+];
+
+#[test]
+fn all_stdlib_funcs_have_c_impls() {
+    // Drift census: the checker's stdlib registry must have a C runtime
+    // implementation for every key. The AOT backend lowers funcs through
+    // `native_impl`; a missing entry means a valid `std.*` call silently
+    // lowers to an unimplemented native.
+    let funcs = zz_stdlib::stdlib_funcs();
+    let supported = |k: &String| native_supported(k);
+    let mut unlisted_gap: Vec<&String> = funcs
+        .keys()
+        .filter(|k| !supported(k))
+        .filter(|k| !KNOWN_CODEGEN_GAPS.iter().any(|(g, _)| g == k))
+        .collect();
+    unlisted_gap.sort();
+    assert!(
+        unlisted_gap.is_empty(),
+        "stdlib_funcs keys without a C impl and without a KNOWN_CODEGEN_GAPS entry: {unlisted_gap:?}"
+    );
+
+    // Stale gaps: an allowlisted key that now HAS a C impl must be removed
+    // from KNOWN_CODEGEN_GAPS so the Phase 2 progress is reflected here.
+    let stale: Vec<&str> = KNOWN_CODEGEN_GAPS
+        .iter()
+        .filter(|(g, _)| native_supported(g))
+        .map(|(g, _)| *g)
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "remove from KNOWN_CODEGEN_GAPS (now implemented): {stale:?}"
+    );
 }
 
 #[test]

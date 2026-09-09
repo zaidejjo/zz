@@ -545,6 +545,15 @@ impl Checker {
                         self.report_mismatch(e, fval.span());
                     }
                 }
+                // Verify all required fields are provided.
+                for (required_name, _) in &sig.fields {
+                    if !fields.iter().any(|(n, _)| n == required_name) {
+                        self.errors.push(error_at(
+                            format!("missing field `{required_name}` in struct literal `{name}`"),
+                            *span,
+                        ));
+                    }
+                }
                 Type::Struct(name.clone())
             }
             Expr::Index { obj, index, span } => {

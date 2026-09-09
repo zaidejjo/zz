@@ -1,8 +1,8 @@
 // E2E: Arrays — creation, indexing, slicing, comprehensions
 // creation
 arr := [10, 20, 30, 40, 50]
-empty_ints: [int] = []
-mixed := [1, "two", true]
+_empty_ints: [int] = []
+_mixed := [1, "two", true]
 
 // indexing
 println(arr[0])

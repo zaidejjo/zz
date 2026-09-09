@@ -1,4 +1,4 @@
-use super::super::stdlib_natives;
+use super::super::{stdlib_funcs, stdlib_natives};
 use zz_runtime::{EvalError, Interp, Span, Value};
 
 fn call(name: &str, args: Vec<Value>) -> Result<Value, EvalError> {
@@ -119,5 +119,32 @@ fn read_line_from_dev_null_is_empty() {
     assert_eq!(
         call("std.io.read_line", vec![]).unwrap(),
         Value::Str(String::new().into())
+    );
+}
+
+#[test]
+fn every_funcs_key_has_a_native() {
+    // Drift census: the checker registry (`stdlib_funcs`) and the interpreter
+    // registry (`stdlib_natives`) must stay in lockstep. Every signature the
+    // checker knows must resolve to a runtime implementation.
+    let funcs = stdlib_funcs();
+    let natives = stdlib_natives();
+    let missing: Vec<String> = funcs
+        .keys()
+        .filter(|k| !natives.contains_key(*k))
+        .cloned()
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "stdlib_funcs keys without a stdlib_natives impl: {missing:?}"
+    );
+    let untyped: Vec<String> = natives
+        .keys()
+        .filter(|k| !funcs.contains_key(*k))
+        .cloned()
+        .collect();
+    assert!(
+        untyped.is_empty(),
+        "stdlib_natives keys without a stdlib_funcs signature: {untyped:?}"
     );
 }

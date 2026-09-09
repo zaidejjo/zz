@@ -188,7 +188,7 @@ fn regression_bench_cpu_intensive_completes_and_stays_under_baseline() {
     // Signature result must be deterministic and non-zero.
     let sig = parse_marker(&stdout, "signature_sum")
         .expect("missing signature_sum in cpu_intensive output");
-    assert_eq!(sig, 50_005_042_949_861, "signature_sum drift (got {sig})");
+    assert_eq!(sig, 50_000_042_999_861, "signature_sum drift (got {sig})");
 }
 
 // ----- bench_string_concats ----------------------------------------

@@ -44,6 +44,9 @@ typedef enum {
     ZZ_TASK_JOIN,
     ZZ_OBJECT,
     ZZ_JSON,
+    ZZ_TCP_STREAM,
+    ZZ_TCP_LISTENER,
+    ZZ_TUPLE,
 } zz_tag;
 
 typedef struct zz_value zz_value;
@@ -55,6 +58,9 @@ typedef struct zz_dict_entry zz_dict_entry;
 typedef struct zz_chan zz_chan;
 typedef struct zz_task_join zz_task_join;
 typedef struct zz_object zz_object;
+
+// A TCP stream or listener: the underlying socket fd.
+typedef struct zz_tcp zz_tcp;
 
 // Refcounted string (null-terminated for C interop).
 //
@@ -91,6 +97,7 @@ struct zz_value {
         zz_task_join *task;
         zz_value *payload;   // Option/Result inner value (heap-allocated)
         zz_object *obj;      // boxed struct instance
+        zz_tcp *net;         // TCP stream or listener (ZZ_TCP_STREAM/LISTENER)
     };
 };
 
@@ -177,6 +184,19 @@ zz_value zz_chan_try_recv(zz_value chan, int *err);
 // Spawn / task join.
 zz_value zz_spawn(zz_value fn, int *err);
 zz_value zz_task_join_recv(zz_value join, int *err);
+
+// ---- std.net TCP --------------------------------------------------------
+zz_value zz_tcp_listen(zz_value addr, int *err);
+zz_value zz_tcp_connect(zz_value addr, zz_value timeout_ms, int *err);
+zz_value zz_tcp_accept(zz_value listener, int *err);
+zz_value zz_tcp_write(zz_value stream, zz_value data, int *err);
+zz_value zz_tcp_read(zz_value stream, zz_value max_bytes, int *err);
+zz_value zz_tcp_readline(zz_value stream, int *err);
+zz_value zz_tcp_close(zz_value stream, int *err);
+zz_value zz_tcp_peer_addr(zz_value stream, int *err);
+zz_value zz_tcp_local_addr(zz_value stream, int *err);
+zz_value zz_tcp_set_read_timeout(zz_value stream, zz_value ms, int *err);
+zz_value zz_tcp_set_write_timeout(zz_value stream, zz_value ms, int *err);
 
 // ---- arena allocator ---------------------------------------------------
 // A bump allocator for non-escaping local allocations. O(1) alloc, O(1)
@@ -308,17 +328,38 @@ zz_value zz_array_get(const zz_array *a, zz_value idx, int *err);
 void zz_array_set(zz_array *a, zz_value idx, zz_value v, int *err);
 size_t zz_array_len(const zz_array *a);
 zz_value zz_array_slice(const zz_array *a, zz_value start, zz_value end, int *err);
+zz_value zz_array_dup(const zz_array *a);
 
 // Index expression support (lowered from `obj[idx]`). Dispatch on the
 // object tag at runtime: arrays and dicts. Returns unit + *err=1 on unsupported.
 zz_value zz_index_get(zz_value obj, zz_value idx, int *err);
 void zz_index_set(zz_value obj, zz_value idx, zz_value item, int *err);
 
+// Slice expression (`obj[a:b]`): arrays (items) and strings (bytes).
+zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err);
+
 void zz_dict_set(zz_dict *d, zz_value key, zz_value val);
 zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err);
 size_t zz_dict_len(const zz_dict *d);
 
 // ---- calls --------------------------------------------------------------
+typedef zz_value (*zz_dispatch_fn)(zz_value *args, size_t argc);
+
+// Build a callable closure value from a generated function pointer. The
+// payload stores the function pointer (not a refcounted object).
+zz_value zz_closure_make(zz_dispatch_fn f);
+// Extract the generated function pointer from a closure value.
+zz_dispatch_fn zz_closure_target(zz_value v);
+
+// Higher-order iterators (map/filter/enumerate/zip) — call closures per item.
+zz_value zz_iter_map(zz_value items, zz_value f, int *err);
+zz_value zz_iter_filter(zz_value items, zz_value f, int *err);
+zz_value zz_iter_enumerate(zz_value items, int *err);
+zz_value zz_iter_zip(zz_value a, zz_value b, int *err);
+zz_value zz_range3(zz_value a, zz_value b, zz_value c, int *err);
+// Tuples: display as `(a, b)` (distinct from arrays' `[a, b]`).
+zz_value zz_tuple(zz_value a, zz_value b);
+
 zz_value zz_call(zz_value fn, zz_value *args, size_t argc, int *err);
 zz_value zz_io_println(zz_value v, int *err);
 zz_value zz_io_print(zz_value v, int *err);
@@ -400,6 +441,16 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err);
 
 // env functions
 zz_value zz_env_var(zz_value name, int *err);
+
+// json functions
+zz_value zz_json_parse(zz_value s, int *err);
+zz_value zz_json_stringify(zz_value v, int *err);
+zz_value zz_json_null(zz_value unused, int *err);
+zz_value zz_json_get(zz_value j, zz_value key, int *err);
+zz_value zz_json_as_str(zz_value j, int *err);
+zz_value zz_json_as_int(zz_value j, int *err);
+zz_value zz_json_as_float(zz_value j, int *err);
+zz_value zz_json_as_bool(zz_value j, int *err);
 
 // option/result
 zz_value zz_option_expect(zz_value opt, zz_value msg, int *err);

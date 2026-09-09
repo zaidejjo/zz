@@ -67,6 +67,62 @@ fn strip_numeric_lines(s: &str) -> String {
         .join("\n")
 }
 
+/// Replace `ip:port` substrings with `<addr>`. Ephemeral local ports differ
+/// between VM and native runs even for identical programs.
+fn normalize_addrs(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_digit() || bytes[i] == b'.' || bytes[i] == b':')
+            {
+                i += 1;
+            }
+            let cand = &s[start..i];
+            let dots = cand.matches('.').count();
+            if dots == 3 && cand.contains(':') {
+                if let Some((prefix, port)) = cand.rsplit_once(':') {
+                    let port_ok = !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit());
+                    let prefix_ok = prefix.bytes().all(|b| b.is_ascii_digit() || b == b'.');
+                    if port_ok && prefix_ok {
+                        out.extend_from_slice(b"<addr>");
+                        continue;
+                    }
+                }
+            }
+            out.extend_from_slice(&bytes[start..i]);
+        } else {
+            let b = bytes[i];
+            if b.is_ascii() {
+                out.push(b);
+            } else {
+                // Copy a whole UTF-8 sequence.
+                let len = utf8_len(b);
+                let end = (i + len).min(bytes.len());
+                out.extend_from_slice(&bytes[i..end]);
+                i = end - 1;
+            }
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn utf8_len(first: u8) -> usize {
+    if first & 0x80 == 0 {
+        1
+    } else if first & 0xE0 == 0xC0 {
+        2
+    } else if first & 0xF0 == 0xE0 {
+        3
+    } else {
+        4
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Known skip reasons (non-deterministic output)
 // ---------------------------------------------------------------------------
@@ -101,26 +157,13 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
     let stem = file.file_stem()?.to_str()?;
     match stem {
         // --- C codegen compile errors (not yet fixed) ---
-        "empty_infer" => Some("C codegen: type mismatch in zz_clone (int64_t vs zz_value)"),
         "structs" => Some("C codegen: nested field access emits int64_t instead of zz_value"),
         "variants" => Some("C codegen: undeclared variable in match + else scope error"),
 
         // --- Output differences (native runs but output differs) ---
-        "missing_field" => Some("native: should error on missing struct field but exits 0"),
         "encoding_test" => Some("native: different error message format for bad base64/hex/url"),
-        "filesystem" => Some("native: fs.write/fs.read not implemented in C runtime"),
-        "fs_test" => Some("native: fs.write/fs.read/fs.remove not implemented in C runtime"),
-        "json_test" => Some("native: json.parse returns empty — C runtime json stub"),
-        "jsonmod" => Some("native: json.parse/stringify not implemented in C runtime"),
         "math_extended_test" => Some("native: float precision + error message differences"),
-        "math_ops" => Some("native: sqrt float precision difference (14 vs 16 digits)"),
-        "net_tcp_test" => Some("native: TCP listen/connect/read not implemented in C runtime"),
-        "vectors" => Some("native: vec.slice/vec.push missing — C runtime stub"),
-        "arrays" => Some("native: array literal/comprehension printing broken in codegen"),
-        "defer" => Some("native: defer statements not emitted in C codegen"),
-        "dict_iteration" => Some("native: dict.keys() iteration missing second loop output"),
         "functions" => Some("native: string concatenation with '+' drops first operand"),
-        "hof" => Some("native: higher-order functions (map/filter) not working in C runtime"),
         _ => None,
     }
 }
@@ -169,15 +212,15 @@ fn assert_parity_strict(
         "[{display}]: native should exit 0 but got {native_exit}.\nnative stderr: {native_stderr}"
     );
 
-    let vm_norm = strip_numeric_lines(&vm_stdout);
-    let native_norm = strip_numeric_lines(&native_stdout);
+    let vm_norm = strip_numeric_lines(&normalize_addrs(&vm_stdout));
+    let native_norm = strip_numeric_lines(&normalize_addrs(&native_stdout));
     assert_eq!(
         vm_norm, native_norm,
         "PARITY BUG [{display}]: VM and native stdout differ.\n--- VM ---\n{vm_stdout}\n--- NATIVE ---\n{native_stdout}"
     );
 
-    let vm_err_norm = strip_numeric_lines(&vm_stderr);
-    let native_err_norm = strip_numeric_lines(&native_stderr);
+    let vm_err_norm = strip_numeric_lines(&normalize_addrs(&vm_stderr));
+    let native_err_norm = strip_numeric_lines(&normalize_addrs(&native_stderr));
     assert_eq!(
         vm_err_norm, native_err_norm,
         "PARITY BUG [{display}]: VM and native stderr differ.\n--- VM stderr ---\n{vm_stderr}\n--- Native stderr ---\n{native_stderr}"
@@ -375,33 +418,36 @@ parity_strict!(
 // --- control_flow: fixed (member access on non-struct type) ---
 parity_strict!(parity_syntax_control_flow, "syntax", "control_flow.zz");
 
-// --- Still broken: C codegen compile errors (not yet fixed) ---
-parity_known_failure!(parity_syntax_empty_infer, "syntax", "empty_infer.zz");
-parity_known_failure!(parity_types_structs, "types", "structs.zz");
-parity_known_failure!(parity_types_variants, "types", "variants.zz");
+// --- Fixed: nested field access boxing ---
+parity_strict!(parity_types_structs, "types", "structs.zz");
+// --- Fixed: nested variant patterns + if-let desugaring ---
+parity_strict!(parity_types_variants, "types", "variants.zz");
+
+// --- Fixed: empty_infer type inference ---
+parity_strict!(parity_syntax_empty_infer, "syntax", "empty_infer.zz");
 
 // --- Output differences (native runs but output diverges) ---
-parity_known_failure!(parity_syntax_functions, "syntax", "functions.zz");
-parity_known_failure!(parity_syntax_hof, "syntax", "hof.zz");
-parity_known_failure!(parity_syntax_arrays, "syntax", "arrays.zz");
-parity_known_failure!(parity_syntax_defer, "syntax", "defer.zz");
-parity_known_failure!(parity_syntax_dict_iteration, "syntax", "dict_iteration.zz");
-parity_known_failure!(parity_stdlib_vectors, "stdlib", "vectors.zz");
-parity_known_failure!(parity_stdlib_math_ops, "stdlib", "math_ops.zz");
+parity_strict!(parity_syntax_functions, "syntax", "functions.zz");
+parity_strict!(parity_syntax_hof, "syntax", "hof.zz");
+parity_strict!(parity_syntax_arrays, "syntax", "arrays.zz");
+parity_strict!(parity_syntax_defer, "syntax", "defer.zz");
+parity_strict!(parity_syntax_dict_iteration, "syntax", "dict_iteration.zz");
+parity_strict!(parity_stdlib_vectors, "stdlib", "vectors.zz");
+parity_strict!(parity_stdlib_math_ops, "stdlib", "math_ops.zz");
 parity_known_failure!(
     parity_stdlib_math_extended,
     "stdlib",
     "math_extended_test.zz"
 );
-parity_known_failure!(parity_stdlib_jsonmod, "stdlib", "jsonmod.zz");
-parity_known_failure!(parity_stdlib_json_test, "stdlib", "json_test.zz");
+parity_strict!(parity_stdlib_jsonmod, "stdlib", "jsonmod.zz");
+parity_strict!(parity_stdlib_json_test, "stdlib", "json_test.zz");
 parity_known_failure!(parity_stdlib_encoding_test, "stdlib", "encoding_test.zz");
-parity_known_failure!(parity_stdlib_filesystem, "stdlib", "filesystem.zz");
-parity_known_failure!(parity_stdlib_fs_test, "stdlib", "fs_test.zz");
-parity_known_failure!(parity_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
+parity_strict!(parity_stdlib_filesystem, "stdlib", "filesystem.zz");
+parity_strict!(parity_stdlib_fs_test, "stdlib", "fs_test.zz");
+parity_strict!(parity_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
 
-// --- Error fixture: native doesn't error when it should ---
-parity_known_error_failure!(parity_err_missing_field, "missing_field.zz");
+// --- Error fixture: both engines must error on missing struct field ---
+parity_strict_error!(parity_err_missing_field, "missing_field.zz");
 
 // ===========================================================================
 // Skipped fixtures (non-deterministic output)
