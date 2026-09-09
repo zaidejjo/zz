@@ -471,6 +471,61 @@ fn needs_temp(e: &Expr) -> bool {
     )
 }
 
+/// Count the number of heap-allocating expressions in a block.
+/// Used to estimate arena pre-size for loop bodies.
+fn count_allocating_exprs(block: &zz_hir::Block) -> usize {
+    let mut count = 0;
+    for stmt in &block.stmts {
+        match stmt {
+            zz_hir::Stmt::Decl { value, .. } => {
+                count += count_allocating_in_expr(value);
+            }
+            zz_hir::Stmt::Expr(e) => {
+                count += count_allocating_in_expr(e);
+            }
+            zz_hir::Stmt::For { body, .. } => {
+                count += count_allocating_exprs(body);
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+fn count_allocating_in_expr(e: &zz_hir::Expr) -> usize {
+    match e {
+        zz_hir::Expr::Array { elems, .. } => {
+            1 + elems.iter().map(count_allocating_in_expr).sum::<usize>()
+        }
+        zz_hir::Expr::Dict { entries, .. } => {
+            1 + entries
+                .iter()
+                .map(|(k, v)| count_allocating_in_expr(k) + count_allocating_in_expr(v))
+                .sum::<usize>()
+        }
+        zz_hir::Expr::Str { .. } => 1,
+        zz_hir::Expr::Fmt { parts, .. } => {
+            1 + parts
+                .iter()
+                .filter_map(|p| match p {
+                    zz_frontend::ast::FmtPart::Expr(inner, _) => {
+                        Some(count_allocating_in_expr(inner))
+                    }
+                    _ => None,
+                })
+                .sum::<usize>()
+        }
+        zz_hir::Expr::Block(b) => count_allocating_exprs(b),
+        zz_hir::Expr::Binary { left, right, .. } => {
+            count_allocating_in_expr(left) + count_allocating_in_expr(right)
+        }
+        zz_hir::Expr::Call { args, .. } => {
+            1 + args.iter().map(count_allocating_in_expr).sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
 /// The lowering context.
 pub struct Lowerer {
     reachable_funcs: std::collections::HashSet<String>,
@@ -493,6 +548,15 @@ pub struct Lowerer {
     defer_slots: std::cell::RefCell<Vec<String>>,
     /// Generated C static functions for closure literals (one per `Expr::Closure`).
     closure_defs: std::cell::RefCell<Vec<String>>,
+    /// Forward declarations for closure static functions.
+    closure_forward_decls: std::cell::RefCell<Vec<String>>,
+    /// True when emitting a call expression whose return value is discarded
+    /// (statement position). Enables in-place mutations like `zz_vec_append`
+    /// instead of copy-on-write `zz_vec_push`.
+    void_context: std::cell::RefCell<bool>,
+    /// Name of the current loop arena, if any. Used to emit arena-aware
+    /// native calls (e.g. str_cast_arena) inside loops.
+    current_loop_arena: std::cell::RefCell<Option<String>>,
 }
 
 impl Lowerer {
@@ -512,6 +576,9 @@ impl Lowerer {
             loop_arenas: std::cell::RefCell::new(Vec::new()),
             defer_slots: std::cell::RefCell::new(Vec::new()),
             closure_defs: std::cell::RefCell::new(Vec::new()),
+            closure_forward_decls: std::cell::RefCell::new(Vec::new()),
+            void_context: std::cell::RefCell::new(false),
+            current_loop_arena: std::cell::RefCell::new(None),
         }
     }
 
@@ -533,6 +600,16 @@ impl Lowerer {
             .get(&span)
             .map(|c| *c == zz_hir::AllocClass::Escaping)
             .unwrap_or(false)
+    }
+
+    /// Check if an expression produces a string value. Used to detect string
+    /// concatenation for arena-aware allocation in loops.
+    fn is_string_expr(&self, expr: &Expr, names: &NameCtx) -> bool {
+        match expr {
+            Expr::Str { .. } => true,
+            Expr::Ident { name, .. } => names.lookup_type(name).map_or(false, |t| t == "string"),
+            _ => false,
+        }
     }
 
     /// Choose the arena for an allocation site.
@@ -565,7 +642,7 @@ impl Lowerer {
     #[allow(dead_code)] // used by experimental array-construction paths
     fn emit_array_new(&self, span: zz_frontend::span::Span) -> String {
         match self.arena_for(span) {
-            Some(arena) => format!("zz_array_new_arena(&{arena})"),
+            Some(arena) => format!("zz_array_new_arena_sized(&{arena}, 0)"),
             None => "zz_array_new()".to_string(),
         }
     }
@@ -1043,8 +1120,9 @@ impl Lowerer {
             forward_decls.push_str(&proto);
         }
 
+        let closure_fwd = self.closure_forward_decls.borrow().join("");
         let source = format!(
-            "{runtime_h}\n{runtime_c}\n\n// ---- struct definitions ----\n{struct_preamble}\n// ---- forward declarations ----\n{forward_decls}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
+            "{runtime_h}\n{runtime_c}\n\n// ---- struct definitions ----\n{struct_preamble}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset_trim(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
             runtime_h = crate::RUNTIME_H,
             runtime_c = crate::RUNTIME_C,
             struct_preamble = struct_preamble,
@@ -1177,7 +1255,7 @@ impl Lowerer {
             o.push_str("    return zz_unit();\n");
         }
         // --- Arena reset: O(1) cleanup of all non-escaping allocations ---
-        o.push_str("    zz_arena_reset(&_arena);\n");
+        o.push_str("    zz_arena_reset_trim(&_arena);\n");
         o.push_str("}\n\n");
         o
     }
@@ -1622,7 +1700,9 @@ impl Lowerer {
                     }
                     // leaf tails skipped (no side effect)
                 } else if matches!(e, Expr::Call { .. }) {
+                    *self.void_context.borrow_mut() = true;
                     let val = self.emit_expr(e, names, out);
+                    *self.void_context.borrow_mut() = false;
                     out.push_str(&format!("    (void)({val});\n"));
                 } else if !is_leaf_expr(e) {
                     let _ = self.emit_expr(e, names, out);
@@ -1723,8 +1803,12 @@ impl Lowerer {
             let loop_arena: Option<String> = if self.escape.loop_spans.contains(&span) {
                 let ac = names.bump_counter();
                 let name = format!("_loop_arena{ac}");
+                // Estimate per-iteration allocation size to pre-size the arena.
+                // Count allocating expressions in the body × 128 bytes each.
+                let alloc_count = count_allocating_exprs(body);
+                let arena_size = (alloc_count * 128).max(65536);
                 out.push_str(&format!("    zz_arena {name};\n"));
-                out.push_str(&format!("    zz_arena_init(&{name}, 65536);\n"));
+                out.push_str(&format!("    zz_arena_init(&{name}, {arena_size});\n"));
                 Some(name)
             } else {
                 None
@@ -1812,12 +1896,14 @@ impl Lowerer {
             // Loop body is never a function tail.
             if let Some(ref name) = loop_arena {
                 self.loop_arenas.borrow_mut().push(name.clone());
+                *self.current_loop_arena.borrow_mut() = Some(name.clone());
             }
             for bstmt in &body.stmts {
                 self.emit_stmt(bstmt, names, out, false);
             }
             if let Some(ref name) = loop_arena {
                 self.loop_arenas.borrow_mut().pop();
+                *self.current_loop_arena.borrow_mut() = self.loop_arenas.borrow().last().cloned();
                 // Per-iteration reset: every arena allocation made inside this
                 // iteration is reclaimed in O(1), so the sub-arena's buffer is
                 // reused indefinitely without growing the heap footprint.
@@ -2349,7 +2435,20 @@ impl Lowerer {
                                 | zz_frontend::ast::BinOp::Rem
                         );
                         if is_arith {
-                            if left_type == Some("int64_t") && right_type == Some("int64_t") {
+                            // Arena string concatenation: when Add is used on
+                            // strings inside a loop, allocate the result on
+                            // the arena to avoid heap malloc per iteration.
+                            if matches!(op, zz_frontend::ast::BinOp::Add)
+                                && (self.is_string_expr(left, names)
+                                    || self.is_string_expr(right, names))
+                                && self.loop_arenas.borrow().last().is_some()
+                            {
+                                let arena = self.loop_arenas.borrow().last().unwrap().clone();
+                                let boxed_l = box_scalar_operand(left, names, &l);
+                                let boxed_r = box_scalar_operand(right, names, &r);
+                                format!("zz_binop_cat_arena({boxed_l}, {boxed_r}, &{arena})")
+                            } else if left_type == Some("int64_t") && right_type == Some("int64_t")
+                            {
                                 // Both sides are int64 — emit raw C arith.
                                 let c_op = match op {
                                     zz_frontend::ast::BinOp::Add => "+",
@@ -2437,14 +2536,17 @@ impl Lowerer {
                 let loop_arena: Option<String> = if self.escape.loop_spans.contains(span) {
                     let ac = names.bump_counter();
                     let name = format!("_loop_arena{ac}");
+                    let alloc_count = count_allocating_exprs(body);
+                    let arena_size = (alloc_count * 128).max(65536);
                     out.push_str(&format!("    zz_arena {name};\n"));
-                    out.push_str(&format!("    zz_arena_init(&{name}, 65536);\n"));
+                    out.push_str(&format!("    zz_arena_init(&{name}, {arena_size});\n"));
                     Some(name)
                 } else {
                     None
                 };
                 if let Some(ref name) = loop_arena {
                     self.loop_arenas.borrow_mut().push(name.clone());
+                    *self.current_loop_arena.borrow_mut() = Some(name.clone());
                 }
                 out.push_str("    while (1) {\n");
                 let c = self.emit_expr(cond, names, out);
@@ -2456,6 +2558,8 @@ impl Lowerer {
                 }
                 if let Some(ref name) = loop_arena {
                     self.loop_arenas.borrow_mut().pop();
+                    *self.current_loop_arena.borrow_mut() =
+                        self.loop_arenas.borrow().last().cloned();
                     out.push_str(&format!("        zz_arena_reset(&{name});\n"));
                 }
                 out.push_str("    }\n");
@@ -2691,7 +2795,7 @@ impl Lowerer {
                 // before any function call could observe it. Function calls
                 // that receive arena-allocated objects must not retain them.
                 let ctor = match self.arena_for(*span) {
-                    Some(arena) => format!("zz_array_new_arena(&{arena})"),
+                    Some(arena) => format!("zz_array_new_arena_sized(&{arena}, {})", elems.len()),
                     None => "zz_array_new()".to_string(),
                 };
                 out.push_str(&format!("    zz_value {arr_var} = {ctor};\n"));
@@ -2717,7 +2821,9 @@ impl Lowerer {
                     "zz_array_new()".to_string()
                 } else {
                     match self.arena_for(zz_frontend::span::Span::new(0, 0)) {
-                        Some(arena) => format!("zz_array_new_arena(&{arena})"),
+                        Some(arena) => {
+                            format!("zz_array_new_arena_sized(&{arena}, {})", items.len())
+                        }
                         None => "zz_array_new()".to_string(),
                     }
                 };
@@ -2740,8 +2846,9 @@ impl Lowerer {
             Expr::Dict { entries, span, .. } => {
                 // Create a temp to hold the dict, populate entries, return the temp.
                 let dv = names.fresh("__dict");
+                let n = entries.len();
                 let arena_code = match self.arena_for(*span) {
-                    Some(arena) => format!("zz_dict_new_arena(&{arena})"),
+                    Some(arena) => format!("zz_dict_new_arena_sized(&{arena}, {n})"),
                     None => "zz_dict_new()".to_string(),
                 };
                 out.push_str(&format!("    zz_value {dv} = {arena_code};\n"));
@@ -2927,6 +3034,11 @@ impl Lowerer {
                 let cid = defs.len().min(1_000_000);
                 let body_c = self.emit_closure(params, body, cid, names, out);
                 defs.push(body_c);
+                // Emit a forward declaration so the closure is visible to
+                // call sites that appear before the closure definition.
+                self.closure_forward_decls.borrow_mut().push(format!(
+                    "static zz_value zz_closure_{cid}(zz_value *args, size_t argc);\n"
+                ));
                 drop(defs);
                 format!("zz_closure_make(zz_closure_{cid})")
             }
@@ -2979,7 +3091,7 @@ impl Lowerer {
                 o.push_str("    }\n");
             }
         }
-        o.push_str(&format!("    zz_arena_reset(&_arena);\n"));
+        o.push_str(&format!("    zz_arena_reset_trim(&_arena);\n"));
         o.push_str(&format!("    return {val};\n"));
         o.push_str("}\n");
         o
@@ -3443,22 +3555,37 @@ impl Lowerer {
             None
         };
         if let Some(impl_name) = native_rt {
+            // In void context (result discarded), use in-place mutation
+            // instead of copy-on-write for vec.push.
+            let effective_name = if *self.void_context.borrow() && impl_name == "zz_vec_push" {
+                "zz_vec_append"
+            } else {
+                impl_name
+            };
+            // Arena-aware str_cast inside loops: allocate result on arena
+            // to avoid heap malloc for intermediate string conversions.
+            if effective_name == "zz_str_cast" {
+                if let Some(ref arena) = *self.current_loop_arena.borrow() {
+                    let a = &arg_items[0];
+                    return format!("zz_str_cast_arena({a}, &(int){{0}}, &{arena})");
+                }
+            }
             return match arg_items.len() {
                 1 => {
                     let a = &arg_items[0];
-                    format!("zz_call_native1({impl_name}, {a})")
+                    format!("zz_call_native1({effective_name}, {a})")
                 }
-                0 => format!("zz_call_native0({impl_name})"),
+                0 => format!("zz_call_native0({effective_name})"),
                 2 => {
                     let a = &arg_items[0];
                     let b = &arg_items[1];
-                    format!("zz_call_native2({impl_name}, {a}, {b})")
+                    format!("zz_call_native2({effective_name}, {a}, {b})")
                 }
                 3 => {
                     let a = &arg_items[0];
                     let b = &arg_items[1];
                     let c = &arg_items[2];
-                    format!("zz_call_native3({impl_name}, {a}, {b}, {c})")
+                    format!("zz_call_native3({effective_name}, {a}, {b}, {c})")
                 }
                 _ => "zz_unit()".to_string(),
             };

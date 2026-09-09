@@ -300,7 +300,8 @@ static void zz_retain_array(zz_array *a) {
     // are not refcounted, and arena-allocated arrays (refs==0) are freed
     // in bulk at arena reset — skip the atomic increment entirely. This
     // keeps tight loops calling zz_clone() on literals atomic-free.
-    if (a->refs == 0 || a->refs == ZZ_ARRAY_STACK_MAGIC || a->refs == ZZ_ARRAY_LIT_MAGIC) {
+    if (a->refs == 0 || a->refs == ZZ_ARRAY_STACK_MAGIC || a->refs == ZZ_ARRAY_LIT_MAGIC
+        || a->refs == ZZ_ARRAY_ARENA_MAGIC) {
         return;
     }
     __atomic_add_fetch(&a->refs, 1, __ATOMIC_RELAXED);
@@ -323,6 +324,16 @@ static void zz_release_array(zz_array *a) {
     // bulk arena reset reclaims everything.
     if (a->refs == ZZ_ARRAY_LIT_MAGIC) {
         return;
+    }
+    // Arena-allocated arrays with pre-sized items buffer. If items were
+    // never migrated to heap (still on arena), just release contained
+    // values and let arena bulk-reset handle the rest. If migrated (refs
+    // was reset to 0 by zz_vec_append), fall through to the refs==0 path.
+    if (a->refs == ZZ_ARRAY_ARENA_MAGIC) {
+        for (size_t i = 0; i < a->len; i++) {
+            zz_release(&a->items[i]);
+        }
+        return;  // items still on arena — no individual free
     }
     // Arena-allocated arrays have refs==0 sentinel — skip atomic decrement.
     // They're freed in bulk at arena reset, not individually.
@@ -347,7 +358,9 @@ static void zz_retain_dict(zz_dict *d) {
     // Arena-allocated dicts have refs==0 sentinel — skip atomic increment so
     // a clone can never make a bulk-reset arena object look like it owns
     // heap refcounts (which would later free() arena memory).
-    if (d && d->refs != 0) __atomic_add_fetch(&d->refs, 1, __ATOMIC_RELAXED);
+    // ZZ_DICT_ARENA_MAGIC dicts are also arena-owned — skip retain.
+    if (d && d->refs != 0 && d->refs != ZZ_DICT_ARENA_MAGIC)
+        __atomic_add_fetch(&d->refs, 1, __ATOMIC_RELAXED);
 }
 
 static void zz_release_dict(zz_dict *d) {
@@ -362,7 +375,24 @@ static void zz_release_dict(zz_dict *d) {
             }
             zz_release(&d->entries[i].val);
         }
-        free(d->entries);  // entries buffer always uses malloc
+        // Entries buffer: arena-allocated (ZZ_DICT_ARENA_MAGIC) → skip free.
+        // Regular arena dict (refs==0, no magic) → entries used malloc.
+        if (d->refs != ZZ_DICT_ARENA_MAGIC) {
+            free(d->entries);
+        }
+        return;
+    }
+    if (d->refs == ZZ_DICT_ARENA_MAGIC) {
+        // Arena-sized dict: entries are arena-allocated, skip individual free.
+        // Only release the contained values (keys may be heap strings).
+        for (size_t i = 0; i < d->len; i++) {
+            if (d->entries[i].key && !d->entries[i].key->interned) {
+                if (__atomic_sub_fetch(&d->entries[i].key->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+                    free(d->entries[i].key);
+                }
+            }
+            zz_release(&d->entries[i].val);
+        }
         return;
     }
     if (__atomic_sub_fetch(&d->refs, 1, __ATOMIC_ACQ_REL) == 0) {
@@ -806,6 +836,35 @@ zz_value zz_array_new_arena(zz_arena *arena) {
     return v;
 }
 
+// Arena-allocated array with pre-sized items buffer. Both header and items
+// live on the arena (zero malloc on creation). Uses ZZ_ARRAY_ARENA_MAGIC
+// sentinel so zz_vec_append can detect arena items and migrate to heap if
+// growth is needed.
+zz_value zz_array_new_arena_sized(zz_arena *arena, size_t cap) {
+    zz_array *a;
+    if (arena) {
+        a = (zz_array *)zz_arena_alloc(arena, sizeof(zz_array), 8);
+        a->refs = ZZ_ARRAY_ARENA_MAGIC;
+        a->len = 0;
+        a->cap = cap;
+        if (cap > 0) {
+            a->items = (zz_value *)zz_arena_alloc(arena, cap * sizeof(zz_value), 8);
+        } else {
+            a->items = NULL;
+        }
+    } else {
+        a = (zz_array *)calloc(1, sizeof(zz_array));
+        a->refs = 1;
+        a->len = 0;
+        a->cap = cap;
+        a->items = cap > 0 ? (zz_value *)malloc(cap * sizeof(zz_value)) : NULL;
+    }
+    zz_value v;
+    v.tag = ZZ_ARRAY;
+    v.arr = a;
+    return v;
+}
+
 zz_value zz_array_new_lit(zz_arena *arena, size_t n) {
     zz_array *a;
     if (arena) {
@@ -960,6 +1019,38 @@ zz_value zz_dict_new_arena(zz_arena *arena) {
     return v;
 }
 
+// Arena-aware dict constructor with pre-allocated entries buffer.
+// When arena is non-NULL, both the header AND the entries buffer are
+// bump-allocated with exactly `hint` slots. zz_dict_set must NOT realloc
+// these — the buffer is fixed-capacity and dies at arena reset.
+zz_value zz_dict_new_arena_sized(zz_arena *arena, size_t hint) {
+    zz_dict *d;
+    if (arena) {
+        d = (zz_dict *)zz_arena_alloc(arena, sizeof(zz_dict), 8);
+        memset(d, 0, sizeof(zz_dict));
+        d->refs = ZZ_DICT_ARENA_MAGIC;  // sentinel: arena-allocated entries
+        d->cap = hint;
+        d->len = 0;
+        if (hint > 0) {
+            d->entries = (zz_dict_entry *)zz_arena_alloc(arena, hint * sizeof(zz_dict_entry), 8);
+            memset(d->entries, 0, hint * sizeof(zz_dict_entry));
+        } else {
+            d->entries = NULL;
+        }
+    } else {
+        d = (zz_dict *)calloc(1, sizeof(zz_dict));
+        d->refs = 1;
+        if (hint > 0) {
+            d->cap = hint;
+            d->entries = (zz_dict_entry *)malloc(hint * sizeof(zz_dict_entry));
+        }
+    }
+    zz_value v;
+    v.tag = ZZ_DICT;
+    v.dict = d;
+    return v;
+}
+
 // Index-expression dispatchers: `obj[idx]` read and `obj[idx] = v` write.
 // Arrays and dicts only; unsupported tags set *err = 1 and return unit.
 zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
@@ -1037,6 +1128,11 @@ void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
         }
     }
     if (d->len == d->cap) {
+        if (d->refs == ZZ_DICT_ARENA_MAGIC) {
+            // Arena-allocated entries buffer is fixed-capacity — cannot grow.
+            // This should not happen if the codegen pre-sized correctly.
+            return;
+        }
         size_t nc = d->cap == 0 ? 4 : d->cap * 2;
         d->entries = (zz_dict_entry *)realloc(d->entries, nc * sizeof(zz_dict_entry));
         d->cap = nc;
@@ -2814,6 +2910,31 @@ zz_value zz_binop_cat(zz_value a, zz_value b) {
     return zz_binop(ZZOP_ADD, a, b);
 }
 
+// Arena-aware string concatenation. Allocates the result zz_str on the
+// given arena (refs=0 sentinel), so zz_release skips it and the bulk
+// arena reset reclaims everything at scope exit. Zero heap malloc for
+// the string header+data.
+zz_value zz_binop_cat_arena(zz_value a, zz_value b, zz_arena *arena) {
+    if (a.tag == ZZ_STR && b.tag == ZZ_STR && arena) {
+        size_t la = a.s->len, lb = b.s->len;
+        size_t need = la + lb;
+        zz_str *out = (zz_str *)zz_arena_alloc(arena, sizeof(zz_str) + need + 1, 8);
+        out->refs = 0;      // arena sentinel
+        out->interned = 0;
+        out->cap = need;
+        out->len = need;
+        memcpy(out->data, a.s->data, la);
+        memcpy(out->data + la, b.s->data, lb);
+        out->data[need] = '\0';
+        zz_value v;
+        v.tag = ZZ_STR;
+        v.s = out;
+        return v;
+    }
+    // Fallback: non-string or no arena — use heap path
+    return zz_binop_cat(a, b);
+}
+
 
 zz_value zz_binop_cat_str(zz_value a, zz_value b) {
     char *sv = zz_value_to_string(&b);
@@ -2933,11 +3054,12 @@ zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
     zz_array *a = arr.arr;
     if (a->len >= a->cap) {
         size_t new_cap = a->cap ? a->cap * 2 : 8;
-        // LIT_MAGIC arrays have items from arena — realloc() on arena memory
-        // is invalid. Also handle n=0 case where items is NULL.
-        // Migrate to malloc, switch to refs=0 (arena-allocated sentinel) so
-        // zz_release knows items is malloc'd but header is still arena.
-        if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC || a->items == NULL) {
+        // LIT_MAGIC / ARENA_MAGIC arrays have items from arena — realloc() on
+        // arena memory is invalid. Also handle n=0 case where items is NULL.
+        // Migrate to malloc, switch to refs=0 (arena-allocated header sentinel)
+        // so zz_release knows items is malloc'd but header is still arena.
+        if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC
+            || a->refs == ZZ_ARRAY_ARENA_MAGIC || a->items == NULL) {
             zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
             // Copy existing elements if any.
             for (size_t i = 0; i < a->len; i++) {
@@ -2962,7 +3084,8 @@ zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
     zz_array *a = out.arr;
     if (a->len >= a->cap) {
         size_t new_cap = a->cap ? a->cap * 2 : 8;
-        if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC || a->items == NULL) {
+        if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC
+            || a->refs == ZZ_ARRAY_ARENA_MAGIC || a->items == NULL) {
             zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
             for (size_t i = 0; i < a->len; i++) {
                 new_items[i] = a->items[i];
@@ -3368,6 +3491,28 @@ zz_value zz_str_cast(zz_value v, int *err) {
     (void)err;
     char *s = zz_value_to_string(&v);
     return zz_str_owned(s);
+}
+
+// Arena-aware str cast: converts v to string and allocates the result on
+// the arena (refs=0 sentinel). The intermediate char* from zz_value_to_string
+// is freed after copying to the arena.
+zz_value zz_str_cast_arena(zz_value v, int *err, zz_arena *arena) {
+    (void)err;
+    if (!arena) return zz_str_cast(v, err);
+    char *s = zz_value_to_string(&v);
+    size_t len = strlen(s);
+    zz_str *str = (zz_str *)zz_arena_alloc(arena, sizeof(zz_str) + len + 1, 8);
+    str->refs = 0;
+    str->interned = 0;
+    str->cap = len;
+    str->len = len;
+    memcpy(str->data, s, len);
+    str->data[len] = '\0';
+    free(s);
+    zz_value rv;
+    rv.tag = ZZ_STR;
+    rv.s = str;
+    return rv;
 }
 
 // to_str(v) — convert any value to a string zz_value (for fstring interpolation).
