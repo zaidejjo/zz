@@ -471,6 +471,61 @@ fn needs_temp(e: &Expr) -> bool {
     )
 }
 
+/// Count the number of heap-allocating expressions in a block.
+/// Used to estimate arena pre-size for loop bodies.
+fn count_allocating_exprs(block: &zz_hir::Block) -> usize {
+    let mut count = 0;
+    for stmt in &block.stmts {
+        match stmt {
+            zz_hir::Stmt::Decl { value, .. } => {
+                count += count_allocating_in_expr(value);
+            }
+            zz_hir::Stmt::Expr(e) => {
+                count += count_allocating_in_expr(e);
+            }
+            zz_hir::Stmt::For { body, .. } => {
+                count += count_allocating_exprs(body);
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+fn count_allocating_in_expr(e: &zz_hir::Expr) -> usize {
+    match e {
+        zz_hir::Expr::Array { elems, .. } => {
+            1 + elems.iter().map(count_allocating_in_expr).sum::<usize>()
+        }
+        zz_hir::Expr::Dict { entries, .. } => {
+            1 + entries
+                .iter()
+                .map(|(k, v)| count_allocating_in_expr(k) + count_allocating_in_expr(v))
+                .sum::<usize>()
+        }
+        zz_hir::Expr::Str { .. } => 1,
+        zz_hir::Expr::Fmt { parts, .. } => {
+            1 + parts
+                .iter()
+                .filter_map(|p| match p {
+                    zz_frontend::ast::FmtPart::Expr(inner, _) => {
+                        Some(count_allocating_in_expr(inner))
+                    }
+                    _ => None,
+                })
+                .sum::<usize>()
+        }
+        zz_hir::Expr::Block(b) => count_allocating_exprs(b),
+        zz_hir::Expr::Binary { left, right, .. } => {
+            count_allocating_in_expr(left) + count_allocating_in_expr(right)
+        }
+        zz_hir::Expr::Call { args, .. } => {
+            1 + args.iter().map(count_allocating_in_expr).sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
 /// The lowering context.
 pub struct Lowerer {
     reachable_funcs: std::collections::HashSet<String>,
@@ -493,6 +548,8 @@ pub struct Lowerer {
     defer_slots: std::cell::RefCell<Vec<String>>,
     /// Generated C static functions for closure literals (one per `Expr::Closure`).
     closure_defs: std::cell::RefCell<Vec<String>>,
+    /// Forward declarations for closure static functions.
+    closure_forward_decls: std::cell::RefCell<Vec<String>>,
 }
 
 impl Lowerer {
@@ -512,6 +569,7 @@ impl Lowerer {
             loop_arenas: std::cell::RefCell::new(Vec::new()),
             defer_slots: std::cell::RefCell::new(Vec::new()),
             closure_defs: std::cell::RefCell::new(Vec::new()),
+            closure_forward_decls: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -1043,8 +1101,9 @@ impl Lowerer {
             forward_decls.push_str(&proto);
         }
 
+        let closure_fwd = self.closure_forward_decls.borrow().join("");
         let source = format!(
-            "{runtime_h}\n{runtime_c}\n\n// ---- struct definitions ----\n{struct_preamble}\n// ---- forward declarations ----\n{forward_decls}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
+            "{runtime_h}\n{runtime_c}\n\n// ---- struct definitions ----\n{struct_preamble}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset_trim(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
             runtime_h = crate::RUNTIME_H,
             runtime_c = crate::RUNTIME_C,
             struct_preamble = struct_preamble,
@@ -1177,7 +1236,7 @@ impl Lowerer {
             o.push_str("    return zz_unit();\n");
         }
         // --- Arena reset: O(1) cleanup of all non-escaping allocations ---
-        o.push_str("    zz_arena_reset(&_arena);\n");
+        o.push_str("    zz_arena_reset_trim(&_arena);\n");
         o.push_str("}\n\n");
         o
     }
@@ -1723,8 +1782,12 @@ impl Lowerer {
             let loop_arena: Option<String> = if self.escape.loop_spans.contains(&span) {
                 let ac = names.bump_counter();
                 let name = format!("_loop_arena{ac}");
+                // Estimate per-iteration allocation size to pre-size the arena.
+                // Count allocating expressions in the body × 128 bytes each.
+                let alloc_count = count_allocating_exprs(body);
+                let arena_size = (alloc_count * 128).max(65536);
                 out.push_str(&format!("    zz_arena {name};\n"));
-                out.push_str(&format!("    zz_arena_init(&{name}, 65536);\n"));
+                out.push_str(&format!("    zz_arena_init(&{name}, {arena_size});\n"));
                 Some(name)
             } else {
                 None
@@ -2437,8 +2500,10 @@ impl Lowerer {
                 let loop_arena: Option<String> = if self.escape.loop_spans.contains(span) {
                     let ac = names.bump_counter();
                     let name = format!("_loop_arena{ac}");
+                    let alloc_count = count_allocating_exprs(body);
+                    let arena_size = (alloc_count * 128).max(65536);
                     out.push_str(&format!("    zz_arena {name};\n"));
-                    out.push_str(&format!("    zz_arena_init(&{name}, 65536);\n"));
+                    out.push_str(&format!("    zz_arena_init(&{name}, {arena_size});\n"));
                     Some(name)
                 } else {
                     None
@@ -2740,8 +2805,9 @@ impl Lowerer {
             Expr::Dict { entries, span, .. } => {
                 // Create a temp to hold the dict, populate entries, return the temp.
                 let dv = names.fresh("__dict");
+                let n = entries.len();
                 let arena_code = match self.arena_for(*span) {
-                    Some(arena) => format!("zz_dict_new_arena(&{arena})"),
+                    Some(arena) => format!("zz_dict_new_arena_sized(&{arena}, {n})"),
                     None => "zz_dict_new()".to_string(),
                 };
                 out.push_str(&format!("    zz_value {dv} = {arena_code};\n"));
@@ -2927,6 +2993,11 @@ impl Lowerer {
                 let cid = defs.len().min(1_000_000);
                 let body_c = self.emit_closure(params, body, cid, names, out);
                 defs.push(body_c);
+                // Emit a forward declaration so the closure is visible to
+                // call sites that appear before the closure definition.
+                self.closure_forward_decls.borrow_mut().push(format!(
+                    "static zz_value zz_closure_{cid}(zz_value *args, size_t argc);\n"
+                ));
                 drop(defs);
                 format!("zz_closure_make(zz_closure_{cid})")
             }
@@ -2979,7 +3050,7 @@ impl Lowerer {
                 o.push_str("    }\n");
             }
         }
-        o.push_str(&format!("    zz_arena_reset(&_arena);\n"));
+        o.push_str(&format!("    zz_arena_reset_trim(&_arena);\n"));
         o.push_str(&format!("    return {val};\n"));
         o.push_str("}\n");
         o

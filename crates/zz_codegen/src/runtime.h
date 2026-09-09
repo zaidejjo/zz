@@ -20,6 +20,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -125,6 +128,11 @@ struct zz_array {
 // a no-op: both blocks die at the next arena reset.
 #define ZZ_ARRAY_LIT_MAGIC ((size_t)0xC0DEC0DEC0DEC0DEULL)
 
+// Sentinel for dicts whose entries buffer is bump-allocated on the arena.
+// zz_dict_set must NOT call realloc on these — the buffer is fixed-capacity
+// and dies at arena reset. Release is a no-op.
+#define ZZ_DICT_ARENA_MAGIC ((size_t)0xA1A2A3A4A5A6A7A8ULL)
+
 struct zz_dict {
     size_t refs;     // atomic reference count (ARC)
     size_t len;
@@ -224,6 +232,16 @@ static inline void zz_arena_reset(zz_arena *a) {
     a->offset = 0;
 }
 
+// Reset the arena and hint the C allocator to return freed heap pages to
+// the OS. Slower than bare reset — call only at function-level cleanup,
+// not per-iteration in tight loops.
+static inline void zz_arena_reset_trim(zz_arena *a) {
+    a->offset = 0;
+#ifdef __GLIBC__
+    malloc_trim(0);
+#endif
+}
+
 // Destroy the arena, freeing its buffer.
 void zz_arena_destroy(zz_arena *a);
 
@@ -282,6 +300,7 @@ zz_value zz_range(int64_t start, int64_t end, int64_t step);
 // Only the *header structs* (zz_array, zz_dict, zz_str) are arena-eligible.
 zz_value zz_array_new_arena(zz_arena *arena);
 zz_value zz_dict_new_arena(zz_arena *arena);
+zz_value zz_dict_new_arena_sized(zz_arena *arena, size_t hint);
 zz_value zz_str_new_arena(const char *s, size_t len, zz_arena *arena);
 
 // Fixed-size array literal constructor. When `arena` is non-NULL, both the

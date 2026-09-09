@@ -347,7 +347,9 @@ static void zz_retain_dict(zz_dict *d) {
     // Arena-allocated dicts have refs==0 sentinel — skip atomic increment so
     // a clone can never make a bulk-reset arena object look like it owns
     // heap refcounts (which would later free() arena memory).
-    if (d && d->refs != 0) __atomic_add_fetch(&d->refs, 1, __ATOMIC_RELAXED);
+    // ZZ_DICT_ARENA_MAGIC dicts are also arena-owned — skip retain.
+    if (d && d->refs != 0 && d->refs != ZZ_DICT_ARENA_MAGIC)
+        __atomic_add_fetch(&d->refs, 1, __ATOMIC_RELAXED);
 }
 
 static void zz_release_dict(zz_dict *d) {
@@ -362,7 +364,24 @@ static void zz_release_dict(zz_dict *d) {
             }
             zz_release(&d->entries[i].val);
         }
-        free(d->entries);  // entries buffer always uses malloc
+        // Entries buffer: arena-allocated (ZZ_DICT_ARENA_MAGIC) → skip free.
+        // Regular arena dict (refs==0, no magic) → entries used malloc.
+        if (d->refs != ZZ_DICT_ARENA_MAGIC) {
+            free(d->entries);
+        }
+        return;
+    }
+    if (d->refs == ZZ_DICT_ARENA_MAGIC) {
+        // Arena-sized dict: entries are arena-allocated, skip individual free.
+        // Only release the contained values (keys may be heap strings).
+        for (size_t i = 0; i < d->len; i++) {
+            if (d->entries[i].key && !d->entries[i].key->interned) {
+                if (__atomic_sub_fetch(&d->entries[i].key->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+                    free(d->entries[i].key);
+                }
+            }
+            zz_release(&d->entries[i].val);
+        }
         return;
     }
     if (__atomic_sub_fetch(&d->refs, 1, __ATOMIC_ACQ_REL) == 0) {
@@ -960,6 +979,38 @@ zz_value zz_dict_new_arena(zz_arena *arena) {
     return v;
 }
 
+// Arena-aware dict constructor with pre-allocated entries buffer.
+// When arena is non-NULL, both the header AND the entries buffer are
+// bump-allocated with exactly `hint` slots. zz_dict_set must NOT realloc
+// these — the buffer is fixed-capacity and dies at arena reset.
+zz_value zz_dict_new_arena_sized(zz_arena *arena, size_t hint) {
+    zz_dict *d;
+    if (arena) {
+        d = (zz_dict *)zz_arena_alloc(arena, sizeof(zz_dict), 8);
+        memset(d, 0, sizeof(zz_dict));
+        d->refs = ZZ_DICT_ARENA_MAGIC;  // sentinel: arena-allocated entries
+        d->cap = hint;
+        d->len = 0;
+        if (hint > 0) {
+            d->entries = (zz_dict_entry *)zz_arena_alloc(arena, hint * sizeof(zz_dict_entry), 8);
+            memset(d->entries, 0, hint * sizeof(zz_dict_entry));
+        } else {
+            d->entries = NULL;
+        }
+    } else {
+        d = (zz_dict *)calloc(1, sizeof(zz_dict));
+        d->refs = 1;
+        if (hint > 0) {
+            d->cap = hint;
+            d->entries = (zz_dict_entry *)malloc(hint * sizeof(zz_dict_entry));
+        }
+    }
+    zz_value v;
+    v.tag = ZZ_DICT;
+    v.dict = d;
+    return v;
+}
+
 // Index-expression dispatchers: `obj[idx]` read and `obj[idx] = v` write.
 // Arrays and dicts only; unsupported tags set *err = 1 and return unit.
 zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
@@ -1037,6 +1088,11 @@ void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
         }
     }
     if (d->len == d->cap) {
+        if (d->refs == ZZ_DICT_ARENA_MAGIC) {
+            // Arena-allocated entries buffer is fixed-capacity — cannot grow.
+            // This should not happen if the codegen pre-sized correctly.
+            return;
+        }
         size_t nc = d->cap == 0 ? 4 : d->cap * 2;
         d->entries = (zz_dict_entry *)realloc(d->entries, nc * sizeof(zz_dict_entry));
         d->cap = nc;
