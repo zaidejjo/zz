@@ -632,7 +632,257 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.json.as_bool".into(),
         sig(vec![("j", json_t.clone())], Type::Bool),
     );
-    m.insert("std.json.null".into(), sig(vec![], json_t));
+    m.insert("std.json.null".into(), sig(vec![], json_t.clone()));
+
+    // json.* short-form (for pure-ZZ and import-free use)
+    m.insert(
+        "json.parse".into(),
+        sig(
+            vec![("s", Type::Str)],
+            Type::Result(Box::new(json_t.clone()), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "json.stringify".into(),
+        sig_t(
+            vec![("v", t.clone())],
+            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "json.get".into(),
+        sig(
+            vec![("j", json_t.clone()), ("key", Type::Str)],
+            Type::Result(Box::new(json_t.clone()), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "json.as_str".into(),
+        sig(vec![("j", json_t.clone())], Type::Str),
+    );
+    m.insert(
+        "json.as_int".into(),
+        sig(vec![("j", json_t.clone())], Type::Int),
+    );
+    m.insert(
+        "json.as_float".into(),
+        sig(vec![("j", json_t.clone())], Type::Float),
+    );
+    m.insert(
+        "json.as_bool".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert("json.null".into(), sig(vec![], json_t.clone()));
+    m.insert(
+        "json.pretty".into(),
+        sig(vec![("j", json_t.clone())], Type::Str),
+    );
+    m.insert(
+        "json.type".into(),
+        sig(vec![("j", json_t.clone())], Type::Str),
+    );
+    m.insert(
+        "json.len".into(),
+        sig(vec![("j", json_t.clone())], Type::Int),
+    );
+    m.insert(
+        "json.keys".into(),
+        sig(
+            vec![("j", json_t.clone())],
+            Type::Array(Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "json.has".into(),
+        sig(vec![("j", json_t.clone()), ("key", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "json.merge".into(),
+        sig(
+            vec![("a", json_t.clone()), ("b", json_t.clone())],
+            json_t.clone(),
+        ),
+    );
+    m.insert(
+        "json.deep_get".into(),
+        sig(
+            vec![("j", json_t.clone()), ("path", Type::Str)],
+            Type::Result(Box::new(json_t.clone()), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "json.array_push".into(),
+        sig_t(
+            vec![("j", json_t.clone()), ("val", t.clone())],
+            json_t.clone(),
+        ),
+    );
+
+    // std.json — Phase 2.6 extensions
+    m.insert(
+        "std.json.pretty".into(),
+        sig(vec![("j", json_t.clone())], Type::Str),
+    );
+    m.insert(
+        "std.json.type".into(),
+        sig(vec![("j", json_t.clone())], Type::Str),
+    );
+    m.insert(
+        "std.json.len".into(),
+        sig(vec![("j", json_t.clone())], Type::Int),
+    );
+    m.insert(
+        "std.json.keys".into(),
+        sig(
+            vec![("j", json_t.clone())],
+            Type::Array(Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.json.has".into(),
+        sig(vec![("j", json_t.clone()), ("key", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.json.merge".into(),
+        sig(
+            vec![("a", json_t.clone()), ("b", json_t.clone())],
+            json_t.clone(),
+        ),
+    );
+    m.insert(
+        "std.json.deep_get".into(),
+        sig(
+            vec![("j", json_t.clone()), ("path", Type::Str)],
+            Type::Result(Box::new(json_t.clone()), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.json.array_push".into(),
+        sig_t(
+            vec![("j", json_t.clone()), ("val", t.clone())],
+            json_t.clone(),
+        ),
+    );
+
+    // Pure-ZZ json helpers (compiled from zz/json/mod.zz)
+    m.insert(
+        "std.json.validate".into(),
+        sig(vec![("s", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.json.parse_or".into(),
+        sig(
+            vec![("s", Type::Str), ("default", json_t.clone())],
+            json_t.clone(),
+        ),
+    );
+    m.insert(
+        "std.json.parse_or_null".into(),
+        sig(vec![("s", Type::Str)], json_t.clone()),
+    );
+    m.insert(
+        "std.json.path_exists".into(),
+        sig(vec![("j", json_t.clone()), ("path", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.json.path_get_or".into(),
+        sig(
+            vec![
+                ("j", json_t.clone()),
+                ("path", Type::Str),
+                ("default", json_t.clone()),
+            ],
+            json_t.clone(),
+        ),
+    );
+    m.insert(
+        "std.json.is_null".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "std.json.is_bool".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "std.json.is_number".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "std.json.is_string".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "std.json.is_array".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "std.json.is_object".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "std.json.is_empty".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+
+    // json.* short-form for pure-ZZ helpers
+    m.insert(
+        "json.validate".into(),
+        sig(vec![("s", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "json.parse_or".into(),
+        sig(
+            vec![("s", Type::Str), ("default", json_t.clone())],
+            json_t.clone(),
+        ),
+    );
+    m.insert(
+        "json.parse_or_null".into(),
+        sig(vec![("s", Type::Str)], json_t.clone()),
+    );
+    m.insert(
+        "json.path_exists".into(),
+        sig(vec![("j", json_t.clone()), ("path", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "json.path_get_or".into(),
+        sig(
+            vec![
+                ("j", json_t.clone()),
+                ("path", Type::Str),
+                ("default", json_t.clone()),
+            ],
+            json_t.clone(),
+        ),
+    );
+    m.insert(
+        "json.is_null".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "json.is_bool".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "json.is_number".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "json.is_string".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "json.is_array".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "json.is_object".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "json.is_empty".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
 
     // std.encoding
     let result_str = || Type::Result(Box::new(Type::Str), Box::new(Type::Str));

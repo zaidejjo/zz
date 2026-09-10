@@ -426,6 +426,175 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
             f: json::json_as_bool,
         },
     );
+    // json.* short-form (for pure-ZZ and import-free use)
+    m.insert(
+        "json.parse".into(),
+        NativeEntry {
+            arity: 1,
+            f: json::json_parse,
+        },
+    );
+    m.insert(
+        "json.stringify".into(),
+        NativeEntry {
+            arity: 1,
+            f: json::json_stringify,
+        },
+    );
+    m.insert(
+        "json.get".into(),
+        NativeEntry {
+            arity: 2,
+            f: json::json_get,
+        },
+    );
+    m.insert(
+        "json.null".into(),
+        NativeEntry {
+            arity: 0,
+            f: json::json_null,
+        },
+    );
+    m.insert(
+        "json.as_str".into(),
+        NativeEntry {
+            arity: 1,
+            f: json::json_as_str,
+        },
+    );
+    m.insert(
+        "json.as_int".into(),
+        NativeEntry {
+            arity: 1,
+            f: json::json_as_int,
+        },
+    );
+    m.insert(
+        "json.as_float".into(),
+        NativeEntry {
+            arity: 1,
+            f: json::json_as_float,
+        },
+    );
+    m.insert(
+        "json.as_bool".into(),
+        NativeEntry {
+            arity: 1,
+            f: json::json_as_bool,
+        },
+    );
+    m.insert(
+        "json.pretty".into(),
+        NativeEntry {
+            arity: 1,
+            f: json::json_pretty,
+        },
+    );
+    m.insert(
+        "json.type".into(),
+        NativeEntry {
+            arity: 1,
+            f: json::json_type,
+        },
+    );
+    m.insert(
+        "json.len".into(),
+        NativeEntry {
+            arity: 1,
+            f: json::json_len,
+        },
+    );
+    m.insert(
+        "json.keys".into(),
+        NativeEntry {
+            arity: 1,
+            f: json::json_keys,
+        },
+    );
+    m.insert(
+        "json.has".into(),
+        NativeEntry {
+            arity: 2,
+            f: json::json_has,
+        },
+    );
+    m.insert(
+        "json.merge".into(),
+        NativeEntry {
+            arity: 2,
+            f: json::json_merge,
+        },
+    );
+    m.insert(
+        "json.deep_get".into(),
+        NativeEntry {
+            arity: 2,
+            f: json::json_deep_get,
+        },
+    );
+    m.insert(
+        "json.array_push".into(),
+        NativeEntry {
+            arity: 2,
+            f: json::json_array_push,
+        },
+    );
+    m.insert(
+        "std.json.pretty".into(),
+        NativeEntry {
+            arity: 1,
+            f: json::json_pretty,
+        },
+    );
+    m.insert(
+        "std.json.type".into(),
+        NativeEntry {
+            arity: 1,
+            f: json::json_type,
+        },
+    );
+    m.insert(
+        "std.json.len".into(),
+        NativeEntry {
+            arity: 1,
+            f: json::json_len,
+        },
+    );
+    m.insert(
+        "std.json.keys".into(),
+        NativeEntry {
+            arity: 1,
+            f: json::json_keys,
+        },
+    );
+    m.insert(
+        "std.json.has".into(),
+        NativeEntry {
+            arity: 2,
+            f: json::json_has,
+        },
+    );
+    m.insert(
+        "std.json.merge".into(),
+        NativeEntry {
+            arity: 2,
+            f: json::json_merge,
+        },
+    );
+    m.insert(
+        "std.json.deep_get".into(),
+        NativeEntry {
+            arity: 2,
+            f: json::json_deep_get,
+        },
+    );
+    m.insert(
+        "std.json.array_push".into(),
+        NativeEntry {
+            arity: 2,
+            f: json::json_array_push,
+        },
+    );
 
     // std.encoding
     m.insert(

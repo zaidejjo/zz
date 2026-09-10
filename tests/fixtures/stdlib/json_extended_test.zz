@@ -1,0 +1,111 @@
+// tests/fixtures/stdlib/json_extended_test.zz — extended JSON E2E test
+import std.json
+
+// ── parse and build test data ──
+j := json.parse("{\"name\": \"test\", \"count\": 42, \"tags\": [\"a\", \"b\"], \"nested\": {\"x\": 1}}") ?? json.null()
+
+// ── json.type ──
+println("type obj: {json.type(j)}")
+arr := json.get(j, "tags") ?? json.null()
+println("type arr: {json.type(arr)}")
+num := json.get(j, "count") ?? json.null()
+println("type num: {json.type(num)}")
+str_val := json.get(j, "name") ?? json.null()
+println("type str: {json.type(str_val)}")
+null_val := json.null()
+println("type null: {json.type(null_val)}")
+
+// ── json.len ──
+println("len obj: {json.len(j)}")
+println("len arr: {json.len(arr)}")
+
+// ── json.keys ──
+k := json.keys(j)
+println("keys: {k}")
+
+// ── json.has ──
+has_name := json.has(j, "name")
+println("has name: {has_name}")
+has_missing := json.has(j, "missing")
+println("has missing: {has_missing}")
+
+// ── json.pretty ──
+pretty_out := json.pretty(j)
+has_newline := str.contains(pretty_out, "\n")
+println("pretty has newlines: {has_newline}")
+
+// ── json.merge ──
+a := json.parse("{\"x\": 1, \"y\": 2}") ?? json.null()
+b := json.parse("{\"y\": 99, \"z\": 3}") ?? json.null()
+merged := json.merge(a, b)
+merged_y := json.get(merged, "y") ?? json.null()
+println("merged y: {json.as_int(merged_y)}")
+has_z := json.has(merged, "z")
+println("has z: {has_z}")
+
+// ── json.deep_get ──
+deep := json.deep_get(j, "nested.x")
+match deep {
+    .ok(v) => println("deep nested.x: {json.as_int(v)}"),
+    .err(msg) => println("deep_get error: {msg}"),
+}
+
+// ── deep_get missing path ──
+miss := json.deep_get(j, "missing.path")
+match miss {
+    .ok(_) => println("deep miss: should not happen"),
+    .err(_) => println("deep miss: correctly returned error"),
+}
+
+// ── json.array_push ──
+original_arr := json.parse("[1, 2, 3]") ?? json.null()
+pushed := json.array_push(original_arr, 4)
+pushed_len := json.len(pushed)
+println("pushed len: {pushed_len}")
+
+// ── json.null ──
+n := json.null()
+println("null type: {json.type(n)}")
+
+// ── json.as_str / json.as_int / json.as_float / json.as_bool ──
+println("as_str: {json.as_str(str_val)}")
+println("as_int: {json.as_int(num)}")
+println("as_float: {json.as_float(num)}")
+bool_j := json.parse("true") ?? json.null()
+println("as_bool: {json.as_bool(bool_j)}")
+
+// ── pure ZZ helpers (validate, parse_or, path_exists, is_*) ──
+good := json.validate("{\"a\": 1}")
+println("validate good: {good}")
+bad := json.validate("not json")
+println("validate bad: {bad}")
+
+fallback := json.parse_or("not json", json.null())
+println("parse_or fallback type: {json.type(fallback)}")
+
+parsed := json.parse_or("{\"x\": 1}", json.null())
+println("parse_or good type: {json.type(parsed)}")
+
+or_null := json.parse_or_null("bad")
+println("parse_or_null type: {json.type(or_null)}")
+
+pe1 := json.path_exists(j, "nested.x")
+println("path_exists nested.x: {pe1}")
+pe2 := json.path_exists(j, "nope")
+println("path_exists nope: {pe2}")
+
+got := json.path_get_or(j, "nested.x", json.null())
+println("path_get_or: {json.as_int(got)}")
+
+println("is_object: {json.is_object(j)}")
+println("is_array: {json.is_array(arr)}")
+println("is_number: {json.is_number(num)}")
+println("is_string: {json.is_string(str_val)}")
+println("is_bool: {json.is_bool(bool_j)}")
+println("is_null: {json.is_null(null_val)}")
+ie1 := json.is_empty(null_val)
+println("is_empty null: {ie1}")
+ie2 := json.is_empty(arr)
+println("is_empty arr: {ie2}")
+
+println("json_extended_test_ok")

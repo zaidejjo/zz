@@ -1,5 +1,5 @@
 use crate::natives::{arg, expect_str};
-use zz_runtime::json::{parse_json, to_json_string, JsonValue};
+use zz_runtime::json::{parse_json, to_json_string, to_json_string_pretty, JsonValue};
 use zz_runtime::{EvalError, Interp, Span, Value};
 
 pub(crate) fn json_parse(
@@ -128,6 +128,141 @@ pub(crate) fn json_null(
     _span: Span,
 ) -> Result<Value, EvalError> {
     Ok(Value::Json(Box::new(JsonValue::Null)))
+}
+
+pub(crate) fn json_pretty(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let j = expect_json(args, 0, "std.json.pretty")?;
+    Ok(Value::Str(to_json_string_pretty(&j).into()))
+}
+
+pub(crate) fn json_type(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let j = expect_json(args, 0, "std.json.type")?;
+    Ok(Value::Str(
+        zz_runtime::json::json_type_name(&j).to_string().into(),
+    ))
+}
+
+pub(crate) fn json_len(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let j = expect_json(args, 0, "std.json.len")?;
+    Ok(Value::Int(zz_runtime::json::json_len(&j) as i64))
+}
+
+pub(crate) fn json_keys(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let j = expect_json(args, 0, "std.json.keys")?;
+    let keys = zz_runtime::json::json_keys(&j);
+    let arr: Vec<Value> = keys.into_iter().map(|k| Value::Str(k.into())).collect();
+    Ok(Value::Array(Box::new(arr)))
+}
+
+pub(crate) fn json_has(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let j = expect_json(args, 0, "std.json.has")?;
+    let key = expect_str(args, 1, "std.json.has")?;
+    Ok(Value::Bool(zz_runtime::json::json_has(&j, &key)))
+}
+
+pub(crate) fn json_merge(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let a = expect_json(args, 0, "std.json.merge")?;
+    let b = expect_json(args, 1, "std.json.merge")?;
+    Ok(Value::Json(Box::new(zz_runtime::json::json_merge(&a, &b))))
+}
+
+pub(crate) fn json_deep_get(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let j = expect_json(args, 0, "std.json.deep_get")?;
+    let path = expect_str(args, 1, "std.json.deep_get")?;
+    let mut current = j;
+    for seg in path.split('.') {
+        if seg.is_empty() {
+            continue;
+        }
+        current = match current {
+            JsonValue::Obj(entries) => match entries.into_iter().find(|(k, _)| k == seg) {
+                Some((_, v)) => v,
+                None => {
+                    return Ok(Value::Result(Box::new(Err(Value::Str(
+                        format!("key `{seg}` not found in path").into(),
+                    )))));
+                }
+            },
+            JsonValue::Arr(items) => match seg.parse::<usize>() {
+                Ok(idx) => match items.get(idx) {
+                    Some(v) => v.clone(),
+                    None => {
+                        return Ok(Value::Result(Box::new(Err(Value::Str(
+                            format!("index {idx} out of bounds in path").into(),
+                        )))));
+                    }
+                },
+                Err(_) => {
+                    return Ok(Value::Result(Box::new(Err(Value::Str(
+                        format!("expected numeric index for array in path, got `{seg}`").into(),
+                    )))));
+                }
+            },
+            _ => {
+                return Ok(Value::Result(Box::new(Err(Value::Str(
+                    format!(
+                        "cannot traverse into `{}` in path",
+                        zz_runtime::json::json_type_name(&current)
+                    )
+                    .into(),
+                )))));
+            }
+        };
+    }
+    Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(current))))))
+}
+
+pub(crate) fn json_array_push(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let j = expect_json(args, 0, "std.json.array_push")?;
+    let val = match arg(args, 1, "std.json.array_push")? {
+        Value::Json(j) => (**j).clone(),
+        other => value_to_json(other)?,
+    };
+    match j {
+        JsonValue::Arr(mut items) => {
+            items.push(val);
+            Ok(Value::Json(Box::new(JsonValue::Arr(items))))
+        }
+        other => Err(EvalError::new(
+            format!(
+                "std.json.array_push: expected an array, found `{}`",
+                zz_runtime::json::json_type_name(&other)
+            ),
+            _span,
+        )),
+    }
 }
 
 pub(crate) fn expect_json(

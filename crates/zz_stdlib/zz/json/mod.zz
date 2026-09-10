@@ -1,0 +1,84 @@
+// Pure-ZZ JSON helpers — compiled once, shared by VM and AOT.
+// Module: std.json
+//
+// Low-level primitives (parse, stringify, get, pretty, type, len, keys,
+// has, merge, deep_get, array_push) stay as native Rust in
+// src/natives/json/mod.rs. Everything below is pure computation built
+// on top of those primitives and can run in both the bytecode VM and
+// AOT codegen.
+//
+// Design notes:
+//   - json.validate checks JSON syntax via parse + match.
+//   - json.parse_or provides a safe fallback for untrusted input.
+//   - json.path_exists checks a dot-path without unwrapping the value.
+//   - json.is_* predicates for quick type checks.
+
+// ── Validation ──────────────────────────────────────────────────────────────
+
+func json.validate(s: str) -> bool {
+    match json.parse(s) {
+        .ok(_) => true,
+        .err(_) => false,
+    }
+}
+
+// ── Safe parsing ────────────────────────────────────────────────────────────
+
+func json.parse_or(s: str, default: json) -> json {
+    match json.parse(s) {
+        .ok(v) => v,
+        .err(_) => default,
+    }
+}
+
+func json.parse_or_null(s: str) -> json {
+    json.parse_or(s, json.null())
+}
+
+// ── Path operations ─────────────────────────────────────────────────────────
+
+func json.path_exists(j: json, path: str) -> bool {
+    match json.deep_get(j, path) {
+        .ok(_) => true,
+        .err(_) => false,
+    }
+}
+
+func json.path_get_or(j: json, path: str, default: json) -> json {
+    match json.deep_get(j, path) {
+        .ok(v) => v,
+        .err(_) => default,
+    }
+}
+
+// ── Type predicates (convenience) ──────────────────────────────────────────
+
+func json.is_null(j: json) -> bool {
+    json.type(j) == "null"
+}
+
+func json.is_bool(j: json) -> bool {
+    json.type(j) == "bool"
+}
+
+func json.is_number(j: json) -> bool {
+    json.type(j) == "number"
+}
+
+func json.is_string(j: json) -> bool {
+    json.type(j) == "string"
+}
+
+func json.is_array(j: json) -> bool {
+    json.type(j) == "array"
+}
+
+func json.is_object(j: json) -> bool {
+    json.type(j) == "object"
+}
+
+// ── Aggregate helpers ───────────────────────────────────────────────────────
+
+func json.is_empty(j: json) -> bool {
+    json.len(j) == 0
+}

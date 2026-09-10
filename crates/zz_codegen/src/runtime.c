@@ -3564,6 +3564,15 @@ static void json_err(json_parser *p, const char *fmt, int a, int b) {
     snprintf(p->err, sizeof(p->err), fmt, a, b);
 }
 
+// Convert byte position to 1-based line and column.
+static void json_line_col(json_parser *p, size_t pos, int *line, int *col) {
+    int l = 1, c = 1;
+    for (size_t i = 0; i < pos && i < p->len; i++) {
+        if (p->s[i] == '\n') { l++; c = 1; } else { c++; }
+    }
+    *line = l; *col = c;
+}
+
 static char json_peek(json_parser *p) {
     return p->pos < p->len ? p->s[p->pos] : '\0';
 }
@@ -3585,7 +3594,8 @@ static int json_parse_value(json_parser *p, zz_value *out);
 
 static int json_parse_str(json_parser *p, zz_value *out) {
     if (!json_eat(p, '"')) {
-        snprintf(p->err, sizeof(p->err), "expected `\"` at byte %zu", p->pos);
+        int line, col; json_line_col(p, p->pos, &line, &col);
+        snprintf(p->err, sizeof(p->err), "expected `\"` at line %d, col %d", line, col);
         return -1;
     }
     // First pass: measure decoded size.
@@ -3627,7 +3637,7 @@ static int json_parse_str(json_parser *p, zz_value *out) {
                         if (h >= '0' && h <= '9') code |= (h - '0');
                         else if (h >= 'a' && h <= 'f') code |= (h - 'a' + 10);
                         else if (h >= 'A' && h <= 'F') code |= (h - 'A' + 10);
-                        else { snprintf(p->err, sizeof(p->err), "invalid \\u escape at byte %zu", p->pos); goto fail; }
+                        else { int line, col; json_line_col(p, p->pos, &line, &col); snprintf(p->err, sizeof(p->err), "invalid \\u escape at line %d, col %d", line, col); goto fail; }
                     }
                     p->pos += 4;
                     if (code < 0x80) str->data[w++] = (char)code;
@@ -3642,7 +3652,7 @@ static int json_parse_str(json_parser *p, zz_value *out) {
                     break;
                 }
                 default:
-                    snprintf(p->err, sizeof(p->err), "invalid escape `\\%c` at byte %zu", e, p->pos);
+                    { int line, col; json_line_col(p, p->pos, &line, &col); snprintf(p->err, sizeof(p->err), "invalid escape `\\%c` at line %d, col %d", e, line, col); }
                     goto fail;
             }
             p->pos++;
@@ -3698,17 +3708,20 @@ static int json_parse_value(json_parser *p, zz_value *out) {
     }
     if (c == 'n') {
         if (p->pos + 4 <= p->len && memcmp(p->s + p->pos, "null", 4) == 0) { p->pos += 4; *out = zz_unit(); return 0; }
-        snprintf(p->err, sizeof(p->err), "invalid literal at byte %zu", p->pos);
+        int line, col; json_line_col(p, p->pos, &line, &col);
+        snprintf(p->err, sizeof(p->err), "invalid literal at line %d, col %d", line, col);
         return -1;
     }
     if (c == 't') {
         if (p->pos + 4 <= p->len && memcmp(p->s + p->pos, "true", 4) == 0) { p->pos += 4; *out = (zz_value){ZZ_BOOL, {.b = true}}; return 0; }
-        snprintf(p->err, sizeof(p->err), "invalid literal at byte %zu", p->pos);
+        int line, col; json_line_col(p, p->pos, &line, &col);
+        snprintf(p->err, sizeof(p->err), "invalid literal at line %d, col %d", line, col);
         return -1;
     }
     if (c == 'f') {
         if (p->pos + 5 <= p->len && memcmp(p->s + p->pos, "false", 5) == 0) { p->pos += 5; *out = (zz_value){ZZ_BOOL, {.b = false}}; return 0; }
-        snprintf(p->err, sizeof(p->err), "invalid literal at byte %zu", p->pos);
+        int line, col; json_line_col(p, p->pos, &line, &col);
+        snprintf(p->err, sizeof(p->err), "invalid literal at line %d, col %d", line, col);
         return -1;
     }
     if (c == '"') return json_parse_str(p, out);
@@ -3725,7 +3738,8 @@ static int json_parse_value(json_parser *p, zz_value *out) {
             json_skip_ws(p);
             if (json_eat(p, ',')) continue;
             if (json_eat(p, ']')) { *out = arr; return 0; }
-            snprintf(p->err, sizeof(p->err), "expected `]` at byte %zu", p->pos);
+            { int line, col; json_line_col(p, p->pos, &line, &col);
+            snprintf(p->err, sizeof(p->err), "expected `]` at line %d, col %d", line, col); }
             zz_release(&arr);
             return -1;
         }
@@ -3741,7 +3755,8 @@ static int json_parse_value(json_parser *p, zz_value *out) {
             if (json_parse_str(p, &k) != 0) { zz_release(&dict); return -1; }
             json_skip_ws(p);
             if (!json_eat(p, ':')) {
-                snprintf(p->err, sizeof(p->err), "expected `:` at byte %zu", p->pos);
+                int line, col; json_line_col(p, p->pos, &line, &col);
+                snprintf(p->err, sizeof(p->err), "expected `:` at line %d, col %d", line, col);
                 zz_release(&k); zz_release(&dict);
                 return -1;
             }
@@ -3753,13 +3768,15 @@ static int json_parse_value(json_parser *p, zz_value *out) {
             json_skip_ws(p);
             if (json_eat(p, ',')) continue;
             if (json_eat(p, '}')) { *out = dict; return 0; }
-            snprintf(p->err, sizeof(p->err), "expected `}` at byte %zu", p->pos);
+            { int line, col; json_line_col(p, p->pos, &line, &col);
+            snprintf(p->err, sizeof(p->err), "expected `}` at line %d, col %d", line, col); }
             zz_release(&dict);
             return -1;
         }
     }
     if (c == '-' || (c >= '0' && c <= '9')) return json_parse_number(p, out);
-    snprintf(p->err, sizeof(p->err), "unexpected character `%c` at byte %zu", c, p->pos);
+    { int line, col; json_line_col(p, p->pos, &line, &col);
+    snprintf(p->err, sizeof(p->err), "unexpected character `%c` at line %d, col %d", c, line, col); }
     return -1;
 }
 
@@ -3773,7 +3790,8 @@ zz_value zz_json_parse(zz_value s, int *err) {
     }
     json_skip_ws(&p);
     if (p.pos < p.len) {
-        snprintf(p.err, sizeof(p.err), "unexpected trailing characters at byte %zu", p.pos);
+        int line, col; json_line_col(&p, p.pos, &line, &col);
+        snprintf(p.err, sizeof(p.err), "unexpected trailing characters at line %d, col %d", line, col);
         return zz_variant_err(zz_str_owned(text_invalid_json(p.err)));
     }
     return zz_variant_ok(zz_json_wrap(raw));

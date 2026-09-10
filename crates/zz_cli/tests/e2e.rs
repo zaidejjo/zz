@@ -200,6 +200,11 @@ e2e_success_test!(
     "stdlib",
     "concurrent_http_test.zz"
 );
+e2e_success_test!(
+    e2e_stdlib_json_extended_test,
+    "stdlib",
+    "json_extended_test.zz"
+);
 
 // ---------------------------------------------------------------------------
 // Error fixtures: must exit 1

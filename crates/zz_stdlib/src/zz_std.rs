@@ -16,12 +16,14 @@ use zz_hir::TypedProgram;
 const STR_MOD_ZZ: &str = include_str!("../zz/str/mod.zz");
 const MATH_MOD_ZZ: &str = include_str!("../zz/math/mod.zz");
 const VEC_ZZ: &str = include_str!("../zz/collections/vec.zz");
+const JSON_MOD_ZZ: &str = include_str!("../zz/json/mod.zz");
 
 /// All embedded source files, in compilation order.
 const ZZ_SOURCES: &[(&str, &str)] = &[
     ("std:str.mod.zz", STR_MOD_ZZ),
     ("std:math.mod.zz", MATH_MOD_ZZ),
     ("std:collections.vec.zz", VEC_ZZ),
+    ("std:json.mod.zz", JSON_MOD_ZZ),
 ];
 
 /// Compiled pure-ZZ stdlib programs, computed once.
@@ -116,7 +118,7 @@ mod tests {
     fn compile_pure_zz_stdlib() {
         let programs = zz_stdlib_programs();
         // Should have compiled three modules (str, math, collections/vec).
-        assert_eq!(programs.len(), 3, "expected 3 pure-ZZ stdlib modules");
+        assert_eq!(programs.len(), 4, "expected 4 pure-ZZ stdlib modules");
         // Each module should have a non-empty types map.
         for (i, tp) in programs.iter().enumerate() {
             assert!(
