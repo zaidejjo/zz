@@ -11,10 +11,27 @@ pub mod lower;
 pub use compile::{compile_and_run, detect_cc, BuildError, BuildOptions};
 pub use lower::{mangle, native_supported, LoweredC, Lowerer};
 
-/// The embedded C runtime header.
-pub const RUNTIME_H: &str = include_str!("runtime.h");
-/// The embedded C runtime implementation.
-pub const RUNTIME_C: &str = include_str!("runtime.c");
+/// The embedded C runtime header. The runtime is split across modular
+/// sub-headers under `src/runtime/`; the umbrella `runtime.h` includes them
+/// in dependency order, and they are concatenated here into one string.
+pub const RUNTIME_H: &str = concat!(
+    include_str!("runtime/runtime.h"),
+    include_str!("runtime/core.h"),
+    include_str!("runtime/memory.h"),
+    include_str!("runtime/strings.h"),
+    include_str!("runtime/collections.h"),
+    include_str!("runtime/json.h"),
+);
+
+/// The embedded C runtime implementation. The modular `.c` files are
+/// concatenated in dependency order into a single translation unit.
+pub const RUNTIME_C: &str = concat!(
+    include_str!("runtime/memory.c"),
+    include_str!("runtime/strings.c"),
+    include_str!("runtime/collections.c"),
+    include_str!("runtime/json.c"),
+    include_str!("runtime/core.c"),
+);
 
 /// Version marker for generated binaries.
 pub const C_BUILD_VERSION: &str = "0.1.0";

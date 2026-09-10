@@ -323,7 +323,8 @@ fn generated_source_contains_expected_sections() {
         "missing println impl"
     );
     // Verify http native functions are NOT in reach.natives when unused.
-    // (they live in runtime.c and are linked, not inlined)
+    // (they live in the modular C runtime under src/runtime/ and are
+    // linked, not inlined)
     let has_http_get = reach.natives.contains(&String::from("http.get"));
     let has_http_post = reach.natives.contains(&String::from("http.post"));
     assert!(
