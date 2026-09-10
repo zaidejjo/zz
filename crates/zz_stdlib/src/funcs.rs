@@ -204,7 +204,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("s", Type::Str)], Type::Str),
     );
 
-    // Pure-ZZ stdlib: string helpers (compiled from zz/str.zz)
+    // Pure-ZZ stdlib: string helpers (compiled from zz/str/mod.zz)
     m.insert(
         "std.str.repeat".into(),
         sig(vec![("s", Type::Str), ("n", Type::Int)], Type::Str),
@@ -212,6 +212,28 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "std.str.count".into(),
         sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "std.str.is_empty".into(),
+        sig(vec![("s", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.str.reverse".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.str.pad_left".into(),
+        sig(
+            vec![("s", Type::Str), ("len", Type::Int), ("pad", Type::Str)],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "std.str.pad_right".into(),
+        sig(
+            vec![("s", Type::Str), ("len", Type::Int), ("pad", Type::Str)],
+            Type::Str,
+        ),
     );
     // Method-dispatch aliases for pure-ZZ string helpers
     m.insert(
@@ -221,6 +243,25 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "str.count".into(),
         sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "str.is_empty".into(),
+        sig(vec![("s", Type::Str)], Type::Bool),
+    );
+    m.insert("str.reverse".into(), sig(vec![("s", Type::Str)], Type::Str));
+    m.insert(
+        "str.pad_left".into(),
+        sig(
+            vec![("s", Type::Str), ("len", Type::Int), ("pad", Type::Str)],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "str.pad_right".into(),
+        sig(
+            vec![("s", Type::Str), ("len", Type::Int), ("pad", Type::Str)],
+            Type::Str,
+        ),
     );
 
     // std.vec — generic over element type T.
@@ -315,6 +356,174 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig_t(
             vec![("v", Type::Array(Box::new(t.clone()))), ("idx", Type::Int)],
             Type::Array(Box::new(t.clone())),
+        ),
+    );
+
+    // Pure-ZZ stdlib: vec helpers (compiled from zz/collections/vec.zz)
+    // min_val/max_val are generic <T> returning Option<T>;
+    // sum_f/product_f handle float arrays with Kahan precision.
+    m.insert(
+        "std.vec.fold".into(),
+        sig(
+            vec![
+                ("arr", Type::Array(Box::new(Type::Int))),
+                ("init", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "std.vec.sum".into(),
+        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+    );
+    m.insert(
+        "std.vec.product".into(),
+        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+    );
+    // Generic min/max — return Option for empty safety
+    m.insert(
+        "std.vec.min_val".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "std.vec.max_val".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    // Float aggregation
+    let float_arr = || Type::Array(Box::new(Type::Float));
+    m.insert(
+        "std.vec.sum_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "std.vec.product_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "std.vec.concat".into(),
+        sig(
+            vec![
+                ("a", Type::Array(Box::new(Type::Int))),
+                ("b", Type::Array(Box::new(Type::Int))),
+            ],
+            Type::Array(Box::new(Type::Int)),
+        ),
+    );
+    m.insert(
+        "std.vec.flatten".into(),
+        sig(
+            vec![(
+                "arr",
+                Type::Array(Box::new(Type::Array(Box::new(Type::Int)))),
+            )],
+            Type::Array(Box::new(Type::Int)),
+        ),
+    );
+    m.insert(
+        "std.vec.index_of".into(),
+        sig(
+            vec![
+                ("arr", Type::Array(Box::new(Type::Int))),
+                ("target", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "std.vec.last_index_of".into(),
+        sig(
+            vec![
+                ("arr", Type::Array(Box::new(Type::Int))),
+                ("target", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    // Method-dispatch aliases for pure-ZZ vec helpers
+    m.insert(
+        "vec.fold".into(),
+        sig(
+            vec![
+                ("arr", Type::Array(Box::new(Type::Int))),
+                ("init", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "vec.sum".into(),
+        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+    );
+    m.insert(
+        "vec.product".into(),
+        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+    );
+    m.insert(
+        "vec.min_val".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "vec.max_val".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "vec.sum_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "vec.product_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "vec.concat".into(),
+        sig(
+            vec![
+                ("a", Type::Array(Box::new(Type::Int))),
+                ("b", Type::Array(Box::new(Type::Int))),
+            ],
+            Type::Array(Box::new(Type::Int)),
+        ),
+    );
+    m.insert(
+        "vec.flatten".into(),
+        sig(
+            vec![(
+                "arr",
+                Type::Array(Box::new(Type::Array(Box::new(Type::Int)))),
+            )],
+            Type::Array(Box::new(Type::Int)),
+        ),
+    );
+    m.insert(
+        "vec.index_of".into(),
+        sig(
+            vec![
+                ("arr", Type::Array(Box::new(Type::Int))),
+                ("target", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "vec.last_index_of".into(),
+        sig(
+            vec![
+                ("arr", Type::Array(Box::new(Type::Int))),
+                ("target", Type::Int),
+            ],
+            Type::Int,
         ),
     );
 
@@ -423,7 +632,257 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.json.as_bool".into(),
         sig(vec![("j", json_t.clone())], Type::Bool),
     );
-    m.insert("std.json.null".into(), sig(vec![], json_t));
+    m.insert("std.json.null".into(), sig(vec![], json_t.clone()));
+
+    // json.* short-form (for pure-ZZ and import-free use)
+    m.insert(
+        "json.parse".into(),
+        sig(
+            vec![("s", Type::Str)],
+            Type::Result(Box::new(json_t.clone()), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "json.stringify".into(),
+        sig_t(
+            vec![("v", t.clone())],
+            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "json.get".into(),
+        sig(
+            vec![("j", json_t.clone()), ("key", Type::Str)],
+            Type::Result(Box::new(json_t.clone()), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "json.as_str".into(),
+        sig(vec![("j", json_t.clone())], Type::Str),
+    );
+    m.insert(
+        "json.as_int".into(),
+        sig(vec![("j", json_t.clone())], Type::Int),
+    );
+    m.insert(
+        "json.as_float".into(),
+        sig(vec![("j", json_t.clone())], Type::Float),
+    );
+    m.insert(
+        "json.as_bool".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert("json.null".into(), sig(vec![], json_t.clone()));
+    m.insert(
+        "json.pretty".into(),
+        sig(vec![("j", json_t.clone())], Type::Str),
+    );
+    m.insert(
+        "json.type".into(),
+        sig(vec![("j", json_t.clone())], Type::Str),
+    );
+    m.insert(
+        "json.len".into(),
+        sig(vec![("j", json_t.clone())], Type::Int),
+    );
+    m.insert(
+        "json.keys".into(),
+        sig(
+            vec![("j", json_t.clone())],
+            Type::Array(Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "json.has".into(),
+        sig(vec![("j", json_t.clone()), ("key", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "json.merge".into(),
+        sig(
+            vec![("a", json_t.clone()), ("b", json_t.clone())],
+            json_t.clone(),
+        ),
+    );
+    m.insert(
+        "json.deep_get".into(),
+        sig(
+            vec![("j", json_t.clone()), ("path", Type::Str)],
+            Type::Result(Box::new(json_t.clone()), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "json.array_push".into(),
+        sig_t(
+            vec![("j", json_t.clone()), ("val", t.clone())],
+            json_t.clone(),
+        ),
+    );
+
+    // std.json — Phase 2.6 extensions
+    m.insert(
+        "std.json.pretty".into(),
+        sig(vec![("j", json_t.clone())], Type::Str),
+    );
+    m.insert(
+        "std.json.type".into(),
+        sig(vec![("j", json_t.clone())], Type::Str),
+    );
+    m.insert(
+        "std.json.len".into(),
+        sig(vec![("j", json_t.clone())], Type::Int),
+    );
+    m.insert(
+        "std.json.keys".into(),
+        sig(
+            vec![("j", json_t.clone())],
+            Type::Array(Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.json.has".into(),
+        sig(vec![("j", json_t.clone()), ("key", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.json.merge".into(),
+        sig(
+            vec![("a", json_t.clone()), ("b", json_t.clone())],
+            json_t.clone(),
+        ),
+    );
+    m.insert(
+        "std.json.deep_get".into(),
+        sig(
+            vec![("j", json_t.clone()), ("path", Type::Str)],
+            Type::Result(Box::new(json_t.clone()), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.json.array_push".into(),
+        sig_t(
+            vec![("j", json_t.clone()), ("val", t.clone())],
+            json_t.clone(),
+        ),
+    );
+
+    // Pure-ZZ json helpers (compiled from zz/json/mod.zz)
+    m.insert(
+        "std.json.validate".into(),
+        sig(vec![("s", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.json.parse_or".into(),
+        sig(
+            vec![("s", Type::Str), ("default", json_t.clone())],
+            json_t.clone(),
+        ),
+    );
+    m.insert(
+        "std.json.parse_or_null".into(),
+        sig(vec![("s", Type::Str)], json_t.clone()),
+    );
+    m.insert(
+        "std.json.path_exists".into(),
+        sig(vec![("j", json_t.clone()), ("path", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.json.path_get_or".into(),
+        sig(
+            vec![
+                ("j", json_t.clone()),
+                ("path", Type::Str),
+                ("default", json_t.clone()),
+            ],
+            json_t.clone(),
+        ),
+    );
+    m.insert(
+        "std.json.is_null".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "std.json.is_bool".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "std.json.is_number".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "std.json.is_string".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "std.json.is_array".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "std.json.is_object".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "std.json.is_empty".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+
+    // json.* short-form for pure-ZZ helpers
+    m.insert(
+        "json.validate".into(),
+        sig(vec![("s", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "json.parse_or".into(),
+        sig(
+            vec![("s", Type::Str), ("default", json_t.clone())],
+            json_t.clone(),
+        ),
+    );
+    m.insert(
+        "json.parse_or_null".into(),
+        sig(vec![("s", Type::Str)], json_t.clone()),
+    );
+    m.insert(
+        "json.path_exists".into(),
+        sig(vec![("j", json_t.clone()), ("path", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "json.path_get_or".into(),
+        sig(
+            vec![
+                ("j", json_t.clone()),
+                ("path", Type::Str),
+                ("default", json_t.clone()),
+            ],
+            json_t.clone(),
+        ),
+    );
+    m.insert(
+        "json.is_null".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "json.is_bool".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "json.is_number".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "json.is_string".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "json.is_array".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "json.is_object".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "json.is_empty".into(),
+        sig(vec![("j", json_t.clone())], Type::Bool),
+    );
 
     // std.encoding
     let result_str = || Type::Result(Box::new(Type::Str), Box::new(Type::Str));
@@ -842,7 +1301,9 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     // `float(v)` — widen an int to float, identity for float, parse from str.
     m.insert("float".into(), sig_t(vec![("v", t.clone())], Type::Float));
 
-    // std.math
+    // std.math — pure-ZZ integer implementations (from zz/math/mod.zz)
+    // These shadow the native Rust versions at type-check time.
+    // Native Rust versions still handle float overloads at runtime.
     m.insert(
         "std.math.abs".into(),
         sig_t(vec![("v", t.clone())], t.clone()),
@@ -1035,7 +1496,9 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig_t(vec![("min", t.clone()), ("max", t.clone())], Type::Float),
     );
 
-    // Pure-ZZ stdlib: math helpers (compiled from zz/math.zz)
+    // Pure-ZZ stdlib: math helpers (compiled from zz/math/mod.zz)
+    // min/max are generic <T>; min_arr/max_arr return Option<T>;
+    // sum_f/product_f/mean_f/median_f handle float arrays with Kahan precision.
     m.insert(
         "std.math.sum".into(),
         sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
@@ -1052,6 +1515,62 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
                 ("target", Type::Int),
             ],
             Type::Int,
+        ),
+    );
+    // Generic min/max — work for int, float, str (anything comparable)
+    m.insert(
+        "std.math.min".into(),
+        sig_t(vec![("a", t.clone()), ("b", t.clone())], t.clone()),
+    );
+    m.insert(
+        "std.math.max".into(),
+        sig_t(vec![("a", t.clone()), ("b", t.clone())], t.clone()),
+    );
+    m.insert(
+        "std.math.is_even".into(),
+        sig(vec![("n", Type::Int)], Type::Bool),
+    );
+    m.insert(
+        "std.math.is_odd".into(),
+        sig(vec![("n", Type::Int)], Type::Bool),
+    );
+    // Generic array min/max — return Option for empty safety
+    m.insert(
+        "std.math.min_arr".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "std.math.max_arr".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    // Float aggregation — Kahan compensated summation
+    let float_arr = || Type::Array(Box::new(Type::Float));
+    m.insert(
+        "std.math.sum_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "std.math.product_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "std.math.mean_f".into(),
+        sig(
+            vec![("arr", float_arr())],
+            Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.math.median_f".into(),
+        sig(
+            vec![("arr", float_arr())],
+            Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
         ),
     );
     // Method-dispatch aliases for pure-ZZ math helpers
@@ -1071,6 +1590,58 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
                 ("target", Type::Int),
             ],
             Type::Int,
+        ),
+    );
+    m.insert(
+        "math.min".into(),
+        sig_t(vec![("a", t.clone()), ("b", t.clone())], t.clone()),
+    );
+    m.insert(
+        "math.max".into(),
+        sig_t(vec![("a", t.clone()), ("b", t.clone())], t.clone()),
+    );
+    m.insert(
+        "math.is_even".into(),
+        sig(vec![("n", Type::Int)], Type::Bool),
+    );
+    m.insert(
+        "math.is_odd".into(),
+        sig(vec![("n", Type::Int)], Type::Bool),
+    );
+    m.insert(
+        "math.min_arr".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "math.max_arr".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "math.sum_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "math.product_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "math.mean_f".into(),
+        sig(
+            vec![("arr", float_arr())],
+            Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "math.median_f".into(),
+        sig(
+            vec![("arr", float_arr())],
+            Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
         ),
     );
 
@@ -1182,7 +1753,7 @@ mod tests {
         assert!(funcs.contains_key("append"));
         assert!(funcs.contains_key("std.task.spawn"));
         assert!(funcs.contains_key("std.task.join"));
-        assert_eq!(funcs.len(), 163);
+        assert_eq!(funcs.len(), 223);
     }
 
     #[test]

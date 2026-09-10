@@ -1,0 +1,92 @@
+// Pure-ZZ string helpers — compiled once, shared by VM and AOT.
+// Module: std.str
+//
+// Functions that need Rust string internals (trim, to_upper, to_lower,
+// replace, split, join, contains, starts_with, ends_with) stay as
+// native Rust in src/natives/str_mod/mod.rs. Everything below is
+// pure computation and can run in both the bytecode VM and AOT codegen.
+//
+// Performance notes:
+//   - str.repeat uses doubling strategy: O(n log n) instead of O(n^2).
+//   - str.pad_left/right build padding once, concat once: O(k) not O(k^2).
+
+// ── Repetition & counting ────────────────────────────────────────────────────
+
+func str.repeat(s: str, n: int) -> str {
+    // Doubling strategy: build result in O(log n) concatenations.
+    // At each step, double the accumulator. Total copies ~ n * (1 + 1/2 + 1/4 + ...) < 2n.
+    if n <= 0 { return "" }
+    result := s
+    m := n - 1
+    buf := s
+    while m > 0 {
+        if m % 2 == 1 {
+            result = result + buf
+        }
+        buf = buf + buf
+        m = m / 2
+    }
+    result
+}
+
+func str.count(s: str, sub: str) -> int {
+    parts := str.split(s, sub)
+    n := vec.len(parts) - 1
+    n
+}
+
+// ── Queries ──────────────────────────────────────────────────────────────────
+
+func str.is_empty(s: str) -> bool {
+    str.length(s) == 0
+}
+
+// ── Transform ────────────────────────────────────────────────────────────────
+
+func str.reverse(s: str) -> str {
+    chars := str.split(s, "")
+    result := ""
+    idx := vec.len(chars) - 1
+    while idx >= 0 {
+        result = result + chars[idx]
+        idx = idx - 1
+    }
+    result
+}
+
+func str.pad_left(s: str, len: int, pad: str) -> str {
+    slen := str.length(s)
+    if slen >= len { return s }
+    needed := len - slen
+    // Build full padding string once, then slice — O(needed) not O(needed^2).
+    // Since we cannot slice strings by char index in pure ZZ, build iteratively
+    // but amortize by doubling the padding buffer.
+    padding := ""
+    buf := pad
+    remaining := needed
+    while remaining > 0 {
+        if remaining % 2 == 1 {
+            padding = padding + buf
+        }
+        buf = buf + buf
+        remaining = remaining / 2
+    }
+    padding + s
+}
+
+func str.pad_right(s: str, len: int, pad: str) -> str {
+    slen := str.length(s)
+    if slen >= len { return s }
+    needed := len - slen
+    padding := ""
+    buf := pad
+    remaining := needed
+    while remaining > 0 {
+        if remaining % 2 == 1 {
+            padding = padding + buf
+        }
+        buf = buf + buf
+        remaining = remaining / 2
+    }
+    s + padding
+}

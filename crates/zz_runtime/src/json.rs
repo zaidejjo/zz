@@ -22,18 +22,12 @@ impl fmt::Display for JsonValue {
     }
 }
 
-/// Serialize a JSON value to its canonical text form.
+/// Serialize a JSON value to its canonical compact text form.
 pub fn to_json_string(v: &JsonValue) -> String {
     match v {
         JsonValue::Null => "null".into(),
         JsonValue::Bool(b) => b.to_string(),
-        JsonValue::Num(n) => {
-            if n.fract() == 0.0 && n.is_finite() && n.abs() < 1e15 {
-                format!("{n:.0}")
-            } else {
-                format!("{n}")
-            }
-        }
+        JsonValue::Num(n) => format_number(*n),
         JsonValue::Str(s) => format!("\"{}\"", escape_str(s)),
         JsonValue::Arr(items) => {
             let inner: Vec<String> = items.iter().map(to_json_string).collect();
@@ -46,6 +40,136 @@ pub fn to_json_string(v: &JsonValue) -> String {
                 .collect();
             format!("{{{}}}", inner.join(","))
         }
+    }
+}
+
+/// Format a number: integers without decimal point, floats as-is.
+fn format_number(n: f64) -> String {
+    if n.fract() == 0.0 && n.is_finite() && n.abs() < 1e15 {
+        format!("{n:.0}")
+    } else {
+        format!("{n}")
+    }
+}
+
+/// Serialize a JSON value to a pretty-printed form with 2-space indentation.
+pub fn to_json_string_pretty(v: &JsonValue) -> String {
+    let mut out = String::with_capacity(256);
+    pretty_print(v, &mut out, 0, 2);
+    out
+}
+
+fn pretty_print(v: &JsonValue, out: &mut String, indent: usize, step: usize) {
+    match v {
+        JsonValue::Null => out.push_str("null"),
+        JsonValue::Bool(b) => out.push_str(&b.to_string()),
+        JsonValue::Num(n) => out.push_str(&format_number(*n)),
+        JsonValue::Str(s) => {
+            out.push('"');
+            out.push_str(&escape_str(s));
+            out.push('"');
+        }
+        JsonValue::Arr(items) => {
+            if items.is_empty() {
+                out.push_str("[]");
+                return;
+            }
+            out.push_str("[\n");
+            for (i, item) in items.iter().enumerate() {
+                pad(out, indent + step);
+                pretty_print(item, out, indent + step, step);
+                if i + 1 < items.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            pad(out, indent);
+            out.push(']');
+        }
+        JsonValue::Obj(entries) => {
+            if entries.is_empty() {
+                out.push_str("{}");
+                return;
+            }
+            out.push_str("{\n");
+            for (i, (k, val)) in entries.iter().enumerate() {
+                pad(out, indent + step);
+                out.push('"');
+                out.push_str(&escape_str(k));
+                out.push_str("\": ");
+                pretty_print(val, out, indent + step, step);
+                if i + 1 < entries.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            pad(out, indent);
+            out.push('}');
+        }
+    }
+}
+
+fn pad(out: &mut String, indent: usize) {
+    for _ in 0..indent {
+        out.push(' ');
+    }
+}
+
+/// Count the number of elements in a JSON value (array length or object key count).
+/// Returns 0 for scalars.
+pub fn json_len(v: &JsonValue) -> usize {
+    match v {
+        JsonValue::Arr(items) => items.len(),
+        JsonValue::Obj(entries) => entries.len(),
+        _ => 0,
+    }
+}
+
+/// Get the type name of a JSON value as a static string.
+pub fn json_type_name(v: &JsonValue) -> &'static str {
+    match v {
+        JsonValue::Null => "null",
+        JsonValue::Bool(_) => "bool",
+        JsonValue::Num(_) => "number",
+        JsonValue::Str(_) => "string",
+        JsonValue::Arr(_) => "array",
+        JsonValue::Obj(_) => "object",
+    }
+}
+
+/// Get the keys of a JSON object as a vector of strings.
+/// Returns empty vector for non-objects.
+pub fn json_keys(v: &JsonValue) -> Vec<String> {
+    match v {
+        JsonValue::Obj(entries) => entries.iter().map(|(k, _)| k.clone()).collect(),
+        _ => vec![],
+    }
+}
+
+/// Check if a JSON object contains a given key.
+pub fn json_has(v: &JsonValue, key: &str) -> bool {
+    match v {
+        JsonValue::Obj(entries) => entries.iter().any(|(k, _)| k == key),
+        _ => false,
+    }
+}
+
+/// Shallow merge two JSON objects. Entries from `b` overwrite `a`.
+/// Returns a new object. Non-object inputs produce the second value.
+pub fn json_merge(a: &JsonValue, b: &JsonValue) -> JsonValue {
+    match (a, b) {
+        (JsonValue::Obj(a_entries), JsonValue::Obj(b_entries)) => {
+            let mut out = a_entries.clone();
+            for (k, v) in b_entries {
+                if let Some(existing) = out.iter_mut().find(|(ek, _)| ek == k) {
+                    *existing = (k.clone(), v.clone());
+                } else {
+                    out.push((k.clone(), v.clone()));
+                }
+            }
+            JsonValue::Obj(out)
+        }
+        (_, b) => b.clone(),
     }
 }
 
@@ -76,7 +200,10 @@ pub fn parse_json(src: &str) -> Result<JsonValue, String> {
     let v = p.parse_value()?;
     p.skip_ws();
     if p.pos < p.bytes.len() {
-        return Err(format!("unexpected trailing characters at byte {}", p.pos));
+        let (line, col) = p.line_col();
+        return Err(format!(
+            "unexpected trailing characters at line {line}, col {col}"
+        ));
     }
     Ok(v)
 }
@@ -88,6 +215,21 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    /// Convert byte position to 1-based line and column.
+    fn line_col(&self) -> (usize, usize) {
+        let mut line = 1;
+        let mut col = 1;
+        for i in 0..self.pos.min(self.bytes.len()) {
+            if self.bytes[i] == b'\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        (line, col)
+    }
+
     fn skip_ws(&mut self) {
         while self.pos < self.bytes.len()
             && matches!(self.bytes[self.pos], b' ' | b'\t' | b'\n' | b'\r')
@@ -113,7 +255,8 @@ impl<'a> Parser<'a> {
         if self.eat(b) {
             Ok(())
         } else {
-            Err(format!("expected `{}` at byte {}", what, self.pos))
+            let (line, col) = self.line_col();
+            Err(format!("expected `{what}` at line {line}, col {col}"))
         }
     }
 
@@ -126,10 +269,13 @@ impl<'a> Parser<'a> {
             Some(b'[') => self.parse_array(),
             Some(b'{') => self.parse_object(),
             Some(b'-') | Some(b'0'..=b'9') => self.parse_number(),
-            Some(c) => Err(format!(
-                "unexpected character `{}` at byte {}",
-                c as char, self.pos
-            )),
+            Some(c) => {
+                let (line, col) = self.line_col();
+                Err(format!(
+                    "unexpected character `{}` at line {line}, col {col}",
+                    c as char,
+                ))
+            }
             None => Err("unexpected end of input".into()),
         }
     }
@@ -139,7 +285,8 @@ impl<'a> Parser<'a> {
             self.pos += lit.len();
             Ok(val)
         } else {
-            Err(format!("invalid literal at byte {}", self.pos))
+            let (line, col) = self.line_col();
+            Err(format!("invalid literal at line {line}, col {col}"))
         }
     }
 
@@ -148,7 +295,10 @@ impl<'a> Parser<'a> {
         let mut out = String::new();
         loop {
             match self.peek() {
-                None => return Err("unterminated string".into()),
+                None => {
+                    let (line, col) = self.line_col();
+                    return Err(format!("unterminated string at line {line}, col {col}"));
+                }
                 Some(b'"') => {
                     self.pos += 1;
                     return Ok(out);
@@ -166,22 +316,30 @@ impl<'a> Parser<'a> {
                         Some(b't') => out.push('\t'),
                         Some(b'u') => {
                             self.pos += 1;
-                            let hex = self
-                                .src
-                                .get(self.pos..self.pos + 4)
-                                .ok_or("truncated \\u escape")?;
-                            let code = u32::from_str_radix(hex, 16)
-                                .map_err(|_| format!("invalid \\u escape at byte {}", self.pos))?;
+                            let hex = self.src.get(self.pos..self.pos + 4).ok_or_else(|| {
+                                let (line, col) = self.line_col();
+                                format!("truncated \\u escape at line {line}, col {col}")
+                            })?;
+                            let code = u32::from_str_radix(hex, 16).map_err(|_| {
+                                let (line, col) = self.line_col();
+                                format!("invalid \\u escape at line {line}, col {col}")
+                            })?;
                             self.pos += 4;
                             out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
                         }
                         Some(c) => {
+                            let (line, col) = self.line_col();
                             return Err(format!(
-                                "invalid escape `\\{}` at byte {}",
-                                c as char, self.pos
-                            ))
+                                "invalid escape `\\{}` at line {line}, col {col}",
+                                c as char,
+                            ));
                         }
-                        None => return Err("unterminated string".into()),
+                        None => {
+                            let (line, col) = self.line_col();
+                            return Err(format!(
+                                "unterminated string escape at line {line}, col {col}"
+                            ));
+                        }
                     }
                     self.pos += 1;
                 }
@@ -215,9 +373,10 @@ impl<'a> Parser<'a> {
             }
         }
         let text = &self.src[start..self.pos];
-        text.parse::<f64>()
-            .map(JsonValue::Num)
-            .map_err(|_| format!("invalid number `{text}`"))
+        text.parse::<f64>().map(JsonValue::Num).map_err(|_| {
+            let (line, col) = self.line_col();
+            format!("invalid number `{text}` at line {line}, col {col}")
+        })
     }
 
     fn parse_array(&mut self) -> Result<JsonValue, String> {
@@ -326,5 +485,148 @@ mod tests {
             )])),
             r#"{"k":"v"}"#
         );
+    }
+
+    // ── pretty-print ────────────────────────────────────────────────────────
+
+    #[test]
+    fn pretty_empty_containers() {
+        assert_eq!(to_json_string_pretty(&JsonValue::Arr(vec![])), "[]");
+        assert_eq!(to_json_string_pretty(&JsonValue::Obj(vec![])), "{}");
+    }
+
+    #[test]
+    fn pretty_nested() {
+        let v = JsonValue::Obj(vec![
+            ("name".into(), JsonValue::Str("test".into())),
+            (
+                "items".into(),
+                JsonValue::Arr(vec![JsonValue::Num(1.0), JsonValue::Num(2.0)]),
+            ),
+        ]);
+        let pretty = to_json_string_pretty(&v);
+        assert!(pretty.contains('\n'));
+        assert!(pretty.contains("  ")); // 2-space indent
+                                        // Round-trips through compact
+        assert_eq!(parse_json(&pretty).unwrap(), v);
+    }
+
+    // ── json_len ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn len_array() {
+        let v = JsonValue::Arr(vec![JsonValue::Num(1.0), JsonValue::Num(2.0)]);
+        assert_eq!(json_len(&v), 2);
+    }
+
+    #[test]
+    fn len_object() {
+        let v = JsonValue::Obj(vec![
+            ("a".into(), JsonValue::Null),
+            ("b".into(), JsonValue::Null),
+        ]);
+        assert_eq!(json_len(&v), 2);
+    }
+
+    #[test]
+    fn len_scalar() {
+        assert_eq!(json_len(&JsonValue::Null), 0);
+        assert_eq!(json_len(&JsonValue::Num(42.0)), 0);
+        assert_eq!(json_len(&JsonValue::Str("hi".into())), 0);
+    }
+
+    // ── json_type_name ──────────────────────────────────────────────────────
+
+    #[test]
+    fn type_names() {
+        assert_eq!(json_type_name(&JsonValue::Null), "null");
+        assert_eq!(json_type_name(&JsonValue::Bool(true)), "bool");
+        assert_eq!(json_type_name(&JsonValue::Num(1.0)), "number");
+        assert_eq!(json_type_name(&JsonValue::Str("x".into())), "string");
+        assert_eq!(json_type_name(&JsonValue::Arr(vec![])), "array");
+        assert_eq!(json_type_name(&JsonValue::Obj(vec![])), "object");
+    }
+
+    // ── json_keys / json_has ────────────────────────────────────────────────
+
+    #[test]
+    fn keys_and_has() {
+        let v = JsonValue::Obj(vec![
+            ("a".into(), JsonValue::Num(1.0)),
+            ("b".into(), JsonValue::Num(2.0)),
+        ]);
+        let mut keys = json_keys(&v);
+        keys.sort();
+        assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
+        assert!(json_has(&v, "a"));
+        assert!(!json_has(&v, "c"));
+        // Non-object
+        assert!(json_keys(&JsonValue::Arr(vec![])).is_empty());
+        assert!(!json_has(&JsonValue::Null, "x"));
+    }
+
+    // ── json_merge ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_objects() {
+        let a = JsonValue::Obj(vec![
+            ("x".into(), JsonValue::Num(1.0)),
+            ("y".into(), JsonValue::Num(2.0)),
+        ]);
+        let b = JsonValue::Obj(vec![
+            ("y".into(), JsonValue::Num(99.0)),
+            ("z".into(), JsonValue::Num(3.0)),
+        ]);
+        let merged = json_merge(&a, &b);
+        assert!(json_has(&merged, "x"));
+        assert!(json_has(&merged, "y"));
+        assert!(json_has(&merged, "z"));
+        // y should be overwritten
+        match &merged {
+            JsonValue::Obj(entries) => {
+                let y_val = entries.iter().find(|(k, _)| k == "y").unwrap();
+                assert_eq!(y_val.1, JsonValue::Num(99.0));
+            }
+            _ => panic!("expected object"),
+        }
+    }
+
+    #[test]
+    fn merge_non_object() {
+        let a = JsonValue::Null;
+        let b = JsonValue::Num(42.0);
+        assert_eq!(json_merge(&a, &b), JsonValue::Num(42.0));
+    }
+
+    // ── error line/col ──────────────────────────────────────────────────────
+
+    #[test]
+    fn error_includes_line_col() {
+        let err = parse_json("{\n  \"a\": 1,\n  \"b\": }").unwrap_err();
+        assert!(err.contains("line 3"), "error should mention line: {err}");
+        assert!(err.contains("col"), "error should mention col: {err}");
+    }
+
+    // ── escape_str ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn escape_special_chars() {
+        assert_eq!(escape_str("hello"), "hello");
+        assert!(escape_str("\"\\n\t").contains("\\\\"));
+    }
+
+    // ── format_number ───────────────────────────────────────────────────────
+
+    #[test]
+    fn format_number_integers() {
+        assert_eq!(format_number(0.0), "0");
+        assert_eq!(format_number(42.0), "42");
+        assert_eq!(format_number(-100.0), "-100");
+    }
+
+    #[test]
+    fn format_number_floats() {
+        assert_eq!(format_number(3.14), "3.14");
+        assert_eq!(format_number(-0.5), "-0.5");
     }
 }

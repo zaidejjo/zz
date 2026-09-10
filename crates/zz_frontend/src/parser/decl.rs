@@ -33,6 +33,38 @@ impl Parser {
     pub(crate) fn parse_type_base(&mut self) -> Ty {
         let tok = self.peek().clone();
         match tok.kind {
+            // func(int) -> int  — function type keyword
+            TokenKind::Func => {
+                self.advance();
+                if !self.eat(TokenKind::LParen) {
+                    self.error_here("expected `(` after `func` in function type");
+                } else {
+                    self.push_delim(TokenKind::LParen, self.previous().span);
+                }
+                let params = if self.at(TokenKind::RParen) {
+                    Vec::new()
+                } else {
+                    let mut ts = vec![self.parse_type()];
+                    while self.eat(TokenKind::Comma) {
+                        ts.push(self.parse_type());
+                    }
+                    ts
+                };
+                if !self.eat(TokenKind::RParen) {
+                    self.error_here("expected `)` to close function type parameters");
+                } else {
+                    self.pop_delim(TokenKind::RParen, self.previous().span);
+                }
+                if !self.eat(TokenKind::Arrow) {
+                    self.error_here("expected `->` in function type");
+                }
+                let ret = self.parse_type();
+                let span = tok.span.join(ret.span);
+                Ty {
+                    kind: TyKind::Func(params, Box::new(ret)),
+                    span,
+                }
+            }
             TokenKind::Ident => {
                 self.advance();
                 // Consume dotted type names: `shapes.Point`, `a.b.c`, etc.
@@ -197,26 +229,58 @@ impl Parser {
                             break;
                         }
                     }
-                    let end = if self.eat_close(TokenKind::RParen) {
-                        self.previous().span
+                    // Save position before consuming `)` to detect `(A, B) -> Ret`.
+                    let save_pos = self.pos;
+                    if self.eat_close(TokenKind::RParen) {
+                        if self.eat(TokenKind::Arrow) {
+                            let ret = self.parse_type();
+                            let span = tok.span.join(ret.span);
+                            Ty {
+                                kind: TyKind::Func(ts, Box::new(ret)),
+                                span,
+                            }
+                        } else {
+                            // Not a function type — restore and re-consume `)`.
+                            self.pos = save_pos;
+                            self.eat_close(TokenKind::RParen);
+                            Ty {
+                                kind: TyKind::Tuple(ts),
+                                span: tok.span.join(self.previous().span),
+                            }
+                        }
                     } else {
                         self.error_here("expected `)` to close tuple type");
-                        first_span
-                    };
-                    Ty {
-                        kind: TyKind::Tuple(ts),
-                        span: tok.span.join(end),
+                        Ty {
+                            kind: TyKind::Tuple(ts),
+                            span: tok.span.join(first_span),
+                        }
                     }
                 } else {
-                    let end = if self.eat_close(TokenKind::RParen) {
-                        self.previous().span
+                    // Save position before consuming `)` to detect `(A) -> Ret`.
+                    let save_pos = self.pos;
+                    if self.eat_close(TokenKind::RParen) {
+                        if self.eat(TokenKind::Arrow) {
+                            let ret = self.parse_type();
+                            let span = tok.span.join(ret.span);
+                            Ty {
+                                kind: TyKind::Func(vec![first], Box::new(ret)),
+                                span,
+                            }
+                        } else {
+                            // Not a function type — restore and re-consume `)`.
+                            self.pos = save_pos;
+                            self.eat_close(TokenKind::RParen);
+                            Ty {
+                                kind: first.kind,
+                                span: tok.span.join(self.previous().span),
+                            }
+                        }
                     } else {
                         self.error_here("expected `)` to close type");
-                        first_span
-                    };
-                    Ty {
-                        kind: first.kind,
-                        span: tok.span.join(end),
+                        Ty {
+                            kind: first.kind,
+                            span: tok.span.join(first_span),
+                        }
                     }
                 }
             }

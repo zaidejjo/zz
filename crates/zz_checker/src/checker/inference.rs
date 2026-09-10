@@ -98,6 +98,8 @@ impl Checker {
                         ));
                     }
                     Type::Struct(name.clone())
+                } else if name == "json" {
+                    Type::Json
                 } else {
                     self.errors
                         .push(error_at(format!("unknown type `{name}`"), ty.span));

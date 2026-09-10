@@ -14,10 +14,12 @@
 //! block          := '{' stmt* '}'
 //! type           := type_base ('|' type_base)*            // union
 //! type_base      := 'int'|'float'|'bool'|'str'|'unit'
+//!                | 'func' '(' type_list ')' '->' type       // function type
 //!                | IDENT ('<' type (',' type)* '>')?
-//!                | '(' type (',' type)* ')'
-//!                | '[' type ']'                           // array
-//!                | '{' type ':' type '}'                  // dict
+//!                | '(' type (',' type)* ')'                // tuple or grouped
+//!                | '(' type ')' '->' type                  // function type (shorthand)
+//!                | '[' type ']'                            // array
+//!                | '{' type ':' type '}'                   // dict
 //! expr           := elvis
 //! elvis          := pipe ('??' pipe)*                        // unwrap or fallback
 //! pipe           := range ('|>' range)*                    // pipeline

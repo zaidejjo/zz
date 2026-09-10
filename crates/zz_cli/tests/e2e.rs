@@ -148,6 +148,7 @@ e2e_success_test!(
     "struct_array_push.zz"
 );
 e2e_success_test!(e2e_syntax_struct_impl, "syntax", "struct_impl.zz");
+e2e_success_test!(e2e_syntax_function_types, "syntax", "function_types.zz");
 
 // Type fixtures
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
@@ -198,6 +199,11 @@ e2e_success_test!(
     e2e_stdlib_concurrent_http_test,
     "stdlib",
     "concurrent_http_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_json_extended_test,
+    "stdlib",
+    "json_extended_test.zz"
 );
 
 // ---------------------------------------------------------------------------

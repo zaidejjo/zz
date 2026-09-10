@@ -13,11 +13,18 @@ use zz_checker::{FuncSig, StructSig, Type};
 use zz_hir::TypedProgram;
 
 /// Embedded pure-ZZ stdlib source files.
-const STR_ZZ: &str = include_str!("../zz/str.zz");
-const MATH_ZZ: &str = include_str!("../zz/math.zz");
+const STR_MOD_ZZ: &str = include_str!("../zz/str/mod.zz");
+const MATH_MOD_ZZ: &str = include_str!("../zz/math/mod.zz");
+const VEC_ZZ: &str = include_str!("../zz/collections/vec.zz");
+const JSON_MOD_ZZ: &str = include_str!("../zz/json/mod.zz");
 
 /// All embedded source files, in compilation order.
-const ZZ_SOURCES: &[(&str, &str)] = &[("std:str.zz", STR_ZZ), ("std:math.zz", MATH_ZZ)];
+const ZZ_SOURCES: &[(&str, &str)] = &[
+    ("std:str.mod.zz", STR_MOD_ZZ),
+    ("std:math.mod.zz", MATH_MOD_ZZ),
+    ("std:collections.vec.zz", VEC_ZZ),
+    ("std:json.mod.zz", JSON_MOD_ZZ),
+];
 
 /// Compiled pure-ZZ stdlib programs, computed once.
 static COMPILED: OnceLock<Vec<TypedProgram>> = OnceLock::new();
@@ -110,8 +117,8 @@ mod tests {
     #[test]
     fn compile_pure_zz_stdlib() {
         let programs = zz_stdlib_programs();
-        // Should have compiled both modules (str.zz and math.zz).
-        assert_eq!(programs.len(), 2, "expected 2 pure-ZZ stdlib modules");
+        // Should have compiled three modules (str, math, collections/vec).
+        assert_eq!(programs.len(), 4, "expected 4 pure-ZZ stdlib modules");
         // Each module should have a non-empty types map.
         for (i, tp) in programs.iter().enumerate() {
             assert!(
@@ -124,7 +131,7 @@ mod tests {
     #[test]
     fn pure_zz_str_has_expected_functions() {
         let programs = zz_stdlib_programs();
-        let str_prog = &programs[0]; // str.zz
+        let str_prog = &programs[0]; // str/mod.zz
         assert!(
             str_prog.funcs.contains_key("str.repeat"),
             "str.repeat should be defined"
@@ -133,12 +140,28 @@ mod tests {
             str_prog.funcs.contains_key("str.count"),
             "str.count should be defined"
         );
+        assert!(
+            str_prog.funcs.contains_key("str.is_empty"),
+            "str.is_empty should be defined"
+        );
+        assert!(
+            str_prog.funcs.contains_key("str.reverse"),
+            "str.reverse should be defined"
+        );
+        assert!(
+            str_prog.funcs.contains_key("str.pad_left"),
+            "str.pad_left should be defined"
+        );
+        assert!(
+            str_prog.funcs.contains_key("str.pad_right"),
+            "str.pad_right should be defined"
+        );
     }
 
     #[test]
     fn pure_zz_math_has_expected_functions() {
         let programs = zz_stdlib_programs();
-        let math_prog = &programs[1]; // math.zz
+        let math_prog = &programs[1]; // math/mod.zz
         assert!(
             math_prog.funcs.contains_key("math.sum"),
             "math.sum should be defined"
@@ -150,6 +173,128 @@ mod tests {
         assert!(
             math_prog.funcs.contains_key("math.count"),
             "math.count should be defined"
+        );
+        assert!(
+            math_prog.funcs.contains_key("math.min"),
+            "math.min should be defined"
+        );
+        assert!(
+            math_prog.funcs.contains_key("math.max"),
+            "math.max should be defined"
+        );
+        assert!(
+            math_prog.funcs.contains_key("math.is_even"),
+            "math.is_even should be defined"
+        );
+        assert!(
+            math_prog.funcs.contains_key("math.is_odd"),
+            "math.is_odd should be defined"
+        );
+        assert!(
+            math_prog.funcs.contains_key("math.min_arr"),
+            "math.min_arr should be defined"
+        );
+        assert!(
+            math_prog.funcs.contains_key("math.max_arr"),
+            "math.max_arr should be defined"
+        );
+        // Float aggregation
+        assert!(
+            math_prog.funcs.contains_key("math.sum_f"),
+            "math.sum_f should be defined"
+        );
+        assert!(
+            math_prog.funcs.contains_key("math.product_f"),
+            "math.product_f should be defined"
+        );
+        assert!(
+            math_prog.funcs.contains_key("math.mean_f"),
+            "math.mean_f should be defined"
+        );
+        assert!(
+            math_prog.funcs.contains_key("math.median_f"),
+            "math.median_f should be defined"
+        );
+        // These are implemented in pure ZZ but have the same names as native
+        // functions; the native versions are used at runtime.
+        assert!(
+            math_prog.funcs.contains_key("math.abs"),
+            "math.abs should be defined (pure ZZ impl, native runtime)"
+        );
+        assert!(
+            math_prog.funcs.contains_key("math.gcd"),
+            "math.gcd should be defined (pure ZZ impl, native runtime)"
+        );
+        assert!(
+            math_prog.funcs.contains_key("math.lcm"),
+            "math.lcm should be defined (pure ZZ impl, native runtime)"
+        );
+        assert!(
+            math_prog.funcs.contains_key("math.factorial"),
+            "math.factorial should be defined (pure ZZ impl, native runtime)"
+        );
+        assert!(
+            math_prog.funcs.contains_key("math.clamp"),
+            "math.clamp should be defined (pure ZZ impl, native runtime)"
+        );
+        assert!(
+            math_prog.funcs.contains_key("math.signum"),
+            "math.signum should be defined (pure ZZ impl, native runtime)"
+        );
+    }
+
+    #[test]
+    fn pure_zz_vec_has_expected_functions() {
+        let programs = zz_stdlib_programs();
+        let vec_prog = &programs[2]; // collections/vec.zz
+        assert!(
+            vec_prog.funcs.contains_key("vec.fold"),
+            "vec.fold should be defined"
+        );
+        assert!(
+            vec_prog.funcs.contains_key("vec.sum"),
+            "vec.sum should be defined"
+        );
+        assert!(
+            vec_prog.funcs.contains_key("vec.product"),
+            "vec.product should be defined"
+        );
+        assert!(
+            vec_prog.funcs.contains_key("vec.min_val"),
+            "vec.min_val should be defined"
+        );
+        assert!(
+            vec_prog.funcs.contains_key("vec.max_val"),
+            "vec.max_val should be defined"
+        );
+        assert!(
+            vec_prog.funcs.contains_key("vec.concat"),
+            "vec.concat should be defined"
+        );
+        assert!(
+            vec_prog.funcs.contains_key("vec.flatten"),
+            "vec.flatten should be defined"
+        );
+        assert!(
+            vec_prog.funcs.contains_key("vec.index_of"),
+            "vec.index_of should be defined"
+        );
+        assert!(
+            vec_prog.funcs.contains_key("vec.last_index_of"),
+            "vec.last_index_of should be defined"
+        );
+        // Float aggregation
+        assert!(
+            vec_prog.funcs.contains_key("vec.sum_f"),
+            "vec.sum_f should be defined"
+        );
+        assert!(
+            vec_prog.funcs.contains_key("vec.product_f"),
+            "vec.product_f should be defined"
+        );
+        assert!(
+            vec_prog.funcs.contains_key("vec.last_index_of"),
+            "vec.last_index_of should be defined"
         );
     }
 }

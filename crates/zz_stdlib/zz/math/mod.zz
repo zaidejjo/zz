@@ -1,0 +1,187 @@
+// Pure-ZZ math helpers — compiled once, shared by VM and AOT.
+// Module: std.math
+//
+// Functions that need float math (trig, log, sqrt, pow, constants,
+// rounding, linear algebra, statistics, random) stay as native Rust
+// in src/natives/math/mod.rs. Everything below is pure computation
+// and can run in both the bytecode VM and AOT codegen.
+//
+// Design notes:
+//   - min/max are generic <T> — only need comparison operators.
+//   - sum/product have separate int and float variants because overflow
+//     semantics and precision requirements differ.
+//   - Array aggregation returns Option<T> to handle empty inputs safely.
+//   - Float summation uses Kahan compensated algorithm for precision.
+
+// ── Scalar predicates & transforms (int) ─────────────────────────────────────
+
+func math.abs(v: int) -> int {
+    if v < 0 { 0 - v } else { v }
+}
+
+func math.signum(n: int) -> int {
+    if n < 0 { 0 - 1 } else { if n > 0 { 1 } else { 0 } }
+}
+
+func math.is_even(n: int) -> bool {
+    half := n / 2
+    half * 2 == n
+}
+
+func math.is_odd(n: int) -> bool {
+    half := n / 2
+    half * 2 != n
+}
+
+// ── Generic min / max (work for int, float, str — anything comparable) ───────
+
+func math.min<T>(a: T, b: T) -> T {
+    if a < b { a } else { b }
+}
+
+func math.max<T>(a: T, b: T) -> T {
+    if a > b { a } else { b }
+}
+
+func math.clamp<T>(v: T, lo: T, hi: T) -> T {
+    if v < lo { lo } else { if v > hi { hi } else { v } }
+}
+
+// ── Int aggregation ──────────────────────────────────────────────────────────
+
+func math.sum(arr: [int]) -> int {
+    total := 0
+    for x in arr {
+        total = total + x
+    }
+    total
+}
+
+func math.product(arr: [int]) -> int {
+    total := 1
+    for x in arr {
+        total = total * x
+    }
+    total
+}
+
+func math.count(arr: [int], target: int) -> int {
+    n := 0
+    for x in arr {
+        if x == target {
+            n = n + 1
+        }
+    }
+    n
+}
+
+// ── Float aggregation (Kahan compensated summation) ──────────────────────────
+
+func math.sum_f(arr: [float]) -> float {
+    // Kahan summation: tracks compensation term to recover lost low-order bits.
+    sum := 0.0
+    comp := 0.0
+    for x in arr {
+        y := x - comp
+        t := sum + y
+        comp = (t - sum) - y
+        sum = t
+    }
+    sum
+}
+
+func math.product_f(arr: [float]) -> float {
+    total := 1.0
+    for x in arr {
+        total = total * x
+    }
+    total
+}
+
+// ── Generic array min / max (return Option for empty safety) ─────────────────
+
+func math.min_arr<T>(arr: [T]) -> Option<T> {
+    if vec.len(arr) == 0 { return .none }
+    best := arr[0]
+    for x in arr {
+        if x < best { best = x }
+    }
+    .some(best)
+}
+
+func math.max_arr<T>(arr: [T]) -> Option<T> {
+    if vec.len(arr) == 0 { return .none }
+    best := arr[0]
+    for x in arr {
+        if x > best { best = x }
+    }
+    .some(best)
+}
+
+// ── Safe float array stats (return Result for empty/invalid input) ───────────
+
+func math.mean_f(arr: [float]) -> Result<float, str> {
+    if vec.len(arr) == 0 { return .err("mean: empty list") }
+    s := math.sum_f(arr)
+    .ok(s / float(vec.len(arr)))
+}
+
+func math.median_f(arr: [float]) -> Result<float, str> {
+    n := vec.len(arr)
+    if n == 0 { return .err("median: empty list") }
+    // Copy and sort (bubble sort — acceptable for pure ZZ median use cases).
+    sorted := arr
+    i := 0
+    while i < n {
+        j := i + 1
+        while j < n {
+            if sorted[j] < sorted[i] {
+                tmp := sorted[i]
+                sorted[i] = sorted[j]
+                sorted[j] = tmp
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    mid := n / 2
+    if n % 2 == 0 {
+        .ok((sorted[mid - 1] + sorted[mid]) / 2.0)
+    } else {
+        .ok(sorted[mid])
+    }
+}
+
+// ── Number theory ────────────────────────────────────────────────────────────
+
+func math.gcd(a: int, b: int) -> int {
+    mut_a := a
+    if mut_a < 0 { mut_a = 0 - mut_a }
+    mut_b := b
+    if mut_b < 0 { mut_b = 0 - mut_b }
+    while mut_b != 0 {
+        tmp := mut_b
+        mut_b = mut_a % mut_b
+        mut_a = tmp
+    }
+    mut_a
+}
+
+func math.lcm(a: int, b: int) -> int {
+    if a == 0 || b == 0 { return 0 }
+    abs_a := a
+    if abs_a < 0 { abs_a = 0 - abs_a }
+    abs_b := b
+    if abs_b < 0 { abs_b = 0 - abs_b }
+    (abs_a / math.gcd(abs_a, abs_b)) * abs_b
+}
+
+func math.factorial(n: int) -> int {
+    result := 1
+    i := 2
+    while i <= n {
+        result = result * i
+        i = i + 1
+    }
+    result
+}
