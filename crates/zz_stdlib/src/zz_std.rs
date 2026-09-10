@@ -13,11 +13,16 @@ use zz_checker::{FuncSig, StructSig, Type};
 use zz_hir::TypedProgram;
 
 /// Embedded pure-ZZ stdlib source files.
-const STR_ZZ: &str = include_str!("../zz/str.zz");
-const MATH_ZZ: &str = include_str!("../zz/math.zz");
+const STR_MOD_ZZ: &str = include_str!("../zz/str/mod.zz");
+const MATH_MOD_ZZ: &str = include_str!("../zz/math/mod.zz");
+const VEC_ZZ: &str = include_str!("../zz/collections/vec.zz");
 
 /// All embedded source files, in compilation order.
-const ZZ_SOURCES: &[(&str, &str)] = &[("std:str.zz", STR_ZZ), ("std:math.zz", MATH_ZZ)];
+const ZZ_SOURCES: &[(&str, &str)] = &[
+    ("std:str.mod.zz", STR_MOD_ZZ),
+    ("std:math.mod.zz", MATH_MOD_ZZ),
+    ("std:collections.vec.zz", VEC_ZZ),
+];
 
 /// Compiled pure-ZZ stdlib programs, computed once.
 static COMPILED: OnceLock<Vec<TypedProgram>> = OnceLock::new();
@@ -110,8 +115,8 @@ mod tests {
     #[test]
     fn compile_pure_zz_stdlib() {
         let programs = zz_stdlib_programs();
-        // Should have compiled both modules (str.zz and math.zz).
-        assert_eq!(programs.len(), 2, "expected 2 pure-ZZ stdlib modules");
+        // Should have compiled three modules (str, math, collections/vec).
+        assert_eq!(programs.len(), 3, "expected 3 pure-ZZ stdlib modules");
         // Each module should have a non-empty types map.
         for (i, tp) in programs.iter().enumerate() {
             assert!(
@@ -124,7 +129,7 @@ mod tests {
     #[test]
     fn pure_zz_str_has_expected_functions() {
         let programs = zz_stdlib_programs();
-        let str_prog = &programs[0]; // str.zz
+        let str_prog = &programs[0]; // str/mod.zz
         assert!(
             str_prog.funcs.contains_key("str.repeat"),
             "str.repeat should be defined"
@@ -138,7 +143,7 @@ mod tests {
     #[test]
     fn pure_zz_math_has_expected_functions() {
         let programs = zz_stdlib_programs();
-        let math_prog = &programs[1]; // math.zz
+        let math_prog = &programs[1]; // math/mod.zz
         assert!(
             math_prog.funcs.contains_key("math.sum"),
             "math.sum should be defined"
@@ -150,6 +155,16 @@ mod tests {
         assert!(
             math_prog.funcs.contains_key("math.count"),
             "math.count should be defined"
+        );
+    }
+
+    #[test]
+    fn pure_zz_vec_has_expected_functions() {
+        let programs = zz_stdlib_programs();
+        let vec_prog = &programs[2]; // collections/vec.zz
+        assert!(
+            vec_prog.funcs.contains_key("vec.fold"),
+            "vec.fold should be defined"
         );
     }
 }

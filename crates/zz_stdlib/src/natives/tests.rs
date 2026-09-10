@@ -127,11 +127,27 @@ fn every_funcs_key_has_a_native() {
     // Drift census: the checker registry (`stdlib_funcs`) and the interpreter
     // registry (`stdlib_natives`) must stay in lockstep. Every signature the
     // checker knows must resolve to a runtime implementation.
+    //
+    // Exception: pure-ZZ stdlib functions (str.repeat, str.count, math.sum,
+    // math.product, math.count, vec.fold) are implemented in .zz files and
+    // compiled at startup — they have no Rust native entry.
+    let pure_zz_funcs = [
+        "std.str.repeat",
+        "std.str.count",
+        "str.repeat",
+        "str.count",
+        "std.math.sum",
+        "std.math.product",
+        "std.math.count",
+        "math.sum",
+        "math.product",
+        "math.count",
+    ];
     let funcs = stdlib_funcs();
     let natives = stdlib_natives();
     let missing: Vec<String> = funcs
         .keys()
-        .filter(|k| !natives.contains_key(*k))
+        .filter(|k| !natives.contains_key(*k) && !pure_zz_funcs.contains(&k.as_str()))
         .cloned()
         .collect();
     assert!(

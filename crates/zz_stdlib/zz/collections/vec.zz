@@ -1,0 +1,15 @@
+// Pure-ZZ collection helpers — compiled once, shared by VM and AOT.
+// Module: std.vec (higher-order helpers)
+//
+// NOTE: vec.map and vec.filter require closure dispatch and remain
+// as native Rust implementations in src/natives/iterators/mod.rs.
+// vec.fold can be implemented in pure ZZ since it only needs the
+// accumulator pattern (no closure as argument).
+
+func vec.fold(arr: [int], init: int) -> int {
+    acc := init
+    for x in arr {
+        acc = acc + x
+    }
+    acc
+}

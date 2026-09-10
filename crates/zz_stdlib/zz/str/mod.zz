@@ -1,4 +1,5 @@
 // Pure-ZZ string helpers — compiled once, shared by VM and AOT.
+// Module: std.str
 
 func str.repeat(s: str, n: int) -> str {
     result := ""

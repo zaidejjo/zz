@@ -1,4 +1,5 @@
 // Pure-ZZ math helpers — compiled once, shared by VM and AOT.
+// Module: std.math
 
 func math.sum(arr: [int]) -> int {
     total := 0

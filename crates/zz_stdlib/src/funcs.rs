@@ -1182,7 +1182,7 @@ mod tests {
         assert!(funcs.contains_key("append"));
         assert!(funcs.contains_key("std.task.spawn"));
         assert!(funcs.contains_key("std.task.join"));
-        assert_eq!(funcs.len(), 163);
+        assert_eq!(funcs.len(), 173);
     }
 
     #[test]
