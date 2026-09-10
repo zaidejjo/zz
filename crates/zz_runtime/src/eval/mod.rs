@@ -73,14 +73,22 @@ impl Interp {
     /// Compile and execute a typed program (HIR).
     ///
     /// Uses the same bytecode compiler as [`run`] but threads the resolved
-    /// type map from the HIR into the compiler. This is the unified pipeline
-    /// entry point consumed by `zz run`.
+    /// type map and struct definitions from the HIR into the compiler. This
+    /// is the unified pipeline entry point consumed by `zz run`.
     pub fn run_typed(
         &mut self,
         program: &Program,
         types: Arc<HashMap<Span, zz_checker::Type>>,
+        structs: HashMap<String, zz_checker::StructSig>,
     ) -> Result<Value, EvalError> {
-        let chunk = Arc::new(crate::vm::Compiler::compile_program_typed(program, types));
+        let native_names: Arc<std::collections::HashSet<String>> =
+            Arc::new(self.natives.keys().cloned().collect());
+        let chunk = Arc::new(crate::vm::Compiler::compile_program_typed(
+            program,
+            types,
+            structs,
+            native_names,
+        ));
         let mut vm = crate::vm::Vm::new();
         match vm.run_chunk(&chunk, self)? {
             Flow::Value(v) => Ok(v),

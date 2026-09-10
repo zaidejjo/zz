@@ -84,7 +84,21 @@ pub enum Op {
     /// Register a struct definition (name -> ordered field names).
     RegisterStruct { name: String, fields: Vec<String> },
 
-    // ---- arithmetic ----
+    // ---- typed arithmetic (unboxed, int-only) ----
+    /// Pop two ints, push `a + b` (wrapping in release, checked in debug).
+    IntAdd(Span),
+    /// Pop two ints, push `a - b`.
+    IntSub(Span),
+    /// Pop two ints, push `a * b`.
+    IntMul(Span),
+    /// Pop two ints, push `a / b` (error on zero).
+    IntDiv(Span),
+    /// Pop two ints, push `a % b` (error on zero).
+    IntRem(Span),
+    /// Pop one int, push `-a`.
+    IntNeg(Span),
+
+    // ---- generic arithmetic (fallback) ----
     /// Pop `b`, pop `a`, push `a op b` (int/float/str semantics).
     BinOp(BinOp, Span),
     /// Pop `v`, push `op v`.
@@ -163,9 +177,14 @@ pub enum Op {
     },
     /// Pop an object, push `object.field`.
     GetField(String, Span),
+    /// Pop an object, push `object.fields[idx]` (O(1) for known struct types).
+    GetFieldIdx(u16, Span),
     /// Pop a value and an object; write `object.field = value`; push the
     /// mutated object back (for write-back).
     SetField(String, Span),
+    /// Pop a value and an object; write `object.fields[idx] = value`; push
+    /// the mutated object back (O(1) for known struct types).
+    SetFieldIdx(u16, Span),
 
     // ---- closures & variants ----
     /// Create a closure value from a pre-compiled body chunk, capturing the
@@ -233,6 +252,11 @@ pub enum Op {
     /// was loaded from a local slot (`p.dist()` where `p` is a local).
     /// Pops `argc` args, then the receiver.
     CallMethod { name: String, argc: u16, span: Span },
+
+    /// Direct native function call: resolves the function by name in the
+    /// native registry and calls it directly, bypassing env/func/method
+    /// resolution. Pops `argc` args, pushes result.
+    CallNative { name: String, argc: u16, span: Span },
 
     // ---- fmt ----
     /// Pop `n` values, concatenate their Display forms, push the string.

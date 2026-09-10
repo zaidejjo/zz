@@ -54,9 +54,11 @@ impl Session {
             // Seed the type checker with pure-ZZ function signatures so that
             // calls like `vec.map(...)` type-check in user snippets.
             funcs.extend(zz_prog.funcs.clone());
-            if let Err(e) =
-                interp.run_typed(&zz_prog.program, std::sync::Arc::new(zz_prog.types.clone()))
-            {
+            if let Err(e) = interp.run_typed(
+                &zz_prog.program,
+                std::sync::Arc::new(zz_prog.types.clone()),
+                zz_prog.structs.clone(),
+            ) {
                 panic!("zz: pure-ZZ stdlib error: {e:?}");
             }
         }

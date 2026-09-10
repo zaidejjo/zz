@@ -74,6 +74,11 @@ pub struct Compiler {
     /// When present, the compiler can make type-driven decisions (e.g.
     /// integer-specific bytecode, direct field access).
     types: Option<Arc<HashMap<Span, zz_checker::Type>>>,
+    /// Struct definitions from the HIR, keyed by fully-qualified name.
+    /// Enables type-driven field access indexing and other struct optimizations.
+    structs: Option<HashMap<String, zz_checker::StructSig>>,
+    /// Known native function names, for direct native call dispatch.
+    native_names: Option<Arc<std::collections::HashSet<String>>>,
 }
 
 enum JumpKind {
@@ -113,6 +118,8 @@ impl Compiler {
             promoted_slots: std::collections::HashMap::new(),
             func_info: std::collections::HashMap::new(),
             types: None,
+            structs: None,
+            native_names: None,
         }
     }
 
@@ -218,16 +225,20 @@ impl Compiler {
     /// Compile a whole program with type information from the HIR.
     ///
     /// Behaves identically to [`compile_program`] but threads the resolved
-    /// type map into the compiler and all sub-compilers (functions, closures).
-    /// The type map enables type-driven optimizations in future phases; in
-    /// this phase it is stored but not yet consumed by the bytecode emitter.
+    /// type map and struct definitions from the HIR into the compiler and all
+    /// sub-compilers (functions, closures). The type map enables type-driven
+    /// optimizations in future phases.
     pub fn compile_program_typed(
         program: &Program,
         types: Arc<HashMap<Span, zz_checker::Type>>,
+        structs: HashMap<String, zz_checker::StructSig>,
+        native_names: Arc<std::collections::HashSet<String>>,
     ) -> Chunk {
         let mut c = Compiler::new();
         c.is_main = true;
         c.types = Some(types);
+        c.structs = Some(structs);
+        c.native_names = Some(native_names);
         // Collect top-level declared names (post-rewrite, so namespaced).
         let mut top_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for stmt in &program.stmts {
@@ -311,19 +322,31 @@ impl Compiler {
     fn emit(&mut self, op: Op) {
         let span = match &op {
             Op::Break(span) | Op::Continue(span) => *span,
-            Op::BinOp(_, span) | Op::UnOp(_, span) => *span,
+            Op::IntAdd(span)
+            | Op::IntSub(span)
+            | Op::IntMul(span)
+            | Op::IntDiv(span)
+            | Op::IntRem(span)
+            | Op::IntNeg(span)
+            | Op::BinOp(_, span)
+            | Op::UnOp(_, span) => *span,
             Op::LoadVar(_, span) | Op::StoreVar(_, span) => *span,
             Op::LoadPath(_, span) | Op::StorePath(_, span) => *span,
             Op::JumpIfFalseBool(_, span) => *span,
             Op::ForSetup { span, .. } | Op::WhileCond { span, .. } => *span,
             Op::ArrayPush(span) | Op::IndexOp(span) | Op::StoreIndexOp(span) => *span,
             Op::SliceOp(span) | Op::MakeRange(span) => *span,
-            Op::MakeStruct { span, .. } | Op::GetField(_, span) | Op::SetField(_, span) => *span,
+            Op::MakeStruct { span, .. }
+            | Op::GetField(_, span)
+            | Op::SetField(_, span)
+            | Op::GetFieldIdx(_, span)
+            | Op::SetFieldIdx(_, span) => *span,
             Op::MakeVariant { span, .. } | Op::MatchError(span) => *span,
             Op::TryOp(span) | Op::Elvis(span) => *span,
-            Op::Call { span, .. } | Op::CallPath { span, .. } | Op::CallMethod { span, .. } => {
-                *span
-            }
+            Op::Call { span, .. }
+            | Op::CallPath { span, .. }
+            | Op::CallMethod { span, .. }
+            | Op::CallNative { span, .. } => *span,
             Op::FormatValue(span) => *span,
             _ => Span::default(),
         };
@@ -349,6 +372,10 @@ impl Compiler {
             Op::SlotLessIntSlot { .. } | Op::SlotLessIntImm { .. } => 1,
             Op::SlotBinaryInt { .. } | Op::SlotBinaryIntImm { .. } => 0,
             Op::MakeFunc { .. } | Op::RegisterStruct { .. } | Op::MakeClosure { .. } => 1,
+            Op::IntAdd(..) | Op::IntSub(..) | Op::IntMul(..) | Op::IntDiv(..) | Op::IntRem(..) => {
+                -1
+            }
+            Op::IntNeg(..) => 0,
             Op::BinOp(..) => -1,
             Op::UnOp(..) => 0,
             Op::Jump(_) => 0,
@@ -369,8 +396,8 @@ impl Compiler {
             Op::SliceOp(_) => -2,
             Op::MakeRange(_) => -1,
             Op::MakeStruct { field_names, .. } => 1 - field_names.len() as i64,
-            Op::GetField(..) => 0,
-            Op::SetField(..) => -1,
+            Op::GetField(..) | Op::GetFieldIdx(..) => 0,
+            Op::SetField(..) | Op::SetFieldIdx(..) => -1,
             Op::MakeVariant { has_arg, .. } => {
                 if *has_arg {
                     0
@@ -386,6 +413,7 @@ impl Compiler {
             Op::Elvis(_) => 1,
             Op::ElvisResult => -2,
             Op::Call { argc, .. } | Op::CallMethod { argc, .. } => -(*argc as i64),
+            Op::CallNative { argc, .. } => 1 - (*argc as i64),
             Op::CallPath { argc, .. } => 1 - (*argc as i64),
             Op::Concat(n) => 1 - *n as i64,
             Op::FormatValue(_) => -1,
@@ -433,6 +461,13 @@ impl Compiler {
         Resolved::Env
     }
 
+    /// Look up the resolved type for an expression by its span.
+    /// Returns `None` when type info is unavailable (no HIR, or expression
+    /// was not resolved by the checker).
+    fn type_of(&self, span: Span) -> Option<&zz_checker::Type> {
+        self.types.as_ref().and_then(|t| t.get(&span))
+    }
+
     /// Match `x = x + y` / `x = y + x` where `x` and `y` both resolve to
     /// local slots. Returns `(dst, src)` so the VM can fuse the load/add/
     /// store into a single in-place `SlotAddInt`.
@@ -447,6 +482,12 @@ impl Compiler {
             return None;
         };
         if *binop != zz_frontend::ast::BinOp::Add {
+            return None;
+        }
+        // Type guard: both operands must be Int.
+        if !matches!(self.type_of(left.span()), Some(zz_checker::Type::Int))
+            || !matches!(self.type_of(right.span()), Some(zz_checker::Type::Int))
+        {
             return None;
         }
         let dst = match self.resolve(target) {
@@ -484,11 +525,16 @@ impl Compiler {
             op: binop,
             left,
             right,
+            span,
             ..
         } = value
         else {
             return None;
         };
+        // Type guard: the binary expression must produce Int.
+        if !matches!(self.type_of(*span), Some(zz_checker::Type::Int)) {
+            return None;
+        }
         let dst = match self.resolve(target) {
             Resolved::Slot(slot) => slot as u16,
             Resolved::Env => return None,
@@ -586,11 +632,16 @@ impl Compiler {
             op: binop,
             left,
             right,
+            span,
             ..
         } = value
         else {
             return None;
         };
+        // Type guard: the binary expression must produce Int.
+        if !matches!(self.type_of(*span), Some(zz_checker::Type::Int)) {
+            return None;
+        }
         let full = target_parts.join(".");
         let dst = match self.resolve(&full) {
             Resolved::Slot(slot) => slot as u16,
@@ -641,7 +692,8 @@ impl Compiler {
     }
 
     /// Peephole for `while`-style conditions: `a < b` / `a < N` where both
-    /// sides resolve to local slots (or one is an int literal).
+    /// sides resolve to local slots (or one is an int literal) and the
+    /// expression is typed Int. Also handles `a > b` by swapping operands.
     fn try_slot_compare(&self, value: &Expr) -> Option<Op> {
         let Expr::Binary {
             op: binop,
@@ -652,20 +704,38 @@ impl Compiler {
         else {
             return None;
         };
+        // Type guard: at least the left operand must be typed Int.
+        if !matches!(self.type_of(left.span()), Some(zz_checker::Type::Int)) {
+            return None;
+        }
         let slot_of = |e: &Expr| match e {
             Expr::Ident { name, .. } => match self.resolve(name) {
+                Resolved::Slot(slot) => Some(slot as u16),
+                Resolved::Env => None,
+            },
+            Expr::Path { parts, .. } => match self.resolve(&parts.join(".")) {
                 Resolved::Slot(slot) => Some(slot as u16),
                 Resolved::Env => None,
             },
             _ => None,
         };
         let imm_of = |e: &Expr| int_literal(e);
-        match (*binop, left.as_ref(), right.as_ref()) {
-            (BinOp::Lt, l, r) => {
-                if let (Some(a), Some(b)) = (slot_of(l), slot_of(r)) {
+        match *binop {
+            BinOp::Lt => {
+                if let (Some(a), Some(b)) = (slot_of(left.as_ref()), slot_of(right.as_ref())) {
                     Some(Op::SlotLessIntSlot { a, b })
-                } else if let (Some(a), Some(imm)) = (slot_of(l), imm_of(r)) {
+                } else if let (Some(a), Some(imm)) =
+                    (slot_of(left.as_ref()), imm_of(right.as_ref()))
+                {
                     Some(Op::SlotLessIntImm { a, imm })
+                } else {
+                    None
+                }
+            }
+            // `a > b` is equivalent to `b < a` — swap operands.
+            BinOp::Gt => {
+                if let (Some(b), Some(a)) = (slot_of(left.as_ref()), slot_of(right.as_ref())) {
+                    Some(Op::SlotLessIntSlot { a, b })
                 } else {
                     None
                 }
@@ -789,6 +859,16 @@ impl Compiler {
             Expr::Path { parts, span } => self.compile_path_store(parts, *span),
             Expr::Field { obj, name, span } => {
                 self.compile_expr(obj);
+                // Type-driven fast path for set.
+                if let Some(zz_checker::Type::Struct(struct_name)) = self.type_of(obj.span()) {
+                    if let Some(sig) = self.structs.as_ref().and_then(|s| s.get(struct_name)) {
+                        if let Some(idx) = sig.fields.iter().position(|(n, _)| n == name) {
+                            self.emit(Op::SetFieldIdx(idx as u16, *span));
+                            self.compile_write_back(obj);
+                            return;
+                        }
+                    }
+                }
                 self.emit(Op::SetField(name.clone(), *span));
                 self.compile_write_back(obj);
             }
@@ -1048,6 +1128,17 @@ impl Compiler {
                 Expr::Field { obj, name, span } => {
                     self.compile_expr(value);
                     self.compile_expr(obj);
+                    // Type-driven fast path for field assignment.
+                    if let Some(zz_checker::Type::Struct(struct_name)) = self.type_of(obj.span()) {
+                        if let Some(sig) = self.structs.as_ref().and_then(|s| s.get(struct_name)) {
+                            if let Some(idx) = sig.fields.iter().position(|(n, _)| n == name) {
+                                self.emit(Op::SetFieldIdx(idx as u16, *span));
+                                self.compile_write_back(obj);
+                                self.emit_const(Value::Unit);
+                                return StmtValue::Discard;
+                            }
+                        }
+                    }
                     self.emit(Op::SetField(name.clone(), *span));
                     self.compile_write_back(obj);
                     self.emit_const(Value::Unit);
@@ -1210,6 +1301,8 @@ impl Compiler {
     fn compile_func_body(&mut self, block: &Block, params: &[Param]) -> Arc<Chunk> {
         let mut sub = Compiler::new();
         sub.types = self.types.clone();
+        sub.structs = self.structs.clone();
+        sub.native_names = self.native_names.clone();
         sub.chunk.params = params.to_vec();
         sub.captured = scan_block_captured(block, params);
         let needs_env = params.iter().any(|p| sub.captured.contains(&p.name.name))
@@ -1284,6 +1377,8 @@ impl Compiler {
     fn compile_closure_body(&mut self, body: &Expr, params: &[Param]) -> Arc<Chunk> {
         let mut sub = Compiler::new();
         sub.types = self.types.clone();
+        sub.structs = self.structs.clone();
+        sub.native_names = self.native_names.clone();
         sub.chunk.params = params.to_vec();
         sub.captured = scan_closure_captured(body, params);
         let needs_env = params.iter().any(|p| sub.captured.contains(&p.name.name));
@@ -1329,7 +1424,14 @@ impl Compiler {
             Expr::Paren { expr, .. } => self.compile_expr(expr),
             Expr::Unary { op, expr, span } => {
                 self.compile_expr(expr);
-                self.emit(Op::UnOp(*op, *span));
+                // Type-driven fast path: int negation.
+                if matches!(op, zz_frontend::ast::UnOp::Neg)
+                    && matches!(self.type_of(expr.span()), Some(zz_checker::Type::Int))
+                {
+                    self.emit(Op::IntNeg(*span));
+                } else {
+                    self.emit(Op::UnOp(*op, *span));
+                }
             }
             Expr::Binary {
                 op,
@@ -1364,9 +1466,29 @@ impl Compiler {
                     self.emit(Op::ElvisResult);
                 }
                 _ => {
-                    self.compile_expr(left);
-                    self.compile_expr(right);
-                    self.emit(Op::BinOp(*op, *span));
+                    // Type-driven fast path: if both operands are Int,
+                    // emit unboxed integer ops that skip generic dispatch.
+                    if matches!(self.type_of(left.span()), Some(zz_checker::Type::Int))
+                        && matches!(self.type_of(right.span()), Some(zz_checker::Type::Int))
+                    {
+                        self.compile_expr(left);
+                        self.compile_expr(right);
+                        match op {
+                            BinOp::Add => self.emit(Op::IntAdd(*span)),
+                            BinOp::Sub => self.emit(Op::IntSub(*span)),
+                            BinOp::Mul => self.emit(Op::IntMul(*span)),
+                            BinOp::Div => self.emit(Op::IntDiv(*span)),
+                            BinOp::Rem => self.emit(Op::IntRem(*span)),
+                            _ => {
+                                // Comparisons, Pow, etc. fall through to generic.
+                                self.emit(Op::BinOp(*op, *span));
+                            }
+                        }
+                    } else {
+                        self.compile_expr(left);
+                        self.compile_expr(right);
+                        self.emit(Op::BinOp(*op, *span));
+                    }
                 }
             },
             Expr::Call {
@@ -1496,12 +1618,29 @@ impl Compiler {
                         if is_input {
                             self.emit_const(Value::Str(String::new().into()));
                         }
-                        self.emit(Op::CallPath {
-                            parts: parts.clone(),
-                            argc: argc as u16,
-                            span: *span,
-                            pspan: *pspan,
-                        });
+                        // Direct native dispatch: if the path resolves to a
+                        // known native function, emit CallNative to bypass
+                        // the multi-step env/func/method resolution.
+                        if !is_range
+                            && !has_named_or_defaults
+                            && self
+                                .native_names
+                                .as_ref()
+                                .is_some_and(|n| n.contains(&func_name))
+                        {
+                            self.emit(Op::CallNative {
+                                name: func_name,
+                                argc: argc as u16,
+                                span: *span,
+                            });
+                        } else {
+                            self.emit(Op::CallPath {
+                                parts: parts.clone(),
+                                argc: argc as u16,
+                                span: *span,
+                                pspan: *pspan,
+                            });
+                        }
                     }
                 }
                 Expr::Field { obj, name, span: _ } => {
@@ -1729,6 +1868,16 @@ impl Compiler {
             }
             Expr::Field { obj, name, span } => {
                 self.compile_expr(obj);
+                // Type-driven fast path: if the receiver is a known struct
+                // type, resolve the field index at compile time for O(1) access.
+                if let Some(zz_checker::Type::Struct(struct_name)) = self.type_of(obj.span()) {
+                    if let Some(sig) = self.structs.as_ref().and_then(|s| s.get(struct_name)) {
+                        if let Some(idx) = sig.fields.iter().position(|(n, _)| n == name) {
+                            self.emit(Op::GetFieldIdx(idx as u16, *span));
+                            return;
+                        }
+                    }
+                }
                 self.emit(Op::GetField(name.clone(), *span));
             }
             Expr::Range { start, end, span } => {
