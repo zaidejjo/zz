@@ -19,6 +19,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "io.println".into(),
         FuncSig {
             generics: vec!["T".into()],
+            bounds: Vec::new(),
             params: vec![("v".into(), t_any.clone())],
             has_default: vec![false],
             ret: unit.clone(),
@@ -28,6 +29,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "io.print".into(),
         FuncSig {
             generics: vec!["T".into()],
+            bounds: Vec::new(),
             params: vec![("v".into(), t_any.clone())],
             has_default: vec![false],
             ret: unit.clone(),
@@ -38,6 +40,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "http.get".into(),
         FuncSig {
             generics: vec![],
+            bounds: Vec::new(),
             params: vec![("url".into(), Type::Str)],
             has_default: vec![false],
             ret: Type::Response,
@@ -47,6 +50,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "http.server".into(),
         FuncSig {
             generics: vec![],
+            bounds: Vec::new(),
             params: vec![],
             has_default: vec![],
             ret: Type::HttpServer,
@@ -57,6 +61,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "str.len".into(),
         FuncSig {
             generics: vec![],
+            bounds: Vec::new(),
             params: vec![("self".into(), Type::Str)],
             has_default: vec![false],
             ret: Type::Int,
@@ -66,6 +71,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "str.trim".into(),
         FuncSig {
             generics: vec![],
+            bounds: Vec::new(),
             params: vec![("self".into(), Type::Str)],
             has_default: vec![false],
             ret: Type::Str,
@@ -76,6 +82,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "vec.push".into(),
         FuncSig {
             generics: vec!["T".into()],
+            bounds: Vec::new(),
             params: vec![
                 ("self".into(), Type::Array(Box::new(t_any.clone()))),
                 ("v".into(), t_any),

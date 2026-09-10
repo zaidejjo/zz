@@ -113,7 +113,7 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
             if !generics.is_empty() {
                 out.push('<');
                 for g in generics {
-                    out.push_str(&g.name);
+                    out.push_str(&g.name.name);
                     out.push(',');
                 }
                 out.push('>');

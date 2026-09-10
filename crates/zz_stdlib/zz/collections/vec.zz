@@ -13,7 +13,7 @@
 
 // ── Generic min / max (work for int, float, str — anything comparable) ───────
 
-func vec.min_val<T>(arr: [T]) -> Option<T> {
+func vec.min_val<T: Ord>(arr: [T]) -> Option<T> {
     if vec.len(arr) == 0 { return .none }
     best := arr[0]
     for x in arr {
@@ -22,7 +22,7 @@ func vec.min_val<T>(arr: [T]) -> Option<T> {
     .some(best)
 }
 
-func vec.max_val<T>(arr: [T]) -> Option<T> {
+func vec.max_val<T: Ord>(arr: [T]) -> Option<T> {
     if vec.len(arr) == 0 { return .none }
     best := arr[0]
     for x in arr {

@@ -16,7 +16,11 @@ impl Checker {
             } => (name, generics, params, ret),
             _ => unreachable!(),
         };
-        let gen_names: Vec<String> = generics.iter().map(|g| g.name.clone()).collect();
+        let gen_names: Vec<String> = generics.iter().map(|g| g.name.name.clone()).collect();
+        let gen_bounds: Vec<(String, Vec<zz_frontend::ast::TraitBound>)> = generics
+            .iter()
+            .map(|g| (g.name.name.clone(), g.bounds.clone()))
+            .collect();
         let sig_params: Vec<(String, Type)> = params
             .iter()
             .map(|p| {
@@ -37,6 +41,7 @@ impl Checker {
             full_name,
             crate::checker::FuncSig {
                 generics: gen_names,
+                bounds: gen_bounds,
                 params: sig_params,
                 has_default,
                 ret: sig_ret,
@@ -55,9 +60,14 @@ impl Checker {
         }
         let prev_ret = self.current_ret.replace(sig.ret.clone());
         let prev_gen = std::mem::replace(&mut self.current_generics, sig.generics.clone());
+        let prev_bounds = std::mem::replace(
+            &mut self.current_bounds,
+            sig.bounds.iter().cloned().collect(),
+        );
         let body_t = self.check_block(body);
         self.current_ret = prev_ret;
         self.current_generics = prev_gen;
+        self.current_bounds = prev_bounds;
         self.pop_scope();
         let _ = name;
         // If the body contains any `return` statement, the body's "natural"

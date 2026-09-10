@@ -332,6 +332,7 @@ mod tests {
                 "add".to_string(),
                 FuncSig {
                     generics: vec![],
+                    bounds: Vec::new(),
                     params: vec![],
                     has_default: vec![],
                     ret: Type::Unit,

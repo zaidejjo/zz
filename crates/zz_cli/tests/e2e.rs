@@ -153,6 +153,7 @@ e2e_success_test!(e2e_syntax_function_types, "syntax", "function_types.zz");
 // Type fixtures
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
 e2e_success_test!(e2e_types_generics, "types", "generics.zz");
+e2e_success_test!(e2e_types_generic_bounds, "types", "generic_bounds.zz");
 e2e_success_test!(e2e_types_variants, "types", "variants.zz");
 e2e_success_test!(e2e_types_type_inference, "types", "type_inference.zz");
 
@@ -244,6 +245,7 @@ e2e_error_test!(e2e_err_div_by_zero, "div_by_zero.zz");
 e2e_error_test!(e2e_err_unknown_field, "unknown_field.zz");
 e2e_error_test!(e2e_err_struct_init_assign, "struct_init_assign_error.zz");
 e2e_error_test!(e2e_err_int_float_cmp, "int_float_cmp.zz");
+e2e_error_test!(e2e_err_generic_unbound, "generic_unbound.zz");
 
 // ---------------------------------------------------------------------------
 // Eval tests: inline code via `zz eval`

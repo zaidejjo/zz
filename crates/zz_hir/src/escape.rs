@@ -575,6 +575,7 @@ mod tests {
             "io.println".into(),
             crate::FuncSig {
                 generics: vec!["T".into()],
+                bounds: Vec::new(),
                 params: vec![("v".into(), t_any)],
                 has_default: vec![false],
                 ret: unit,
