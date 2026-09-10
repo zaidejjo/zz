@@ -54,34 +54,31 @@ fn cache_key(src: &str, opts: BuildOptions) -> String {
 
 /// Get modification time of the C runtime + codegen files for cache invalidation.
 /// The runtime and codegen live in the zz_codegen crate, one level up from zz_cli.
+/// The backend is split across `src/lower/` and `src/runtime/`; any change to
+/// those files must invalidate the native build cache.
 fn runtime_mtime() -> Option<u64> {
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../zz_codegen");
-    let rt_c = base.join("src/runtime.c");
-    let rt_h = base.join("src/runtime.h");
-    let lower_rs = base.join("src/lower.rs");
-    let c_mtime = rt_c.metadata().and_then(|m| m.modified()).ok();
-    let h_mtime = rt_h.metadata().and_then(|m| m.modified()).ok();
-    let lr_mtime = lower_rs.metadata().and_then(|m| m.modified()).ok();
-    match (c_mtime, h_mtime, lr_mtime) {
-        (Some(ct), Some(ht), Some(lr)) => {
-            let ct_sys = ct
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs());
-            let ht_sys = ht
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs());
-            let lr_sys = lr
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs());
-            ct_sys.and_then(|c| {
-                ht_sys.and_then(|h| lr_sys.map(|lr| c.wrapping_mul(h).wrapping_add(lr)))
-            })
+    let mut mtimes: Vec<u64> = Vec::new();
+    for dir in ["src/lower", "src/runtime"] {
+        let dir = base.join(dir);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(m) = meta.modified() {
+                    if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
+                        mtimes.push(d.as_secs());
+                    }
+                }
+            }
         }
-        _ => None,
     }
+    if mtimes.is_empty() {
+        return None;
+    }
+    // Combine order-independently: sum of all file mtimes.
+    Some(mtimes.iter().fold(0u64, |acc, m| acc.wrapping_add(*m)))
 }
 
 fn opts_for(mode: BuildMode) -> BuildOptions {
