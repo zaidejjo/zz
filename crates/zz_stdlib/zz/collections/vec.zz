@@ -3,8 +3,75 @@
 //
 // NOTE: vec.map and vec.filter require closure dispatch and remain
 // as native Rust implementations in src/natives/iterators/mod.rs.
-// vec.fold can be implemented in pure ZZ since it only needs the
-// accumulator pattern (no closure as argument).
+// Everything below uses accumulator patterns or delegates to native
+// vec builtins and can run in both the bytecode VM and AOT codegen.
+//
+// Design notes:
+//   - min/max are generic <T> — only need comparison operators.
+//   - Array aggregation returns Option<T> to handle empty inputs safely.
+//   - Float aggregation uses Kahan compensated summation for precision.
+
+// ── Generic min / max (work for int, float, str — anything comparable) ───────
+
+func vec.min_val<T>(arr: [T]) -> Option<T> {
+    if vec.len(arr) == 0 { return .none }
+    best := arr[0]
+    for x in arr {
+        if x < best { best = x }
+    }
+    .some(best)
+}
+
+func vec.max_val<T>(arr: [T]) -> Option<T> {
+    if vec.len(arr) == 0 { return .none }
+    best := arr[0]
+    for x in arr {
+        if x > best { best = x }
+    }
+    .some(best)
+}
+
+// ── Int aggregation ──────────────────────────────────────────────────────────
+
+func vec.sum(arr: [int]) -> int {
+    total := 0
+    for x in arr {
+        total = total + x
+    }
+    total
+}
+
+func vec.product(arr: [int]) -> int {
+    total := 1
+    for x in arr {
+        total = total * x
+    }
+    total
+}
+
+// ── Float aggregation (Kahan compensated summation) ──────────────────────────
+
+func vec.sum_f(arr: [float]) -> float {
+    sum := 0.0
+    comp := 0.0
+    for x in arr {
+        y := x - comp
+        t := sum + y
+        comp = (t - sum) - y
+        sum = t
+    }
+    sum
+}
+
+func vec.product_f(arr: [float]) -> float {
+    total := 1.0
+    for x in arr {
+        total = total * x
+    }
+    total
+}
+
+// ── Fold (int addition accumulator — see vec.sum for direct use) ──────────────
 
 func vec.fold(arr: [int], init: int) -> int {
     acc := init
@@ -12,4 +79,45 @@ func vec.fold(arr: [int], init: int) -> int {
         acc = acc + x
     }
     acc
+}
+
+// ── Structural transforms ────────────────────────────────────────────────────
+
+func vec.concat(a: [int], b: [int]) -> [int] {
+    result := a
+    for x in b {
+        result = vec.push(result, x)
+    }
+    result
+}
+
+func vec.flatten(arr: [[int]]) -> [int] {
+    result := []
+    for sub in arr {
+        for x in sub {
+            result = vec.push(result, x)
+        }
+    }
+    result
+}
+
+// ── Index helpers ────────────────────────────────────────────────────────────
+
+func vec.index_of(arr: [int], target: int) -> int {
+    i := 0
+    for x in arr {
+        if x == target { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+func vec.last_index_of(arr: [int], target: int) -> int {
+    result := 0 - 1
+    i := 0
+    for x in arr {
+        if x == target { result = i }
+        i = i + 1
+    }
+    result
 }

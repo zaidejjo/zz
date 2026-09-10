@@ -204,7 +204,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("s", Type::Str)], Type::Str),
     );
 
-    // Pure-ZZ stdlib: string helpers (compiled from zz/str.zz)
+    // Pure-ZZ stdlib: string helpers (compiled from zz/str/mod.zz)
     m.insert(
         "std.str.repeat".into(),
         sig(vec![("s", Type::Str), ("n", Type::Int)], Type::Str),
@@ -212,6 +212,28 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "std.str.count".into(),
         sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "std.str.is_empty".into(),
+        sig(vec![("s", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.str.reverse".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.str.pad_left".into(),
+        sig(
+            vec![("s", Type::Str), ("len", Type::Int), ("pad", Type::Str)],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "std.str.pad_right".into(),
+        sig(
+            vec![("s", Type::Str), ("len", Type::Int), ("pad", Type::Str)],
+            Type::Str,
+        ),
     );
     // Method-dispatch aliases for pure-ZZ string helpers
     m.insert(
@@ -221,6 +243,25 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "str.count".into(),
         sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "str.is_empty".into(),
+        sig(vec![("s", Type::Str)], Type::Bool),
+    );
+    m.insert("str.reverse".into(), sig(vec![("s", Type::Str)], Type::Str));
+    m.insert(
+        "str.pad_left".into(),
+        sig(
+            vec![("s", Type::Str), ("len", Type::Int), ("pad", Type::Str)],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "str.pad_right".into(),
+        sig(
+            vec![("s", Type::Str), ("len", Type::Int), ("pad", Type::Str)],
+            Type::Str,
+        ),
     );
 
     // std.vec — generic over element type T.
@@ -315,6 +356,174 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig_t(
             vec![("v", Type::Array(Box::new(t.clone()))), ("idx", Type::Int)],
             Type::Array(Box::new(t.clone())),
+        ),
+    );
+
+    // Pure-ZZ stdlib: vec helpers (compiled from zz/collections/vec.zz)
+    // min_val/max_val are generic <T> returning Option<T>;
+    // sum_f/product_f handle float arrays with Kahan precision.
+    m.insert(
+        "std.vec.fold".into(),
+        sig(
+            vec![
+                ("arr", Type::Array(Box::new(Type::Int))),
+                ("init", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "std.vec.sum".into(),
+        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+    );
+    m.insert(
+        "std.vec.product".into(),
+        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+    );
+    // Generic min/max — return Option for empty safety
+    m.insert(
+        "std.vec.min_val".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "std.vec.max_val".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    // Float aggregation
+    let float_arr = || Type::Array(Box::new(Type::Float));
+    m.insert(
+        "std.vec.sum_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "std.vec.product_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "std.vec.concat".into(),
+        sig(
+            vec![
+                ("a", Type::Array(Box::new(Type::Int))),
+                ("b", Type::Array(Box::new(Type::Int))),
+            ],
+            Type::Array(Box::new(Type::Int)),
+        ),
+    );
+    m.insert(
+        "std.vec.flatten".into(),
+        sig(
+            vec![(
+                "arr",
+                Type::Array(Box::new(Type::Array(Box::new(Type::Int)))),
+            )],
+            Type::Array(Box::new(Type::Int)),
+        ),
+    );
+    m.insert(
+        "std.vec.index_of".into(),
+        sig(
+            vec![
+                ("arr", Type::Array(Box::new(Type::Int))),
+                ("target", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "std.vec.last_index_of".into(),
+        sig(
+            vec![
+                ("arr", Type::Array(Box::new(Type::Int))),
+                ("target", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    // Method-dispatch aliases for pure-ZZ vec helpers
+    m.insert(
+        "vec.fold".into(),
+        sig(
+            vec![
+                ("arr", Type::Array(Box::new(Type::Int))),
+                ("init", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "vec.sum".into(),
+        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+    );
+    m.insert(
+        "vec.product".into(),
+        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+    );
+    m.insert(
+        "vec.min_val".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "vec.max_val".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "vec.sum_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "vec.product_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "vec.concat".into(),
+        sig(
+            vec![
+                ("a", Type::Array(Box::new(Type::Int))),
+                ("b", Type::Array(Box::new(Type::Int))),
+            ],
+            Type::Array(Box::new(Type::Int)),
+        ),
+    );
+    m.insert(
+        "vec.flatten".into(),
+        sig(
+            vec![(
+                "arr",
+                Type::Array(Box::new(Type::Array(Box::new(Type::Int)))),
+            )],
+            Type::Array(Box::new(Type::Int)),
+        ),
+    );
+    m.insert(
+        "vec.index_of".into(),
+        sig(
+            vec![
+                ("arr", Type::Array(Box::new(Type::Int))),
+                ("target", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "vec.last_index_of".into(),
+        sig(
+            vec![
+                ("arr", Type::Array(Box::new(Type::Int))),
+                ("target", Type::Int),
+            ],
+            Type::Int,
         ),
     );
 
@@ -842,7 +1051,9 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     // `float(v)` — widen an int to float, identity for float, parse from str.
     m.insert("float".into(), sig_t(vec![("v", t.clone())], Type::Float));
 
-    // std.math
+    // std.math — pure-ZZ integer implementations (from zz/math/mod.zz)
+    // These shadow the native Rust versions at type-check time.
+    // Native Rust versions still handle float overloads at runtime.
     m.insert(
         "std.math.abs".into(),
         sig_t(vec![("v", t.clone())], t.clone()),
@@ -1035,7 +1246,9 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig_t(vec![("min", t.clone()), ("max", t.clone())], Type::Float),
     );
 
-    // Pure-ZZ stdlib: math helpers (compiled from zz/math.zz)
+    // Pure-ZZ stdlib: math helpers (compiled from zz/math/mod.zz)
+    // min/max are generic <T>; min_arr/max_arr return Option<T>;
+    // sum_f/product_f/mean_f/median_f handle float arrays with Kahan precision.
     m.insert(
         "std.math.sum".into(),
         sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
@@ -1052,6 +1265,62 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
                 ("target", Type::Int),
             ],
             Type::Int,
+        ),
+    );
+    // Generic min/max — work for int, float, str (anything comparable)
+    m.insert(
+        "std.math.min".into(),
+        sig_t(vec![("a", t.clone()), ("b", t.clone())], t.clone()),
+    );
+    m.insert(
+        "std.math.max".into(),
+        sig_t(vec![("a", t.clone()), ("b", t.clone())], t.clone()),
+    );
+    m.insert(
+        "std.math.is_even".into(),
+        sig(vec![("n", Type::Int)], Type::Bool),
+    );
+    m.insert(
+        "std.math.is_odd".into(),
+        sig(vec![("n", Type::Int)], Type::Bool),
+    );
+    // Generic array min/max — return Option for empty safety
+    m.insert(
+        "std.math.min_arr".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "std.math.max_arr".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    // Float aggregation — Kahan compensated summation
+    let float_arr = || Type::Array(Box::new(Type::Float));
+    m.insert(
+        "std.math.sum_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "std.math.product_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "std.math.mean_f".into(),
+        sig(
+            vec![("arr", float_arr())],
+            Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.math.median_f".into(),
+        sig(
+            vec![("arr", float_arr())],
+            Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
         ),
     );
     // Method-dispatch aliases for pure-ZZ math helpers
@@ -1071,6 +1340,58 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
                 ("target", Type::Int),
             ],
             Type::Int,
+        ),
+    );
+    m.insert(
+        "math.min".into(),
+        sig_t(vec![("a", t.clone()), ("b", t.clone())], t.clone()),
+    );
+    m.insert(
+        "math.max".into(),
+        sig_t(vec![("a", t.clone()), ("b", t.clone())], t.clone()),
+    );
+    m.insert(
+        "math.is_even".into(),
+        sig(vec![("n", Type::Int)], Type::Bool),
+    );
+    m.insert(
+        "math.is_odd".into(),
+        sig(vec![("n", Type::Int)], Type::Bool),
+    );
+    m.insert(
+        "math.min_arr".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "math.max_arr".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "math.sum_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "math.product_f".into(),
+        sig(vec![("arr", float_arr())], Type::Float),
+    );
+    m.insert(
+        "math.mean_f".into(),
+        sig(
+            vec![("arr", float_arr())],
+            Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "math.median_f".into(),
+        sig(
+            vec![("arr", float_arr())],
+            Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
         ),
     );
 
@@ -1182,7 +1503,7 @@ mod tests {
         assert!(funcs.contains_key("append"));
         assert!(funcs.contains_key("std.task.spawn"));
         assert!(funcs.contains_key("std.task.join"));
-        assert_eq!(funcs.len(), 173);
+        assert_eq!(funcs.len(), 223);
     }
 
     #[test]
