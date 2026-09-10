@@ -52,16 +52,18 @@ fn cache_key(src: &str, opts: BuildOptions) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// Get modification time of the C runtime files for cache invalidation.
-/// The runtime lives in the zz_codegen crate, one level up from zz_cli.
+/// Get modification time of the C runtime + codegen files for cache invalidation.
+/// The runtime and codegen live in the zz_codegen crate, one level up from zz_cli.
 fn runtime_mtime() -> Option<u64> {
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../zz_codegen");
     let rt_c = base.join("src/runtime.c");
     let rt_h = base.join("src/runtime.h");
+    let lower_rs = base.join("src/lower.rs");
     let c_mtime = rt_c.metadata().and_then(|m| m.modified()).ok();
     let h_mtime = rt_h.metadata().and_then(|m| m.modified()).ok();
-    match (c_mtime, h_mtime) {
-        (Some(ct), Some(ht)) => {
+    let lr_mtime = lower_rs.metadata().and_then(|m| m.modified()).ok();
+    match (c_mtime, h_mtime, lr_mtime) {
+        (Some(ct), Some(ht), Some(lr)) => {
             let ct_sys = ct
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()
@@ -70,7 +72,13 @@ fn runtime_mtime() -> Option<u64> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()
                 .map(|d| d.as_secs());
-            ct_sys.and_then(|c| ht_sys.map(|h| c.wrapping_mul(h)))
+            let lr_sys = lr
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs());
+            ct_sys.and_then(|c| {
+                ht_sys.and_then(|h| lr_sys.map(|lr| c.wrapping_mul(h).wrapping_add(lr)))
+            })
         }
         _ => None,
     }

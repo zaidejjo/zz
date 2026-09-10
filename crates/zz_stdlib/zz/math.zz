@@ -1,0 +1,27 @@
+// Pure-ZZ math helpers — compiled once, shared by VM and AOT.
+
+func math.sum(arr: [int]) -> int {
+    total := 0
+    for x in arr {
+        total = total + x
+    }
+    total
+}
+
+func math.product(arr: [int]) -> int {
+    total := 1
+    for x in arr {
+        total = total * x
+    }
+    total
+}
+
+func math.count(arr: [int], target: int) -> int {
+    n := 0
+    for x in arr {
+        if x == target {
+            n = n + 1
+        }
+    }
+    n
+}

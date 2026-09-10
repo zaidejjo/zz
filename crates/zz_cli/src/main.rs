@@ -276,6 +276,20 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
 
     let mut interp = Interp::with_natives(loaded.natives.clone());
     interp.args = script_args.to_vec();
+
+    // Run compiled pure-ZZ stdlib programs. These populate the environment
+    // with functions written in ZZ (e.g. vec.map, math.sum) that extend
+    // the native stdlib. Must happen before user code so the functions are
+    // available when user modules reference them.
+    for zz_prog in zz_stdlib::zz_stdlib_programs() {
+        if let Err(e) =
+            interp.run_typed(&zz_prog.program, std::sync::Arc::new(zz_prog.types.clone()))
+        {
+            eprintln!("zz: pure-ZZ stdlib error: {e:?}");
+            return Err("stdlib initialization failed".to_string());
+        }
+    }
+
     let mut last = Value::Unit;
     for (i, program) in loaded.programs.iter().enumerate() {
         match interp.run_typed(program, types.clone()) {

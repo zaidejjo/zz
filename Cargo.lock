@@ -2234,5 +2234,6 @@ dependencies = [
  "urlencoding",
  "zz_checker",
  "zz_frontend",
+ "zz_hir",
  "zz_runtime",
 ]

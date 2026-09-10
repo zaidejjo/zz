@@ -13,9 +13,11 @@
 
 pub mod funcs;
 pub mod natives;
+pub mod zz_std;
 
 pub use funcs::stdlib_funcs;
 pub use natives::stdlib_natives;
+pub use zz_std::zz_stdlib_programs;
 
 /// The set of known `std.*` module names (second path component).
 pub const STDLIB_MODULES: &[&str] = &[
