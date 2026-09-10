@@ -389,7 +389,6 @@ impl<'a> Lexer<'a> {
             "import" => TokenKind::Import,
             "as" => TokenKind::As,
             "func" => TokenKind::Func,
-            "fn" => TokenKind::Func,
             "return" => TokenKind::Return,
             "if" => TokenKind::If,
             "else" => TokenKind::Else,

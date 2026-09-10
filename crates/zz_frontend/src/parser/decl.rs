@@ -33,11 +33,11 @@ impl Parser {
     pub(crate) fn parse_type_base(&mut self) -> Ty {
         let tok = self.peek().clone();
         match tok.kind {
-            // fn(int) -> int  — function type keyword
+            // func(int) -> int  — function type keyword
             TokenKind::Func => {
                 self.advance();
                 if !self.eat(TokenKind::LParen) {
-                    self.error_here("expected `(` after `fn` in function type");
+                    self.error_here("expected `(` after `func` in function type");
                 } else {
                     self.push_delim(TokenKind::LParen, self.previous().span);
                 }

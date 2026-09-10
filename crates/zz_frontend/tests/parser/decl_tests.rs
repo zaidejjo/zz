@@ -86,7 +86,7 @@ fn parses_assign() {
 
 #[test]
 fn parses_func_type_keyword() {
-    let p = parse_ok("f: fn(int) -> int = x");
+    let p = parse_ok("f: func(int) -> int = x");
     match &p.stmts[0] {
         zz_frontend::ast::Stmt::Decl { ty, .. } => {
             let ty = ty.as_ref().expect("expected type annotation");
@@ -105,7 +105,7 @@ fn parses_func_type_keyword() {
 
 #[test]
 fn parses_func_type_multi_params() {
-    let p = parse_ok("f: fn(int, str) -> bool = x");
+    let p = parse_ok("f: func(int, str) -> bool = x");
     match &p.stmts[0] {
         zz_frontend::ast::Stmt::Decl { ty, .. } => {
             let ty = ty.as_ref().expect("expected type annotation");
@@ -125,7 +125,7 @@ fn parses_func_type_multi_params() {
 
 #[test]
 fn parses_func_type_no_params() {
-    let p = parse_ok("f: fn() -> int = x");
+    let p = parse_ok("f: func() -> int = x");
     match &p.stmts[0] {
         zz_frontend::ast::Stmt::Decl { ty, .. } => {
             let ty = ty.as_ref().expect("expected type annotation");
@@ -182,7 +182,7 @@ fn parses_func_type_shorthand_multi() {
 
 #[test]
 fn parses_func_type_returning_func() {
-    let p = parse_ok("f: fn(int) -> fn(int) -> int = x");
+    let p = parse_ok("f: func(int) -> func(int) -> int = x");
     match &p.stmts[0] {
         zz_frontend::ast::Stmt::Decl { ty, .. } => {
             let ty = ty.as_ref().expect("expected type annotation");
@@ -208,7 +208,7 @@ fn parses_func_type_returning_func() {
 
 #[test]
 fn parses_func_type_in_func_param() {
-    let p = parse_ok("func apply(f: fn(int) -> int, x: int) -> int { f(x) }");
+    let p = parse_ok("func apply(f: func(int) -> int, x: int) -> int { f(x) }");
     match &p.stmts[0] {
         zz_frontend::ast::Stmt::Func { params, ret, .. } => {
             assert_eq!(params.len(), 2);

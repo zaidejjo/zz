@@ -14,7 +14,7 @@
 //! block          := '{' stmt* '}'
 //! type           := type_base ('|' type_base)*            // union
 //! type_base      := 'int'|'float'|'bool'|'str'|'unit'
-//!                | 'fn' '(' type_list ')' '->' type       // function type
+//!                | 'func' '(' type_list ')' '->' type       // function type
 //!                | IDENT ('<' type (',' type)* '>')?
 //!                | '(' type (',' type)* ')'                // tuple or grouped
 //!                | '(' type ')' '->' type                  // function type (shorthand)
