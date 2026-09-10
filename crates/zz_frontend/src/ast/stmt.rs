@@ -13,6 +13,35 @@ pub struct Param {
     pub span: Span,
 }
 
+/// A trait/type bound applicable to a generic parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraitBound {
+    Num,
+    Ord,
+    Eq,
+    Display,
+}
+
+impl TraitBound {
+    pub fn name(self) -> &'static str {
+        match self {
+            TraitBound::Num => "Num",
+            TraitBound::Ord => "Ord",
+            TraitBound::Eq => "Eq",
+            TraitBound::Display => "Display",
+        }
+    }
+}
+
+/// A generic parameter declaration with its trait bounds:
+/// `T` in `func id<T>` or `T: Num + Ord` in `func min<T: Num + Ord>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeParam {
+    pub name: Ident,
+    pub bounds: Vec<TraitBound>,
+    pub span: Span,
+}
+
 /// A `{ ... }` block. Its value is the last expression statement, or unit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
@@ -51,7 +80,7 @@ pub enum Stmt {
     },
     Func {
         name: Vec<String>,
-        generics: Vec<Ident>,
+        generics: Vec<TypeParam>,
         params: Vec<Param>,
         ret: Option<Ty>,
         body: Block,

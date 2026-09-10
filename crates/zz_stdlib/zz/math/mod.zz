@@ -35,15 +35,15 @@ func math.is_odd(n: int) -> bool {
 
 // ── Generic min / max (work for int, float, str — anything comparable) ───────
 
-func math.min<T>(a: T, b: T) -> T {
+func math.min<T: Ord>(a: T, b: T) -> T {
     if a < b { a } else { b }
 }
 
-func math.max<T>(a: T, b: T) -> T {
+func math.max<T: Ord>(a: T, b: T) -> T {
     if a > b { a } else { b }
 }
 
-func math.clamp<T>(v: T, lo: T, hi: T) -> T {
+func math.clamp<T: Ord>(v: T, lo: T, hi: T) -> T {
     if v < lo { lo } else { if v > hi { hi } else { v } }
 }
 
@@ -100,7 +100,7 @@ func math.product_f(arr: [float]) -> float {
 
 // ── Generic array min / max (return Option for empty safety) ─────────────────
 
-func math.min_arr<T>(arr: [T]) -> Option<T> {
+func math.min_arr<T: Ord>(arr: [T]) -> Option<T> {
     if vec.len(arr) == 0 { return .none }
     best := arr[0]
     for x in arr {
@@ -109,7 +109,7 @@ func math.min_arr<T>(arr: [T]) -> Option<T> {
     .some(best)
 }
 
-func math.max_arr<T>(arr: [T]) -> Option<T> {
+func math.max_arr<T: Ord>(arr: [T]) -> Option<T> {
     if vec.len(arr) == 0 { return .none }
     best := arr[0]
     for x in arr {

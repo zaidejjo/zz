@@ -8,6 +8,7 @@ use zz_checker::{FuncSig, Type};
 fn sig(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
     FuncSig {
         generics: Vec::new(),
+        bounds: Vec::new(),
         params: params
             .into_iter()
             .map(|(n, t)| (n.to_string(), t))
@@ -21,6 +22,7 @@ fn sig(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
 fn sig_t(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
     FuncSig {
         generics: vec!["T".to_string()],
+        bounds: Vec::new(),
         params: params
             .into_iter()
             .map(|(n, t)| (n.to_string(), t))
@@ -34,6 +36,7 @@ fn sig_t(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
 fn sig_tu(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
     FuncSig {
         generics: vec!["T".to_string(), "U".to_string()],
+        bounds: Vec::new(),
         params: params
             .into_iter()
             .map(|(n, t)| (n.to_string(), t))
@@ -562,6 +565,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "result.unwrap".into(),
         FuncSig {
             generics: vec!["T".to_string(), "E".to_string()],
+            bounds: Vec::new(),
             params: vec![("res".to_string(), result_t.clone())],
             has_default: vec![],
             ret: t.clone(),
@@ -571,6 +575,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "result.unwrap_or".into(),
         FuncSig {
             generics: vec!["T".to_string(), "E".to_string()],
+            bounds: Vec::new(),
             params: vec![
                 ("res".to_string(), result_t.clone()),
                 ("default".to_string(), t.clone()),
@@ -583,6 +588,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "result.expect".into(),
         FuncSig {
             generics: vec!["T".to_string(), "E".to_string()],
+            bounds: Vec::new(),
             params: vec![
                 ("res".to_string(), result_t),
                 ("msg".to_string(), Type::Str),

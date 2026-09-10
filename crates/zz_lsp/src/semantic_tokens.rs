@@ -131,7 +131,7 @@ fn collect_stmt_tokens(stmt: &Stmt, source: &str, out: &mut Vec<RawToken>) {
             push_name_tokens(name, TokenType::Function, source, out);
             // Generics.
             for g in generics {
-                push_ident_token(&g.name, g.span, TokenType::Type, source, out);
+                push_ident_token(&g.name.name, g.span, TokenType::Type, source, out);
             }
             // Parameters.
             for param in params {

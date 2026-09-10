@@ -69,7 +69,7 @@ impl<'a> Rewriter<'a> {
                     self.declare(&name.join("."));
                 }
                 for g in generics {
-                    self.declare(&g.name);
+                    self.declare(&g.name.name);
                 }
                 for p in params {
                     self.declare(&p.name.name);

@@ -489,12 +489,13 @@ impl Checker {
                         };
                         if let Some(ns) = ns {
                             if let Some(sig) = self.funcs.get(&format!("{ns}.{method}")).cloned() {
-                                let (ps, ret) = self.instantiate(&sig);
+                                let (ps, ret, subs) = self.instantiate(&sig);
                                 if !ps.is_empty() {
                                     if let Err(e) = self.unifier.unify(&other, &ps[0]) {
                                         self.report_mismatch(e, *span);
                                     }
                                 }
+                                self.validate_bounds(&sig, &subs, *span);
                                 return ret;
                             }
                         }
@@ -841,6 +842,20 @@ impl Checker {
             UnOp::Pos | UnOp::Neg => match t {
                 Type::Int => Type::Int,
                 Type::Float => Type::Float,
+                Type::Named(n) => {
+                    if self.has_bound(&n, zz_frontend::ast::TraitBound::Num) {
+                        Type::Named(n)
+                    } else {
+                        self.errors.push(error_at(
+                            format!(
+                                "generic parameter `{n}` needs a `Num` bound for `{}`; write `func ...<{n}: Num>`",
+                                op.symbol()
+                            ),
+                            span,
+                        ));
+                        Type::Int
+                    }
+                }
                 Type::Var(id) => {
                     self.unifier.bind(id, Type::Int);
                     Type::Int
@@ -898,10 +913,16 @@ impl Checker {
                 }
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                use zz_frontend::ast::TraitBound;
                 let lt = self.check_expr(left);
                 let lt = self.unifier.resolve(&lt);
                 let rt = self.check_expr(right);
                 let rt = self.unifier.resolve(&rt);
+                // Which bound does this comparison require?
+                let needed = match op {
+                    BinOp::Eq | BinOp::Ne => TraitBound::Eq,
+                    _ => TraitBound::Ord,
+                };
                 // Reject int/float mixed comparisons with a helpful message.
                 match (&lt, &rt) {
                     (Type::Int, Type::Float) | (Type::Float, Type::Int) => {
@@ -913,6 +934,41 @@ impl Checker {
                             span,
                         ));
                         Type::Bool
+                    }
+                    // Generic operands: allowed only when the parameter
+                    // carries the required bound (`Eq` for ==/!=, `Ord` for
+                    // ordering). The concrete type is pinned at the call site.
+                    (Type::Named(a), Type::Named(b)) if a == b => {
+                        if self.has_bound(a, needed) {
+                            Type::Bool
+                        } else {
+                            self.errors.push(error_at(
+                                format!(
+                                    "generic parameter `{a}` needs a `{}` bound for `{}`; write `func ...<{a}: {}>`",
+                                    needed.name(),
+                                    op.symbol(),
+                                    needed.name()
+                                ),
+                                span,
+                            ));
+                            Type::Bool
+                        }
+                    }
+                    (Type::Named(n), _) | (_, Type::Named(n)) => {
+                        if self.has_bound(n, needed) {
+                            Type::Bool
+                        } else {
+                            self.errors.push(error_at(
+                                format!(
+                                    "generic parameter `{n}` needs a `{}` bound for `{}`; write `func ...<{n}: {}>`",
+                                    needed.name(),
+                                    op.symbol(),
+                                    needed.name()
+                                ),
+                                span,
+                            ));
+                            Type::Bool
+                        }
                     }
                     (Type::Var(_), t) => {
                         self.unifier.bind_var(&lt, t.clone());
@@ -937,6 +993,7 @@ impl Checker {
     }
 
     pub(crate) fn check_arith(&mut self, op: BinOp, left: &Expr, right: &Expr, span: Span) -> Type {
+        use zz_frontend::ast::TraitBound;
         let lt = self.check_expr(left);
         let lt = self.unifier.resolve(&lt);
         let rt = self.check_expr(right);
@@ -946,6 +1003,53 @@ impl Checker {
             (Type::Str, Type::Str) if op == BinOp::Add => Type::Str,
             (Type::Int, Type::Float) | (Type::Float, Type::Int) | (Type::Float, Type::Float) => {
                 Type::Float
+            }
+            // Generic operands: allowed only when the parameter carries a
+            // `Num` bound. The result keeps the generic type; the concrete
+            // type is pinned at the call site via instantiation.
+            (Type::Named(a), Type::Named(b)) if a == b => {
+                if self.has_bound(a, TraitBound::Num) {
+                    Type::Named(a.clone())
+                } else {
+                    self.errors.push(error_at(
+                        format!(
+                            "generic parameter `{a}` needs a `Num` bound for `{}`; write `func ...<{a}: Num>`",
+                            op.symbol()
+                        ),
+                        span,
+                    ));
+                    Type::Error
+                }
+            }
+            (Type::Named(a), Type::Named(b)) => {
+                self.errors.push(error_at(
+                    format!(
+                        "cannot apply `{}` to `{a}` and `{b}`: distinct generic parameters\n\
+                         hint: use the same type parameter (`x: T, y: T`) or a concrete type",
+                        op.symbol()
+                    ),
+                    span,
+                ));
+                Type::Error
+            }
+            (Type::Named(n), t) | (t, Type::Named(n))
+                if self.has_bound(n, TraitBound::Num) && matches!(t, Type::Int | Type::Float) =>
+            {
+                Type::Named(n.clone())
+            }
+            (Type::Named(n), Type::Var(_)) | (Type::Var(_), Type::Named(n)) => {
+                if self.has_bound(n, TraitBound::Num) {
+                    Type::Named(n.clone())
+                } else {
+                    self.errors.push(error_at(
+                        format!(
+                            "generic parameter `{n}` needs a `Num` bound for `{}`; write `func ...<{n}: Num>`",
+                            op.symbol()
+                        ),
+                        span,
+                    ));
+                    Type::Error
+                }
             }
             (Type::Var(_), t) => {
                 self.unifier.bind_var(&lt, t.clone());
@@ -1019,7 +1123,7 @@ impl Checker {
                     }
                 }
                 if let Some(sig) = sig {
-                    let (ps, ret) = self.instantiate(&sig);
+                    let (ps, ret, subs) = self.instantiate(&sig);
                     if ps.is_empty() {
                         self.errors.push(error_at(
                             format!("method `{method}` takes no arguments"),
@@ -1041,6 +1145,7 @@ impl Checker {
                         named,
                         span,
                     );
+                    self.validate_bounds(&sig, &subs, span);
                     return ret;
                 }
                 None
@@ -1050,7 +1155,7 @@ impl Checker {
         if let Some(name) = &direct_name {
             if let Some(sig) = self.funcs.get(name).cloned() {
                 self.used_names.insert(name.clone());
-                let (ps, ret) = self.instantiate(&sig);
+                let (ps, ret, subs) = self.instantiate(&sig);
                 if name == "input" {
                     if args.len() + named.len() > 1 {
                         self.errors.push(error_at(
@@ -1098,6 +1203,7 @@ impl Checker {
                 }
                 let pnames: Vec<String> = sig.params.iter().map(|(n, _)| n.clone()).collect();
                 self.check_args_against(&pnames, &ps, &sig.has_default, args, named, span);
+                self.validate_bounds(&sig, &subs, span);
                 return ret;
             }
         }
@@ -1125,7 +1231,7 @@ impl Checker {
                                 }
                                 Type::Named(ref nname) => {
                                     if let Some(sig) = self.funcs.get(nname).cloned() {
-                                        let (ps, ret) = self.instantiate(&sig);
+                                        let (ps, ret, subs) = self.instantiate(&sig);
                                         let pnames: Vec<String> =
                                             sig.params.iter().map(|(n, _)| n.clone()).collect();
                                         self.check_args_against(
@@ -1136,6 +1242,7 @@ impl Checker {
                                             named,
                                             span,
                                         );
+                                        self.validate_bounds(&sig, &subs, span);
                                         return ret;
                                     }
                                 }
@@ -1210,7 +1317,7 @@ impl Checker {
                     }
                 }
                 if let Some(sig) = sig {
-                    let (ps, ret) = self.instantiate(&sig);
+                    let (ps, ret, subs) = self.instantiate(&sig);
                     if ps.is_empty() {
                         self.errors.push(error_at(
                             format!("method `{method}` takes no arguments"),
@@ -1232,6 +1339,7 @@ impl Checker {
                         named,
                         span,
                     );
+                    self.validate_bounds(&sig, &subs, span);
                     return ret;
                 }
             }
@@ -1246,10 +1354,11 @@ impl Checker {
             }
             Type::Named(name) => match self.funcs.get(&name).cloned() {
                 Some(sig) => {
-                    let (ps, ret) = self.instantiate(&sig);
+                    let (ps, ret, subs) = self.instantiate(&sig);
                     let param_names: Vec<String> =
                         sig.params.iter().map(|(n, _)| n.clone()).collect();
                     self.check_args_against(&param_names, &ps, &sig.has_default, args, named, span);
+                    self.validate_bounds(&sig, &subs, span);
                     ret
                 }
                 None => {

@@ -19,6 +19,8 @@ use crate::type_::Type;
 #[derive(Debug, Clone)]
 pub struct FuncSig {
     pub generics: Vec<String>,
+    /// Trait bounds per generic parameter name (e.g. `T` → `[Num, Ord]`).
+    pub bounds: Vec<(String, Vec<zz_frontend::ast::TraitBound>)>,
     pub params: Vec<(String, Type)>,
     pub has_default: Vec<bool>,
     pub ret: Type,
@@ -131,7 +133,12 @@ fn check_program_impl(
                 } = method
                 {
                     let full_name = format!("{}.{}", type_name, mname.join("."));
-                    let gen_names: Vec<String> = generics.iter().map(|g| g.name.clone()).collect();
+                    let gen_names: Vec<String> =
+                        generics.iter().map(|g| g.name.name.clone()).collect();
+                    let gen_bounds: Vec<(String, Vec<zz_frontend::ast::TraitBound>)> = generics
+                        .iter()
+                        .map(|g| (g.name.name.clone(), g.bounds.clone()))
+                        .collect();
                     // Build params, replacing `self` with the struct type
                     let sig_params: Vec<(String, Type)> = params
                         .iter()
@@ -168,6 +175,7 @@ fn check_program_impl(
                         full_name.clone(),
                         crate::checker::FuncSig {
                             generics: gen_names,
+                            bounds: gen_bounds,
                             params: sig_params,
                             has_default,
                             ret: sig_ret,
@@ -302,6 +310,9 @@ pub(crate) struct Checker {
     pub(crate) new_bindings: HashMap<String, Type>,
     pub(crate) current_ret: Option<Type>,
     pub(crate) current_generics: Vec<String>,
+    /// Trait bounds for the generic parameters currently in scope (set while
+    /// checking a generic function body).
+    pub(crate) current_bounds: HashMap<String, Vec<zz_frontend::ast::TraitBound>>,
     /// Nesting depth of `for`/`while` loops (for `break`/`continue`).
     pub(crate) loop_depth: usize,
     /// Names that were used (looked up) — for unused-variable warnings.
@@ -338,6 +349,7 @@ impl Checker {
             new_bindings: HashMap::new(),
             current_ret: None,
             current_generics: Vec::new(),
+            current_bounds: HashMap::new(),
             loop_depth: 0,
             used_names: std::collections::HashSet::new(),
             pub_names: std::collections::HashSet::new(),

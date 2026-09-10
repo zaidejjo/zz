@@ -1,6 +1,6 @@
 //! Statement parsing.
 
-use crate::ast::{Block, Ident, Param, Pattern, Stmt};
+use crate::ast::{Block, Ident, Param, Pattern, Stmt, TraitBound, TypeParam};
 use crate::diag::error_at;
 use crate::span::Span;
 use crate::token::TokenKind;
@@ -445,9 +445,34 @@ impl Parser {
         let generics = if self.eat(TokenKind::Lt) {
             let mut gs = Vec::new();
             loop {
-                if let Some(id) = self.expect_ident() {
-                    gs.push(id);
+                let name = self
+                    .expect_ident()
+                    .unwrap_or_else(|| dummy_ident(self.peek().span));
+                let start = name.span;
+                let mut bounds = Vec::new();
+                if self.eat(TokenKind::Colon) {
+                    loop {
+                        if let Some(id) = self.expect_ident() {
+                            match id.name.as_str() {
+                                "Num" => bounds.push(TraitBound::Num),
+                                "Ord" => bounds.push(TraitBound::Ord),
+                                "Eq" => bounds.push(TraitBound::Eq),
+                                "Display" => bounds.push(TraitBound::Display),
+                                other => self.errors.push(error_at(
+                                    format!("unknown trait bound `{other}` (expected `Num`, `Ord`, `Eq`, or `Display`)"),
+                                    id.span,
+                                )),
+                            }
+                        }
+                        if self.eat(TokenKind::Plus) {
+                            continue;
+                        }
+                        break;
+                    }
                 }
+                let end = self.previous().span;
+                let span = start.join(end);
+                gs.push(TypeParam { name, bounds, span });
                 if self.eat(TokenKind::Comma) {
                     continue;
                 }

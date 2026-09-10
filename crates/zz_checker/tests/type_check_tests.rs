@@ -102,6 +102,114 @@ fn generic_func_monomorphic_fail() {
     );
 }
 
+// --- generic type bounds ------------------------------------------------
+
+#[test]
+fn generic_num_bound_arith_ok() {
+    let r = check_src(
+        "func add<T: Num>(x: T, y: T) -> T { return x + y }\na := add(2.1, 3.0)\nb := add(1, 2)",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Float);
+    assert_eq!(r.bindings["b"], Type::Int);
+}
+
+#[test]
+fn generic_unbound_arith_errors_with_hint() {
+    errors_contain(
+        "func add<T>(x: T, y: T) -> T { return x + y }",
+        "needs a `Num` bound for `+`",
+    );
+}
+
+#[test]
+fn generic_ord_bound_comparison_ok() {
+    let r = check_src(
+        "func min<T: Ord>(a: T, b: T) -> T { if a < b { a } else { b } }\nm := min(3, 7)",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["m"], Type::Int);
+}
+
+#[test]
+fn generic_unbound_comparison_errors_with_hint() {
+    errors_contain(
+        "func min<T>(a: T, b: T) -> T { if a < b { a } else { b } }",
+        "needs a `Ord` bound for `<`",
+    );
+}
+
+#[test]
+fn generic_eq_bound_ok() {
+    let r = check_src("func same<T: Eq>(a: T, b: T) -> bool { return a == b }\ns := same(1, 1)");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["s"], Type::Bool);
+}
+
+#[test]
+fn generic_unbound_eq_errors_with_hint() {
+    errors_contain(
+        "func same<T>(a: T, b: T) -> bool { return a == b }",
+        "needs a `Eq` bound for `==`",
+    );
+}
+
+#[test]
+fn generic_multi_bound_ok() {
+    let r = check_src(
+        "func minmax<T: Num + Ord>(a: T, b: T) -> T { if a < b { a } else { b } }\nm := minmax(1.5, 2.5)",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["m"], Type::Float);
+}
+
+#[test]
+fn generic_call_site_bound_violation() {
+    errors_contain(
+        "func min<T: Ord>(a: T, b: T) -> T { if a < b { a } else { b } }\nmin(true, false)",
+        "does not satisfy bound `Ord`",
+    );
+}
+
+#[test]
+fn generic_mixed_int_float_still_rejects() {
+    errors_contain(
+        "func add<T: Num>(x: T, y: T) -> T { return x + y }\nadd(2.1, 3)",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn generic_distinct_params_reject_arith() {
+    errors_contain(
+        "func add<T: Num, U: Num>(x: T, y: U) -> T { return x + y }",
+        "distinct generic parameters",
+    );
+}
+
+#[test]
+fn generic_unary_neg_needs_num() {
+    errors_contain(
+        "func neg<T>(x: T) -> T { return -x }",
+        "needs a `Num` bound for `-`",
+    );
+}
+
+#[test]
+fn generic_unary_neg_with_num_ok() {
+    let r = check_src("func neg<T: Num>(x: T) -> T { return -x }\nn := neg(5)");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["n"], Type::Int);
+}
+
+#[test]
+fn generic_identity_still_works() {
+    let r = check_src("func id<T>(x: T) -> T { return x }\na := id(1)\nb := id(\"s\")");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Int);
+    assert_eq!(r.bindings["b"], Type::Str);
+}
+
 #[test]
 fn recursion_works() {
     let r = check_src("func fact(n: int) -> int { if n <= 1 { 1 } else { n * fact(n - 1) } }");
@@ -653,6 +761,7 @@ fn typeof_any_value() {
         "typeof".to_string(),
         FuncSig {
             generics: vec!["T".to_string()],
+            bounds: Vec::new(),
             params: vec![("v".to_string(), Type::Named("T".to_string()))],
             has_default: vec![],
             ret: Type::Str,
@@ -679,6 +788,7 @@ fn method_funcs() -> HashMap<String, FuncSig> {
         "dist".to_string(),
         FuncSig {
             generics: Vec::new(),
+            bounds: Vec::new(),
             params: vec![
                 ("p".to_string(), Type::Struct("Point".to_string())),
                 ("scale".to_string(), Type::Int),
@@ -748,6 +858,7 @@ fn method_call_namespaced_by_struct_type() {
         "shapes.dist".to_string(),
         FuncSig {
             generics: Vec::new(),
+            bounds: Vec::new(),
             params: vec![("p".to_string(), Type::Struct("shapes.Point".to_string()))],
             has_default: vec![],
             ret: Type::Int,
@@ -778,6 +889,7 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
         "str".to_string(),
         FuncSig {
             generics: vec!["T".to_string()],
+            bounds: Vec::new(),
             params: vec![("v".to_string(), t.clone())],
             has_default: vec![],
             ret: Type::Str,
@@ -787,6 +899,7 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
         "int".to_string(),
         FuncSig {
             generics: vec!["T".to_string()],
+            bounds: Vec::new(),
             params: vec![("v".to_string(), t.clone())],
             has_default: vec![],
             ret: Type::Option(Box::new(Type::Int)),
@@ -796,6 +909,7 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
         "float".to_string(),
         FuncSig {
             generics: vec!["T".to_string()],
+            bounds: Vec::new(),
             params: vec![("v".to_string(), t.clone())],
             has_default: vec![],
             ret: Type::Option(Box::new(Type::Float)),
@@ -867,6 +981,7 @@ fn typo_suggestion_variable() {
         "println".to_string(),
         FuncSig {
             generics: vec![],
+            bounds: Vec::new(),
             params: vec![("msg".to_string(), Type::Str)],
             has_default: vec![false],
             ret: Type::Unit,

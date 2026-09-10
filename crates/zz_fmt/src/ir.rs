@@ -333,7 +333,16 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         if i > 0 {
                             self.text(", ");
                         }
-                        self.text(g.name.clone());
+                        self.text(g.name.name.clone());
+                        if !g.bounds.is_empty() {
+                            self.text(": ");
+                            for (j, b) in g.bounds.iter().enumerate() {
+                                if j > 0 {
+                                    self.text(" + ");
+                                }
+                                self.text(b.name());
+                            }
+                        }
                     }
                     self.text(">");
                 }

@@ -1,6 +1,7 @@
 //! Parser statement tests.
 
 use zz_frontend::ast::{BinOp, Expr as E};
+use zz_frontend::parse;
 use zz_frontend::tests::common::parse_ok;
 
 #[test]
@@ -134,7 +135,8 @@ fn parses_generic_func() {
             generics, params, ..
         } => {
             assert_eq!(generics.len(), 1);
-            assert_eq!(generics[0].name, "T");
+            assert_eq!(generics[0].name.name, "T");
+            assert!(generics[0].bounds.is_empty());
             assert_eq!(
                 params[0].ty.as_ref().unwrap().kind,
                 zz_frontend::ast::TyKind::Named("T".into(), vec![])
@@ -142,6 +144,44 @@ fn parses_generic_func() {
         }
         other => panic!("unexpected: {other:?}"),
     }
+}
+
+#[test]
+fn parses_generic_func_with_bounds() {
+    let p = parse_ok("func min<T: Num + Ord>(a: T, b: T) -> T { return a }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func {
+            generics, params, ..
+        } => {
+            assert_eq!(generics.len(), 1);
+            assert_eq!(generics[0].name.name, "T");
+            assert_eq!(
+                generics[0].bounds,
+                vec![
+                    zz_frontend::ast::TraitBound::Num,
+                    zz_frontend::ast::TraitBound::Ord
+                ]
+            );
+            assert_eq!(
+                params[0].ty.as_ref().unwrap().kind,
+                zz_frontend::ast::TyKind::Named("T".into(), vec![])
+            );
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_generic_func_with_unknown_bound_errors() {
+    let p = parse("func f<T: Foo>(x: T) -> T { return x }");
+    assert!(!p.errors.is_empty());
+    assert!(
+        p.errors
+            .iter()
+            .any(|e| e.message.contains("unknown trait bound")),
+        "errors: {:?}",
+        p.errors
+    );
 }
 
 #[test]

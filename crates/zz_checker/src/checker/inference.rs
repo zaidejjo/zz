@@ -4,6 +4,7 @@ use crate::checker::Checker;
 use crate::type_::Type;
 use zz_frontend::ast::Ty;
 use zz_frontend::diag::error_at;
+use zz_frontend::span::Span;
 
 impl Checker {
     /// Merge element types into a single type: identical types collapse to
@@ -30,7 +31,64 @@ impl Checker {
 
     // --- generics ---------------------------------------------------------
 
-    pub(crate) fn instantiate(&mut self, sig: &crate::checker::FuncSig) -> (Vec<Type>, Type) {
+    /// Does the generic parameter currently in scope carry the given bound?
+    pub(crate) fn has_bound(&self, name: &str, bound: zz_frontend::ast::TraitBound) -> bool {
+        self.current_bounds
+            .get(name)
+            .is_some_and(|bs| bs.contains(&bound))
+    }
+
+    /// Does a concrete type satisfy a trait bound?
+    pub(crate) fn satisfies_bound(&self, ty: &Type, bound: zz_frontend::ast::TraitBound) -> bool {
+        use zz_frontend::ast::TraitBound as B;
+        match ty {
+            Type::Union(ms) => ms.iter().all(|m| self.satisfies_bound(m, bound)),
+            Type::Var(_) | Type::Named(_) | Type::Error => false,
+            Type::Func(..) => false,
+            Type::Unit => false,
+            _ => match bound {
+                B::Num => matches!(ty, Type::Int | Type::Float),
+                B::Ord => matches!(ty, Type::Int | Type::Float | Type::Str),
+                B::Eq => true,
+                B::Display => true,
+            },
+        }
+    }
+
+    /// Validate that every generic parameter with a bound was instantiated
+    /// with a concrete type satisfying that bound. Called at call sites after
+    /// argument unification. Unresolved generics (never pinned by the call)
+    /// are skipped — the body's operator checks already validated them.
+    pub(crate) fn validate_bounds(
+        &mut self,
+        sig: &crate::checker::FuncSig,
+        subs: &std::collections::HashMap<String, Type>,
+        span: Span,
+    ) {
+        for (gen, bounds) in &sig.bounds {
+            let Some(sub) = subs.get(gen) else { continue };
+            let rt = self.unifier.resolve(sub);
+            if matches!(rt, Type::Var(_)) {
+                continue;
+            }
+            for b in bounds {
+                if !self.satisfies_bound(&rt, *b) {
+                    self.errors.push(error_at(
+                        format!(
+                            "type `{rt}` does not satisfy bound `{}` for generic parameter `{gen}`",
+                            b.name()
+                        ),
+                        span,
+                    ));
+                }
+            }
+        }
+    }
+
+    pub(crate) fn instantiate(
+        &mut self,
+        sig: &crate::checker::FuncSig,
+    ) -> (Vec<Type>, Type, std::collections::HashMap<String, Type>) {
         let subs: std::collections::HashMap<String, Type> = sig
             .generics
             .iter()
@@ -38,7 +96,7 @@ impl Checker {
             .collect();
         let params = sig.params.iter().map(|(_, t)| subst(t, &subs)).collect();
         let ret = subst(&sig.ret, &subs);
-        (params, ret)
+        (params, ret, subs)
     }
 
     // --- type annotations -------------------------------------------------

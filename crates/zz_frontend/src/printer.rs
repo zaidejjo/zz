@@ -167,6 +167,11 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_generic_func_with_bounds() {
+        round_trips("func min<T: Num + Ord>(a: T, b: T) -> T {\n    return a\n}\n");
+    }
+
+    #[test]
     fn round_trip_match() {
         round_trips("match x {\n    .ok(v) => v\n    .err(e) => 0\n}\n");
     }

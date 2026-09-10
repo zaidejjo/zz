@@ -1,0 +1,6 @@
+// E2E: Unbound generic using an operator — must fail with a hint
+func add<T>(x: T, y: T) -> T {
+    x + y
+}
+
+println(add(1, 2))
