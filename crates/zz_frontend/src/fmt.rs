@@ -339,7 +339,7 @@ impl<'a> FmtCtx<'a> {
                 self.write_str(")");
             }
             TyKind::Func(params, ret) => {
-                self.write_str("\\(");
+                self.write_str("fn(");
                 for (i, p) in params.iter().enumerate() {
                     if i > 0 {
                         self.write_str(", ");

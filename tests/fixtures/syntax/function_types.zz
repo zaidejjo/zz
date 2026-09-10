@@ -1,0 +1,28 @@
+// E2E: Function type annotations — `fn(int) -> int` and `(int) -> int`
+
+// Function type in parameter declaration
+func apply(f: fn(int) -> int, x: int) -> int {
+    f(x)
+}
+
+// Function type in variable declaration
+transform: fn(int, int) -> int = |x: int, y: int| x + y
+
+// Call with fn type annotation
+result1 := apply(|x: int| x * 2, 5)
+println(result1)
+
+// Multi-param function type
+result2 := transform(3, 4)
+println(result2)
+
+// Shorthand syntax: (int) -> int
+adder: (int) -> int = |x: int| x + 10
+result3 := apply(adder, 5)
+println(result3)
+
+// Higher-order with map using fn type
+mapped := map([1, 2, 3], |x: int| x * 10)
+println(mapped)
+
+println("function_types_ok")

@@ -1,6 +1,6 @@
 //! Parser declaration/type tests.
 
-use zz_frontend::ast::Expr as E;
+use zz_frontend::ast::{Expr as E, TyKind};
 use zz_frontend::tests::common::parse_ok;
 
 #[test]
@@ -77,6 +77,181 @@ fn parses_assign() {
         zz_frontend::ast::Stmt::Assign { target, value, .. } => {
             assert!(matches!(target, E::Ident { name, .. } if name == "x"));
             assert!(matches!(value, E::Int { value: 5, .. }));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+// --- Function type tests ---
+
+#[test]
+fn parses_func_type_keyword() {
+    let p = parse_ok("f: fn(int) -> int = x");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { ty, .. } => {
+            let ty = ty.as_ref().expect("expected type annotation");
+            match &ty.kind {
+                TyKind::Func(params, ret) => {
+                    assert_eq!(params.len(), 1);
+                    assert!(matches!(params[0].kind, TyKind::Int));
+                    assert!(matches!(ret.kind, TyKind::Int));
+                }
+                other => panic!("expected Func, got {other:?}"),
+            }
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_func_type_multi_params() {
+    let p = parse_ok("f: fn(int, str) -> bool = x");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { ty, .. } => {
+            let ty = ty.as_ref().expect("expected type annotation");
+            match &ty.kind {
+                TyKind::Func(params, ret) => {
+                    assert_eq!(params.len(), 2);
+                    assert!(matches!(params[0].kind, TyKind::Int));
+                    assert!(matches!(params[1].kind, TyKind::Str));
+                    assert!(matches!(ret.kind, TyKind::Bool));
+                }
+                other => panic!("expected Func, got {other:?}"),
+            }
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_func_type_no_params() {
+    let p = parse_ok("f: fn() -> int = x");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { ty, .. } => {
+            let ty = ty.as_ref().expect("expected type annotation");
+            match &ty.kind {
+                TyKind::Func(params, ret) => {
+                    assert_eq!(params.len(), 0);
+                    assert!(matches!(ret.kind, TyKind::Int));
+                }
+                other => panic!("expected Func, got {other:?}"),
+            }
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_func_type_shorthand() {
+    let p = parse_ok("f: (int) -> int = x");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { ty, .. } => {
+            let ty = ty.as_ref().expect("expected type annotation");
+            match &ty.kind {
+                TyKind::Func(params, ret) => {
+                    assert_eq!(params.len(), 1);
+                    assert!(matches!(params[0].kind, TyKind::Int));
+                    assert!(matches!(ret.kind, TyKind::Int));
+                }
+                other => panic!("expected Func, got {other:?}"),
+            }
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_func_type_shorthand_multi() {
+    let p = parse_ok("f: (int, str) -> bool = x");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { ty, .. } => {
+            let ty = ty.as_ref().expect("expected type annotation");
+            match &ty.kind {
+                TyKind::Func(params, ret) => {
+                    assert_eq!(params.len(), 2);
+                    assert!(matches!(params[0].kind, TyKind::Int));
+                    assert!(matches!(params[1].kind, TyKind::Str));
+                    assert!(matches!(ret.kind, TyKind::Bool));
+                }
+                other => panic!("expected Func, got {other:?}"),
+            }
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_func_type_returning_func() {
+    let p = parse_ok("f: fn(int) -> fn(int) -> int = x");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { ty, .. } => {
+            let ty = ty.as_ref().expect("expected type annotation");
+            match &ty.kind {
+                TyKind::Func(params, ret) => {
+                    assert_eq!(params.len(), 1);
+                    assert!(matches!(params[0].kind, TyKind::Int));
+                    match &ret.kind {
+                        TyKind::Func(inner_params, inner_ret) => {
+                            assert_eq!(inner_params.len(), 1);
+                            assert!(matches!(inner_params[0].kind, TyKind::Int));
+                            assert!(matches!(inner_ret.kind, TyKind::Int));
+                        }
+                        other => panic!("expected inner Func, got {other:?}"),
+                    }
+                }
+                other => panic!("expected Func, got {other:?}"),
+            }
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_func_type_in_func_param() {
+    let p = parse_ok("func apply(f: fn(int) -> int, x: int) -> int { f(x) }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { params, ret, .. } => {
+            assert_eq!(params.len(), 2);
+            match &params[0].ty.as_ref().unwrap().kind {
+                TyKind::Func(ps, r) => {
+                    assert_eq!(ps.len(), 1);
+                    assert!(matches!(ps[0].kind, TyKind::Int));
+                    assert!(matches!(r.kind, TyKind::Int));
+                }
+                other => panic!("expected Func param type, got {other:?}"),
+            }
+            assert!(matches!(ret.as_ref().unwrap().kind, TyKind::Int));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn paren_type_still_parses_as_tuple() {
+    let p = parse_ok("x: (int, str) = y");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { ty, .. } => {
+            let ty = ty.as_ref().expect("expected type annotation");
+            match &ty.kind {
+                TyKind::Tuple(ts) => {
+                    assert_eq!(ts.len(), 2);
+                    assert!(matches!(ts[0].kind, TyKind::Int));
+                    assert!(matches!(ts[1].kind, TyKind::Str));
+                }
+                other => panic!("expected Tuple, got {other:?}"),
+            }
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn paren_type_still_parses_as_grouped() {
+    let p = parse_ok("x: (int) = y");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { ty, .. } => {
+            let ty = ty.as_ref().expect("expected type annotation");
+            assert!(matches!(ty.kind, TyKind::Int));
         }
         other => panic!("unexpected: {other:?}"),
     }
