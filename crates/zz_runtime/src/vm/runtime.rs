@@ -488,6 +488,149 @@ impl Vm {
                     let v = eval_binary(*op, l, r, *span)?;
                     self.stack.push(v);
                 }
+                Op::IntAdd(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            #[cfg(not(debug_assertions))]
+                            {
+                                self.stack.push(Value::Int(a.wrapping_add(*b)));
+                            }
+                            #[cfg(debug_assertions)]
+                            {
+                                let v = a.checked_add(*b).ok_or_else(|| {
+                                    EvalError::new("integer overflow in addition", *span)
+                                })?;
+                                self.stack.push(Value::Int(v));
+                            }
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Add, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntSub(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            #[cfg(not(debug_assertions))]
+                            {
+                                self.stack.push(Value::Int(a.wrapping_sub(*b)));
+                            }
+                            #[cfg(debug_assertions)]
+                            {
+                                let v = a.checked_sub(*b).ok_or_else(|| {
+                                    EvalError::new("integer overflow in subtraction", *span)
+                                })?;
+                                self.stack.push(Value::Int(v));
+                            }
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Sub, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntMul(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            #[cfg(not(debug_assertions))]
+                            {
+                                self.stack.push(Value::Int(a.wrapping_mul(*b)));
+                            }
+                            #[cfg(debug_assertions)]
+                            {
+                                let v = a.checked_mul(*b).ok_or_else(|| {
+                                    EvalError::new("integer overflow in multiplication", *span)
+                                })?;
+                                self.stack.push(Value::Int(v));
+                            }
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Mul, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntDiv(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(_), Value::Int(0)) => {
+                            return Err(EvalError::new("division by zero", *span));
+                        }
+                        (Value::Int(a), Value::Int(b)) => {
+                            #[cfg(not(debug_assertions))]
+                            {
+                                self.stack.push(Value::Int(a.wrapping_div(*b)));
+                            }
+                            #[cfg(debug_assertions)]
+                            {
+                                let v = a.checked_div(*b).ok_or_else(|| {
+                                    EvalError::new("integer overflow in division", *span)
+                                })?;
+                                self.stack.push(Value::Int(v));
+                            }
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Div, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntRem(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(_), Value::Int(0)) => {
+                            return Err(EvalError::new("modulo by zero", *span));
+                        }
+                        (Value::Int(a), Value::Int(b)) => {
+                            #[cfg(not(debug_assertions))]
+                            {
+                                self.stack.push(Value::Int(a.wrapping_rem(*b)));
+                            }
+                            #[cfg(debug_assertions)]
+                            {
+                                let v = a.checked_rem(*b).ok_or_else(|| {
+                                    EvalError::new("integer overflow in modulo", *span)
+                                })?;
+                                self.stack.push(Value::Int(v));
+                            }
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Rem, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntNeg(span) => {
+                    let v = self.stack.pop().unwrap();
+                    match &v {
+                        Value::Int(a) => {
+                            #[cfg(not(debug_assertions))]
+                            {
+                                self.stack.push(Value::Int(a.wrapping_neg()));
+                            }
+                            #[cfg(debug_assertions)]
+                            {
+                                let r = a.checked_neg().ok_or_else(|| {
+                                    EvalError::new("integer overflow in negation", *span)
+                                })?;
+                                self.stack.push(Value::Int(r));
+                            }
+                        }
+                        _ => {
+                            let v = eval_unary(zz_frontend::ast::UnOp::Neg, v, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
                 Op::UnOp(op, span) => {
                     let v = self.stack.pop().unwrap();
                     let v = eval_unary(*op, v, *span)?;
@@ -847,10 +990,60 @@ impl Vm {
                     let v = object_field(&ov, name, *span)?;
                     self.stack.push(v);
                 }
+                Op::GetFieldIdx(idx, span) => {
+                    let ov = self.stack.pop().unwrap();
+                    match ov {
+                        Value::Object(o) => {
+                            if (*idx as usize) < o.fields.len() {
+                                self.stack.push(o.fields[*idx as usize].1.clone());
+                            } else {
+                                return Err(EvalError::new(
+                                    format!(
+                                        "struct `{}` field index {} out of bounds",
+                                        o.name, idx
+                                    ),
+                                    *span,
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(EvalError::new(
+                                "expected struct for indexed field access".to_string(),
+                                *span,
+                            ));
+                        }
+                    }
+                }
                 Op::SetField(name, span) => {
                     let mut ov = self.stack.pop().unwrap();
                     let value = self.stack.pop().unwrap();
                     set_object_field(&mut ov, name, value, *span)?;
+                    self.stack.push(ov);
+                }
+                Op::SetFieldIdx(idx, span) => {
+                    let mut ov = self.stack.pop().unwrap();
+                    let value = self.stack.pop().unwrap();
+                    match &mut ov {
+                        Value::Object(o) => {
+                            if (*idx as usize) < o.fields.len() {
+                                o.fields[*idx as usize].1 = value;
+                            } else {
+                                return Err(EvalError::new(
+                                    format!(
+                                        "struct `{}` field index {} out of bounds",
+                                        o.name, idx
+                                    ),
+                                    *span,
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(EvalError::new(
+                                "expected struct for indexed field access".to_string(),
+                                *span,
+                            ));
+                        }
+                    }
                     self.stack.push(ov);
                 }
                 Op::MakeClosure { params, chunk } => {
@@ -1150,6 +1343,23 @@ impl Vm {
                 Op::DeferRecord => {
                     let closure = self.stack.pop().unwrap();
                     self.defer_stack.push(closure);
+                }
+                Op::CallNative { name, argc, span } => {
+                    let argc = *argc;
+                    let span = *span;
+                    let mut args = Vec::with_capacity(argc as usize);
+                    for _ in 0..argc {
+                        args.push(self.stack.pop().unwrap());
+                    }
+                    args.reverse();
+                    let entry = interp
+                        .natives
+                        .get(name)
+                        .ok_or_else(|| EvalError::new(format!("unknown native `{name}`"), span))?;
+                    self.frames.last_mut().unwrap().ip = ip;
+                    let result = (entry.f)(interp, &mut args, span)?;
+                    self.stack.push(result);
+                    re_cache!();
                 }
             }
         }

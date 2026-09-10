@@ -13,7 +13,9 @@ use zz_checker::{check_program, FuncSig, StructSig, Type};
 use zz_frontend::diag::{error_at, render_to_string, Files, RawDiag};
 use zz_frontend::parse;
 use zz_runtime::{EvalError, Interp, Value};
-use zz_stdlib::{register_module_namespace, stdlib_funcs, stdlib_natives, STDLIB_MODULES};
+use zz_stdlib::{
+    register_module_namespace, stdlib_funcs, stdlib_natives, zz_stdlib_programs, STDLIB_MODULES,
+};
 
 /// Result of evaluating one source snippet.
 pub struct EvalOutput {
@@ -42,10 +44,29 @@ impl Session {
         let name = name.into();
         let mut files = Files::new();
         let file_id = files.add(name.clone(), String::new());
+        let mut interp = Interp::with_natives(stdlib_natives());
+
+        // Run compiled pure-ZZ stdlib programs (vec.map, math.sum, etc.).
+        // These populate the environment with functions written in ZZ that
+        // extend the native stdlib. Must happen before user code.
+        let mut funcs = stdlib_funcs();
+        for zz_prog in zz_stdlib_programs() {
+            // Seed the type checker with pure-ZZ function signatures so that
+            // calls like `vec.map(...)` type-check in user snippets.
+            funcs.extend(zz_prog.funcs.clone());
+            if let Err(e) = interp.run_typed(
+                &zz_prog.program,
+                std::sync::Arc::new(zz_prog.types.clone()),
+                zz_prog.structs.clone(),
+            ) {
+                panic!("zz: pure-ZZ stdlib error: {e:?}");
+            }
+        }
+
         Session {
-            interp: Interp::with_natives(stdlib_natives()),
+            interp,
             bindings: HashMap::new(),
-            funcs: stdlib_funcs(),
+            funcs,
             structs: HashMap::new(),
             files,
             file_id,
@@ -682,5 +703,47 @@ mod tests {
         let out = s.eval("import std.math\nmath.abs(-7)");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "7");
+    }
+
+    // --- Phase 3: pure-ZZ stdlib tests ------------------------------------
+
+    #[test]
+    fn pure_zz_math_sum_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.math\nmath.sum([1, 2, 3, 4])");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "10");
+    }
+
+    #[test]
+    fn pure_zz_math_product_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.math\nmath.product([2, 3, 4])");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "24");
+    }
+
+    #[test]
+    fn pure_zz_math_count_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.math\nmath.count([1, 2, 3, 2, 2], 2)");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "3");
+    }
+
+    #[test]
+    fn pure_zz_str_repeat_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.str\nstr.repeat(\"ab\", 3)");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "ababab");
+    }
+
+    #[test]
+    fn pure_zz_str_count_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.str\nstr.count(\"aabaa\", \"aa\")");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "2");
     }
 }

@@ -1,0 +1,18 @@
+// Pure-ZZ string helpers — compiled once, shared by VM and AOT.
+
+func str.repeat(s: str, n: int) -> str {
+    result := ""
+    i := 0
+    while i < n {
+        result = result + s
+        i = i + 1
+    }
+    result
+}
+
+func str.count(s: str, sub: str) -> int {
+    parts := str.split(s, sub)
+    // count = number of parts minus 1
+    n := vec.len(parts) - 1
+    n
+}

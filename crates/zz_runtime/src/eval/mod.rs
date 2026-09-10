@@ -55,8 +55,40 @@ impl Interp {
         }
     }
 
+    /// Compile and execute a raw AST program (no type information).
     pub fn run(&mut self, program: &Program) -> Result<Value, EvalError> {
         let chunk = Arc::new(crate::vm::Compiler::compile_program(program));
+        let mut vm = crate::vm::Vm::new();
+        match vm.run_chunk(&chunk, self)? {
+            Flow::Value(v) => Ok(v),
+            Flow::Return(_) => Err(EvalError::new(
+                "`return` outside of a function",
+                Span::new(0, 0),
+            )),
+            Flow::Break(span) => Err(EvalError::new("`break` outside of a loop", span)),
+            Flow::Continue(span) => Err(EvalError::new("`continue` outside of a loop", span)),
+        }
+    }
+
+    /// Compile and execute a typed program (HIR).
+    ///
+    /// Uses the same bytecode compiler as [`run`] but threads the resolved
+    /// type map and struct definitions from the HIR into the compiler. This
+    /// is the unified pipeline entry point consumed by `zz run`.
+    pub fn run_typed(
+        &mut self,
+        program: &Program,
+        types: Arc<HashMap<Span, zz_checker::Type>>,
+        structs: HashMap<String, zz_checker::StructSig>,
+    ) -> Result<Value, EvalError> {
+        let native_names: Arc<std::collections::HashSet<String>> =
+            Arc::new(self.natives.keys().cloned().collect());
+        let chunk = Arc::new(crate::vm::Compiler::compile_program_typed(
+            program,
+            types,
+            structs,
+            native_names,
+        ));
         let mut vm = crate::vm::Vm::new();
         match vm.run_chunk(&chunk, self)? {
             Flow::Value(v) => Ok(v),

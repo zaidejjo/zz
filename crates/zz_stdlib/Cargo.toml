@@ -5,11 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+zz_frontend = { path = "../zz_frontend" }
 zz_checker = { path = "../zz_checker" }
+zz_hir = { path = "../zz_hir" }
 zz_runtime = { path = "../zz_runtime" }
 base64 = "0.22"
 urlencoding = "2"
 reqwest = { version = "0.12", features = ["blocking"] }
 
 [dev-dependencies]
-zz_frontend = { path = "../zz_frontend" }

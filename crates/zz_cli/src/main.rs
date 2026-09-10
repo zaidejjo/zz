@@ -245,11 +245,54 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
             .to_string());
     }
 
+    // Build the typed program (HIR) to get the resolved type map.
+    // The merged program is only used for type checking; execution still
+    // runs each module's original program so top-level side effects
+    // (imports, struct registrations) happen in dependency order.
+    let merged_stmts: Vec<_> = loaded
+        .programs
+        .iter()
+        .flat_map(|p| p.stmts.iter().cloned())
+        .collect();
+    let merged_span = loaded
+        .programs
+        .last()
+        .map(|p| p.span)
+        .unwrap_or(Span::new(0, 0));
+    let merged = zz_frontend::ast::Program {
+        stmts: merged_stmts,
+        span: merged_span,
+    };
+    let typed = zz_hir::build_program(
+        &merged,
+        std::collections::HashMap::new(),
+        loaded.funcs.clone(),
+        loaded.structs.clone(),
+    );
+    let types = std::sync::Arc::new(typed.program.types);
+    let structs = typed.program.structs;
+
     let mut interp = Interp::with_natives(loaded.natives.clone());
     interp.args = script_args.to_vec();
+
+    // Run compiled pure-ZZ stdlib programs. These populate the environment
+    // with functions written in ZZ (e.g. vec.map, math.sum) that extend
+    // the native stdlib. Must happen before user code so the functions are
+    // available when user modules reference them.
+    for zz_prog in zz_stdlib::zz_stdlib_programs() {
+        if let Err(e) = interp.run_typed(
+            &zz_prog.program,
+            std::sync::Arc::new(zz_prog.types.clone()),
+            zz_prog.structs.clone(),
+        ) {
+            eprintln!("zz: pure-ZZ stdlib error: {e:?}");
+            return Err("stdlib initialization failed".to_string());
+        }
+    }
+
     let mut last = Value::Unit;
     for (i, program) in loaded.programs.iter().enumerate() {
-        match interp.run(program) {
+        match interp.run_typed(program, types.clone(), structs.clone()) {
             Ok(v) => last = v,
             Err(e) => {
                 let (name, source) = loaded

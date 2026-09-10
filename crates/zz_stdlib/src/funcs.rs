@@ -204,6 +204,25 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("s", Type::Str)], Type::Str),
     );
 
+    // Pure-ZZ stdlib: string helpers (compiled from zz/str.zz)
+    m.insert(
+        "std.str.repeat".into(),
+        sig(vec![("s", Type::Str), ("n", Type::Int)], Type::Str),
+    );
+    m.insert(
+        "std.str.count".into(),
+        sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Int),
+    );
+    // Method-dispatch aliases for pure-ZZ string helpers
+    m.insert(
+        "str.repeat".into(),
+        sig(vec![("s", Type::Str), ("n", Type::Int)], Type::Str),
+    );
+    m.insert(
+        "str.count".into(),
+        sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Int),
+    );
+
     // std.vec — generic over element type T.
     let t = Type::Named("T".to_string());
     m.insert(
@@ -1014,6 +1033,45 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "std.math.rand_range".into(),
         sig_t(vec![("min", t.clone()), ("max", t.clone())], Type::Float),
+    );
+
+    // Pure-ZZ stdlib: math helpers (compiled from zz/math.zz)
+    m.insert(
+        "std.math.sum".into(),
+        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+    );
+    m.insert(
+        "std.math.product".into(),
+        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+    );
+    m.insert(
+        "std.math.count".into(),
+        sig(
+            vec![
+                ("arr", Type::Array(Box::new(Type::Int))),
+                ("target", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    // Method-dispatch aliases for pure-ZZ math helpers
+    m.insert(
+        "math.sum".into(),
+        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+    );
+    m.insert(
+        "math.product".into(),
+        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+    );
+    m.insert(
+        "math.count".into(),
+        sig(
+            vec![
+                ("arr", Type::Array(Box::new(Type::Int))),
+                ("target", Type::Int),
+            ],
+            Type::Int,
+        ),
     );
 
     // std.time

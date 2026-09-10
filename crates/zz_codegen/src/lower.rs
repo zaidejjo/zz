@@ -3434,6 +3434,11 @@ impl Lowerer {
                 arg_items.push(boxed);
             }
         }
+        // Save and clear void_context while emitting arguments — argument
+        // return values are always consumed, so the optimization that swaps
+        // vec.push → vec.append (in-place mutation) must not apply here.
+        let saved_void = *self.void_context.borrow();
+        *self.void_context.borrow_mut() = false;
         for a in ordered_args {
             let emitted = self.emit_expr(a, names, out);
             // Auto-box if this argument is a scalar variable or struct field
@@ -3513,6 +3518,8 @@ impl Lowerer {
             };
             arg_items.push(boxed);
         }
+        // Restore void_context after argument emission.
+        *self.void_context.borrow_mut() = saved_void;
 
         // Only lower natives that survived DCE reachability AND have a C
         // runtime implementation.
