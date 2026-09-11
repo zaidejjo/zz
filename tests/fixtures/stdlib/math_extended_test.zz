@@ -2,9 +2,9 @@
 import std.math
 
 // ── Constants ──
-println("PI: {math.PI()}")
-println("E: {math.E()}")
-println("TAU: {math.TAU()}")
+println("PI: {math.PI}")
+println("E: {math.E}")
+println("TAU: {math.TAU}")
 
 // ── Rounding ──
 println("round(3.7): {math.round(3.7)}")
@@ -18,9 +18,9 @@ println("signum(0): {math.signum(0)}")
 println("signum(7): {math.signum(7)}")
 println("hypot(3, 4): {math.hypot(3, 4)}")
 println("is_nan(1.0): {math.is_nan(1.0)}")
-println("is_nan(NaN): {math.is_nan(math.NAN())}")
+println("is_nan(NaN): {math.is_nan(math.NAN)}")
 println("is_inf(1.0): {math.is_inf(1.0)}")
-println("is_inf(INF): {math.is_inf(math.INF())}")
+println("is_inf(INF): {math.is_inf(math.INF)}")
 
 // ── Number theory ──
 println("root(8, 3): {math.root(8, 3)}")
@@ -54,11 +54,11 @@ println("sin_deg(90): {math.sin_deg(90)}")
 println("cos_deg(90): {math.cos_deg(90)}")
 println("tan_deg(45): {math.tan_deg(45)}")
 println("to_radians(180): {math.to_radians(180)}")
-println("to_degrees(pi): {math.to_degrees(math.PI())}")
+println("to_degrees(pi): {math.to_degrees(math.PI)}")
 
 // ── Logarithms & exponents ──
 println("log(1): {math.log(1)}")
-println("log(E): {math.log(math.E())}")
+println("log(E): {math.log(math.E)}")
 println("log10(100): {math.log10(100)}")
 println("exp(0): {math.exp(0)}")
 println("exp(1): {math.exp(1)}")

@@ -1,0 +1,9 @@
+// E2E: symbol alias from stdlib
+import std.math(PI as pi, abs as absolute)
+
+pi_val := pi
+ab := absolute(-10)
+
+println(pi_val)
+println(ab)
+println("symbol_alias_ok")

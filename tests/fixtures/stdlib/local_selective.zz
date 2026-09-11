@@ -1,0 +1,9 @@
+// E2E: selective import from local file
+import helpers.math_utils(double, triple)
+
+d := double(5)
+t := triple(5)
+
+println(d)
+println(t)
+println("local_selective_ok")

@@ -58,6 +58,19 @@ pub struct Program {
     pub span: Span,
 }
 
+/// A single item in a selective import list: `PI`, `PI as pi`, or `*`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportItem {
+    /// Wildcard: `import module(*)`
+    Wildcard { span: Span },
+    /// Named import: `name` or `name as alias`
+    Named {
+        name: String,
+        alias: Option<String>,
+        span: Span,
+    },
+}
+
 /// Statement AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
@@ -74,10 +87,13 @@ pub enum Stmt {
         is_const: bool,
     },
     /// `import std.io` — a dotted path of identifiers, optionally aliased
-    /// (`import std.io as console`).
+    /// (`import std.io as console`), with optional selective items
+    /// (`import std.math(PI, sin)`).
     Import {
         path: Vec<String>,
         alias: Option<String>,
+        /// Empty = full module import. Non-empty = selective/wildcard import.
+        items: Vec<ImportItem>,
         span: Span,
         pub_: bool,
     },

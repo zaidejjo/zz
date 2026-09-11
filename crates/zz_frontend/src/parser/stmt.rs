@@ -1,6 +1,6 @@
 //! Statement parsing.
 
-use crate::ast::{Block, Ident, Param, Pattern, Stmt, TraitBound, TypeParam};
+use crate::ast::{Block, Ident, ImportItem, Param, Pattern, Stmt, TraitBound, TypeParam};
 use crate::diag::error_at;
 use crate::span::Span;
 use crate::token::TokenKind;
@@ -351,10 +351,39 @@ impl Parser {
         } else {
             None
         };
+        // Parse optional selective import list: `import module(A, B, *)`
+        let items = if self.eat(TokenKind::LParen) {
+            let mut items = Vec::new();
+            while self.peek_kind() != TokenKind::RParen {
+                if self.peek_kind() == TokenKind::Star {
+                    let tok = self.advance();
+                    items.push(ImportItem::Wildcard { span: tok.span });
+                } else if let Some(id) = self.expect_ident() {
+                    let item_alias = if self.eat(TokenKind::As) {
+                        self.expect_ident().map(|id| id.name)
+                    } else {
+                        None
+                    };
+                    items.push(ImportItem::Named {
+                        name: id.name,
+                        alias: item_alias,
+                        span: id.span,
+                    });
+                }
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.eat(TokenKind::RParen);
+            items
+        } else {
+            Vec::new()
+        };
         let span = import_tok.span.join(self.previous().span);
         Stmt::Import {
             path,
             alias,
+            items,
             span,
             pub_,
         }
@@ -651,6 +680,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
         Stmt::Import {
             path,
             alias,
+            items,
             span: mut sp,
             pub_,
         } => {
@@ -658,6 +688,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
             Stmt::Import {
                 path,
                 alias,
+                items,
                 span: sp,
                 pub_,
             }

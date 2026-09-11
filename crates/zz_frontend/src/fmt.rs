@@ -173,7 +173,11 @@ impl<'a> FmtCtx<'a> {
                 self.fmt_expr(value, source);
             }
             Stmt::Import {
-                path, alias, pub_, ..
+                path,
+                alias,
+                items,
+                pub_,
+                ..
             } => {
                 self.write_indent();
                 if *pub_ {
@@ -184,6 +188,27 @@ impl<'a> FmtCtx<'a> {
                 if let Some(a) = alias {
                     self.write_str(" as ");
                     self.write_str(a);
+                }
+                if !items.is_empty() {
+                    self.write_str("(");
+                    for (i, item) in items.iter().enumerate() {
+                        if i > 0 {
+                            self.write_str(", ");
+                        }
+                        match item {
+                            crate::ast::stmt::ImportItem::Wildcard { .. } => {
+                                self.write_str("*");
+                            }
+                            crate::ast::stmt::ImportItem::Named { name, alias, .. } => {
+                                self.write_str(name);
+                                if let Some(a) = alias {
+                                    self.write_str(" as ");
+                                    self.write_str(a);
+                                }
+                            }
+                        }
+                    }
+                    self.write_str(")");
                 }
             }
             Stmt::Return { value, .. } => {

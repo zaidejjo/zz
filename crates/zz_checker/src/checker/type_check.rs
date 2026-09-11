@@ -76,15 +76,40 @@ impl Checker {
             Stmt::Import {
                 path,
                 alias,
+                items,
                 span,
                 pub_: _,
             } => {
-                let ns = alias
-                    .as_ref()
-                    .cloned()
-                    .or_else(|| path.last().cloned())
-                    .unwrap_or_default();
-                self.imports.push((ns, *span));
+                if items.is_empty() {
+                    // Full module import: track namespace for unused-import warnings.
+                    let ns = alias
+                        .as_ref()
+                        .cloned()
+                        .or_else(|| path.last().cloned())
+                        .unwrap_or_default();
+                    self.imports.push((ns, *span));
+                } else {
+                    // Selective/wildcard import: track each imported name.
+                    for item in items {
+                        let name = match item {
+                            zz_frontend::ast::ImportItem::Wildcard { .. } => {
+                                // Wildcard: track the module namespace.
+                                let ns = alias
+                                    .as_ref()
+                                    .cloned()
+                                    .or_else(|| path.last().cloned())
+                                    .unwrap_or_default();
+                                ns
+                            }
+                            zz_frontend::ast::ImportItem::Named {
+                                name,
+                                alias: item_alias,
+                                ..
+                            } => item_alias.clone().unwrap_or_else(|| name.clone()),
+                        };
+                        self.imports.push((name, *span));
+                    }
+                }
                 Type::Unit
             }
             Stmt::Func { .. } => {

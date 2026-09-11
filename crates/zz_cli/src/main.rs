@@ -275,6 +275,31 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
     let mut interp = Interp::with_natives(loaded.natives.clone());
     interp.args = script_args.to_vec();
 
+    // Inject math constants as static float values in the runtime env.
+    // This avoids the zero-arg native function indirection — `PI` resolves
+    // directly to `Value::Float(3.14159…)` without a function call.
+    // Three forms are injected so all reference styles work:
+    //   - `std.math.PI`  — fully qualified
+    //   - `math.PI`      — module namespace (import std.math)
+    //   - `PI`           — bare (import std.math(PI))
+    // The checker gates which names are actually accessible per-module,
+    // so injecting all bare forms here is safe.
+    for (key, val) in zz_stdlib::stdlib_consts() {
+        interp.env.borrow_mut().define(&key, Value::Float(val));
+        if let Some(rest) = key.strip_prefix("std.") {
+            interp.env.borrow_mut().define(rest, Value::Float(val));
+        }
+        // Bare name: `std.math.PI` → `PI`
+        if let Some(bare) = key.rsplit('.').next() {
+            interp.env.borrow_mut().define(bare, Value::Float(val));
+        }
+    }
+    // Also inject any aliased constants from selective imports
+    // (e.g. `import std.math(PI as pi)` → inject `pi`).
+    for (name, val) in &loaded.consts {
+        interp.env.borrow_mut().define(name, Value::Float(*val));
+    }
+
     // Run compiled pure-ZZ stdlib programs. These populate the environment
     // with functions written in ZZ (e.g. vec.map, math.sum) that extend
     // the native stdlib. Must happen before user code so the functions are

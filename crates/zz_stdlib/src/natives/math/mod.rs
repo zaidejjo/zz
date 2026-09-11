@@ -22,48 +22,6 @@ fn to_float(v: &Value) -> Option<f64> {
     }
 }
 
-// ── Constants (zero-arg functions) ──────────────────────────────────────────
-
-pub(crate) fn math_pi(
-    _interp: &mut Interp,
-    _args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    Ok(Value::Float(std::f64::consts::PI))
-}
-
-pub(crate) fn math_e(
-    _interp: &mut Interp,
-    _args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    Ok(Value::Float(std::f64::consts::E))
-}
-
-pub(crate) fn math_tau(
-    _interp: &mut Interp,
-    _args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    Ok(Value::Float(std::f64::consts::TAU))
-}
-
-pub(crate) fn math_inf(
-    _interp: &mut Interp,
-    _args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    Ok(Value::Float(f64::INFINITY))
-}
-
-pub(crate) fn math_nan(
-    _interp: &mut Interp,
-    _args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    Ok(Value::Float(f64::NAN))
-}
-
 // ── Utilities & Rounding ────────────────────────────────────────────────────
 
 pub(crate) fn math_abs(

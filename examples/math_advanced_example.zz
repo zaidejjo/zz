@@ -3,11 +3,11 @@ import std.math
 
 // ── Constants ──
 println("=== Constants ===")
-println("PI  = {math.PI()}")
-println("E   = {math.E()}")
-println("TAU = {math.TAU()}")
-println("INF = {math.INF()}")
-println("NAN is nan: {math.is_nan(math.NAN())}")
+println("PI  = {math.PI}")
+println("E   = {math.E}")
+println("TAU = {math.TAU}")
+println("INF = {math.INF}")
+println("NAN is nan: {math.is_nan(math.NAN)}")
 
 // ── Rounding & Clamping ──
 println("")
@@ -38,15 +38,15 @@ match math.isqrt(144) {
 // ── Trigonometry ──
 println("")
 println("=== Trigonometry ===")
-println("sin(pi/2) = {math.sin(math.PI() / 2)}")
+println("sin(pi/2) = {math.sin(math.PI / 2)}")
 println("cos(0)    = {math.cos(0)}")
 println("sin_deg(90) = {math.sin_deg(90)}")
-println("to_degrees(pi) = {math.to_degrees(math.PI())}")
+println("to_degrees(pi) = {math.to_degrees(math.PI)}")
 
 // ── Logarithms & Exponents ──
 println("")
 println("=== Logarithms & Exponents ===")
-println("ln(e)     = {math.log(math.E())}")
+println("ln(e)     = {math.log(math.E)}")
 println("log10(1k) = {math.log10(1000)}")
 println("e^0       = {math.exp(0)}")
 println("e^1       = {math.exp(1)}")
