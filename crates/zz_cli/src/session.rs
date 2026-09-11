@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use zz_checker::{check_program, FuncSig, StructSig, Type};
+use zz_checker::{check_program_with_consts, FuncSig, StructSig, Type};
 use zz_frontend::diag::{error_at, render_to_string, Files, RawDiag};
 use zz_frontend::parse;
 use zz_runtime::{EvalError, Interp, Value};
@@ -29,6 +29,9 @@ pub struct Session {
     pub interp: Interp,
     /// Types of top-level bindings from previous snippets (checker seed).
     bindings: HashMap<String, Type>,
+    /// Declaration spans of top-level `const` bindings from previous
+    /// snippets (checker seed) — keeps immutable names immutable in the REPL.
+    consts: HashMap<String, zz_frontend::span::Span>,
     /// Signatures of functions from previous snippets (checker seed).
     funcs: HashMap<String, FuncSig>,
     /// Struct definitions from previous snippets (checker seed).
@@ -66,6 +69,7 @@ impl Session {
         Session {
             interp,
             bindings: HashMap::new(),
+            consts: HashMap::new(),
             funcs,
             structs: HashMap::new(),
             files,
@@ -155,11 +159,12 @@ impl Session {
             }
         }
 
-        let checked = check_program(
+        let checked = check_program_with_consts(
             &parsed.program,
             self.bindings.clone(),
             self.funcs.clone(),
             self.structs.clone(),
+            self.consts.clone(),
         );
         let has_errors = checked
             .errors
@@ -178,6 +183,16 @@ impl Session {
                 self.last_had_errors = false;
                 // Seed the checker with this snippet's new top-level types.
                 self.bindings.extend(checked.bindings);
+                // Const spans from this snippet won't be valid in the next
+                // REPL snippet, so replace them with an out-of-bounds sentinel.
+                // The renderer treats u32::MAX spans as cross-snippet references
+                // and emits them as notes instead of source labels.
+                self.consts.extend(
+                    checked
+                        .const_bindings
+                        .into_keys()
+                        .map(|k| (k, zz_frontend::span::Span::new(u32::MAX, u32::MAX))),
+                );
                 self.funcs.extend(checked.funcs);
                 self.structs.extend(checked.structs);
                 EvalOutput {

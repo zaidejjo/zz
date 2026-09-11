@@ -147,16 +147,24 @@ impl<'a> FmtCtx<'a> {
                 name,
                 value,
                 pub_,
+                is_const,
                 ..
             } => {
                 self.write_indent();
                 if *pub_ {
                     self.write_str("pub ");
                 }
+                if *is_const {
+                    self.write_str("const ");
+                }
                 if let Some(ty) = ty {
                     self.write_str(&name.name);
                     self.write_str(": ");
                     self.fmt_ty(ty, source);
+                    self.write_str(" = ");
+                } else if *is_const {
+                    // `const x = expr` uses `=` even without a type annotation.
+                    self.write_str(&name.name);
                     self.write_str(" = ");
                 } else {
                     self.write_str(&name.name);

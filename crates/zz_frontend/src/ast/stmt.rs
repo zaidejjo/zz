@@ -62,13 +62,16 @@ pub struct Program {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     /// A variable declaration. `ty == None` is the short form (`x := 10`);
-    /// `ty == Some(t)` is the explicit form (`x: int = 10`).
+    /// `ty == Some(t)` is the explicit form (`x: int = 10`). `is_const`
+    /// marks `const x = 10` / `const x: int = 10` — immutable bindings that
+    /// cannot be reassigned.
     Decl {
         ty: Option<Ty>,
         name: Ident,
         value: Expr,
         span: Span,
         pub_: bool,
+        is_const: bool,
     },
     /// `import std.io` — a dotted path of identifiers, optionally aliased
     /// (`import std.io as console`).

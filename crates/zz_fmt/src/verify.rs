@@ -85,9 +85,16 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
             out.push(']');
         }
         Stmt::Decl {
-            ty, name, value, ..
+            ty,
+            name,
+            value,
+            is_const,
+            ..
         } => {
             out.push_str("Decl[");
+            if *is_const {
+                out.push_str("const ");
+            }
             out.push_str(&name.name);
             if let Some(t) = ty {
                 out.push(':');

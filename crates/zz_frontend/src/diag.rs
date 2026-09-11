@@ -82,6 +82,14 @@ impl FixIt {
     }
 }
 
+/// A secondary source label: a second span with its own message, rendered
+/// above the primary span (e.g. "variable defined as immutable here").
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SecondaryLabel {
+    pub span: Span,
+    pub message: String,
+}
+
 /// A frontend diagnostic, decoupled from any file store.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawDiag {
@@ -90,6 +98,8 @@ pub struct RawDiag {
     pub span: Option<Span>,
     pub notes: Vec<String>,
     pub fixits: Vec<FixIt>,
+    /// Optional secondary source label (rendered above the primary span).
+    pub secondary: Option<SecondaryLabel>,
 }
 
 /// A rendered diagnostic bound to a file.
@@ -107,6 +117,7 @@ pub fn error(message: impl Into<String>) -> RawDiag {
         span: None,
         notes: Vec::new(),
         fixits: Vec::new(),
+        secondary: None,
     }
 }
 
@@ -117,6 +128,7 @@ pub fn error_at(message: impl Into<String>, span: Span) -> RawDiag {
         span: Some(span),
         notes: Vec::new(),
         fixits: Vec::new(),
+        secondary: None,
     }
 }
 
@@ -127,6 +139,7 @@ pub fn warning(message: impl Into<String>) -> RawDiag {
         span: None,
         notes: Vec::new(),
         fixits: Vec::new(),
+        secondary: None,
     }
 }
 
@@ -137,6 +150,7 @@ pub fn warning_at(message: impl Into<String>, span: Span) -> RawDiag {
         span: Some(span),
         notes: Vec::new(),
         fixits: Vec::new(),
+        secondary: None,
     }
 }
 
@@ -147,6 +161,7 @@ pub fn note(message: impl Into<String>) -> RawDiag {
         span: None,
         notes: Vec::new(),
         fixits: Vec::new(),
+        secondary: None,
     }
 }
 
@@ -158,6 +173,12 @@ impl RawDiag {
 
     pub fn with_fixit(mut self, fixit: FixIt) -> Self {
         self.fixits.push(fixit);
+        self
+    }
+
+    /// Attach a secondary source label (rendered above the primary span).
+    pub fn with_secondary(mut self, label: SecondaryLabel) -> Self {
+        self.secondary = Some(label);
         self
     }
 
@@ -179,6 +200,11 @@ impl RawDiag {
         let mut labels = Vec::new();
         if let Some(span) = self.span {
             labels.push(Label::primary(file_id, span.to_range()));
+        }
+        if let Some(sec) = &self.secondary {
+            labels.push(
+                Label::secondary(file_id, sec.span.to_range()).with_message(sec.message.clone()),
+            );
         }
 
         for fixit in &self.fixits {
@@ -269,6 +295,10 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
     };
     let _ = write!(out, "{}: {}", tag, raw.message.bold());
 
+    // When the secondary span points outside the current source (e.g. a const
+    // defined in an earlier REPL snippet), we emit it as a note instead.
+    let mut secondary_note: Option<String> = None;
+
     // --- Location + source context ---
     if let Some(span) = raw.span {
         if let Ok(file) = files.get(file_id) {
@@ -279,12 +309,49 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
             let (line_num, col) = line_col_for(source, start);
             let _ = write!(out, "\n  --> {}:{line_num}:{}", name, col + 1);
 
+            // Gutter width must fit the widest line number shown (the
+            // secondary label may sit on a different line than the primary).
+            let mut gutter = format!("{line_num:>4}").len();
+            if let Some(sec) = &raw.secondary {
+                if sec.span.end as usize <= source.len() {
+                    let (sec_line_num, _) = line_col_for(source, sec.span.start as usize);
+                    gutter = gutter.max(format!("{sec_line_num:>4}").len());
+                }
+            }
+            let _ = write!(out, "\n    |");
+
+            // Secondary label first: source line + `-` carets + message.
+            // When the span points outside the current source (e.g. a const
+            // defined in an earlier REPL snippet), fall back to a note.
+            if let Some(sec) = &raw.secondary {
+                if sec.span.end as usize <= source.len() {
+                    let (sec_line_num, _) = line_col_for(source, sec.span.start as usize);
+                    let sec_lstart = line_start_for(source, sec.span.start as usize);
+                    let sec_lend = line_end_for(source, sec.span.start as usize);
+                    let sec_line_text = &source[sec_lstart..sec_lend];
+                    let sec_pad = format!("{sec_line_num:>4}");
+                    let _ = write!(out, "\n {sec_pad} | {sec_line_text}");
+                    let sec_col_offset = sec.span.start as usize - sec_lstart;
+                    let sec_len = (sec.span.end - sec.span.start) as usize;
+                    let sec_spaces = " ".repeat(sec_col_offset);
+                    let sec_dashes = "-".repeat(sec_len);
+                    let _ = write!(
+                        out,
+                        "\n {:>width$} | {sec_spaces}{sec_dashes} {}",
+                        "",
+                        sec.message.cyan(),
+                        width = gutter,
+                    );
+                } else {
+                    secondary_note = Some(sec.message.clone());
+                }
+            }
+
             // Source line
             let lstart = line_start_for(source, start);
             let lend = line_end_for(source, start);
             let line_text = &source[lstart..lend];
             let pad = format!("{line_num:>4}");
-            let _ = write!(out, "\n    |");
             let _ = write!(out, "\n {pad} | {line_text}");
 
             // Carets under the span + inline fixit hint
@@ -299,7 +366,7 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
             };
             // Inline the first fixit hint directly under the carets
             // Use blank padding matching the source line prefix width
-            let blank_pad = format!("{:>width$}", "", width = pad.len());
+            let blank_pad = format!("{:>width$}", "", width = gutter);
             if let Some(fixit) = raw.fixits.first() {
                 let hint = format!(" help: replace with `{}`", fixit.replacement);
                 let _ = write!(
@@ -316,6 +383,14 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
     // --- Notes ---
     for note_text in &raw.notes {
         let _ = write!(out, "\n    {} {}", "=".bold(), note_text.cyan());
+    }
+    if let Some(note_text) = &secondary_note {
+        let _ = write!(
+            out,
+            "\n    {} {} (defined in a previous snippet)",
+            "=".bold(),
+            note_text.cyan(),
+        );
     }
 
     // --- Additional FixIt suggestions (beyond the first, which is inlined) ---
@@ -368,10 +443,36 @@ pub fn render_to_stderr(files: &Files, file_id: FileId, diags: &[RawDiag]) {
                     let source: &str = file.source().as_ref();
                     let (ln, col) = line_col_for(source, span.start as usize);
                     let _ = write!(line, "\n  --> {name}:{ln}:{}", col + 1);
+                    let _ = write!(line, "\n    |");
+                    // Secondary label first (source line + `-` carets).
+                    if let Some(sec) = &raw.secondary {
+                        if sec.span.end as usize <= source.len() {
+                            let (sec_ln, _) = line_col_for(source, sec.span.start as usize);
+                            let sec_lstart = line_start_for(source, sec.span.start as usize);
+                            let sec_lend = line_end_for(source, sec.span.start as usize);
+                            let sec_line_text = &source[sec_lstart..sec_lend];
+                            let _ = write!(line, "\n {:>4} | {sec_line_text}", sec_ln);
+                            let sec_col_off = sec.span.start as usize - sec_lstart;
+                            let sec_len = (sec.span.end - sec.span.start) as usize;
+                            let _ = write!(line, "\n {:>4} |", "");
+                            let _ = write!(
+                                line,
+                                " {}{} {}",
+                                " ".repeat(sec_col_off),
+                                "-".repeat(sec_len),
+                                sec.message,
+                            );
+                        } else {
+                            let _ = write!(
+                                line,
+                                "\n    = {} (defined in a previous snippet)",
+                                sec.message,
+                            );
+                        }
+                    }
                     let lstart = line_start_for(source, span.start as usize);
                     let lend = line_end_for(source, span.start as usize);
                     let line_text = &source[lstart..lend];
-                    let _ = write!(line, "\n    |");
                     let _ = write!(line, "\n {:>4} | {line_text}", ln);
                     let col_off = span.start as usize - lstart;
                     let len = ((span.end - span.start).max(1)) as usize;
