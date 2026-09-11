@@ -49,6 +49,18 @@ impl Session {
         let file_id = files.add(name.clone(), String::new());
         let mut interp = Interp::with_natives(stdlib_natives());
 
+        // Inject math constants as static float values.
+        // Three forms: fully qualified, module namespace, bare name.
+        for (key, val) in zz_stdlib::stdlib_consts() {
+            interp.env.borrow_mut().define(&key, Value::Float(val));
+            if let Some(rest) = key.strip_prefix("std.") {
+                interp.env.borrow_mut().define(rest, Value::Float(val));
+            }
+            if let Some(bare) = key.rsplit('.').next() {
+                interp.env.borrow_mut().define(bare, Value::Float(val));
+            }
+        }
+
         // Run compiled pure-ZZ stdlib programs (vec.map, math.sum, etc.).
         // These populate the environment with functions written in ZZ that
         // extend the native stdlib. Must happen before user code.
@@ -106,6 +118,7 @@ impl Session {
             if let zz_frontend::ast::Stmt::Import {
                 path,
                 alias,
+                items: _,
                 span,
                 pub_: _,
             } = stmt

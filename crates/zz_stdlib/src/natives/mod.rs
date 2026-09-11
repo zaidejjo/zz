@@ -948,43 +948,6 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
-    // ── std.math constants ──
-    m.insert(
-        "std.math.PI".into(),
-        NativeEntry {
-            arity: 0,
-            f: math::math_pi,
-        },
-    );
-    m.insert(
-        "std.math.E".into(),
-        NativeEntry {
-            arity: 0,
-            f: math::math_e,
-        },
-    );
-    m.insert(
-        "std.math.TAU".into(),
-        NativeEntry {
-            arity: 0,
-            f: math::math_tau,
-        },
-    );
-    m.insert(
-        "std.math.INF".into(),
-        NativeEntry {
-            arity: 0,
-            f: math::math_inf,
-        },
-    );
-    m.insert(
-        "std.math.NAN".into(),
-        NativeEntry {
-            arity: 0,
-            f: math::math_nan,
-        },
-    );
-
     // ── std.math utilities & rounding ──
     m.insert(
         "std.math.round".into(),

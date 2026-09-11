@@ -16,7 +16,7 @@ pub mod span;
 pub mod tests;
 pub mod token;
 
-pub use ast::{BinOp, Expr, Ident, Program, Stmt, UnOp};
+pub use ast::{BinOp, Expr, Ident, ImportItem, Program, Stmt, UnOp};
 pub use diag::{Diag, Files};
 pub use fmt::{format_program, is_formatted, FormatConfig};
 pub use lexer::lex;

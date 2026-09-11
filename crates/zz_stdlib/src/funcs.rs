@@ -1332,13 +1332,6 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert("std.math.random".into(), sig(vec![], Type::Float));
 
-    // ── std.math constants ──
-    m.insert("std.math.PI".into(), sig(vec![], Type::Float));
-    m.insert("std.math.E".into(), sig(vec![], Type::Float));
-    m.insert("std.math.TAU".into(), sig(vec![], Type::Float));
-    m.insert("std.math.INF".into(), sig(vec![], Type::Float));
-    m.insert("std.math.NAN".into(), sig(vec![], Type::Float));
-
     // ── std.math utilities & rounding ──
     m.insert(
         "std.math.round".into(),

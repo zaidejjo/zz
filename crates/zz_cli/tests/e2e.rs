@@ -207,6 +207,12 @@ e2e_success_test!(
     "stdlib",
     "json_extended_test.zz"
 );
+e2e_success_test!(e2e_stdlib_selective_import, "stdlib", "selective_import.zz");
+e2e_success_test!(e2e_stdlib_wildcard_import, "stdlib", "wildcard_import.zz");
+e2e_success_test!(e2e_stdlib_symbol_alias, "stdlib", "symbol_alias.zz");
+e2e_success_test!(e2e_stdlib_multi_selective, "stdlib", "multi_selective.zz");
+e2e_success_test!(e2e_stdlib_local_selective, "stdlib", "local_selective.zz");
+e2e_success_test!(e2e_stdlib_local_wildcard, "stdlib", "local_wildcard.zz");
 
 // ---------------------------------------------------------------------------
 // Error fixtures: must exit 1

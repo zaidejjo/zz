@@ -1,0 +1,11 @@
+// E2E: wildcard import from local file — all pub symbols available directly
+import helpers.math_utils(*)
+
+d := double(5)
+t := triple(5)
+p := PI
+
+println(d)
+println(t)
+println(p)
+println("local_wildcard_ok")

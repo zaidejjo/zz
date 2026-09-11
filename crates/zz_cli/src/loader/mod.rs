@@ -18,12 +18,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use zz_checker::{check_program, FuncSig, StructSig, Type};
-use zz_frontend::ast::{Expr, Program, Stmt};
+use zz_frontend::ast::{Expr, ImportItem, Program, Stmt};
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
 use zz_frontend::span::Span;
 use zz_runtime::NativeEntry;
-use zz_stdlib::{register_module_namespace, stdlib_funcs, stdlib_natives, STDLIB_MODULES};
+use zz_stdlib::{
+    register_module_namespace, register_selective_namespace, register_wildcard_namespace,
+    stdlib_funcs, stdlib_natives, STDLIB_MODULES,
+};
 
 mod rewrite;
 
@@ -60,6 +63,9 @@ pub struct LoadResult {
     /// Native implementations (stdlib + namespaced copies), for the
     /// interpreter.
     pub natives: HashMap<String, NativeEntry>,
+    /// Static constant values resolved through selective imports (including
+    /// aliases).  Keys are bare names like `"pi"`, values are the float.
+    pub consts: HashMap<String, f64>,
     pub errors: Vec<LoadError>,
 }
 
@@ -86,6 +92,12 @@ struct Loader {
     ns_of: HashMap<PathBuf, String>,
     /// Canonical path of the entry file (for main() call validation).
     entry: PathBuf,
+    /// Selective/wildcard imports to process after all modules are loaded.
+    /// Each entry: (importing_file_path, module_path, items, is_stdlib).
+    selective_imports: Vec<(PathBuf, Vec<String>, Vec<ImportItem>, bool)>,
+    /// Bare constant names (including aliases) to inject into the runtime env.
+    /// Populated during selective import processing in finish().
+    selected_consts: HashMap<String, f64>,
 }
 
 /// Load an entry file and all of its imports.
@@ -114,6 +126,8 @@ pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
         namespaces: HashMap::new(),
         ns_of: HashMap::new(),
         entry,
+        selective_imports: Vec::new(),
+        selected_consts: HashMap::new(),
     };
     loader.load_file(main_path, None)?;
     Ok(loader.finish())
@@ -204,17 +218,20 @@ impl Loader {
 
         self.visiting.insert(canon.clone());
 
-        let imports: Vec<(Vec<String>, Option<String>)> = parsed
+        let imports: Vec<(Vec<String>, Option<String>, Vec<ImportItem>)> = parsed
             .program
             .stmts
             .iter()
             .filter_map(|s| match s {
-                Stmt::Import { path, alias, .. } => Some((path.clone(), alias.clone())),
+                Stmt::Import {
+                    path, alias, items, ..
+                } => Some((path.clone(), alias.clone(), items.clone())),
                 _ => None,
             })
             .collect();
 
-        for (imp, imp_alias) in imports {
+        for (imp, imp_alias, imp_items) in imports {
+            let is_selective = !imp_items.is_empty();
             if imp.first().map(String::as_str) == Some("std") {
                 let Some(module) = imp.get(1) else { continue };
                 if !STDLIB_MODULES.contains(&module.as_str()) {
@@ -232,24 +249,32 @@ impl Loader {
                     });
                     continue;
                 }
-                let ns = imp_alias.unwrap_or_else(|| module.clone());
-                if let Err(msg) =
-                    register_module_namespace(module, &ns, &mut self.funcs, &mut self.natives)
-                {
-                    self.errors.push(LoadError {
-                         name: path.display().to_string(),
-                         source: source.clone(),
-                         diags: vec![error_at(
-                             format!("{msg}\n\
-                                      hint: this may occur if the stdlib module exports a conflicting name"),
-                             Span::new(0, 0),
-                         )],
-                     });
-                    continue;
+                if is_selective {
+                    // Store for processing in finish() when all modules are loaded.
+                    self.selective_imports
+                        .push((canon.clone(), imp.clone(), imp_items, true));
+                } else {
+                    // Full module import: copy all symbols under namespace.
+                    let ns = imp_alias.unwrap_or_else(|| module.clone());
+                    if let Err(msg) =
+                        register_module_namespace(module, &ns, &mut self.funcs, &mut self.natives)
+                    {
+                        self.errors.push(LoadError {
+                             name: path.display().to_string(),
+                             source: source.clone(),
+                             diags: vec![error_at(
+                                 format!("{msg}\n\
+                                          hint: this may occur if the stdlib module exports a conflicting name"),
+                                 Span::new(0, 0),
+                             )],
+                         });
+                        continue;
+                    }
+                    self.register_ns(&ns, &PathBuf::from(format!("std:{module}")), path, &source);
                 }
-                self.register_ns(&ns, &PathBuf::from(format!("std:{module}")), path, &source);
                 continue;
             }
+            // Local file import.
             let rel = canon
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
@@ -296,6 +321,11 @@ impl Loader {
                 }
             }
             self.load_file(&rel, imp_alias.as_deref())?;
+            if is_selective {
+                // Store for processing in finish() when all modules are loaded.
+                self.selective_imports
+                    .push((canon.clone(), imp.clone(), imp_items, false));
+            }
         }
 
         self.visiting.remove(&canon);
@@ -437,7 +467,297 @@ impl Loader {
             let source = self.sources.remove(path).unwrap_or_default();
             files.push((name.clone(), source.clone()));
 
-            let program = self.programs.remove(path).unwrap();
+            // Process selective/wildcard imports for this module before
+            // type-checking, so imported symbols are in the seed.
+            let selective: Vec<_> = self
+                .selective_imports
+                .iter()
+                .filter(|(p, _, _, _)| p == path)
+                .cloned()
+                .collect();
+            for (_, imp_path, items, is_std) in selective {
+                if is_std {
+                    // Stdlib selective import.
+                    let Some(module) = imp_path.get(1) else {
+                        continue;
+                    };
+                    let has_wildcard = items
+                        .iter()
+                        .any(|i| matches!(i, ImportItem::Wildcard { .. }));
+                    if has_wildcard {
+                        if let Err(msg) =
+                            register_wildcard_namespace(module, &mut self.funcs, &mut self.natives)
+                        {
+                            self.errors.push(LoadError {
+                                name: name.clone(),
+                                source: source.clone(),
+                                diags: vec![error_at(
+                                    format!("{msg}\n\
+                                             hint: this may occur if the stdlib module exports a conflicting name"),
+                                    Span::new(0, 0),
+                                )],
+                            });
+                        }
+                    } else {
+                        let name_aliases: Vec<(String, Option<String>)> = items
+                            .iter()
+                            .filter_map(|i| match i {
+                                ImportItem::Named { name, alias, .. } => {
+                                    Some((name.clone(), alias.clone()))
+                                }
+                                ImportItem::Wildcard { .. } => None,
+                            })
+                            .collect();
+                        match register_selective_namespace(
+                            module,
+                            &name_aliases,
+                            &mut self.funcs,
+                            &mut self.natives,
+                        ) {
+                            Ok(missing) => {
+                                for sym in &missing {
+                                    self.errors.push(LoadError {
+                                        name: name.clone(),
+                                        source: source.clone(),
+                                        diags: vec![error_at(
+                                            format!(
+                                                "symbol `{sym}` not found in `std.{module}`\n\
+                                                 hint: check the module's public exports"
+                                            ),
+                                            Span::new(0, 0),
+                                        )],
+                                    });
+                                }
+                            }
+                            Err(msg) => {
+                                self.errors.push(LoadError {
+                                    name: name.clone(),
+                                    source: source.clone(),
+                                    diags: vec![error_at(
+                                        format!("{msg}\n\
+                                                 hint: this may occur if the stdlib module exports a conflicting name"),
+                                        Span::new(0, 0),
+                                    )],
+                                });
+                            }
+                        }
+                        // Collect constants (including aliases) for runtime injection.
+                        let std_consts = zz_stdlib::stdlib_consts();
+                        for (sym_name, alias) in &name_aliases {
+                            let qualified = format!("std.{module}.{sym_name}");
+                            if let Some(&val) = std_consts.get(&qualified) {
+                                let target = alias.as_ref().unwrap_or(sym_name);
+                                self.selected_consts.insert(target.clone(), val);
+                            }
+                        }
+                    }
+                } else {
+                    // Local file selective import — items are in seed as ns.name.
+                    let ns = imp_path.last().map(String::as_str).unwrap_or("");
+                    let prefix = format!("{ns}.");
+                    for item in &items {
+                        match item {
+                            ImportItem::Named {
+                                name: sym_name,
+                                alias,
+                                ..
+                            } => {
+                                let target = alias.as_ref().unwrap_or(sym_name);
+                                let full = format!("{prefix}{sym_name}");
+                                let mut found = false;
+                                if let Some(sig) = self.funcs.get(&full).cloned() {
+                                    self.funcs.insert(target.clone(), sig.clone());
+                                    self.all_funcs.insert(target.clone(), sig);
+                                    found = true;
+                                }
+                                if let Some(entry) = self.natives.get(&full).cloned() {
+                                    self.natives.insert(target.clone(), entry);
+                                    found = true;
+                                }
+                                if let Some(ty) = self.bindings.get(&full).cloned() {
+                                    self.bindings.insert(target.clone(), ty.clone());
+                                    self.all_bindings.insert(target.clone(), ty);
+                                    found = true;
+                                }
+                                if let Some(sig) = self.structs.get(&full).cloned() {
+                                    self.structs.insert(target.clone(), sig.clone());
+                                    self.all_structs.insert(target.clone(), sig);
+                                    found = true;
+                                }
+                                if !found {
+                                    self.errors.push(LoadError {
+                                        name: name.clone(),
+                                        source: source.clone(),
+                                        diags: vec![error_at(
+                                            format!(
+                                                "symbol `{sym_name}` not found or not public in `{}`\n\
+                                                 hint: ensure the symbol is declared with `pub` in the imported module",
+                                                imp_path.join(".")
+                                            ),
+                                            Span::new(0, 0),
+                                        )],
+                                    });
+                                }
+                            }
+                            ImportItem::Wildcard { .. } => {
+                                // Copy ALL pub items from ns.* → bare names.
+                                let keys: Vec<String> = self
+                                    .funcs
+                                    .keys()
+                                    .filter(|k| k.starts_with(&prefix))
+                                    .cloned()
+                                    .collect();
+                                for key in keys {
+                                    let bare = key[prefix.len()..].to_string();
+                                    if let Some(sig) = self.funcs.get(&key).cloned() {
+                                        self.funcs.insert(bare.clone(), sig.clone());
+                                        self.all_funcs.insert(bare, sig);
+                                    }
+                                    if let Some(entry) = self.natives.get(&key).cloned() {
+                                        self.natives.insert(key[prefix.len()..].to_string(), entry);
+                                    }
+                                }
+                                let bkeys: Vec<String> = self
+                                    .bindings
+                                    .keys()
+                                    .filter(|k| k.starts_with(&prefix))
+                                    .cloned()
+                                    .collect();
+                                for key in bkeys {
+                                    let bare = key[prefix.len()..].to_string();
+                                    if let Some(ty) = self.bindings.get(&key).cloned() {
+                                        self.bindings.insert(bare.clone(), ty.clone());
+                                        self.all_bindings.insert(bare, ty);
+                                    }
+                                }
+                                let skeys: Vec<String> = self
+                                    .structs
+                                    .keys()
+                                    .filter(|k| k.starts_with(&prefix))
+                                    .cloned()
+                                    .collect();
+                                for key in skeys {
+                                    let bare = key[prefix.len()..].to_string();
+                                    if let Some(sig) = self.structs.get(&key).cloned() {
+                                        self.structs.insert(bare.clone(), sig.clone());
+                                        self.all_structs.insert(bare, sig);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Remove processed selective imports for this module.
+            // Replace selective import statements with synthetic Decl
+            // assignments so the runtime (VM) creates the variable bindings.
+            self.selective_imports.retain(|(p, _, _, _)| p != path);
+
+            let mut program = self.programs.remove(path).unwrap();
+            let mut new_stmts = Vec::new();
+            for stmt in program.stmts.drain(..) {
+                match &stmt {
+                    Stmt::Import {
+                        items,
+                        path: imp_path,
+                        span,
+                        ..
+                    } if !items.is_empty() => {
+                        // Stdlib selective imports: bare names are already in
+                        // self.funcs / self.natives by the register_* helpers.
+                        // The runtime resolves them as natives. Don't emit
+                        // any import statement — it would trigger a false
+                        // "unused import" warning since the namespace is
+                        // never used in qualified form.
+                        let is_stdlib = imp_path.first().map(String::as_str) == Some("std");
+
+                        if is_stdlib {
+                            // Stdlib: skip entirely. Bare names are in seed.
+                            // Constants are injected into the runtime env via
+                            // LoadResult.consts (including aliased names).
+                        } else {
+                            // Local file: keep the import (items cleared) for
+                            // namespace tracking, then emit synthetic Decls.
+                            new_stmts.push(Stmt::Import {
+                                path: imp_path.clone(),
+                                alias: None,
+                                items: Vec::new(),
+                                pub_: false,
+                                span: *span,
+                            });
+                            let ns = imp_path.last().map(String::as_str).unwrap_or("");
+                            let prefix = format!("{ns}.");
+                            for item in items {
+                                match item {
+                                    ImportItem::Named {
+                                        name: sym_name,
+                                        alias,
+                                        span: item_span,
+                                    } => {
+                                        let target = alias.as_ref().unwrap_or(sym_name);
+                                        let parts = vec![ns.to_string(), sym_name.clone()];
+                                        new_stmts.push(Stmt::Decl {
+                                            ty: None,
+                                            name: zz_frontend::ast::Ident {
+                                                name: target.clone(),
+                                                span: *item_span,
+                                            },
+                                            value: Expr::Path {
+                                                parts,
+                                                span: *item_span,
+                                            },
+                                            span: *item_span,
+                                            pub_: false,
+                                            is_const: false,
+                                        });
+                                    }
+                                    ImportItem::Wildcard { span: item_span } => {
+                                        // Wildcard: emit a Decl for every pub
+                                        // symbol in the imported module.
+                                        let mut names: Vec<String> = Vec::new();
+                                        for key in self.funcs.keys() {
+                                            if key.starts_with(&prefix) {
+                                                let bare = &key[prefix.len()..];
+                                                if !bare.is_empty() {
+                                                    names.push(bare.to_string());
+                                                }
+                                            }
+                                        }
+                                        for key in self.bindings.keys() {
+                                            if key.starts_with(&prefix) {
+                                                let bare = &key[prefix.len()..];
+                                                if !bare.is_empty()
+                                                    && !names.contains(&bare.to_string())
+                                                {
+                                                    names.push(bare.to_string());
+                                                }
+                                            }
+                                        }
+                                        for bare in &names {
+                                            new_stmts.push(Stmt::Decl {
+                                                ty: None,
+                                                name: zz_frontend::ast::Ident {
+                                                    name: bare.to_string(),
+                                                    span: *item_span,
+                                                },
+                                                value: Expr::Path {
+                                                    parts: vec![ns.to_string(), bare.to_string()],
+                                                    span: *item_span,
+                                                },
+                                                span: *item_span,
+                                                pub_: false,
+                                                is_const: false,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => new_stmts.push(stmt),
+                }
+            }
+            program.stmts = new_stmts;
 
             // In the entry file, error if func main() and a top-level main()
             // call coexist — the auto-call would double-execute main().
@@ -593,6 +913,7 @@ impl Loader {
             bindings: self.all_bindings,
             structs: self.all_structs,
             natives: self.natives,
+            consts: self.selected_consts,
             errors: self.errors,
         }
     }

@@ -9,5 +9,5 @@ pub mod stmt;
 pub mod types;
 
 pub use expr::{Expr, FmtPart, Ident, Lit, MatchArm, Pattern};
-pub use stmt::{Block, Param, Program, Stmt, TraitBound, TypeParam};
+pub use stmt::{Block, ImportItem, Param, Program, Stmt, TraitBound, TypeParam};
 pub use types::{BinOp, Ty, TyKind, UnOp};
