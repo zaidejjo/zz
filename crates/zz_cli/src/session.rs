@@ -96,6 +96,40 @@ impl Session {
         self.last_had_errors
     }
 
+    /// Flatten the runtime environment into (name, value) pairs.
+    /// Used by the REPL completer and `:vars` command.
+    pub fn env_vars(&self) -> std::collections::HashMap<String, Value> {
+        self.interp.env.borrow().flatten()
+    }
+
+    /// Get the type of a variable by name from the checker seed.
+    pub fn var_type(&self, name: &str) -> Option<&Type> {
+        self.bindings.get(name)
+    }
+
+    /// Get all function signatures (stdlib + user-defined).
+    pub fn funcs(&self) -> &std::collections::HashMap<String, FuncSig> {
+        &self.funcs
+    }
+
+    /// Get all struct definitions.
+    #[allow(dead_code)]
+    pub fn structs(&self) -> &std::collections::HashMap<String, StructSig> {
+        &self.structs
+    }
+
+    /// Get the runtime environment reference (for completion queries).
+    #[allow(dead_code)]
+    pub fn env(&self) -> &std::rc::Rc<std::cell::RefCell<zz_runtime::Env>> {
+        &self.interp.env
+    }
+
+    /// Get native function names (for stdlib completion).
+    #[allow(dead_code)]
+    pub fn native_names(&self) -> Vec<String> {
+        self.interp.natives.keys().cloned().collect()
+    }
+
     /// Evaluate source: parse, type-check, then run. The environment is only
     /// updated when the snippet is both syntactically and type-correct.
     pub fn eval(&mut self, src: &str) -> EvalOutput {

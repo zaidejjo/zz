@@ -17,3 +17,6 @@ zz_stdlib = { path = "../zz_stdlib" }
 zz_codegen = { path = "../zz_codegen" }
 zz_fmt = { path = "../zz_fmt" }
 codespan-reporting = "0.11"
+reedline = "0.51"
+dirs = "6"
+nu-ansi-term = "0.50"
