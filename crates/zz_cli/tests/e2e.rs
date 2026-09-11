@@ -114,6 +114,7 @@ macro_rules! e2e_success_test {
 
 // Syntax fixtures
 e2e_success_test!(e2e_syntax_declarations, "syntax", "declarations.zz");
+e2e_success_test!(e2e_syntax_const, "syntax", "const.zz");
 e2e_success_test!(e2e_syntax_functions, "syntax", "functions.zz");
 e2e_success_test!(e2e_syntax_control_flow, "syntax", "control_flow.zz");
 e2e_success_test!(e2e_syntax_pipelines, "syntax", "pipelines.zz");
@@ -237,6 +238,7 @@ macro_rules! e2e_error_test {
 }
 
 e2e_error_test!(e2e_err_type_mismatch, "type_mismatch.zz");
+e2e_error_test!(e2e_err_const_reassign, "const_reassign.zz");
 e2e_error_test!(e2e_err_undefined_var, "undefined_var.zz");
 e2e_error_test!(e2e_err_missing_field, "missing_field.zz");
 e2e_error_test!(e2e_err_arity, "arity.zz");

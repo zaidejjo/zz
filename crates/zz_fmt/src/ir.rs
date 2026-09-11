@@ -258,16 +258,25 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 name,
                 value,
                 pub_,
+                is_const,
                 ..
             } => {
                 if *pub_ {
                     self.text("pub");
                     self.space();
                 }
+                if *is_const {
+                    self.text("const");
+                    self.space();
+                }
                 self.text(name.name.clone());
                 if let Some(t) = ty {
                     self.text(":");
                     self.emit_ty(t);
+                    self.space();
+                    self.text("=");
+                    self.space();
+                } else if *is_const {
                     self.space();
                     self.text("=");
                     self.space();

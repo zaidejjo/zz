@@ -12,6 +12,7 @@ impl Checker {
     pub(crate) fn push_scope(&mut self) {
         self.env.push(std::collections::HashMap::new());
         self.defined_names.push(std::collections::HashMap::new());
+        self.const_env.push(std::collections::HashMap::new());
     }
 
     /// Strip the module prefix from a name for display.
@@ -51,6 +52,7 @@ impl Checker {
             }
         }
         self.env.pop();
+        self.const_env.pop();
     }
 
     pub(crate) fn define(&mut self, name: &str, ty: Type) {
@@ -63,6 +65,39 @@ impl Checker {
         if let Some(scope) = self.defined_names.last_mut() {
             scope.insert(name.to_string(), span);
         }
+    }
+
+    /// Define a variable, recording its immutability when `is_const`.
+    pub(crate) fn define_var_at(&mut self, name: &str, ty: Type, span: Span, is_const: bool) {
+        if is_const {
+            self.define_const_at(name, ty, span);
+        } else {
+            self.define_at(name, ty, span);
+        }
+    }
+
+    /// Define an immutable (`const`) variable, remembering its declaration
+    /// span so reassignment errors can point back at it.
+    pub(crate) fn define_const_at(&mut self, name: &str, ty: Type, span: Span) {
+        self.define_at(name, ty, span);
+        if let Some(scope) = self.const_env.last_mut() {
+            scope.insert(name.to_string(), span);
+        }
+    }
+
+    /// If `name` resolves to a `const` binding, return its declaration span.
+    /// Shadowing-aware: only the scope that actually binds the name is
+    /// consulted, so an inner mutable shadow of an outer const is mutable.
+    pub(crate) fn lookup_const_span(&mut self, name: &str) -> Option<Span> {
+        for (i, scope) in self.env.iter().enumerate().rev() {
+            if scope.contains_key(name) {
+                if let Some(s) = self.const_env[i].get(name) {
+                    return Some(*s);
+                }
+                return None;
+            }
+        }
+        None
     }
 
     /// Emit unused-variable warnings for the global scope (scope index 0).

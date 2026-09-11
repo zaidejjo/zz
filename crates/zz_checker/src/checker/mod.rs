@@ -41,6 +41,9 @@ pub struct CheckResult {
     pub funcs: HashMap<String, FuncSig>,
     /// Top-level struct definitions.
     pub structs: HashMap<String, StructSig>,
+    /// Top-level `const` bindings and their declaration spans. Used to seed
+    /// later REPL snippets so immutable names stay immutable across evals.
+    pub const_bindings: HashMap<String, Span>,
     /// Only `pub` bindings (for cross-module export).
     pub pub_bindings: HashMap<String, Type>,
     /// Only `pub` functions (for cross-module export).
@@ -58,7 +61,33 @@ pub fn check_program(
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
 ) -> CheckResult {
-    check_program_impl(program, initial_bindings, initial_funcs, initial_structs).result
+    check_program_impl(
+        program,
+        initial_bindings,
+        initial_funcs,
+        initial_structs,
+        HashMap::new(),
+    )
+    .result
+}
+
+/// Like [`check_program`], but seeds the `const` (immutable) bindings from a
+/// prior session so REPL snippets remember which names are immutable.
+pub fn check_program_with_consts(
+    program: &Program,
+    initial_bindings: HashMap<String, Type>,
+    initial_funcs: HashMap<String, FuncSig>,
+    initial_structs: HashMap<String, StructSig>,
+    initial_consts: HashMap<String, Span>,
+) -> CheckResult {
+    check_program_impl(
+        program,
+        initial_bindings,
+        initial_funcs,
+        initial_structs,
+        initial_consts,
+    )
+    .result
 }
 
 /// Like [`check_program`], but also returns a deep-resolved type annotation
@@ -70,18 +99,31 @@ pub fn check_program_typed(
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
 ) -> (CheckResult, std::collections::HashMap<Span, Type>) {
-    let out = check_program_impl(program, initial_bindings, initial_funcs, initial_structs);
+    let out = check_program_impl(
+        program,
+        initial_bindings,
+        initial_funcs,
+        initial_structs,
+        HashMap::new(),
+    );
     (out.result, out.span_types)
 }
 
-/// Core pass shared by [`check_program`] and [`check_program_typed`].
+/// Core pass shared by [`check_program`], [`check_program_with_consts`], and
+/// [`check_program_typed`].
 fn check_program_impl(
     program: &Program,
     initial_bindings: HashMap<String, Type>,
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
+    initial_consts: HashMap<String, Span>,
 ) -> CheckerOutcome {
-    let mut checker = Checker::new(initial_bindings, initial_funcs, initial_structs);
+    let mut checker = Checker::new(
+        initial_bindings,
+        initial_funcs,
+        initial_structs,
+        initial_consts,
+    );
 
     // Track which items are pub (for cross-module export).
     let mut pub_bindings_set: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -279,12 +321,18 @@ fn check_program_impl(
         }
     }
 
+    // Top-level `const` bindings (name → declaration span) for session
+    // persistence across REPL snippets.
+    let const_bindings: HashMap<String, Span> =
+        checker.const_env.first().cloned().unwrap_or_default();
+
     CheckerOutcome {
         result: CheckResult {
             errors: checker.errors,
             bindings,
             funcs: checker.funcs,
             structs: checker.structs,
+            const_bindings,
             pub_bindings,
             pub_funcs,
             pub_structs,
@@ -306,6 +354,11 @@ pub(crate) struct Checker {
     pub(crate) funcs: HashMap<String, FuncSig>,
     pub(crate) structs: HashMap<String, StructSig>,
     pub(crate) env: Vec<HashMap<String, Type>>,
+    /// Names declared `const` in each scope, mapped to their declaration
+    /// span (for the "defined as immutable here" secondary label). Parallel
+    /// to `env` — a name is immutable iff the scope that binds it also
+    /// contains it here.
+    pub(crate) const_env: Vec<HashMap<String, zz_frontend::span::Span>>,
     /// Top-level let bindings discovered this run: name → type.
     pub(crate) new_bindings: HashMap<String, Type>,
     pub(crate) current_ret: Option<Type>,
@@ -338,6 +391,7 @@ impl Checker {
         initial_bindings: HashMap<String, Type>,
         funcs: HashMap<String, FuncSig>,
         structs: HashMap<String, StructSig>,
+        initial_consts: HashMap<String, Span>,
     ) -> Self {
         let env = vec![initial_bindings];
         Checker {
@@ -346,6 +400,7 @@ impl Checker {
             funcs,
             structs,
             env,
+            const_env: vec![initial_consts],
             new_bindings: HashMap::new(),
             current_ret: None,
             current_generics: Vec::new(),

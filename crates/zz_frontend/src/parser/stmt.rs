@@ -56,15 +56,17 @@ impl Parser {
                         self.parse_impl(false)
                     }
                     TokenKind::Import => self.parse_import(true),
+                    // `pub const x = expr` / `pub const x: type = expr`
+                    TokenKind::Const => self.parse_const_decl(true),
                     // `pub x := expr` or `pub x: type = expr`
                     TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {
-                        self.parse_short_decl(true)
+                        self.parse_short_decl(true, false)
                     }
                     TokenKind::Ident => {
                         // Try `pub x: type = expr`
                         let save_pos = self.pos;
                         let save_errs = self.errors.len();
-                        if let Some(decl) = self.try_parse_explicit_decl(true) {
+                        if let Some(decl) = self.try_parse_explicit_decl(true, false) {
                             decl
                         } else {
                             self.pos = save_pos;
@@ -104,8 +106,10 @@ impl Parser {
             }
             // `x := expr` — short declaration with inference.
             TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {
-                self.parse_short_decl(false)
+                self.parse_short_decl(false, false)
             }
+            // `const x = expr` / `const x: type = expr` — immutable binding.
+            TokenKind::Const => self.parse_const_decl(false),
             // `(a, b) := expr` — tuple destructuring declaration.
             TokenKind::LParen
                 if self.peek_kind_at(1) == TokenKind::Ident
@@ -138,7 +142,7 @@ impl Parser {
                 // on failure so ordinary expressions still parse.
                 let save_pos = self.pos;
                 let save_errs = self.errors.len();
-                if let Some(decl) = self.try_parse_explicit_decl(false) {
+                if let Some(decl) = self.try_parse_explicit_decl(false, false) {
                     return decl;
                 }
                 self.pos = save_pos;
@@ -181,6 +185,7 @@ impl Parser {
                             value,
                             span,
                             pub_: false,
+                            is_const: false,
                         };
                     }
                 }
@@ -355,7 +360,7 @@ impl Parser {
         }
     }
 
-    pub(crate) fn parse_short_decl(&mut self, pub_: bool) -> Stmt {
+    pub(crate) fn parse_short_decl(&mut self, pub_: bool, is_const: bool) -> Stmt {
         let name = self.advance(); // identifier
         self.advance(); // `:=`
         let value = self.parse_expr();
@@ -369,6 +374,36 @@ impl Parser {
             value,
             span,
             pub_,
+            is_const,
+        }
+    }
+
+    /// Parse `const x = expr` or `const x: Type = expr` — an immutable
+    /// binding. Unlike plain declarations, `const` uses `=` for both the
+    /// inferred and the annotated form.
+    pub(crate) fn parse_const_decl(&mut self, pub_: bool) -> Stmt {
+        let const_tok = self.advance(); // `const`
+        let name = self.advance(); // identifier
+        let ty = if self.eat(TokenKind::Colon) {
+            Some(self.parse_type())
+        } else {
+            None
+        };
+        if !self.eat(TokenKind::Assign) {
+            self.error_here("expected `=` after const declaration");
+        }
+        let value = self.parse_expr();
+        let span = const_tok.span.join(value.span());
+        Stmt::Decl {
+            ty,
+            name: Ident {
+                name: name.text,
+                span: name.span,
+            },
+            value,
+            span,
+            pub_,
+            is_const: true,
         }
     }
 
@@ -409,7 +444,7 @@ impl Parser {
 
     /// Parse `IDENT: TYPE = expr`; returns `None` (with position restored by
     /// the caller) when the statement is not an explicit declaration.
-    pub(crate) fn try_parse_explicit_decl(&mut self, pub_: bool) -> Option<Stmt> {
+    pub(crate) fn try_parse_explicit_decl(&mut self, pub_: bool, is_const: bool) -> Option<Stmt> {
         // Must start with an identifier.
         if !self.at(TokenKind::Ident) {
             return None;
@@ -436,6 +471,7 @@ impl Parser {
             value,
             span,
             pub_,
+            is_const,
         })
     }
 
@@ -600,6 +636,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
             value,
             span: mut sp,
             pub_,
+            is_const,
         } => {
             span(&mut sp);
             Stmt::Decl {
@@ -608,6 +645,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
                 value,
                 span: sp,
                 pub_,
+                is_const,
             }
         }
         Stmt::Import {

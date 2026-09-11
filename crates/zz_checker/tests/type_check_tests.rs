@@ -1165,3 +1165,124 @@ fn fixit_structure_is_populated() {
     assert_eq!(fixit.replacement, "_x");
     assert_eq!(fixit.message, "rename to");
 }
+
+// --- const (immutable variables) -------------------------------------------
+
+#[test]
+fn const_decl_type_checks() {
+    let r = check_src("const x = 10");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Int);
+}
+
+#[test]
+fn const_explicit_type_checks() {
+    let r = check_src("const x: float = 1.5");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Float);
+}
+
+#[test]
+fn cannot_reassign_const() {
+    errors_contain(
+        "const x = 10\nx = 20",
+        "cannot assign to immutable variable `x`",
+    );
+}
+
+#[test]
+fn cannot_reassign_const_explicit() {
+    errors_contain(
+        "const x: int = 10\nx = 20",
+        "cannot assign to immutable variable `x`",
+    );
+}
+
+#[test]
+fn const_error_has_hint() {
+    let r = check_src("const x = 10\nx = 20");
+    let diag = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("cannot assign to immutable variable"))
+        .unwrap();
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.contains("remove `const` to make `x` mutable")),
+        "missing hint, got: {:?}",
+        diag.notes,
+    );
+}
+
+#[test]
+fn const_error_has_secondary_label() {
+    let r = check_src("const x = 10\nx = 20");
+    let diag = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("cannot assign to immutable variable"))
+        .unwrap();
+    let sec = diag
+        .secondary
+        .as_ref()
+        .expect("const error must carry a secondary label");
+    assert_eq!(sec.message, "variable defined as immutable here");
+    // The secondary span points at the `x` in `const x = 10` (byte 6).
+    assert_eq!(sec.span.start, 6);
+}
+
+#[test]
+fn can_reassign_mutable() {
+    let r = check_src("x := 10\nx = 20");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn const_in_function_scope() {
+    errors_contain(
+        "func f() -> int { const y = 1\ny = 2\nreturn y }",
+        "cannot assign to immutable variable `y`",
+    );
+}
+
+#[test]
+fn mutable_shadow_of_const_is_reassignable() {
+    // The inner `x := 5` shadows the outer const; reassigning the shadow is
+    // legal even though an outer `x` is immutable.
+    let r = check_src(
+        "const x = 10\n\
+         func f() -> int {\n\
+         \x20   x := 5\n\
+         \x20   x = 6\n\
+         \x20   return x\n\
+         }",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn const_shadowed_by_const_still_immutable() {
+    errors_contain(
+        "const x = 10\n\
+         func f() -> int {\n\
+         \x20   const x = 5\n\
+         \x20   x = 6\n\
+         \x20   return x\n\
+         }",
+        "cannot assign to immutable variable `x`",
+    );
+}
+
+#[test]
+fn const_can_be_read() {
+    let r = check_src("const x = 10\ny := x + 1");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["y"], Type::Int);
+}
+
+#[test]
+fn const_closure_capture() {
+    let r = check_src("const x = 10\nf := | | x\nz := f()");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}

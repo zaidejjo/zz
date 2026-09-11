@@ -202,6 +202,62 @@ fn parses_option_result_types() {
 }
 
 #[test]
+fn parses_const_decl() {
+    let p = parse_ok("const x = 10");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl {
+            ty: None,
+            name,
+            is_const,
+            ..
+        } => {
+            assert!(is_const, "expected is_const=true");
+            assert_eq!(name.name, "x");
+        }
+        other => panic!("expected const decl, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_const_explicit_decl() {
+    let p = parse_ok("const x: int = 10");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl {
+            ty: Some(ty),
+            is_const,
+            ..
+        } => {
+            assert!(is_const, "expected is_const=true");
+            assert_eq!(ty.kind, zz_frontend::ast::TyKind::Int);
+        }
+        other => panic!("expected const decl, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_pub_const_decl() {
+    let p = parse_ok("pub const x = 10");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { is_const, pub_, .. } => {
+            assert!(is_const, "expected is_const=true");
+            assert!(pub_, "expected pub_=true");
+        }
+        other => panic!("expected const decl, got {other:?}"),
+    }
+}
+
+#[test]
+fn plain_decl_is_mutable() {
+    let p = parse_ok("x := 10");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { is_const, .. } => {
+            assert!(!is_const, "expected is_const=false");
+        }
+        other => panic!("expected decl, got {other:?}"),
+    }
+}
+
+#[test]
 fn multiple_statements() {
     let p = parse_ok("a := 1\nb := 2\nc := a + b");
     assert_eq!(p.stmts.len(), 3);

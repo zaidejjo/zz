@@ -1,0 +1,14 @@
+// E2E: const (immutable) variables — inferred and explicit types
+const x = 10
+const y: int = 20
+const name = "hello"
+const pi: float = 3.14
+
+// const values can be read freely
+z := x + y
+println("const_ok")
+println(x)
+println(y)
+println(name)
+println(pi)
+println(z)

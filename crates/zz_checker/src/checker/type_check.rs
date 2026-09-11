@@ -20,11 +20,12 @@ impl Checker {
                 value,
                 span: _,
                 pub_: _,
+                is_const,
             } => {
                 // Pre-bind closures so recursive references resolve.
                 if matches!(value, Expr::Closure { .. }) {
                     let fv = self.unifier.fresh_var();
-                    self.define_at(&name.name, fv, name.span);
+                    self.define_var_at(&name.name, fv, name.span, *is_const);
                 }
                 let vt = self.check_expr(value);
                 if let Some(ann) = ty {
@@ -59,7 +60,7 @@ impl Checker {
                             ));
                         }
                     } else {
-                        self.define_at(&name.name, d.clone(), name.span);
+                        self.define_var_at(&name.name, d.clone(), name.span, *is_const);
                         if self.env.len() == 1 {
                             self.new_bindings.insert(name.name.clone(), d.clone());
                         }
@@ -69,7 +70,7 @@ impl Checker {
                 if self.env.len() == 1 {
                     self.new_bindings.insert(name.name.clone(), vt.clone());
                 }
-                self.define_at(&name.name, rt.clone(), name.span);
+                self.define_var_at(&name.name, rt.clone(), name.span, *is_const);
                 rt
             }
             Stmt::Import {
@@ -259,6 +260,33 @@ impl Checker {
                 value,
                 span,
             } => {
+                // Reject assignment to immutable (`const`) variables. The target is an
+                // `Ident` in plain programs and a `Path` (e.g. `ns.x`) after
+                // the loader namespaces top-level bindings.
+                let tname: Option<String> = match target {
+                    Expr::Ident { name, .. } => Some(name.clone()),
+                    Expr::Path { parts, .. } => Some(parts.join(".")),
+                    _ => None,
+                };
+                if let Some(tname) = tname {
+                    if let Some(def_span) = self.lookup_const_span(&tname) {
+                        let display = Self::display_name(&tname);
+                        self.errors.push(
+                            error_at(
+                                format!("cannot assign to immutable variable `{}`", display),
+                                target.span(),
+                            )
+                            .with_secondary(zz_frontend::diag::SecondaryLabel {
+                                span: def_span,
+                                message: "variable defined as immutable here".to_string(),
+                            })
+                            .with_note(format!(
+                                "hint: remove `const` to make `{}` mutable",
+                                display
+                            )),
+                        );
+                    }
+                }
                 let errors_before = self.errors.len();
                 let tt = self.check_assign_target(target);
                 let vt = self.check_expr(value);
