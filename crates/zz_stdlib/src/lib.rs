@@ -58,6 +58,7 @@ fn const_sig(ret: zz_checker::Type) -> zz_checker::FuncSig {
         params: Vec::new(),
         has_default: vec![],
         ret,
+        is_extern: false,
     }
 }
 

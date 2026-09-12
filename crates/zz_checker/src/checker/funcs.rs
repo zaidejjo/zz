@@ -45,8 +45,97 @@ impl Checker {
                 params: sig_params,
                 has_default,
                 ret: sig_ret,
+                is_extern: false,
             },
         );
+    }
+
+    /// Register one `extern "C"` signature. No body is checked; parameter and
+    /// return types must be C-compatible (int/float/bool/pointer/void/unit).
+    pub(crate) fn collect_extern(
+        &mut self,
+        name: &zz_frontend::ast::Ident,
+        params: &[zz_frontend::ast::Param],
+        ret: &Option<zz_frontend::ast::Ty>,
+    ) {
+        let mut sig_params = Vec::with_capacity(params.len());
+        for p in params {
+            let ty = match &p.ty {
+                Some(t) => {
+                    let ct = self.ast_to_type(t, &[]);
+                    if !Self::is_c_abi_type(&ct) {
+                        self.errors.push(zz_frontend::diag::error_at(
+                            format!(
+                                "extern function `{}`: parameter `{}` has non-C type `{}` (allowed: int, float, bool, *const T, *mut T, void, ())",
+                                name.name, p.name.name, ct
+                            ),
+                            p.span,
+                        ));
+                    }
+                    ct
+                }
+                None => {
+                    self.errors.push(zz_frontend::diag::error_at(
+                        format!(
+                            "extern function `{}`: parameter `{}` needs an explicit C type",
+                            name.name, p.name.name
+                        ),
+                        p.span,
+                    ));
+                    Type::Error
+                }
+            };
+            sig_params.push((p.name.name.clone(), ty));
+        }
+        let sig_ret = match ret {
+            Some(t) => {
+                let ct = self.ast_to_type(t, &[]);
+                if !Self::is_c_abi_type(&ct) {
+                    self.errors.push(zz_frontend::diag::error_at(
+                        format!(
+                            "extern function `{}` has non-C return type `{}` (allowed: int, float, bool, *const T, *mut T, void, ())",
+                            name.name, ct
+                        ),
+                        t.span,
+                    ));
+                }
+                ct
+            }
+            None => Type::Unit,
+        };
+        let full_name = name.name.clone();
+        if self.funcs.contains_key(&full_name) {
+            self.errors.push(zz_frontend::diag::error_at(
+                format!("duplicate definition of function `{full_name}`"),
+                name.span,
+            ));
+        }
+        self.funcs.insert(
+            full_name,
+            crate::checker::FuncSig {
+                generics: Vec::new(),
+                bounds: Vec::new(),
+                params: sig_params,
+                has_default: vec![false; params.len()],
+                ret: sig_ret,
+                is_extern: true,
+            },
+        );
+    }
+
+    fn is_c_abi_type(ty: &Type) -> bool {
+        match ty {
+            Type::Int | Type::Float | Type::Bool | Type::Unit | Type::Void | Type::Error => true,
+            Type::Ptr { inner, .. } => Self::is_c_abi_scalar(inner),
+            _ => false,
+        }
+    }
+
+    fn is_c_abi_scalar(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Int | Type::Float | Type::Bool | Type::Unit | Type::Void
+        )
     }
 
     pub(crate) fn check_func_body(&mut self, stmt: &Stmt, sig: &crate::checker::FuncSig) {

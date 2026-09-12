@@ -24,6 +24,8 @@ pub struct FuncSig {
     pub params: Vec<(String, Type)>,
     pub has_default: Vec<bool>,
     pub ret: Type,
+    /// True for `extern "C"` declarations — no ZZ body, linked natively.
+    pub is_extern: bool,
 }
 
 /// A registered struct definition: field names and their types.
@@ -41,6 +43,8 @@ pub struct CheckResult {
     pub funcs: HashMap<String, FuncSig>,
     /// Top-level struct definitions.
     pub structs: HashMap<String, StructSig>,
+    /// Native libraries requested via `@link("lib")`, in source order, deduped.
+    pub link_libs: Vec<String>,
     /// Top-level `const` bindings and their declaration spans. Used to seed
     /// later REPL snippets so immutable names stay immutable across evals.
     pub const_bindings: HashMap<String, Span>,
@@ -221,6 +225,7 @@ fn check_program_impl(
                             params: sig_params,
                             has_default,
                             ret: sig_ret,
+                            is_extern: false,
                         },
                     );
                     // Only `pub` methods are visible cross-module. `pub impl`
@@ -256,6 +261,23 @@ fn check_program_impl(
                 pub_funcs_set.insert(full_name);
             }
         }
+        // Pass 1d: register `extern "C"` signatures (no bodies to check).
+        if let Stmt::ExternBlock { items, .. } = stmt {
+            for item in items {
+                if let Some(prev) = seen.insert(item.name.name.clone(), item.span) {
+                    checker.errors.push(zz_frontend::diag::error_at(
+                        format!("duplicate definition of function `{}`", item.name.name),
+                        item.span,
+                    ));
+                    checker.errors.push(zz_frontend::diag::error_at(
+                        "previous definition here",
+                        prev,
+                    ));
+                }
+                checker.collect_extern(&item.name, &item.params, &item.ret);
+            }
+        }
+        // `@link` is collected in Pass 2 (check_stmt) to preserve order/dedup.
     }
 
     // Pass 2: check top-level statements in order.
@@ -332,6 +354,7 @@ fn check_program_impl(
             bindings,
             funcs: checker.funcs,
             structs: checker.structs,
+            link_libs: checker.link_libs,
             const_bindings,
             pub_bindings,
             pub_funcs,
@@ -384,6 +407,8 @@ pub(crate) struct Checker {
     /// Resolved type per expression span, recorded during the type walk.
     /// Used by the HIR builder to attach a resolved `Type` to every AST node.
     pub(crate) span_types: std::collections::HashMap<zz_frontend::span::Span, Type>,
+    /// Native libraries requested via `@link`, in source order, deduped.
+    pub(crate) link_libs: Vec<String>,
 }
 
 impl Checker {
@@ -412,6 +437,7 @@ impl Checker {
             had_undefined_var: false,
             imports: Vec::new(),
             span_types: std::collections::HashMap::new(),
+            link_libs: Vec::new(),
         }
     }
 

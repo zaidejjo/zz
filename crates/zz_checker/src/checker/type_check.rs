@@ -114,7 +114,21 @@ impl Checker {
             }
             Stmt::Func { .. } => {
                 let sig = self.funcs.get(&Self::func_name(stmt)).unwrap().clone();
+                // Extern functions have no ZZ body — already registered in Pass 1d.
+                if sig.is_extern {
+                    return Type::Unit;
+                }
                 self.check_func_body(stmt, &sig);
+                Type::Unit
+            }
+            Stmt::ExternBlock { .. } => Type::Unit,
+            Stmt::Link { lib, span } => {
+                if lib.trim().is_empty() {
+                    self.errors
+                        .push(error_at("`@link` requires a non-empty library name", *span));
+                } else if !self.link_libs.iter().any(|l| l == lib) {
+                    self.link_libs.push(lib.clone());
+                }
                 Type::Unit
             }
             Stmt::Impl { name, methods, .. } => {

@@ -419,6 +419,8 @@ impl Lowerer {
                 out.push_str("    // unsupported statement skipped\n");
             }
             Stmt::Func { .. } | Stmt::Struct { .. } | Stmt::Impl { .. } | Stmt::Import { .. } => {}
+            // Top-level only: emitted in the preamble by `Lowerer::lower`.
+            Stmt::ExternBlock { .. } | Stmt::Link { .. } => {}
         }
     }
 

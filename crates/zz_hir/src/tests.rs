@@ -17,7 +17,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
     // io
     f.insert(
         "io.println".into(),
-        FuncSig {
+        FuncSig { is_extern: false, 
             generics: vec!["T".into()],
             bounds: Vec::new(),
             params: vec![("v".into(), t_any.clone())],
@@ -27,7 +27,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
     );
     f.insert(
         "io.print".into(),
-        FuncSig {
+        FuncSig { is_extern: false, 
             generics: vec!["T".into()],
             bounds: Vec::new(),
             params: vec![("v".into(), t_any.clone())],
@@ -38,7 +38,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
     // http (heavy module — should be pruned if unused)
     f.insert(
         "http.get".into(),
-        FuncSig {
+        FuncSig { is_extern: false, 
             generics: vec![],
             bounds: Vec::new(),
             params: vec![("url".into(), Type::Str)],
@@ -48,7 +48,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
     );
     f.insert(
         "http.server".into(),
-        FuncSig {
+        FuncSig { is_extern: false, 
             generics: vec![],
             bounds: Vec::new(),
             params: vec![],
@@ -59,7 +59,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
     // str methods
     f.insert(
         "str.len".into(),
-        FuncSig {
+        FuncSig { is_extern: false, 
             generics: vec![],
             bounds: Vec::new(),
             params: vec![("self".into(), Type::Str)],
@@ -69,7 +69,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
     );
     f.insert(
         "str.trim".into(),
-        FuncSig {
+        FuncSig { is_extern: false, 
             generics: vec![],
             bounds: Vec::new(),
             params: vec![("self".into(), Type::Str)],
@@ -80,7 +80,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
     // vec methods
     f.insert(
         "vec.push".into(),
-        FuncSig {
+        FuncSig { is_extern: false, 
             generics: vec!["T".into()],
             bounds: Vec::new(),
             params: vec![

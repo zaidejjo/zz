@@ -160,6 +160,19 @@ fn collect_stmt_defs(stmt: &Stmt, source: &str, defs: &mut HashMap<u32, Definiti
         }
         Stmt::Expr(e) => collect_expr_defs(e, source, defs),
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::ExternBlock { items, .. } => {
+            for item in items {
+                defs.insert(
+                    item.name.span.start,
+                    Definition {
+                        name: item.name.name.clone(),
+                        span: item.name.span,
+                        kind: DefKind::Func,
+                    },
+                );
+            }
+        }
+        Stmt::Link { .. } => {}
         Stmt::Destructure { value, .. } => collect_expr_defs(value, source, defs),
     }
 }
@@ -351,6 +364,12 @@ fn walk_stmt<'a>(stmt: &'a Stmt, source: &str, offset: u32, result: &mut NodeAtO
         Stmt::Defer { expr, .. } => walk_expr(expr, source, offset, result),
         Stmt::Import { .. } => {}
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::ExternBlock { items, .. } => {
+            for item in items {
+                check_ident(&item.name, offset, result);
+            }
+        }
+        Stmt::Link { .. } => {}
         Stmt::Destructure { pat, value, .. } => {
             walk_pattern(pat, source, offset, result);
             walk_expr(value, source, offset, result);
@@ -848,7 +867,11 @@ fn collect_name_refs_in_stmt(stmt: &Stmt, name: &str, refs: &mut Vec<Reference>)
             }
         }
         Stmt::Expr(e) => collect_name_refs_in_expr(e, name, refs),
-        Stmt::Import { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Import { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::ExternBlock { .. }
+        | Stmt::Link { .. } => {}
     }
 }
 
@@ -1092,7 +1115,11 @@ fn collect_hl_stmt(stmt: &Stmt, name: &str, source: &str, out: &mut Vec<Highligh
             }
         }
         Stmt::Expr(e) => collect_hl_expr(e, name, out),
-        Stmt::Import { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Import { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::ExternBlock { .. }
+        | Stmt::Link { .. } => {}
     }
 }
 

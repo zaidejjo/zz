@@ -15,6 +15,7 @@ fn sig(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
             .collect(),
         has_default: vec![],
         ret,
+        is_extern: false,
     }
 }
 
@@ -29,6 +30,7 @@ fn sig_t(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
             .collect(),
         has_default: vec![],
         ret,
+        is_extern: false,
     }
 }
 
@@ -43,6 +45,7 @@ fn sig_tu(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
             .collect(),
         has_default: vec![],
         ret,
+        is_extern: false,
     }
 }
 
@@ -569,6 +572,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             params: vec![("res".to_string(), result_t.clone())],
             has_default: vec![],
             ret: t.clone(),
+            is_extern: false,
         },
     );
     m.insert(
@@ -582,6 +586,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             ],
             has_default: vec![],
             ret: t.clone(),
+            is_extern: false,
         },
     );
     m.insert(
@@ -595,6 +600,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             ],
             has_default: vec![],
             ret: t,
+            is_extern: false,
         },
     );
 

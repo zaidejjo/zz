@@ -330,7 +330,7 @@ mod tests {
             let mut funcs = state.funcs.write().unwrap();
             funcs.insert(
                 "add".to_string(),
-                FuncSig {
+                FuncSig { is_extern: false, 
                     generics: vec![],
                     bounds: Vec::new(),
                     params: vec![],

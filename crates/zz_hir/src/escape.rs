@@ -573,7 +573,7 @@ mod tests {
         let t_any = Type::Named("T".to_string());
         funcs.insert(
             "io.println".into(),
-            crate::FuncSig {
+            crate::FuncSig { is_extern: false, 
                 generics: vec!["T".into()],
                 bounds: Vec::new(),
                 params: vec![("v".into(), t_any)],

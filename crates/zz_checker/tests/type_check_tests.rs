@@ -759,7 +759,7 @@ fn typeof_any_value() {
     let mut funcs = HashMap::new();
     funcs.insert(
         "typeof".to_string(),
-        FuncSig {
+        FuncSig { is_extern: false, 
             generics: vec!["T".to_string()],
             bounds: Vec::new(),
             params: vec![("v".to_string(), Type::Named("T".to_string()))],
@@ -786,7 +786,7 @@ fn method_funcs() -> HashMap<String, FuncSig> {
     let mut funcs = HashMap::new();
     funcs.insert(
         "dist".to_string(),
-        FuncSig {
+        FuncSig { is_extern: false, 
             generics: Vec::new(),
             bounds: Vec::new(),
             params: vec![
@@ -856,7 +856,7 @@ fn method_call_namespaced_by_struct_type() {
     let mut funcs = HashMap::new();
     funcs.insert(
         "shapes.dist".to_string(),
-        FuncSig {
+        FuncSig { is_extern: false, 
             generics: Vec::new(),
             bounds: Vec::new(),
             params: vec![("p".to_string(), Type::Struct("shapes.Point".to_string()))],
@@ -887,7 +887,7 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
     let mut funcs = HashMap::new();
     funcs.insert(
         "str".to_string(),
-        FuncSig {
+        FuncSig { is_extern: false, 
             generics: vec!["T".to_string()],
             bounds: Vec::new(),
             params: vec![("v".to_string(), t.clone())],
@@ -897,7 +897,7 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
     );
     funcs.insert(
         "int".to_string(),
-        FuncSig {
+        FuncSig { is_extern: false, 
             generics: vec!["T".to_string()],
             bounds: Vec::new(),
             params: vec![("v".to_string(), t.clone())],
@@ -907,7 +907,7 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
     );
     funcs.insert(
         "float".to_string(),
-        FuncSig {
+        FuncSig { is_extern: false, 
             generics: vec!["T".to_string()],
             bounds: Vec::new(),
             params: vec![("v".to_string(), t.clone())],
@@ -979,7 +979,7 @@ fn typo_suggestion_variable() {
     let mut funcs = HashMap::new();
     funcs.insert(
         "println".to_string(),
-        FuncSig {
+        FuncSig { is_extern: false, 
             generics: vec![],
             bounds: Vec::new(),
             params: vec![("msg".to_string(), Type::Str)],

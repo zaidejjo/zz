@@ -53,6 +53,7 @@ pub fn walk_stmt<'a>(
             }
         }
         Stmt::Struct { .. } | Stmt::Import { .. } => {}
+        Stmt::ExternBlock { .. } | Stmt::Link { .. } => {}
         Stmt::Impl { methods, .. } => {
             for m in methods {
                 walk_stmt(tp, m, f);

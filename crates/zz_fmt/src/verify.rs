@@ -216,6 +216,33 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
             fp_expr(value, out);
             out.push(']');
         }
+        Stmt::ExternBlock { abi, items, .. } => {
+            out.push_str("Extern[");
+            out.push_str(abi);
+            for item in items {
+                out.push_str(&item.name.name);
+                out.push('(');
+                for p in &item.params {
+                    out.push_str(&p.name.name);
+                    if let Some(t) = &p.ty {
+                        out.push(':');
+                        fp_ty(t, out);
+                    }
+                    out.push(',');
+                }
+                out.push(')');
+                if let Some(r) = &item.ret {
+                    out.push_str("->");
+                    fp_ty(r, out);
+                }
+            }
+            out.push(']');
+        }
+        Stmt::Link { lib, .. } => {
+            out.push_str("Link[");
+            out.push_str(lib);
+            out.push(']');
+        }
         Stmt::Expr(e) => fp_expr(e, out),
     }
 }
@@ -252,6 +279,11 @@ fn fp_ty(t: &Ty, out: &mut String) {
         TyKind::Bool => out.push_str("bool"),
         TyKind::Str => out.push_str("str"),
         TyKind::Unit => out.push_str("unit"),
+        TyKind::Void => out.push_str("void"),
+        TyKind::Ptr { mutable, inner } => {
+            out.push_str(if *mutable { "*mut" } else { "*const" });
+            fp_ty(inner, out);
+        }
         TyKind::Tuple(items) => {
             out.push('(');
             for t in items {

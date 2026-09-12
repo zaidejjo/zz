@@ -213,6 +213,7 @@ impl<'a> Lexer<'a> {
                 }
                 ':' => self.emit_significant(TokenKind::Colon, self.pos, self.pos + 1),
                 ',' => self.emit_significant(TokenKind::Comma, self.pos, self.pos + 1),
+                '@' => self.emit_significant(TokenKind::At, self.pos, self.pos + 1),
                 '.' if self.peek_char_at(1) == Some('.') => {
                     self.emit_significant(TokenKind::DotDot, self.pos, self.pos + 2)
                 }
@@ -422,6 +423,8 @@ impl<'a> Lexer<'a> {
             "pub" => TokenKind::Pub,
             "impl" => TokenKind::Impl,
             "const" => TokenKind::Const,
+            "extern" => TokenKind::Extern,
+            "mut" => TokenKind::Mut,
             _ => TokenKind::Ident,
         };
         self.push_token(kind, span, text);
