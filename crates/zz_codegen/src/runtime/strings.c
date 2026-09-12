@@ -211,8 +211,29 @@ char *copy_cstr(const char *s, size_t n) {
 
 
 zz_value zz_str_static(const char *src) {
+    // Call-site literal cache (P6): the same .rodata address arrives on
+    // every loop iteration, so a tiny MRU keyed on POINTER equality
+    // (same address ⇒ same bytes) skips strlen + fnv1a + table probe on
+    // hits. Misses fall through to the intern table. Thread-local like
+    // the header slab; singletons are never freed so entries stay valid.
+#define ZZ_LIT_CACHE_N 8
+    static __thread const char *zz_lit_keys[ZZ_LIT_CACHE_N];
+    static __thread zz_str *zz_lit_vals[ZZ_LIT_CACHE_N];
+    static __thread unsigned zz_lit_victim;
+    for (unsigned i = 0; i < ZZ_LIT_CACHE_N; i++) {
+        if (zz_lit_keys[i] == src) {
+            zz_value v;
+            v.tag = ZZ_STR;
+            v.s = zz_lit_vals[i];
+            return v;
+        }
+    }
     size_t len = strlen(src);
     zz_str *s = intern_lookup_or_create(src, len);
+    unsigned vic = zz_lit_victim;
+    zz_lit_keys[vic] = src;
+    zz_lit_vals[vic] = s;
+    zz_lit_victim = (vic + 1) % ZZ_LIT_CACHE_N;
     // Note: do NOT bump refs here — the singleton is permanent and owned
     // by the intern table. Generated code treats the returned zz_value as
     // a borrowed reference; if it ever escapes into zz_assign / zz_release,
@@ -941,14 +962,59 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
     return arr;
 }
 
-// Fast int → string: snprintf into a 24-byte stack buffer, then SSO.
+// Fast int64 → decimal (P7): two-digit lookup table writes pairs per
+// division, halving (expensive) divisions vs one-digit loops and skipping
+// snprintf's format/varargs/locale machinery entirely. Writes backwards
+// from `end` (one past the buffer); buffer needs >= 22 bytes (20 digits
+// + sign + slack). Returns pointer to the first char; length via *len.
+static const char *zz_fmt_i64(char *end, int64_t n, size_t *len) {
+    static const char pairs[] =
+        "00010203040506070809"
+        "10111213141516171819"
+        "20212223242526272829"
+        "30313233343536373839"
+        "40414243444546474849"
+        "50515253545556575859"
+        "60616263646566676869"
+        "70717273747576777879"
+        "80818283848586878889"
+        "90919293949596979899";
+    uint64_t u;
+    int neg = 0;
+    if (n < 0) {
+        neg = 1;
+        u = 0u - (uint64_t)n;  // exact even for INT64_MIN
+    } else {
+        u = (uint64_t)n;
+    }
+    char *p = end;
+    while (u >= 100) {
+        unsigned r = (unsigned)(u % 100);
+        u /= 100;
+        *--p = pairs[r * 2 + 1];
+        *--p = pairs[r * 2];
+    }
+    // Final 1–2 digits: never emit a leading zero.
+    unsigned last = (unsigned)u;
+    *--p = pairs[last * 2 + 1];
+    if (last >= 10) {
+        *--p = pairs[last * 2];
+    }
+    if (neg) {
+        *--p = '-';
+    }
+    *len = (size_t)(end - p);
+    return p;
+}
+
+// Fast int → string: format into a 24-byte stack buffer, then SSO.
 // Avoids the zz_value_to_string strbuf path (malloc 256 + free) for the
 // most common cast in loops (`str(i)`). int64 min is 20 chars, always SSO.
 zz_value zz_str_from_int(int64_t n) {
     char buf[24];
-    int len = snprintf(buf, sizeof buf, "%lld", (long long)n);
-    if (len < 0) return zz_str_new("", 0);
-    return zz_str_new(buf, (size_t)len);
+    size_t len;
+    const char *p = zz_fmt_i64(buf + sizeof buf, n, &len);
+    return zz_str_new(p, len);
 }
 
 // typeof(v) — return type name as string.
@@ -966,13 +1032,13 @@ zz_value zz_str_cast(zz_value v, int *err) {
 zz_value zz_str_cast_arena(zz_value v, int *err, zz_arena *arena) {
     (void)err;
     if (!arena) return zz_str_cast(v, err);
-    // Int fast path: stack-format, then arena-allocate (SSO, zero heap).
+    // Int fast path: LUT-format, then arena-allocate (SSO, zero heap).
     // Skips the zz_value_to_string strbuf malloc/free entirely.
     if (v.tag == ZZ_INT) {
         char ibuf[24];
-        int ilen = snprintf(ibuf, sizeof ibuf, "%lld", (long long)v.i);
-        if (ilen < 0) return zz_str_new_arena("", 0, arena);
-        return zz_str_new_arena(ibuf, (size_t)ilen, arena);
+        size_t ilen;
+        const char *p = zz_fmt_i64(ibuf + sizeof ibuf, v.i, &ilen);
+        return zz_str_new_arena(p, ilen, arena);
     }
     char *s = zz_value_to_string(&v);
     size_t len = strlen(s);

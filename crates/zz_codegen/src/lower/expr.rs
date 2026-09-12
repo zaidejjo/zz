@@ -1247,7 +1247,28 @@ impl Lowerer {
             _ => false,
         };
         if let Some(ref recv) = method_receiver {
-            let recv_val = self.emit_expr(recv, names, out);
+            // Borrowed-receiver fast path: zz_vec_push/zz_vec_append
+            // never retain, release, or store the receiver array itself
+            // (push dups elements internally; append mutates in place),
+            // so the atomic retain that Ident emission adds is pure
+            // overhead in tight push loops. Pass plain Ident receivers
+            // borrowed; complex receivers already come out uncloned.
+            let borrow_recv = matches!(
+                native_impl(&cname),
+                Some("zz_vec_push") | Some("zz_vec_append")
+            ) && matches!(recv, Expr::Ident { .. });
+            let recv_val = if borrow_recv {
+                if let Expr::Ident { name, .. } = recv {
+                    names
+                        .lookup(name)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| self.emit_expr(recv, names, out))
+                } else {
+                    self.emit_expr(recv, names, out)
+                }
+            } else {
+                self.emit_expr(recv, names, out)
+            };
             if recv_is_struct {
                 arg_items.push(recv_val);
             } else {
