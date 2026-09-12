@@ -94,6 +94,7 @@ static int json_parse_str(json_parser *p, zz_value *out) {
     }
     if (q >= p->len) { snprintf(p->err, sizeof(p->err), "unterminated string"); return -1; }
     zz_str *str = str_alloc(cap);
+    char *sd = zz_str_ptr(str);
     size_t w = 0;
     while (p->pos < p->len && p->s[p->pos] != '"') {
         char c = p->s[p->pos];
@@ -101,14 +102,14 @@ static int json_parse_str(json_parser *p, zz_value *out) {
             p->pos++;
             char e = p->s[p->pos];
             switch (e) {
-                case '"': str->data[w++] = '"'; break;
-                case '\\': str->data[w++] = '\\'; break;
-                case '/': str->data[w++] = '/'; break;
-                case 'b': str->data[w++] = '\b'; break;
-                case 'f': str->data[w++] = '\f'; break;
-                case 'n': str->data[w++] = '\n'; break;
-                case 'r': str->data[w++] = '\r'; break;
-                case 't': str->data[w++] = '\t'; break;
+                case '"': sd[w++] = '"'; break;
+                case '\\': sd[w++] = '\\'; break;
+                case '/': sd[w++] = '/'; break;
+                case 'b': sd[w++] = '\b'; break;
+                case 'f': sd[w++] = '\f'; break;
+                case 'n': sd[w++] = '\n'; break;
+                case 'r': sd[w++] = '\r'; break;
+                case 't': sd[w++] = '\t'; break;
                 case 'u': {
                     p->pos++;
                     if (p->pos + 4 > p->len) { snprintf(p->err, sizeof(p->err), "truncated \\u escape"); goto fail; }
@@ -122,14 +123,14 @@ static int json_parse_str(json_parser *p, zz_value *out) {
                         else { int line, col; json_line_col(p, p->pos, &line, &col); snprintf(p->err, sizeof(p->err), "invalid \\u escape at line %d, col %d", line, col); goto fail; }
                     }
                     p->pos += 4;
-                    if (code < 0x80) str->data[w++] = (char)code;
+                    if (code < 0x80) sd[w++] = (char)code;
                     else if (code < 0x800) {
-                        str->data[w++] = (char)(0xC0 | (code >> 6));
-                        str->data[w++] = (char)(0x80 | (code & 0x3F));
+                        sd[w++] = (char)(0xC0 | (code >> 6));
+                        sd[w++] = (char)(0x80 | (code & 0x3F));
                     } else {
-                        str->data[w++] = (char)(0xE0 | (code >> 12));
-                        str->data[w++] = (char)(0x80 | ((code >> 6) & 0x3F));
-                        str->data[w++] = (char)(0x80 | (code & 0x3F));
+                        sd[w++] = (char)(0xE0 | (code >> 12));
+                        sd[w++] = (char)(0x80 | ((code >> 6) & 0x3F));
+                        sd[w++] = (char)(0x80 | (code & 0x3F));
                     }
                     break;
                 }
@@ -139,11 +140,11 @@ static int json_parse_str(json_parser *p, zz_value *out) {
             }
             p->pos++;
         } else {
-            str->data[w++] = c;
+            sd[w++] = c;
             p->pos++;
         }
     }
-    str->data[w] = '\0';
+    sd[w] = '\0';
     str->len = w;
     if (!json_eat(p, '"')) { snprintf(p->err, sizeof(p->err), "unterminated string"); goto fail; }
     // Shrink unused capacity warning-free: leave cap as is.
@@ -265,7 +266,7 @@ static int json_parse_value(json_parser *p, zz_value *out) {
 // json.parse(s) → Result(Ok(Json)) / Result(Err("invalid JSON: ..."))
 zz_value zz_json_parse(zz_value s, int *err) {
     if (s.tag != ZZ_STR) { *err = 1; return zz_unit(); }
-    json_parser p = { .s = s.s->data, .len = s.s->len, .pos = 0, .err = {0} };
+    json_parser p = { .s = zz_str_cptr(s.s), .len = s.s->len, .pos = 0, .err = {0} };
     zz_value raw;
     if (json_parse_value(&p, &raw) != 0) {
         return zz_variant_err(zz_str_owned(text_invalid_json(p.err)));
@@ -302,7 +303,7 @@ void json_serialize(SB *sb, zz_value v) {
         break;
     case ZZ_STR: {
         sb_str(sb, "\"", 1);
-        json_append_str_sb(sb, v.s->data, v.s->len);
+        json_append_str_sb(sb, zz_str_cptr(v.s), v.s->len);
         sb_str(sb, "\"", 1);
         break;
     }
@@ -321,7 +322,7 @@ void json_serialize(SB *sb, zz_value v) {
             if (i > 0) sb_str(sb, ",", 1);
             zz_dict_entry *e = &v.dict->entries[i];
             sb_str(sb, "\"", 1);
-            json_append_str_sb(sb, e->key->data, e->key->len);
+            json_append_str_sb(sb, zz_str_cptr(e->key), e->key->len);
             sb_str(sb, "\":", 2);
             json_serialize(sb, e->val);
         }
@@ -387,20 +388,20 @@ zz_value zz_json_get(zz_value j, zz_value key, int *err) {
     case ZZ_DICT: {
         for (size_t i = 0; i < inner.dict->len; i++) {
             zz_dict_entry *e = &inner.dict->entries[i];
-            if (e->key->len == k->len && memcmp(e->key->data, k->data, k->len) == 0) {
+            if (e->key->len == k->len && memcmp(zz_str_cptr(e->key), zz_str_cptr(k), k->len) == 0) {
                 return zz_variant_ok(zz_json_wrap(zz_clone(e->val)));
             }
         }
         char buf[160];
-        int n = snprintf(buf, sizeof buf, "key `%s` not found", k->data);
+        int n = snprintf(buf, sizeof buf, "key `%s` not found", zz_str_cptr(k));
         return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
     }
     case ZZ_ARRAY: {
         char *endptr;
-        long idx = strtol(k->data, &endptr, 10);
-        if (endptr != k->data + k->len) {
+        long idx = strtol(zz_str_cptr(k), &endptr, 10);
+        if (endptr != zz_str_cptr(k) + k->len) {
             char buf[192];
-            int n = snprintf(buf, sizeof buf, "expected a numeric index for array, got `%s`", k->data);
+            int n = snprintf(buf, sizeof buf, "expected a numeric index for array, got `%s`", zz_str_cptr(k));
             return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
         }
         if (idx < 0 || (size_t)idx >= inner.arr->len) {
@@ -417,7 +418,7 @@ zz_value zz_json_get(zz_value j, zz_value key, int *err) {
         char buf[200];
         int n = 0;
         if (inner.tag == ZZ_STR) {
-            n = snprintf(buf, sizeof buf, "\"%.*s\"", (int)inner.s->len, inner.s->data);
+            n = snprintf(buf, sizeof buf, "\"%.*s\"", (int)inner.s->len, zz_str_cptr(inner.s));
         } else if (inner.tag == ZZ_INT) {
             n = snprintf(buf, sizeof buf, "%lld", (long long)inner.i);
         } else if (inner.tag == ZZ_FLOAT) {

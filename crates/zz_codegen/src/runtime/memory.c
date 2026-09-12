@@ -15,13 +15,7 @@
 //  The arena uses a stack-allocated primary buffer (fast path) and falls
 //  back to heap-allocated chunks when it fills up. Multiple chunks form
 //  a singly-linked list; all are freed on destroy.
-#define ZZ_ARENA_DEFAULT_CAP (64 * 1024)  // 64 KB primary block
-
-typedef struct zz_arena_chunk {
-    struct zz_arena_chunk *next;
-    size_t cap;
-    char buf[];              // flexible array
-} zz_arena_chunk;
+#define ZZ_ARENA_DEFAULT_CAP (256 * 1024)  // 256 KB primary block
 
 // Thread-local arena for the current function scope.
 // Each generated function sets up its own arena on entry and resets on exit.
@@ -36,6 +30,7 @@ void zz_arena_init(zz_arena *a, size_t cap) {
     }
     a->cap = cap;
     a->offset = 0;
+    a->chunks = NULL;
 }
 
 void *zz_arena_alloc(zz_arena *a, size_t size, size_t align) {
@@ -46,41 +41,52 @@ void *zz_arena_alloc(zz_arena *a, size_t size, size_t align) {
         a->offset = aligned + size;
         return ptr;
     }
-    // Arena full: allocate a new chunk large enough for this request.
+    // Arena full: save the current buffer as an overflow chunk, then
+    // allocate a fresh block large enough for this request (and future
+    // ones of similar size).
     size_t chunk_cap = (size > a->cap) ? size * 2 : a->cap;
-    zz_arena_chunk *chunk = (zz_arena_chunk *)malloc(sizeof(zz_arena_chunk) + chunk_cap);
-    if (!chunk) {
+
+    // Save current buffer as a chunk node so destroy can free it later.
+    if (a->buf && a->offset > 0) {
+        zz_arena_chunk *old = (zz_arena_chunk *)malloc(sizeof(zz_arena_chunk) + a->cap);
+        if (old) {
+            old->next = a->chunks;
+            old->cap = a->cap;
+            memcpy(old->buf, a->buf, a->offset);
+            a->chunks = old;
+        }
+        // If malloc fails, we silently lose the old data — acceptable for
+        // an OOM path.  We do NOT free the old buf here; it's now owned
+        // by the chunk node.
+    }
+
+    // Allocate the new primary block.
+    a->buf = (char *)malloc(chunk_cap);
+    if (!a->buf) {
         fprintf(stderr, "zz: arena chunk out of memory\n");
         exit(1);
     }
-    // Link old arena buffer as a chunk so destroy frees it.
-    if (a->buf) {
-        zz_arena_chunk *old = (zz_arena_chunk *)malloc(sizeof(zz_arena_chunk) + a->cap);
-        if (old) {
-            old->next = NULL;
-            old->cap = a->cap;
-            memcpy(old->buf, a->buf, a->offset);
-            // We can't easily link this without a list; just free the old buf.
-            free(a->buf);
-        } else {
-            free(a->buf);
-        }
-    }
-    chunk->next = NULL;
-    chunk->cap = chunk_cap;
-    a->buf = chunk->buf;
     a->cap = chunk_cap;
     a->offset = size;
     return a->buf;
 }
 
 void zz_arena_destroy(zz_arena *a) {
+    // Free the current primary block.
     if (a->buf) {
         free(a->buf);
         a->buf = NULL;
-        a->cap = 0;
-        a->offset = 0;
     }
+    // Walk the overflow chunk list and free each one.
+    zz_arena_chunk *chunk = a->chunks;
+    while (chunk) {
+        zz_arena_chunk *next = chunk->next;
+        free(chunk);
+        chunk = next;
+    }
+    a->chunks = NULL;
+    a->cap = 0;
+    a->offset = 0;
 }
 
 // ---- thread-safe ARC (atomic reference counting) -----------------------
@@ -164,7 +170,8 @@ static void zz_release_dict(zz_dict *d) {
         for (size_t i = 0; i < d->len; i++) {
             if (d->entries[i].key && !d->entries[i].key->interned) {
                 if (__atomic_sub_fetch(&d->entries[i].key->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-                    free(d->entries[i].key);
+                    if (d->entries[i].key->cap > 0) free(d->entries[i].key->heap);
+                    zz_str_header_free(d->entries[i].key);
                 }
             }
             zz_release(&d->entries[i].val);
@@ -182,7 +189,8 @@ static void zz_release_dict(zz_dict *d) {
         for (size_t i = 0; i < d->len; i++) {
             if (d->entries[i].key && !d->entries[i].key->interned) {
                 if (__atomic_sub_fetch(&d->entries[i].key->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-                    free(d->entries[i].key);
+                    if (d->entries[i].key->cap > 0) free(d->entries[i].key->heap);
+                    zz_str_header_free(d->entries[i].key);
                 }
             }
             zz_release(&d->entries[i].val);
@@ -193,7 +201,8 @@ static void zz_release_dict(zz_dict *d) {
         for (size_t i = 0; i < d->len; i++) {
             if (d->entries[i].key && !d->entries[i].key->interned) {
                 if (__atomic_sub_fetch(&d->entries[i].key->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-                    free(d->entries[i].key);
+                    if (d->entries[i].key->cap > 0) free(d->entries[i].key->heap);
+                    zz_str_header_free(d->entries[i].key);
                 }
             }
             zz_release(&d->entries[i].val);
@@ -252,7 +261,10 @@ void zz_release_arc(zz_value *v) {
             // Arena-allocated strings have refs==0 sentinel — skip free.
             if (v->s->refs == 0) return;
             if (__atomic_sub_fetch(&v->s->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-                free(v->s);
+                // SSO strings (cap==0) have no separate heap buffer.
+                // Heap strings (cap>0) store data in a separate malloc'd buffer.
+                if (v->s->cap > 0) free(v->s->heap);
+                zz_str_header_free(v->s);
             }
         }
         break;
@@ -340,11 +352,13 @@ void zz_release(zz_value *v) {
         if (v->s && !v->s->interned) {
             // Arena-allocated strings have refs==0 sentinel — skip free.
             if (v->s->refs == 0) {
-                // Data is inline (flexible array), nothing to individually free.
                 return;
             }
             if (--v->s->refs == 0) {
-                free(v->s);
+                // SSO strings (cap==0) have no separate heap buffer.
+                // Heap strings (cap>0) store data in a separate malloc'd buffer.
+                if (v->s->cap > 0) free(v->s->heap);
+                zz_str_header_free(v->s);
             }
         }
         break;

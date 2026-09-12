@@ -128,14 +128,14 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
     if (a.tag == ZZ_STR && b.tag == ZZ_STR) {
         if (op == ZZOP_ADD) {
             zz_str *out = str_alloc(a.s->len + b.s->len);
-            memcpy(out->data, a.s->data, a.s->len);
-            memcpy(out->data + a.s->len, b.s->data, b.s->len);
+            memcpy(zz_str_ptr(out), zz_str_cptr(a.s), a.s->len);
+            memcpy(zz_str_ptr(out) + a.s->len, zz_str_cptr(b.s), b.s->len);
             zz_value v;
             v.tag = ZZ_STR;
             v.s = out;
             return v;
         }
-        int cmp = memcmp(a.s->data, b.s->data,
+        int cmp = memcmp(zz_str_cptr(a.s), zz_str_cptr(b.s),
                          a.s->len < b.s->len ? a.s->len : b.s->len);
         // If common prefix matches, shorter string is "less than"
         if (cmp == 0 && a.s->len != b.s->len) {
@@ -144,10 +144,10 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
         switch (op) {
         case ZZOP_EQ:
             return zz_bool(a.s->len == b.s->len &&
-                           memcmp(a.s->data, b.s->data, a.s->len) == 0);
+                           memcmp(zz_str_cptr(a.s), zz_str_cptr(b.s), a.s->len) == 0);
         case ZZOP_NE:
             return zz_bool(!(a.s->len == b.s->len &&
-                             memcmp(a.s->data, b.s->data, a.s->len) == 0));
+                             memcmp(zz_str_cptr(a.s), zz_str_cptr(b.s), a.s->len) == 0));
         case ZZOP_LT:
             return zz_bool(cmp < 0);
         case ZZOP_GT:
@@ -233,7 +233,7 @@ zz_value zz_io_print(zz_value v, int *err) {
 zz_value zz_io_input(zz_value prompt, int *err) {
     (void)err;
     if (prompt.tag == ZZ_STR) {
-        fwrite(prompt.s->data, 1, prompt.s->len, stdout);
+        fwrite(zz_str_cptr(prompt.s), 1, prompt.s->len, stdout);
         fflush(stdout);
     }
     char buf[1024];
@@ -295,6 +295,8 @@ zz_value zz_chan_new(int *err) {
     pthread_cond_init(&ch->cond, NULL);
     ch->len = 0;
     ch->cap = 16;
+    ch->head = 0;
+    ch->tail = 0;
     ch->queue = (zz_value *)malloc(sizeof(zz_value) * ch->cap);
     if (!ch->queue) {
         fprintf(stderr, "zz: out of memory (channel buffer)\n");
@@ -310,19 +312,28 @@ zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
     if (chan.tag != ZZ_CHAN) { *err = 1; return zz_unit(); }
     zz_chan *ch = chan.chan;
     pthread_mutex_lock(&ch->lock);
-    // Grow if needed.
+    // Grow if needed. The live items may wrap around `tail`, so copy
+    // them back into linear order in the new buffer.
     if (ch->len == ch->cap) {
         size_t new_cap = ch->cap * 2;
-        zz_value *new_queue = (zz_value *)realloc(ch->queue, sizeof(zz_value) * new_cap);
+        zz_value *new_queue = (zz_value *)malloc(sizeof(zz_value) * new_cap);
         if (!new_queue) {
             pthread_mutex_unlock(&ch->lock);
             *err = 1;
             return zz_unit();
         }
+        for (size_t i = 0; i < ch->len; i++) {
+            new_queue[i] = ch->queue[(ch->head + i) % ch->cap];
+        }
+        free(ch->queue);
         ch->queue = new_queue;
         ch->cap = new_cap;
+        ch->head = 0;
+        ch->tail = ch->len;
     }
-    ch->queue[ch->len++] = zz_clone(val);
+    ch->queue[ch->tail] = zz_clone(val);
+    ch->tail = (ch->tail + 1) % ch->cap;
+    ch->len++;
     pthread_cond_signal(&ch->cond);
     pthread_mutex_unlock(&ch->lock);
     return zz_unit();
@@ -336,11 +347,9 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
     while (ch->len == 0) {
         pthread_cond_wait(&ch->cond, &ch->lock);
     }
-    zz_value v = ch->queue[0];
-    // Shift remaining items left.
-    for (size_t i = 0; i < ch->len - 1; i++) {
-        ch->queue[i] = ch->queue[i + 1];
-    }
+    // O(1) pop from the head — no memmove.
+    zz_value v = ch->queue[ch->head];
+    ch->head = (ch->head + 1) % ch->cap;
     ch->len--;
     pthread_mutex_unlock(&ch->lock);
     return v;
@@ -355,10 +364,8 @@ zz_value zz_chan_try_recv(zz_value chan, int *err) {
         *err = 1;  // No message available.
         return zz_unit();
     }
-    zz_value v = ch->queue[0];
-    for (size_t i = 0; i < ch->len - 1; i++) {
-        ch->queue[i] = ch->queue[i + 1];
-    }
+    zz_value v = ch->queue[ch->head];
+    ch->head = (ch->head + 1) % ch->cap;
     ch->len--;
     pthread_mutex_unlock(&ch->lock);
     *err = 0;
@@ -504,9 +511,9 @@ zz_value zz_tcp_listen(zz_value addr, int *err) {
     (void)err;
     if (addr.tag != ZZ_STR) return zz_variant_err(zz_str_static("tcp_listen: expected a string"));
     struct sockaddr_in sa;
-    if (tcp_resolve(addr.s->data, &sa) != 0) {
+    if (tcp_resolve(zz_str_cptr(addr.s), &sa) != 0) {
         char buf[192];
-        int n = snprintf(buf, sizeof buf, "tcp_listen failed: invalid address `%s`", addr.s->data);
+        int n = snprintf(buf, sizeof buf, "tcp_listen failed: invalid address `%s`", zz_str_cptr(addr.s));
         return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
     }
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -531,9 +538,9 @@ zz_value zz_tcp_connect(zz_value addr, zz_value timeout_ms, int *err) {
     (void)err;
     if (addr.tag != ZZ_STR) return zz_variant_err(zz_str_static("tcp_connect: expected a string"));
     struct sockaddr_in sa;
-    if (tcp_resolve(addr.s->data, &sa) != 0) {
+    if (tcp_resolve(zz_str_cptr(addr.s), &sa) != 0) {
         char buf[192];
-        int n = snprintf(buf, sizeof buf, "invalid address: `%s`", addr.s->data);
+        int n = snprintf(buf, sizeof buf, "invalid address: `%s`", zz_str_cptr(addr.s));
         return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
     }
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -594,7 +601,7 @@ zz_value zz_tcp_write(zz_value stream, zz_value data, int *err) {
     if (data.tag != ZZ_STR) return zz_variant_err(zz_str_static("tcp_write failed: expected a string"));
     size_t total = 0;
     while (total < data.s->len) {
-        ssize_t w = send(stream.net->fd, data.s->data + total, data.s->len - total, 0);
+        ssize_t w = send(stream.net->fd, zz_str_cptr(data.s) + total, data.s->len - total, 0);
         if (w <= 0) {
             char buf[192];
             int n = snprintf(buf, sizeof buf, "tcp_write failed: %s", strerror(errno));
@@ -1194,7 +1201,7 @@ zz_value zz_http_route_get(zz_value server, zz_value path, zz_value handler, int
     *err = 0;
     (void)server; (void)handler;
     if (g_http_route_count < MAX_ROUTES - 1 && path.tag == ZZ_STR) {
-        g_http_routes[g_http_route_count++] = strndup(path.s->data, path.s->len);
+        g_http_routes[g_http_route_count++] = strndup(zz_str_cptr(path.s), path.s->len);
     }
     return zz_int(0);
 }
@@ -1348,8 +1355,8 @@ zz_value zz_int_cast(zz_value v, int *err) {
         case ZZ_BOOL: return (zz_value){ZZ_INT, {.i = v.b ? 1 : 0}};
         case ZZ_STR: {
             char *end;
-            int64_t n = strtoll(v.s->data, &end, 10);
-            if (end == v.s->data) return (zz_value){ZZ_INT, {.i = 0}};
+            int64_t n = strtoll(zz_str_cptr(v.s), &end, 10);
+            if (end == zz_str_cptr(v.s)) return (zz_value){ZZ_INT, {.i = 0}};
             return (zz_value){ZZ_INT, {.i = n}};
         }
         default: return (zz_value){ZZ_INT, {.i = 0}};
@@ -1365,8 +1372,8 @@ zz_value zz_float_cast(zz_value v, int *err) {
         case ZZ_BOOL: return (zz_value){ZZ_FLOAT, {.f = v.b ? 1.0 : 0.0}};
         case ZZ_STR: {
             char *end;
-            double n = strtod(v.s->data, &end);
-            if (end == v.s->data) return (zz_value){ZZ_FLOAT, {.f = 0.0}};
+            double n = strtod(zz_str_cptr(v.s), &end);
+            if (end == zz_str_cptr(v.s)) return (zz_value){ZZ_FLOAT, {.f = 0.0}};
             return (zz_value){ZZ_FLOAT, {.f = n}};
         }
         default: return (zz_value){ZZ_FLOAT, {.f = 0.0}};
@@ -1745,7 +1752,7 @@ zz_value zz_math_matrix_mul(zz_value m1, zz_value m2, int *err) {
 zz_value zz_env_get(zz_value name, int *err) {
     (void)err;
     if (name.tag != ZZ_STR) return (zz_value){ZZ_OPTION_NONE, {0}};
-    const char *val = getenv(name.s->data);
+    const char *val = getenv(zz_str_cptr(name.s));
     if (!val) return (zz_value){ZZ_OPTION_NONE, {0}};
     return zz_variant_some(zz_str_static(val));
 }
@@ -1754,7 +1761,7 @@ zz_value zz_env_get(zz_value name, int *err) {
 zz_value zz_env_var(zz_value name, int *err) {
     (void)err;
     if (name.tag != ZZ_STR) return zz_variant_err(zz_str_static("env.var: expected string name"));
-    const char *val = getenv(name.s->data);
+    const char *val = getenv(zz_str_cptr(name.s));
     if (!val) {
         // Build error message: "environment variable `NAME` not set"
         size_t nlen = name.s->len;
@@ -1763,7 +1770,7 @@ zz_value zz_env_var(zz_value name, int *err) {
         size_t total = strlen(prefix) + nlen + strlen(suffix);
         char *msg = (char *)malloc(total + 1);
         memcpy(msg, prefix, strlen(prefix));
-        memcpy(msg + strlen(prefix), name.s->data, nlen);
+        memcpy(msg + strlen(prefix), zz_str_cptr(name.s), nlen);
         memcpy(msg + strlen(prefix) + nlen, suffix, strlen(suffix));
         msg[total] = '\0';
         return zz_variant_err(zz_str_owned(msg));
@@ -1783,7 +1790,7 @@ zz_value zz_env_args(zz_value unused, int *err) {
 // fs.read(path)
 zz_value zz_fs_read(zz_value path, int *err) {
     if (path.tag != ZZ_STR) { *err = 1; return zz_unit(); }
-    FILE *f = fopen(path.s->data, "rb");
+    FILE *f = fopen(zz_str_cptr(path.s), "rb");
     if (!f) {
         // Match the VM: `.err(io error string)`
         return zz_variant_err(zz_str_static("No such file or directory"));
@@ -1793,9 +1800,9 @@ zz_value zz_fs_read(zz_value path, int *err) {
     fseek(f, 0, SEEK_SET);
     if (sz < 0) sz = 0;
     zz_str *out = str_alloc(sz);
-    size_t n = fread(out->data, 1, sz, f);
+    size_t n = fread(zz_str_ptr(out), 1, sz, f);
     fclose(f);
-    out->data[n] = '\0';
+    zz_str_ptr(out)[n] = '\0';
     out->len = n;
     return zz_variant_ok((zz_value){ZZ_STR, {.s = out}});
 }
@@ -1803,11 +1810,11 @@ zz_value zz_fs_read(zz_value path, int *err) {
 // fs.write(path, data)
 zz_value zz_fs_write(zz_value path, zz_value data, int *err) {
     if (path.tag != ZZ_STR || data.tag != ZZ_STR) { *err = 1; return zz_unit(); }
-    FILE *f = fopen(path.s->data, "wb");
+    FILE *f = fopen(zz_str_cptr(path.s), "wb");
     if (!f) {
         return zz_variant_err(zz_str_static("cannot open file for write"));
     }
-    size_t w = fwrite(data.s->data, 1, data.s->len, f);
+    size_t w = fwrite(zz_str_cptr(data.s), 1, data.s->len, f);
     int close_ok = (fclose(f) == 0);
     if (w != data.s->len || !close_ok) {
         return zz_variant_err(zz_str_static("write failed"));
@@ -1819,7 +1826,7 @@ zz_value zz_fs_write(zz_value path, zz_value data, int *err) {
 zz_value zz_fs_exists(zz_value path, int *err) {
     (void)err;
     if (path.tag != ZZ_STR) return (zz_value){ZZ_BOOL, {.b = false}};
-    FILE *f = fopen(path.s->data, "rb");
+    FILE *f = fopen(zz_str_cptr(path.s), "rb");
     if (!f) return (zz_value){ZZ_BOOL, {.b = false}};
     fclose(f);
     return (zz_value){ZZ_BOOL, {.b = true}};
@@ -1828,7 +1835,7 @@ zz_value zz_fs_exists(zz_value path, int *err) {
 // fs.remove(path)
 zz_value zz_fs_remove(zz_value path, int *err) {
     if (path.tag != ZZ_STR) { *err = 1; return zz_unit(); }
-    int r = remove(path.s->data);
+    int r = remove(zz_str_cptr(path.s));
     if (r != 0) {
         return zz_variant_err(zz_str_static("cannot remove file"));
     }
@@ -1838,7 +1845,7 @@ zz_value zz_fs_remove(zz_value path, int *err) {
 // fs.mkdir(path)
 zz_value zz_fs_mkdir(zz_value path, int *err) {
     if (path.tag != ZZ_STR) { *err = 1; return zz_unit(); }
-    int r = mkdir(path.s->data, 0755);
+    int r = mkdir(zz_str_cptr(path.s), 0755);
     if (r != 0) { *err = 1; return zz_unit(); }
     return zz_unit();
 }
@@ -1855,7 +1862,7 @@ zz_value zz_fs_readdir(zz_value path, int *err) {
 zz_value zz_encoding_url_encode(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
-    const char *src = s.s->data;
+    const char *src = zz_str_cptr(s.s);
     size_t len = s.s->len;
     // Worst case: every byte becomes %XX.
     zz_str *out = str_alloc(len * 3);
@@ -1863,13 +1870,13 @@ zz_value zz_encoding_url_encode(zz_value s, int *err) {
     for (size_t i = 0; i < len; i++) {
         unsigned char c = (unsigned char)src[i];
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
-            out->data[pos++] = c;
+            zz_str_ptr(out)[pos++] = c;
         } else {
-            snprintf(out->data + pos, 4, "%%%02X", c);
+            snprintf(zz_str_ptr(out) + pos, 4, "%%%02X", c);
             pos += 3;
         }
     }
-    out->data[pos] = '\0';
+    zz_str_ptr(out)[pos] = '\0';
     out->len = pos;
     return (zz_value){ZZ_STR, {.s = out}};
 }
@@ -1879,22 +1886,22 @@ zz_value zz_encoding_url_decode(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR)
         return zz_variant_err(zz_str_static("URL decode error: expected string"));
-    const char *src = s.s->data;
+    const char *src = zz_str_cptr(s.s);
     size_t len = s.s->len;
     zz_str *out = str_alloc(len);
     size_t pos = 0;
     for (size_t i = 0; i < len; i++) {
         if (src[i] == '%' && i + 2 < len) {
             char hex[3] = {src[i+1], src[i+2], '\0'};
-            out->data[pos++] = (char)strtol(hex, NULL, 16);
+            zz_str_ptr(out)[pos++] = (char)strtol(hex, NULL, 16);
             i += 2;
         } else if (src[i] == '+') {
-            out->data[pos++] = ' ';
+            zz_str_ptr(out)[pos++] = ' ';
         } else {
-            out->data[pos++] = src[i];
+            zz_str_ptr(out)[pos++] = src[i];
         }
     }
-    out->data[pos] = '\0';
+    zz_str_ptr(out)[pos] = '\0';
     out->len = pos;
     return zz_variant_ok((zz_value){ZZ_STR, {.s = out}});
 }
@@ -1904,7 +1911,7 @@ zz_value zz_encoding_base64_encode(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
     static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    const unsigned char *src = (const unsigned char *)s.s->data;
+    const unsigned char *src = (const unsigned char *)zz_str_cptr(s.s);
     size_t len = s.s->len;
     size_t out_len = 4 * ((len + 2) / 3);
     zz_str *out = str_alloc(out_len);
@@ -1914,12 +1921,12 @@ zz_value zz_encoding_base64_encode(zz_value s, int *err) {
         unsigned int b = (i+1 < len) ? src[i+1] : 0;
         unsigned int c = (i+2 < len) ? src[i+2] : 0;
         unsigned int triple = (a << 16) | (b << 8) | c;
-        out->data[j++] = tbl[(triple >> 18) & 0x3F];
-        out->data[j++] = tbl[(triple >> 12) & 0x3F];
-        out->data[j++] = (i+1 < len) ? tbl[(triple >> 6) & 0x3F] : '=';
-        out->data[j++] = (i+2 < len) ? tbl[triple & 0x3F] : '=';
+        zz_str_ptr(out)[j++] = tbl[(triple >> 18) & 0x3F];
+        zz_str_ptr(out)[j++] = tbl[(triple >> 12) & 0x3F];
+        zz_str_ptr(out)[j++] = (i+1 < len) ? tbl[(triple >> 6) & 0x3F] : '=';
+        zz_str_ptr(out)[j++] = (i+2 < len) ? tbl[triple & 0x3F] : '=';
     }
-    out->data[j] = '\0';
+    zz_str_ptr(out)[j] = '\0';
     out->len = j;
     return (zz_value){ZZ_STR, {.s = out}};
 }
@@ -1934,7 +1941,7 @@ zz_value zz_encoding_base64_decode(zz_value s, int *err) {
         ['0']=52,53,54,55,56,57,58,59,60,61,
         ['+']=62, ['/']=63
     };
-    const char *src = s.s->data;
+    const char *src = zz_str_cptr(s.s);
     size_t len = s.s->len;
     // Remove padding.
     while (len > 0 && src[len-1] == '=') len--;
@@ -1957,11 +1964,11 @@ zz_value zz_encoding_base64_decode(zz_value s, int *err) {
         unsigned int c = (i+2 < len) ? tbl[(unsigned char)src[i+2]] : 0;
         unsigned int d = (i+3 < len) ? tbl[(unsigned char)src[i+3]] : 0;
         unsigned int triple = (a << 18) | (b << 12) | (c << 6) | d;
-        if (j < out_len) out->data[j++] = (triple >> 16) & 0xFF;
-        if (j < out_len) out->data[j++] = (triple >> 8) & 0xFF;
-        if (j < out_len) out->data[j++] = triple & 0xFF;
+        if (j < out_len) zz_str_ptr(out)[j++] = (triple >> 16) & 0xFF;
+        if (j < out_len) zz_str_ptr(out)[j++] = (triple >> 8) & 0xFF;
+        if (j < out_len) zz_str_ptr(out)[j++] = triple & 0xFF;
     }
-    out->data[j] = '\0';
+    zz_str_ptr(out)[j] = '\0';
     out->len = j;
     return zz_variant_ok((zz_value){ZZ_STR, {.s = out}});
 }
@@ -1970,7 +1977,7 @@ zz_value zz_encoding_base64_decode(zz_value s, int *err) {
 zz_value zz_encoding_hex_encode(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return zz_str_static("");
-    const unsigned char *d = (const unsigned char *)s.s->data;
+    const unsigned char *d = (const unsigned char *)zz_str_cptr(s.s);
     size_t len = s.s->len;
     char *hex = (char *)malloc(len * 2 + 1);
     for (size_t i = 0; i < len; i++) {
@@ -1990,7 +1997,7 @@ zz_value zz_encoding_hex_decode(zz_value s, int *err) {
         return zz_variant_err(zz_str_static("odd-length hex string"));
     char *out = (char *)malloc(len / 2 + 1);
     for (size_t i = 0; i < len; i += 2) {
-        char byte_str[3] = { s.s->data[i], s.s->data[i+1], '\0' };
+        char byte_str[3] = { zz_str_cptr(s.s)[i], zz_str_cptr(s.s)[i+1], '\0' };
         char *endptr;
         unsigned long val = strtoul(byte_str, &endptr, 16);
         if (endptr != byte_str + 2)
@@ -2047,13 +2054,13 @@ static size_t curl_header_cb(void *data, size_t size, size_t nmemb, void *userp)
     if (hdrs_val->tag != ZZ_DICT) return realsize;
 
     zz_str *key = str_alloc(key_len);
-    memcpy(key->data, line, key_len);
-    key->data[key_len] = '\0';
+    memcpy(zz_str_ptr(key), line, key_len);
+    zz_str_ptr(key)[key_len] = '\0';
     key->len = key_len;
 
     zz_str *value_str = str_alloc(val_len);
-    memcpy(value_str->data, val, val_len);
-    value_str->data[val_len] = '\0';
+    memcpy(zz_str_ptr(value_str), val, val_len);
+    zz_str_ptr(value_str)[val_len] = '\0';
     value_str->len = val_len;
 
     zz_dict_set(hdrs_val->dict, (zz_value){ZZ_STR, {.s = key}}, (zz_value){ZZ_STR, {.s = value_str}});
@@ -2071,7 +2078,7 @@ zz_value zz_http_get(zz_value url, zz_value headers, int *err) {
     curl_buf body_buf = {0};
     zz_value headers_dict = zz_dict_new();
 
-    curl_easy_setopt(curl, CURLOPT_URL, (char *)url.s->data);
+    curl_easy_setopt(curl, CURLOPT_URL, (char *)zz_str_cptr(url.s));
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body_buf);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, curl_header_cb);
@@ -2091,10 +2098,10 @@ zz_value zz_http_get(zz_value url, zz_value headers, int *err) {
                 // and swallows the request body into the headers.
                 size_t hlen = k->len + 2 + v->s->len;
                 char *h = (char *)malloc(hlen + 1);
-                memcpy(h, k->data, k->len);
+                memcpy(h, zz_str_cptr(k), k->len);
                 h[k->len] = ':';
                 h[k->len + 1] = ' ';
-                memcpy(h + k->len + 2, v->s->data, v->s->len);
+                memcpy(h + k->len + 2, zz_str_cptr(v->s), v->s->len);
                 h[k->len + 2 + v->s->len] = '\0';
                 header_list = curl_slist_append(header_list, h);
                 free(h);
@@ -2120,15 +2127,12 @@ zz_value zz_http_get(zz_value url, zz_value headers, int *err) {
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_cleanup(curl);
 
-    // Adopt body_buf into a proper zz_str (flexible array requires full struct alloc)
+    // Adopt body_buf into a proper zz_str
     zz_str *body_str;
     if (body_buf.data && body_buf.len > 0) {
-        body_str = (zz_str *)malloc(sizeof(zz_str) + body_buf.cap + 1);
-        body_str->refs = 1;
-        body_str->interned = 0;
-        body_str->cap = body_buf.cap;
-        body_str->len = body_buf.len;
-        memcpy(body_str->data, body_buf.data, body_buf.len + 1);
+        body_str = str_alloc(body_buf.len);
+        memcpy(zz_str_ptr(body_str), body_buf.data, body_buf.len);
+        zz_str_ptr(body_str)[body_buf.len] = '\0';
         free(body_buf.data);
     } else {
         body_str = str_alloc(0);
@@ -2169,7 +2173,7 @@ zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
     curl_buf body_buf = {0};
     zz_value headers_dict = zz_dict_new();
 
-    curl_easy_setopt(curl, CURLOPT_URL, (char *)url.s->data);
+    curl_easy_setopt(curl, CURLOPT_URL, (char *)zz_str_cptr(url.s));
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body_buf);
@@ -2180,7 +2184,7 @@ zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 
     if (body.tag == ZZ_STR && body.s && body.s->len > 0) {
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, (char *)body.s->data);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, (char *)zz_str_cptr(body.s));
         // Explicit size: CURLOPT_POSTFIELDS alone uses strlen(), which is
         // wrong if the payload ever contains NUL bytes.
         curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body.s->len);
@@ -2197,10 +2201,10 @@ zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
                 // and swallows the request body into the headers.
                 size_t hlen = k->len + 2 + v->s->len;
                 char *h = (char *)malloc(hlen + 1);
-                memcpy(h, k->data, k->len);
+                memcpy(h, zz_str_cptr(k), k->len);
                 h[k->len] = ':';
                 h[k->len + 1] = ' ';
-                memcpy(h + k->len + 2, v->s->data, v->s->len);
+                memcpy(h + k->len + 2, zz_str_cptr(v->s), v->s->len);
                 h[k->len + 2 + v->s->len] = '\0';
                 header_list = curl_slist_append(header_list, h);
                 free(h);
@@ -2228,12 +2232,9 @@ zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
 
     zz_str *body_str;
     if (body_buf.data && body_buf.len > 0) {
-        body_str = (zz_str *)malloc(sizeof(zz_str) + body_buf.cap + 1);
-        body_str->refs = 1;
-        body_str->interned = 0;
-        body_str->cap = body_buf.cap;
-        body_str->len = body_buf.len;
-        memcpy(body_str->data, body_buf.data, body_buf.len + 1);
+        body_str = str_alloc(body_buf.len);
+        memcpy(zz_str_ptr(body_str), body_buf.data, body_buf.len);
+        zz_str_ptr(body_str)[body_buf.len] = '\0';
         free(body_buf.data);
     } else {
         body_str = str_alloc(0);

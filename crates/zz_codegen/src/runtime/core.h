@@ -73,23 +73,44 @@ typedef struct zz_object zz_object;
 // A TCP stream or listener: the underlying socket fd.
 typedef struct zz_tcp zz_tcp;
 
-// Refcounted string (null-terminated for C interop).
+// Refcounted string with Small String Optimization (SSO).
 //
-// Layout:
-//   - `refs`   : reference count (size_t). 0 only valid for freed.
-//   - `interned`: non-zero if this object is a permanent singleton owned by
-//     the global interning table; zz_release must NOT free it.
-//   - `cap`    : allocated buffer capacity (>= len). For heap strings this
-//     allows amortized O(1) append and in-place concatenation.
-//   - `len`    : payload length in bytes (excluding trailing NUL).
-//   - `data[]` : flexible array, `data[len] == '\0'`.
+// Strings <= 23 bytes are stored inline in `sso` — zero malloc beyond
+// the zz_str header.  Longer strings are heap-allocated via a separate
+// buffer pointed to by `heap`.
+//
+// Layout (56 bytes on x86_64):
+//   refs     (8)  — reference count. 0 = arena sentinel.
+//   interned (4)  — non-zero if permanent singleton.
+//   _pad     (4)
+//   cap      (8)  — heap buffer capacity. 0 = SSO mode.
+//   len      (8)  — payload length in bytes.
+//   sso      (24) — inline SSO data (cap == 0).
+//   heap     (8)  — pointer to heap buffer (cap > 0, sso unused).
+//
+// Use ZZ_STR_PTR(s) to get a usable char* in either mode.
+#define ZZ_SSO_MAX 23
+
 typedef struct {
     size_t refs;
     int interned;
-    size_t cap;
+    size_t cap;     // 0 = SSO, >0 = heap capacity
     size_t len;
-    char data[];
+    union {
+        char sso[ZZ_SSO_MAX + 1]; // 24 bytes: inline data (cap == 0)
+        char *heap;                // 8 bytes:  heap pointer  (cap > 0)
+    };
 } zz_str;
+
+// Get a usable char* pointer for string data in either SSO or heap mode.
+// Always inlined: these sit on every string fast path (concat, compare,
+// print, hash) and must compile down to a single branchless select.
+static inline __attribute__((always_inline)) char *zz_str_ptr(zz_str *s) {
+    return s->cap == 0 ? s->sso : s->heap;
+}
+static inline __attribute__((always_inline)) const char *zz_str_cptr(const zz_str *s) {
+    return s->cap == 0 ? s->sso : s->heap;
+}
 
 // A function value: signature + optional captured environment.
 typedef struct zz_func zz_func;
@@ -180,13 +201,17 @@ struct zz_func {
 };
 
 // ---- thread-safe channels (pthread-based) ------------------------------
-// Thread-safe channel for inter-thread communication.
+// Thread-safe channel for inter-thread communication. The queue is a
+// circular ring buffer: send appends at `tail`, recv pops from `head`
+// — both O(1), no memmove on the hot path.
 struct zz_chan {
     pthread_mutex_t lock;
     pthread_cond_t  cond;
     zz_value       *queue;   // ring buffer of zz_value
     size_t          len;     // current number of items
     size_t          cap;     // buffer capacity
+    size_t          head;    // next read position (mod cap)
+    size_t          tail;    // next write position (mod cap)
 };
 
 // Task join handle for spawned threads.
@@ -204,10 +229,21 @@ struct zz_task_join {
 // reset on exit. Objects allocated here do NOT need individual free calls.
 //
 // Thread-local: each thread maintains its own arena (no locking needed).
+//
+// Overflow chunks form a singly-linked list so that zz_arena_destroy can
+// free them all in one walk (instead of the old code that leaked or
+// free'd the primary buffer prematurely).
+typedef struct zz_arena_chunk {
+    struct zz_arena_chunk *next;
+    size_t cap;
+    char buf[];              // flexible array
+} zz_arena_chunk;
+
 typedef struct zz_arena {
-    char  *buf;       // contiguous memory block
-    size_t cap;       // total capacity in bytes
-    size_t offset;    // next free byte position
+    char  *buf;              // current contiguous block (primary or overflow)
+    size_t cap;              // total capacity in bytes of current block
+    size_t offset;           // next free byte position
+    zz_arena_chunk *chunks;  // linked list of overflow chunks (for destroy)
 } zz_arena;
 
 // O(1) reset: free all arena allocations at once by resetting the offset.

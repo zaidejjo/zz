@@ -292,7 +292,7 @@ zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err) {
             if (si < 0) si = 0;
             if (ei > n) ei = n;
             if (si > ei) si = ei;
-            zz_value out = zz_str_new(obj.s->data + si, (size_t)(ei - si));
+            zz_value out = zz_str_new(zz_str_cptr(obj.s) + si, (size_t)(ei - si));
             return out;
         }
     default:
@@ -321,7 +321,7 @@ void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
     for (size_t i = 0; i < d->len; i++) {
         zz_dict_entry *e = &d->entries[i];
         if (e->key->len == key.s->len &&
-            memcmp(e->key->data, key.s->data, key.s->len) == 0) {
+            memcmp(zz_str_cptr(e->key), zz_str_cptr(key.s), key.s->len) == 0) {
             zz_assign(&e->val, val);
             return;
         }
@@ -351,7 +351,7 @@ zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err) {
     for (size_t i = 0; i < d->len; i++) {
         zz_dict_entry *e = &d->entries[i];
         if (e->key->len == key.s->len &&
-            memcmp(e->key->data, key.s->data, key.s->len) == 0) {
+            memcmp(zz_str_cptr(e->key), zz_str_cptr(key.s), key.s->len) == 0) {
             return zz_clone(e->val);
         }
     }
@@ -526,7 +526,7 @@ void zz_object_set_field(zz_value *obj, const char *name, zz_value val) {
     zz_object *o = obj->obj;
     for (size_t i = 0; i < o->len; i++) {
         zz_value *fname = &o->fields[i * 2];
-        if (fname->tag == ZZ_STR && strcmp(fname->s->data, name) == 0) {
+        if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
             zz_value *slot = &o->fields[i * 2 + 1];
             zz_release(slot);
             *slot = zz_clone(val);
@@ -540,7 +540,7 @@ zz_value zz_object_get_field(zz_value *obj, const char *name) {
     zz_object *o = obj->obj;
     for (size_t i = 0; i < o->len; i++) {
         zz_value *fname = &o->fields[i * 2];
-        if (fname->tag == ZZ_STR && strcmp(fname->s->data, name) == 0) {
+        if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
             return zz_clone(o->fields[i * 2 + 1]);
         }
     }
@@ -821,7 +821,7 @@ zz_value zz_dict_has(zz_value d, zz_value key, int *err) {
     (void)err;
     if (d.tag != ZZ_DICT || key.tag != ZZ_STR) return (zz_value){ZZ_BOOL, {.b = false}};
     for (size_t i = 0; i < d.dict->len; i++) {
-        if (strcmp(d.dict->entries[i].key->data, key.s->data) == 0)
+        if (strcmp(zz_str_cptr(d.dict->entries[i].key), zz_str_cptr(key.s)) == 0)
             return (zz_value){ZZ_BOOL, {.b = true}};
     }
     return (zz_value){ZZ_BOOL, {.b = false}};
@@ -833,7 +833,7 @@ zz_value zz_option_expect(zz_value opt, zz_value msg, int *err) {
     if (opt.tag == ZZ_OPTION_SOME && opt.payload)
         return zz_clone(*opt.payload);
     // Panic: print error message and exit.
-    const char *m = (msg.tag == ZZ_STR) ? msg.s->data : "expect failed";
+    const char *m = (msg.tag == ZZ_STR) ? zz_str_cptr(msg.s) : "expect failed";
     fprintf(stderr, "error: %s\n", m);
     exit(1);
 }
@@ -847,11 +847,11 @@ zz_value zz_result_expect(zz_value res, zz_value msg, int *err) {
     if (res.tag == ZZ_RESULT_ERR && res.payload) {
         char *estr = zz_value_to_string(res.payload);
         fprintf(stderr, "error: %s: %s\n",
-                (msg.tag == ZZ_STR) ? msg.s->data : "expect failed", estr);
+                (msg.tag == ZZ_STR) ? zz_str_cptr(msg.s) : "expect failed", estr);
         free(estr);
     } else {
         fprintf(stderr, "error: %s\n",
-                (msg.tag == ZZ_STR) ? msg.s->data : "expect failed");
+                (msg.tag == ZZ_STR) ? zz_str_cptr(msg.s) : "expect failed");
     }
     exit(1);
 }
