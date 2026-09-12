@@ -43,7 +43,10 @@ impl Fingerprint {
         let mut imports: Vec<String> = Vec::new();
         let mut body = String::new();
         for st in &p.stmts {
-            if let Stmt::Import { path, alias, .. } = st {
+            if let Stmt::Import {
+                path, alias, items, ..
+            } = st
+            {
                 let mut fp = String::from("Import-kw[");
                 for part in path {
                     fp.push_str(part);
@@ -53,6 +56,7 @@ impl Fingerprint {
                     fp.push_str("alias=");
                     fp.push_str(a);
                 }
+                fp_import_items(items, &mut fp);
                 fp.push(']');
                 imports.push(fp);
             } else {
@@ -70,9 +74,33 @@ impl Fingerprint {
     }
 }
 
+/// Fingerprint of a selective-import item list: `(PI, sqrt as s, *)`.
+fn fp_import_items(items: &[ImportItem], out: &mut String) {
+    if items.is_empty() {
+        return;
+    }
+    out.push_str("items[");
+    for item in items {
+        match item {
+            ImportItem::Wildcard { .. } => out.push_str("*,"),
+            ImportItem::Named { name, alias, .. } => {
+                out.push_str(name);
+                if let Some(a) = alias {
+                    out.push_str(" as ");
+                    out.push_str(a);
+                }
+                out.push(',');
+            }
+        }
+    }
+    out.push(']');
+}
+
 fn fp_stmt(s: &Stmt, out: &mut String) {
     match s {
-        Stmt::Import { path, alias, .. } => {
+        Stmt::Import {
+            path, alias, items, ..
+        } => {
             out.push_str("Import-kw[");
             for p in path {
                 out.push_str(p);
@@ -82,6 +110,7 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
                 out.push_str("alias=");
                 out.push_str(a);
             }
+            fp_import_items(items, out);
             out.push(']');
         }
         Stmt::Decl {
@@ -708,6 +737,26 @@ fn is_digits(tok: &str) -> bool {
     !tok.is_empty() && tok.bytes().all(|b| b.is_ascii_digit() || b == b'_')
 }
 
+/// Canonicalize function-type syntax: `func(A) -> R` and `(A) -> R` are
+/// equivalent spellings of the same type (the AST stores only
+/// `TyKind::Func`), so a `func` keyword that directly precedes `(` is
+/// stripped before comparing. `func` followed by `(` only occurs in
+/// function-type position — declarations always have an identifier between
+/// `func` and `(`.
+fn normalize_func_types(seq: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(seq.len());
+    let mut i = 0;
+    while i < seq.len() {
+        if seq[i] == "func" && seq.get(i + 1).map(String::as_str) == Some("(") {
+            i += 1;
+            continue;
+        }
+        out.push(seq[i].clone());
+        i += 1;
+    }
+    out
+}
+
 /// Comma is "arm-start" when the next token begins a match arm or closes a
 /// container: `_`, `.variant`, literal, string, or a closing delimiter.
 fn arm_start(tok: &str) -> bool {
@@ -840,8 +889,12 @@ pub fn verify(
     //    normalized on both sides (the emitter never produces them) and
     //    imports are compared as an order-insensitive set (the emitter
     //    hoists them to the top of the file).
-    let orig_tokens = normalize_trailing_commas(&significant_token_sequence(original_src));
-    let new_tokens = normalize_trailing_commas(&significant_token_sequence(formatted_src));
+    let orig_tokens = normalize_func_types(&normalize_trailing_commas(
+        &significant_token_sequence(original_src),
+    ));
+    let new_tokens = normalize_func_types(&normalize_trailing_commas(&significant_token_sequence(
+        formatted_src,
+    )));
     let (orig_imports, orig_rest) = split_imports(&orig_tokens);
     let (new_imports, new_rest) = split_imports(&new_tokens);
     if orig_imports != new_imports || orig_rest != new_rest {

@@ -38,6 +38,14 @@ zz_value zz_json_as_str(zz_value j, int *err);
 zz_value zz_json_as_int(zz_value j, int *err);
 zz_value zz_json_as_float(zz_value j, int *err);
 zz_value zz_json_as_bool(zz_value j, int *err);
+zz_value zz_json_type(zz_value j, int *err);
+zz_value zz_json_len(zz_value j, int *err);
+zz_value zz_json_keys(zz_value j, int *err);
+zz_value zz_json_has(zz_value j, zz_value key, int *err);
+zz_value zz_json_pretty(zz_value j, int *err);
+zz_value zz_json_merge(zz_value a, zz_value b, int *err);
+zz_value zz_json_deep_get(zz_value j, zz_value path, int *err);
+zz_value zz_json_array_push(zz_value j, zz_value val, int *err);
 
 #ifdef __cplusplus
 }

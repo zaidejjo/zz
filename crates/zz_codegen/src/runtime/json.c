@@ -478,4 +478,249 @@ zz_value zz_json_null(zz_value unused, int *err) {
     return zz_json_wrap(zz_unit());
 }
 
+// ---- json utilities (pretty, type, len, keys, has, merge, deep_get,
+// array_push) — mirror the VM natives in zz_stdlib/src/natives/json/mod.rs.
+
+// Type name of a plain (unwrapped) value, matching the VM's json_type_name.
+static const char *json_type_name_c(zz_value v) {
+    switch (v.tag) {
+    case ZZ_UNIT: return "null";
+    case ZZ_BOOL: return "bool";
+    case ZZ_INT:
+    case ZZ_FLOAT: return "number";
+    case ZZ_STR: return "string";
+    case ZZ_ARRAY: return "array";
+    case ZZ_DICT: return "object";
+    default: return "null";
+    }
+}
+
+// json.type(j) → "null" | "bool" | "number" | "string" | "array" | "object"
+zz_value zz_json_type(zz_value j, int *err) {
+    (void)err;
+    return zz_str_static(json_type_name_c(zz_json_unwrap(j)));
+}
+
+// json.len(j) → array length or object key count (0 for scalars).
+zz_value zz_json_len(zz_value j, int *err) {
+    (void)err;
+    zz_value v = zz_json_unwrap(j);
+    if (v.tag == ZZ_ARRAY) return zz_int((int64_t)v.arr->len);
+    if (v.tag == ZZ_DICT) return zz_int((int64_t)v.dict->len);
+    return zz_int(0);
+}
+
+// json.keys(j) → array of object keys (empty for non-objects).
+zz_value zz_json_keys(zz_value j, int *err) {
+    (void)err;
+    zz_value v = zz_json_unwrap(j);
+    zz_value arr = zz_array_new();
+    if (v.tag == ZZ_DICT) {
+        for (size_t i = 0; i < v.dict->len; i++) {
+            zz_dict_entry *e = &v.dict->entries[i];
+            zz_array_push(arr.arr, zz_str_new(zz_str_cptr(e->key), e->key->len));
+        }
+    }
+    return arr;
+}
+
+// json.has(j, key) → whether an object contains the key.
+zz_value zz_json_has(zz_value j, zz_value key, int *err) {
+    (void)err;
+    zz_value v = zz_json_unwrap(j);
+    if (v.tag != ZZ_DICT || key.tag != ZZ_STR) return zz_bool(false);
+    for (size_t i = 0; i < v.dict->len; i++) {
+        zz_dict_entry *e = &v.dict->entries[i];
+        if (e->key->len == key.s->len &&
+            memcmp(zz_str_cptr(e->key), zz_str_cptr(key.s), key.s->len) == 0) {
+            return zz_bool(true);
+        }
+    }
+    return zz_bool(false);
+}
+
+// Pretty-print a JSON value with 2-space indentation (matches the VM's
+// to_json_string_pretty: empty containers inline, nested values indented).
+static void json_pretty_print(SB *sb, zz_value v, int indent) {
+    v = zz_json_unwrap(v);
+    switch (v.tag) {
+    case ZZ_UNIT:
+        sb_str(sb, "null", 4);
+        break;
+    case ZZ_BOOL:
+        sb_str(sb, v.b ? "true" : "false", v.b ? 4 : 5);
+        break;
+    case ZZ_INT: {
+        char buf[32];
+        int n = snprintf(buf, sizeof buf, "%lld", (long long)v.i);
+        sb_str(sb, buf, (size_t)n);
+        break;
+    }
+    case ZZ_FLOAT:
+        if (v.f == (double)(int64_t)v.f) {
+            char buf[32];
+            int n = snprintf(buf, sizeof buf, "%.0f", v.f);
+            sb_str(sb, buf, (size_t)n);
+        } else {
+            char buf[64];
+            int n = snprintf(buf, sizeof buf, "%.15g", v.f);
+            sb_str(sb, buf, (size_t)n);
+        }
+        break;
+    case ZZ_STR:
+        sb_str(sb, "\"", 1);
+        json_append_str_sb(sb, zz_str_cptr(v.s), v.s->len);
+        sb_str(sb, "\"", 1);
+        break;
+    case ZZ_ARRAY: {
+        if (v.arr->len == 0) { sb_str(sb, "[]", 2); break; }
+        sb_str(sb, "[\n", 2);
+        for (size_t i = 0; i < v.arr->len; i++) {
+            for (int k = 0; k < indent + 2; k++) sb_str(sb, " ", 1);
+            json_pretty_print(sb, v.arr->items[i], indent + 2);
+            if (i + 1 < v.arr->len) sb_str(sb, ",", 1);
+            sb_str(sb, "\n", 1);
+        }
+        for (int k = 0; k < indent; k++) sb_str(sb, " ", 1);
+        sb_str(sb, "]", 1);
+        break;
+    }
+    case ZZ_DICT: {
+        if (v.dict->len == 0) { sb_str(sb, "{}", 2); break; }
+        sb_str(sb, "{\n", 2);
+        for (size_t i = 0; i < v.dict->len; i++) {
+            zz_dict_entry *e = &v.dict->entries[i];
+            for (int k = 0; k < indent + 2; k++) sb_str(sb, " ", 1);
+            sb_str(sb, "\"", 1);
+            json_append_str_sb(sb, zz_str_cptr(e->key), e->key->len);
+            sb_str(sb, "\": ", 3);
+            json_pretty_print(sb, e->val, indent + 2);
+            if (i + 1 < v.dict->len) sb_str(sb, ",", 1);
+            sb_str(sb, "\n", 1);
+        }
+        for (int k = 0; k < indent; k++) sb_str(sb, " ", 1);
+        sb_str(sb, "}", 1);
+        break;
+    }
+    default:
+        sb_str(sb, "null", 4);
+        break;
+    }
+}
+
+// json.pretty(j) → pretty-printed JSON text (2-space indent).
+zz_value zz_json_pretty(zz_value j, int *err) {
+    (void)err;
+    SB sb = {0};
+    json_pretty_print(&sb, j, 0);
+    return zz_str_owned(sb_take(&sb));
+}
+
+// json.merge(a, b) → shallow merge of two objects; b's entries win.
+// Non-object inputs produce the second value (matches the VM).
+zz_value zz_json_merge(zz_value a, zz_value b, int *err) {
+    (void)err;
+    zz_value av = zz_json_unwrap(a);
+    zz_value bv = zz_json_unwrap(b);
+    if (av.tag != ZZ_DICT || bv.tag != ZZ_DICT) {
+        return zz_json_wrap(zz_clone(bv));
+    }
+    zz_value out = zz_dict_new();
+    for (size_t i = 0; i < av.dict->len; i++) {
+        zz_dict_entry *e = &av.dict->entries[i];
+        zz_value k = (zz_value){ZZ_STR, {.s = e->key}};
+        zz_dict_set(out.dict, k, zz_clone(e->val));
+    }
+    for (size_t i = 0; i < bv.dict->len; i++) {
+        zz_dict_entry *e = &bv.dict->entries[i];
+        zz_value k = (zz_value){ZZ_STR, {.s = e->key}};
+        zz_dict_set(out.dict, k, zz_clone(e->val));
+    }
+    return zz_json_wrap(out);
+}
+
+// json.deep_get(j, path) → Result(Ok(Json)) / Result(Err(msg)).
+// Dot-path traversal: objects by key, arrays by numeric index.
+zz_value zz_json_deep_get(zz_value j, zz_value path, int *err) {
+    (void)err;
+    if (path.tag != ZZ_STR) return zz_variant_err(zz_str_static("expected a string path"));
+    zz_value current = zz_json_unwrap(j);
+    const char *p = zz_str_cptr(path.s);
+    size_t plen = path.s->len;
+    size_t start = 0;
+    while (start <= plen) {
+        size_t end = start;
+        while (end < plen && p[end] != '.') end++;
+        size_t seg_len = end - start;
+        if (seg_len == 0) { start = end + 1; continue; }
+        char seg_buf[256];
+        if (seg_len >= sizeof seg_buf) seg_len = sizeof seg_buf - 1;
+        memcpy(seg_buf, p + start, seg_len);
+        seg_buf[seg_len] = '\0';
+        switch (current.tag) {
+        case ZZ_DICT: {
+            int found = 0;
+            for (size_t i = 0; i < current.dict->len; i++) {
+                zz_dict_entry *e = &current.dict->entries[i];
+                if (e->key->len == seg_len &&
+                    memcmp(zz_str_cptr(e->key), seg_buf, seg_len) == 0) {
+                    current = zz_clone(e->val);
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                char buf[192];
+                int n = snprintf(buf, sizeof buf, "key `%s` not found in path", seg_buf);
+                return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
+            }
+            break;
+        }
+        case ZZ_ARRAY: {
+            char *endptr;
+            long idx = strtol(seg_buf, &endptr, 10);
+            if (endptr != seg_buf + seg_len) {
+                char buf[192];
+                int n = snprintf(buf, sizeof buf,
+                                 "expected numeric index for array in path, got `%s`", seg_buf);
+                return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
+            }
+            if (idx < 0 || (size_t)idx >= current.arr->len) {
+                char buf[192];
+                int n = snprintf(buf, sizeof buf, "index %ld out of bounds in path", idx);
+                return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
+            }
+            current = zz_clone(current.arr->items[(size_t)idx]);
+            break;
+        }
+        default: {
+            char buf[192];
+            int n = snprintf(buf, sizeof buf, "cannot traverse into `%s` in path",
+                             json_type_name_c(current));
+            return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
+        }
+        }
+        start = end + 1;
+    }
+    return zz_variant_ok(zz_json_wrap(current));
+}
+
+// json.array_push(j, val) → new array with val appended. Plain values are
+// converted to JSON (unit=null, bool, int/float, str, array, dict pass
+// through; JSON values are unwrapped).
+zz_value zz_json_array_push(zz_value j, zz_value val, int *err) {
+    zz_value v = zz_json_unwrap(j);
+    if (v.tag != ZZ_ARRAY) {
+        *err = 1;
+        return zz_unit();
+    }
+    zz_value item = zz_json_unwrap(val);
+    zz_value out = zz_array_new();
+    for (size_t i = 0; i < v.arr->len; i++) {
+        zz_array_push(out.arr, zz_clone(v.arr->items[i]));
+    }
+    zz_array_push(out.arr, zz_clone(item));
+    return zz_json_wrap(out);
+}
+
 // math.abs(v)

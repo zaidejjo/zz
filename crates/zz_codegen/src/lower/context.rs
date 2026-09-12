@@ -232,7 +232,7 @@ impl Lowerer {
     pub(super) fn is_string_expr(&self, expr: &Expr, names: &NameCtx) -> bool {
         match expr {
             Expr::Str { .. } => true,
-            Expr::Ident { name, .. } => names.lookup_type(name).map_or(false, |t| t == "string"),
+            Expr::Ident { name, .. } => names.lookup_type(name) == Some("string"),
             _ => false,
         }
     }
@@ -784,7 +784,7 @@ pub(crate) fn box_scalar_operand(e: &Expr, names: &NameCtx, emitted: &str) -> St
                 // whose C identifier matches `emitted` and whose type is
                 // a scalar.
                 if is_simple_ident(emitted) {
-                    for (_zzname, entries) in names.stack.iter() {
+                    for entries in names.stack.values() {
                         if let Some((cid, ty)) = entries.last() {
                             if cid == emitted {
                                 match ty.as_str() {

@@ -144,7 +144,7 @@ mod tests {
             span: Some(Span::new(0, 5)),
             notes: vec![],
             fixits: vec![],
-        secondary: None,
+            secondary: None,
         };
         let diag = convert_diagnostic("hello", &raw);
         assert_eq!(diag.range.start.line, 0);
@@ -190,7 +190,7 @@ mod tests {
             span: Some(Span::new(2, 8)),
             notes: vec![],
             fixits: vec![],
-        secondary: None,
+            secondary: None,
         };
         let diag = convert_diagnostic("ab\ncd\ndef", &raw);
         // byte 2 is '\n' on line 0 → Position(0, 2)
@@ -247,7 +247,7 @@ mod tests {
             span: Some(Span::new(0, 3)),
             notes: vec![],
             fixits: vec![],
-        secondary: None,
+            secondary: None,
         };
         let diag = convert_diagnostic("abc", &raw);
         assert_eq!(diag.severity, Some(DiagnosticSeverity::HINT));

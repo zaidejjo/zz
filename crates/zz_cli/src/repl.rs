@@ -524,26 +524,24 @@ fn check_incomplete(input: &str) -> IncompleteReason {
     }
 
     // Trailing operator
-    match last_significant {
-        Some(
-            TokenKind::Plus
-            | TokenKind::Minus
-            | TokenKind::Star
-            | TokenKind::Slash
-            | TokenKind::Percent
-            | TokenKind::Assign
-            | TokenKind::ColonEq
-            | TokenKind::Pipe
-            | TokenKind::PipeGt
-            | TokenKind::Arrow
-            | TokenKind::AndAnd
-            | TokenKind::OrOr
-            | TokenKind::Comma
-            | TokenKind::Colon,
-        ) => {
-            return IncompleteReason::TrailingOp;
-        }
-        _ => {}
+    if let Some(
+        TokenKind::Plus
+        | TokenKind::Minus
+        | TokenKind::Star
+        | TokenKind::Slash
+        | TokenKind::Percent
+        | TokenKind::Assign
+        | TokenKind::ColonEq
+        | TokenKind::Pipe
+        | TokenKind::PipeGt
+        | TokenKind::Arrow
+        | TokenKind::AndAnd
+        | TokenKind::OrOr
+        | TokenKind::Comma
+        | TokenKind::Colon,
+    ) = last_significant
+    {
+        return IncompleteReason::TrailingOp;
     }
 
     // Trailing keyword detection is intentionally omitted — it requires

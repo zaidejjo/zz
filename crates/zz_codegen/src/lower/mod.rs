@@ -482,6 +482,14 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "json.as_int" | "std.json.as_int" => Some("zz_json_as_int"),
         "json.as_float" | "std.json.as_float" => Some("zz_json_as_float"),
         "json.as_bool" | "std.json.as_bool" => Some("zz_json_as_bool"),
+        "json.type" | "std.json.type" => Some("zz_json_type"),
+        "json.len" | "std.json.len" => Some("zz_json_len"),
+        "json.keys" | "std.json.keys" => Some("zz_json_keys"),
+        "json.has" | "std.json.has" => Some("zz_json_has"),
+        "json.pretty" | "std.json.pretty" => Some("zz_json_pretty"),
+        "json.merge" | "std.json.merge" => Some("zz_json_merge"),
+        "json.deep_get" | "std.json.deep_get" => Some("zz_json_deep_get"),
+        "json.array_push" | "std.json.array_push" => Some("zz_json_array_push"),
         // env
         "env.get" | "std.env.get" | "envmod.get" | "std.envmod.get" => Some("zz_env_get"),
         "env.get_var" | "std.env.get_var" | "envmod.get_var" | "std.envmod.get_var" => {

@@ -36,8 +36,9 @@ impl Lowerer {
                             let boxed_v = box_scalar_operand(inner, names, &v);
                             // If format spec is present, use zz_to_str_fmt
                             if let Some(ref s) = spec {
-                                acc = format!("zz_binop_cat({acc}, zz_str_owned(zz_to_str_fmt({boxed_v}, {spec_str})))",
-                                    spec_str = format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")));
+                                let spec_str =
+                                    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+                                acc = format!("zz_binop_cat({acc}, zz_str_owned(zz_to_str_fmt({boxed_v}, {spec_str})))");
                             } else {
                                 acc = format!("zz_binop_cat_str({acc}, {boxed_v})");
                             }
@@ -518,12 +519,9 @@ impl Lowerer {
                         .lookup_type(obj_name)
                         .map(|t| t.starts_with("zz_struct_"))
                         .unwrap_or(false)
-                } else if let Some(obj_span) = self.tp.types.get(&obj.span()) {
-                    if let zz_checker::Type::Struct(sname) = obj_span {
-                        self.is_unboxed_struct(sname)
-                    } else {
-                        false
-                    }
+                } else if let Some(zz_checker::Type::Struct(sname)) = self.tp.types.get(&obj.span())
+                {
+                    self.is_unboxed_struct(sname)
                 } else {
                     false
                 };
@@ -886,7 +884,7 @@ impl Lowerer {
         let mut body_out = String::new();
         let val = self.emit_expr(body, &mut names, &mut body_out);
         o.push_str(&body_out);
-        let val = box_scalar_operand(body, &mut names, &val);
+        let val = box_scalar_operand(body, &names, &val);
         {
             let mut slots = self.defer_slots.borrow_mut();
             if !slots.is_empty() {
@@ -895,7 +893,7 @@ impl Lowerer {
                 let snap: Vec<String> = slots.drain(..).collect();
                 for (idx, snippet) in snap.iter().enumerate() {
                     o.push_str(&format!("        case {idx}:\n"));
-                    o.push_str(&snippet);
+                    o.push_str(snippet);
                     o.push_str("\n            break;\n");
                 }
                 o.push_str("        default: break;\n");
@@ -903,7 +901,7 @@ impl Lowerer {
                 o.push_str("    }\n");
             }
         }
-        o.push_str(&format!("    zz_arena_reset_trim(&_arena);\n"));
+        o.push_str("    zz_arena_reset_trim(&_arena);\n");
         o.push_str(&format!("    return {val};\n"));
         o.push_str("}\n");
         o
@@ -1009,9 +1007,8 @@ impl Lowerer {
                             let std_candidate = format!("std.{type_ns}.{method}");
                             if self.reachable_natives.contains(&candidate)
                                 || self.reachable_natives.contains(&std_candidate)
+                                || native_supported(&candidate)
                             {
-                                found_ns = type_ns;
-                            } else if native_supported(&candidate) {
                                 found_ns = type_ns;
                             }
                         }
