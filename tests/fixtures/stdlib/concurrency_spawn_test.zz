@@ -10,7 +10,7 @@ task.spawn(|_| {
 task.spawn(|_| {
     std.chan.send(results, 2 * 3)
 })
-a : int = std.chan.recv(results)
-b : int = std.chan.recv(results)
+a:int = std.chan.recv(results)
+b:int = std.chan.recv(results)
 io.println("{a} {b}")
 io.println("spawn_ok")

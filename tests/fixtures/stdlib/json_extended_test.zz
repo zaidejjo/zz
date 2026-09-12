@@ -46,15 +46,15 @@ println("has z: {has_z}")
 // ── json.deep_get ──
 deep := json.deep_get(j, "nested.x")
 match deep {
-    .ok(v) => println("deep nested.x: {json.as_int(v)}"),
-    .err(msg) => println("deep_get error: {msg}"),
+    .ok(v) => println("deep nested.x: {json.as_int(v)}")
+    .err(msg) => println("deep_get error: {msg}")
 }
 
 // ── deep_get missing path ──
 miss := json.deep_get(j, "missing.path")
 match miss {
-    .ok(_) => println("deep miss: should not happen"),
-    .err(_) => println("deep miss: correctly returned error"),
+    .ok(_) => println("deep miss: should not happen")
+    .err(_) => println("deep miss: correctly returned error")
 }
 
 // ── json.array_push ──

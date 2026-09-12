@@ -1,12 +1,12 @@
 // Pure-ZZ JSON helpers — compiled once, shared by VM and AOT.
 // Module: std.json
-//
+// 
 // Low-level primitives (parse, stringify, get, pretty, type, len, keys,
 // has, merge, deep_get, array_push) stay as native Rust in
 // src/natives/json/mod.rs. Everything below is pure computation built
 // on top of those primitives and can run in both the bytecode VM and
 // AOT codegen.
-//
+// 
 // Design notes:
 //   - json.validate checks JSON syntax via parse + match.
 //   - json.parse_or provides a safe fallback for untrusted input.
@@ -17,8 +17,8 @@
 
 func json.validate(s: str) -> bool {
     match json.parse(s) {
-        .ok(_) => true,
-        .err(_) => false,
+        .ok(_) => true
+        .err(_) => false
     }
 }
 
@@ -26,8 +26,8 @@ func json.validate(s: str) -> bool {
 
 func json.parse_or(s: str, default: json) -> json {
     match json.parse(s) {
-        .ok(v) => v,
-        .err(_) => default,
+        .ok(v) => v
+        .err(_) => default
     }
 }
 
@@ -39,15 +39,15 @@ func json.parse_or_null(s: str) -> json {
 
 func json.path_exists(j: json, path: str) -> bool {
     match json.deep_get(j, path) {
-        .ok(_) => true,
-        .err(_) => false,
+        .ok(_) => true
+        .err(_) => false
     }
 }
 
 func json.path_get_or(j: json, path: str, default: json) -> json {
     match json.deep_get(j, path) {
-        .ok(v) => v,
-        .err(_) => default,
+        .ok(v) => v
+        .err(_) => default
     }
 }
 

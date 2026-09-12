@@ -4,7 +4,9 @@ import std.task
 import std.chan
 
 c := std.chan()
-task.spawn(|_| { std.chan.send(c, 42) })
-val : int = std.chan.recv(c)
+task.spawn(|_| {
+    std.chan.send(c, 42)
+})
+val:int = std.chan.recv(c)
 io.println(val)
 io.println("channel_ok")

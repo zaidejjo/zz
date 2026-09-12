@@ -1,11 +1,11 @@
 // Pure-ZZ collection helpers — compiled once, shared by VM and AOT.
 // Module: std.vec (higher-order helpers)
-//
+// 
 // NOTE: vec.map and vec.filter require closure dispatch and remain
 // as native Rust implementations in src/natives/iterators/mod.rs.
 // Everything below uses accumulator patterns or delegates to native
 // vec builtins and can run in both the bytecode VM and AOT codegen.
-//
+// 
 // Design notes:
 //   - min/max are generic <T> — only need comparison operators.
 //   - Array aggregation returns Option<T> to handle empty inputs safely.
@@ -14,19 +14,27 @@
 // ── Generic min / max (work for int, float, str — anything comparable) ───────
 
 func vec.min_val<T: Ord>(arr: [T]) -> Option<T> {
-    if vec.len(arr) == 0 { return .none }
+    if vec.len(arr) == 0 {
+        return .none
+    }
     best := arr[0]
     for x in arr {
-        if x < best { best = x }
+        if x < best {
+            best = x
+        }
     }
     .some(best)
 }
 
 func vec.max_val<T: Ord>(arr: [T]) -> Option<T> {
-    if vec.len(arr) == 0 { return .none }
+    if vec.len(arr) == 0 {
+        return .none
+    }
     best := arr[0]
     for x in arr {
-        if x > best { best = x }
+        if x > best {
+            best = x
+        }
     }
     .some(best)
 }
@@ -106,7 +114,9 @@ func vec.flatten(arr: [[int]]) -> [int] {
 func vec.index_of(arr: [int], target: int) -> int {
     i := 0
     for x in arr {
-        if x == target { return i }
+        if x == target {
+            return i
+        }
         i = i + 1
     }
     0 - 1
@@ -116,7 +126,9 @@ func vec.last_index_of(arr: [int], target: int) -> int {
     result := 0 - 1
     i := 0
     for x in arr {
-        if x == target { result = i }
+        if x == target {
+            result = i
+        }
         i = i + 1
     }
     result

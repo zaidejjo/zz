@@ -13,7 +13,7 @@ d["a"] = 100
 println(d["a"])
 
 // empty dict with type annotation
-empty: {str: int} = {}
+empty:{str: int} = {}
 println(len(empty))
 
 println("dict_ok")

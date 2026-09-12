@@ -1,11 +1,23 @@
 // E2E: Generic type bounds — Num, Ord, Eq, Display
-func add<T: Num>(x: T, y: T) -> T { x + y }
+func add<T: Num>(x: T, y: T) -> T {
+    x + y
+}
 
-func min<T: Ord>(a: T, b: T) -> T { if a < b { a } else { b } }
+func min<T: Ord>(a: T, b: T) -> T {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
 
-func same<T: Eq>(a: T, b: T) -> bool { a == b }
+func same<T: Eq>(a: T, b: T) -> bool {
+    a == b
+}
 
-func describe<T: Display>(v: T) -> str { "value: {v}" }
+func describe<T: Display>(v: T) -> str {
+    "value: {v}"
+}
 
 // Num bound: int and float
 println(add(2, 3))
@@ -26,7 +38,15 @@ println(describe("hi"))
 
 // multi-bound
 func clamp<T: Num + Ord>(v: T, lo: T, hi: T) -> T {
-    if v < lo { lo } else { if v > hi { hi } else { v } }
+    if v < lo {
+        lo
+    } else {
+        if v > hi {
+            hi
+        } else {
+            v
+        }
+    }
 }
 println(clamp(5, 1, 10))
 println(clamp(0, 1, 10))

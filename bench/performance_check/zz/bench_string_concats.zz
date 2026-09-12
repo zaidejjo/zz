@@ -1,12 +1,12 @@
 // =====================================================================
 // bench_string_concats.zz
 // Multi-language stress benchmark — ZZ implementation.
-//
+// 
 // Heavy string concatenation in many short rounds to exercise the
 // allocator and measure peak memory footprint. Each round is released
 // before the next begins so a healthy runtime should peak at
 // O(max round size), not O(total bytes).
-//
+// 
 // Workload:
 //   * 50 rounds × 5000 single-char appends  →  250k chars
 //   * 20 rounds × 2000 multi-char appends   →  ~80k chars per round
@@ -17,7 +17,6 @@ import std.time
 
 func main() {
     t0 := time.now_ms()
-
     // ── Round 1: 50 × 5000 single-char appends ──────────────────────
     round_sum := 0
     for r in 0..50 {
@@ -30,7 +29,6 @@ func main() {
     t1 := time.now_ms()
     println("round1_50x5000_ms: " + str(t1 - t0))
     println("round1_chars: " + str(round_sum))
-
     // ── Round 2: 20 × 2000 multi-char appends ───────────────────────
     round_sum = 0
     for r in 0..20 {
@@ -44,7 +42,6 @@ func main() {
     t2 := time.now_ms()
     println("round2_20x2000_ms: " + str(t2 - t1))
     println("round2_chars: " + str(round_sum))
-
     // ── Round 3: one 10000-char string via repeated concat ───────────
     s := ""
     for i in 0..10000 {
@@ -53,7 +50,6 @@ func main() {
     t3 := time.now_ms()
     println("round3_10000_ms: " + str(t3 - t2))
     println("round3_chars: " + str(len(s)))
-
     // ── Final stats ──────────────────────────────────────────────────
     t4 := time.now_ms()
     final_len := len(s)

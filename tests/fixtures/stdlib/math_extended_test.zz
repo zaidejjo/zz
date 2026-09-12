@@ -25,20 +25,20 @@ println("is_inf(INF): {math.is_inf(math.INF)}")
 // ── Number theory ──
 println("root(8, 3): {math.root(8, 3)}")
 match math.isqrt(16) {
-    .ok(v) => println("isqrt(16): {v}"),
-    .err(e) => println("isqrt err: {e}"),
+    .ok(v) => println("isqrt(16): {v}")
+    .err(e) => println("isqrt err: {e}")
 }
 match math.isqrt(-5) {
-    .ok(v) => println("isqrt(-5): {v}"),
-    .err(e) => println("isqrt(-5) err: {e}"),
+    .ok(v) => println("isqrt(-5): {v}")
+    .err(e) => println("isqrt(-5) err: {e}")
 }
 match math.factorial(5) {
-    .ok(v) => println("5!: {v}"),
-    .err(e) => println("factorial err: {e}"),
+    .ok(v) => println("5!: {v}")
+    .err(e) => println("factorial err: {e}")
 }
 match math.factorial(-1) {
-    .ok(v) => println("factorial(-1): {v}"),
-    .err(e) => println("factorial(-1) err: {e}"),
+    .ok(v) => println("factorial(-1): {v}")
+    .err(e) => println("factorial(-1) err: {e}")
 }
 println("gcd(12, 8): {math.gcd(12, 8)}")
 println("lcm(4, 6): {math.lcm(4, 6)}")
@@ -65,23 +65,23 @@ println("exp(1): {math.exp(1)}")
 
 // ── Linear algebra ──
 match math.dot_product([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]) {
-    .ok(v) => println("dot([1,2,3],[4,5,6]): {v}"),
-    .err(e) => println("dot err: {e}"),
+    .ok(v) => println("dot([1,2,3],[4,5,6]): {v}")
+    .err(e) => println("dot err: {e}")
 }
 println("magnitude([3,4]): {math.magnitude([3.0, 4.0])}")
 
 // ── Statistics ──
 match math.mean([1.0, 2.0, 3.0, 4.0, 5.0]) {
-    .ok(v) => println("mean([1..5]): {v}"),
-    .err(e) => println("mean err: {e}"),
+    .ok(v) => println("mean([1..5]): {v}")
+    .err(e) => println("mean err: {e}")
 }
 match math.median([1.0, 3.0, 5.0]) {
-    .ok(v) => println("median([1,3,5]): {v}"),
-    .err(e) => println("median err: {e}"),
+    .ok(v) => println("median([1,3,5]): {v}")
+    .err(e) => println("median err: {e}")
 }
 match math.median([1.0, 2.0, 3.0, 4.0]) {
-    .ok(v) => println("median([1,2,3,4]): {v}"),
-    .err(e) => println("median err: {e}"),
+    .ok(v) => println("median([1,2,3,4]): {v}")
+    .err(e) => println("median err: {e}")
 }
 r := math.rand_range(1.0, 10.0)
 println("rand_range(1,10): {r}")

@@ -1,6 +1,6 @@
 // E2E: Variable declarations — inferred and explicit types
 x := 42
-y: int = 10
+y:int = 10
 pi := 3.14
 name := "hello"
 flag := true
