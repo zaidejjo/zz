@@ -44,7 +44,25 @@ void zz_array_push_lit(zz_array *a, zz_value item);
 
 // ---- containers --------------------------------------------------------
 void zz_array_push(zz_array *a, zz_value v);
-zz_value zz_array_get(const zz_array *a, zz_value idx, int *err);
+// Inlined: every `arr[i]` in a loop pays no call overhead. The tag/bounds
+// branches predict perfectly for monomorphic loops; element clone folds
+// to a plain increment (str) or nothing (int) via core.h inlines.
+static inline zz_value zz_array_get(const zz_array *a, zz_value idx, int *err) {
+    *err = 0;
+    if (idx.tag != ZZ_INT) {
+        *err = 1;
+        return zz_unit();
+    }
+    int64_t i = idx.i;
+    int64_t n = (int64_t)a->len;
+    if (i < 0)
+        i += n;
+    if (i < 0 || i >= n) {
+        *err = 1;
+        return zz_unit();
+    }
+    return zz_clone(a->items[i]);
+}
 void zz_array_set(zz_array *a, zz_value idx, zz_value v, int *err);
 size_t zz_array_len(const zz_array *a);
 zz_value zz_array_slice(const zz_array *a, zz_value start, zz_value end, int *err);
@@ -52,7 +70,35 @@ zz_value zz_array_dup(const zz_array *a);
 
 // Index expression support (lowered from `obj[idx]`). Dispatch on the
 // object tag at runtime: arrays and dicts. Returns unit + *err=1 on unsupported.
-zz_value zz_index_get(zz_value obj, zz_value idx, int *err);
+// Inlined for the same reason as zz_array_get above.
+static inline zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err) {
+    *err = 0;
+    if (key.tag != ZZ_STR) {
+        *err = 1;
+        return zz_unit();
+    }
+    for (size_t i = 0; i < d->len; i++) {
+        zz_dict_entry *e = &d->entries[i];
+        if (e->key->len == key.s->len &&
+            memcmp(zz_str_cptr(e->key), zz_str_cptr(key.s), key.s->len) == 0) {
+            return zz_clone(e->val);
+        }
+    }
+    *err = 1;
+    return zz_unit();
+}
+
+static inline zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
+    switch (obj.tag) {
+    case ZZ_ARRAY:
+        return zz_array_get(obj.arr, idx, err);
+    case ZZ_DICT:
+        return zz_dict_get(obj.dict, idx, err);
+    default:
+        *err = 1;
+        return zz_unit();
+    }
+}
 void zz_index_set(zz_value obj, zz_value idx, zz_value item, int *err);
 
 // Slice expression (`obj[a:b]`): arrays (items) and strings (bytes).

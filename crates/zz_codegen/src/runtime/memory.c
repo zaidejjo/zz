@@ -94,7 +94,7 @@ void zz_arena_destroy(zz_arena *a) {
 // Arrays, dicts, and funcs carry an atomic refcount. When the refcount
 // drops to zero, the object is freed.
 
-static void zz_retain_array(zz_array *a) {
+void zz_retain_array(zz_array *a) {
     if (!a) return;
     // Stack-promoted (STACK_MAGIC) and fixed-literal (LIT_MAGIC) arrays
     // are not refcounted, and arena-allocated arrays (refs==0) are freed
@@ -107,7 +107,7 @@ static void zz_retain_array(zz_array *a) {
     __atomic_add_fetch(&a->refs, 1, __ATOMIC_RELAXED);
 }
 
-static void zz_release_array(zz_array *a) {
+void zz_release_array(zz_array *a) {
     if (!a) return;
     // Stack-promoted arrays (codegen-set sentinel): header + items buffer
     // both live on the C stack. Nothing to free, but contained values may
@@ -154,7 +154,7 @@ static void zz_release_array(zz_array *a) {
     }
 }
 
-static void zz_retain_dict(zz_dict *d) {
+void zz_retain_dict(zz_dict *d) {
     // Arena-allocated dicts have refs==0 sentinel — skip atomic increment so
     // a clone can never make a bulk-reset arena object look like it owns
     // heap refcounts (which would later free() arena memory).
@@ -163,7 +163,7 @@ static void zz_retain_dict(zz_dict *d) {
         __atomic_add_fetch(&d->refs, 1, __ATOMIC_RELAXED);
 }
 
-static void zz_release_dict(zz_dict *d) {
+void zz_release_dict(zz_dict *d) {
     if (!d) return;
     // Arena-allocated dicts have refs==0 sentinel — skip atomic decrement.
     if (d->refs == 0) {
@@ -212,11 +212,11 @@ static void zz_release_dict(zz_dict *d) {
     }
 }
 
-static void zz_retain_func(zz_func *f) {
+void zz_retain_func(zz_func *f) {
     if (f) __atomic_add_fetch(&f->refs, 1, __ATOMIC_RELAXED);
 }
 
-static void zz_release_func(zz_func *f) {
+void zz_release_func(zz_func *f) {
     if (f && __atomic_sub_fetch(&f->refs, 1, __ATOMIC_ACQ_REL) == 0) {
         // Release captured env values.
         for (size_t i = 0; i < f->env_len; i++) {
@@ -317,115 +317,7 @@ zz_value zz_clone_arc(zz_value v) {
 }
 
 // ---- refcounting -------------------------------------------------------
-// Unified refcounting: strings use the original inline refcount, arrays/dicts/funcs
-// use atomic ARC for thread safety. zz_retain/zz_release dispatch to the right path.
-void zz_retain(zz_value *v) {
-    switch (v->tag) {
-    case ZZ_STR:
-        if (v->s && !v->s->interned && v->s->refs > 0) {
-            v->s->refs++;
-        }
-        break;
-    case ZZ_ARRAY:
-        zz_retain_array(v->arr);
-        break;
-    case ZZ_DICT:
-        zz_retain_dict(v->dict);
-        break;
-    case ZZ_FUNC:
-        zz_retain_func(v->fn);
-        break;
-    case ZZ_OPTION_SOME:
-    case ZZ_RESULT_OK:
-    case ZZ_RESULT_ERR:
-    case ZZ_JSON:
-        if (v->payload) zz_retain(v->payload);
-        break;
-    default:
-        break;
-    }
-}
-
-void zz_release(zz_value *v) {
-    switch (v->tag) {
-    case ZZ_STR:
-        if (v->s && !v->s->interned) {
-            // Arena-allocated strings have refs==0 sentinel — skip free.
-            if (v->s->refs == 0) {
-                return;
-            }
-            if (--v->s->refs == 0) {
-                // SSO strings (cap==0) have no separate heap buffer.
-                // Heap strings (cap>0) store data in a separate malloc'd buffer.
-                if (v->s->cap > 0) free(v->s->heap);
-                zz_str_header_free(v->s);
-            }
-        }
-        break;
-    case ZZ_ARRAY:
-        zz_release_array(v->arr);
-        break;
-    case ZZ_DICT:
-        zz_release_dict(v->dict);
-        break;
-    case ZZ_FUNC:
-        zz_release_func(v->fn);
-        break;
-    case ZZ_OPTION_SOME:
-    case ZZ_RESULT_OK:
-    case ZZ_RESULT_ERR:
-    case ZZ_JSON:
-        zz_release_variant(v);
-        break;
-    case ZZ_OBJECT:
-        zz_release_object(v);
-        break;
-    default:
-        break;
-    }
-}
-
-void zz_assign(zz_value *dst, zz_value src) {
-    // Release old value if it's a refcounted type.
-    if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY ||
-        dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC || dst->tag == ZZ_OBJECT ||
-        dst->tag == ZZ_OPTION_SOME || dst->tag == ZZ_RESULT_OK ||
-        dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON) {
-        zz_release(dst);
-    }
-    *dst = src;
-    // Retain the new value for refcounted types.
-    if (src.tag == ZZ_ARRAY || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
-        src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
-        src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON) {
-        zz_retain(dst);
-    }
-}
-
-zz_value zz_clone(zz_value v) {
-    switch (v.tag) {
-    case ZZ_STR:
-        if (v.s && !v.s->interned) {
-            v.s->refs++;
-        }
-        break;
-    case ZZ_ARRAY:
-        zz_retain_array(v.arr);
-        break;
-    case ZZ_DICT:
-        zz_retain_dict(v.dict);
-        break;
-    case ZZ_FUNC:
-        zz_retain_func(v.fn);
-        break;
-    case ZZ_OPTION_SOME:
-    case ZZ_RESULT_OK:
-    case ZZ_RESULT_ERR:
-    case ZZ_JSON:
-        if (v.payload) zz_retain(v.payload);
-        break;
-    default:
-        break;
-    }
-    return v;
-}
+// Unified refcounting entry points (zz_retain/zz_release/zz_assign/
+// zz_clone) live as `static inline` in core.h so hot call sites pay no
+// call + switch dispatch. The atomic ARC helpers above stay out-of-line.
+// The `_arc` (all-atomic) variants below are kept for explicit use.

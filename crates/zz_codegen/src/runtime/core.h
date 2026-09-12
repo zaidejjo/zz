@@ -283,6 +283,135 @@ static inline zz_value zz_bool(bool b) {
     return v;
 }
 
+// ---- refcount fast path ------------------------------------------------
+// Unified refcounting inlined: strings use plain (non-atomic) refcounts,
+// arrays/dicts/funcs delegate to the out-of-line atomic ARC helpers.
+// Inlining removes a call + switch dispatch on every boxed touch
+// (clone/assign/index-load) in hot loops; the atomic slow paths stay
+// out-of-line in memory.c so hot call sites stay small.
+//
+// Forward declarations for helpers defined later in the TU.
+void zz_retain_array(zz_array *a);
+void zz_release_array(zz_array *a);
+void zz_retain_dict(zz_dict *d);
+void zz_release_dict(zz_dict *d);
+void zz_retain_func(zz_func *f);
+void zz_release_func(zz_func *f);
+void zz_release_variant(zz_value *v);
+void zz_release_object(zz_value *v);
+void zz_str_header_free(zz_str *s);
+
+static inline void zz_retain(zz_value *v) {
+    switch (v->tag) {
+    case ZZ_STR:
+        if (v->s && !v->s->interned && v->s->refs > 0) {
+            v->s->refs++;
+        }
+        break;
+    case ZZ_ARRAY:
+        zz_retain_array(v->arr);
+        break;
+    case ZZ_DICT:
+        zz_retain_dict(v->dict);
+        break;
+    case ZZ_FUNC:
+        zz_retain_func(v->fn);
+        break;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON:
+        if (v->payload) zz_retain(v->payload);
+        break;
+    default:
+        break;
+    }
+}
+
+static inline void zz_release(zz_value *v) {
+    switch (v->tag) {
+    case ZZ_STR:
+        if (v->s && !v->s->interned) {
+            // Arena-allocated strings have refs==0 sentinel — skip free.
+            if (v->s->refs == 0) {
+                return;
+            }
+            if (--v->s->refs == 0) {
+                // SSO strings (cap==0) have no separate heap buffer.
+                // Heap strings (cap>0) store data in a separate malloc'd buffer.
+                if (v->s->cap > 0) free(v->s->heap);
+                zz_str_header_free(v->s);
+            }
+        }
+        break;
+    case ZZ_ARRAY:
+        zz_release_array(v->arr);
+        break;
+    case ZZ_DICT:
+        zz_release_dict(v->dict);
+        break;
+    case ZZ_FUNC:
+        zz_release_func(v->fn);
+        break;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON:
+        zz_release_variant(v);
+        break;
+    case ZZ_OBJECT:
+        zz_release_object(v);
+        break;
+    default:
+        break;
+    }
+}
+
+static inline void zz_assign(zz_value *dst, zz_value src) {
+    // Release old value if it's a refcounted type.
+    if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY ||
+        dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC || dst->tag == ZZ_OBJECT ||
+        dst->tag == ZZ_OPTION_SOME || dst->tag == ZZ_RESULT_OK ||
+        dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON) {
+        zz_release(dst);
+    }
+    *dst = src;
+    // Retain the new value for refcounted types.
+    if (src.tag == ZZ_ARRAY || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
+        src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
+        src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON) {
+        zz_retain(dst);
+    }
+}
+
+static inline zz_value zz_clone(zz_value v) {
+    switch (v.tag) {
+    case ZZ_STR:
+        if (v.s && !v.s->interned) {
+            v.s->refs++;
+        }
+        break;
+    case ZZ_ARRAY:
+        zz_retain_array(v.arr);
+        break;
+    case ZZ_DICT:
+        zz_retain_dict(v.dict);
+        break;
+    case ZZ_FUNC:
+        zz_retain_func(v.fn);
+        break;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON:
+        if (v.payload) zz_retain(v.payload);
+        break;
+    default:
+        break;
+    }
+    return v;
+}
+
 // ---- binaries ----------------------------------------------------------
 #define ZZOP_ADD 1
 #define ZZOP_SUB 2

@@ -123,23 +123,6 @@ size_t zz_array_len(const zz_array *a) {
     return a ? a->len : 0;
 }
 
-zz_value zz_array_get(const zz_array *a, zz_value idx, int *err) {
-    *err = 0;
-    if (idx.tag != ZZ_INT) {
-        *err = 1;
-        return zz_unit();
-    }
-    int64_t i = idx.i;
-    int64_t n = (int64_t)a->len;
-    if (i < 0)
-        i += n;
-    if (i < 0 || i >= n) {
-        *err = 1;
-        return zz_unit();
-    }
-    return zz_clone(a->items[i]);
-}
-
 void zz_array_set(zz_array *a, zz_value idx, zz_value item, int *err) {
     *err = 0;
     if (idx.tag != ZZ_INT) {
@@ -260,17 +243,8 @@ zz_value zz_dict_new_sized(size_t hint) {
 
 // Index-expression dispatchers: `obj[idx]` read and `obj[idx] = v` write.
 // Arrays and dicts only; unsupported tags set *err = 1 and return unit.
-zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
-    switch (obj.tag) {
-    case ZZ_ARRAY:
-        return zz_array_get(obj.arr, idx, err);
-    case ZZ_DICT:
-        return zz_dict_get(obj.dict, idx, err);
-    default:
-        *err = 1;
-        return zz_unit();
-    }
-}
+// (zz_index_get lives inline in collections.h; only the setter, which is
+// never loop-hot, stays out-of-line here.)
 
 // Slice a value by byte indices (array elements or ASCII-compatible strings).
 // Missing bounds (unit) mean "from 0" / "to end". Matches the VM for ASCII.
@@ -348,23 +322,6 @@ void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
     e->key = key.s;
     key.s->refs++;
     e->val = val;
-}
-
-zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err) {
-    *err = 0;
-    if (key.tag != ZZ_STR) {
-        *err = 1;
-        return zz_unit();
-    }
-    for (size_t i = 0; i < d->len; i++) {
-        zz_dict_entry *e = &d->entries[i];
-        if (e->key->len == key.s->len &&
-            memcmp(zz_str_cptr(e->key), zz_str_cptr(key.s), key.s->len) == 0) {
-            return zz_clone(e->val);
-        }
-    }
-    *err = 1;
-    return zz_unit();
 }
 
 size_t zz_dict_len(const zz_dict *d) {

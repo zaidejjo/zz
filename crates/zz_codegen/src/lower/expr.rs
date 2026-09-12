@@ -407,11 +407,28 @@ impl Lowerer {
             }
             Expr::Index { obj, index, .. } => {
                 // `obj[idx]` — runtime-dispatched read (arrays/dicts).
-                let o = self.emit_expr(obj, names, out);
+                // Two fast-paths over the naive
+                // `zz_call_native2(zz_index_get, zz_clone(o), boxed_i)`:
+                //   1. Plain Ident receivers pass borrowed: zz_index_get
+                //      never releases or stores its object argument, so
+                //      the atomic retain per load is pure overhead.
+                //   2. Direct `zz_index_get` call (now static inline in
+                //      collections.h) instead of the native-call shim.
+                // Error behavior is unchanged: the shim ignored *err, and
+                // the temp err here is likewise unread.
+                let o = match obj.as_ref() {
+                    Expr::Ident { name, .. } => names
+                        .lookup(name)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| self.emit_expr(obj, names, out)),
+                    _ => self.emit_expr(obj, names, out),
+                };
                 let i = self.emit_expr(index, names, out);
                 // Box a scalar index (ident/raw-arith) to a zz_value.
                 let i_boxed = self.box_index_arg(index, i, names);
-                format!("zz_call_native2(zz_index_get, {o}, {i_boxed})")
+                let e = names.fresh("_idxe");
+                out.push_str(&format!("    int {e} = 0;\n"));
+                format!("zz_index_get({o}, {i_boxed}, &{e})")
             }
             Expr::Slice {
                 obj, start, end, ..
