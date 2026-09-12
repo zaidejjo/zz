@@ -43,6 +43,15 @@ enum LexContext {
         /// always emits `Str`, not `StrFmt`, because it terminates a
         /// completely separate string literal, not a continuation segment.
         is_nested: bool,
+        /// True for triple-quoted (`"""..."""`) multiline strings. These
+        /// allow unescaped `"`/`""` and raw newlines inside; the closing
+        /// delimiter is `"""`. Interpolation uses the same `{ident}` trigger
+        /// as single-line strings, plus `(`- and digit-led expressions.
+        triple: bool,
+        /// Token indices (into `tokens`) of already-emitted segments of the
+        /// current triple-quoted string. On close, all segments are dedented
+        /// together based on the closing delimiter's indentation.
+        segs: Vec<usize>,
     },
     /// Inside an interpolation `{ expr }`. `depth` counts nested braces
     /// beyond the interpolation's own opening brace (dicts, blocks, ...).
@@ -85,7 +94,15 @@ impl<'a> Lexer<'a> {
             // interpolation start is pending, the `{` must be dispatched below.
             if matches!(self.contexts.last(), Some(LexContext::Str { .. })) && !self.pending_interp
             {
-                self.lex_string_cont();
+                let triple = matches!(
+                    self.contexts.last(),
+                    Some(LexContext::Str { triple: true, .. })
+                );
+                if triple {
+                    self.lex_triple_cont();
+                } else {
+                    self.lex_string_cont();
+                }
                 continue;
             }
             match c {
@@ -468,17 +485,26 @@ impl<'a> Lexer<'a> {
         self.push_token(kind, span, text);
     }
 
-    /// Begin a fresh string literal: consume the opening quote and enter
-    /// string mode. The main loop then feeds characters through
-    /// [`Lexer::lex_string_cont`].
+    /// Begin a fresh string literal: consume the opening quote(s) and enter
+    /// string mode. A `"""` opener starts a triple-quoted multiline string;
+    /// otherwise a regular single-line string. The main loop then feeds
+    /// characters through [`Lexer::lex_string_cont`] or
+    /// [`Lexer::lex_triple_cont`].
     fn lex_string(&mut self) {
         let start = self.pos;
-        self.bump_char(); // opening quote
+        let triple = self.src[start..].starts_with("\"\"\"");
+        if triple {
+            self.pos += 3; // opening `"""`
+        } else {
+            self.bump_char(); // opening quote
+        }
         let is_nested = matches!(self.contexts.last(), Some(LexContext::Interp { .. }));
         self.contexts.push(LexContext::Str {
             start,
             value: String::new(),
             is_nested,
+            triple,
+            segs: Vec::new(),
         });
     }
 
@@ -492,7 +518,15 @@ impl<'a> Lexer<'a> {
                 start,
                 value,
                 is_nested,
-            }) => (start, value, is_nested),
+                triple: false,
+                segs,
+            }) => {
+                debug_assert!(segs.is_empty());
+                (start, value, is_nested)
+            }
+            Some(LexContext::Str { triple: true, .. }) => {
+                unreachable!("triple-quoted string dispatched to lex_string_cont")
+            }
             _ => unreachable!("lex_string_cont called outside string mode"),
         };
         match self.peek_char() {
@@ -519,6 +553,8 @@ impl<'a> Lexer<'a> {
                         start: self.pos,
                         value: String::new(),
                         is_nested: false,
+                        triple: false,
+                        segs: Vec::new(),
                     });
                 } else {
                     // Final closing quote — emit Str (complete string).
@@ -537,6 +573,8 @@ impl<'a> Lexer<'a> {
                     start: self.pos,
                     value: String::new(),
                     is_nested,
+                    triple: false,
+                    segs: Vec::new(),
                 });
                 self.pending_interp = true;
             }
@@ -564,6 +602,16 @@ impl<'a> Lexer<'a> {
                         value.push('"');
                         self.bump_char();
                     }
+                    // Escaped literal braces: `\{` / `\}` stay text and never
+                    // open an interpolation.
+                    Some('{') => {
+                        value.push('{');
+                        self.bump_char();
+                    }
+                    Some('}') => {
+                        value.push('}');
+                        self.bump_char();
+                    }
                     Some(other) => {
                         let span =
                             Span::new((self.pos - 1) as u32, (self.pos + other.len_utf8()) as u32);
@@ -582,6 +630,8 @@ impl<'a> Lexer<'a> {
                     start,
                     value,
                     is_nested,
+                    triple: false,
+                    segs: Vec::new(),
                 });
             }
             Some(c) => {
@@ -592,6 +642,8 @@ impl<'a> Lexer<'a> {
                     start,
                     value,
                     is_nested,
+                    triple: false,
+                    segs: Vec::new(),
                 });
             }
             None => {
@@ -599,6 +651,255 @@ impl<'a> Lexer<'a> {
                 self.errors
                     .push(error_at("unterminated string literal", span));
             }
+        }
+    }
+
+    /// Consume one unit of triple-quoted (`"""..."""`) string content.
+    ///
+    /// Differences from single-line strings:
+    /// - the string only closes on `"""`; lone `"`/`""` and raw newlines are
+    ///   literal content,
+    /// - interpolation also triggers on digit- and `(`-led expressions
+    ///   (`{1 + 2}`, `{(a)}`) so `{expr}` works for arbitrary expressions,
+    ///   while `{"k": v}` (JSON-like) stays literal text,
+    /// - on close, all emitted text segments are dedented together based on
+    ///   the closing delimiter's indentation.
+    fn lex_triple_cont(&mut self) {
+        let (start, value, is_nested, segs) = match self.contexts.pop() {
+            Some(LexContext::Str {
+                start,
+                value,
+                is_nested,
+                triple: true,
+                segs,
+            }) => (start, value, is_nested, segs),
+            Some(LexContext::Str { triple: false, .. }) => {
+                unreachable!("single-line string dispatched to lex_triple_cont")
+            }
+            _ => unreachable!("lex_triple_cont called outside string mode"),
+        };
+        // Closing delimiter.
+        if self.src[self.pos..].starts_with("\"\"\"") {
+            let indent = self.closing_triple_indent();
+            self.pos += 3;
+            let span = Span::new(start as u32, self.pos as u32);
+            if is_nested {
+                let idx = self.tokens.len();
+                self.push_token(TokenKind::Str, span, value);
+                self.dedent_triple_segments(&segs, idx, indent);
+            } else if self
+                .contexts
+                .iter()
+                .any(|c| matches!(c, LexContext::Interp { .. }))
+            {
+                let idx = self.tokens.len();
+                self.push_token(TokenKind::StrFmt, span, value);
+                let mut next_segs = segs;
+                next_segs.push(idx);
+                // Dedent will run when the final `"""` closes; segments stay
+                // tracked so the whole logical string is dedented together.
+                self.dedent_triple_segments(&next_segs, usize::MAX, indent);
+                self.contexts.push(LexContext::Str {
+                    start: self.pos,
+                    value: String::new(),
+                    is_nested: false,
+                    triple: true,
+                    segs: next_segs,
+                });
+            } else {
+                let idx = self.tokens.len();
+                self.push_token(TokenKind::Str, span, value);
+                self.dedent_triple_segments(&segs, idx, indent);
+            }
+            return;
+        }
+        match self.peek_char() {
+            // Interpolation: `{ident...`, `{1...`, `{(...` start an embedded
+            // expression. `{{`, `{}` and `{"...` (JSON-like) stay literal.
+            Some('{') if is_triple_interp_start(self.peek_char_at(1)) => {
+                let span = Span::new(start as u32, self.pos as u32);
+                let idx = self.tokens.len();
+                self.push_token(TokenKind::StrFmt, span, value);
+                let mut next_segs = segs;
+                next_segs.push(idx);
+                self.contexts.push(LexContext::Str {
+                    start: self.pos,
+                    value: String::new(),
+                    is_nested,
+                    triple: true,
+                    segs: next_segs,
+                });
+                self.pending_interp = true;
+            }
+            Some('\\') => {
+                self.bump_char();
+                let mut value = value;
+                match self.peek_char() {
+                    Some('n') => {
+                        value.push('\n');
+                        self.bump_char();
+                    }
+                    Some('t') => {
+                        value.push('\t');
+                        self.bump_char();
+                    }
+                    Some('r') => {
+                        value.push('\r');
+                        self.bump_char();
+                    }
+                    Some('\\') => {
+                        value.push('\\');
+                        self.bump_char();
+                    }
+                    Some('"') => {
+                        value.push('"');
+                        self.bump_char();
+                    }
+                    // Escaped literal braces: `\{` / `\}` stay text and never
+                    // open an interpolation.
+                    Some('{') => {
+                        value.push('{');
+                        self.bump_char();
+                    }
+                    Some('}') => {
+                        value.push('}');
+                        self.bump_char();
+                    }
+                    Some(other) => {
+                        let span =
+                            Span::new((self.pos - 1) as u32, (self.pos + other.len_utf8()) as u32);
+                        self.errors
+                            .push(error_at(format!("unknown escape `\\{other}`"), span));
+                        self.bump_char();
+                    }
+                    None => {
+                        let span = Span::new(start as u32, self.src.len() as u32);
+                        self.errors
+                            .push(error_at("unterminated string literal", span));
+                        return;
+                    }
+                }
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                    triple: true,
+                    segs,
+                });
+            }
+            Some(c) => {
+                let mut value = value;
+                value.push(c);
+                self.bump_char();
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                    triple: true,
+                    segs,
+                });
+            }
+            None => {
+                let span = Span::new(start as u32, self.src.len() as u32);
+                self.errors
+                    .push(error_at("unterminated string literal", span));
+            }
+        }
+    }
+
+    /// Width (in ` `/`\t` chars) of the whitespace between the start of the
+    /// closing delimiter's line and the closing `"""` itself. Used as the
+    /// dedent width for the whole triple-quoted string.
+    fn closing_triple_indent(&self) -> usize {
+        let mut j = self.pos;
+        while j > 0 && (self.src.as_bytes()[j - 1] == b' ' || self.src.as_bytes()[j - 1] == b'\t') {
+            j -= 1;
+        }
+        self.pos - j
+    }
+
+    /// Dedent the text segments of a closed triple-quoted string in place.
+    ///
+    /// `segs` holds token indices of previously emitted `StrFmt` segments and
+    /// `final_idx` is the closing segment's index (`usize::MAX` when the
+    /// string continues after an interpolation and dedent must be deferred —
+    /// in that case this is a no-op and the stored `segs` are dedented at the
+    /// final close).
+    ///
+    /// Rules (Swift/Kotlin-style `trimIndent`):
+    /// - one leading newline right after the opening `"""` is formatting, not
+    ///   content, and is stripped;
+    /// - the line break + whitespace before the closing `"""` is formatting
+    ///   and is stripped;
+    /// - every other line that begins after a newline has up to `indent`
+    ///   leading spaces/tabs removed; the first line (on the opener's line)
+    ///   is never dedented;
+    /// - whitespace-only lines collapse to empty.
+    fn dedent_triple_segments(&mut self, segs: &[usize], final_idx: usize, indent: usize) {
+        if final_idx == usize::MAX {
+            return; // string continues; dedent once at the final close
+        }
+        let mut idxs: Vec<usize> = segs.to_vec();
+        idxs.push(final_idx);
+        let mut texts: Vec<String> = idxs.iter().map(|&i| self.tokens[i].text.clone()).collect();
+        if texts.is_empty() {
+            return;
+        }
+        // Strip one leading newline (formatting, not content).
+        let mut at_line_start = false;
+        if let Some(first) = texts.first_mut() {
+            if first.starts_with("\r\n") {
+                first.drain(..2);
+                at_line_start = true;
+            } else if first.starts_with('\n') {
+                first.drain(..1);
+                at_line_start = true;
+            }
+        }
+        // Strip the closer line: a trailing `\n` followed only by spaces/tabs
+        // is the line break before the closing delimiter (formatting).
+        if let Some(last) = texts.last_mut() {
+            if let Some(nl) = last.rfind('\n') {
+                if last[nl + 1..].chars().all(|c| c == ' ' || c == '\t') {
+                    last.truncate(nl);
+                }
+            }
+        }
+        // Dedent line by line, carrying `at_line_start` across interpolation
+        // boundaries so a segment that continues a line is left alone.
+        for text in texts.iter_mut() {
+            let mut out = String::with_capacity(text.len());
+            let mut first_line = true;
+            for line in text.split('\n') {
+                if !first_line {
+                    out.push('\n');
+                    at_line_start = true;
+                }
+                first_line = false;
+                if at_line_start {
+                    let stripped = strip_up_to_indent(line, indent);
+                    out.push_str(&stripped);
+                    // A line with real content ends the line-start state;
+                    // blank lines stay "at start" for the next line.
+                    if !stripped.is_empty() {
+                        at_line_start = false;
+                    }
+                } else {
+                    out.push_str(line);
+                }
+            }
+            // A segment ending with `\n` leaves the next segment at a line
+            // start (its first line gets dedented).
+            if text.ends_with('\n') {
+                at_line_start = true;
+            } else if !text.is_empty() {
+                // `split` bookkeeping above already updated the flag for the
+                // last line; nothing more to do.
+            }
+            *text = out;
+        }
+        for (tok_idx, new_text) in idxs.iter().zip(texts) {
+            self.tokens[*tok_idx].text = new_text;
         }
     }
 
@@ -674,6 +975,38 @@ fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }
 
+/// Interpolation trigger inside triple-quoted strings: `{` opens an embedded
+/// expression when followed by an identifier start, a digit, or `(`.
+/// `{{`, `{}` and JSON-like `{"key"...` stay literal text.
+fn is_triple_interp_start(c: Option<char>) -> bool {
+    match c {
+        Some(ch) if is_ident_start(ch) => true,
+        Some(ch) if ch.is_ascii_digit() => true,
+        Some('(') => true,
+        _ => false,
+    }
+}
+
+/// Remove up to `n` leading spaces/tabs from `line`. Whitespace-only lines
+/// collapse to empty so indentation never pollutes the value with trailing
+/// spaces.
+fn strip_up_to_indent(line: &str, n: usize) -> String {
+    if line.trim().is_empty() {
+        return String::new();
+    }
+    let mut rest = line;
+    let mut removed = 0;
+    while removed < n {
+        if rest.starts_with(' ') || rest.starts_with('\t') {
+            rest = &rest[1..];
+            removed += 1;
+        } else {
+            break;
+        }
+    }
+    rest.to_string()
+}
+
 fn is_ident_continue(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
@@ -742,6 +1075,143 @@ mod tests {
             .filter(|t| t.kind == TokenKind::PipeGt)
             .count();
         assert_eq!(pipe_count, 2, "should have two PipeGt tokens");
+    }
+
+    // --- triple-quoted (multiline) strings ---------------------------------
+
+    /// Significant tokens, excluding StmtEnd trivia and Eof.
+    fn sig(src: &str) -> Vec<(TokenKind, String)> {
+        let lexed = lex(src);
+        assert!(
+            lexed.errors.is_empty(),
+            "lex errors for {src:?}: {:?}",
+            lexed.errors
+        );
+        lexed
+            .tokens
+            .into_iter()
+            .filter(|t| !matches!(t.kind, TokenKind::StmtEnd | TokenKind::Eof))
+            .map(|t| (t.kind, t.text))
+            .collect()
+    }
+
+    #[test]
+    fn triple_empty() {
+        assert_eq!(sig(r#""""""""#), vec![(TokenKind::Str, String::new())]);
+    }
+
+    #[test]
+    fn triple_single_line() {
+        assert_eq!(
+            sig(r#""""hello""""#),
+            vec![(TokenKind::Str, "hello".to_string())]
+        );
+    }
+
+    #[test]
+    fn triple_dedents_to_closer_indent() {
+        let toks = sig("\"\"\"\n    line1\n    line2\n    \"\"\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "line1\nline2".to_string())]);
+    }
+
+    #[test]
+    fn triple_dedent_keeps_relative_indent() {
+        let toks = sig("\"\"\"\n    outer\n        inner\n    \"\"\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "outer\n    inner".to_string())]);
+    }
+
+    #[test]
+    fn triple_first_line_never_dedented() {
+        // Content on the opener's line is kept verbatim.
+        let toks = sig("\"\"\"SELECT *\n    FROM t\n    \"\"\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "SELECT *\nFROM t".to_string())]);
+    }
+
+    #[test]
+    fn triple_unescaped_quotes_inside() {
+        let toks = sig("\"\"\"a \"quoted\" word\"\"\"");
+        assert_eq!(
+            toks,
+            vec![(TokenKind::Str, "a \"quoted\" word".to_string())]
+        );
+    }
+
+    #[test]
+    fn triple_interpolation() {
+        let toks = sig("\"\"\"hello {name}!\"\"\"");
+        assert_eq!(
+            toks,
+            vec![
+                (TokenKind::StrFmt, "hello ".to_string()),
+                (TokenKind::LBrace, "{".to_string()),
+                (TokenKind::Ident, "name".to_string()),
+                (TokenKind::RBrace, "}".to_string()),
+                (TokenKind::Str, "!".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn triple_digit_led_interpolation() {
+        // `{expr}` works for arbitrary expressions, not just identifiers.
+        let toks = sig("\"\"\"{1}\n\"\"\"");
+        assert_eq!(toks[0], (TokenKind::StrFmt, String::new()));
+        assert_eq!(toks[1], (TokenKind::LBrace, "{".to_string()));
+        assert_eq!(toks[2], (TokenKind::Int, "1".to_string()));
+    }
+
+    #[test]
+    fn triple_json_braces_stay_literal() {
+        // `{"k"...` must not open an interpolation (nested-brace safety).
+        let toks = sig("\"\"\"{\"k\": 1}\"\"\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{\"k\": 1}".to_string())]);
+    }
+
+    #[test]
+    fn triple_double_brace_stays_literal() {
+        let toks = sig("\"\"\"a {{ b\"\"\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "a {{ b".to_string())]);
+    }
+
+    #[test]
+    fn triple_escaped_braces() {
+        let toks = sig("\"\"\"\\{x\\}\"\"\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{x}".to_string())]);
+    }
+
+    #[test]
+    fn single_line_escaped_braces() {
+        let toks = sig("\"\\{x\\}\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{x}".to_string())]);
+    }
+
+    #[test]
+    fn triple_dedent_across_interpolation() {
+        // Segments before/after `{expr}` dedent as one logical string.
+        let toks = sig("\"\"\"\n    a {x} b\n    c\n    \"\"\"");
+        assert_eq!(
+            toks,
+            vec![
+                (TokenKind::StrFmt, "a ".to_string()),
+                (TokenKind::LBrace, "{".to_string()),
+                (TokenKind::Ident, "x".to_string()),
+                (TokenKind::RBrace, "}".to_string()),
+                (TokenKind::Str, " b\nc".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn triple_unterminated_is_error() {
+        let lexed = lex("\"\"\"never closed");
+        assert!(
+            lexed
+                .errors
+                .iter()
+                .any(|e| e.message.contains("unterminated")),
+            "expected unterminated error, got {:?}",
+            lexed.errors
+        );
     }
 
     #[test]

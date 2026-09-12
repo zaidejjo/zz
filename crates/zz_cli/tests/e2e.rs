@@ -126,6 +126,11 @@ e2e_success_test!(e2e_syntax_arrays, "syntax", "arrays.zz");
 e2e_success_test!(e2e_syntax_dicts, "syntax", "dicts.zz");
 e2e_success_test!(e2e_syntax_defer, "syntax", "defer.zz");
 e2e_success_test!(e2e_syntax_string_blocks, "syntax", "string_blocks.zz");
+e2e_success_test!(
+    e2e_syntax_multiline_strings,
+    "syntax",
+    "multiline_strings.zz"
+);
 e2e_success_test!(e2e_syntax_return_in_loops, "syntax", "return_in_loops.zz");
 e2e_success_test!(e2e_syntax_dict_iteration, "syntax", "dict_iteration.zz");
 e2e_success_test!(e2e_syntax_pipe_elvis, "syntax", "pipe_elvis.zz");

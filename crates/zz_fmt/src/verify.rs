@@ -614,6 +614,10 @@ fn fp_expr(e: &Expr, out: &mut String) {
 
 /// Lex `source` and return the sequence of significant-token texts
 /// (whitespace, comments, and StmtEnd newlines stripped).
+///
+/// String tokens (`Str`/`StrFmt`) compare by *decoded value*, not raw source
+/// slice: the same value can be written as `"..."` or `"""..."""` (with any
+/// indentation), so the emitter is free to pick the canonical form.
 fn significant_token_sequence(source: &str) -> Vec<String> {
     let lexed = lex(source);
     let mut seq = Vec::new();
@@ -622,6 +626,8 @@ fn significant_token_sequence(source: &str) -> Vec<String> {
             TokenKind::Eof => break,
             // StmtEnd newlines are pure trivia for verification purposes.
             TokenKind::StmtEnd => continue,
+            TokenKind::Str => seq.push(format!("Str({})", t.text)),
+            TokenKind::StrFmt => seq.push(format!("StrFmt({})", t.text)),
             _ => {
                 let s = t.span.start as usize;
                 let e = (t.span.end as usize).min(source.len());

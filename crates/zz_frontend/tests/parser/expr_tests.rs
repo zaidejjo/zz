@@ -1,6 +1,6 @@
 //! Parser expression tests.
 
-use zz_frontend::ast::{BinOp, Expr as E, UnOp};
+use zz_frontend::ast::{BinOp, Expr as E, FmtPart, UnOp};
 use zz_frontend::tests::common::parse_ok;
 
 #[test]
@@ -288,5 +288,97 @@ if x == "world" {
             other => panic!("expected ==, got {other:?}"),
         },
         other => panic!("expected if stmt, got {other:?}"),
+    }
+}
+
+// --- triple-quoted (multiline) strings ------------------------------------
+
+fn fmt_parts_of(src: &str) -> Vec<FmtPart> {
+    let p = parse_ok(src);
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Fmt { parts, .. }) => parts.clone(),
+        zz_frontend::ast::Stmt::Decl { value, .. } => match value {
+            E::Fmt { parts, .. } => parts.clone(),
+            other => panic!("expected fmt expr, got {other:?}"),
+        },
+        other => panic!("expected expr/let stmt, got {other:?}"),
+    }
+}
+
+#[test]
+fn triple_single_line_parses_as_plain_str() {
+    // No interpolation: a plain `Str` with the dedented value (no formatting
+    // overhead for static segments).
+    let p = parse_ok("x := \"\"\"hello\"\"\"");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { value, .. } => match value {
+            E::Str { value, .. } => assert_eq!(value, "hello"),
+            other => panic!("expected str expr, got {other:?}"),
+        },
+        other => panic!("expected let stmt, got {other:?}"),
+    }
+}
+
+#[test]
+fn triple_empty_is_empty_str() {
+    let p = parse_ok("x := \"\"\"\"\"\"");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { value, .. } => match value {
+            E::Str { value, .. } => assert_eq!(value, ""),
+            other => panic!("expected str expr, got {other:?}"),
+        },
+        other => panic!("expected let stmt, got {other:?}"),
+    }
+}
+
+#[test]
+fn triple_dedents_closing_indent() {
+    let p = parse_ok("x := \"\"\"\n    SELECT *\n    FROM t\n    \"\"\"");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { value, .. } => match value {
+            E::Str { value, .. } => assert_eq!(value, "SELECT *\nFROM t"),
+            other => panic!("expected str expr, got {other:?}"),
+        },
+        other => panic!("expected let stmt, got {other:?}"),
+    }
+}
+
+#[test]
+fn triple_interpolation_splits_text_and_expr() {
+    let parts = fmt_parts_of("\"\"\"\n    hello {name}!\n    \"\"\"");
+    assert_eq!(parts.len(), 3);
+    assert!(matches!(&parts[0], FmtPart::Text(t) if t == "hello "));
+    assert!(
+        matches!(&parts[1], FmtPart::Expr(e, None) if matches!(e.as_ref(), E::Ident { name, .. } if name == "name"))
+    );
+    assert!(matches!(&parts[2], FmtPart::Text(t) if t == "!"));
+}
+
+#[test]
+fn triple_nested_braces_stay_literal() {
+    // JSON-like content is static text, not interpolation.
+    let p = parse_ok("\"\"\"{\"k\": 1}\"\"\"");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Str { value, .. }) => assert_eq!(value, "{\"k\": 1}"),
+        other => panic!("expected str expr, got {other:?}"),
+    }
+}
+
+#[test]
+fn triple_escaped_braces_are_literal_text() {
+    let p = parse_ok("\"\"\"\\{x\\}\"\"\"");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Str { value, .. }) => assert_eq!(value, "{x}"),
+        other => panic!("expected str expr, got {other:?}"),
+    }
+}
+
+#[test]
+fn triple_format_spec_parses() {
+    let parts = fmt_parts_of("\"\"\"{pi:.2f}\"\"\"");
+    assert_eq!(parts.len(), 3);
+    match &parts[1] {
+        FmtPart::Expr(_, Some(spec)) => assert_eq!(spec, ".2f"),
+        other => panic!("expected expr with format spec, got {other:?}"),
     }
 }
