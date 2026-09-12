@@ -311,7 +311,11 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.emit_expr(value);
             }
             Stmt::Import {
-                path, alias, pub_, ..
+                path,
+                alias,
+                items,
+                pub_,
+                ..
             } => {
                 if *pub_ {
                     self.text("pub");
@@ -324,6 +328,27 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         self.text(".");
                     }
                     self.text(p);
+                }
+                if !items.is_empty() {
+                    self.text("(");
+                    for (i, item) in items.iter().enumerate() {
+                        if i > 0 {
+                            self.text(", ");
+                        }
+                        match item {
+                            ImportItem::Wildcard { .. } => self.text("*"),
+                            ImportItem::Named { name, alias, .. } => {
+                                self.text(name.clone());
+                                if let Some(a) = alias {
+                                    self.space();
+                                    self.text("as");
+                                    self.space();
+                                    self.text(a.clone());
+                                }
+                            }
+                        }
+                    }
+                    self.text(")");
                 }
                 if let Some(a) = alias {
                     self.space();
@@ -493,6 +518,39 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.space();
                 self.emit_expr(value);
             }
+            Stmt::ExternBlock { abi, items, .. } => {
+                self.text("extern");
+                self.space();
+                self.text(format!("\"{abi}\""));
+                self.space();
+                self.text("{");
+                for item in items {
+                    self.text("func");
+                    self.space();
+                    self.text(item.name.name.clone());
+                    self.text("(");
+                    for (i, p) in item.params.iter().enumerate() {
+                        if i > 0 {
+                            self.text(", ");
+                        }
+                        self.text(p.name.name.clone());
+                        if let Some(t) = &p.ty {
+                            self.text(":");
+                            self.emit_ty(t);
+                        }
+                    }
+                    self.text(")");
+                    if let Some(r) = &item.ret {
+                        self.text(" -> ");
+                        self.emit_ty(r);
+                    }
+                }
+                self.text("}");
+            }
+            Stmt::Link { lib, .. } => {
+                self.text("@link");
+                self.text(format!("(\"{lib}\")"));
+            }
             Stmt::Expr(e) => self.emit_expr(e),
         }
         // For statements that don't carry their own AST-aware
@@ -656,6 +714,11 @@ impl<'src, 'a> Ctx<'src, 'a> {
             TyKind::Bool => self.text("bool"),
             TyKind::Str => self.text("str"),
             TyKind::Unit => self.text("unit"),
+            TyKind::Void => self.text("void"),
+            TyKind::Ptr { mutable, inner } => {
+                self.text(if *mutable { "*mut " } else { "*const " });
+                self.emit_ty(inner);
+            }
             TyKind::Tuple(items) => {
                 self.text("(");
                 for (i, t) in items.iter().enumerate() {
@@ -679,16 +742,15 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.text(">");
             }
             TyKind::Func(args, ret) => {
-                self.text("Fn[");
+                self.text("func(");
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {
                         self.text(", ");
                     }
                     self.emit_ty(a);
                 }
-                self.text(", ");
+                self.text(") -> ");
                 self.emit_ty(ret);
-                self.text("]");
             }
             TyKind::Array(inner) => {
                 self.text("[");

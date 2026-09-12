@@ -188,6 +188,8 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
         }
         Stmt::Assign { .. } => None,
         Stmt::Destructure { .. } => None,
+        Stmt::ExternBlock { .. } => None,
+        Stmt::Link { .. } => None,
         Stmt::Expr(_) => None,
     }
 }
@@ -238,6 +240,15 @@ fn fmt_ty(ty: &zz_frontend::ast::Ty) -> String {
         TyKind::Bool => "bool".into(),
         TyKind::Str => "str".into(),
         TyKind::Unit => "unit".into(),
+        TyKind::Void => "void".into(),
+        TyKind::Ptr { mutable, inner } => {
+            let base = fmt_ty(inner);
+            if *mutable {
+                format!("*mut {base}")
+            } else {
+                format!("*const {base}")
+            }
+        }
         TyKind::Named(name, args) => {
             if args.is_empty() {
                 name.clone()

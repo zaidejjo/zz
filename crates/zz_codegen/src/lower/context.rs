@@ -232,7 +232,7 @@ impl Lowerer {
     pub(super) fn is_string_expr(&self, expr: &Expr, names: &NameCtx) -> bool {
         match expr {
             Expr::Str { .. } => true,
-            Expr::Ident { name, .. } => names.lookup_type(name).map_or(false, |t| t == "string"),
+            Expr::Ident { name, .. } => names.lookup_type(name) == Some("string"),
             _ => false,
         }
     }
@@ -329,6 +329,17 @@ impl Lowerer {
             zz_checker::Type::Int => "int64_t".to_string(),
             zz_checker::Type::Float => "double".to_string(),
             zz_checker::Type::Bool => "bool".to_string(),
+            zz_checker::Type::Void => "void".to_string(),
+            zz_checker::Type::Ptr { mutable, inner } => {
+                let base = self.c_abi_base(inner);
+                if *mutable {
+                    format!("{base} *")
+                } else if base == "void" {
+                    "const void *".to_string()
+                } else {
+                    format!("const {base} *")
+                }
+            }
             zz_checker::Type::Struct(name) => {
                 if self.is_unboxed_struct(name) {
                     format!("zz_struct_{}", mangle(name))
@@ -337,6 +348,19 @@ impl Lowerer {
                 }
             }
             _ => "zz_value".to_string(),
+        }
+    }
+
+    /// Base C type for the pointee of a raw pointer (no trailing `*`).
+    /// Nested pointers recurse through [`Lowerer::type_to_c`].
+    pub(super) fn c_abi_base(&self, ty: &zz_checker::Type) -> String {
+        match ty {
+            zz_checker::Type::Int => "int64_t".to_string(),
+            zz_checker::Type::Float => "double".to_string(),
+            zz_checker::Type::Bool => "bool".to_string(),
+            zz_checker::Type::Unit | zz_checker::Type::Void => "void".to_string(),
+            zz_checker::Type::Ptr { .. } => self.type_to_c(ty),
+            _ => "void".to_string(),
         }
     }
 
@@ -760,7 +784,7 @@ pub(crate) fn box_scalar_operand(e: &Expr, names: &NameCtx, emitted: &str) -> St
                 // whose C identifier matches `emitted` and whose type is
                 // a scalar.
                 if is_simple_ident(emitted) {
-                    for (_zzname, entries) in names.stack.iter() {
+                    for entries in names.stack.values() {
                         if let Some((cid, ty)) = entries.last() {
                             if cid == emitted {
                                 match ty.as_str() {

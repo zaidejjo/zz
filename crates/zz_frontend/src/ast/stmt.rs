@@ -71,6 +71,16 @@ pub enum ImportItem {
     },
 }
 
+/// A single function signature inside `extern "C" { ... }`.
+/// No body — the implementation lives in C and is linked natively.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternFunc {
+    pub name: Ident,
+    pub params: Vec<Param>,
+    pub ret: Option<Ty>,
+    pub span: Span,
+}
+
 /// Statement AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
@@ -157,6 +167,17 @@ pub enum Stmt {
         value: Expr,
         span: Span,
     },
+    /// `extern "C" { func strlen(s: *const u8) -> int ... }` — raw C signatures.
+    ExternBlock {
+        abi: String,
+        items: Vec<ExternFunc>,
+        span: Span,
+    },
+    /// `@link("sqlite3")` — request `-lsqlite3` at native link time.
+    Link {
+        lib: String,
+        span: Span,
+    },
     Expr(Expr),
 }
 
@@ -173,6 +194,7 @@ impl Stmt {
             | Stmt::Continue { span }
             | Stmt::Defer { span, .. }
             | Stmt::Assign { span, .. } => *span,
+            Stmt::ExternBlock { span, .. } | Stmt::Link { span, .. } => *span,
             Stmt::Impl { span, .. } => *span,
             Stmt::Destructure { span, .. } => *span,
             Stmt::Expr(e) => e.span(),

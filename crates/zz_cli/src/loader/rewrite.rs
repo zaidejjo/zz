@@ -128,6 +128,21 @@ impl<'a> Rewriter<'a> {
             }
             Stmt::Expr(e) => self.rewrite_expr(e),
             Stmt::Import { .. } => {}
+            // Extern signatures and link directives are global: no namespacing.
+            // Extern param/return types still need struct namespacing.
+            Stmt::ExternBlock { items, .. } => {
+                for item in items {
+                    for p in &mut item.params {
+                        if let Some(t) = &mut p.ty {
+                            self.rewrite_ty(t);
+                        }
+                    }
+                    if let Some(t) = &mut item.ret {
+                        self.rewrite_ty(t);
+                    }
+                }
+            }
+            Stmt::Link { .. } => {}
         }
     }
 

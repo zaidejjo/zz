@@ -28,6 +28,8 @@ impl Interp {
                 Flow::Continue(span) => Ok(Flow::Continue(span)),
             },
             Stmt::Import { .. } => Ok(Flow::Value(Value::Unit)),
+            Stmt::ExternBlock { .. } => Ok(Flow::Value(Value::Unit)),
+            Stmt::Link { .. } => Ok(Flow::Value(Value::Unit)),
             Stmt::Func {
                 name, params, body, ..
             } => {

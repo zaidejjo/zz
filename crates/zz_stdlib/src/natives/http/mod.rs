@@ -449,6 +449,14 @@ fn http_route(
             span,
         ));
     }
+    // Snapshot the handler's captured env at registration time so the
+    // server is self-contained: dispatch threads (and `http.listen`'s
+    // ServerSnapshot) never touch the caller's live env RefCell. Without
+    // this, a spawned server thread borrowing the handler env races with
+    // the caller's own env writes (e.g. top-level chunk completion).
+    let handler = snapshot_func(&handler)
+        .map(|fs| fs.reconstruct())
+        .unwrap_or(handler);
     let _ = interp;
     let mut server = server;
     server.routes.push((method.to_string(), path, handler));

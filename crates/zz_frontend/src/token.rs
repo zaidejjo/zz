@@ -53,6 +53,8 @@ pub enum TokenKind {
     Pub,
     Impl,
     Const,
+    Extern,
+    Mut,
     // Literals
     Int,
     Float,
@@ -97,6 +99,7 @@ pub enum TokenKind {
     RBrace,
     LBracket,
     RBracket,
+    At,
     // Statement terminator: `;` or a newline at bracket depth 0
     StmtEnd,
     Eof,
@@ -124,6 +127,8 @@ impl TokenKind {
             TokenKind::Pub => "`pub`",
             TokenKind::Impl => "`impl`",
             TokenKind::Const => "`const`",
+            TokenKind::Extern => "`extern`",
+            TokenKind::Mut => "`mut`",
             TokenKind::Int => "integer literal",
             TokenKind::Float => "float literal",
             TokenKind::Str => "string literal",
@@ -161,6 +166,7 @@ impl TokenKind {
             TokenKind::RBrace => "`}`",
             TokenKind::LBracket => "`[`",
             TokenKind::RBracket => "`]`",
+            TokenKind::At => "`@`",
             TokenKind::StmtEnd => "end of statement",
             TokenKind::Eof => "end of input",
         }

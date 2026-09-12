@@ -319,6 +319,7 @@ macro_rules! parity_known_failure {
 }
 
 /// Generate a known-failure error test.
+#[allow(unused_macros)]
 macro_rules! parity_known_error_failure {
     ($name:ident, $file:expr) => {
         #[test]

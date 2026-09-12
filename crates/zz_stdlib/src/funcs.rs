@@ -15,6 +15,7 @@ fn sig(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
             .collect(),
         has_default: vec![],
         ret,
+        is_extern: false,
     }
 }
 
@@ -29,6 +30,7 @@ fn sig_t(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
             .collect(),
         has_default: vec![],
         ret,
+        is_extern: false,
     }
 }
 
@@ -43,6 +45,7 @@ fn sig_tu(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
             .collect(),
         has_default: vec![],
         ret,
+        is_extern: false,
     }
 }
 
@@ -569,6 +572,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             params: vec![("res".to_string(), result_t.clone())],
             has_default: vec![],
             ret: t.clone(),
+            is_extern: false,
         },
     );
     m.insert(
@@ -582,6 +586,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             ],
             has_default: vec![],
             ret: t.clone(),
+            is_extern: false,
         },
     );
     m.insert(
@@ -595,6 +600,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             ],
             has_default: vec![],
             ret: t,
+            is_extern: false,
         },
     );
 
@@ -1686,6 +1692,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stdlib_consts;
 
     #[test]
     fn has_all_modules() {
@@ -1715,8 +1722,6 @@ mod tests {
         assert!(funcs.contains_key("std.env.args"));
         assert!(funcs.contains_key("std.math.abs"));
         assert!(funcs.contains_key("std.math.random"));
-        assert!(funcs.contains_key("std.math.PI"));
-        assert!(funcs.contains_key("std.math.E"));
         assert!(funcs.contains_key("std.math.round"));
         assert!(funcs.contains_key("std.math.trunc"));
         assert!(funcs.contains_key("std.math.clamp"));
@@ -1752,7 +1757,12 @@ mod tests {
         assert!(funcs.contains_key("append"));
         assert!(funcs.contains_key("std.task.spawn"));
         assert!(funcs.contains_key("std.task.join"));
-        assert_eq!(funcs.len(), 223);
+        // Math constants are static values, not zero-arg functions.
+        let consts = stdlib_consts();
+        assert!(consts.contains_key("std.math.PI"));
+        assert!(consts.contains_key("std.math.E"));
+        assert!(consts.contains_key("std.math.TAU"));
+        assert_eq!(funcs.len(), 266);
     }
 
     #[test]

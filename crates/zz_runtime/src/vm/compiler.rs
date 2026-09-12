@@ -947,6 +947,9 @@ impl Compiler {
                 }
             }
             Stmt::Import { .. } => StmtValue::None,
+            // VM stub: extern C requires --native; calls fail at runtime with
+            // a clear error (see vm/runtime.rs LoadVar/native dispatch).
+            Stmt::ExternBlock { .. } | Stmt::Link { .. } => StmtValue::None,
             Stmt::Func {
                 name, params, body, ..
             } => {

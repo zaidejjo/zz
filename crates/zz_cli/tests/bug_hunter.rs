@@ -113,6 +113,7 @@ fn assert_vm_works(desc: &str, src: &str) {
 
 /// Assert that native has a known bug (VM succeeds, native fails/differs).
 /// Returns the native output for documentation.
+#[allow(dead_code)]
 fn assert_native_known_bug(desc: &str, src: &str) -> (String, String) {
     let (vm_exit, vm_stdout, vm_stderr, native_exit, native_stdout, native_stderr) = run_both(src);
 
@@ -166,7 +167,7 @@ fn bh_deep_nested_expressions() {
     let mut expr = String::new();
     for i in 1..=20 {
         if i == 1 {
-            expr.push_str("1");
+            expr.push('1');
         } else {
             expr = format!("({expr} + {i})");
         }

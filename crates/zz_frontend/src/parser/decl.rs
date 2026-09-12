@@ -32,6 +32,28 @@ impl Parser {
 
     pub(crate) fn parse_type_base(&mut self) -> Ty {
         let tok = self.peek().clone();
+        // `*const T` / `*mut T` / `*T` — raw C pointer. Bare `*T` means `*const T`.
+        if tok.kind == TokenKind::Star {
+            self.advance();
+            let mutable = if self.at(TokenKind::Const) {
+                self.advance();
+                false
+            } else if self.at(TokenKind::Mut) {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            let inner = self.parse_type_base();
+            let span = tok.span.join(inner.span);
+            return Ty {
+                kind: TyKind::Ptr {
+                    mutable,
+                    inner: Box::new(inner),
+                },
+                span,
+            };
+        }
         match tok.kind {
             // func(int) -> int  — function type keyword
             TokenKind::Func => {
@@ -136,6 +158,15 @@ impl Parser {
                             ));
                         }
                         TyKind::Unit
+                    }
+                    "void" => {
+                        if !args.is_empty() {
+                            self.errors.push(error_at(
+                                "type `void` does not take type arguments",
+                                tok.span,
+                            ));
+                        }
+                        TyKind::Void
                     }
                     "Option" => match args.len() {
                         1 => TyKind::Option(Box::new(args.into_iter().next().unwrap())),

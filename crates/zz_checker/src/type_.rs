@@ -13,6 +13,13 @@ pub enum Type {
     Bool,
     Str,
     Unit,
+    /// C `void` — only valid in `extern "C"` signatures. Distinct from `unit`.
+    Void,
+    /// Raw C pointer: `*const T` (mutable=false) or `*mut T` (mutable=true).
+    Ptr {
+        mutable: bool,
+        inner: Box<Type>,
+    },
     Tuple(Vec<Type>),
     Option(Box<Type>),
     Result(Box<Type>, Box<Type>),
@@ -65,6 +72,14 @@ impl fmt::Display for Type {
             Type::Bool => write!(f, "bool"),
             Type::Str => write!(f, "str"),
             Type::Unit => write!(f, "unit"),
+            Type::Void => write!(f, "void"),
+            Type::Ptr { mutable, inner } => {
+                if *mutable {
+                    write!(f, "*mut {inner}")
+                } else {
+                    write!(f, "*const {inner}")
+                }
+            }
             Type::Tuple(ts) => {
                 write!(f, "(")?;
                 for (i, t) in ts.iter().enumerate() {

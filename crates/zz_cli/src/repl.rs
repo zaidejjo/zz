@@ -341,7 +341,9 @@ impl ZZHighlighter {
             | TokenKind::Defer
             | TokenKind::Pub
             | TokenKind::Impl
-            | TokenKind::Const => (Color::Purple, true),
+            | TokenKind::Const
+            | TokenKind::Extern
+            | TokenKind::Mut => (Color::Purple, true),
 
             // Numeric literals — cyan
             TokenKind::Int | TokenKind::Float => (Color::Cyan, false),
@@ -391,7 +393,8 @@ impl ZZHighlighter {
             | TokenKind::LBrace
             | TokenKind::RBrace
             | TokenKind::LBracket
-            | TokenKind::RBracket => (Color::DarkGray, false),
+            | TokenKind::RBracket
+            | TokenKind::At => (Color::DarkGray, false),
 
             // Punctuation
             TokenKind::Colon | TokenKind::Comma | TokenKind::Dot | TokenKind::Pipe => {
@@ -521,26 +524,24 @@ fn check_incomplete(input: &str) -> IncompleteReason {
     }
 
     // Trailing operator
-    match last_significant {
-        Some(
-            TokenKind::Plus
-            | TokenKind::Minus
-            | TokenKind::Star
-            | TokenKind::Slash
-            | TokenKind::Percent
-            | TokenKind::Assign
-            | TokenKind::ColonEq
-            | TokenKind::Pipe
-            | TokenKind::PipeGt
-            | TokenKind::Arrow
-            | TokenKind::AndAnd
-            | TokenKind::OrOr
-            | TokenKind::Comma
-            | TokenKind::Colon,
-        ) => {
-            return IncompleteReason::TrailingOp;
-        }
-        _ => {}
+    if let Some(
+        TokenKind::Plus
+        | TokenKind::Minus
+        | TokenKind::Star
+        | TokenKind::Slash
+        | TokenKind::Percent
+        | TokenKind::Assign
+        | TokenKind::ColonEq
+        | TokenKind::Pipe
+        | TokenKind::PipeGt
+        | TokenKind::Arrow
+        | TokenKind::AndAnd
+        | TokenKind::OrOr
+        | TokenKind::Comma
+        | TokenKind::Colon,
+    ) = last_significant
+    {
+        return IncompleteReason::TrailingOp;
     }
 
     // Trailing keyword detection is intentionally omitted — it requires

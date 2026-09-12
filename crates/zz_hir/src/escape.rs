@@ -574,6 +574,7 @@ mod tests {
         funcs.insert(
             "io.println".into(),
             crate::FuncSig {
+                is_extern: false,
                 generics: vec!["T".into()],
                 bounds: Vec::new(),
                 params: vec![("v".into(), t_any)],

@@ -1,6 +1,8 @@
 //! Statement parsing.
 
-use crate::ast::{Block, Ident, ImportItem, Param, Pattern, Stmt, TraitBound, TypeParam};
+use crate::ast::{
+    Block, ExternFunc, Ident, ImportItem, Param, Pattern, Stmt, TraitBound, TypeParam,
+};
 use crate::diag::error_at;
 use crate::span::Span;
 use crate::token::TokenKind;
@@ -119,6 +121,8 @@ impl Parser {
             }
             TokenKind::Struct => self.parse_struct(false),
             TokenKind::Impl => self.parse_impl(false),
+            TokenKind::At => self.parse_link(),
+            TokenKind::Extern => self.parse_extern_block(),
             TokenKind::For => self.parse_for(),
             TokenKind::Break => {
                 let tok = self.advance();
@@ -204,6 +208,127 @@ impl Parser {
                 }
                 Stmt::Expr(expr)
             }
+        }
+    }
+
+    pub(crate) fn parse_link(&mut self) -> Stmt {
+        let at_tok = self.advance(); // `@`
+        if self.at(TokenKind::Ident) && self.peek().text == "link" {
+            self.advance();
+        } else {
+            self.error_here("expected `link` after `@` (e.g. `@link(\"sqlite3\")`)");
+        }
+        let lib = if self.eat(TokenKind::LParen) {
+            let lib_tok = self.peek().clone();
+            let lib = if self.at(TokenKind::Str) {
+                self.advance().text
+            } else {
+                self.error_here("expected string literal in `@link(\"lib\")`");
+                String::new()
+            };
+            if !self.eat(TokenKind::RParen) {
+                self.error_here("expected `)` to close `@link(...)`");
+            }
+            let _ = lib_tok;
+            lib
+        } else if self.at(TokenKind::Str) {
+            self.advance().text
+        } else {
+            self.error_here("expected `(\"lib\")` after `@link`");
+            String::new()
+        };
+        if lib.is_empty() {
+            self.error_here("`@link` requires a non-empty library name");
+        }
+        let span = at_tok.span.join(self.previous().span);
+        Stmt::Link { lib, span }
+    }
+
+    pub(crate) fn parse_extern_block(&mut self) -> Stmt {
+        let extern_tok = self.advance(); // `extern`
+        let abi_tok = self.peek().clone();
+        let abi = if self.at(TokenKind::Str) {
+            self.advance().text
+        } else {
+            self.error_here("expected ABI string after `extern` (e.g. `extern \"C\"`)");
+            String::new()
+        };
+        if abi != "C" {
+            self.errors.push(error_at(
+                format!("unsupported extern ABI `{abi}` (expected `\"C\"`)"),
+                abi_tok.span,
+            ));
+        }
+        if !self.eat(TokenKind::LBrace) {
+            self.error_here("expected `{` to start extern block");
+            self.skip_to_rbrace();
+        }
+        let mut items = Vec::new();
+        loop {
+            self.skip_stmt_ends();
+            if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
+                break;
+            }
+            if !self.at(TokenKind::Func) {
+                self.error_here("expected `func` signature in extern block");
+                self.skip_to_stmt_end();
+                continue;
+            }
+            let func_tok = self.advance(); // `func`
+            let name = self
+                .expect_ident()
+                .unwrap_or_else(|| dummy_ident(self.peek().span));
+            if self.at(TokenKind::Lt) {
+                self.error_here("extern functions cannot have generic parameters");
+            }
+            if !self.eat(TokenKind::LParen) {
+                self.error_here("expected `(` after extern function name");
+            } else {
+                self.push_delim(TokenKind::LParen, self.previous().span);
+            }
+            let params = self.parse_param_list();
+            if !self.eat(TokenKind::RParen) {
+                self.error_here("expected `)` after extern parameters");
+            } else {
+                self.pop_delim(TokenKind::RParen, self.previous().span);
+            }
+            let ret = if self.eat(TokenKind::Arrow) {
+                Some(self.parse_type())
+            } else {
+                None
+            };
+            // Extern signatures have no body — must end the statement here.
+            let span = func_tok.span.join(
+                ret.as_ref()
+                    .map(|t| t.span)
+                    .unwrap_or_else(|| params.last().map(|p| p.span).unwrap_or(name.span)),
+            );
+            items.push(ExternFunc {
+                name,
+                params,
+                ret,
+                span,
+            });
+            // A trailing `{` means the user wrote a body — reject it.
+            if self.at(TokenKind::LBrace) {
+                self.error_here("extern function signatures must not have a body");
+                // Skip the block to recover.
+                self.advance();
+                self.skip_to_rbrace();
+                self.eat(TokenKind::RBrace);
+            }
+        }
+        let end = if self.eat(TokenKind::RBrace) {
+            self.previous().span
+        } else {
+            self.error_here("expected `}` to close extern block");
+            self.peek().span
+        };
+        let span = extern_tok.span.join(end);
+        Stmt::ExternBlock {
+            abi: if abi.is_empty() { "C".to_string() } else { abi },
+            items,
+            span,
         }
     }
 

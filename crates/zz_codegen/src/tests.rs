@@ -108,6 +108,19 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("std.vec.flatten", "pure ZZ; no C codegen"),
     ("std.vec.index_of", "pure ZZ; no C codegen"),
     ("std.vec.last_index_of", "pure ZZ; no C codegen"),
+    // Pure-ZZ JSON helpers — compiled from zz/json/mod.zz, run in VM only
+    ("std.json.validate", "pure ZZ; no C codegen"),
+    ("std.json.parse_or", "pure ZZ; no C codegen"),
+    ("std.json.parse_or_null", "pure ZZ; no C codegen"),
+    ("std.json.path_exists", "pure ZZ; no C codegen"),
+    ("std.json.path_get_or", "pure ZZ; no C codegen"),
+    ("std.json.is_null", "pure ZZ; no C codegen"),
+    ("std.json.is_bool", "pure ZZ; no C codegen"),
+    ("std.json.is_number", "pure ZZ; no C codegen"),
+    ("std.json.is_string", "pure ZZ; no C codegen"),
+    ("std.json.is_array", "pure ZZ; no C codegen"),
+    ("std.json.is_object", "pure ZZ; no C codegen"),
+    ("std.json.is_empty", "pure ZZ; no C codegen"),
     // Method-dispatch aliases for pure-ZZ functions
     ("math.sum", "pure ZZ alias"),
     ("math.product", "pure ZZ alias"),
@@ -139,6 +152,19 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("vec.flatten", "pure ZZ alias"),
     ("vec.index_of", "pure ZZ alias"),
     ("vec.last_index_of", "pure ZZ alias"),
+    // Method-dispatch aliases for pure-ZZ JSON helpers
+    ("json.validate", "pure ZZ alias"),
+    ("json.parse_or", "pure ZZ alias"),
+    ("json.parse_or_null", "pure ZZ alias"),
+    ("json.path_exists", "pure ZZ alias"),
+    ("json.path_get_or", "pure ZZ alias"),
+    ("json.is_null", "pure ZZ alias"),
+    ("json.is_bool", "pure ZZ alias"),
+    ("json.is_number", "pure ZZ alias"),
+    ("json.is_string", "pure ZZ alias"),
+    ("json.is_array", "pure ZZ alias"),
+    ("json.is_object", "pure ZZ alias"),
+    ("json.is_empty", "pure ZZ alias"),
     // Parity-skipped modules (non-deterministic output):
     ("std.http.serve_dir", "http fixtures skipped in parity"),
     ("http.serve_dir", "http fixtures skipped in parity"),
@@ -442,6 +468,53 @@ io.println(p.x)
 "#;
     let (_, out) = native_run(src);
     assert_eq!(out, "10\n20\n99\n");
+}
+
+#[test]
+fn native_json_extended_matches_vm() {
+    // Mirrors tests/fixtures/stdlib/json_extended_test.zz: exercises the
+    // json.* natives that have C runtime impls (type, len, keys, has,
+    // pretty, merge, deep_get, array_push).
+    let src = r#"
+j := json.parse("{\"name\": \"test\", \"count\": 42, \"tags\": [\"a\", \"b\"], \"nested\": {\"x\": 1}}") ?? json.null()
+io.println(json.type(j))
+arr := json.get(j, "tags") ?? json.null()
+io.println(json.type(arr))
+num := json.get(j, "count") ?? json.null()
+io.println(json.type(num))
+io.println(json.len(j))
+io.println(json.len(arr))
+k := json.keys(j)
+io.println(len(k))
+io.println(json.has(j, "name"))
+io.println(json.has(j, "missing"))
+pretty_out := json.pretty(j)
+io.println(str.contains(pretty_out, "\n"))
+a := json.parse("{\"x\": 1, \"y\": 2}") ?? json.null()
+b := json.parse("{\"y\": 99, \"z\": 3}") ?? json.null()
+merged := json.merge(a, b)
+merged_y := json.get(merged, "y") ?? json.null()
+io.println(json.as_int(merged_y))
+io.println(json.has(merged, "z"))
+deep := json.deep_get(j, "nested.x")
+match deep {
+    .ok(v) => io.println(json.as_int(v))
+    .err(msg) => io.println("deep_get error: {msg}")
+}
+miss := json.deep_get(j, "missing.path")
+match miss {
+    .ok(_) => io.println("deep miss: should not happen")
+    .err(_) => io.println("deep miss: correctly returned error")
+}
+original_arr := json.parse("[1, 2, 3]") ?? json.null()
+pushed := json.array_push(original_arr, 4)
+io.println(json.len(pushed))
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(
+        out,
+        "object\narray\nnumber\n4\n2\n4\ntrue\nfalse\ntrue\n99\ntrue\n1\ndeep miss: correctly returned error\n4\n"
+    );
 }
 
 #[test]

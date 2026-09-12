@@ -210,6 +210,7 @@ pub(crate) fn scan_stmt_captured(
             defined.insert(name.name.clone());
         }
         Stmt::Import { .. } => {}
+        Stmt::ExternBlock { .. } | Stmt::Link { .. } => {}
         Stmt::Func {
             name, params, body, ..
         } => {

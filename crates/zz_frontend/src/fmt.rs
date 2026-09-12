@@ -294,6 +294,40 @@ impl<'a> FmtCtx<'a> {
                 self.write_indent();
                 self.fmt_expr(e, source);
             }
+            Stmt::ExternBlock { abi, items, .. } => {
+                self.write_indent();
+                self.write_str("extern \"");
+                self.write_str(abi);
+                self.write_str("\" {");
+                if items.is_empty() {
+                    self.write_str("}");
+                } else {
+                    self.write_line();
+                    self.indent += 1;
+                    for item in items {
+                        self.write_indent();
+                        self.write_str("func ");
+                        self.write_str(&item.name.name);
+                        self.write_str("(");
+                        self.fmt_params(&item.params, source);
+                        self.write_str(")");
+                        if let Some(ret) = &item.ret {
+                            self.write_str(" -> ");
+                            self.fmt_ty(ret, source);
+                        }
+                        self.write_line();
+                    }
+                    self.indent -= 1;
+                    self.write_indent();
+                    self.write_str("}");
+                }
+            }
+            Stmt::Link { lib, .. } => {
+                self.write_indent();
+                self.write_str("@link(\"");
+                self.write_str(lib);
+                self.write_str("\")");
+            }
         }
     }
 
@@ -337,6 +371,11 @@ impl<'a> FmtCtx<'a> {
             TyKind::Bool => self.write_str("bool"),
             TyKind::Str => self.write_str("str"),
             TyKind::Unit => self.write_str("()"),
+            TyKind::Void => self.write_str("void"),
+            TyKind::Ptr { mutable, inner } => {
+                self.write_str(if *mutable { "*mut " } else { "*const " });
+                self.fmt_ty(inner, _source);
+            }
             TyKind::Named(name, generics) => {
                 self.write_str(name);
                 if !generics.is_empty() {

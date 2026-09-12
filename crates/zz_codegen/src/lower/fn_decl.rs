@@ -92,7 +92,7 @@ impl Lowerer {
                 let snap: Vec<String> = slots.drain(..).collect();
                 for (idx, snippet) in snap.iter().enumerate() {
                     o.push_str(&format!("        case {idx}:\n"));
-                    o.push_str(&snippet);
+                    o.push_str(snippet);
                     o.push_str("\n            break;\n");
                 }
                 o.push_str("        default: break;\n");

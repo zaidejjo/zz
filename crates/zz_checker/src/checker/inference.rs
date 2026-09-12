@@ -45,7 +45,7 @@ impl Checker {
             Type::Union(ms) => ms.iter().all(|m| self.satisfies_bound(m, bound)),
             Type::Var(_) | Type::Named(_) | Type::Error => false,
             Type::Func(..) => false,
-            Type::Unit => false,
+            Type::Unit | Type::Void => false,
             _ => match bound {
                 B::Num => matches!(ty, Type::Int | Type::Float),
                 B::Ord => matches!(ty, Type::Int | Type::Float | Type::Str),
@@ -113,6 +113,11 @@ impl Checker {
             TyKind::Bool => Type::Bool,
             TyKind::Str => Type::Str,
             TyKind::Unit => Type::Unit,
+            TyKind::Void => Type::Void,
+            TyKind::Ptr { mutable, inner } => Type::Ptr {
+                mutable: *mutable,
+                inner: Box::new(self.ast_to_type_inner(inner, generics)),
+            },
             TyKind::Tuple(ts) => Type::Tuple(
                 ts.iter()
                     .map(|t| self.ast_to_type_inner(t, generics))
@@ -172,6 +177,7 @@ impl Checker {
 pub(crate) fn contains_var(t: &Type) -> bool {
     match t {
         Type::Var(_) => true,
+        Type::Void => false,
         Type::Tuple(ts) => ts.iter().any(contains_var),
         Type::Option(x) => contains_var(x),
         Type::Result(a, b) => contains_var(a) || contains_var(b),
@@ -180,6 +186,7 @@ pub(crate) fn contains_var(t: &Type) -> bool {
         Type::Dict(k, v) => contains_var(k) || contains_var(v),
         Type::Union(ts) => ts.iter().any(contains_var),
         Type::Range(x) => contains_var(x),
+        Type::Ptr { inner, .. } => contains_var(inner),
         _ => false,
     }
 }
@@ -232,6 +239,10 @@ pub(crate) fn subst(t: &Type, subs: &std::collections::HashMap<String, Type>) ->
         Type::Dict(k, v) => Type::Dict(Box::new(subst(k, subs)), Box::new(subst(v, subs))),
         Type::Union(ts) => Type::Union(ts.iter().map(|x| subst(x, subs)).collect()),
         Type::Range(x) => Type::Range(Box::new(subst(x, subs))),
+        Type::Ptr { mutable, inner } => Type::Ptr {
+            mutable: *mutable,
+            inner: Box::new(subst(inner, subs)),
+        },
         other => other.clone(),
     }
 }

@@ -213,6 +213,43 @@ fn collect_stmt_tokens(stmt: &Stmt, source: &str, out: &mut Vec<RawToken>) {
             collect_expr_tokens(value, source, out);
         }
         Stmt::Destructure { value, .. } => collect_expr_tokens(value, source, out),
+        Stmt::ExternBlock { items, .. } => {
+            for item in items {
+                // "func" keyword
+                push_keyword_token(item.span, "func", source, out);
+                // function name
+                push_ident_token(
+                    &item.name.name,
+                    item.name.span,
+                    TokenType::Function,
+                    source,
+                    out,
+                );
+                // parameters
+                for (i, param) in item.params.iter().enumerate() {
+                    if i > 0 {
+                        // skip comma
+                    }
+                    push_ident_token(
+                        &param.name.name,
+                        param.name.span,
+                        TokenType::Parameter,
+                        source,
+                        out,
+                    );
+                    if let Some(ty) = &param.ty {
+                        collect_type_tokens(ty, source, out);
+                    }
+                }
+                // return type
+                if let Some(ret) = &item.ret {
+                    // skip arrow
+                    collect_type_tokens(ret, source, out);
+                }
+                // skip semicolon
+            }
+        }
+        Stmt::Link { .. } => {}
         Stmt::Expr(e) => collect_expr_tokens(e, source, out),
     }
 }

@@ -33,20 +33,12 @@ impl Lowerer {
                         }
                         FmtPart::Expr(inner, spec) => {
                             let v = self.emit_expr(inner, names, out);
-                            // Auto-box if the embedded expression is an unboxed scalar
-                            let boxed_v = if let Expr::Ident { name, .. } = inner.as_ref() {
-                                let name_str = name.clone();
-                                auto_box(&v, names.lookup_type(&name_str))
-                            } else if let Expr::Path { parts, .. } = inner.as_ref() {
-                                let joined = parts.join(".");
-                                auto_box(&v, names.lookup_type(&joined))
-                            } else {
-                                v
-                            };
+                            let boxed_v = box_scalar_operand(inner, names, &v);
                             // If format spec is present, use zz_to_str_fmt
                             if let Some(ref s) = spec {
-                                acc = format!("zz_binop_cat({acc}, zz_str_owned(zz_to_str_fmt({boxed_v}, {spec_str})))",
-                                    spec_str = format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")));
+                                let spec_str =
+                                    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+                                acc = format!("zz_binop_cat({acc}, zz_str_owned(zz_to_str_fmt({boxed_v}, {spec_str})))");
                             } else {
                                 acc = format!("zz_binop_cat_str({acc}, {boxed_v})");
                             }
@@ -527,12 +519,9 @@ impl Lowerer {
                         .lookup_type(obj_name)
                         .map(|t| t.starts_with("zz_struct_"))
                         .unwrap_or(false)
-                } else if let Some(obj_span) = self.tp.types.get(&obj.span()) {
-                    if let zz_checker::Type::Struct(sname) = obj_span {
-                        self.is_unboxed_struct(sname)
-                    } else {
-                        false
-                    }
+                } else if let Some(zz_checker::Type::Struct(sname)) = self.tp.types.get(&obj.span())
+                {
+                    self.is_unboxed_struct(sname)
                 } else {
                     false
                 };
@@ -895,7 +884,7 @@ impl Lowerer {
         let mut body_out = String::new();
         let val = self.emit_expr(body, &mut names, &mut body_out);
         o.push_str(&body_out);
-        let val = box_scalar_operand(body, &mut names, &val);
+        let val = box_scalar_operand(body, &names, &val);
         {
             let mut slots = self.defer_slots.borrow_mut();
             if !slots.is_empty() {
@@ -904,7 +893,7 @@ impl Lowerer {
                 let snap: Vec<String> = slots.drain(..).collect();
                 for (idx, snippet) in snap.iter().enumerate() {
                     o.push_str(&format!("        case {idx}:\n"));
-                    o.push_str(&snippet);
+                    o.push_str(snippet);
                     o.push_str("\n            break;\n");
                 }
                 o.push_str("        default: break;\n");
@@ -912,7 +901,7 @@ impl Lowerer {
                 o.push_str("    }\n");
             }
         }
-        o.push_str(&format!("    zz_arena_reset_trim(&_arena);\n"));
+        o.push_str("    zz_arena_reset_trim(&_arena);\n");
         o.push_str(&format!("    return {val};\n"));
         o.push_str("}\n");
         o
@@ -1018,9 +1007,8 @@ impl Lowerer {
                             let std_candidate = format!("std.{type_ns}.{method}");
                             if self.reachable_natives.contains(&candidate)
                                 || self.reachable_natives.contains(&std_candidate)
+                                || native_supported(&candidate)
                             {
-                                found_ns = type_ns;
-                            } else if native_supported(&candidate) {
                                 found_ns = type_ns;
                             }
                         }
@@ -1311,6 +1299,64 @@ impl Lowerer {
                 } else {
                     emitted
                 }
+            } else if let Expr::Paren { expr, .. } = a {
+                // Handle parentheses by looking at the inner expression.
+                let inner = expr.as_ref();
+                let emitted_inner = self.emit_expr(inner, names, out);
+                let boxed = if let Expr::Ident { name, .. } = inner {
+                    auto_box(&emitted_inner, names.lookup_type(name))
+                } else if let Expr::Path { parts, .. } = inner {
+                    let joined = parts.join(".");
+                    let direct_type = names.lookup_type(&joined);
+                    if direct_type.is_some() {
+                        auto_box(&emitted_inner, direct_type)
+                    } else if parts.len() == 2 {
+                        if let Some(base_type) = names.lookup_type(&parts[0]) {
+                            if let Some(field_type) =
+                                self.field_type_from_struct(base_type, &parts[1])
+                            {
+                                auto_box(&emitted_inner, Some(field_type))
+                            } else {
+                                emitted_inner
+                            }
+                        } else {
+                            emitted_inner
+                        }
+                    } else if parts.len() >= 3 {
+                        self.auto_box_nested_field(parts, names, &emitted_inner)
+                    } else {
+                        emitted_inner
+                    }
+                } else if let Expr::Binary { .. } = inner {
+                    let val_is_unboxed = emitted_inner.starts_with("(int64_t)(")
+                        || emitted_inner.starts_with("(double)(")
+                        || emitted_inner.starts_with("(bool)(");
+                    let boxed = if val_is_unboxed {
+                        // Determine the box type from the emitted cast.
+                        if emitted_inner.starts_with("(double)(") {
+                            format!("zz_float({emitted_inner})")
+                        } else {
+                            format!("zz_int({emitted_inner})")
+                        }
+                    } else {
+                        // Already a zz_value — but we may need to clone it
+                        // if it's a reference-counted type.
+                        if let Expr::Ident { name, .. } = inner {
+                            // If the variable is a refcounted type, clone it.
+                            if let Some(_ty) = names.lookup_type(name) {
+                                format!("zz_clone({emitted_inner})")
+                            } else {
+                                emitted_inner
+                            }
+                        } else {
+                            emitted_inner
+                        }
+                    };
+                    boxed
+                } else {
+                    emitted_inner
+                };
+                boxed
             } else if let Expr::Binary { .. } = a {
                 // Binary op: result is unboxed only if the emitted C
                 // expression starts with `(int64_t)(` or `(double)(`.
