@@ -165,6 +165,22 @@ impl<'src, 'a> Ctx<'src, 'a> {
         self.out.push(Doc::Text(" "));
     }
 
+    /// Emit a string value in canonical form: a triple-quoted block when the
+    /// value spans lines (and is dedent-safe), otherwise a single-line
+    /// literal with escapes. The triple form uses a column-0 closer so the
+    /// lexer's dedent is a no-op and the value round-trips exactly.
+    fn emit_str_value(&mut self, s: &str) {
+        if is_triple_safe(s) {
+            self.text("\"\"\"\n");
+            self.text(escape_str_triple(s));
+            self.text("\n\"\"\"");
+        } else {
+            self.text("\"");
+            self.text(escape_str(s));
+            self.text("\"");
+        }
+    }
+
     fn hard_line(&mut self) {
         self.consecutive_nls += 1;
         // Cap consecutive newlines at two (at most one blank line) — the
@@ -715,9 +731,7 @@ impl<'src, 'a> Ctx<'src, 'a> {
             Lit::Int(n) => self.text(n.to_string()),
             Lit::Float(f) => self.text(format_float(*f)),
             Lit::Str(s) => {
-                self.text("\"");
-                self.text(escape_str(s));
-                self.text("\"");
+                self.emit_str_value(s);
             }
             Lit::Bool(b) => self.text(b.to_string()),
         }
@@ -728,9 +742,7 @@ impl<'src, 'a> Ctx<'src, 'a> {
             Expr::Int { value, .. } => self.text(value.to_string()),
             Expr::Float { value, .. } => self.text(format_float(*value)),
             Expr::Str { value, .. } => {
-                self.text("\"");
-                self.text(escape_str(value));
-                self.text("\"");
+                self.emit_str_value(value);
             }
             Expr::Bool { value, .. } => self.text(value.to_string()),
             Expr::Ident { name, .. } => self.text(name.clone()),
@@ -743,22 +755,41 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 }
             }
             Expr::Fmt { parts, .. } => {
-                self.text("\"");
-                for p in parts {
-                    match p {
-                        FmtPart::Text(t) => self.text(escape_str(t)),
-                        FmtPart::Expr(e, spec) => {
-                            self.text("{");
-                            self.emit_expr(e);
-                            if let Some(s) = spec {
-                                self.text(":");
-                                self.text(s);
+                if fmt_parts_use_triple(parts) {
+                    self.text("\"\"\"\n");
+                    for p in parts {
+                        match p {
+                            FmtPart::Text(t) => self.text(escape_str_triple(t)),
+                            FmtPart::Expr(e, spec) => {
+                                self.text("{");
+                                self.emit_expr(e);
+                                if let Some(s) = spec {
+                                    self.text(":");
+                                    self.text(s);
+                                }
+                                self.text("}");
                             }
-                            self.text("}");
                         }
                     }
+                    self.text("\n\"\"\"");
+                } else {
+                    self.text("\"");
+                    for p in parts {
+                        match p {
+                            FmtPart::Text(t) => self.text(escape_str(t)),
+                            FmtPart::Expr(e, spec) => {
+                                self.text("{");
+                                self.emit_expr(e);
+                                if let Some(s) = spec {
+                                    self.text(":");
+                                    self.text(s);
+                                }
+                                self.text("}");
+                            }
+                        }
+                    }
+                    self.text("\"");
                 }
-                self.text("\"");
             }
             Expr::Paren { expr, .. } => {
                 self.text("(");
@@ -1132,9 +1163,13 @@ fn format_float(value: f64) -> String {
 }
 
 /// Re-escape a decoded string value so the emitted literal source matches
-/// the lexer's accepted escapes (`\n`, `\t`, `\r`, `\\`, `\"`). The
-/// parser stores decoded text; re-escaping keeps significant-token
+/// the lexer's accepted escapes (`\n`, `\t`, `\r`, `\\`, `\"`, `\{`, `\}`).
+/// The parser stores decoded text; re-escaping keeps significant-token
 /// verification green and output parseable.
+///
+/// `{` is always escaped: a literal `{` followed by an identifier character
+/// would otherwise re-lex as the start of an interpolation. `}` needs no
+/// escape — outside an interpolation it is always literal text.
 fn escape_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -1144,10 +1179,70 @@ fn escape_str(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
+            '{' => out.push_str("\\{"),
             _ => out.push(c),
         }
     }
     out
+}
+
+/// Triple-quoted emission escaping: newlines stay raw (that is the point of
+/// the block form); runs of quotes that could form a `"""` closer are broken
+/// up with `\"`; `{` is escaped so literal braces never re-lex as
+/// interpolation.
+fn escape_str_triple(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 8);
+    for (i, c) in chars.iter().enumerate() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '"' => {
+                let adjacent_quote =
+                    (i > 0 && chars[i - 1] == '"') || (i + 1 < chars.len() && chars[i + 1] == '"');
+                if adjacent_quote {
+                    out.push_str("\\\"");
+                } else {
+                    out.push('"');
+                }
+            }
+            '{' => out.push_str("\\{"),
+            _ => out.push(*c),
+        }
+    }
+    out
+}
+
+/// True when `s` should be emitted as a `"""` block: it spans lines and every
+/// line survives the lexer's dedent unchanged. With a column-0 closer the
+/// dedent width is 0, so the only lossy case is whitespace-only lines (the
+/// lexer collapses those to empty) — those fall back to escaped single-line.
+fn is_triple_safe(s: &str) -> bool {
+    if !s.contains('\n') {
+        return false;
+    }
+    !s.split('\n')
+        .any(|line| !line.is_empty() && line.trim().is_empty())
+}
+
+/// True when an interpolated string should use the `"""` block form: some
+/// text part spans lines and every text part is dedent-safe.
+fn fmt_parts_use_triple(parts: &[FmtPart]) -> bool {
+    let mut any_multiline = false;
+    for p in parts {
+        if let FmtPart::Text(t) = p {
+            if t.contains('\n') {
+                any_multiline = true;
+            }
+            if t.contains('\n') && !is_triple_safe(t) {
+                // A text part that is multiline but not dedent-safe forces
+                // the whole literal back to escaped single-line form.
+                return false;
+            }
+        }
+    }
+    any_multiline
 }
 
 #[cfg(test)]

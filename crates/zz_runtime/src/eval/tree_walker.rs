@@ -508,7 +508,17 @@ impl Interp {
                 ))
             }
             Expr::Fmt { parts, .. } => {
-                let mut out = String::new();
+                // Pre-size the buffer from static segments so formatting is a
+                // single allocation in the common case (dynamic parts append
+                // into the same buffer — one builder, no temporaries).
+                let reserve: usize = parts
+                    .iter()
+                    .map(|part| match part {
+                        FmtPart::Text(t) => t.len(),
+                        FmtPart::Expr(_, _) => 16,
+                    })
+                    .sum();
+                let mut out = String::with_capacity(reserve);
                 for part in parts {
                     match part {
                         FmtPart::Text(t) => out.push_str(t),

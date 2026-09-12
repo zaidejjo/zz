@@ -1,0 +1,52 @@
+// E2E: Multiline raw/smart strings ("""...""") with {expr} interpolation.
+// The closing delimiter's indentation is stripped (dedent).
+
+// basic multiline with dedent
+q := """
+    SELECT * FROM users
+    WHERE age >= 18
+    """
+println(q)
+
+// interpolation of identifiers and expressions
+name := "ZZ"
+n := 21
+msg := """
+    hello {name}, you are {n * 2}
+    """
+println(msg)
+
+// single-line inside triple quotes
+one := """just one line"""
+println(one)
+
+// empty multiline
+e := """"""
+println("empty:{e}done")
+
+// unescaped quotes inside
+quote := """say "hi" ok"""
+println(quote)
+
+// JSON-like braces stay literal
+j := """{"k": 1}"""
+println(j)
+
+// escaped braces stay literal
+esc := """\{literal\}"""
+println(esc)
+
+// format specs inside multiline interpolation
+pi := 3.14159
+println("""pi is {pi:.2f}""")
+
+// multiline survives function calls and nesting
+func wrap(s: str) -> str {
+    return s
+}
+wrapped := wrap("""
+    nested content
+    """)
+println(wrapped)
+
+println("multiline_ok")
