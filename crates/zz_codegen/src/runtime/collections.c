@@ -250,6 +250,14 @@ zz_value zz_dict_new_arena_sized(zz_arena *arena, size_t hint) {
     return v;
 }
 
+// Heap dict constructor with pre-allocated entries buffer. Eliminates
+// the calloc + realloc cascade for dict literals that escape the loop
+// arena (wave 2/4 of memory_alloc when heap-allocated): all `n` inserts
+// fit without growth. Unlike the arena path the buffer stays growable.
+zz_value zz_dict_new_sized(size_t hint) {
+    return zz_dict_new_arena_sized(NULL, hint);
+}
+
 // Index-expression dispatchers: `obj[idx]` read and `obj[idx] = v` write.
 // Arrays and dicts only; unsupported tags set *err = 1 and return unit.
 zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {

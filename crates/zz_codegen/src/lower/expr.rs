@@ -154,8 +154,36 @@ impl Lowerer {
                 }
             }
             Expr::Binary {
-                op, left, right, ..
+                op,
+                left,
+                right,
+                span,
             } => {
+                // Strength reduction: `x ** 2` → `x * x`, `x ** 3` →
+                // `x * x * x`. The generic pow path boxes both operands
+                // and routes through double-precision `dpow` — pure
+                // overhead for small literal exponents in tight loops.
+                // Only fires for duplication-safe bases (no side effects);
+                // variable/complex exponents keep the `dpow` path.
+                if matches!(op, zz_frontend::ast::BinOp::Pow) {
+                    if let Expr::Int { value, .. } = right.as_ref() {
+                        if (*value == 2 || *value == 3) && is_dup_safe(left) {
+                            let mk_mul = |a: Expr, b: Expr| Expr::Binary {
+                                op: zz_frontend::ast::BinOp::Mul,
+                                left: Box::new(a),
+                                right: Box::new(b),
+                                span: *span,
+                            };
+                            let base = (**left).clone();
+                            let reduced = if *value == 2 {
+                                mk_mul(base.clone(), base)
+                            } else {
+                                mk_mul(base.clone(), mk_mul(base.clone(), base))
+                            };
+                            return self.emit_expr(&reduced, names, out);
+                        }
+                    }
+                }
                 let l = self.emit_expr(left, names, out);
                 let r = self.emit_expr(right, names, out);
                 match op {
@@ -623,7 +651,9 @@ impl Lowerer {
                 let n = entries.len();
                 let arena_code = match self.arena_for(*span) {
                     Some(arena) => format!("zz_dict_new_arena_sized(&{arena}, {n})"),
-                    None => "zz_dict_new()".to_string(),
+                    // Heap path is also pre-sized: avoids the calloc +
+                    // realloc cascade when the literal escapes the arena.
+                    None => format!("zz_dict_new_sized({n})"),
                 };
                 out.push_str(&format!("    zz_value {dv} = {arena_code};\n"));
                 for (k, v) in entries {

@@ -941,10 +941,21 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
     return arr;
 }
 
+// Fast int → string: snprintf into a 24-byte stack buffer, then SSO.
+// Avoids the zz_value_to_string strbuf path (malloc 256 + free) for the
+// most common cast in loops (`str(i)`). int64 min is 20 chars, always SSO.
+zz_value zz_str_from_int(int64_t n) {
+    char buf[24];
+    int len = snprintf(buf, sizeof buf, "%lld", (long long)n);
+    if (len < 0) return zz_str_new("", 0);
+    return zz_str_new(buf, (size_t)len);
+}
+
 // typeof(v) — return type name as string.
 // zz_str(v) — cast to string.
 zz_value zz_str_cast(zz_value v, int *err) {
     (void)err;
+    if (v.tag == ZZ_INT) return zz_str_from_int(v.i);
     char *s = zz_value_to_string(&v);
     return zz_str_owned(s);
 }
@@ -955,6 +966,14 @@ zz_value zz_str_cast(zz_value v, int *err) {
 zz_value zz_str_cast_arena(zz_value v, int *err, zz_arena *arena) {
     (void)err;
     if (!arena) return zz_str_cast(v, err);
+    // Int fast path: stack-format, then arena-allocate (SSO, zero heap).
+    // Skips the zz_value_to_string strbuf malloc/free entirely.
+    if (v.tag == ZZ_INT) {
+        char ibuf[24];
+        int ilen = snprintf(ibuf, sizeof ibuf, "%lld", (long long)v.i);
+        if (ilen < 0) return zz_str_new_arena("", 0, arena);
+        return zz_str_new_arena(ibuf, (size_t)ilen, arena);
+    }
     char *s = zz_value_to_string(&v);
     size_t len = strlen(s);
     zz_str *str = (zz_str *)zz_arena_alloc(arena, sizeof(zz_str), 8);

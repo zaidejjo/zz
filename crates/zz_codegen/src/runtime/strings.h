@@ -69,6 +69,7 @@ zz_value zz_str_join(zz_value items, zz_value sep, int *err);
 zz_value zz_str_split(zz_value s, zz_value sep, int *err);
 
 // ---- string casts ------------------------------------------------------
+zz_value zz_str_from_int(int64_t n);
 zz_value zz_str_cast(zz_value v, int *err);
 zz_value zz_to_str(zz_value v, int *err);
 

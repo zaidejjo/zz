@@ -14,6 +14,7 @@ extern "C" {
 // ---- array / dict constructors -----------------------------------------
 zz_value zz_array_new(void);
 zz_value zz_dict_new(void);
+zz_value zz_dict_new_sized(size_t hint);
 zz_value zz_range(int64_t start, int64_t end, int64_t step);
 
 // ---- arena-aware constructors -------------------------------------------
