@@ -18,6 +18,11 @@ extern "C" {
 zz_str *str_alloc(size_t need);
 // Grow an existing heap string's buffer to hold at least `new_len` bytes.
 zz_str *str_grow(zz_str *s, size_t new_len);
+// Fast header pool (mimalloc-lite): thread-local free-list of zz_str
+// headers. Short-lived strings in tight loops recycle headers without
+// touching the system allocator. Arena headers never enter the pool.
+zz_str *zz_str_header_alloc(void);
+void zz_str_header_free(zz_str *s);
 
 // Small growable byte-buffer builder (malloc'd, caller frees via sb_take).
 typedef struct { char *buf; size_t len; size_t cap; } SB;
@@ -64,6 +69,7 @@ zz_value zz_str_join(zz_value items, zz_value sep, int *err);
 zz_value zz_str_split(zz_value s, zz_value sep, int *err);
 
 // ---- string casts ------------------------------------------------------
+zz_value zz_str_from_int(int64_t n);
 zz_value zz_str_cast(zz_value v, int *err);
 zz_value zz_to_str(zz_value v, int *err);
 

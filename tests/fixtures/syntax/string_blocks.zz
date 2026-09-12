@@ -10,7 +10,9 @@ if name1 == "Zaid" {
 }
 
 // Parse correctly: string comparison before single-line block
-if name2 == "Ali" { println("second branch") }
+if name2 == "Ali" {
+    println("second branch")
+}
 
 // Parse correctly: string comparison with else block
 if name1 == "nobody" {
@@ -20,12 +22,14 @@ if name1 == "nobody" {
 }
 
 // Unspaced: string comparison immediately before block (no whitespace)
-if name1 == "Zaid"{ println("unspaced if") }
+if name1 == "Zaid" {
+    println("unspaced if")
+}
 
 // Unspaced: else block directly after }
 if name1 == "nobody" {
     println("nope")
-}else{
+} else {
     println("unspaced else")
 }
 

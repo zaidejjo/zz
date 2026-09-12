@@ -45,18 +45,11 @@ static zz_str *intern_lookup_or_create(const char *src, size_t len) {
         uint32_t i = (idx + probe) % ZZ_INTERN_BUCKETS;
         zz_intern_entry *e = &zz_intern_table[i];
         if (e->src == NULL) {
-            // Empty slot: build singleton, store, return.
-            zz_str *s = (zz_str *)malloc(sizeof(zz_str) + len + 1);
-            if (!s) {
-                fprintf(stderr, "zz: out of memory\n");
-                exit(1);
-            }
-            s->refs = 1;
+            // Empty slot: build singleton via str_alloc (handles SSO).
+            zz_str *s = str_alloc(len);
             s->interned = 1;
-            s->cap = len;
-            s->len = len;
-            memcpy(s->data, src, len);
-            s->data[len] = '\0';
+            memcpy(zz_str_ptr(s), src, len);
+            zz_str_ptr(s)[len] = '\0';
             e->src = src;
             e->len = len;
             e->singleton = s;
@@ -72,63 +65,111 @@ static zz_str *intern_lookup_or_create(const char *src, size_t len) {
             return e->singleton;
         }
     }
-    // Table full: fall back to a fresh allocation. Should never happen in
-    // practice for any reasonable program.
-    zz_str *s = (zz_str *)malloc(sizeof(zz_str) + len + 1);
-    if (!s) {
-        fprintf(stderr, "zz: out of memory\n");
-        exit(1);
-    }
-    s->refs = 1;
+    // Table full: fall back to a fresh allocation via str_alloc.
+    zz_str *s = str_alloc(len);
     s->interned = 1;
-    s->cap = len;
-    s->len = len;
-    memcpy(s->data, src, len);
-    s->data[len] = '\0';
+    memcpy(zz_str_ptr(s), src, len);
+    zz_str_ptr(s)[len] = '\0';
     return s;
 }
 
 // ---- string helpers ----------------------------------------------------
-// Allocate a heap string with at least `need` bytes of payload capacity.
-// `need` is the exact required length; capacity may grow beyond it (1.5x
-// amortization) for future appends.
+// Fast header pool (mimalloc-lite): zz_str headers are a fixed 56 bytes
+// and churn heavily in string/alloc benchmarks. A thread-local free-list
+// recycles them with O(1) push/pop and zero syscalls on the hot path.
+// Heap payload buffers (s->heap) still use malloc/realloc/free.
+#define ZZ_STR_SLAB_MAX 256
+static __thread zz_str *zz_str_slab = NULL;
+static __thread size_t zz_str_slab_len = 0;
+
+zz_str *zz_str_header_alloc(void) {
+    if (zz_str_slab) {
+        zz_str *s = zz_str_slab;
+        zz_str_slab = *(zz_str **)s->sso;  // next pointer stashed in sso
+        zz_str_slab_len--;
+        return s;
+    }
+    return (zz_str *)malloc(sizeof(zz_str));
+}
+
+void zz_str_header_free(zz_str *s) {
+    if (zz_str_slab_len < ZZ_STR_SLAB_MAX) {
+        *(zz_str **)s->sso = zz_str_slab;  // stash next pointer in sso
+        zz_str_slab = s;
+        zz_str_slab_len++;
+        return;
+    }
+    free(s);
+}
+
+// Allocate a string with at least `need` bytes of payload capacity.
+// SSO: if need <= ZZ_SSO_MAX, store inline in s->sso — zero extra alloc.
+// Heap: allocate a separate buffer, store pointer in s->heap.
 zz_str *str_alloc(size_t need) {
-    size_t cap = need;
-    // Amortization: start with enough room for ~1.5 future growths so a
-    // tight loop of small appends avoids repeated reallocs. 32 is a
-    // reasonable lower bound for the first allocation.
-    if (cap < 32) cap = 32;
-    zz_str *s = (zz_str *)malloc(sizeof(zz_str) + cap + 1);
+    zz_str *s = zz_str_header_alloc();
     if (!s) {
         fprintf(stderr, "zz: out of memory\n");
         exit(1);
     }
     s->refs = 1;
     s->interned = 0;
-    s->cap = cap;
     s->len = need;
-    s->data[need] = '\0';
+    if (need <= ZZ_SSO_MAX) {
+        s->cap = 0;   // SSO sentinel
+        s->sso[need] = '\0';
+    } else {
+        size_t cap = need;
+        if (cap < 32) cap = 32;
+        s->cap = cap;
+        s->heap = (char *)malloc(cap + 1);
+        if (!s->heap) {
+            fprintf(stderr, "zz: out of memory\n");
+            exit(1);
+        }
+        s->heap[need] = '\0';
+    }
     return s;
 }
 
-// Grow an existing heap string's buffer to hold at least `new_len` bytes.
+// Grow an existing string's buffer to hold at least `new_len` bytes.
 // Caller must have already verified new_len > s->cap and refs==1.
+// If the string is currently in SSO mode, promotes to heap.
 zz_str *str_grow(zz_str *s, size_t new_len) {
-    // 1.5x growth factor: amortized O(1) for repeated appends.
-    size_t nc = s->cap + s->cap / 2;
-    if (nc < new_len) nc = new_len;
-    zz_str *ns = (zz_str *)realloc(s, sizeof(zz_str) + nc + 1);
-    if (!ns) {
-        fprintf(stderr, "zz: out of memory\n");
-        exit(1);
+    // Small growth that still fits SSO: stay inline, no heap alloc.
+    if (new_len <= ZZ_SSO_MAX && s->cap == 0) {
+        return s;
     }
-    ns->cap = nc;
-    return ns;
+    // 2x growth factor (matches Rust `String`): amortized O(1) appends
+    // with minimal reallocs on large builds (5k–12k char strings).
+    size_t nc = s->cap ? s->cap * 2 : 32;
+    if (nc < new_len) nc = new_len;
+    if (s->cap == 0) {
+        // SSO → heap promotion: allocate fresh buffer, copy inline data.
+        char *buf = (char *)malloc(nc + 1);
+        if (!buf) {
+            fprintf(stderr, "zz: out of memory\n");
+            exit(1);
+        }
+        memcpy(buf, s->sso, s->len);
+        buf[s->len] = '\0';
+        s->cap = nc;
+        s->heap = buf;
+    } else {
+        // Heap → heap grow: realloc the buffer.
+        char *buf = (char *)realloc(s->heap, nc + 1);
+        if (!buf) {
+            fprintf(stderr, "zz: out of memory\n");
+            exit(1);
+        }
+        s->cap = nc;
+        s->heap = buf;
+    }
+    return s;
 }
 
 zz_value zz_str_new(const char *src, size_t len) {
     zz_str *s = str_alloc(len);
-    memcpy(s->data, src, len);
+    memcpy(zz_str_ptr(s), src, len);
     zz_value v;
     v.tag = ZZ_STR;
     v.s = s;
@@ -146,7 +187,7 @@ zz_value zz_str_owned(char *src) {
 // `SB` typedef lives in strings.h (shared with the JSON serializer).
 void sb_str(SB *sb, const char *s, size_t n) {
     if (sb->len + n + 1 > sb->cap) {
-        size_t nc = sb->cap ? sb->cap * 2 : 64;
+        size_t nc = sb->cap ? sb->cap * 2 : 256;
         while (nc < sb->len + n + 1) nc *= 2;
         sb->buf = (char *)realloc(sb->buf, nc);
         sb->cap = nc;
@@ -170,8 +211,29 @@ char *copy_cstr(const char *s, size_t n) {
 
 
 zz_value zz_str_static(const char *src) {
+    // Call-site literal cache (P6): the same .rodata address arrives on
+    // every loop iteration, so a tiny MRU keyed on POINTER equality
+    // (same address ⇒ same bytes) skips strlen + fnv1a + table probe on
+    // hits. Misses fall through to the intern table. Thread-local like
+    // the header slab; singletons are never freed so entries stay valid.
+#define ZZ_LIT_CACHE_N 8
+    static __thread const char *zz_lit_keys[ZZ_LIT_CACHE_N];
+    static __thread zz_str *zz_lit_vals[ZZ_LIT_CACHE_N];
+    static __thread unsigned zz_lit_victim;
+    for (unsigned i = 0; i < ZZ_LIT_CACHE_N; i++) {
+        if (zz_lit_keys[i] == src) {
+            zz_value v;
+            v.tag = ZZ_STR;
+            v.s = zz_lit_vals[i];
+            return v;
+        }
+    }
     size_t len = strlen(src);
     zz_str *s = intern_lookup_or_create(src, len);
+    unsigned vic = zz_lit_victim;
+    zz_lit_keys[vic] = src;
+    zz_lit_vals[vic] = s;
+    zz_lit_victim = (vic + 1) % ZZ_LIT_CACHE_N;
     // Note: do NOT bump refs here — the singleton is permanent and owned
     // by the intern table. Generated code treats the returned zz_value as
     // a borrowed reference; if it ever escapes into zz_assign / zz_release,
@@ -189,16 +251,26 @@ zz_value zz_str_static(const char *src) {
 zz_value zz_str_new_arena(const char *src, size_t len, zz_arena *arena) {
     zz_str *s;
     if (arena) {
-        s = (zz_str *)zz_arena_alloc(arena, sizeof(zz_str) + len + 1, 8);
+        // Arena-allocated string: header on arena, data handled per size.
+        s = (zz_str *)zz_arena_alloc(arena, sizeof(zz_str), 8);
         s->refs = 0;  // sentinel: arena-allocated
         s->interned = 0;
-        s->cap = len;
         s->len = len;
-        memcpy(s->data, src, len);
-        s->data[len] = '\0';
+        if (len <= ZZ_SSO_MAX) {
+            // Small string: store inline in SSO buffer — zero extra alloc.
+            s->cap = 0;
+            memcpy(s->sso, src, len);
+            s->sso[len] = '\0';
+        } else {
+            // Large string: allocate data on the arena too.
+            s->cap = len;
+            s->heap = (char *)zz_arena_alloc(arena, len + 1, 1);
+            memcpy(s->heap, src, len);
+            s->heap[len] = '\0';
+        }
     } else {
         s = str_alloc(len);
-        memcpy(s->data, src, len);
+        memcpy(zz_str_ptr(s), src, len);
     }
     zz_value v;
     v.tag = ZZ_STR;
@@ -254,7 +326,7 @@ void zz_print_value(FILE *out, const zz_value *v) {
         fputs(v->b ? "true" : "false", out);
         break;
     case ZZ_STR:
-        fwrite(v->s->data, 1, v->s->len, out);
+        fwrite(zz_str_ptr(v->s), 1, v->s->len, out);
         break;
     case ZZ_ARRAY:
         fputs("[", out);
@@ -271,7 +343,7 @@ void zz_print_value(FILE *out, const zz_value *v) {
         if (v->dict) {
             for (size_t i = 0; i < v->dict->len; i++) {
                 if (i > 0) fputs(", ", out);
-                fwrite(v->dict->entries[i].key->data, 1,
+                fwrite(zz_str_ptr(v->dict->entries[i].key), 1,
                        v->dict->entries[i].key->len, out);
                 fputs(": ", out);
                 zz_print_value(out, &v->dict->entries[i].val);
@@ -350,26 +422,26 @@ static char *strdup_len(const char *s, size_t len) {
 
 // Simple growable buffer for value_to_string.
 typedef struct {
-    char  *data;
+    char  *buf;
     size_t len;
     size_t cap;
 } strbuf;
 
 static void sb_init(strbuf *sb) {
-    sb->cap  = 64;
+    sb->cap  = 256;
     sb->len  = 0;
-    sb->data = (char *)malloc(sb->cap);
-    sb->data[0] = '\0';
+    sb->buf = (char *)malloc(sb->cap);
+    sb->buf[0] = '\0';
 }
 
 static void sb_append(strbuf *sb, const char *s, size_t slen) {
     while (sb->len + slen + 1 > sb->cap) {
         sb->cap *= 2;
-        sb->data = (char *)realloc(sb->data, sb->cap);
+        sb->buf = (char *)realloc(sb->buf, sb->cap);
     }
-    memcpy(sb->data + sb->len, s, slen);
+    memcpy(sb->buf + sb->len, s, slen);
     sb->len += slen;
-    sb->data[sb->len] = '\0';
+    sb->buf[sb->len] = '\0';
 }
 
 static void sb_append_str(strbuf *sb, const char *s) {
@@ -427,7 +499,7 @@ static void zz_value_to_strbuf(strbuf *sb, const zz_value *v) {
         sb_append_str(sb, v->b ? "true" : "false");
         break;
     case ZZ_STR:
-        sb_append(sb, v->s->data, v->s->len);
+        sb_append(sb, zz_str_ptr(v->s), v->s->len);
         break;
     case ZZ_ARRAY:
         sb_append_c(sb, '[');
@@ -444,7 +516,7 @@ static void zz_value_to_strbuf(strbuf *sb, const zz_value *v) {
         if (v->dict) {
             for (size_t i = 0; i < v->dict->len; i++) {
                 if (i > 0) sb_append_str(sb, ", ");
-                sb_append(sb, v->dict->entries[i].key->data,
+                sb_append(sb, zz_str_ptr(v->dict->entries[i].key),
                           v->dict->entries[i].key->len);
                 sb_append_str(sb, ": ");
                 zz_value_to_strbuf(sb, &v->dict->entries[i].val);
@@ -519,7 +591,7 @@ char *zz_value_to_string(const zz_value *v) {
     strbuf sb;
     sb_init(&sb);
     zz_value_to_strbuf(&sb, v);
-    return sb.data;
+    return sb.buf;
 }
 
 // zz_to_str_fmt(val, spec) — format a value using a format spec string.
@@ -577,20 +649,22 @@ zz_value zz_binop_cat(zz_value a, zz_value b) {
         zz_str *out;
         // In-place fast path: a is uniquely owned (refs==1) and is NOT
         // interned (we must never mutate an interned singleton) and has
-        // capacity for the result.
-        if (a.s->refs == 1 && !a.s->interned && a.s->cap >= need) {
+        // capacity for the result. SSO strings (cap==0) are reusable when
+        // the result still fits inline.
+        if (a.s->refs == 1 && !a.s->interned
+            && (a.s->cap >= need || (a.s->cap == 0 && need <= ZZ_SSO_MAX))) {
             out = a.s;
-            memcpy(out->data + la, b.s->data, lb);
+            memcpy(zz_str_ptr(out) + la, zz_str_ptr(b.s), lb);
             out->len = need;
-            out->data[need] = '\0';
+            zz_str_ptr(out)[need] = '\0';
             zz_value v;
             v.tag = ZZ_STR;
             v.s = out;
             return v;
         }
         out = str_alloc(need);
-        memcpy(out->data, a.s->data, la);
-        memcpy(out->data + la, b.s->data, lb);
+        memcpy(zz_str_ptr(out), zz_str_ptr(a.s), la);
+        memcpy(zz_str_ptr(out) + la, zz_str_ptr(b.s), lb);
         zz_value v;
         v.tag = ZZ_STR;
         v.s = out;
@@ -607,14 +681,22 @@ zz_value zz_binop_cat_arena(zz_value a, zz_value b, zz_arena *arena) {
     if (a.tag == ZZ_STR && b.tag == ZZ_STR && arena) {
         size_t la = a.s->len, lb = b.s->len;
         size_t need = la + lb;
-        zz_str *out = (zz_str *)zz_arena_alloc(arena, sizeof(zz_str) + need + 1, 8);
+        zz_str *out = (zz_str *)zz_arena_alloc(arena, sizeof(zz_str), 8);
         out->refs = 0;      // arena sentinel
         out->interned = 0;
-        out->cap = need;
         out->len = need;
-        memcpy(out->data, a.s->data, la);
-        memcpy(out->data + la, b.s->data, lb);
-        out->data[need] = '\0';
+        if (need <= ZZ_SSO_MAX) {
+            out->cap = 0;
+            memcpy(out->sso, zz_str_ptr(a.s), la);
+            memcpy(out->sso + la, zz_str_ptr(b.s), lb);
+            out->sso[need] = '\0';
+        } else {
+            out->cap = need;
+            out->heap = (char *)zz_arena_alloc(arena, need + 1, 1);
+            memcpy(out->heap, zz_str_ptr(a.s), la);
+            memcpy(out->heap + la, zz_str_ptr(b.s), lb);
+            out->heap[need] = '\0';
+        }
         zz_value v;
         v.tag = ZZ_STR;
         v.s = out;
@@ -644,19 +726,20 @@ void zz_str_append_str(zz_value *a, zz_value b) {
         if (a->s->cap < need) {
             a->s = str_grow(a->s, need);
         }
-        memcpy(a->s->data + la, b.s->data, lb);
+        memcpy(zz_str_ptr(a->s) + la, zz_str_ptr(b.s), lb);
         a->s->len = need;
-        a->s->data[need] = '\0';
+        zz_str_ptr(a->s)[need] = '\0';
         return;
     }
     // Buffer not reusable: replace with a fresh allocation. Release the
     // old ref first so we don't leak (and don't double-free if the old
     // buffer happened to be interned — refs==1 interned strings stay put).
     zz_str *fresh = str_alloc(need);
-    memcpy(fresh->data, a->s->data, la);
-    memcpy(fresh->data + la, b.s->data, lb);
+    memcpy(zz_str_ptr(fresh), zz_str_ptr(a->s), la);
+    memcpy(zz_str_ptr(fresh) + la, zz_str_ptr(b.s), lb);
     if (!a->s->interned && --a->s->refs == 0) {
-        free(a->s);
+        if (a->s->cap > 0) free(a->s->heap);
+        zz_str_header_free(a->s);
     }
     a->s = fresh;
 }
@@ -671,16 +754,17 @@ void zz_str_append_lit(zz_value *a, const char *lit, size_t lit_len) {
         if (a->s->cap < need) {
             a->s = str_grow(a->s, need);
         }
-        memcpy(a->s->data + la, lit, lit_len);
+        memcpy(zz_str_ptr(a->s) + la, lit, lit_len);
         a->s->len = need;
-        a->s->data[need] = '\0';
+        zz_str_ptr(a->s)[need] = '\0';
         return;
     }
     zz_str *fresh = str_alloc(need);
-    memcpy(fresh->data, a->s->data, la);
-    memcpy(fresh->data + la, lit, lit_len);
+    memcpy(zz_str_ptr(fresh), zz_str_ptr(a->s), la);
+    memcpy(zz_str_ptr(fresh) + la, lit, lit_len);
     if (!a->s->interned && --a->s->refs == 0) {
-        free(a->s);
+        if (a->s->cap > 0) free(a->s->heap);
+        zz_str_header_free(a->s);
     }
     a->s = fresh;
 }
@@ -698,10 +782,10 @@ zz_value zz_str_lower(zz_value s, int *err) {
     size_t len = s.s->len;
     zz_str *out = str_alloc(len);
     for (size_t i = 0; i < len; i++) {
-        char c = s.s->data[i];
-        out->data[i] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
+        char c = zz_str_ptr(s.s)[i];
+        zz_str_ptr(out)[i] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
     }
-    out->data[len] = '\0';
+    zz_str_ptr(out)[len] = '\0';
     return (zz_value){ZZ_STR, {.s = out}};
 }
 
@@ -712,10 +796,10 @@ zz_value zz_str_upper(zz_value s, int *err) {
     size_t len = s.s->len;
     zz_str *out = str_alloc(len);
     for (size_t i = 0; i < len; i++) {
-        char c = s.s->data[i];
-        out->data[i] = (c >= 'a' && c <= 'z') ? c - 32 : c;
+        char c = zz_str_ptr(s.s)[i];
+        zz_str_ptr(out)[i] = (c >= 'a' && c <= 'z') ? c - 32 : c;
     }
-    out->data[len] = '\0';
+    zz_str_ptr(out)[len] = '\0';
     return (zz_value){ZZ_STR, {.s = out}};
 }
 
@@ -723,11 +807,11 @@ zz_value zz_str_upper(zz_value s, int *err) {
 zz_value zz_str_replace(zz_value s, zz_value old_s, zz_value new_s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR || old_s.tag != ZZ_STR || new_s.tag != ZZ_STR) return s;
-    const char *src = s.s->data;
+    const char *src = zz_str_ptr(s.s);
     size_t src_len = s.s->len;
-    const char *old_str = old_s.s->data;
+    const char *old_str = zz_str_ptr(old_s.s);
     size_t old_len = old_s.s->len;
-    const char *new_str = new_s.s->data;
+    const char *new_str = zz_str_ptr(new_s.s);
     size_t new_len = new_s.s->len;
     if (old_len == 0) return zz_clone(s);
     // Count occurrences.
@@ -743,14 +827,14 @@ zz_value zz_str_replace(zz_value s, zz_value old_s, zz_value new_s, int *err) {
     size_t pos = 0;
     for (size_t i = 0; i < src_len;) {
         if (i + old_len <= src_len && memcmp(src + i, old_str, old_len) == 0) {
-            memcpy(out->data + pos, new_str, new_len);
+            memcpy(zz_str_ptr(out) + pos, new_str, new_len);
             pos += new_len;
             i += old_len;
         } else {
-            out->data[pos++] = src[i++];
+            zz_str_ptr(out)[pos++] = src[i++];
         }
     }
-    out->data[out_len] = '\0';
+    zz_str_ptr(out)[out_len] = '\0';
     return (zz_value){ZZ_STR, {.s = out}};
 }
 
@@ -758,9 +842,9 @@ zz_value zz_str_replace(zz_value s, zz_value old_s, zz_value new_s, int *err) {
 zz_value zz_str_contains(zz_value s, zz_value sub, int *err) {
     (void)err;
     if (s.tag != ZZ_STR || sub.tag != ZZ_STR) return (zz_value){ZZ_BOOL, {.b = false}};
-    const char *src = s.s->data;
+    const char *src = zz_str_ptr(s.s);
     size_t src_len = s.s->len;
-    const char *needle = sub.s->data;
+    const char *needle = zz_str_ptr(sub.s);
     size_t needle_len = sub.s->len;
     if (needle_len == 0) return (zz_value){ZZ_BOOL, {.b = true}};
     for (size_t i = 0; i + needle_len <= src_len; i++) {
@@ -774,7 +858,7 @@ zz_value zz_str_startswith(zz_value s, zz_value prefix, int *err) {
     (void)err;
     if (s.tag != ZZ_STR || prefix.tag != ZZ_STR) return (zz_value){ZZ_BOOL, {.b = false}};
     if (prefix.s->len > s.s->len) return (zz_value){ZZ_BOOL, {.b = false}};
-    return (zz_value){ZZ_BOOL, {.b = memcmp(s.s->data, prefix.s->data, prefix.s->len) == 0}};
+    return (zz_value){ZZ_BOOL, {.b = memcmp(zz_str_ptr(s.s), zz_str_ptr(prefix.s), prefix.s->len) == 0}};
 }
 
 // str.endswith(s, suffix)
@@ -782,14 +866,14 @@ zz_value zz_str_endswith(zz_value s, zz_value suffix, int *err) {
     (void)err;
     if (s.tag != ZZ_STR || suffix.tag != ZZ_STR) return (zz_value){ZZ_BOOL, {.b = false}};
     if (suffix.s->len > s.s->len) return (zz_value){ZZ_BOOL, {.b = false}};
-    return (zz_value){ZZ_BOOL, {.b = memcmp(s.s->data + s.s->len - suffix.s->len, suffix.s->data, suffix.s->len) == 0}};
+    return (zz_value){ZZ_BOOL, {.b = memcmp(zz_str_ptr(s.s) + s.s->len - suffix.s->len, zz_str_ptr(suffix.s), suffix.s->len) == 0}};
 }
 
 // str.trim(s) — strip leading/trailing whitespace
 zz_value zz_str_trim(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
-    const char *d = s.s->data;
+    const char *d = zz_str_ptr(s.s);
     size_t len = s.s->len;
     size_t start = 0, end = len;
     while (start < end && (d[start] == ' ' || d[start] == '\t' || d[start] == '\n' || d[start] == '\r')) start++;
@@ -801,7 +885,7 @@ zz_value zz_str_trim(zz_value s, int *err) {
 zz_value zz_str_trim_start(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
-    const char *d = s.s->data;
+    const char *d = zz_str_ptr(s.s);
     size_t len = s.s->len;
     size_t start = 0;
     while (start < len && (d[start] == ' ' || d[start] == '\t' || d[start] == '\n' || d[start] == '\r')) start++;
@@ -812,7 +896,7 @@ zz_value zz_str_trim_start(zz_value s, int *err) {
 zz_value zz_str_trim_end(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
-    const char *d = s.s->data;
+    const char *d = zz_str_ptr(s.s);
     size_t len = s.s->len;
     size_t end = len;
     while (end > 0 && (d[end-1] == ' ' || d[end-1] == '\t' || d[end-1] == '\n' || d[end-1] == '\r')) end--;
@@ -825,7 +909,7 @@ zz_value zz_str_join(zz_value items, zz_value sep, int *err) {
     if (items.tag != ZZ_ARRAY || !items.arr) return zz_str_static("");
     const char *sep_d = "";
     size_t sep_len = 0;
-    if (sep.tag == ZZ_STR) { sep_d = sep.s->data; sep_len = sep.s->len; }
+    if (sep.tag == ZZ_STR) { sep_d = zz_str_ptr(sep.s); sep_len = sep.s->len; }
     // Calculate total length.
     size_t total = 0;
     for (size_t i = 0; i < items.arr->len; i++) {
@@ -838,7 +922,7 @@ zz_value zz_str_join(zz_value items, zz_value sep, int *err) {
     for (size_t i = 0; i < items.arr->len; i++) {
         if (i > 0) { memcpy(buf + pos, sep_d, sep_len); pos += sep_len; }
         zz_value v = items.arr->items[i];
-        if (v.tag == ZZ_STR) { memcpy(buf + pos, v.s->data, v.s->len); pos += v.s->len; }
+        if (v.tag == ZZ_STR) { memcpy(buf + pos, zz_str_ptr(v.s), v.s->len); pos += v.s->len; }
     }
     buf[pos] = '\0';
     return zz_str_owned(buf);
@@ -848,10 +932,10 @@ zz_value zz_str_join(zz_value items, zz_value sep, int *err) {
 zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return zz_array_new();
-    const char *d = s.s->data;
+    const char *d = zz_str_ptr(s.s);
     size_t len = s.s->len;
     const char *sd = ""; size_t slen = 0;
-    if (sep.tag == ZZ_STR) { sd = sep.s->data; slen = sep.s->len; }
+    if (sep.tag == ZZ_STR) { sd = zz_str_ptr(sep.s); slen = sep.s->len; }
     zz_value arr = zz_array_new();
     if (slen == 0) {
         // Split into individual characters.
@@ -878,10 +962,66 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
     return arr;
 }
 
+// Fast int64 → decimal (P7): two-digit lookup table writes pairs per
+// division, halving (expensive) divisions vs one-digit loops and skipping
+// snprintf's format/varargs/locale machinery entirely. Writes backwards
+// from `end` (one past the buffer); buffer needs >= 22 bytes (20 digits
+// + sign + slack). Returns pointer to the first char; length via *len.
+static const char *zz_fmt_i64(char *end, int64_t n, size_t *len) {
+    static const char pairs[] =
+        "00010203040506070809"
+        "10111213141516171819"
+        "20212223242526272829"
+        "30313233343536373839"
+        "40414243444546474849"
+        "50515253545556575859"
+        "60616263646566676869"
+        "70717273747576777879"
+        "80818283848586878889"
+        "90919293949596979899";
+    uint64_t u;
+    int neg = 0;
+    if (n < 0) {
+        neg = 1;
+        u = 0u - (uint64_t)n;  // exact even for INT64_MIN
+    } else {
+        u = (uint64_t)n;
+    }
+    char *p = end;
+    while (u >= 100) {
+        unsigned r = (unsigned)(u % 100);
+        u /= 100;
+        *--p = pairs[r * 2 + 1];
+        *--p = pairs[r * 2];
+    }
+    // Final 1–2 digits: never emit a leading zero.
+    unsigned last = (unsigned)u;
+    *--p = pairs[last * 2 + 1];
+    if (last >= 10) {
+        *--p = pairs[last * 2];
+    }
+    if (neg) {
+        *--p = '-';
+    }
+    *len = (size_t)(end - p);
+    return p;
+}
+
+// Fast int → string: format into a 24-byte stack buffer, then SSO.
+// Avoids the zz_value_to_string strbuf path (malloc 256 + free) for the
+// most common cast in loops (`str(i)`). int64 min is 20 chars, always SSO.
+zz_value zz_str_from_int(int64_t n) {
+    char buf[24];
+    size_t len;
+    const char *p = zz_fmt_i64(buf + sizeof buf, n, &len);
+    return zz_str_new(p, len);
+}
+
 // typeof(v) — return type name as string.
 // zz_str(v) — cast to string.
 zz_value zz_str_cast(zz_value v, int *err) {
     (void)err;
+    if (v.tag == ZZ_INT) return zz_str_from_int(v.i);
     char *s = zz_value_to_string(&v);
     return zz_str_owned(s);
 }
@@ -892,15 +1032,30 @@ zz_value zz_str_cast(zz_value v, int *err) {
 zz_value zz_str_cast_arena(zz_value v, int *err, zz_arena *arena) {
     (void)err;
     if (!arena) return zz_str_cast(v, err);
+    // Int fast path: LUT-format, then arena-allocate (SSO, zero heap).
+    // Skips the zz_value_to_string strbuf malloc/free entirely.
+    if (v.tag == ZZ_INT) {
+        char ibuf[24];
+        size_t ilen;
+        const char *p = zz_fmt_i64(ibuf + sizeof ibuf, v.i, &ilen);
+        return zz_str_new_arena(p, ilen, arena);
+    }
     char *s = zz_value_to_string(&v);
     size_t len = strlen(s);
-    zz_str *str = (zz_str *)zz_arena_alloc(arena, sizeof(zz_str) + len + 1, 8);
+    zz_str *str = (zz_str *)zz_arena_alloc(arena, sizeof(zz_str), 8);
     str->refs = 0;
     str->interned = 0;
-    str->cap = len;
     str->len = len;
-    memcpy(str->data, s, len);
-    str->data[len] = '\0';
+    if (len <= ZZ_SSO_MAX) {
+        str->cap = 0;
+        memcpy(str->sso, s, len);
+        str->sso[len] = '\0';
+    } else {
+        str->cap = len;
+        str->heap = (char *)zz_arena_alloc(arena, len + 1, 1);
+        memcpy(str->heap, s, len);
+        str->heap[len] = '\0';
+    }
     free(s);
     zz_value rv;
     rv.tag = ZZ_STR;

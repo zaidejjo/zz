@@ -11,6 +11,5 @@ func main() {
     server = http.route_get(server, "/ping", |_req| "pong")
     server = http.route_get(server, "/json", |_req| "{\"status\":\"ok\"}")
     server = http.log(server, false)
-
     http.listen(server, 8080)
 }

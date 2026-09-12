@@ -26,7 +26,7 @@ println("hello" + " " + "world")
 // elvis operator
 val := .some(99)
 println(val ?? 0)
-none_val: Option<int> = .none
+none_val:Option<int> = .none
 println(none_val ?? -1)
 
 println("op_ok")

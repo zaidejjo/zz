@@ -123,23 +123,6 @@ size_t zz_array_len(const zz_array *a) {
     return a ? a->len : 0;
 }
 
-zz_value zz_array_get(const zz_array *a, zz_value idx, int *err) {
-    *err = 0;
-    if (idx.tag != ZZ_INT) {
-        *err = 1;
-        return zz_unit();
-    }
-    int64_t i = idx.i;
-    int64_t n = (int64_t)a->len;
-    if (i < 0)
-        i += n;
-    if (i < 0 || i >= n) {
-        *err = 1;
-        return zz_unit();
-    }
-    return zz_clone(a->items[i]);
-}
-
 void zz_array_set(zz_array *a, zz_value idx, zz_value item, int *err) {
     *err = 0;
     if (idx.tag != ZZ_INT) {
@@ -250,19 +233,18 @@ zz_value zz_dict_new_arena_sized(zz_arena *arena, size_t hint) {
     return v;
 }
 
+// Heap dict constructor with pre-allocated entries buffer. Eliminates
+// the calloc + realloc cascade for dict literals that escape the loop
+// arena (wave 2/4 of memory_alloc when heap-allocated): all `n` inserts
+// fit without growth. Unlike the arena path the buffer stays growable.
+zz_value zz_dict_new_sized(size_t hint) {
+    return zz_dict_new_arena_sized(NULL, hint);
+}
+
 // Index-expression dispatchers: `obj[idx]` read and `obj[idx] = v` write.
 // Arrays and dicts only; unsupported tags set *err = 1 and return unit.
-zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
-    switch (obj.tag) {
-    case ZZ_ARRAY:
-        return zz_array_get(obj.arr, idx, err);
-    case ZZ_DICT:
-        return zz_dict_get(obj.dict, idx, err);
-    default:
-        *err = 1;
-        return zz_unit();
-    }
-}
+// (zz_index_get lives inline in collections.h; only the setter, which is
+// never loop-hot, stays out-of-line here.)
 
 // Slice a value by byte indices (array elements or ASCII-compatible strings).
 // Missing bounds (unit) mean "from 0" / "to end". Matches the VM for ASCII.
@@ -292,7 +274,7 @@ zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err) {
             if (si < 0) si = 0;
             if (ei > n) ei = n;
             if (si > ei) si = ei;
-            zz_value out = zz_str_new(obj.s->data + si, (size_t)(ei - si));
+            zz_value out = zz_str_new(zz_str_cptr(obj.s) + si, (size_t)(ei - si));
             return out;
         }
     default:
@@ -321,7 +303,7 @@ void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
     for (size_t i = 0; i < d->len; i++) {
         zz_dict_entry *e = &d->entries[i];
         if (e->key->len == key.s->len &&
-            memcmp(e->key->data, key.s->data, key.s->len) == 0) {
+            memcmp(zz_str_cptr(e->key), zz_str_cptr(key.s), key.s->len) == 0) {
             zz_assign(&e->val, val);
             return;
         }
@@ -340,23 +322,6 @@ void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
     e->key = key.s;
     key.s->refs++;
     e->val = val;
-}
-
-zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err) {
-    *err = 0;
-    if (key.tag != ZZ_STR) {
-        *err = 1;
-        return zz_unit();
-    }
-    for (size_t i = 0; i < d->len; i++) {
-        zz_dict_entry *e = &d->entries[i];
-        if (e->key->len == key.s->len &&
-            memcmp(e->key->data, key.s->data, key.s->len) == 0) {
-            return zz_clone(e->val);
-        }
-    }
-    *err = 1;
-    return zz_unit();
 }
 
 size_t zz_dict_len(const zz_dict *d) {
@@ -526,7 +491,7 @@ void zz_object_set_field(zz_value *obj, const char *name, zz_value val) {
     zz_object *o = obj->obj;
     for (size_t i = 0; i < o->len; i++) {
         zz_value *fname = &o->fields[i * 2];
-        if (fname->tag == ZZ_STR && strcmp(fname->s->data, name) == 0) {
+        if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
             zz_value *slot = &o->fields[i * 2 + 1];
             zz_release(slot);
             *slot = zz_clone(val);
@@ -540,7 +505,7 @@ zz_value zz_object_get_field(zz_value *obj, const char *name) {
     zz_object *o = obj->obj;
     for (size_t i = 0; i < o->len; i++) {
         zz_value *fname = &o->fields[i * 2];
-        if (fname->tag == ZZ_STR && strcmp(fname->s->data, name) == 0) {
+        if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
             return zz_clone(o->fields[i * 2 + 1]);
         }
     }
@@ -821,7 +786,7 @@ zz_value zz_dict_has(zz_value d, zz_value key, int *err) {
     (void)err;
     if (d.tag != ZZ_DICT || key.tag != ZZ_STR) return (zz_value){ZZ_BOOL, {.b = false}};
     for (size_t i = 0; i < d.dict->len; i++) {
-        if (strcmp(d.dict->entries[i].key->data, key.s->data) == 0)
+        if (strcmp(zz_str_cptr(d.dict->entries[i].key), zz_str_cptr(key.s)) == 0)
             return (zz_value){ZZ_BOOL, {.b = true}};
     }
     return (zz_value){ZZ_BOOL, {.b = false}};
@@ -833,7 +798,7 @@ zz_value zz_option_expect(zz_value opt, zz_value msg, int *err) {
     if (opt.tag == ZZ_OPTION_SOME && opt.payload)
         return zz_clone(*opt.payload);
     // Panic: print error message and exit.
-    const char *m = (msg.tag == ZZ_STR) ? msg.s->data : "expect failed";
+    const char *m = (msg.tag == ZZ_STR) ? zz_str_cptr(msg.s) : "expect failed";
     fprintf(stderr, "error: %s\n", m);
     exit(1);
 }
@@ -847,11 +812,11 @@ zz_value zz_result_expect(zz_value res, zz_value msg, int *err) {
     if (res.tag == ZZ_RESULT_ERR && res.payload) {
         char *estr = zz_value_to_string(res.payload);
         fprintf(stderr, "error: %s: %s\n",
-                (msg.tag == ZZ_STR) ? msg.s->data : "expect failed", estr);
+                (msg.tag == ZZ_STR) ? zz_str_cptr(msg.s) : "expect failed", estr);
         free(estr);
     } else {
         fprintf(stderr, "error: %s\n",
-                (msg.tag == ZZ_STR) ? msg.s->data : "expect failed");
+                (msg.tag == ZZ_STR) ? zz_str_cptr(msg.s) : "expect failed");
     }
     exit(1);
 }

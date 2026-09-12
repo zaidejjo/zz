@@ -154,8 +154,36 @@ impl Lowerer {
                 }
             }
             Expr::Binary {
-                op, left, right, ..
+                op,
+                left,
+                right,
+                span,
             } => {
+                // Strength reduction: `x ** 2` → `x * x`, `x ** 3` →
+                // `x * x * x`. The generic pow path boxes both operands
+                // and routes through double-precision `dpow` — pure
+                // overhead for small literal exponents in tight loops.
+                // Only fires for duplication-safe bases (no side effects);
+                // variable/complex exponents keep the `dpow` path.
+                if matches!(op, zz_frontend::ast::BinOp::Pow) {
+                    if let Expr::Int { value, .. } = right.as_ref() {
+                        if (*value == 2 || *value == 3) && is_dup_safe(left) {
+                            let mk_mul = |a: Expr, b: Expr| Expr::Binary {
+                                op: zz_frontend::ast::BinOp::Mul,
+                                left: Box::new(a),
+                                right: Box::new(b),
+                                span: *span,
+                            };
+                            let base = (**left).clone();
+                            let reduced = if *value == 2 {
+                                mk_mul(base.clone(), base)
+                            } else {
+                                mk_mul(base.clone(), mk_mul(base.clone(), base))
+                            };
+                            return self.emit_expr(&reduced, names, out);
+                        }
+                    }
+                }
                 let l = self.emit_expr(left, names, out);
                 let r = self.emit_expr(right, names, out);
                 match op {
@@ -379,11 +407,28 @@ impl Lowerer {
             }
             Expr::Index { obj, index, .. } => {
                 // `obj[idx]` — runtime-dispatched read (arrays/dicts).
-                let o = self.emit_expr(obj, names, out);
+                // Two fast-paths over the naive
+                // `zz_call_native2(zz_index_get, zz_clone(o), boxed_i)`:
+                //   1. Plain Ident receivers pass borrowed: zz_index_get
+                //      never releases or stores its object argument, so
+                //      the atomic retain per load is pure overhead.
+                //   2. Direct `zz_index_get` call (now static inline in
+                //      collections.h) instead of the native-call shim.
+                // Error behavior is unchanged: the shim ignored *err, and
+                // the temp err here is likewise unread.
+                let o = match obj.as_ref() {
+                    Expr::Ident { name, .. } => names
+                        .lookup(name)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| self.emit_expr(obj, names, out)),
+                    _ => self.emit_expr(obj, names, out),
+                };
                 let i = self.emit_expr(index, names, out);
                 // Box a scalar index (ident/raw-arith) to a zz_value.
                 let i_boxed = self.box_index_arg(index, i, names);
-                format!("zz_call_native2(zz_index_get, {o}, {i_boxed})")
+                let e = names.fresh("_idxe");
+                out.push_str(&format!("    int {e} = 0;\n"));
+                format!("zz_index_get({o}, {i_boxed}, &{e})")
             }
             Expr::Slice {
                 obj, start, end, ..
@@ -623,7 +668,9 @@ impl Lowerer {
                 let n = entries.len();
                 let arena_code = match self.arena_for(*span) {
                     Some(arena) => format!("zz_dict_new_arena_sized(&{arena}, {n})"),
-                    None => "zz_dict_new()".to_string(),
+                    // Heap path is also pre-sized: avoids the calloc +
+                    // realloc cascade when the literal escapes the arena.
+                    None => format!("zz_dict_new_sized({n})"),
                 };
                 out.push_str(&format!("    zz_value {dv} = {arena_code};\n"));
                 for (k, v) in entries {
@@ -1200,7 +1247,28 @@ impl Lowerer {
             _ => false,
         };
         if let Some(ref recv) = method_receiver {
-            let recv_val = self.emit_expr(recv, names, out);
+            // Borrowed-receiver fast path: zz_vec_push/zz_vec_append
+            // never retain, release, or store the receiver array itself
+            // (push dups elements internally; append mutates in place),
+            // so the atomic retain that Ident emission adds is pure
+            // overhead in tight push loops. Pass plain Ident receivers
+            // borrowed; complex receivers already come out uncloned.
+            let borrow_recv = matches!(
+                native_impl(&cname),
+                Some("zz_vec_push") | Some("zz_vec_append")
+            ) && matches!(recv, Expr::Ident { .. });
+            let recv_val = if borrow_recv {
+                if let Expr::Ident { name, .. } = recv {
+                    names
+                        .lookup(name)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| self.emit_expr(recv, names, out))
+                } else {
+                    self.emit_expr(recv, names, out)
+                }
+            } else {
+                self.emit_expr(recv, names, out)
+            };
             if recv_is_struct {
                 arg_items.push(recv_val);
             } else {

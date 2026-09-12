@@ -1,22 +1,20 @@
 // Struct impl block tests
-struct Point { x: int, y: int }
+struct Point {x: int, y: int}
 
 impl Point {
     func dist(self) -> int {
         self.x + self.y
     }
-
     func scale(self, f: int) -> Point {
-        Point{ x: self.x * f, y: self.y * f }
+        Point{x: self.x * f, y: self.y * f}
     }
-
     func describe(self) -> str {
         "Point({self.x}, {self.y})"
     }
 }
 
 // Instance methods
-p := Point{ x: 3, y: 4 }
+p := Point{x: 3, y: 4}
 println("dist = {p.dist()}")
 
 // Method with args
@@ -25,7 +23,7 @@ println("scaled = {s.describe()}")
 
 // Associated function (factory-like)
 func Point.zero() -> Point {
-    Point{ x: 0, y: 0 }
+    Point{x: 0, y: 0}
 }
 
 z := Point.zero()

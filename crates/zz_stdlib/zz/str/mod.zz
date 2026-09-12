@@ -1,11 +1,11 @@
 // Pure-ZZ string helpers — compiled once, shared by VM and AOT.
 // Module: std.str
-//
+// 
 // Functions that need Rust string internals (trim, to_upper, to_lower,
 // replace, split, join, contains, starts_with, ends_with) stay as
 // native Rust in src/natives/str_mod/mod.rs. Everything below is
 // pure computation and can run in both the bytecode VM and AOT codegen.
-//
+// 
 // Performance notes:
 //   - str.repeat uses doubling strategy: O(n log n) instead of O(n^2).
 //   - str.pad_left/right build padding once, concat once: O(k) not O(k^2).
@@ -15,7 +15,9 @@
 func str.repeat(s: str, n: int) -> str {
     // Doubling strategy: build result in O(log n) concatenations.
     // At each step, double the accumulator. Total copies ~ n * (1 + 1/2 + 1/4 + ...) < 2n.
-    if n <= 0 { return "" }
+    if n <= 0 {
+        return ""
+    }
     result := s
     m := n - 1
     buf := s
@@ -56,7 +58,9 @@ func str.reverse(s: str) -> str {
 
 func str.pad_left(s: str, len: int, pad: str) -> str {
     slen := str.length(s)
-    if slen >= len { return s }
+    if slen >= len {
+        return s
+    }
     needed := len - slen
     // Build full padding string once, then slice — O(needed) not O(needed^2).
     // Since we cannot slice strings by char index in pure ZZ, build iteratively
@@ -76,7 +80,9 @@ func str.pad_left(s: str, len: int, pad: str) -> str {
 
 func str.pad_right(s: str, len: int, pad: str) -> str {
     slen := str.length(s)
-    if slen >= len { return s }
+    if slen >= len {
+        return s
+    }
     needed := len - slen
     padding := ""
     buf := pad

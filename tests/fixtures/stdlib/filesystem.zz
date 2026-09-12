@@ -3,13 +3,13 @@ import std.fs
 
 // write + read
 match fs.write_file("/tmp/zz_e2e_test.txt", "hello from zz") {
-    .ok(_)  => println("write_ok"),
-    .err(e) => println("write_err: {e}"),
+    .ok(_) => println("write_ok")
+    .err(e) => println("write_err: {e}")
 }
 
 match fs.read_file("/tmp/zz_e2e_test.txt") {
-    .ok(content) => println(content),
-    .err(e)      => println("read_err: {e}"),
+    .ok(content) => println(content)
+    .err(e) => println("read_err: {e}")
 }
 
 // exists

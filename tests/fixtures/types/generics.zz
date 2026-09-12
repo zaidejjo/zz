@@ -1,5 +1,7 @@
 // E2E: Generics — generic functions with type inference
-func identity<T>(x: T) -> T { x }
+func identity<T>(x: T) -> T {
+    x
+}
 
 func pair<T, U>(a: T, b: U) -> str {
     "{a}-{b}"

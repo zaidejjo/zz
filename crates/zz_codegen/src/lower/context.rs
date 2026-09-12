@@ -623,6 +623,22 @@ pub(crate) fn auto_box(expr: &str, ctype: Option<&str>) -> String {
     }
 }
 
+/// True if an expression can be duplicated in generated C without
+/// changing program semantics (no side effects, no captured temporaries).
+/// Used by pow strength reduction (`x ** 2` → `x * x`), which emits the
+/// base expression twice.
+pub(crate) fn is_dup_safe(e: &Expr) -> bool {
+    match e {
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Bool { .. }
+        | Expr::Str { .. }
+        | Expr::Ident { .. } => true,
+        Expr::Paren { expr, .. } => is_dup_safe(expr),
+        _ => false,
+    }
+}
+
 /// Classify a binary operand as a recognized scalar shape, returning its C
 /// type (`"int64_t"` / `"double"`) if so. Recognized shapes:
 ///   - Int literal  → `"int64_t"`
@@ -657,6 +673,31 @@ pub(crate) fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static 
             }
         }
         Expr::Paren { expr, .. } => scalar_operand_type(expr, names),
+        Expr::Binary {
+            op, left, right, ..
+        } => {
+            // Fold nested integer/float arithmetic so strength-reduced
+            // forms (e.g. `(i * i) % 97`) stay raw: both sides must be
+            // the same numeric scalar type. Div is excluded (division
+            // keeps boxed runtime error semantics); Rem with a literal
+            // zero divisor is excluded (boxed div-by-zero guard).
+            use zz_frontend::ast::BinOp::{Add, Mul, Rem, Sub};
+            match op {
+                Add | Sub | Mul | Rem => {
+                    if matches!(op, Rem) && matches!(right.as_ref(), Expr::Int { value: 0, .. }) {
+                        return None;
+                    }
+                    let lt = scalar_operand_type(left, names)?;
+                    let rt = scalar_operand_type(right, names)?;
+                    if lt == rt && (lt == "int64_t" || lt == "double") {
+                        Some(lt)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -853,6 +894,24 @@ pub(crate) fn scalar_operand_c(e: &Expr, names: &NameCtx) -> Option<String> {
             }
         }
         Expr::Paren { expr, .. } => scalar_operand_c(expr, names),
+        Expr::Binary {
+            op, left, right, ..
+        } => {
+            // Must agree with scalar_operand_type's Binary fold: only
+            // emit raw C when the fold classified this node.
+            let t = scalar_operand_type(e, names)?;
+            debug_assert!(t == "int64_t" || t == "double");
+            let l = scalar_operand_c(left, names)?;
+            let r = scalar_operand_c(right, names)?;
+            let c_op = match op {
+                zz_frontend::ast::BinOp::Add => "+",
+                zz_frontend::ast::BinOp::Sub => "-",
+                zz_frontend::ast::BinOp::Mul => "*",
+                zz_frontend::ast::BinOp::Rem => "%",
+                _ => return None,
+            };
+            Some(format!("({l} {c_op} {r})"))
+        }
         _ => None,
     }
 }

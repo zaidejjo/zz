@@ -217,6 +217,13 @@ pub fn build(
         } else {
             cmd.arg("-O3").arg("-flto");
         }
+        // Aggressive release flags: host-native SIMD, relaxed FP, loop
+        // unrolling, frame pointer elimination.  These give measurable
+        // gains on CPU-bound and FP-heavy benchmarks.
+        cmd.arg("-march=native");
+        cmd.arg("-ffast-math");
+        cmd.arg("-funroll-loops");
+        cmd.arg("-fomit-frame-pointer");
     } else {
         cmd.arg("-O1");
     }

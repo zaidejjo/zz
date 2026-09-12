@@ -11,8 +11,8 @@ println("decoded: {decoded}")
 // ── base64 error handling ──
 bad_b64 := encoding.base64_decode("!!!not-valid-base64!!!")
 match bad_b64 {
-    .ok(v) => println("bad b64: should not happen"),
-    .err(msg) => println("bad b64: {msg}"),
+    .ok(v) => println("bad b64: should not happen")
+    .err(msg) => println("bad b64: {msg}")
 }
 
 // ── hex encode/decode ──
@@ -25,15 +25,15 @@ println("hex decoded: {hex_decoded}")
 // ── hex error handling ──
 bad_hex_len := encoding.hex_decode("abc")
 match bad_hex_len {
-    .ok(_) => println("bad hex len: should not happen"),
-    .err(msg) => println("bad hex len: {msg}"),
+    .ok(_) => println("bad hex len: should not happen")
+    .err(msg) => println("bad hex len: {msg}")
 }
 
 bad_hex_char := encoding.hex_encode("ZZ")
 unhex := encoding.hex_decode("zzzz")
 match unhex {
-    .ok(_) => println("bad hex char: should not happen"),
-    .err(msg) => println("bad hex char: {msg}"),
+    .ok(_) => println("bad hex char: should not happen")
+    .err(msg) => println("bad hex char: {msg}")
 }
 
 // ── URL encode/decode ──
@@ -46,8 +46,8 @@ println("url decoded: {url_decoded}")
 // ── URL error handling ──
 bad_url := encoding.url_decode("%zz")
 match bad_url {
-    .ok(_) => println("bad url: should not happen"),
-    .err(msg) => println("bad url: {msg}"),
+    .ok(_) => println("bad url: should not happen")
+    .err(msg) => println("bad url: {msg}")
 }
 
 println("encoding_test_ok")

@@ -7,7 +7,6 @@ import std.time
 
 func main() {
     t0 := time.now_ms()
-
     // Wave 1: Small arrays (1M iterations)
     sum1 := 0
     wave1_start := time.now_ms()
@@ -19,7 +18,6 @@ func main() {
     }
     wave1_end := time.now_ms()
     println("wave1_arrays_1M_ms: " + str(wave1_end - wave1_start))
-
     // Wave 2: Dictionaries (500k iterations)
     sum2 := 0
     wave2_start := time.now_ms()
@@ -31,7 +29,6 @@ func main() {
     }
     wave2_end := time.now_ms()
     println("wave2_dicts_500k_ms: " + str(wave2_end - wave2_start))
-
     // Wave 3: Strings (500k iterations)
     sum3 := 0
     wave3_start := time.now_ms()
@@ -43,7 +40,6 @@ func main() {
     }
     wave3_end := time.now_ms()
     println("wave3_strings_500k_ms: " + str(wave3_end - wave3_start))
-
     // Wave 4: Nested structures (200k iterations)
     sum4 := 0
     wave4_start := time.now_ms()
@@ -57,7 +53,6 @@ func main() {
     }
     wave4_end := time.now_ms()
     println("wave4_nested_200k_ms: " + str(wave4_end - wave4_start))
-
     // Baseline: Keep data alive (arrays only, no string keys in dicts)
     baseline_start := time.now_ms()
     big_arr := []
@@ -67,7 +62,6 @@ func main() {
     baseline_end := time.now_ms()
     println("baseline_arr_len: " + str(len(big_arr)))
     println("baseline_alloc_100k_ms: " + str(baseline_end - baseline_start))
-
     t1 := time.now_ms()
     println("total_ms: " + str(t1 - t0))
     println("signature_sum: " + str(sum1 + sum2 + sum3 + sum4))

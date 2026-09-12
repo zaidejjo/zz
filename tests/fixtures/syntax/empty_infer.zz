@@ -20,23 +20,19 @@ func main() {
     items := []
     r1 := sum(items)
     println(r1)
-
     // Empty dict inferred from function parameter context
     counts := {}
     r2 := count_size(counts)
     println(r2)
-
     // Explicit types still work
-    x: [int] = []
-    y: {str: int} = {}
+    x:[int] = []
+    y:{str: int} = {}
     println(sum(x))
     println(count_size(y))
-
     // Int-float promotion
     z := 1 + 2.5
     println(z)
     w := 3 * 1.0
     println(w)
-
     println("empty_infer_ok")
 }

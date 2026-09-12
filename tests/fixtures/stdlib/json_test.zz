@@ -51,22 +51,22 @@ println("roundtrip: {roundtrip}")
 // ── parse error ──
 bad := json.parse("not valid json at all!!!")
 match bad {
-    .ok(_) => println("bad parse: should not happen"),
-    .err(msg) => println("bad parse: {msg}"),
+    .ok(_) => println("bad parse: should not happen")
+    .err(msg) => println("bad parse: {msg}")
 }
 
 // ── missing key ──
 miss := json.get(j, "missing")
 match miss {
-    .ok(_) => println("missing: should not happen"),
-    .err(msg) => println("missing key: {msg}"),
+    .ok(_) => println("missing: should not happen")
+    .err(msg) => println("missing key: {msg}")
 }
 
 // ── invalid index ──
 bad_idx := json.get(b, "abc")
 match bad_idx {
-    .ok(_) => println("bad index: should not happen"),
-    .err(msg) => println("bad index: {msg}"),
+    .ok(_) => println("bad index: should not happen")
+    .err(msg) => println("bad index: {msg}")
 }
 
 println("json_test_ok")

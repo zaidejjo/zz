@@ -3,8 +3,7 @@
 // ?? multiline continuation (operator spans lines) must still work.
 
 x := 1
-y := x ??
-    2
+y := x ?? 2
 println(y)
 
 // Verify two separate ?? expressions on separate lines

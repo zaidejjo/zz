@@ -1,16 +1,16 @@
 // =====================================================================
 // bench_cpu_intensive.zz
 // Multi-language stress benchmark — ZZ implementation.
-//
+// 
 // Heavy integer math + tight array fills. Measures raw CPU throughput
 // and cache locality.
-//
+// 
 // Workload:
 //   * 10M integer accumulations (tight scalar loop)
 //   * 1M pow + modulo (tight scalar loop)
 //   * 100k array push + index-sum (memory-bound)
 //   * Sum of squares 1..N
-//
+// 
 // NOTE: array sizes chosen to stay safely below the ZZ VM's runtime
 // `for v in arr` overhead threshold; index loops are used instead.
 // =====================================================================
@@ -19,7 +19,6 @@ import std.time
 
 func main() {
     sum := 0
-
     // ── 10M integer accumulation ────────────────────────────────────
     t0 := time.now_ms()
     for i in 0..10000000 {
@@ -27,7 +26,6 @@ func main() {
     }
     t1 := time.now_ms()
     println("accum_10M_ms: " + str(t1 - t0))
-
     // ── 1M pow + mod ─────────────────────────────────────────────────
     acc := 0
     for i in 0..1000000 {
@@ -36,7 +34,6 @@ func main() {
     t2 := time.now_ms()
     println("powmod_1M_ms: " + str(t2 - t1))
     println("powmod_sum: " + str(acc))
-
     // ── 100k array fill + indexed sum ───────────────────────────────
     arr := []
     for i in 0..100000 {
@@ -44,7 +41,6 @@ func main() {
     }
     t3 := time.now_ms()
     println("fill_100k_ms: " + str(t3 - t2))
-
     s := 0
     n := len(arr)
     for i in 0..n {
@@ -53,7 +49,6 @@ func main() {
     t4 := time.now_ms()
     println("sum_100k_ms: " + str(t4 - t3))
     println("arr_sum: " + str(s))
-
     // ── Total wall-clock + signature sum ─────────────────────────────
     t5 := time.now_ms()
     println("total_ms: " + str(t5 - t0))
