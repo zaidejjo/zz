@@ -110,6 +110,9 @@ pub enum Value {
     /// An opaque SQLite database handle (`std.sqlz.open`;
     /// `std.db.open` alias).
     Db(DbHandle),
+    /// A generic opaque handle into the `zz_native_rt` pool (regex patterns,
+    /// arg parsers, log spans, …). The tag selects the method namespace.
+    Opaque(Box<zz_native_rt::Handle>),
     /// An HTTP response (status + body + headers).
     Response(Box<Response>),
     /// A struct instance: its type name and insertion-ordered fields.
@@ -326,6 +329,7 @@ impl Value {
             Value::TcpStream(_) => "tcp.stream".to_string(),
             Value::TcpListener(_) => "tcp.listener".to_string(),
             Value::Db(_) => "db".to_string(),
+            Value::Opaque(h) => h.tag.clone(),
             Value::Response(_) => "http.response".to_string(),
             Value::Object(o) => o.name.clone(),
             Value::Range(_) => "range".to_string(),
@@ -347,6 +351,11 @@ impl Value {
             Value::TcpStream(_) => Some("net"),
             Value::TcpListener(_) => Some("net"),
             Value::Db(_) => Some("sqlz"),
+            // Opaque handles dispatch on their tag (e.g. a `"regex"` handle
+            // resolves `regex.is_match`). Tags are dynamic, so the `&str`
+            // is leaked once per distinct tag — same pattern as `Object`
+            // namespaces below.
+            Value::Opaque(h) => Some(Box::leak(h.tag.clone().into_boxed_str()) as &str),
             Value::Response(_) => Some("http"),
             Value::Chan(_) => Some("chan"),
             Value::TaskJoin(_) => None,
@@ -439,6 +448,7 @@ impl fmt::Display for Value {
             Value::Chan(_) => write!(f, "<chan>"),
             Value::TaskJoin(_) => write!(f, "<task.join>"),
             Value::Db(_) => write!(f, "<db>"),
+            Value::Opaque(h) => write!(f, "<{} #{}>", h.tag, h.id),
         }
     }
 }
@@ -472,6 +482,8 @@ impl PartialEq for Value {
             (Value::TaskJoin(a), Value::TaskJoin(b)) => Arc::ptr_eq(a, b),
             // Db handles: identity (same connection)
             (Value::Db(a), Value::Db(b)) => a == b,
+            // Opaque handles: same tag and pool id (same object).
+            (Value::Opaque(a), Value::Opaque(b)) => a == b,
             _ => false,
         }
     }
@@ -545,5 +557,22 @@ mod tests {
             Value::Result(Box::new(Err(Value::Str("x".to_string().into())))).to_string(),
             ".err(x)"
         );
+    }
+
+    #[test]
+    fn opaque_handle_value() {
+        let h = zz_native_rt::alloc("regex", std::sync::Arc::new(1u32));
+        let v = Value::Opaque(Box::new(h.clone()));
+        assert_eq!(v.type_name(), "regex");
+        assert_eq!(v.method_namespace(), Some("regex"));
+        assert_eq!(v.to_string(), format!("<regex #{}>", h.id));
+        assert_eq!(v, Value::Opaque(Box::new(h.clone())));
+        let other = Value::Opaque(Box::new(zz_native_rt::Handle {
+            tag: "uuid".to_string(),
+            id: h.id,
+        }));
+        assert_ne!(v, other);
+        assert_ne!(v, Value::Int(1));
+        assert!(zz_native_rt::drop_handle(h.id));
     }
 }

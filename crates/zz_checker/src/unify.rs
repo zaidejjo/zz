@@ -116,6 +116,8 @@ impl Unifier {
             (Type::Error, _) | (_, Type::Error) => Ok(()),
             (Type::Named(a), Type::Named(b)) if a == b => Ok(()),
             (Type::Struct(a), Type::Struct(b)) if a == b => Ok(()),
+            // Opaque handles unify only within the same module tag.
+            (Type::Opaque(a), Type::Opaque(b)) if a == b => Ok(()),
             (Type::Range(x), Type::Range(y)) => self.unify(&x, &y),
             (Type::Json, Type::Json)
             | (Type::Db, Type::Db)

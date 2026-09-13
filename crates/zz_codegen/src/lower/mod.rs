@@ -30,6 +30,9 @@ pub(crate) use context::{
 pub struct LoweredC {
     /// The full generated C source (runtime + user code + main glue).
     pub source: String,
+    /// True when the program calls natives provided by the Rust static
+    /// library; the build must link `libzz_native_rt.a`.
+    pub needs_native_rt: bool,
 }
 
 /// Mangle a zz qualified name to a C identifier.
@@ -256,8 +259,18 @@ impl Lowerer {
         }
 
         let closure_fwd = self.closure_forward_decls.borrow().join("");
+        // FFI prelude: `extern` declarations for Rust-staticlib natives used
+        // by this program. Empty when none, keeping generated C for existing
+        // programs byte-identical.
+        let ffi_pre = crate::ffi::ffi_prelude(&self.reachable_natives);
+        let ffi_section = if ffi_pre.is_empty() {
+            String::new()
+        } else {
+            format!("\n// ---- native-runtime FFI ----\n{ffi_pre}\n")
+        };
+        let needs_native_rt = crate::ffi::needs_native_rt(&self.reachable_natives);
         let source = format!(
-            "{runtime_h}\n{runtime_c}\n\n// ---- struct definitions ----\n{struct_preamble}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset_trim(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
+            "{runtime_h}\n{runtime_c}\n{ffi_section}\n// ---- struct definitions ----\n{struct_preamble}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset_trim(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
             runtime_h = crate::RUNTIME_H,
             runtime_c = crate::RUNTIME_C,
             struct_preamble = struct_preamble,
@@ -289,7 +302,10 @@ impl Lowerer {
             1,
         );
 
-        LoweredC { source }
+        LoweredC {
+            source,
+            needs_native_rt,
+        }
     }
 }
 
@@ -579,7 +595,11 @@ fn native_impl(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Whether a reachable native has a C runtime implementation.
+/// Whether a reachable native has a callable implementation.
+///
+/// Embedded-C natives resolve through [`native_impl`]; Rust-staticlib
+/// natives (regex, crypto, … from Phase 1 on) through [`crate::ffi_impl`].
+/// Anything else lowers to unit (documented MVP limitation).
 pub fn native_supported(name: &str) -> bool {
-    native_impl(name).is_some()
+    native_impl(name).is_some() || crate::ffi_impl(name).is_some()
 }

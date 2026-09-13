@@ -36,6 +36,8 @@ fn resolve_methods(tp: &TypedProgram, recv: &Expr, method: &str) -> Vec<String> 
         // regardless of which namespace the call site used.
         Some(Type::Db) => vec![format!("sqlz.{method}"), format!("db.{method}")],
         Some(Type::Json) => vec![format!("json.{method}")],
+        // Opaque handles dispatch on their module tag (`regex.*`, …).
+        Some(Type::Opaque(tag)) => vec![format!("{tag}.{method}")],
         Some(Type::Struct(s)) => {
             let fq = format!("{s}.{method}");
             if tp.funcs.contains_key(&fq) {

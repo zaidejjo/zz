@@ -1225,6 +1225,12 @@ impl Checker {
                         }
                         Type::Chan => sig = self.funcs.get(&format!("chan.{method}")).cloned(),
                         Type::TaskJoin => sig = self.funcs.get(&format!("task.{method}")).cloned(),
+                        // Opaque handles dispatch on their module tag, e.g.
+                        // an `Opaque("regex")` receiver resolves
+                        // `regex.is_match`.
+                        Type::Opaque(tag) => {
+                            sig = self.funcs.get(&format!("{tag}.{method}")).cloned()
+                        }
                         Type::Struct(sname) => {
                             // Try TypeName.method (impl block methods)
                             sig = self.funcs.get(&format!("{sname}.{method}")).cloned();
@@ -1505,6 +1511,9 @@ impl Checker {
                         }
                         Type::TaskJoin => {
                             sig = self.funcs.get(&format!("task.{method}")).cloned();
+                        }
+                        Type::Opaque(tag) => {
+                            sig = self.funcs.get(&format!("{tag}.{method}")).cloned();
                         }
                         Type::Struct(sname) => {
                             // Try TypeName.method (impl block methods)

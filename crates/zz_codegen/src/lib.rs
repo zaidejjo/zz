@@ -6,9 +6,11 @@
 //! is required on standard systems (they ship with the OS toolchain).
 
 pub mod compile;
+pub mod ffi;
 pub mod lower;
 
 pub use compile::{compile_and_run, detect_cc, BuildError, BuildOptions};
+pub use ffi::{ffi_impl, FfiError, FFI_VERSION};
 pub use lower::{mangle, native_supported, LoweredC, Lowerer};
 
 /// The embedded C runtime header. The runtime is split across modular
@@ -57,6 +59,10 @@ pub fn build_native(
         tp.clone(),
     );
     let lowered = lowerer.lower();
+    // Programs calling Rust-staticlib natives need the native runtime link
+    // even when the caller did not opt in explicitly.
+    let mut opts = opts;
+    opts.native_rt = opts.native_rt || lowered.needs_native_rt;
     compile::build(&lowered.source, out_path, opts)?;
     Ok(lowered)
 }

@@ -995,6 +995,12 @@ impl Lowerer {
                                 zz_checker::Type::Option(_) => Some("option"),
                                 zz_checker::Type::Result(_, _) => Some("result"),
                                 zz_checker::Type::Db => Some("sqlz"),
+                                // Opaque handles dispatch on their module tag.
+                                // Tags are dynamic, so leak once per tag —
+                                // same pattern as struct namespaces in the VM.
+                                zz_checker::Type::Opaque(tag) => {
+                                    Some(Box::leak(tag.clone().into_boxed_str()) as &str)
+                                }
                                 _ => None,
                             });
                         // Also check the type checker's span_types map
@@ -1008,6 +1014,9 @@ impl Lowerer {
                                 zz_checker::Type::Option(_) => Some("option"),
                                 zz_checker::Type::Result(_, _) => Some("result"),
                                 zz_checker::Type::Db => Some("sqlz"),
+                                zz_checker::Type::Opaque(tag) => {
+                                    Some(Box::leak(tag.clone().into_boxed_str()) as &str)
+                                }
                                 _ => None,
                             }
                         } else {
@@ -1114,12 +1123,15 @@ impl Lowerer {
                         // same runtime fn via native_impl.
                         zz_checker::Type::Db => (format!("sqlz.{method}"), Some(*obj.clone())),
                         _ => {
-                            let ns = match zzty {
+                            let ns: &str = match zzty {
                                 zz_checker::Type::Array(_) => "vec",
                                 zz_checker::Type::Str => "str",
                                 zz_checker::Type::Dict(_, _) => "dict",
                                 zz_checker::Type::Option(_) => "option",
                                 zz_checker::Type::Result(_, _) => "result",
+                                zz_checker::Type::Opaque(tag) => {
+                                    Box::leak(tag.clone().into_boxed_str()) as &str
+                                }
                                 _ => "",
                             };
                             if !ns.is_empty() {
@@ -1551,7 +1563,8 @@ impl Lowerer {
         let is_native = self.reachable_natives.contains(&cname_for_native)
             || self.reachable_natives.contains(&std_name);
         let native_rt = if is_native {
-            native_impl(&cname_for_native)
+            // Embedded C runtime first, Rust staticlib second (Phase 1+).
+            native_impl(&cname_for_native).or_else(|| crate::ffi_impl(&cname_for_native))
         } else {
             None
         };

@@ -2647,6 +2647,7 @@ dependencies = [
  "zz_checker",
  "zz_frontend",
  "zz_hir",
+ "zz_native_rt",
  "zz_runtime",
  "zz_stdlib",
 ]
@@ -2697,12 +2698,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_native_rt"
+version = "0.1.0"
+
+[[package]]
 name = "zz_runtime"
 version = "0.1.0"
 dependencies = [
  "codespan-reporting",
  "zz_checker",
  "zz_frontend",
+ "zz_native_rt",
 ]
 
 [[package]]

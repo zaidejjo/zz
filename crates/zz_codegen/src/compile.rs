@@ -10,6 +10,8 @@ pub enum BuildError {
     NoCompiler,
     /// The C compiler failed with `stderr`.
     CompileFailed { stderr: String },
+    /// The Rust native runtime could not be built or linked.
+    NativeRt { reason: String },
     /// Rust-side IO error.
     Io(std::io::Error),
 }
@@ -19,6 +21,7 @@ impl std::fmt::Display for BuildError {
         match self {
             BuildError::NoCompiler => write!(f, "no C compiler found (tried cc, clang, gcc, tcc)"),
             BuildError::CompileFailed { stderr } => write!(f, "C compile failed:\n{stderr}"),
+            BuildError::NativeRt { reason } => write!(f, "native runtime link failed: {reason}"),
             BuildError::Io(e) => write!(f, "io error: {e}"),
         }
     }
@@ -101,6 +104,9 @@ pub struct BuildOptions {
     pub thin_lto: bool,
     /// PGO mode for profile-guided optimization.
     pub pgo: PgoMode,
+    /// Link the Rust native runtime (`libzz_native_rt.a`) for FFI natives.
+    /// Set automatically from the lowered program; tests can opt in directly.
+    pub native_rt: bool,
 }
 
 impl BuildOptions {
@@ -113,6 +119,7 @@ impl BuildOptions {
             gc_sections: true,
             thin_lto: false,
             pgo: PgoMode::None,
+            native_rt: false,
         }
     }
 
@@ -126,6 +133,7 @@ impl BuildOptions {
             gc_sections: true,
             thin_lto: false,
             pgo: PgoMode::None,
+            native_rt: false,
         }
     }
 
@@ -139,6 +147,7 @@ impl BuildOptions {
             gc_sections: true,
             thin_lto: true,
             pgo: PgoMode::None,
+            native_rt: false,
         }
     }
 
@@ -152,6 +161,7 @@ impl BuildOptions {
             gc_sections: true,
             thin_lto: true,
             pgo: PgoMode::Generate,
+            native_rt: false,
         }
     }
 
@@ -165,6 +175,7 @@ impl BuildOptions {
             gc_sections: true,
             thin_lto: true,
             pgo: PgoMode::Use,
+            native_rt: false,
         }
     }
 }
@@ -181,6 +192,7 @@ impl BuildOptions {
         self.gc_sections.hash(&mut h);
         self.thin_lto.hash(&mut h);
         self.pgo.hash(&mut h);
+        self.native_rt.hash(&mut h);
         h.finish()
     }
 }
@@ -255,6 +267,23 @@ pub fn build(
         .arg("-lsqlite3")
         // sqlz: prepared-statement FFI needs sqlite3 headers.
         .arg("-DZZ_HAS_SQLITE3");
+    // Unified Rust native runtime: link the static library providing FFI
+    // natives. Fully-static binaries cannot use it (shared libstd), so fail
+    // early with a clear message instead of a cryptic `ld` error.
+    if opts.native_rt {
+        if opts.static_link {
+            return Err(BuildError::NativeRt {
+                reason: "fully-static builds cannot link the Rust native runtime \
+                         (it needs the shared libstd); use `zz build` or `zz build -p`"
+                    .to_string(),
+            });
+        }
+        let extra = crate::ffi::link_args(opts.optimize)
+            .map_err(|e| BuildError::NativeRt { reason: e.0 })?;
+        for a in &extra {
+            cmd.arg(a);
+        }
+    }
 
     let out = cmd.output().map_err(BuildError::Io)?;
     if !out.status.success() {
