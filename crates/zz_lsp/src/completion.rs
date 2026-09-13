@@ -21,7 +21,7 @@ const KEYWORDS: &[&str] = &[
 // ── Stdlib module names ──────────────────────────────────────────────────
 
 const STDLIB_MODULES: &[&str] = &[
-    "io", "str", "vec", "json", "http", "fs", "env", "math", "time",
+    "io", "str", "vec", "json", "http", "fs", "env", "math", "time", "sqlz", "db",
 ];
 
 // ── Public API ───────────────────────────────────────────────────────────

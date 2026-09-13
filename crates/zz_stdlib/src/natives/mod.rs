@@ -11,6 +11,7 @@ use zz_runtime::{EvalError, NativeEntry, Value};
 
 pub(crate) mod builtins;
 pub(crate) mod concurrency;
+pub(crate) mod db;
 pub(crate) mod encoding;
 pub(crate) mod env;
 pub(crate) mod fs;
@@ -1322,6 +1323,127 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 2,
             f: net::set_write_timeout,
+        },
+    );
+
+    // std.sqlz — SQLite (rusqlite bundled), CANONICAL module name.
+    // `query`/`exec` take (db, template, ...bound_params); the VM's DbQuery
+    // op splits the interpolated SQL into template + params so values are
+    // bound via prepared statements, never concatenated.
+    // `std.db` / `db.*` below are zero-overhead aliases (same fn pointers).
+    m.insert(
+        "std.sqlz.open".into(),
+        NativeEntry {
+            arity: 1,
+            f: db::db_open,
+        },
+    );
+    m.insert(
+        "std.sqlz.exec".into(),
+        NativeEntry {
+            arity: 3,
+            f: db::db_exec,
+        },
+    );
+    m.insert(
+        "std.sqlz.query".into(),
+        NativeEntry {
+            arity: 3,
+            f: db::db_query,
+        },
+    );
+    m.insert(
+        "std.sqlz.close".into(),
+        NativeEntry {
+            arity: 1,
+            f: db::db_close,
+        },
+    );
+    // Method-dispatch aliases (`sqlz.open(...)` after `import std.sqlz`).
+    m.insert(
+        "sqlz.open".into(),
+        NativeEntry {
+            arity: 1,
+            f: db::db_open,
+        },
+    );
+    m.insert(
+        "sqlz.exec".into(),
+        NativeEntry {
+            arity: 3,
+            f: db::db_exec,
+        },
+    );
+    m.insert(
+        "sqlz.query".into(),
+        NativeEntry {
+            arity: 3,
+            f: db::db_query,
+        },
+    );
+    m.insert(
+        "sqlz.close".into(),
+        NativeEntry {
+            arity: 1,
+            f: db::db_close,
+        },
+    );
+    // Alias: `std.db` / `db.*` point directly at the `std.sqlz` impls.
+    m.insert(
+        "std.db.open".into(),
+        NativeEntry {
+            arity: 1,
+            f: db::db_open,
+        },
+    );
+    m.insert(
+        "std.db.exec".into(),
+        NativeEntry {
+            arity: 3,
+            f: db::db_exec,
+        },
+    );
+    m.insert(
+        "std.db.query".into(),
+        NativeEntry {
+            arity: 3,
+            f: db::db_query,
+        },
+    );
+    m.insert(
+        "std.db.close".into(),
+        NativeEntry {
+            arity: 1,
+            f: db::db_close,
+        },
+    );
+    // Method-dispatch aliases (`db.open(...)` after `import std.db`).
+    m.insert(
+        "db.open".into(),
+        NativeEntry {
+            arity: 1,
+            f: db::db_open,
+        },
+    );
+    m.insert(
+        "db.exec".into(),
+        NativeEntry {
+            arity: 3,
+            f: db::db_exec,
+        },
+    );
+    m.insert(
+        "db.query".into(),
+        NativeEntry {
+            arity: 3,
+            f: db::db_query,
+        },
+    );
+    m.insert(
+        "db.close".into(),
+        NativeEntry {
+            arity: 1,
+            f: db::db_close,
         },
     );
 

@@ -39,10 +39,22 @@ pub fn stdlib_consts() -> std::collections::HashMap<String, f64> {
 }
 
 /// The set of known `std.*` module names (second path component).
+/// `sqlz` is the canonical SQLite module; `db` is a zero-overhead alias
+/// pointing directly at `std.sqlz` (see [`canonical_module`]).
 pub const STDLIB_MODULES: &[&str] = &[
     "io", "str", "vec", "json", "http", "fs", "env", "math", "time", "encoding", "net", "chan",
-    "task",
+    "task", "sqlz", "db",
 ];
+
+/// Resolve a module name to its canonical backing module.
+/// Currently `db` is an alias for the canonical `sqlz` module; every
+/// other module is its own canonical name.
+pub fn canonical_module(module: &str) -> &str {
+    match module {
+        "db" => "sqlz",
+        _ => module,
+    }
+}
 
 /// Register a `std.*` module under a namespace name by copying its entries
 /// from the `std.<module>.*` keys to `<ns>.*` keys in both registries.
@@ -71,7 +83,10 @@ pub fn register_module_namespace(
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
-    let prefix = format!("std.{module}.");
+    // `std.db` is a zero-overhead alias: importing it copies the canonical
+    // `std.sqlz.*` entries (identical sigs + fn pointers, no extra layer).
+    let source = canonical_module(module);
+    let prefix = format!("std.{source}.");
     let std_funcs = stdlib_funcs();
     let std_natives = stdlib_natives();
     for (k, v) in std_funcs {
@@ -112,7 +127,8 @@ pub fn register_selective_namespace(
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
-    let prefix = format!("std.{module}.");
+    // Alias: selective `import std.db(open)` resolves against `std.sqlz.*`.
+    let prefix = format!("std.{}.", canonical_module(module));
     let std_funcs = stdlib_funcs();
     let std_natives = stdlib_natives();
     let std_consts = stdlib_consts();
@@ -151,7 +167,8 @@ pub fn register_wildcard_namespace(
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
-    let prefix = format!("std.{module}.");
+    // Alias: wildcard `import std.db(*)` resolves against `std.sqlz.*`.
+    let prefix = format!("std.{}.", canonical_module(module));
     let std_funcs = stdlib_funcs();
     let std_natives = stdlib_natives();
     let std_consts = stdlib_consts();

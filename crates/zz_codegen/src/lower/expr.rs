@@ -984,6 +984,7 @@ impl Lowerer {
                                 zz_checker::Type::Dict(_, _) => Some("dict"),
                                 zz_checker::Type::Option(_) => Some("option"),
                                 zz_checker::Type::Result(_, _) => Some("result"),
+                                zz_checker::Type::Db => Some("sqlz"),
                                 _ => None,
                             });
                         // Also check the type checker's span_types map
@@ -996,6 +997,7 @@ impl Lowerer {
                                 zz_checker::Type::Dict(_, _) => Some("dict"),
                                 zz_checker::Type::Option(_) => Some("option"),
                                 zz_checker::Type::Result(_, _) => Some("result"),
+                                zz_checker::Type::Db => Some("sqlz"),
                                 _ => None,
                             }
                         } else {
@@ -1015,7 +1017,9 @@ impl Lowerer {
                         // Fallback: generic namespace search (untyped
                         // receivers, e.g. variables without type annotations).
                         if found_ns.is_empty() {
-                            let namespaces = ["vec", "str", "dict", "option", "result", "http"];
+                            let namespaces = [
+                                "vec", "str", "dict", "option", "result", "http", "sqlz", "db",
+                            ];
                             for ns in &namespaces {
                                 let candidate = format!("{ns}.{method}");
                                 let std_candidate = format!("std.{ns}.{method}");
@@ -1031,7 +1035,9 @@ impl Lowerer {
                             // Also try matching by native_impl — checks if there's
                             // a C runtime function registered for this method under
                             // any namespace.
-                            let namespaces = ["vec", "str", "dict", "option", "result", "http"];
+                            let namespaces = [
+                                "vec", "str", "dict", "option", "result", "http", "sqlz", "db",
+                            ];
                             for ns in &namespaces {
                                 let candidate = format!("{ns}.{method}");
                                 if native_supported(&candidate) {
@@ -1094,6 +1100,9 @@ impl Lowerer {
                 if let Some(zzty) = self.tp.types.get(&obj.span()) {
                     match zzty {
                         zz_checker::Type::Struct(sname) => (format!("{sname}.{method}"), None),
+                        // Canonical `sqlz.*`; `db.*` alias resolves to the
+                        // same runtime fn via native_impl.
+                        zz_checker::Type::Db => (format!("sqlz.{method}"), Some(*obj.clone())),
                         _ => {
                             let ns = match zzty {
                                 zz_checker::Type::Array(_) => "vec",
@@ -1217,6 +1226,21 @@ impl Lowerer {
         };
 
         let mut arg_items: Vec<String> = Vec::new();
+        // sqlz early-out: sqlz.query/sqlz.exec (+ db.* alias) lower via
+        // emit_db_call, which needs the raw Exprs (Fmt split into template
+        // + binds). Runs BEFORE the generic receiver/arg loops below, which
+        // would otherwise concatenate the Fmt into a single string.
+        // NOTE: ordered_args holds ONLY user args ([sql]); the receiver
+        // is separate in method_receiver. Both are passed explicitly.
+        if matches!(
+            cname.as_str(),
+            "sqlz.query" | "std.sqlz.query" | "db.query" | "std.db.query"
+        ) || matches!(
+            cname.as_str(),
+            "sqlz.exec" | "std.sqlz.exec" | "db.exec" | "std.db.exec"
+        ) {
+            return self.emit_db_call(&cname, method_receiver.as_ref(), ordered_args, names, out);
+        }
         // Clone the method receiver up front; we may need it again in the
         // impl-method call-site branch (which needs the original Expr
         // to emit the unboxed-struct address).
@@ -1269,7 +1293,7 @@ impl Lowerer {
         // vec.push → vec.append (in-place mutation) must not apply here.
         let saved_void = *self.void_context.borrow();
         *self.void_context.borrow_mut() = false;
-        for a in ordered_args {
+        for a in &ordered_args {
             let emitted = self.emit_expr(a, names, out);
             // Auto-box if this argument is a scalar variable or struct field
             let boxed = if let Expr::Ident { name, .. } = a {
@@ -1669,6 +1693,151 @@ impl Lowerer {
         }
         o.push('"');
         format!("zz_str_static({o})")
+    }
+
+    /// Escape a raw string for embedding as a C string literal body
+    /// (without the `zz_str_static` wrapper).
+    fn c_escape(s: &str) -> String {
+        let mut o = String::new();
+        for c in s.chars() {
+            match c {
+                '"' => o.push_str("\\\""),
+                '\\' => o.push_str("\\\\"),
+                '\n' => o.push_str("\\n"),
+                '\r' => o.push_str("\\r"),
+                '\t' => o.push_str("\\t"),
+                c if (c as u32) < 32 => o.push_str(&format!("\\x{:02x}", c as u32)),
+                c => o.push(c),
+            }
+        }
+        o
+    }
+
+    /// Lower `sqlz.query(sql)` / `sqlz.exec(sql)` (+ `db.*` alias) to
+    /// zero-alloc C FFI: static template with `{expr}` → `?N`, bound exprs
+    /// collected into a binds array, then the native-convention
+    /// `zz_db_query` / `zz_db_exec` (db, sql_str, binds_array) which call
+    /// `sqlite3_prepare_v2` + `sqlite3_bind_*` + `sqlite3_step`.
+    /// The receiver arrives separately (`method_receiver`); `sql_args`
+    /// holds the user args ([sql]).
+    fn emit_db_call(
+        &self,
+        cname: &str,
+        method_receiver: Option<&Expr>,
+        sql_args: Vec<&Expr>,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        let recv_c = match method_receiver {
+            Some(r) => {
+                let raw = self.emit_expr(r, names, out);
+                match r {
+                    Expr::Ident { name, .. } => auto_box(&raw, names.lookup_type(name)),
+                    _ => raw,
+                }
+            }
+            None => "zz_unit()".to_string(),
+        };
+        // Split SQL into template + bound exprs.
+        let (template, bound): (String, Vec<Expr>) = match sql_args.first() {
+            Some(Expr::Fmt { parts, .. }) => {
+                let mut t = String::new();
+                let mut b = Vec::new();
+                let mut n = 0u32;
+                for p in parts.iter() {
+                    match p {
+                        FmtPart::Text(s) => t.push_str(s),
+                        FmtPart::Expr(e, _) => {
+                            n += 1;
+                            t.push_str(&format!("?{n}"));
+                            b.push((**e).clone());
+                        }
+                    }
+                }
+                (t, b)
+            }
+            Some(Expr::Paren { expr, .. }) => match expr.as_ref() {
+                Expr::Fmt { parts, .. } => {
+                    let mut t = String::new();
+                    let mut b = Vec::new();
+                    let mut n = 0u32;
+                    for p in parts.iter() {
+                        match p {
+                            FmtPart::Text(s) => t.push_str(s),
+                            FmtPart::Expr(e, _) => {
+                                n += 1;
+                                t.push_str(&format!("?{n}"));
+                                b.push((**e).clone());
+                            }
+                        }
+                    }
+                    (t, b)
+                }
+                other => (self.sql_text_of(other), Vec::new()),
+            },
+            Some(other) => (self.sql_text_of(other), Vec::new()),
+            None => (String::new(), Vec::new()),
+        };
+        let n = bound.len();
+        // Static template as a zz_value string (avoids raw char* in the
+        // native call convention) + binds collected into a zz array.
+        let tvar = names.fresh("zz_sql");
+        out.push_str(&format!(
+            "    zz_value {tvar} = zz_str_static(\"{}\");\n",
+            Self::c_escape(&template)
+        ));
+        // Emit bound values as zz_value temporaries.
+        let mut bvars: Vec<String> = Vec::with_capacity(n);
+        for (i, b) in bound.iter().enumerate() {
+            let raw = self.emit_expr(b, names, out);
+            let boxed = match b {
+                Expr::Ident { name, .. } => auto_box(&raw, names.lookup_type(name)),
+                Expr::Path { parts, .. } => {
+                    let joined = parts.join(".");
+                    auto_box(&raw, names.lookup_type(&joined))
+                }
+                _ => box_scalar_operand(b, names, &raw),
+            };
+            let bv = names.fresh("zz_bind");
+            out.push_str(&format!("    zz_value {bv} = {boxed};\n"));
+            let _ = i;
+            bvars.push(bv);
+        }
+        let arr = names.fresh("zz_binds");
+        if n == 0 {
+            out.push_str(&format!("    zz_value {arr} = zz_array_new();\n"));
+        } else {
+            // Build the binds array via zz_vec_push chain (copy-on-write
+            // safe: each push returns the new array).
+            out.push_str(&format!("    zz_value {arr} = zz_array_new();\n"));
+            for bv in &bvars {
+                out.push_str(&format!(
+                    "    {{ int _e = 0; {arr} = zz_vec_push({arr}, {bv}, &_e); }}\n"
+                ));
+            }
+        }
+        let is_query = matches!(
+            cname,
+            "sqlz.query" | "std.sqlz.query" | "db.query" | "std.db.query"
+        );
+        let rt = if is_query {
+            "zz_db_query"
+        } else {
+            "zz_db_exec"
+        };
+        // Native convention (db, sql_str, binds_array) → route through
+        // zz_call_native3 so err plumbing matches every other native.
+        format!("zz_call_native3({rt}, {recv_c}, {tvar}, {arr})")
+    }
+
+    /// Best-effort static text of a non-Fmt SQL arg (plain string literal
+    /// or anything else — the latter lowers to "" and the runtime reports
+    /// the SQLite error verbatim).
+    fn sql_text_of(&self, e: &Expr) -> String {
+        match e {
+            Expr::Str { value, .. } => value.clone(),
+            _ => String::new(),
+        }
     }
 
     /// Emit a `match scrutinee { ... }` as an if/else chain on the tag,

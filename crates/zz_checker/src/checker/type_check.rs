@@ -8,6 +8,48 @@ use zz_frontend::diag::{error_at, FixIt};
 use zz_frontend::levenshtein::suggest_all;
 use zz_frontend::span::Span;
 
+/// Cheap static sanity check over the literal SQL text: balanced
+/// single/double quotes and parens. Returns an error message when the
+/// text is clearly malformed; `None` means "looks plausible".
+fn check_sql_static(text: &str) -> Option<String> {
+    let mut single = false;
+    let mut double = false;
+    let mut depth: i32 = 0;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '(' if !single && !double => depth += 1,
+            ')' if !single && !double => {
+                depth -= 1;
+                if depth < 0 {
+                    return Some("unbalanced `)` in SQL string".to_string());
+                }
+            }
+            '-' if !single && !double && chars.peek() == Some(&'-') => {
+                // `--` line comment: skip to end of line.
+                for c2 in chars.by_ref() {
+                    if c2 == '\n' {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if single {
+        return Some("unbalanced `'` in SQL string".to_string());
+    }
+    if double {
+        return Some("unbalanced `\"` in SQL string".to_string());
+    }
+    if depth != 0 {
+        return Some("unbalanced `(` in SQL string".to_string());
+    }
+    None
+}
+
 impl Checker {
     // --- statements -------------------------------------------------------
 
@@ -1174,6 +1216,13 @@ impl Checker {
                             sig = self.funcs.get(&format!("http.{method}")).cloned()
                         }
                         Type::Json => sig = self.funcs.get(&format!("json.{method}")).cloned(),
+                        Type::Db => {
+                            // Canonical `sqlz.*` first, `db.*` alias fallback.
+                            sig = self.funcs.get(&format!("sqlz.{method}")).cloned();
+                            if sig.is_none() {
+                                sig = self.funcs.get(&format!("db.{method}")).cloned();
+                            }
+                        }
                         Type::Chan => sig = self.funcs.get(&format!("chan.{method}")).cloned(),
                         Type::TaskJoin => sig = self.funcs.get(&format!("task.{method}")).cloned(),
                         Type::Struct(sname) => {
@@ -1220,6 +1269,52 @@ impl Checker {
             _ => None,
         };
         if let Some(name) = &direct_name {
+            // sqlz foundation: `sqlz.query(sql)` / `sqlz.exec(sql)` (canonical;
+            // `db.*` / `std.db.*` are zero-overhead aliases) take an
+            // interpolated SQL string. `{expr}` segments are extracted as
+            // bound parameters (never inlined), so verification here is:
+            // receiver is `db`, SQL arg is `str`, each bound expr is a
+            // scalar (int/float/str/bool). Return type unifies with the
+            // caller's annotation (`let users: [User] = sqlz.query(...)`).
+            //
+            // NOTE: this direct-name path only fires for qualified calls
+            // (`sqlz.query(...)` where `sqlz` is the module namespace). The
+            // common method form (`mydb.query(...)` on a handle) is handled
+            // in the Path-method branch below, which treats the receiver
+            // as implicit.
+            if name == "sqlz.query"
+                || name == "std.sqlz.query"
+                || name == "sqlz.exec"
+                || name == "std.sqlz.exec"
+                || name == "db.query"
+                || name == "std.db.query"
+                || name == "db.exec"
+                || name == "std.db.exec"
+            {
+                if let Some(sig) = self.funcs.get(name).cloned() {
+                    // Only take this path when the receiver really is the
+                    // module namespace (first part `db` is NOT a local
+                    // variable). Otherwise fall through to method dispatch.
+                    let recv_is_module = match callee {
+                        Expr::Path { parts, .. } => {
+                            parts.len() == 2 && self.lookup_opt(&parts[0]).is_none()
+                        }
+                        _ => false,
+                    };
+                    if recv_is_module {
+                        self.used_names.insert(name.clone());
+                        let (ps, ret, subs) = self.instantiate(&sig);
+                        let pnames: Vec<String> =
+                            sig.params.iter().map(|(n, _)| n.clone()).collect();
+                        self.check_args_against(&pnames, &ps, &sig.has_default, args, named, span);
+                        if let Some(sql_arg) = args.first() {
+                            self.verify_sql_params(sql_arg, span);
+                        }
+                        self.validate_bounds(&sig, &subs, span);
+                        return ret;
+                    }
+                }
+            }
             if let Some(sig) = self.funcs.get(name).cloned() {
                 self.used_names.insert(name.clone());
                 let (ps, ret, subs) = self.instantiate(&sig);
@@ -1364,6 +1459,13 @@ impl Checker {
                         Type::Json => {
                             sig = self.funcs.get(&format!("json.{method}")).cloned();
                         }
+                        Type::Db => {
+                            // Canonical `sqlz.*` first, `db.*` alias fallback.
+                            sig = self.funcs.get(&format!("sqlz.{method}")).cloned();
+                            if sig.is_none() {
+                                sig = self.funcs.get(&format!("db.{method}")).cloned();
+                            }
+                        }
                         Type::Chan => {
                             sig = self.funcs.get(&format!("chan.{method}")).cloned();
                         }
@@ -1384,6 +1486,37 @@ impl Checker {
                     }
                 }
                 if let Some(sig) = sig {
+                    // sqlz method form: `db.query(sql)` — receiver is
+                    // implicit, so the single user arg is checked against
+                    // the sig's sql param (not via check_args_against,
+                    // which expects explicit receiver+sql).
+                    if (*method == "query" || *method == "exec")
+                        && matches!(self.unifier.resolve(&recv_t), Type::Db)
+                    {
+                        let (ps, ret, subs) = self.instantiate(&sig);
+                        if !ps.is_empty() {
+                            if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
+                                self.report_mismatch(e, *pspan);
+                            }
+                        }
+                        if args.len() + named.len() != 1 {
+                            self.errors.push(error_at(
+                                format!(
+                                    "expected 1 argument (sql), found {}",
+                                    args.len() + named.len()
+                                ),
+                                span,
+                            ));
+                        } else if ps.len() >= 2 {
+                            let at = self.check_expr(&args[0]);
+                            if let Err(e) = self.unifier.unify(&at, &ps[1]) {
+                                self.report_mismatch(e, args[0].span());
+                            }
+                            self.verify_sql_params(&args[0], span);
+                        }
+                        self.validate_bounds(&sig, &subs, span);
+                        return ret;
+                    }
                     let (ps, ret, subs) = self.instantiate(&sig);
                     if ps.is_empty() {
                         self.errors.push(error_at(
@@ -1531,6 +1664,79 @@ impl Checker {
                     self.report_mismatch(e, arg.span());
                 }
             }
+        }
+    }
+
+    /// Compile-time SQL verification for `db.query(sql)` / `db.exec(sql)`.
+    ///
+    /// The SQL arg is normally an interpolated string (`Fmt`): static text
+    /// segments stay in the prepared statement, `{expr}` segments become
+    /// `?N` bound parameters. This check ensures every bound expr is a
+    /// bindable scalar (int/float/str/bool) and rejects format specs
+    /// (`{x:.2f}` would render client-side, breaking parameterization).
+    /// Static text is scanned for balanced quotes/parens as a cheap
+    /// syntax sanity check; full schema verification happens at runtime
+    /// against the live connection.
+    pub(crate) fn verify_sql_params(&mut self, sql_arg: &Expr, span: Span) {
+        let parts = match sql_arg {
+            Expr::Fmt { parts, .. } => Some(parts.clone()),
+            Expr::Str { .. } => None,
+            Expr::Paren { expr, .. } => match expr.as_ref() {
+                Expr::Fmt { parts, .. } => Some(parts.clone()),
+                Expr::Str { .. } => None,
+                _ => {
+                    let at = self.check_expr(sql_arg);
+                    if let Err(e) = self.unifier.unify(&at, &Type::Str) {
+                        self.report_mismatch(e, sql_arg.span());
+                    }
+                    return;
+                }
+            },
+            _ => {
+                let at = self.check_expr(sql_arg);
+                if let Err(e) = self.unifier.unify(&at, &Type::Str) {
+                    self.report_mismatch(e, sql_arg.span());
+                }
+                return;
+            }
+        };
+        let Some(parts) = parts else { return };
+        let mut static_text = String::new();
+        for part in &parts {
+            match part {
+                FmtPart::Text(t) => static_text.push_str(t),
+                FmtPart::Expr(e, spec) => {
+                    if let Some(s) = spec {
+                        self.errors.push(error_at(
+                            format!(
+                                "format spec `:{s}` not allowed in SQL interpolation; use plain `{{...}}` so the value is bound as a parameter"
+                            ),
+                            e.span(),
+                        ));
+                    }
+                    let bt = self.check_expr(e);
+                    let rt = self.unifier.resolve(&bt);
+                    match rt {
+                        Type::Int
+                        | Type::Float
+                        | Type::Str
+                        | Type::Bool
+                        | Type::Var(_)
+                        | Type::Error => {}
+                        other => {
+                            self.errors.push(error_at(
+                                format!(
+                                    "SQL parameter must be int, float, str, or bool, found `{other}`"
+                                ),
+                                e.span(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(msg) = check_sql_static(&static_text) {
+            self.errors.push(error_at(msg, span));
         }
     }
 

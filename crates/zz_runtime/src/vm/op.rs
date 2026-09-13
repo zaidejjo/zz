@@ -263,6 +263,14 @@ pub enum Op {
     Concat(u16),
     /// Pop a format spec string, pop a value, push the formatted string.
     FormatValue(Span),
+    /// sqlz prepared-query split: pop `n` bound values, pop the Fmt
+    /// template parts count `m`... (compiled inline — see DbQuery).
+    /// Pops `nparams` bound values + `nparts` template parts, pushes the
+    /// SQL template string (with `{expr}` segments replaced by `?N`
+    /// placeholders), then re-pushes each bound value in order. The
+    /// following `CallNative(db.query/db.exec)` consumes
+    /// `[template, p1, ...]` and binds via prepared statements.
+    DbQuery { nparams: u16, span: Span },
 
     // ---- scopes ----
     /// Enter a new child scope (only emitted when the scope declares

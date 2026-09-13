@@ -118,6 +118,7 @@ impl Unifier {
             (Type::Struct(a), Type::Struct(b)) if a == b => Ok(()),
             (Type::Range(x), Type::Range(y)) => self.unify(&x, &y),
             (Type::Json, Type::Json)
+            | (Type::Db, Type::Db)
             | (Type::HttpServer, Type::HttpServer)
             | (Type::TcpStream, Type::TcpStream)
             | (Type::TcpListener, Type::TcpListener)

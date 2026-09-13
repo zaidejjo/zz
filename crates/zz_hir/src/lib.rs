@@ -126,6 +126,7 @@ pub fn is_dynamic(ty: &Type) -> bool {
         ty,
         Type::Union(_)
             | Type::Json
+            | Type::Db
             | Type::HttpServer
             | Type::TcpStream
             | Type::TcpListener

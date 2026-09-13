@@ -32,6 +32,9 @@ fn resolve_methods(tp: &TypedProgram, recv: &Expr, method: &str) -> Vec<String> 
         Some(Type::Response) => vec![format!("http.{method}")],
         Some(Type::TcpStream) | Some(Type::TcpListener) => vec![format!("net.{method}")],
         Some(Type::HttpServer) => vec![format!("http.{method}")],
+        // Canonical `sqlz.*` plus `db.*` alias so DCE keeps the target
+        // regardless of which namespace the call site used.
+        Some(Type::Db) => vec![format!("sqlz.{method}"), format!("db.{method}")],
         Some(Type::Json) => vec![format!("json.{method}")],
         Some(Type::Struct(s)) => {
             let fq = format!("{s}.{method}");

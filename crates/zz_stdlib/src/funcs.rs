@@ -1657,6 +1657,84 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("ms", Type::Int)], Type::Unit),
     );
 
+    // std.sqlz — SQLite foundation (CANONICAL module name).
+    //
+    // `open(path) -> db`, `exec(db, sql) -> int` (rows changed),
+    // `query(db, sql) -> [T]` (rows mapped to structs), `close(db)`.
+    // The SQL param is checked by `verify_sql_params` (Fmt segments become
+    // `?N` bound params); `query`'s return unifies with the caller's
+    // annotation (`let users: [User] = sqlz.query(...)`) so the runtime can
+    // map columns positionally into that struct.
+    //
+    // `std.db` / `db.*` are zero-overhead aliases (identical sigs below).
+    let db_row_t = Type::Named("T".to_string());
+    m.insert(
+        "std.sqlz.open".into(),
+        sig(vec![("path", Type::Str)], Type::Db),
+    );
+    m.insert(
+        "std.sqlz.exec".into(),
+        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "std.sqlz.query".into(),
+        sig_t(
+            vec![("db", Type::Db), ("sql", Type::Str)],
+            Type::Array(Box::new(db_row_t.clone())),
+        ),
+    );
+    m.insert(
+        "std.sqlz.close".into(),
+        sig(vec![("db", Type::Db)], Type::Unit),
+    );
+    // Method-dispatch aliases (`sqlz.open(...)` after `import std.sqlz`).
+    m.insert("sqlz.open".into(), sig(vec![("path", Type::Str)], Type::Db));
+    m.insert(
+        "sqlz.exec".into(),
+        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "sqlz.query".into(),
+        sig_t(
+            vec![("db", Type::Db), ("sql", Type::Str)],
+            Type::Array(Box::new(db_row_t.clone())),
+        ),
+    );
+    m.insert("sqlz.close".into(), sig(vec![("db", Type::Db)], Type::Unit));
+    // Alias: `std.db` / `db.*` point directly at the `std.sqlz` sigs.
+    m.insert(
+        "std.db.open".into(),
+        sig(vec![("path", Type::Str)], Type::Db),
+    );
+    m.insert(
+        "std.db.exec".into(),
+        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "std.db.query".into(),
+        sig_t(
+            vec![("db", Type::Db), ("sql", Type::Str)],
+            Type::Array(Box::new(db_row_t.clone())),
+        ),
+    );
+    m.insert(
+        "std.db.close".into(),
+        sig(vec![("db", Type::Db)], Type::Unit),
+    );
+    m.insert("db.open".into(), sig(vec![("path", Type::Str)], Type::Db));
+    m.insert(
+        "db.exec".into(),
+        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "db.query".into(),
+        sig_t(
+            vec![("db", Type::Db), ("sql", Type::Str)],
+            Type::Array(Box::new(db_row_t.clone())),
+        ),
+    );
+    m.insert("db.close".into(), sig(vec![("db", Type::Db)], Type::Unit));
+
     // std.chan — concurrency primitives
     let t = Type::Named("T".to_string());
     m.insert("std.chan".into(), sig(vec![], Type::Chan));
@@ -1757,12 +1835,28 @@ mod tests {
         assert!(funcs.contains_key("append"));
         assert!(funcs.contains_key("std.task.spawn"));
         assert!(funcs.contains_key("std.task.join"));
+        assert!(funcs.contains_key("std.sqlz.open"));
+        assert!(funcs.contains_key("std.sqlz.exec"));
+        assert!(funcs.contains_key("std.sqlz.query"));
+        assert!(funcs.contains_key("std.sqlz.close"));
+        assert!(funcs.contains_key("sqlz.open"));
+        assert!(funcs.contains_key("sqlz.exec"));
+        assert!(funcs.contains_key("sqlz.query"));
+        assert!(funcs.contains_key("sqlz.close"));
+        assert!(funcs.contains_key("std.db.open"));
+        assert!(funcs.contains_key("std.db.exec"));
+        assert!(funcs.contains_key("std.db.query"));
+        assert!(funcs.contains_key("std.db.close"));
+        assert!(funcs.contains_key("db.open"));
+        assert!(funcs.contains_key("db.exec"));
+        assert!(funcs.contains_key("db.query"));
+        assert!(funcs.contains_key("db.close"));
         // Math constants are static values, not zero-arg functions.
         let consts = stdlib_consts();
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 266);
+        assert_eq!(funcs.len(), 282);
     }
 
     #[test]
