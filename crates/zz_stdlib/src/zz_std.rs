@@ -17,6 +17,7 @@ const STR_MOD_ZZ: &str = include_str!("../zz/str/mod.zz");
 const MATH_MOD_ZZ: &str = include_str!("../zz/math/mod.zz");
 const VEC_ZZ: &str = include_str!("../zz/collections/vec.zz");
 const JSON_MOD_ZZ: &str = include_str!("../zz/json/mod.zz");
+const REGEXP_MOD_ZZ: &str = include_str!("../zz/regexp/mod.zz");
 
 /// All embedded source files, in compilation order.
 const ZZ_SOURCES: &[(&str, &str)] = &[
@@ -24,6 +25,7 @@ const ZZ_SOURCES: &[(&str, &str)] = &[
     ("std:math.mod.zz", MATH_MOD_ZZ),
     ("std:collections.vec.zz", VEC_ZZ),
     ("std:json.mod.zz", JSON_MOD_ZZ),
+    ("std:regexp.mod.zz", REGEXP_MOD_ZZ),
 ];
 
 /// Compiled pure-ZZ stdlib programs, computed once.
@@ -117,8 +119,9 @@ mod tests {
     #[test]
     fn compile_pure_zz_stdlib() {
         let programs = zz_stdlib_programs();
-        // Should have compiled three modules (str, math, collections/vec).
-        assert_eq!(programs.len(), 4, "expected 4 pure-ZZ stdlib modules");
+        // Should have compiled five modules (str, math, collections/vec,
+        // json, regexp).
+        assert_eq!(programs.len(), 5, "expected 5 pure-ZZ stdlib modules");
         // Each module should have a non-empty types map.
         for (i, tp) in programs.iter().enumerate() {
             assert!(
@@ -295,6 +298,20 @@ mod tests {
         assert!(
             vec_prog.funcs.contains_key("vec.last_index_of"),
             "vec.last_index_of should be defined"
+        );
+    }
+
+    #[test]
+    fn pure_zz_regexp_has_expected_functions() {
+        let programs = zz_stdlib_programs();
+        let regexp_prog = &programs[4]; // regexp/mod.zz
+        assert!(
+            regexp_prog.funcs.contains_key("Regexp.new"),
+            "Regexp.new should be defined"
+        );
+        assert!(
+            regexp_prog.funcs.contains_key("regexp.is_email"),
+            "regexp.is_email should be defined"
         );
     }
 }

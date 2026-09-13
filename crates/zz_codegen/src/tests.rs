@@ -165,6 +165,11 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("json.is_array", "pure ZZ alias"),
     ("json.is_object", "pure ZZ alias"),
     ("json.is_empty", "pure ZZ alias"),
+    // Pure-ZZ regexp helpers — compiled from zz/regexp/mod.zz and merged
+    // into AOT builds as ZZ functions (no C/FFI native needed).
+    ("Regexp.new", "pure ZZ; lowered as ZZ fn"),
+    ("std.regexp.is_email", "pure ZZ; lowered as ZZ fn"),
+    ("regexp.is_email", "pure ZZ alias"),
     // Parity-skipped modules (non-deterministic output):
     ("std.http.serve_dir", "http fixtures skipped in parity"),
     ("http.serve_dir", "http fixtures skipped in parity"),

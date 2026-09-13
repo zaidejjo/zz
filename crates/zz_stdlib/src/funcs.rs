@@ -923,6 +923,92 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("encoded", Type::Str)], result_str()),
     );
 
+    // std.regexp — compiled patterns are opaque handles; the tag selects
+    // the `regexp.*` method namespace. `compile` is fallible (bad patterns
+    // yield `.err`). Both spellings registered (like json).
+    let regexp_t = Type::Opaque("regexp".to_string());
+    let regexp_result = || Type::Result(Box::new(regexp_t.clone()), Box::new(Type::Str));
+    m.insert(
+        "std.regexp.compile".into(),
+        sig(vec![("pat", Type::Str)], regexp_result()),
+    );
+    m.insert(
+        "std.regexp.is_match".into(),
+        sig(vec![("re", regexp_t.clone()), ("s", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.regexp.find".into(),
+        sig(
+            vec![("re", regexp_t.clone()), ("s", Type::Str)],
+            Type::Option(Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.regexp.replace_all".into(),
+        sig(
+            vec![
+                ("re", regexp_t.clone()),
+                ("s", Type::Str),
+                ("rep", Type::Str),
+            ],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "std.regexp.captures".into(),
+        sig(
+            vec![("re", regexp_t.clone()), ("s", Type::Str)],
+            Type::Array(Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "regexp.compile".into(),
+        sig(vec![("pat", Type::Str)], regexp_result()),
+    );
+    m.insert(
+        "regexp.is_match".into(),
+        sig(vec![("re", regexp_t.clone()), ("s", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "regexp.find".into(),
+        sig(
+            vec![("re", regexp_t.clone()), ("s", Type::Str)],
+            Type::Option(Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "regexp.replace_all".into(),
+        sig(
+            vec![
+                ("re", regexp_t.clone()),
+                ("s", Type::Str),
+                ("rep", Type::Str),
+            ],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "regexp.captures".into(),
+        sig(
+            vec![("re", regexp_t.clone()), ("s", Type::Str)],
+            Type::Array(Box::new(Type::Str)),
+        ),
+    );
+    // Pure-ZZ wrapper (zz/regexp/mod.zz): `Regexp` struct constructor and
+    // the email-validation helper.
+    m.insert(
+        "Regexp.new".into(),
+        sig(vec![("pat", Type::Str)], regexp_result()),
+    );
+    m.insert(
+        "std.regexp.is_email".into(),
+        sig(vec![("s", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "regexp.is_email".into(),
+        sig(vec![("s", Type::Str)], Type::Bool),
+    );
+
     // std.http — Client
     let result_response = || Type::Result(Box::new(Type::Response), Box::new(Type::Str));
     let dict_str = || Type::Dict(Box::new(Type::Str), Box::new(Type::Str));
@@ -1940,7 +2026,7 @@ mod tests {
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 294);
+        assert_eq!(funcs.len(), 307);
     }
 
     #[test]

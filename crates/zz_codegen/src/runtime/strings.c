@@ -209,6 +209,17 @@ char *copy_cstr(const char *s, size_t n) {
     return out;
 }
 
+// FFI bridge (see strings.h): string bytes for Rust staticlib callers.
+void zz_str_view(zz_value v, const char **out_ptr, size_t *out_len) {
+    if (v.tag != ZZ_STR || v.s == NULL) {
+        *out_ptr = NULL;
+        *out_len = 0;
+        return;
+    }
+    *out_ptr = zz_str_cptr(v.s);
+    *out_len = v.s->len;
+}
+
 
 zz_value zz_str_static(const char *src) {
     // Call-site literal cache (P6): the same .rodata address arrives on

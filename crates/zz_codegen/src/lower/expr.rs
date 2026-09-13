@@ -1064,6 +1064,26 @@ impl Lowerer {
                                     break;
                                 }
                             }
+                            // Dynamic scan for FFI-module namespaces (regexp,
+                            // uuid, …) that are not in the fixed lists above:
+                            // any reachable `<ns>.<method>` wins, sorted for
+                            // determinism.
+                            if found_ns.is_empty() {
+                                let suffix = format!(".{method}");
+                                let mut cands: Vec<&str> = self
+                                    .reachable_natives
+                                    .iter()
+                                    .filter_map(|n| {
+                                        n.strip_suffix(suffix.as_str())
+                                            .map(|ns| ns.strip_prefix("std.").unwrap_or(ns))
+                                    })
+                                    .collect();
+                                cands.sort_unstable();
+                                cands.dedup();
+                                if let Some(ns) = cands.into_iter().next() {
+                                    found_ns = ns;
+                                }
+                            }
                             if found_ns.is_empty() {
                                 eprintln!("[codegen-warn] method {}.{}: no namespace found. reach_natives={:?}", obj_name, method, self.reachable_natives);
                             }

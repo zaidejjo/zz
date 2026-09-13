@@ -220,6 +220,10 @@ fn every_funcs_key_has_a_native() {
         "json.is_array",
         "json.is_object",
         "json.is_empty",
+        // regexp helpers (pure-ZZ, compiled from zz/regexp/mod.zz)
+        "Regexp.new",
+        "std.regexp.is_email",
+        "regexp.is_email",
     ];
     let funcs = stdlib_funcs();
     let natives = stdlib_natives();

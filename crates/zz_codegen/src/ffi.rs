@@ -45,13 +45,18 @@ bool zz_rt_handle_tag_eq(uint64_t id, const uint8_t *tag, size_t tag_len);
 
 /// Map a zz native qualified name to its Rust-staticlib C symbol.
 ///
-/// Populated per module from Phase 1 on (`std.regex.compile` →
-/// `zz_regex_compile`, …). Phase 0 ships the handle primitives only, which
-/// are declared in [`FFI_H`] and need no per-name mapping, so this returns
-/// `None` until the first module lands.
+/// Populated per module as it lands (Phase 1: `std.regexp`). Both the
+/// `std.<mod>.*` and bare `<mod>.*` spellings map to the same symbol,
+/// mirroring the `native_impl` convention for embedded-C natives.
 pub fn ffi_impl(name: &str) -> Option<&'static str> {
-    let _ = name;
-    None
+    match name {
+        "regexp.compile" | "std.regexp.compile" => Some("zz_regexp_compile"),
+        "regexp.is_match" | "std.regexp.is_match" => Some("zz_regexp_is_match"),
+        "regexp.find" | "std.regexp.find" => Some("zz_regexp_find"),
+        "regexp.replace_all" | "std.regexp.replace_all" => Some("zz_regexp_replace_all"),
+        "regexp.captures" | "std.regexp.captures" => Some("zz_regexp_captures"),
+        _ => None,
+    }
 }
 
 /// True when any reachable native is provided by the Rust static library
@@ -62,15 +67,43 @@ pub fn needs_native_rt(natives: &HashSet<String>) -> bool {
     natives.iter().any(|n| ffi_impl(n).is_some())
 }
 
-/// `extern` declarations to inject into generated C. Currently just the
-/// handle-primitive header; per-module symbol declarations join from
-/// Phase 1 on. Emits an empty string when no FFI native is reachable so
-/// existing programs generate byte-identical C.
+/// `extern` declarations to inject into generated C: the handle-primitive
+/// header plus one declaration per used FFI symbol. Emits an empty string
+/// when no FFI native is reachable so existing programs generate
+/// byte-identical C.
 pub fn ffi_prelude(natives: &HashSet<String>) -> String {
-    if needs_native_rt(natives) {
-        FFI_H.to_string()
-    } else {
-        String::new()
+    let mut symbols: Vec<&str> = natives.iter().filter_map(|n| ffi_impl(n)).collect();
+    symbols.sort_unstable();
+    symbols.dedup();
+    if symbols.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(FFI_H);
+    out.push('\n');
+    for sym in symbols {
+        if let Some(decl) = ffi_decl(sym) {
+            out.push_str(decl);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// C declaration for a staticlib symbol. Extended alongside [`ffi_impl`].
+fn ffi_decl(symbol: &str) -> Option<&'static str> {
+    match symbol {
+        "zz_regexp_compile" => Some("zz_value zz_regexp_compile(zz_value pat, int *err);"),
+        "zz_regexp_is_match" => {
+            Some("zz_value zz_regexp_is_match(zz_value re, zz_value s, int *err);")
+        }
+        "zz_regexp_find" => Some("zz_value zz_regexp_find(zz_value re, zz_value s, int *err);"),
+        "zz_regexp_replace_all" => {
+            Some("zz_value zz_regexp_replace_all(zz_value re, zz_value s, zz_value rep, int *err);")
+        }
+        "zz_regexp_captures" => {
+            Some("zz_value zz_regexp_captures(zz_value re, zz_value s, int *err);")
+        }
+        _ => None,
     }
 }
 
@@ -242,7 +275,23 @@ mod tests {
         assert!(!needs_native_rt(&natives));
         assert_eq!(ffi_prelude(&natives), "");
         // Unknown future names without a registry entry stay embedded-only.
-        assert_eq!(ffi_impl("std.regex.compile"), None);
+        assert_eq!(ffi_impl("std.uuid.v4"), None);
+    }
+
+    #[test]
+    fn prelude_declares_used_ffi_symbols() {
+        let natives: HashSet<String> = [
+            "std.regexp.compile".to_string(),
+            "regexp.is_match".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        assert!(needs_native_rt(&natives));
+        let pre = ffi_prelude(&natives);
+        assert!(pre.contains("zz_rt_handle_alloc"));
+        assert!(pre.contains("zz_value zz_regexp_compile(zz_value pat, int *err);"));
+        assert!(pre.contains("zz_value zz_regexp_is_match(zz_value re, zz_value s, int *err);"));
+        assert!(!pre.contains("zz_regexp_find"));
     }
 
     #[test]

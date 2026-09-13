@@ -6,3 +6,6 @@ license.workspace = true
 
 [lib]
 crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+regex = "1"
