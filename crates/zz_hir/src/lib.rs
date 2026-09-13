@@ -131,6 +131,7 @@ pub fn is_dynamic(ty: &Type) -> bool {
             | Type::TcpStream
             | Type::TcpListener
             | Type::Response
+            | Type::Opaque(_)
             | Type::Dict(_, _)
             | Type::Func(_, _)
     )

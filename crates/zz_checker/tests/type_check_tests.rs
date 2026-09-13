@@ -1293,3 +1293,63 @@ fn const_closure_capture() {
     let r = check_src("const x = 10\nf := | | x\nz := f()");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
+
+fn opaque_test_funcs() -> HashMap<String, FuncSig> {
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "regex.compile".to_string(),
+        FuncSig {
+            is_extern: false,
+            generics: Vec::new(),
+            bounds: Vec::new(),
+            params: vec![("pat".to_string(), Type::Str)],
+            has_default: vec![],
+            ret: Type::Opaque("regex".to_string()),
+        },
+    );
+    funcs.insert(
+        "regex.is_match".to_string(),
+        FuncSig {
+            is_extern: false,
+            generics: Vec::new(),
+            bounds: Vec::new(),
+            params: vec![
+                ("re".to_string(), Type::Opaque("regex".to_string())),
+                ("s".to_string(), Type::Str),
+            ],
+            has_default: vec![],
+            ret: Type::Bool,
+        },
+    );
+    funcs
+}
+
+#[test]
+fn opaque_handle_method_dispatch() {
+    let r = check_src_with_funcs(
+        "r := regex.compile(\"[a-z]+\")\nok := r.is_match(\"abc\")",
+        opaque_test_funcs(),
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["r"], Type::Opaque("regex".to_string()));
+    assert_eq!(r.bindings["ok"], Type::Bool);
+}
+
+#[test]
+fn opaque_handle_tag_mismatch_errors() {
+    // A `uuid` handle passed where a `regex` handle is expected.
+    let mut funcs = opaque_test_funcs();
+    funcs.insert(
+        "uuid.v4".to_string(),
+        FuncSig {
+            is_extern: false,
+            generics: Vec::new(),
+            bounds: Vec::new(),
+            params: vec![],
+            has_default: vec![],
+            ret: Type::Opaque("uuid".to_string()),
+        },
+    );
+    let r = check_src_with_funcs("u := uuid.v4()\nok := regex.is_match(u, \"abc\")", funcs);
+    assert!(has_errors(&r), "expected tag mismatch, got {:?}", r.errors);
+}

@@ -336,5 +336,6 @@ pub(crate) fn value_to_json(v: &Value) -> Result<JsonValue, EvalError> {
         Value::Chan(_) => Err(err("a channel")),
         Value::TaskJoin(_) => Err(err("a task join handle")),
         Value::Db(_) => Err(err("a db handle")),
+        Value::Opaque(h) => Err(err(&format!("an opaque {} handle", h.tag))),
     }
 }

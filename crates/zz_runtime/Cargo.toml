@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 zz_frontend = { path = "../zz_frontend" }
 zz_checker = { path = "../zz_checker" }
+zz_native_rt = { path = "../zz_native_rt" }
 codespan-reporting = "0.11"
