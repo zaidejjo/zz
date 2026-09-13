@@ -52,23 +52,47 @@ fn cache_key(src: &str, opts: BuildOptions) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// Get modification time of the C runtime + codegen files for cache invalidation.
-/// The runtime and codegen live in the zz_codegen crate, one level up from zz_cli.
-/// The backend is split across `src/lower/` and `src/runtime/`; any change to
-/// those files must invalidate the native build cache.
+/// Get modification time of every input that affects native output, for
+/// cache invalidation: the C runtime + codegen (`zz_codegen`), the Rust
+/// native runtime linked into FFI builds (`zz_native_rt`), the pure-ZZ
+/// stdlib sources merged into every build (`zz_stdlib/zz/`), and this
+/// build module itself.
 fn runtime_mtime() -> Option<u64> {
-    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../zz_codegen");
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../");
+    // Crate dirs and the subdirs to watch inside them (one level deep).
+    let watched: &[(&str, &[&str])] = &[
+        ("zz_codegen", &["src/lower", "src/runtime", "src"]),
+        ("zz_native_rt", &["src"]),
+        ("zz_stdlib", &["zz"]),
+        ("zz_cli", &["src"]),
+    ];
     let mut mtimes: Vec<u64> = Vec::new();
-    for dir in ["src/lower", "src/runtime"] {
-        let dir = base.join(dir);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if let Ok(meta) = entry.metadata() {
-                if let Ok(m) = meta.modified() {
-                    if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
-                        mtimes.push(d.as_secs());
+    for (krate, dirs) in watched {
+        for dir in *dirs {
+            let dir = crates.join(krate).join(dir);
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                // Recurse one level (covers `zz_stdlib/zz/<mod>/` and
+                // `zz_codegen/src/` files alongside the subdirs above).
+                let candidates = if path.is_dir() {
+                    std::fs::read_dir(&path)
+                        .map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>())
+                        .unwrap_or_default()
+                } else {
+                    vec![path]
+                };
+                for cand in candidates {
+                    if let Ok(meta) = std::fs::metadata(&cand) {
+                        if meta.is_file() {
+                            if let Ok(m) = meta.modified() {
+                                if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
+                                    mtimes.push(d.as_secs());
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -118,7 +142,14 @@ fn typed_program_for(
 
     // Merge all module programs into one for HIR building / DCE. Modules
     // are namespaced by the loader (entry = file stem), so concat is safe.
+    // Pure-ZZ stdlib sources come first (mirroring the VM, which executes
+    // them before user code): without them AOT binaries silently lower
+    // pure-ZZ helpers like `str.repeat` to unit. They contain only function
+    // definitions, so merging cannot introduce top-level side effects.
     let mut merged_stmts = Vec::new();
+    for zz_prog in zz_stdlib::zz_stdlib_programs() {
+        merged_stmts.extend(zz_prog.program.stmts.iter().cloned());
+    }
     let merged_span = loaded
         .programs
         .last()

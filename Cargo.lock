@@ -2700,6 +2700,9 @@ dependencies = [
 [[package]]
 name = "zz_native_rt"
 version = "0.1.0"
+dependencies = [
+ "regex",
+]
 
 [[package]]
 name = "zz_runtime"
@@ -2722,5 +2725,6 @@ dependencies = [
  "zz_checker",
  "zz_frontend",
  "zz_hir",
+ "zz_native_rt",
  "zz_runtime",
 ]

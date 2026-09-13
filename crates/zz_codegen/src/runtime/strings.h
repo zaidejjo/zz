@@ -31,6 +31,12 @@ char *sb_take(SB *sb);
 // malloc'd NUL-terminated copy of a (possibly embedded-NUL) buffer.
 char *copy_cstr(const char *s, size_t n);
 
+// FFI bridge for the Rust static library: expose string bytes without
+// requiring Rust to mirror the zz_str layout. Sets (*out_ptr, *out_len);
+// (NULL, 0) for non-strings. The bytes stay owned by the runtime — the
+// caller must copy synchronously, never retain.
+void zz_str_view(zz_value v, const char **out_ptr, size_t *out_len);
+
 // JSON helpers defined in json.c; printers in this module use them so JSON
 // values display in their canonical compact form (matching the VM's
 // to_json_string).

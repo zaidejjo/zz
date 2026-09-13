@@ -20,6 +20,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
+/// C ABI mirror of the AOT `zz_value` plus linkable runtime constructors.
+pub mod cabi;
+/// `std.regexp` implementation (safe pool API + `extern "C"` FFI).
+pub mod regexp;
+
 /// Opaque handle value: the tag of the owning module plus a pool id.
 ///
 /// Cheap to clone (a `u64` and a short `String`); the heavy payload stays in

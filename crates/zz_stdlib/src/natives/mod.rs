@@ -22,6 +22,7 @@ pub(crate) mod json;
 pub(crate) mod math;
 pub(crate) mod net;
 pub(crate) mod option_mod;
+pub(crate) mod regexp;
 pub(crate) mod result_mod;
 pub(crate) mod str_mod;
 pub(crate) mod time;
@@ -594,6 +595,81 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 2,
             f: json::json_array_push,
+        },
+    );
+
+    // std.regexp — compiled-pattern handles (`Value::Opaque`, tag "regexp").
+    // Both spellings are registered (like `std.json.*` / `json.*`): the
+    // `std.*` keys back `import std.regexp`, the bare keys back method
+    // dispatch (`re.is_match(s)`) and direct calls.
+    m.insert(
+        "std.regexp.compile".into(),
+        NativeEntry {
+            arity: 1,
+            f: regexp::regexp_compile,
+        },
+    );
+    m.insert(
+        "std.regexp.is_match".into(),
+        NativeEntry {
+            arity: 2,
+            f: regexp::regexp_is_match,
+        },
+    );
+    m.insert(
+        "std.regexp.find".into(),
+        NativeEntry {
+            arity: 2,
+            f: regexp::regexp_find,
+        },
+    );
+    m.insert(
+        "std.regexp.replace_all".into(),
+        NativeEntry {
+            arity: 3,
+            f: regexp::regexp_replace_all,
+        },
+    );
+    m.insert(
+        "std.regexp.captures".into(),
+        NativeEntry {
+            arity: 2,
+            f: regexp::regexp_captures,
+        },
+    );
+    m.insert(
+        "regexp.compile".into(),
+        NativeEntry {
+            arity: 1,
+            f: regexp::regexp_compile,
+        },
+    );
+    m.insert(
+        "regexp.is_match".into(),
+        NativeEntry {
+            arity: 2,
+            f: regexp::regexp_is_match,
+        },
+    );
+    m.insert(
+        "regexp.find".into(),
+        NativeEntry {
+            arity: 2,
+            f: regexp::regexp_find,
+        },
+    );
+    m.insert(
+        "regexp.replace_all".into(),
+        NativeEntry {
+            arity: 3,
+            f: regexp::regexp_replace_all,
+        },
+    );
+    m.insert(
+        "regexp.captures".into(),
+        NativeEntry {
+            arity: 2,
+            f: regexp::regexp_captures,
         },
     );
 
