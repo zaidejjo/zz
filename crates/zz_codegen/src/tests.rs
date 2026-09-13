@@ -182,6 +182,11 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("std.sqlz.postgres.exec", "VM-only; no C socket driver"),
     ("std.sqlz.postgres.query", "VM-only; no C socket driver"),
     ("std.sqlz.postgres.close", "VM-only; no C socket driver"),
+    // MySQL wire driver — same VM-only rationale as postgres.
+    ("std.sqlz.mysql.connect", "VM-only; no C socket driver"),
+    ("std.sqlz.mysql.exec", "VM-only; no C socket driver"),
+    ("std.sqlz.mysql.query", "VM-only; no C socket driver"),
+    ("std.sqlz.mysql.close", "VM-only; no C socket driver"),
 ];
 
 #[test]

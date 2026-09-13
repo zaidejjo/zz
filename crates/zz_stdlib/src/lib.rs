@@ -41,8 +41,9 @@ pub fn stdlib_consts() -> std::collections::HashMap<String, f64> {
 /// The set of known `std.*` module names (second path component).
 /// `sqlz` is the canonical SQLite module; `db` is a zero-overhead alias
 /// pointing directly at `std.sqlz` (see [`canonical_module`]).
-/// `sqlz.postgres` is the nested PostgreSQL wire-protocol submodule
-/// (dotted key; see the loader's multi-component handling).
+/// `sqlz.postgres` is the nested PostgreSQL wire-protocol submodule and
+/// `sqlz.mysql` the nested MySQL wire-protocol submodule
+/// (dotted keys; see the loader's multi-component handling).
 pub const STDLIB_MODULES: &[&str] = &[
     "io",
     "str",
@@ -60,6 +61,7 @@ pub const STDLIB_MODULES: &[&str] = &[
     "sqlz",
     "db",
     "sqlz.postgres",
+    "sqlz.mysql",
 ];
 
 /// Resolve a module name to its canonical backing module.

@@ -1481,6 +1481,37 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
+    // std.sqlz.mysql — wire-protocol driver. Same per-import namespace
+    // rule as postgres: only canonical `std.sqlz.mysql.*` keys here.
+    m.insert(
+        "std.sqlz.mysql.connect".into(),
+        NativeEntry {
+            arity: 1,
+            f: db::my_connect,
+        },
+    );
+    m.insert(
+        "std.sqlz.mysql.exec".into(),
+        NativeEntry {
+            arity: 3,
+            f: db::my_exec,
+        },
+    );
+    m.insert(
+        "std.sqlz.mysql.query".into(),
+        NativeEntry {
+            arity: 3,
+            f: db::my_query,
+        },
+    );
+    m.insert(
+        "std.sqlz.mysql.close".into(),
+        NativeEntry {
+            arity: 1,
+            f: db::my_close,
+        },
+    );
+
     // Built-in: `typeof(v)` — the runtime type name of any value.
     m.insert(
         "typeof".into(),

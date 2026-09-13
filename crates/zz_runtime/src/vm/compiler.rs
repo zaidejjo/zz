@@ -1657,17 +1657,20 @@ impl Compiler {
                     //
                     // A leading component that resolves to a slot/env LOCAL
                     // is a receiver; a module namespace (`sqlz`, `db`,
-                    // `pg`, `postgres`, `std`) takes the free-function
-                    // branch below (`is_module_db_call`).
+                    // `pg`, `postgres`, `my`, `mysql`, `std`) takes the
+                    // free-function branch below (`is_module_db_call`).
                     let leading_is_module_ns =
-                        matches!(parts[0].as_str(), "sqlz" | "db" | "pg" | "postgres" | "std")
-                            && matches!(self.resolve(&parts[0]), Resolved::Env);
+                        matches!(
+                            parts[0].as_str(),
+                            "sqlz" | "db" | "pg" | "postgres" | "my" | "mysql" | "std"
+                        ) && matches!(self.resolve(&parts[0]), Resolved::Env);
                     let is_db_call = parts.len() == 2
                         && matches!(parts[1].as_str(), "query" | "exec")
                         && !leading_is_module_ns
                         && self.is_db_path(parts);
                     // Free-function form with explicit receiver:
-                    // `pg.query(db, sql)`, `sqlz.query(db, sql)`,
+                    // `pg.query(db, sql)`, `my.exec(db, sql)`,
+                    // `sqlz.query(db, sql)`,
                     // `std.sqlz.postgres.exec(db, sql)`, ... The db handle
                     // is args[0], the SQL (args[1]) compiles in DbQuery
                     // mode exactly like the method form.
@@ -1688,6 +1691,9 @@ impl Compiler {
                             | "pg"
                             | "postgres"
                             | "std.sqlz.postgres"
+                            | "my"
+                            | "mysql"
+                            | "std.sqlz.mysql"
                     ) && leading_is_module_ns
                         && args.len() + named.len() >= 2;
                     let is_input = parts.len() == 1

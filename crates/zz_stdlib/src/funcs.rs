@@ -1763,6 +1763,30 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("db", Type::Db)], Type::Unit),
     );
 
+    // std.sqlz.mysql — MySQL wire-protocol driver (binary prepared
+    // statements). Same shape as postgres: import as
+    // `import std.sqlz.mysql as my`.
+    let my_row_t = Type::Named("T".to_string());
+    m.insert(
+        "std.sqlz.mysql.connect".into(),
+        sig(vec![("conninfo", Type::Str)], Type::Db),
+    );
+    m.insert(
+        "std.sqlz.mysql.exec".into(),
+        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "std.sqlz.mysql.query".into(),
+        sig_t(
+            vec![("db", Type::Db), ("sql", Type::Str)],
+            Type::Array(Box::new(my_row_t.clone())),
+        ),
+    );
+    m.insert(
+        "std.sqlz.mysql.close".into(),
+        sig(vec![("db", Type::Db)], Type::Unit),
+    );
+
     // std.chan — concurrency primitives
     let t = Type::Named("T".to_string());
     m.insert("std.chan".into(), sig(vec![], Type::Chan));
@@ -1883,12 +1907,16 @@ mod tests {
         assert!(funcs.contains_key("std.sqlz.postgres.exec"));
         assert!(funcs.contains_key("std.sqlz.postgres.query"));
         assert!(funcs.contains_key("std.sqlz.postgres.close"));
+        assert!(funcs.contains_key("std.sqlz.mysql.connect"));
+        assert!(funcs.contains_key("std.sqlz.mysql.exec"));
+        assert!(funcs.contains_key("std.sqlz.mysql.query"));
+        assert!(funcs.contains_key("std.sqlz.mysql.close"));
         // Math constants are static values, not zero-arg functions.
         let consts = stdlib_consts();
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 286);
+        assert_eq!(funcs.len(), 290);
     }
 
     #[test]

@@ -1278,8 +1278,10 @@ impl Checker {
             // caller's annotation (`let users: [User] = sqlz.query(...)`).
             //
             // `pg.query(db, sql)` / `pg.exec(db, sql)` (+ `postgres.*` and
-            // `std.sqlz.postgres.*` spellings) are the explicit-receiver
-            // free-function forms: the SQL is the SECOND user arg.
+            // `std.sqlz.postgres.*` spellings) and `my.query(db, sql)` /
+            // `my.exec(db, sql)` (+ `mysql.*`, `std.sqlz.mysql.*`) are the
+            // explicit-receiver free-function forms: the SQL is the SECOND
+            // user arg.
             //
             // NOTE: this direct-name path only fires for qualified calls
             // where the leading component is the module namespace (not a
@@ -1291,7 +1293,13 @@ impl Checker {
                 || name == "postgres.query"
                 || name == "postgres.exec"
                 || name == "std.sqlz.postgres.query"
-                || name == "std.sqlz.postgres.exec";
+                || name == "std.sqlz.postgres.exec"
+                || name == "my.query"
+                || name == "my.exec"
+                || name == "mysql.query"
+                || name == "mysql.exec"
+                || name == "std.sqlz.mysql.query"
+                || name == "std.sqlz.mysql.exec";
             if name == "sqlz.query"
                 || name == "std.sqlz.query"
                 || name == "sqlz.exec"

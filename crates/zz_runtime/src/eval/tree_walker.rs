@@ -1048,7 +1048,7 @@ impl Interp {
     pub fn call(&mut self, f: Value, mut args: Vec<Value>, span: Span) -> Result<Value, EvalError> {
         match f {
             Value::Native(nf) => {
-                // sqlz/pg query/exec (+ aliases) are variadic over bound
+                // sqlz/pg/my query/exec (+ aliases) are variadic over bound
                 // params (template + N params [+ struct marker]); skip the
                 // fixed arity gate for them.
                 let is_db = matches!(
@@ -1067,6 +1067,12 @@ impl Interp {
                         | "postgres.exec"
                         | "std.sqlz.postgres.query"
                         | "std.sqlz.postgres.exec"
+                        | "my.query"
+                        | "my.exec"
+                        | "mysql.query"
+                        | "mysql.exec"
+                        | "std.sqlz.mysql.query"
+                        | "std.sqlz.mysql.exec"
                 );
                 if !is_db && args.len() != nf.arity {
                     return Err(EvalError::new(

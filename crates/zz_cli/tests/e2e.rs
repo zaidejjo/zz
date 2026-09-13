@@ -261,6 +261,7 @@ e2e_error_test!(e2e_err_struct_init_assign, "struct_init_assign_error.zz");
 e2e_error_test!(e2e_err_int_float_cmp, "int_float_cmp.zz");
 e2e_error_test!(e2e_err_generic_unbound, "generic_unbound.zz");
 e2e_error_test!(e2e_err_pg_connect_refused, "pg_connect_refused.zz");
+e2e_error_test!(e2e_err_mysql_connect_refused, "mysql_connect_refused.zz");
 
 // ---------------------------------------------------------------------------
 // Eval tests: inline code via `zz eval`
