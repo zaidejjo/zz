@@ -11,6 +11,7 @@ use zz_runtime::{EvalError, NativeEntry, Value};
 
 pub(crate) mod builtins;
 pub(crate) mod concurrency;
+pub(crate) mod crypto;
 pub(crate) mod db;
 pub(crate) mod encoding;
 pub(crate) mod env;
@@ -670,6 +671,79 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 2,
             f: regexp::regexp_captures,
+        },
+    );
+
+    // std.crypto — digests (hex), HMAC, CSPRNG, constant-time equality.
+    // Both spellings registered (like `std.json.*` / `json.*`).
+    m.insert(
+        "std.crypto.sha256".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_sha256,
+        },
+    );
+    m.insert(
+        "std.crypto.sha512".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_sha512,
+        },
+    );
+    m.insert(
+        "std.crypto.hmac_sha256".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_hmac_sha256,
+        },
+    );
+    m.insert(
+        "std.crypto.random_bytes".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_random_bytes,
+        },
+    );
+    m.insert(
+        "std.crypto.ct_eq".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_ct_eq,
+        },
+    );
+    m.insert(
+        "crypto.sha256".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_sha256,
+        },
+    );
+    m.insert(
+        "crypto.sha512".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_sha512,
+        },
+    );
+    m.insert(
+        "crypto.hmac_sha256".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_hmac_sha256,
+        },
+    );
+    m.insert(
+        "crypto.random_bytes".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_random_bytes,
+        },
+    );
+    m.insert(
+        "crypto.ct_eq".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_ct_eq,
         },
     );
 

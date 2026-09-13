@@ -896,6 +896,49 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("j", json_t.clone())], Type::Bool),
     );
 
+    // std.crypto — digests (hex strings), HMAC, CSPRNG, constant-time eq.
+    // Both spellings registered (like json).
+    m.insert(
+        "std.crypto.sha256".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.crypto.sha512".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.crypto.hmac_sha256".into(),
+        sig(vec![("key", Type::Str), ("msg", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.crypto.random_bytes".into(),
+        sig(vec![("n", Type::Int)], Type::Str),
+    );
+    m.insert(
+        "std.crypto.ct_eq".into(),
+        sig(vec![("a", Type::Str), ("b", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "crypto.sha256".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "crypto.sha512".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "crypto.hmac_sha256".into(),
+        sig(vec![("key", Type::Str), ("msg", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "crypto.random_bytes".into(),
+        sig(vec![("n", Type::Int)], Type::Str),
+    );
+    m.insert(
+        "crypto.ct_eq".into(),
+        sig(vec![("a", Type::Str), ("b", Type::Str)], Type::Bool),
+    );
+
     // std.encoding
     let result_str = || Type::Result(Box::new(Type::Str), Box::new(Type::Str));
     m.insert(
@@ -2026,7 +2069,7 @@ mod tests {
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 307);
+        assert_eq!(funcs.len(), 317);
     }
 
     #[test]

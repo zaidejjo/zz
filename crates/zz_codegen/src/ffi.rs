@@ -55,6 +55,11 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "regexp.find" | "std.regexp.find" => Some("zz_regexp_find"),
         "regexp.replace_all" | "std.regexp.replace_all" => Some("zz_regexp_replace_all"),
         "regexp.captures" | "std.regexp.captures" => Some("zz_regexp_captures"),
+        "crypto.sha256" | "std.crypto.sha256" => Some("zz_crypto_sha256"),
+        "crypto.sha512" | "std.crypto.sha512" => Some("zz_crypto_sha512"),
+        "crypto.hmac_sha256" | "std.crypto.hmac_sha256" => Some("zz_crypto_hmac_sha256"),
+        "crypto.random_bytes" | "std.crypto.random_bytes" => Some("zz_crypto_random_bytes"),
+        "crypto.ct_eq" | "std.crypto.ct_eq" => Some("zz_crypto_ct_eq"),
         _ => None,
     }
 }
@@ -103,6 +108,13 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
         "zz_regexp_captures" => {
             Some("zz_value zz_regexp_captures(zz_value re, zz_value s, int *err);")
         }
+        "zz_crypto_sha256" => Some("zz_value zz_crypto_sha256(zz_value s, int *err);"),
+        "zz_crypto_sha512" => Some("zz_value zz_crypto_sha512(zz_value s, int *err);"),
+        "zz_crypto_hmac_sha256" => {
+            Some("zz_value zz_crypto_hmac_sha256(zz_value key, zz_value msg, int *err);")
+        }
+        "zz_crypto_random_bytes" => Some("zz_value zz_crypto_random_bytes(zz_value n, int *err);"),
+        "zz_crypto_ct_eq" => Some("zz_value zz_crypto_ct_eq(zz_value a, zz_value b, int *err);"),
         _ => None,
     }
 }

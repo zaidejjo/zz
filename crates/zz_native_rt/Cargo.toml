@@ -9,3 +9,7 @@ crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 regex = "1"
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2"
+getrandom = "0.3"

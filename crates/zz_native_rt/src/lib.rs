@@ -22,6 +22,8 @@ use std::sync::{LazyLock, Mutex};
 
 /// C ABI mirror of the AOT `zz_value` plus linkable runtime constructors.
 pub mod cabi;
+/// `std.crypto` core primitives (hashing, HMAC, CSPRNG, constant-time eq).
+pub mod crypto_core;
 /// `std.regexp` implementation (safe pool API + `extern "C"` FFI).
 pub mod regexp;
 
