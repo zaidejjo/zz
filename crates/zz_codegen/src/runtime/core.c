@@ -797,6 +797,12 @@ static int zz_db_bind_all(
     return 0;
 }
 
+// ---- transaction error flag --------------------------------------------
+static int _zz_tx_error = 0;
+void zz_tx_set_error(void)   { _zz_tx_error = 1; }
+void zz_tx_reset_error(void) { _zz_tx_error = 0; }
+int  zz_tx_has_error(void)   { return _zz_tx_error; }
+
 zz_value zz_db_exec_raw(zz_value db, const char *sql, zz_value *binds, size_t nbinds, int *err) {
     (void)err;
     if (db.tag != ZZ_DB || !db.db || !sql) return zz_int(0);
@@ -808,7 +814,7 @@ zz_value zz_db_exec_raw(zz_value db, const char *sql, zz_value *binds, size_t nb
     int rc = sqlite3_step(st);
     int changed = sqlite3_changes(conn);
     sqlite3_finalize(st);
-    if (rc != SQLITE_DONE && rc != SQLITE_ROW) return zz_int(0);
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW) { zz_tx_set_error(); return zz_int(0); }
     return zz_int((int64_t)changed);
 #else
     (void)binds; (void)nbinds;
@@ -830,8 +836,15 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         zz_value row = zz_dict_new();
         for (int i = 0; i < ncol; i++) {
-            char key[32];
-            snprintf(key, sizeof key, "c%d", i);
+            /* Use the real SQL column name so ZZ struct field access
+               (e.g. users[0].id) works in AOT mode.  Fall back to
+               the positional "cN" form if the name is unavailable. */
+            const char *cname = sqlite3_column_name(st, i);
+            char fallback[32];
+            if (!cname || !cname[0]) {
+                snprintf(fallback, sizeof fallback, "c%d", i);
+                cname = fallback;
+            }
             zz_value val;
             switch (sqlite3_column_type(st, i)) {
             case SQLITE_INTEGER: val = zz_int(sqlite3_column_int64(st, i)); break;
@@ -852,7 +865,7 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
             }
             }
             int derr = 0;
-            zz_value k = zz_str_owned(copy_cstr(key, strlen(key)));
+            zz_value k = zz_str_owned(copy_cstr(cname, strlen(cname)));
             zz_index_set(row, k, val, &derr);
             (void)derr;
         }

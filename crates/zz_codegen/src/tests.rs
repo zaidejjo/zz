@@ -187,6 +187,12 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("std.sqlz.mysql.exec", "VM-only; no C socket driver"),
     ("std.sqlz.mysql.query", "VM-only; no C socket driver"),
     ("std.sqlz.mysql.close", "VM-only; no C socket driver"),
+    // Closure transactions — inlined by the AOT codegen (BEGIN/COMMIT/ROLLBACK
+    // around the closure body); no native C implementation needed.
+    ("std.sqlz.transaction", "AOT-inlined; no native C impl"),
+    ("sqlz.transaction", "AOT-inlined; no native C impl"),
+    ("std.db.transaction", "AOT-inlined; no native C impl"),
+    ("db.transaction", "AOT-inlined; no native C impl"),
 ];
 
 #[test]

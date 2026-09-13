@@ -1787,6 +1787,26 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("db", Type::Db)], Type::Unit),
     );
 
+    // sqlz.transaction — unified closure transactions for all backends.
+    //
+    // `transaction(db, fn(tx) { ... }) -> Result[T, str]`: BEGIN, run the
+    // closure with the transaction handle, COMMIT on clean return
+    // (`.ok(value)`), ROLLBACK on closure error (`.err(message)`).
+    // `db.transaction` is the same zero-overhead alias pattern as the
+    // other sqlz methods.
+    let tx_t = Type::Named("T".to_string());
+    let tx_sig = sig_t(
+        vec![
+            ("db", Type::Db),
+            ("f", Type::Func(vec![Type::Db], Box::new(tx_t.clone()))),
+        ],
+        Type::Result(Box::new(tx_t.clone()), Box::new(Type::Str)),
+    );
+    m.insert("std.sqlz.transaction".into(), tx_sig.clone());
+    m.insert("sqlz.transaction".into(), tx_sig.clone());
+    m.insert("std.db.transaction".into(), tx_sig.clone());
+    m.insert("db.transaction".into(), tx_sig);
+
     // std.chan — concurrency primitives
     let t = Type::Named("T".to_string());
     m.insert("std.chan".into(), sig(vec![], Type::Chan));
@@ -1911,12 +1931,16 @@ mod tests {
         assert!(funcs.contains_key("std.sqlz.mysql.exec"));
         assert!(funcs.contains_key("std.sqlz.mysql.query"));
         assert!(funcs.contains_key("std.sqlz.mysql.close"));
+        assert!(funcs.contains_key("std.sqlz.transaction"));
+        assert!(funcs.contains_key("sqlz.transaction"));
+        assert!(funcs.contains_key("std.db.transaction"));
+        assert!(funcs.contains_key("db.transaction"));
         // Math constants are static values, not zero-arg functions.
         let consts = stdlib_consts();
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 290);
+        assert_eq!(funcs.len(), 294);
     }
 
     #[test]

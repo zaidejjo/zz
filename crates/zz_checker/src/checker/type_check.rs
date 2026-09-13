@@ -759,7 +759,7 @@ impl Checker {
                 ret_ty,
                 body,
                 span,
-            } => self.check_closure(params, ret_ty.as_ref(), body, *span),
+            } => self.check_closure(params, ret_ty.as_ref(), body, *span, None),
             Expr::If {
                 cond,
                 then,
@@ -1308,6 +1308,10 @@ impl Checker {
                 || name == "std.db.query"
                 || name == "db.exec"
                 || name == "std.db.exec"
+                || name == "sqlz.transaction"
+                || name == "std.sqlz.transaction"
+                || name == "db.transaction"
+                || name == "std.db.transaction"
                 || is_pg_call
             {
                 if let Some(sig) = self.funcs.get(name).cloned() {
@@ -1329,9 +1333,16 @@ impl Checker {
                         // Explicit-receiver forms (`pg.query(db, sql)`,
                         // `sqlz.query(db, sql)`) carry the SQL second;
                         // the bare method-namespace form carries it first.
-                        let sql_idx = if is_pg_call || args.len() >= 2 { 1 } else { 0 };
-                        if let Some(sql_arg) = args.get(sql_idx) {
-                            self.verify_sql_params(sql_arg, span);
+                        // Skip for transaction — second arg is a closure, not SQL.
+                        let is_tx_call = name == "sqlz.transaction"
+                            || name == "std.sqlz.transaction"
+                            || name == "db.transaction"
+                            || name == "std.db.transaction";
+                        if !is_tx_call {
+                            let sql_idx = if is_pg_call || args.len() >= 2 { 1 } else { 0 };
+                            if let Some(sql_arg) = args.get(sql_idx) {
+                                self.verify_sql_params(sql_arg, span);
+                            }
                         }
                         self.validate_bounds(&sig, &subs, span);
                         return ret;
@@ -1509,11 +1520,10 @@ impl Checker {
                     }
                 }
                 if let Some(sig) = sig {
-                    // sqlz method form: `db.query(sql)` — receiver is
-                    // implicit, so the single user arg is checked against
-                    // the sig's sql param (not via check_args_against,
-                    // which expects explicit receiver+sql).
-                    if (*method == "query" || *method == "exec")
+                    // sqlz method form: `db.exec(sql)`, `db.query(sql)`,
+                    // `db.transaction(fn(tx) { ... })` — receiver is
+                    // implicit, so user args are matched against sig[1..].
+                    if (*method == "query" || *method == "exec" || *method == "transaction")
                         && matches!(self.unifier.resolve(&recv_t), Type::Db)
                     {
                         let (ps, ret, subs) = self.instantiate(&sig);
@@ -1522,20 +1532,56 @@ impl Checker {
                                 self.report_mismatch(e, *pspan);
                             }
                         }
-                        if args.len() + named.len() != 1 {
+                        let expected = ps.len().saturating_sub(1);
+                        let actual = args.len() + named.len();
+                        if actual != expected {
                             self.errors.push(error_at(
-                                format!(
-                                    "expected 1 argument (sql), found {}",
-                                    args.len() + named.len()
-                                ),
+                                format!("expected {expected} argument(s), found {actual}"),
                                 span,
                             ));
-                        } else if ps.len() >= 2 {
-                            let at = self.check_expr(&args[0]);
-                            if let Err(e) = self.unifier.unify(&at, &ps[1]) {
-                                self.report_mismatch(e, args[0].span());
+                        } else if expected >= 1 {
+                            // Verify each user arg against sig[1..].
+                            for (i, arg) in args.iter().enumerate() {
+                                if ps.len() >= 2 + i {
+                                    // Propagate expected types into
+                                    // closures so their bodies can
+                                    // resolve method calls on known
+                                    // param types (e.g. `tx.exec`
+                                    // when `tx: Db`).
+                                    if let Expr::Closure {
+                                        params,
+                                        ret_ty,
+                                        body,
+                                        span: cspan,
+                                    } = arg
+                                    {
+                                        let expected_t = self.unifier.resolve(&ps[1 + i]);
+                                        let ep = if let Type::Func(ep, _) = &expected_t {
+                                            Some(ep.as_slice())
+                                        } else {
+                                            None
+                                        };
+                                        let at = self.check_closure(
+                                            params,
+                                            ret_ty.as_ref(),
+                                            body,
+                                            *cspan,
+                                            ep,
+                                        );
+                                        if let Err(e) = self.unifier.unify(&at, &ps[1 + i]) {
+                                            self.report_mismatch(e, arg.span());
+                                        }
+                                    } else {
+                                        let at = self.check_expr(arg);
+                                        if let Err(e) = self.unifier.unify(&at, &ps[1 + i]) {
+                                            self.report_mismatch(e, arg.span());
+                                        }
+                                    }
+                                }
                             }
-                            self.verify_sql_params(&args[0], span);
+                            if *method == "query" || *method == "exec" {
+                                self.verify_sql_params(&args[0], span);
+                            }
                         }
                         self.validate_bounds(&sig, &subs, span);
                         return ret;
@@ -1682,9 +1728,33 @@ impl Checker {
 
         for (i, slot) in slots.iter().enumerate() {
             if let Some(arg) = slot {
-                let at = self.check_expr(arg);
-                if let Err(e) = self.unifier.unify(&at, &ps[i]) {
-                    self.report_mismatch(e, arg.span());
+                // When passing a closure to a function with a known
+                // signature, propagate expected param types so the body
+                // can resolve method calls on known types (e.g. `tx.exec`
+                // when `tx: Db`).  Without this, unannotated params get
+                // fresh vars and method dispatch fails on `?0`.
+                if let Expr::Closure {
+                    params,
+                    ret_ty,
+                    body,
+                    span,
+                } = arg
+                {
+                    let expected = self.unifier.resolve(&ps[i]);
+                    let ep = if let Type::Func(ep, _) = &expected {
+                        Some(ep.as_slice())
+                    } else {
+                        None
+                    };
+                    let at = self.check_closure(params, ret_ty.as_ref(), body, *span, ep);
+                    if let Err(e) = self.unifier.unify(&at, &ps[i]) {
+                        self.report_mismatch(e, arg.span());
+                    }
+                } else {
+                    let at = self.check_expr(arg);
+                    if let Err(e) = self.unifier.unify(&at, &ps[i]) {
+                        self.report_mismatch(e, arg.span());
+                    }
                 }
             }
         }
@@ -1763,22 +1833,41 @@ impl Checker {
         }
     }
 
+    /// `expected_params`: when a closure is passed to a function with a
+    /// known signature, the caller can provide the expected parameter types
+    /// here. For each unannotated param, if an expected type exists, the
+    /// fresh var is unified with it *before* checking the body — so the
+    /// body sees known param types and can resolve method calls (e.g.
+    /// `tx.exec(...)` when `tx: Db`).
     pub(crate) fn check_closure(
         &mut self,
         params: &[Param],
         ret_ty: Option<&Ty>,
         body: &Expr,
         _span: Span,
+        expected_params: Option<&[Type]>,
     ) -> Type {
         self.push_scope();
         let mut ptypes = Vec::new();
-        for p in params {
+        for (i, p) in params.iter().enumerate() {
             let ty = match &p.ty {
                 Some(t) => {
                     let gens = self.current_generics.clone();
                     self.ast_to_type(t, &gens)
                 }
-                None => self.unifier.fresh_var(),
+                None => {
+                    if let Some(ep) = expected_params.and_then(|eps| eps.get(i)) {
+                        // Bind the fresh var to the expected type so the
+                        // body can resolve method calls on known types.
+                        let fv = self.unifier.fresh_var();
+                        if let Err(e) = self.unifier.unify(&fv, ep) {
+                            self.report_mismatch(e, p.span);
+                        }
+                        fv
+                    } else {
+                        self.unifier.fresh_var()
+                    }
+                }
             };
             self.define(&p.name.name, ty.clone());
             ptypes.push(ty);

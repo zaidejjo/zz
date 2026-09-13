@@ -15,7 +15,9 @@
 //!   `Interp::structs` via the checker's `Type::Array(Type::Struct)` return
 //!   annotation (`let users: [User] = sqlz.query(...)`).
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use zz_runtime::value::{DbHandle, DbHandleInner, ObjectValue};
 use zz_runtime::{EvalError, Interp, Span, Value};
@@ -26,11 +28,13 @@ pub(crate) mod mysql_conn;
 pub(crate) mod mysql_wire;
 pub(crate) mod pg_conn;
 pub(crate) mod pg_wire;
+pub(crate) mod placeholders;
 
 use mysql_conn::{MyConn, MyConnInfo};
 use mysql_wire::{col_type_kind, MyKind, MyParam};
 use pg_conn::{ConnInfo, PgConn, PgParam};
 use pg_wire::{col_oid_kind, ColKind};
+use placeholders::PlaceholderStyle;
 
 /// Concrete connections stored type-erased inside `Value::Db`.
 /// `Sqlite` backs `sqlz.open` file/memory paths, `Pg` backs
@@ -223,12 +227,14 @@ pub(crate) fn db_exec(
         .ok_or_else(|| EvalError::new("`std.sqlz.exec`: invalid db handle".to_string(), span))?;
     match db {
         DbConn::Sqlite(conn) => {
+            // Canonical dialect: the `?N` template renders identically.
+            let sql = placeholders::render(&template, PlaceholderStyle::Numbered);
             let bound = bind_params(&params);
             let clock = conn.lock().map_err(|e| {
                 EvalError::new(format!("`std.sqlz.exec`: connection poisoned: {e}"), span)
             })?;
             let mut stmt = clock
-                .prepare(&template)
+                .prepare(&sql)
                 .map_err(|e| EvalError::new(format!("`std.sqlz.exec` failed: {e}"), span))?;
             let n = stmt
                 .execute(rusqlite::params_from_iter(bound.iter()))
@@ -310,12 +316,14 @@ pub(crate) fn db_query(
         .ok_or_else(|| EvalError::new("`std.sqlz.query`: invalid db handle".to_string(), span))?;
     let rows: Vec<Vec<Value>> = match db {
         DbConn::Sqlite(conn) => {
+            // Canonical dialect: the `?N` template renders identically.
+            let sql = placeholders::render(&template, PlaceholderStyle::Numbered);
             let bound = bind_params(&params);
             let clock = conn.lock().map_err(|e| {
                 EvalError::new(format!("`std.sqlz.query`: connection poisoned: {e}"), span)
             })?;
             let mut stmt = clock
-                .prepare(&template)
+                .prepare(&sql)
                 .map_err(|e| EvalError::new(format!("`std.sqlz.query` failed: {e}"), span))?;
             let col_count = stmt.column_count();
             check_arity(&fields, col_count, span)?;
@@ -481,28 +489,10 @@ fn float_to_pg_text(f: f64) -> String {
     }
 }
 
-/// Rewrite the VM's `?N` placeholders to Postgres `$N`. The `DbQuery` op
-/// emits `?1..?N` in order; scanning char-by-char keeps `?10` (two digits)
-/// intact where naive replacement would corrupt it.
+/// Rewrite the VM's `?N` placeholders to Postgres `$N` via the shared
+/// [`placeholders`] transpiler.
 fn rewrite_q_to_dollar(template: &str) -> String {
-    let mut out = String::with_capacity(template.len());
-    let mut chars = template.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '?' && chars.peek().is_some_and(|p| p.is_ascii_digit()) {
-            out.push('$');
-            while let Some(d) = chars.peek() {
-                if d.is_ascii_digit() {
-                    out.push(*d);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    placeholders::render(template, PlaceholderStyle::Dollar)
 }
 
 /// Map one text-format cell to a ZZ value using the column type OID.
@@ -660,24 +650,12 @@ fn zz_to_my_param(v: &Value) -> MyParam {
     }
 }
 
-/// Rewrite the VM's `?N` placeholders to bare MySQL `?` (positional).
-/// The `DbQuery` op emits `?1..?N` in order, which already matches
-/// `COM_STMT_EXECUTE` positional binding. Digit-aware so `?10` stays one
-/// placeholder where naive replacement would corrupt it.
+/// Rewrite the VM's `?N` placeholders to bare MySQL `?` (positional)
+/// via the shared [`placeholders`] transpiler. The `DbQuery` op emits
+/// `?1..?N` in order, which already matches `COM_STMT_EXECUTE`
+/// positional binding.
 fn rewrite_q_to_plain(template: &str) -> String {
-    let mut out = String::with_capacity(template.len());
-    let mut chars = template.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '?' && chars.peek().is_some_and(|p| p.is_ascii_digit()) {
-            out.push('?');
-            while chars.peek().is_some_and(|p| p.is_ascii_digit()) {
-                chars.next();
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    placeholders::render(template, PlaceholderStyle::Plain)
 }
 
 /// Map one binary-protocol cell to a ZZ value using the column type.
@@ -817,6 +795,187 @@ pub(crate) fn my_close(
         Ok(())
     })?;
     Ok(Value::Unit)
+}
+
+// ---------------------------------------------------------------------------
+// Unified transactions: `sqlz.transaction(db, fn(tx) { ... })`
+// ---------------------------------------------------------------------------
+//
+// One API for all three backends. The closure runs with the SAME handle
+// (the connection is the transaction context), so `tx.exec` / `tx.query`
+// inside the body join the transaction on every backend. On clean return
+// the native issues `COMMIT`; on closure error it issues `ROLLBACK` and
+// folds the message into a `.err(...)` value (never raises); on Rust
+// panic it rolls back and re-panics.
+//
+// Nesting is depth-counted per handle: only the outermost frame sends
+// `BEGIN`/`COMMIT`; any error rolls the whole transaction back.
+
+/// Transaction depth per live handle, keyed by handle allocation.
+/// Entries always vanish at frame exit (commit, rollback, or panic
+/// cleanup), so keys can never go stale.
+static TX_DEPTH: OnceLock<Mutex<HashMap<usize, u32>>> = OnceLock::new();
+
+fn tx_depths() -> &'static Mutex<HashMap<usize, u32>> {
+    TX_DEPTH.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn tx_key(handle: &Arc<DbHandleInner>) -> usize {
+    Arc::as_ptr(handle) as usize
+}
+
+/// Run a bare `BEGIN` / `COMMIT` / `ROLLBACK` on any backend.
+fn tx_stmt(
+    handle: &Arc<DbHandleInner>,
+    name: &str,
+    sql: &str,
+    span: Span,
+) -> Result<(), EvalError> {
+    let guard = lock_handle(handle, name, span)?;
+    let db = guard
+        .downcast_ref::<DbConn>()
+        .ok_or_else(|| EvalError::new(format!("`{name}`: invalid db handle"), span))?;
+    match db {
+        DbConn::Sqlite(conn) => {
+            let clock = conn
+                .lock()
+                .map_err(|e| EvalError::new(format!("`{name}`: connection poisoned: {e}"), span))?;
+            clock
+                .execute(sql, [])
+                .map(|_| ())
+                .map_err(|e| EvalError::new(format!("`{name}` failed: {e}"), span))
+        }
+        DbConn::Pg(conn) => {
+            let mut clock = conn
+                .lock()
+                .map_err(|e| EvalError::new(format!("`{name}`: connection poisoned: {e}"), span))?;
+            clock
+                .exec(sql, &[])
+                .map(|_| ())
+                .map_err(|e| EvalError::new(format!("`{name}` failed: {e}"), span))
+        }
+        DbConn::My(conn) => {
+            let mut clock = conn
+                .lock()
+                .map_err(|e| EvalError::new(format!("`{name}`: connection poisoned: {e}"), span))?;
+            clock
+                .exec(sql, &[])
+                .map(|_| ())
+                .map_err(|e| EvalError::new(format!("`{name}` failed: {e}"), span))
+        }
+    }
+}
+
+/// Enter a transaction frame: send `BEGIN` at depth 0, else just deepen.
+fn tx_begin(handle: &Arc<DbHandleInner>, span: Span) -> Result<(), EvalError> {
+    let key = tx_key(handle);
+    let mut depths = tx_depths()
+        .lock()
+        .map_err(|e| EvalError::new(format!("sqlz.transaction: lock poisoned: {e}"), span))?;
+    let depth = depths.get(&key).copied().unwrap_or(0);
+    if depth == 0 {
+        tx_stmt(handle, "sqlz.transaction", "BEGIN", span)?;
+        depths.insert(key, 1);
+    } else {
+        depths.insert(key, depth + 1);
+    }
+    Ok(())
+}
+
+/// Leave a frame on success: `COMMIT` at the outermost frame, else shallow.
+fn tx_commit(handle: &Arc<DbHandleInner>, span: Span) -> Result<(), EvalError> {
+    let key = tx_key(handle);
+    let mut depths = tx_depths()
+        .lock()
+        .map_err(|e| EvalError::new(format!("sqlz.transaction: lock poisoned: {e}"), span))?;
+    match depths.get(&key).copied().unwrap_or(0) {
+        0 | 1 => {
+            depths.remove(&key);
+            drop(depths);
+            if let Err(e) = tx_stmt(handle, "sqlz.transaction", "COMMIT", span) {
+                // Leave nothing half-open: best-effort rollback, then
+                // report the commit failure.
+                let _ = tx_stmt(handle, "sqlz.transaction", "ROLLBACK", span);
+                return Err(e);
+            }
+            Ok(())
+        }
+        depth => {
+            depths.insert(key, depth - 1);
+            Ok(())
+        }
+    }
+}
+
+/// Leave on error: `ROLLBACK` the whole transaction (any depth), always.
+/// Missing entry means an inner frame already finalized — no-op.
+fn tx_rollback(handle: &Arc<DbHandleInner>, span: Span) -> Result<(), EvalError> {
+    let key = tx_key(handle);
+    let present = {
+        let mut depths = tx_depths()
+            .lock()
+            .map_err(|e| EvalError::new(format!("sqlz.transaction: lock poisoned: {e}"), span))?;
+        depths.remove(&key).is_some()
+    };
+    if present {
+        tx_stmt(handle, "sqlz.transaction", "ROLLBACK", span)?;
+    }
+    Ok(())
+}
+
+/// `sqlz.transaction(db, fn(tx) { ... }) -> Result[T, str]`.
+///
+/// Runs the closure with the transaction handle: `COMMIT` on clean
+/// return (yielding `.ok(value)`), `ROLLBACK` on closure error
+/// (yielding `.err(message)`). Rust panics roll back and re-panic.
+pub(crate) fn db_transaction(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let handle = expect_db(args, 0, "sqlz.transaction", span)?;
+    let closure = match args.get(1) {
+        Some(Value::Func(f)) => (**f).clone(),
+        Some(other) => {
+            return Err(EvalError::new(
+                format!("`sqlz.transaction` expects a closure, found `{other}`"),
+                span,
+            ));
+        }
+        None => {
+            return Err(EvalError::new(
+                "`sqlz.transaction` expects a closure, found nothing",
+                span,
+            ));
+        }
+    };
+    // The connection is the transaction context: pass the same handle in.
+    let tx = Value::Db(DbHandle(Arc::clone(&handle)));
+    tx_begin(&handle, span)?;
+    // Never hold the connection lock across the closure body (it would
+    // deadlock the body's own queries on the same thread).
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        interp.call(Value::Func(Box::new(closure)), vec![tx], span)
+    }));
+    match outcome {
+        Ok(Ok(v)) => match tx_commit(&handle, span) {
+            Ok(()) => Ok(Value::Result(Box::new(Ok(v)))),
+            Err(e) => Err(e),
+        },
+        Ok(Err(e)) => {
+            let err_value = match tx_rollback(&handle, span) {
+                Ok(()) => Value::Str(e.message.into()),
+                Err(rb) => {
+                    Value::Str(format!("{}; rollback failed: {}", e.message, rb.message).into())
+                }
+            };
+            Ok(Value::Result(Box::new(Err(err_value))))
+        }
+        Err(payload) => {
+            let _ = tx_rollback(&handle, span);
+            resume_unwind(payload);
+        }
+    }
 }
 
 #[cfg(test)]

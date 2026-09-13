@@ -578,6 +578,12 @@ zz_value zz_db_close(zz_value db, int *err);
 zz_value zz_db_exec_raw(zz_value db, const char *sql, zz_value *binds, size_t nbinds, int *err);
 zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t nbinds, int *err);
 
+// Transaction error flag — set by zz_db_exec_raw / zz_db_query_raw when
+// a statement fails.  Cleared by the inlined transaction prologue.
+void zz_tx_set_error(void);
+void zz_tx_reset_error(void);
+int  zz_tx_has_error(void);
+
 // ---- option / result ----------------------------------------------------
 zz_value zz_option_expect(zz_value opt, zz_value msg, int *err);
 zz_value zz_result_expect(zz_value res, zz_value msg, int *err);

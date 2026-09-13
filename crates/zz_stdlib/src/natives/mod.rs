@@ -1512,6 +1512,37 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
+    // sqlz.transaction — closure transactions (method form works on any
+    // backend handle; the free-function form takes the handle explicitly).
+    m.insert(
+        "std.sqlz.transaction".into(),
+        NativeEntry {
+            arity: 2,
+            f: db::db_transaction,
+        },
+    );
+    m.insert(
+        "sqlz.transaction".into(),
+        NativeEntry {
+            arity: 2,
+            f: db::db_transaction,
+        },
+    );
+    m.insert(
+        "std.db.transaction".into(),
+        NativeEntry {
+            arity: 2,
+            f: db::db_transaction,
+        },
+    );
+    m.insert(
+        "db.transaction".into(),
+        NativeEntry {
+            arity: 2,
+            f: db::db_transaction,
+        },
+    );
+
     // Built-in: `typeof(v)` — the runtime type name of any value.
     m.insert(
         "typeof".into(),

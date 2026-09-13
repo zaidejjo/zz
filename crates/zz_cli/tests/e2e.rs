@@ -219,6 +219,7 @@ e2e_success_test!(e2e_stdlib_multi_selective, "stdlib", "multi_selective.zz");
 e2e_success_test!(e2e_stdlib_local_selective, "stdlib", "local_selective.zz");
 e2e_success_test!(e2e_stdlib_local_wildcard, "stdlib", "local_wildcard.zz");
 e2e_success_test!(e2e_stdlib_sqlz_sqlite, "stdlib", "sqlz_sqlite.zz");
+e2e_success_test!(e2e_stdlib_sqlz_transaction, "stdlib", "sqlz_transaction.zz");
 
 // ---------------------------------------------------------------------------
 // Error fixtures: must exit 1

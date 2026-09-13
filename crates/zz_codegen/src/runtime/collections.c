@@ -501,13 +501,23 @@ void zz_object_set_field(zz_value *obj, const char *name, zz_value val) {
 }
 
 zz_value zz_object_get_field(zz_value *obj, const char *name) {
-    if (obj->tag != ZZ_OBJECT || !obj->obj) return zz_unit();
-    zz_object *o = obj->obj;
-    for (size_t i = 0; i < o->len; i++) {
-        zz_value *fname = &o->fields[i * 2];
-        if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
-            return zz_clone(o->fields[i * 2 + 1]);
+    if (!obj) return zz_unit();
+    // Struct field access — works on both ZZ_OBJECT (boxed structs) and
+    // ZZ_DICT (e.g. rows returned by the AOT C FFI for db.query).
+    if (obj->tag == ZZ_OBJECT && obj->obj) {
+        zz_object *o = obj->obj;
+        for (size_t i = 0; i < o->len; i++) {
+            zz_value *fname = &o->fields[i * 2];
+            if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
+                return zz_clone(o->fields[i * 2 + 1]);
+            }
         }
+        return zz_unit();
+    }
+    if (obj->tag == ZZ_DICT && obj->dict) {
+        int derr = 0;
+        zz_value key = zz_str_static(name);
+        return zz_dict_get(obj->dict, key, &derr);
     }
     return zz_unit();
 }

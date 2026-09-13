@@ -542,8 +542,18 @@ impl Lowerer {
                     });
                     auto_box(&raw, field_ctype.as_deref())
                 } else {
-                    // Boxed object: use runtime function
-                    format!("zz_object_get_field(&{obj_val}, \"{name}\")")
+                    // Boxed object: use runtime function.
+                    // `zz_object_get_field` takes a pointer, so we need
+                    // an lvalue.  A simple Ident produces a C variable
+                    // name (lvalue), but anything else (Index, Call,
+                    // Field chain, …) is an rvalue — hoist to a temp.
+                    if matches!(obj.as_ref(), Expr::Ident { .. }) {
+                        format!("zz_object_get_field(&{obj_val}, \"{name}\")")
+                    } else {
+                        let tmp = names.fresh("_field_obj");
+                        out.push_str(&format!("    zz_value {tmp} = {obj_val};\n"));
+                        format!("zz_object_get_field(&{tmp}, \"{name}\")")
+                    }
                 }
             }
             Expr::Array { elems, span, .. } => {
@@ -1240,6 +1250,78 @@ impl Lowerer {
             "sqlz.exec" | "std.sqlz.exec" | "db.exec" | "std.db.exec"
         ) {
             return self.emit_db_call(&cname, method_receiver.as_ref(), ordered_args, names, out);
+        }
+        // ── sqlz.transaction / db.transaction inlining ────────────────────
+        // The closure-based transaction cannot go through the normal native
+        // path (closures have no C function pointer).  Instead we inline the
+        // closure body between BEGIN / COMMIT / ROLLBACK directly, binding
+        // the closure parameter (typically `tx`) to the same db handle.
+        if matches!(
+            cname.as_str(),
+            "sqlz.transaction" | "std.sqlz.transaction" | "db.transaction" | "std.db.transaction"
+        ) {
+            if let Some(Expr::Closure { params, body, .. }) = args.last() {
+                // Emit the db handle — for the method form
+                // `db.transaction(|tx| {...})` the receiver IS the db;
+                // for the static form `sqlz.transaction(db, |tx| {...})`
+                // it's the first user arg.
+                let db_val = if let Some(ref recv) = method_receiver {
+                    self.emit_expr(recv, names, out)
+                } else if let Some(first) = ordered_args.first() {
+                    self.emit_expr(first, names, out)
+                } else {
+                    return "zz_unit()".to_string();
+                };
+                // Bind the closure parameter (e.g. `tx`) to the db handle.
+                if let Some(param) = params.first() {
+                    let param_c = names.enter(&param.name.name);
+                    out.push_str(&format!("    zz_value {param_c} = {db_val};\n"));
+                }
+                // BEGIN.
+                out.push_str(&format!(
+                    "    zz_tx_reset_error();\n\
+                     {{ int _txerr = 0; \
+                     zz_db_exec_raw({db_val}, \"BEGIN\", NULL, 0, &_txerr); }}\n"
+                ));
+                // Inline the closure body.  Use emit_func_block for Block
+                // bodies so that __tail is preserved (emit_block truncates it).
+                let mut body_out = String::new();
+                let body_val = if let Expr::Block(b) = body.as_ref() {
+                    self.emit_func_block(b, names, &mut body_out);
+                    if let Some((tmp, _)) = names.stack.get("__tail").and_then(|s| s.last()) {
+                        tmp.clone()
+                    } else {
+                        // Leaf tail (string literal, ident, etc.) — emit_expr
+                        // was skipped by emit_func_block; evaluate it directly.
+                        if let Some(Stmt::Expr(e)) = b.stmts.last() {
+                            let v = self.emit_expr(e, names, &mut body_out);
+                            box_scalar_operand(e, names, &v)
+                        } else {
+                            "zz_unit()".to_string()
+                        }
+                    }
+                } else {
+                    self.emit_expr(body, names, &mut body_out)
+                };
+                out.push_str(&body_out);
+                let body_val = box_scalar_operand(body, names, &body_val);
+                // COMMIT or ROLLBACK based on the error flag.
+                let tx_result = names.fresh("_tx_result");
+                out.push_str(&format!(
+                    "    zz_value {tx_result};\n\
+                     if (zz_tx_has_error()) {{\n\
+                     {{ int _txerr = 0; \
+                     zz_db_exec_raw({db_val}, \"ROLLBACK\", NULL, 0, &_txerr); }}\n\
+                     {tx_result} = zz_variant_err(zz_str_static(\"transaction failed\"));\n\
+                     }} else {{\n\
+                     {{ int _txerr = 0; \
+                     zz_db_exec_raw({db_val}, \"COMMIT\", NULL, 0, &_txerr); }}\n\
+                     {tx_result} = zz_variant_ok({body_val});\n\
+                     }}\n"
+                ));
+                return tx_result;
+            }
+            // Fallback: not a closure argument — let it fall through to zz_unit().
         }
         // Clone the method receiver up front; we may need it again in the
         // impl-method call-site branch (which needs the original Expr
