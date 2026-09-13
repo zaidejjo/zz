@@ -213,9 +213,8 @@ impl Checker {
                 // stdlib pattern, suggest adding the import.
                 if let Some((module, _func)) = name.split_once('.') {
                     let std_module = match module {
-                        "io" | "str" | "vec" | "json" | "http" | "fs" | "env" | "math" | "time" => {
-                            Some(module)
-                        }
+                        "io" | "str" | "vec" | "json" | "http" | "fs" | "env" | "math" | "time"
+                        | "sqlz" | "db" => Some(module),
                         _ => None,
                     };
                     if let Some(mod_name) = std_module {

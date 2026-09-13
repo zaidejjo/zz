@@ -251,7 +251,10 @@ pub fn build(
         .arg(output_path)
         .arg(&src_path)
         .arg("-lm")
-        .arg("-lcurl");
+        .arg("-lcurl")
+        .arg("-lsqlite3")
+        // sqlz: prepared-statement FFI needs sqlite3 headers.
+        .arg("-DZZ_HAS_SQLITE3");
 
     let out = cmd.output().map_err(BuildError::Io)?;
     if !out.status.success() {

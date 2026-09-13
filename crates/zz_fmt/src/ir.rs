@@ -73,12 +73,20 @@ pub fn lower_program<'src>(program: &Program, source: &'src str) -> (Doc<'src>, 
         .filter(|t| t.kind == TokenKind::PipeGt)
         .map(|t| t.start)
         .collect();
+    // sqlz! macros desugar to Call nodes; re-emitting structurally would
+    // lose the `!` token, so render verbatim like pipelines.
+    let bang_starts: Vec<u32> = toks
+        .iter()
+        .filter(|t| t.kind == TokenKind::Bang)
+        .map(|t| t.start)
+        .collect();
     let mut ctx = Ctx {
         source,
         toks: &toks,
         out: Vec::new(),
         consecutive_nls: 0,
         pipe_starts,
+        bang_starts,
     };
 
     // Imports are hoisted to the top of the file, in their source order,
@@ -151,6 +159,7 @@ struct Ctx<'src, 'a> {
     out: Vec<Doc<'src>>,
     consecutive_nls: usize,
     pipe_starts: Vec<u32>,
+    bang_starts: Vec<u32>,
 }
 
 impl<'src, 'a> Ctx<'src, 'a> {
@@ -256,6 +265,16 @@ impl<'src, 'a> Ctx<'src, 'a> {
     fn has_pipe_in(&self, span: Span) -> bool {
         let (lo, hi) = (span.start as i64, span.end as i64);
         self.pipe_starts
+            .iter()
+            .any(|&p| (p as i64) >= lo && (p as i64) < hi)
+    }
+
+    /// Does `span` cover a `!` macro bang? `sqlz!{...}` desugars to a
+    /// `Call` node; re-emitting structurally would lose the `!`, so the
+    /// emitter renders the original source range verbatim.
+    fn has_bang_in(&self, span: Span) -> bool {
+        let (lo, hi) = (span.start as i64, span.end as i64);
+        self.bang_starts
             .iter()
             .any(|&p| (p as i64) >= lo && (p as i64) < hi)
     }
@@ -893,7 +912,8 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 // Pipeline chains (`a |> f(b)`) are desugared into nested
                 // `Call`s by the parser; re-emit their original source text
                 // verbatim since no AST shape can reproduce the `|>` token.
-                if self.has_pipe_in(*span) {
+                // Same for `sqlz!{...}` macros (desugared to `db.query`).
+                if self.has_pipe_in(*span) || self.has_bang_in(*span) {
                     let s = span.start as usize;
                     let e = (span.end as usize).min(self.source.len());
                     if e > s {

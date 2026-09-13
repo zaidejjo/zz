@@ -1,0 +1,5 @@
+// E2E: my.connect to a closed port must fail cleanly (no live server needed).
+import std.sqlz.mysql as my
+
+mydb := my.connect("host=127.0.0.1 port=1 dbname=x user=u connect_timeout=1")
+print("unreachable")

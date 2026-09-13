@@ -636,6 +636,7 @@ pub(crate) fn auto_box(expr: &str, ctype: Option<&str>) -> String {
         || expr.starts_with("zz_bool(")
         || expr.starts_with("zz_clone(")
         || expr.starts_with("zz_unit()")
+        || expr.starts_with("zz_object_get_field(")
     {
         return expr.to_string();
     }

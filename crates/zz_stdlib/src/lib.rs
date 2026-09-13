@@ -39,10 +39,40 @@ pub fn stdlib_consts() -> std::collections::HashMap<String, f64> {
 }
 
 /// The set of known `std.*` module names (second path component).
+/// `sqlz` is the canonical SQLite module; `db` is a zero-overhead alias
+/// pointing directly at `std.sqlz` (see [`canonical_module`]).
+/// `sqlz.postgres` is the nested PostgreSQL wire-protocol submodule and
+/// `sqlz.mysql` the nested MySQL wire-protocol submodule
+/// (dotted keys; see the loader's multi-component handling).
 pub const STDLIB_MODULES: &[&str] = &[
-    "io", "str", "vec", "json", "http", "fs", "env", "math", "time", "encoding", "net", "chan",
+    "io",
+    "str",
+    "vec",
+    "json",
+    "http",
+    "fs",
+    "env",
+    "math",
+    "time",
+    "encoding",
+    "net",
+    "chan",
     "task",
+    "sqlz",
+    "db",
+    "sqlz.postgres",
+    "sqlz.mysql",
 ];
+
+/// Resolve a module name to its canonical backing module.
+/// Currently `db` is an alias for the canonical `sqlz` module; every
+/// other module is its own canonical name.
+pub fn canonical_module(module: &str) -> &str {
+    match module {
+        "db" => "sqlz",
+        _ => module,
+    }
+}
 
 /// Register a `std.*` module under a namespace name by copying its entries
 /// from the `std.<module>.*` keys to `<ns>.*` keys in both registries.
@@ -71,17 +101,26 @@ pub fn register_module_namespace(
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
-    let prefix = format!("std.{module}.");
+    // `std.db` is a zero-overhead alias: importing it copies the canonical
+    // `std.sqlz.*` entries (identical sigs + fn pointers, no extra layer).
+    let source = canonical_module(module);
+    let prefix = format!("std.{source}.");
     let std_funcs = stdlib_funcs();
     let std_natives = stdlib_natives();
     for (k, v) in std_funcs {
+        // Direct members only: `import std.sqlz` must not leak the nested
+        // `std.sqlz.postgres.*` keys (those belong to `sqlz.postgres`).
         if let Some(rest) = k.strip_prefix(&prefix) {
-            funcs.insert(format!("{ns}.{rest}"), v);
+            if !rest.contains('.') {
+                funcs.insert(format!("{ns}.{rest}"), v);
+            }
         }
     }
     for (k, v) in std_natives {
         if let Some(rest) = k.strip_prefix(&prefix) {
-            natives.insert(format!("{ns}.{rest}"), v);
+            if !rest.contains('.') {
+                natives.insert(format!("{ns}.{rest}"), v);
+            }
         }
     }
     // Also copy static constants.
@@ -112,7 +151,8 @@ pub fn register_selective_namespace(
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
-    let prefix = format!("std.{module}.");
+    // Alias: selective `import std.db(open)` resolves against `std.sqlz.*`.
+    let prefix = format!("std.{}.", canonical_module(module));
     let std_funcs = stdlib_funcs();
     let std_natives = stdlib_natives();
     let std_consts = stdlib_consts();
@@ -151,23 +191,31 @@ pub fn register_wildcard_namespace(
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
-    let prefix = format!("std.{module}.");
+    // Alias: wildcard `import std.db(*)` resolves against `std.sqlz.*`.
+    let prefix = format!("std.{}.", canonical_module(module));
     let std_funcs = stdlib_funcs();
     let std_natives = stdlib_natives();
     let std_consts = stdlib_consts();
     for (k, v) in std_funcs {
+        // Direct members only (see `register_module_namespace`).
         if let Some(rest) = k.strip_prefix(&prefix) {
-            funcs.insert(rest.to_string(), v);
+            if !rest.contains('.') {
+                funcs.insert(rest.to_string(), v);
+            }
         }
     }
     for (k, v) in std_natives {
         if let Some(rest) = k.strip_prefix(&prefix) {
-            natives.insert(rest.to_string(), v);
+            if !rest.contains('.') {
+                natives.insert(rest.to_string(), v);
+            }
         }
     }
     for k in std_consts.keys() {
         if let Some(rest) = k.strip_prefix(&prefix) {
-            funcs.insert(rest.to_string(), const_sig(zz_checker::Type::Float));
+            if !rest.contains('.') {
+                funcs.insert(rest.to_string(), const_sig(zz_checker::Type::Float));
+            }
         }
     }
     Ok(())

@@ -1657,6 +1657,156 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("ms", Type::Int)], Type::Unit),
     );
 
+    // std.sqlz — SQLite foundation (CANONICAL module name).
+    //
+    // `open(path) -> db`, `exec(db, sql) -> int` (rows changed),
+    // `query(db, sql) -> [T]` (rows mapped to structs), `close(db)`.
+    // The SQL param is checked by `verify_sql_params` (Fmt segments become
+    // `?N` bound params); `query`'s return unifies with the caller's
+    // annotation (`let users: [User] = sqlz.query(...)`) so the runtime can
+    // map columns positionally into that struct.
+    //
+    // `std.db` / `db.*` are zero-overhead aliases (identical sigs below).
+    let db_row_t = Type::Named("T".to_string());
+    m.insert(
+        "std.sqlz.open".into(),
+        sig(vec![("path", Type::Str)], Type::Db),
+    );
+    m.insert(
+        "std.sqlz.exec".into(),
+        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "std.sqlz.query".into(),
+        sig_t(
+            vec![("db", Type::Db), ("sql", Type::Str)],
+            Type::Array(Box::new(db_row_t.clone())),
+        ),
+    );
+    m.insert(
+        "std.sqlz.close".into(),
+        sig(vec![("db", Type::Db)], Type::Unit),
+    );
+    // Method-dispatch aliases (`sqlz.open(...)` after `import std.sqlz`).
+    m.insert("sqlz.open".into(), sig(vec![("path", Type::Str)], Type::Db));
+    m.insert(
+        "sqlz.exec".into(),
+        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "sqlz.query".into(),
+        sig_t(
+            vec![("db", Type::Db), ("sql", Type::Str)],
+            Type::Array(Box::new(db_row_t.clone())),
+        ),
+    );
+    m.insert("sqlz.close".into(), sig(vec![("db", Type::Db)], Type::Unit));
+    // Alias: `std.db` / `db.*` point directly at the `std.sqlz` sigs.
+    m.insert(
+        "std.db.open".into(),
+        sig(vec![("path", Type::Str)], Type::Db),
+    );
+    m.insert(
+        "std.db.exec".into(),
+        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "std.db.query".into(),
+        sig_t(
+            vec![("db", Type::Db), ("sql", Type::Str)],
+            Type::Array(Box::new(db_row_t.clone())),
+        ),
+    );
+    m.insert(
+        "std.db.close".into(),
+        sig(vec![("db", Type::Db)], Type::Unit),
+    );
+    m.insert("db.open".into(), sig(vec![("path", Type::Str)], Type::Db));
+    m.insert(
+        "db.exec".into(),
+        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "db.query".into(),
+        sig_t(
+            vec![("db", Type::Db), ("sql", Type::Str)],
+            Type::Array(Box::new(db_row_t.clone())),
+        ),
+    );
+    m.insert("db.close".into(), sig(vec![("db", Type::Db)], Type::Unit));
+
+    // std.sqlz.postgres — async-minded PostgreSQL wire-protocol driver.
+    //
+    // `connect(conninfo) -> db` (URL or keyword form), `exec(db, sql)`,
+    // `query(db, sql) -> [T]`, `close(db)`. Import as
+    // `import std.sqlz.postgres as pg`. Handles are `Type::Db`, so method
+    // syntax (`mydb.query(...)`) dispatches through the shared sqlz path;
+    // `pg.query(db, sql)` is the explicit-receiver spelling.
+    let pg_row_t = Type::Named("T".to_string());
+    m.insert(
+        "std.sqlz.postgres.connect".into(),
+        sig(vec![("conninfo", Type::Str)], Type::Db),
+    );
+    m.insert(
+        "std.sqlz.postgres.exec".into(),
+        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "std.sqlz.postgres.query".into(),
+        sig_t(
+            vec![("db", Type::Db), ("sql", Type::Str)],
+            Type::Array(Box::new(pg_row_t.clone())),
+        ),
+    );
+    m.insert(
+        "std.sqlz.postgres.close".into(),
+        sig(vec![("db", Type::Db)], Type::Unit),
+    );
+
+    // std.sqlz.mysql — MySQL wire-protocol driver (binary prepared
+    // statements). Same shape as postgres: import as
+    // `import std.sqlz.mysql as my`.
+    let my_row_t = Type::Named("T".to_string());
+    m.insert(
+        "std.sqlz.mysql.connect".into(),
+        sig(vec![("conninfo", Type::Str)], Type::Db),
+    );
+    m.insert(
+        "std.sqlz.mysql.exec".into(),
+        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "std.sqlz.mysql.query".into(),
+        sig_t(
+            vec![("db", Type::Db), ("sql", Type::Str)],
+            Type::Array(Box::new(my_row_t.clone())),
+        ),
+    );
+    m.insert(
+        "std.sqlz.mysql.close".into(),
+        sig(vec![("db", Type::Db)], Type::Unit),
+    );
+
+    // sqlz.transaction — unified closure transactions for all backends.
+    //
+    // `transaction(db, fn(tx) { ... }) -> Result[T, str]`: BEGIN, run the
+    // closure with the transaction handle, COMMIT on clean return
+    // (`.ok(value)`), ROLLBACK on closure error (`.err(message)`).
+    // `db.transaction` is the same zero-overhead alias pattern as the
+    // other sqlz methods.
+    let tx_t = Type::Named("T".to_string());
+    let tx_sig = sig_t(
+        vec![
+            ("db", Type::Db),
+            ("f", Type::Func(vec![Type::Db], Box::new(tx_t.clone()))),
+        ],
+        Type::Result(Box::new(tx_t.clone()), Box::new(Type::Str)),
+    );
+    m.insert("std.sqlz.transaction".into(), tx_sig.clone());
+    m.insert("sqlz.transaction".into(), tx_sig.clone());
+    m.insert("std.db.transaction".into(), tx_sig.clone());
+    m.insert("db.transaction".into(), tx_sig);
+
     // std.chan — concurrency primitives
     let t = Type::Named("T".to_string());
     m.insert("std.chan".into(), sig(vec![], Type::Chan));
@@ -1757,12 +1907,40 @@ mod tests {
         assert!(funcs.contains_key("append"));
         assert!(funcs.contains_key("std.task.spawn"));
         assert!(funcs.contains_key("std.task.join"));
+        assert!(funcs.contains_key("std.sqlz.open"));
+        assert!(funcs.contains_key("std.sqlz.exec"));
+        assert!(funcs.contains_key("std.sqlz.query"));
+        assert!(funcs.contains_key("std.sqlz.close"));
+        assert!(funcs.contains_key("sqlz.open"));
+        assert!(funcs.contains_key("sqlz.exec"));
+        assert!(funcs.contains_key("sqlz.query"));
+        assert!(funcs.contains_key("sqlz.close"));
+        assert!(funcs.contains_key("std.db.open"));
+        assert!(funcs.contains_key("std.db.exec"));
+        assert!(funcs.contains_key("std.db.query"));
+        assert!(funcs.contains_key("std.db.close"));
+        assert!(funcs.contains_key("db.open"));
+        assert!(funcs.contains_key("db.exec"));
+        assert!(funcs.contains_key("db.query"));
+        assert!(funcs.contains_key("db.close"));
+        assert!(funcs.contains_key("std.sqlz.postgres.connect"));
+        assert!(funcs.contains_key("std.sqlz.postgres.exec"));
+        assert!(funcs.contains_key("std.sqlz.postgres.query"));
+        assert!(funcs.contains_key("std.sqlz.postgres.close"));
+        assert!(funcs.contains_key("std.sqlz.mysql.connect"));
+        assert!(funcs.contains_key("std.sqlz.mysql.exec"));
+        assert!(funcs.contains_key("std.sqlz.mysql.query"));
+        assert!(funcs.contains_key("std.sqlz.mysql.close"));
+        assert!(funcs.contains_key("std.sqlz.transaction"));
+        assert!(funcs.contains_key("sqlz.transaction"));
+        assert!(funcs.contains_key("std.db.transaction"));
+        assert!(funcs.contains_key("db.transaction"));
         // Math constants are static values, not zero-arg functions.
         let consts = stdlib_consts();
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 266);
+        assert_eq!(funcs.len(), 294);
     }
 
     #[test]

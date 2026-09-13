@@ -171,7 +171,11 @@ impl Session {
                         )),
                     };
                 }
-                let Some(module) = path.get(1) else { continue };
+                if path.len() < 2 {
+                    continue;
+                }
+                // Dotted module key (`std.sqlz.postgres` -> "sqlz.postgres").
+                let module = path[1..].join(".");
                 if !STDLIB_MODULES.contains(&module.as_str()) {
                     self.last_had_errors = true;
                     return EvalOutput {
@@ -186,9 +190,13 @@ impl Session {
                         )),
                     };
                 }
-                let ns = alias.clone().unwrap_or_else(|| module.clone());
+                // Default namespace is the last component:
+                // `import std.sqlz.postgres` -> `postgres.*`.
+                let ns = alias
+                    .clone()
+                    .unwrap_or_else(|| path.last().cloned().unwrap_or_else(|| module.clone()));
                 if let Err(msg) = register_module_namespace(
-                    module,
+                    &module,
                     &ns,
                     &mut self.funcs,
                     &mut self.interp.natives,

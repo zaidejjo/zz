@@ -1,0 +1,5 @@
+// E2E: pg.connect to a closed port must fail cleanly (no live server needed).
+import std.sqlz.postgres as pg
+
+mydb := pg.connect("host=127.0.0.1 port=1 dbname=x user=u connect_timeout=1")
+print("unreachable")

@@ -79,6 +79,11 @@ pub struct Compiler {
     structs: Option<HashMap<String, zz_checker::StructSig>>,
     /// Known native function names, for direct native call dispatch.
     native_names: Option<Arc<std::collections::HashSet<String>>>,
+    /// True while compiling the SQL argument of `sqlz.query`/`sqlz.exec`
+    /// (`db.*` alias included):
+    /// the Fmt lowers to template + bound params (DbQuery) instead of
+    /// string concatenation.
+    in_db_query: bool,
 }
 
 enum JumpKind {
@@ -120,6 +125,7 @@ impl Compiler {
             types: None,
             structs: None,
             native_names: None,
+            in_db_query: false,
         }
     }
 
@@ -348,6 +354,7 @@ impl Compiler {
             | Op::CallMethod { span, .. }
             | Op::CallNative { span, .. } => *span,
             Op::FormatValue(span) => *span,
+            Op::DbQuery { span, .. } => *span,
             _ => Span::default(),
         };
         let effect = Self::stack_effect(&op);
@@ -417,6 +424,9 @@ impl Compiler {
             Op::CallPath { argc, .. } => 1 - (*argc as i64),
             Op::Concat(n) => 1 - *n as i64,
             Op::FormatValue(_) => -1,
+            // DbQuery pops nparams bound values + template, pushes
+            // template + params back: net 0 (reordering only).
+            Op::DbQuery { .. } => 0,
             Op::EnterScope | Op::ExitScope => 0,
             Op::PopN(n) => -(*n as i64),
             Op::DeferRecord => -1,
@@ -1377,6 +1387,144 @@ impl Compiler {
         }
     }
 
+    /// Count `{expr}` params in an SQL Fmt arg (0 for plain strings).
+    fn fmt_param_count(arg: &Expr) -> usize {
+        match arg {
+            Expr::Fmt { parts, .. } => parts
+                .iter()
+                .filter(|p| matches!(p, FmtPart::Expr(_, _)))
+                .count(),
+            Expr::Paren { expr, .. } => Self::fmt_param_count(expr),
+            _ => 0,
+        }
+    }
+
+    /// Total native argc for a `sqlz.query`/`sqlz.exec` call site
+    /// (`db.*` alias included):
+    /// receiver + template + bound params (+1 struct marker for query
+    /// when the checker resolved an `[Struct]` element type).
+    fn db_call_argc(&self, args: &[Expr], span: Span) -> usize {
+        let nparams = args.first().map(Self::fmt_param_count).unwrap_or(0);
+        // Path-form call site: `args` holds ONLY user args ([sql]);
+        // receiver already emitted separately. CallMethod pops `argc`
+        // args then pops recv, so argc = template + params (+ marker).
+        let base = 1 + nparams;
+        if self.db_query_struct(span).is_some() {
+            base + 1
+        } else {
+            base
+        }
+    }
+
+    /// Resolve the `[Struct]` element type for a `sqlz.query` call site
+    /// (`db.*` alias included)
+    /// from the checker's span map (the call's own span carries the
+    /// unified return type, which includes the `let x: [User]` annotation).
+    fn db_query_struct(&self, span: Span) -> Option<String> {
+        let ty = self.type_of(span)?;
+        match ty {
+            zz_checker::Type::Array(inner) => match inner.as_ref() {
+                zz_checker::Type::Struct(name) => Some(name.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Compile `mydb.query(sql)` / `mydb.exec(sql)` args into
+    /// `[recv, template, p1..pn, marker?]`:
+    /// - receiver as normal,
+    /// - SQL Fmt in DbQuery mode (template with `?N` + bound values),
+    ///   plain Str as a zero-param template,
+    /// - trailing `__struct:Name` marker for query when the return
+    ///   element type is a known struct (drives row-to-struct mapping).
+    ///
+    /// NOTE: at this Path-form call site, `args` holds ONLY the user
+    /// args (`[sql]`); the receiver (`parts[0]`) was already emitted as
+    /// LoadSlot/LoadVar above. So the SQL is `args[0]`, not `args[1]`.
+    fn compile_db_args(&mut self, args: &[Expr], span: Span) {
+        if let Some(sql) = args.first() {
+            let prev = std::mem::replace(&mut self.in_db_query, true);
+            self.compile_expr(sql);
+            self.in_db_query = prev;
+        }
+        if let Some(name) = self.db_query_struct(span) {
+            self.emit_const(Value::Str(format!("__struct:{name}").into()));
+        }
+    }
+
+    /// Total native argc for a module-namespace call
+    /// (`pg.query(db, sql)`, `sqlz.query(db, sql)`, ...): the handle is a
+    /// normal arg, so argc = db + template + bound params (+1 struct
+    /// marker for query when the checker resolved `[Struct]`, + named).
+    fn module_db_call_argc(&self, args: &[Expr], named: &[(String, Expr)], span: Span) -> usize {
+        let nparams = args.get(1).map(Self::fmt_param_count).unwrap_or(0);
+        let base = 2 + nparams + args.len().saturating_sub(2) + named.len();
+        if self.db_query_struct(span).is_some() {
+            base + 1
+        } else {
+            base
+        }
+    }
+
+    /// Compile `pg.query(db, sql)` / `sqlz.exec(db, sql)` args into
+    /// `[db, template, p1..pn, marker?]` for `CallNative`:
+    /// - args[0] (the handle) as normal,
+    /// - args[1] (the SQL) in DbQuery mode,
+    /// - trailing `__struct:Name` marker for query when typed.
+    fn compile_module_db_args(&mut self, args: &[Expr], named: &[(String, Expr)], span: Span) {
+        if let Some(db) = args.first() {
+            self.compile_expr(db);
+        }
+        if let Some(sql) = args.get(1) {
+            let prev = std::mem::replace(&mut self.in_db_query, true);
+            self.compile_expr(sql);
+            self.in_db_query = prev;
+        }
+        for extra in args.iter().skip(2) {
+            self.compile_expr(extra);
+        }
+        for (_, val) in named {
+            self.compile_expr(val);
+        }
+        // Only `query` carries a struct marker (`exec` returns int).
+        if self.db_query_struct(span).is_some() {
+            self.emit_const(Value::Str(
+                format!("__struct:{}", self.db_query_struct(span).unwrap()).into(),
+            ));
+        }
+    }
+
+    /// True when a Path-form call `recv.method` targets a db handle:
+    /// either the module-qualified `sqlz.query`/`std.sqlz.query` (or the
+    /// `db.*`/`std.db.*` alias, receiver is the module namespace) or a
+    /// method on a local whose checker type is `Db`. Falls back to
+    /// name-only match when type info is absent (untyped
+    /// `compile_program` path, e.g. tests/REPL snippets).
+    fn is_db_path(&self, parts: &[String]) -> bool {
+        if parts.len() != 2 {
+            return false;
+        }
+        if !matches!(parts[1].as_str(), "query" | "exec" | "close" | "open") {
+            return false;
+        }
+        if parts[0] == "sqlz" || parts[0] == "db" || parts[0] == "std" {
+            return true;
+        }
+        // Type-driven: receiver local resolved to Db by the checker.
+        // The span map keys full call spans, not ident spans, so consult
+        // the struct/type tables indirectly: check `types` for any entry
+        // — when typed info exists we trust method-name + Db namespace
+        // registration instead (checker already gated the call).
+        if self.types.is_some() {
+            return true;
+        }
+        // Untyped path: accept query/exec/close on any receiver; the
+        // runtime `lookup_method` will resolve `sqlz.*` (or the `db.*`
+        // alias) or error clearly.
+        true
+    }
+
     fn compile_closure_body(&mut self, body: &Expr, params: &[Param]) -> Arc<Chunk> {
         let mut sub = Compiler::new();
         sub.types = self.types.clone();
@@ -1502,6 +1650,52 @@ impl Compiler {
             } => match callee.as_ref() {
                 Expr::Path { parts, span: pspan } => {
                     let func_name = parts.join(".");
+                    // Method form: `mydb.query(sql)` / `mydb.exec(sql)` —
+                    // pure ident chains parse as Path; the receiver is a
+                    // local, NOT a module namespace. The SQL arg compiles
+                    // in DbQuery mode (template + bound params).
+                    //
+                    // A leading component that resolves to a slot/env LOCAL
+                    // is a receiver; a module namespace (`sqlz`, `db`,
+                    // `pg`, `postgres`, `my`, `mysql`, `std`) takes the
+                    // free-function branch below (`is_module_db_call`).
+                    let leading_is_module_ns =
+                        matches!(
+                            parts[0].as_str(),
+                            "sqlz" | "db" | "pg" | "postgres" | "my" | "mysql" | "std"
+                        ) && matches!(self.resolve(&parts[0]), Resolved::Env);
+                    let is_db_call = parts.len() == 2
+                        && matches!(parts[1].as_str(), "query" | "exec")
+                        && !leading_is_module_ns
+                        && self.is_db_path(parts);
+                    // Free-function form with explicit receiver:
+                    // `pg.query(db, sql)`, `my.exec(db, sql)`,
+                    // `sqlz.query(db, sql)`,
+                    // `std.sqlz.postgres.exec(db, sql)`, ... The db handle
+                    // is args[0], the SQL (args[1]) compiles in DbQuery
+                    // mode exactly like the method form.
+                    let db_module_prefix = if parts.len() >= 2 {
+                        parts[..parts.len() - 1].join(".")
+                    } else {
+                        String::new()
+                    };
+                    let is_module_db_call = matches!(
+                        parts.last().map(String::as_str),
+                        Some("query") | Some("exec")
+                    ) && matches!(
+                        db_module_prefix.as_str(),
+                        "sqlz"
+                            | "std.sqlz"
+                            | "db"
+                            | "std.db"
+                            | "pg"
+                            | "postgres"
+                            | "std.sqlz.postgres"
+                            | "my"
+                            | "mysql"
+                            | "std.sqlz.mysql"
+                    ) && leading_is_module_ns
+                        && args.len() + named.len() >= 2;
                     let is_input = parts.len() == 1
                         && parts[0] == "input"
                         && args.len() <= 1
@@ -1567,6 +1761,17 @@ impl Compiler {
                         for part in &parts[1..parts.len() - 1] {
                             self.emit(Op::GetField(part.clone(), *pspan));
                         }
+                        if is_db_call {
+                            self.compile_db_args(args, *span);
+                            self.emit(Op::CallMethod {
+                                name: parts.last().unwrap().clone(),
+                                argc: self.db_call_argc(args, *span) as u16,
+                                span: *span,
+                            });
+                            // Skip the trailing generic CallMethod below —
+                            // the db call is fully emitted.
+                            return;
+                        }
                         if is_range {
                             if args.len() == 1 {
                                 self.emit_const(Value::Int(0));
@@ -1597,7 +1802,51 @@ impl Compiler {
                             span: *span,
                         });
                     } else {
-                        if is_range {
+                        // Env-path receiver (e.g. top-level `mydb` lives in
+                        // env, not a slot). Method-form db calls need
+                        // DbQuery treatment here too — same as the slot
+                        // path above. The if/else chain below handles
+                        // emission; guard each generic branch so db args
+                        // are compiled exactly once.
+                        if is_db_call {
+                            match self.resolve(&parts[0]) {
+                                Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
+                                Resolved::Env => self.emit(Op::LoadVar(parts[0].clone(), *pspan)),
+                            }
+                            for part in &parts[1..parts.len() - 1] {
+                                self.emit(Op::GetField(part.clone(), *pspan));
+                            }
+                            self.compile_db_args(args, *span);
+                            self.emit(Op::CallMethod {
+                                name: parts.last().unwrap().clone(),
+                                argc: self.db_call_argc(args, *span) as u16,
+                                span: *span,
+                            });
+                        } else if is_module_db_call {
+                            // Free-function form with explicit receiver
+                            // (`pg.query(db, sql)`): handle is a normal
+                            // arg, SQL splits to template + bound params.
+                            self.compile_module_db_args(args, named, *span);
+                            let argc = self.module_db_call_argc(args, named, *span);
+                            if self
+                                .native_names
+                                .as_ref()
+                                .is_some_and(|n| n.contains(&func_name))
+                            {
+                                self.emit(Op::CallNative {
+                                    name: func_name.clone(),
+                                    argc: argc as u16,
+                                    span: *span,
+                                });
+                            } else {
+                                self.emit(Op::CallPath {
+                                    parts: parts.clone(),
+                                    argc: argc as u16,
+                                    span: *span,
+                                    pspan: *pspan,
+                                });
+                            }
+                        } else if is_range {
                             if args.len() == 1 {
                                 self.emit_const(Value::Int(0));
                                 self.compile_expr(&args[0]);
@@ -1613,7 +1862,10 @@ impl Compiler {
                             }
                         } else if has_named_or_defaults {
                             self.compile_reordered_args(&func_name, args, named);
-                        } else {
+                        } else if !is_db_call && !is_module_db_call {
+                            // (db calls already emitted above with CallMethod
+                            // or CallNative; compiling args again would
+                            // duplicate them.)
                             for a in args {
                                 self.compile_expr(a);
                             }
@@ -1621,10 +1873,11 @@ impl Compiler {
                         if is_input {
                             self.emit_const(Value::Str(String::new().into()));
                         }
-                        // Direct native dispatch: if the path resolves to a
-                        // known native function, emit CallNative to bypass
-                        // the multi-step env/func/method resolution.
-                        if !is_range
+                        // (db calls already emitted above — skip so we don't
+                        // emit a second call op.)
+                        if is_db_call || is_module_db_call {
+                            // Already emitted. Do nothing.
+                        } else if !is_range
                             && !has_named_or_defaults
                             && self
                                 .native_names
@@ -1647,6 +1900,37 @@ impl Compiler {
                     }
                 }
                 Expr::Field { obj, name, span: _ } => {
+                    // sqlz method form: `mydb.query(sql)` where mydb is a local
+                    // (Field, not Path). Same DbQuery treatment as Path form.
+                    let is_db_method = matches!(name.as_str(), "query" | "exec");
+                    if is_db_method {
+                        self.compile_expr(obj);
+                        let prev = std::mem::replace(&mut self.in_db_query, true);
+                        for a in args {
+                            self.compile_expr(a);
+                        }
+                        self.in_db_query = prev;
+                        for (_, val) in named {
+                            self.compile_expr(val);
+                        }
+                        // argc: template + params (+ struct marker).
+                        // CallMethod pops `argc` args then pops recv, so
+                        // recv is NOT counted here.
+                        let nparams = args.first().map(Self::fmt_param_count).unwrap_or(0);
+                        let mut argc = 1 + nparams + named.len();
+                        if name == "query" && self.db_query_struct(*span).is_some() {
+                            self.emit_const(Value::Str(
+                                format!("__struct:{}", self.db_query_struct(*span).unwrap()).into(),
+                            ));
+                            argc += 1;
+                        }
+                        self.emit(Op::CallMethod {
+                            name: name.clone(),
+                            argc: argc as u16,
+                            span: *span,
+                        });
+                        return;
+                    }
                     self.compile_expr(obj);
                     for a in args {
                         self.compile_expr(a);
@@ -1745,6 +2029,35 @@ impl Compiler {
             }
             Expr::Block(b) => self.compile_block(b),
             Expr::Fmt { parts, .. } => {
+                // sqlz context: when this Fmt is the SQL arg of
+                // `sqlz.query`/`sqlz.exec` (+ `db.*` alias), emit DbQuery
+                // so the template and
+                // bound values stay separate (prepared-statement binding,
+                // never string concatenation). Otherwise normal Concat.
+                if self.in_db_query {
+                    let mut nparams = 0u16;
+                    let mut template = String::new();
+                    let mut param_exprs: Vec<&Expr> = Vec::new();
+                    for part in parts {
+                        match part {
+                            FmtPart::Text(t) => template.push_str(t),
+                            FmtPart::Expr(e, _) => {
+                                nparams += 1;
+                                template.push_str(&format!("?{nparams}"));
+                                param_exprs.push(e);
+                            }
+                        }
+                    }
+                    self.emit_const(Value::Str(template.into()));
+                    for e in param_exprs {
+                        self.compile_expr(e);
+                    }
+                    self.emit(Op::DbQuery {
+                        nparams,
+                        span: expr.span(),
+                    });
+                    return;
+                }
                 let mut n = 0u16;
                 for part in parts {
                     match part {

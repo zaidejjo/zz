@@ -176,6 +176,23 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("std.http.put", "http fixtures skipped in parity"),
     ("std.http.query", "http fixtures skipped in parity"),
     ("std.http.test", "http fixtures skipped in parity"),
+    // PostgreSQL wire driver — VM-only (blocking TCP sockets have no C
+    // runtime counterpart; AOT lowers these to Unit like time.now_ms).
+    ("std.sqlz.postgres.connect", "VM-only; no C socket driver"),
+    ("std.sqlz.postgres.exec", "VM-only; no C socket driver"),
+    ("std.sqlz.postgres.query", "VM-only; no C socket driver"),
+    ("std.sqlz.postgres.close", "VM-only; no C socket driver"),
+    // MySQL wire driver — same VM-only rationale as postgres.
+    ("std.sqlz.mysql.connect", "VM-only; no C socket driver"),
+    ("std.sqlz.mysql.exec", "VM-only; no C socket driver"),
+    ("std.sqlz.mysql.query", "VM-only; no C socket driver"),
+    ("std.sqlz.mysql.close", "VM-only; no C socket driver"),
+    // Closure transactions — inlined by the AOT codegen (BEGIN/COMMIT/ROLLBACK
+    // around the closure body); no native C implementation needed.
+    ("std.sqlz.transaction", "AOT-inlined; no native C impl"),
+    ("sqlz.transaction", "AOT-inlined; no native C impl"),
+    ("std.db.transaction", "AOT-inlined; no native C impl"),
+    ("db.transaction", "AOT-inlined; no native C impl"),
 ];
 
 #[test]

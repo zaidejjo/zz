@@ -8,6 +8,48 @@ use zz_frontend::diag::{error_at, FixIt};
 use zz_frontend::levenshtein::suggest_all;
 use zz_frontend::span::Span;
 
+/// Cheap static sanity check over the literal SQL text: balanced
+/// single/double quotes and parens. Returns an error message when the
+/// text is clearly malformed; `None` means "looks plausible".
+fn check_sql_static(text: &str) -> Option<String> {
+    let mut single = false;
+    let mut double = false;
+    let mut depth: i32 = 0;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '(' if !single && !double => depth += 1,
+            ')' if !single && !double => {
+                depth -= 1;
+                if depth < 0 {
+                    return Some("unbalanced `)` in SQL string".to_string());
+                }
+            }
+            '-' if !single && !double && chars.peek() == Some(&'-') => {
+                // `--` line comment: skip to end of line.
+                for c2 in chars.by_ref() {
+                    if c2 == '\n' {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if single {
+        return Some("unbalanced `'` in SQL string".to_string());
+    }
+    if double {
+        return Some("unbalanced `\"` in SQL string".to_string());
+    }
+    if depth != 0 {
+        return Some("unbalanced `(` in SQL string".to_string());
+    }
+    None
+}
+
 impl Checker {
     // --- statements -------------------------------------------------------
 
@@ -717,7 +759,7 @@ impl Checker {
                 ret_ty,
                 body,
                 span,
-            } => self.check_closure(params, ret_ty.as_ref(), body, *span),
+            } => self.check_closure(params, ret_ty.as_ref(), body, *span, None),
             Expr::If {
                 cond,
                 then,
@@ -1174,6 +1216,13 @@ impl Checker {
                             sig = self.funcs.get(&format!("http.{method}")).cloned()
                         }
                         Type::Json => sig = self.funcs.get(&format!("json.{method}")).cloned(),
+                        Type::Db => {
+                            // Canonical `sqlz.*` first, `db.*` alias fallback.
+                            sig = self.funcs.get(&format!("sqlz.{method}")).cloned();
+                            if sig.is_none() {
+                                sig = self.funcs.get(&format!("db.{method}")).cloned();
+                            }
+                        }
                         Type::Chan => sig = self.funcs.get(&format!("chan.{method}")).cloned(),
                         Type::TaskJoin => sig = self.funcs.get(&format!("task.{method}")).cloned(),
                         Type::Struct(sname) => {
@@ -1220,6 +1269,86 @@ impl Checker {
             _ => None,
         };
         if let Some(name) = &direct_name {
+            // sqlz foundation: `sqlz.query(sql)` / `sqlz.exec(sql)` (canonical;
+            // `db.*` / `std.db.*` are zero-overhead aliases) take an
+            // interpolated SQL string. `{expr}` segments are extracted as
+            // bound parameters (never inlined), so verification here is:
+            // receiver is `db`, SQL arg is `str`, each bound expr is a
+            // scalar (int/float/str/bool). Return type unifies with the
+            // caller's annotation (`let users: [User] = sqlz.query(...)`).
+            //
+            // `pg.query(db, sql)` / `pg.exec(db, sql)` (+ `postgres.*` and
+            // `std.sqlz.postgres.*` spellings) and `my.query(db, sql)` /
+            // `my.exec(db, sql)` (+ `mysql.*`, `std.sqlz.mysql.*`) are the
+            // explicit-receiver free-function forms: the SQL is the SECOND
+            // user arg.
+            //
+            // NOTE: this direct-name path only fires for qualified calls
+            // where the leading component is the module namespace (not a
+            // local). The common method form (`mydb.query(...)` on a
+            // handle) is handled in the Path-method branch below, which
+            // treats the receiver as implicit.
+            let is_pg_call = name == "pg.query"
+                || name == "pg.exec"
+                || name == "postgres.query"
+                || name == "postgres.exec"
+                || name == "std.sqlz.postgres.query"
+                || name == "std.sqlz.postgres.exec"
+                || name == "my.query"
+                || name == "my.exec"
+                || name == "mysql.query"
+                || name == "mysql.exec"
+                || name == "std.sqlz.mysql.query"
+                || name == "std.sqlz.mysql.exec";
+            if name == "sqlz.query"
+                || name == "std.sqlz.query"
+                || name == "sqlz.exec"
+                || name == "std.sqlz.exec"
+                || name == "db.query"
+                || name == "std.db.query"
+                || name == "db.exec"
+                || name == "std.db.exec"
+                || name == "sqlz.transaction"
+                || name == "std.sqlz.transaction"
+                || name == "db.transaction"
+                || name == "std.db.transaction"
+                || is_pg_call
+            {
+                if let Some(sig) = self.funcs.get(name).cloned() {
+                    // Only take this path when the leading component really
+                    // is the module namespace (NOT a local variable).
+                    // Otherwise fall through to method dispatch.
+                    let recv_is_module = match callee {
+                        Expr::Path { parts, .. } => {
+                            parts.len() >= 2 && self.lookup_opt(&parts[0]).is_none()
+                        }
+                        _ => false,
+                    };
+                    if recv_is_module {
+                        self.used_names.insert(name.clone());
+                        let (ps, ret, subs) = self.instantiate(&sig);
+                        let pnames: Vec<String> =
+                            sig.params.iter().map(|(n, _)| n.clone()).collect();
+                        self.check_args_against(&pnames, &ps, &sig.has_default, args, named, span);
+                        // Explicit-receiver forms (`pg.query(db, sql)`,
+                        // `sqlz.query(db, sql)`) carry the SQL second;
+                        // the bare method-namespace form carries it first.
+                        // Skip for transaction — second arg is a closure, not SQL.
+                        let is_tx_call = name == "sqlz.transaction"
+                            || name == "std.sqlz.transaction"
+                            || name == "db.transaction"
+                            || name == "std.db.transaction";
+                        if !is_tx_call {
+                            let sql_idx = if is_pg_call || args.len() >= 2 { 1 } else { 0 };
+                            if let Some(sql_arg) = args.get(sql_idx) {
+                                self.verify_sql_params(sql_arg, span);
+                            }
+                        }
+                        self.validate_bounds(&sig, &subs, span);
+                        return ret;
+                    }
+                }
+            }
             if let Some(sig) = self.funcs.get(name).cloned() {
                 self.used_names.insert(name.clone());
                 let (ps, ret, subs) = self.instantiate(&sig);
@@ -1364,6 +1493,13 @@ impl Checker {
                         Type::Json => {
                             sig = self.funcs.get(&format!("json.{method}")).cloned();
                         }
+                        Type::Db => {
+                            // Canonical `sqlz.*` first, `db.*` alias fallback.
+                            sig = self.funcs.get(&format!("sqlz.{method}")).cloned();
+                            if sig.is_none() {
+                                sig = self.funcs.get(&format!("db.{method}")).cloned();
+                            }
+                        }
                         Type::Chan => {
                             sig = self.funcs.get(&format!("chan.{method}")).cloned();
                         }
@@ -1384,6 +1520,72 @@ impl Checker {
                     }
                 }
                 if let Some(sig) = sig {
+                    // sqlz method form: `db.exec(sql)`, `db.query(sql)`,
+                    // `db.transaction(fn(tx) { ... })` — receiver is
+                    // implicit, so user args are matched against sig[1..].
+                    if (*method == "query" || *method == "exec" || *method == "transaction")
+                        && matches!(self.unifier.resolve(&recv_t), Type::Db)
+                    {
+                        let (ps, ret, subs) = self.instantiate(&sig);
+                        if !ps.is_empty() {
+                            if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
+                                self.report_mismatch(e, *pspan);
+                            }
+                        }
+                        let expected = ps.len().saturating_sub(1);
+                        let actual = args.len() + named.len();
+                        if actual != expected {
+                            self.errors.push(error_at(
+                                format!("expected {expected} argument(s), found {actual}"),
+                                span,
+                            ));
+                        } else if expected >= 1 {
+                            // Verify each user arg against sig[1..].
+                            for (i, arg) in args.iter().enumerate() {
+                                if ps.len() >= 2 + i {
+                                    // Propagate expected types into
+                                    // closures so their bodies can
+                                    // resolve method calls on known
+                                    // param types (e.g. `tx.exec`
+                                    // when `tx: Db`).
+                                    if let Expr::Closure {
+                                        params,
+                                        ret_ty,
+                                        body,
+                                        span: cspan,
+                                    } = arg
+                                    {
+                                        let expected_t = self.unifier.resolve(&ps[1 + i]);
+                                        let ep = if let Type::Func(ep, _) = &expected_t {
+                                            Some(ep.as_slice())
+                                        } else {
+                                            None
+                                        };
+                                        let at = self.check_closure(
+                                            params,
+                                            ret_ty.as_ref(),
+                                            body,
+                                            *cspan,
+                                            ep,
+                                        );
+                                        if let Err(e) = self.unifier.unify(&at, &ps[1 + i]) {
+                                            self.report_mismatch(e, arg.span());
+                                        }
+                                    } else {
+                                        let at = self.check_expr(arg);
+                                        if let Err(e) = self.unifier.unify(&at, &ps[1 + i]) {
+                                            self.report_mismatch(e, arg.span());
+                                        }
+                                    }
+                                }
+                            }
+                            if *method == "query" || *method == "exec" {
+                                self.verify_sql_params(&args[0], span);
+                            }
+                        }
+                        self.validate_bounds(&sig, &subs, span);
+                        return ret;
+                    }
                     let (ps, ret, subs) = self.instantiate(&sig);
                     if ps.is_empty() {
                         self.errors.push(error_at(
@@ -1526,30 +1728,146 @@ impl Checker {
 
         for (i, slot) in slots.iter().enumerate() {
             if let Some(arg) = slot {
-                let at = self.check_expr(arg);
-                if let Err(e) = self.unifier.unify(&at, &ps[i]) {
-                    self.report_mismatch(e, arg.span());
+                // When passing a closure to a function with a known
+                // signature, propagate expected param types so the body
+                // can resolve method calls on known types (e.g. `tx.exec`
+                // when `tx: Db`).  Without this, unannotated params get
+                // fresh vars and method dispatch fails on `?0`.
+                if let Expr::Closure {
+                    params,
+                    ret_ty,
+                    body,
+                    span,
+                } = arg
+                {
+                    let expected = self.unifier.resolve(&ps[i]);
+                    let ep = if let Type::Func(ep, _) = &expected {
+                        Some(ep.as_slice())
+                    } else {
+                        None
+                    };
+                    let at = self.check_closure(params, ret_ty.as_ref(), body, *span, ep);
+                    if let Err(e) = self.unifier.unify(&at, &ps[i]) {
+                        self.report_mismatch(e, arg.span());
+                    }
+                } else {
+                    let at = self.check_expr(arg);
+                    if let Err(e) = self.unifier.unify(&at, &ps[i]) {
+                        self.report_mismatch(e, arg.span());
+                    }
                 }
             }
         }
     }
 
+    /// Compile-time SQL verification for `db.query(sql)` / `db.exec(sql)`.
+    ///
+    /// The SQL arg is normally an interpolated string (`Fmt`): static text
+    /// segments stay in the prepared statement, `{expr}` segments become
+    /// `?N` bound parameters. This check ensures every bound expr is a
+    /// bindable scalar (int/float/str/bool) and rejects format specs
+    /// (`{x:.2f}` would render client-side, breaking parameterization).
+    /// Static text is scanned for balanced quotes/parens as a cheap
+    /// syntax sanity check; full schema verification happens at runtime
+    /// against the live connection.
+    pub(crate) fn verify_sql_params(&mut self, sql_arg: &Expr, span: Span) {
+        let parts = match sql_arg {
+            Expr::Fmt { parts, .. } => Some(parts.clone()),
+            Expr::Str { .. } => None,
+            Expr::Paren { expr, .. } => match expr.as_ref() {
+                Expr::Fmt { parts, .. } => Some(parts.clone()),
+                Expr::Str { .. } => None,
+                _ => {
+                    let at = self.check_expr(sql_arg);
+                    if let Err(e) = self.unifier.unify(&at, &Type::Str) {
+                        self.report_mismatch(e, sql_arg.span());
+                    }
+                    return;
+                }
+            },
+            _ => {
+                let at = self.check_expr(sql_arg);
+                if let Err(e) = self.unifier.unify(&at, &Type::Str) {
+                    self.report_mismatch(e, sql_arg.span());
+                }
+                return;
+            }
+        };
+        let Some(parts) = parts else { return };
+        let mut static_text = String::new();
+        for part in &parts {
+            match part {
+                FmtPart::Text(t) => static_text.push_str(t),
+                FmtPart::Expr(e, spec) => {
+                    if let Some(s) = spec {
+                        self.errors.push(error_at(
+                            format!(
+                                "format spec `:{s}` not allowed in SQL interpolation; use plain `{{...}}` so the value is bound as a parameter"
+                            ),
+                            e.span(),
+                        ));
+                    }
+                    let bt = self.check_expr(e);
+                    let rt = self.unifier.resolve(&bt);
+                    match rt {
+                        Type::Int
+                        | Type::Float
+                        | Type::Str
+                        | Type::Bool
+                        | Type::Var(_)
+                        | Type::Error => {}
+                        other => {
+                            self.errors.push(error_at(
+                                format!(
+                                    "SQL parameter must be int, float, str, or bool, found `{other}`"
+                                ),
+                                e.span(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(msg) = check_sql_static(&static_text) {
+            self.errors.push(error_at(msg, span));
+        }
+    }
+
+    /// `expected_params`: when a closure is passed to a function with a
+    /// known signature, the caller can provide the expected parameter types
+    /// here. For each unannotated param, if an expected type exists, the
+    /// fresh var is unified with it *before* checking the body — so the
+    /// body sees known param types and can resolve method calls (e.g.
+    /// `tx.exec(...)` when `tx: Db`).
     pub(crate) fn check_closure(
         &mut self,
         params: &[Param],
         ret_ty: Option<&Ty>,
         body: &Expr,
         _span: Span,
+        expected_params: Option<&[Type]>,
     ) -> Type {
         self.push_scope();
         let mut ptypes = Vec::new();
-        for p in params {
+        for (i, p) in params.iter().enumerate() {
             let ty = match &p.ty {
                 Some(t) => {
                     let gens = self.current_generics.clone();
                     self.ast_to_type(t, &gens)
                 }
-                None => self.unifier.fresh_var(),
+                None => {
+                    if let Some(ep) = expected_params.and_then(|eps| eps.get(i)) {
+                        // Bind the fresh var to the expected type so the
+                        // body can resolve method calls on known types.
+                        let fv = self.unifier.fresh_var();
+                        if let Err(e) = self.unifier.unify(&fv, ep) {
+                            self.report_mismatch(e, p.span);
+                        }
+                        fv
+                    } else {
+                        self.unifier.fresh_var()
+                    }
+                }
             };
             self.define(&p.name.name, ty.clone());
             ptypes.push(ty);

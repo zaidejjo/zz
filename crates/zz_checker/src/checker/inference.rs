@@ -163,6 +163,8 @@ impl Checker {
                     Type::Struct(name.clone())
                 } else if name == "json" {
                     Type::Json
+                } else if name == "db" || name == "sqlz" {
+                    Type::Db
                 } else {
                     self.errors
                         .push(error_at(format!("unknown type `{name}`"), ty.span));

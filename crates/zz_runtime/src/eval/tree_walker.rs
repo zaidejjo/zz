@@ -426,6 +426,14 @@ impl Interp {
             if let Ok(f) = self.lookup_callable(&format!("{ns}.{method}"), span) {
                 return Ok(f);
             }
+            // `db.*` is a zero-overhead alias for canonical `sqlz.*`:
+            // fall back so handles work regardless of which module was
+            // imported.
+            if ns == "sqlz" {
+                if let Ok(f) = self.lookup_callable(&format!("db.{method}"), span) {
+                    return Ok(f);
+                }
+            }
         }
         if let Value::Object(o) = recv {
             // Try TypeName.method (impl block methods)
@@ -1040,7 +1048,33 @@ impl Interp {
     pub fn call(&mut self, f: Value, mut args: Vec<Value>, span: Span) -> Result<Value, EvalError> {
         match f {
             Value::Native(nf) => {
-                if args.len() != nf.arity {
+                // sqlz/pg/my query/exec (+ aliases) are variadic over bound
+                // params (template + N params [+ struct marker]); skip the
+                // fixed arity gate for them.
+                let is_db = matches!(
+                    nf.name.as_str(),
+                    "sqlz.query"
+                        | "std.sqlz.query"
+                        | "sqlz.exec"
+                        | "std.sqlz.exec"
+                        | "db.query"
+                        | "std.db.query"
+                        | "db.exec"
+                        | "std.db.exec"
+                        | "pg.query"
+                        | "pg.exec"
+                        | "postgres.query"
+                        | "postgres.exec"
+                        | "std.sqlz.postgres.query"
+                        | "std.sqlz.postgres.exec"
+                        | "my.query"
+                        | "my.exec"
+                        | "mysql.query"
+                        | "mysql.exec"
+                        | "std.sqlz.mysql.query"
+                        | "std.sqlz.mysql.exec"
+                );
+                if !is_db && args.len() != nf.arity {
                     return Err(EvalError::new(
                         format!("expected {} arguments, found {}", nf.arity, args.len()),
                         span,

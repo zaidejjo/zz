@@ -721,6 +721,205 @@ zz_value zz_tcp_set_write_timeout(zz_value stream, zz_value ms, int *err) {
 }
 
 // =====================================================================
+//  std.db SQLite — prepared-statement FFI (zero-alloc binding path)
+// =====================================================================
+//
+//  Contract (mirrors the rusqlite natives in zz_stdlib):
+//    - `zz_db_open(path)` → ZZ_DB handle (sqlite3* boxed, :memory: ok).
+//    - `zz_db_exec(db, sql, binds, n)` → int rows-changed. Uses
+//      sqlite3_prepare_v2 + sqlite3_bind_* + sqlite3_step; the SQL
+//      template is a static C string with ?N placeholders, bound values
+//      arrive as zz_values — never string-concatenated.
+//    - `zz_db_query(db, sql, binds, n)` → array of row dicts
+//      (positional c0..cN keys; struct mapping happens at the ZZ
+//      layer via field order).
+//    - `zz_db_close(db)` → unit (also closed at process exit).
+#ifdef ZZ_HAS_SQLITE3
+#include <sqlite3.h>
+#endif
+
+zz_value zz_db_open(zz_value path, int *err) {
+    (void)err;
+    if (path.tag != ZZ_STR || !path.s) return (zz_value){ZZ_DB, {.db = NULL}};
+    const char *p = zz_str_cptr(path.s);
+#ifdef ZZ_HAS_SQLITE3
+    sqlite3 *conn = NULL;
+    int rc;
+    if (strcmp(p, ":memory:") == 0) rc = sqlite3_open(":memory:", &conn);
+    else {
+        /* Strip optional `sqlite://` prefix (scheme routing). */
+        const char *sp = (strncmp(p, "sqlite://", 9) == 0) ? p + 9 : p;
+        if (sp[0] == '\0') rc = sqlite3_open(":memory:", &conn);
+        else rc = sqlite3_open(sp, &conn);
+    }
+    if (rc != SQLITE_OK) {
+        if (conn) sqlite3_close(conn);
+        return (zz_value){ZZ_DB, {.db = NULL}};
+    }
+    return (zz_value){ZZ_DB, {.db = (void *)conn}};
+#else
+    (void)p;
+    return (zz_value){ZZ_DB, {.db = NULL}};
+#endif
+}
+
+static int zz_db_bind_all(
+#ifdef ZZ_HAS_SQLITE3
+    sqlite3_stmt *st,
+#endif
+    zz_value *binds, size_t nbinds, int *err) {
+    (void)err;
+    for (size_t i = 0; i < nbinds; i++) {
+        zz_value v = binds[i];
+#ifdef ZZ_HAS_SQLITE3
+        int idx = (int)i + 1;
+        int rc = SQLITE_OK;
+        switch (v.tag) {
+        case ZZ_INT: rc = sqlite3_bind_int64(st, idx, v.i); break;
+        case ZZ_FLOAT: rc = sqlite3_bind_double(st, idx, v.f); break;
+        case ZZ_BOOL: rc = sqlite3_bind_int(st, idx, v.b ? 1 : 0); break;
+        case ZZ_STR:
+            rc = v.s ? sqlite3_bind_text(st, idx, zz_str_cptr(v.s), (int)v.s->len, SQLITE_TRANSIENT) : sqlite3_bind_null(st, idx);
+            break;
+        case ZZ_OPTION_NONE: rc = sqlite3_bind_null(st, idx); break;
+        case ZZ_OPTION_SOME:
+            if (v.payload) {
+                zz_value inner = *v.payload;
+                if (inner.tag == ZZ_INT) rc = sqlite3_bind_int64(st, idx, inner.i);
+                else if (inner.tag == ZZ_FLOAT) rc = sqlite3_bind_double(st, idx, inner.f);
+                else if (inner.tag == ZZ_BOOL) rc = sqlite3_bind_int(st, idx, inner.b ? 1 : 0);
+                else if (inner.tag == ZZ_STR && inner.s) rc = sqlite3_bind_text(st, idx, zz_str_cptr(inner.s), (int)inner.s->len, SQLITE_TRANSIENT);
+                else rc = sqlite3_bind_null(st, idx);
+            } else rc = sqlite3_bind_null(st, idx);
+            break;
+        default: rc = sqlite3_bind_null(st, idx); break;
+        }
+        if (rc != SQLITE_OK) return rc;
+#else
+        (void)v;
+#endif
+    }
+    return 0;
+}
+
+// ---- transaction error flag --------------------------------------------
+static int _zz_tx_error = 0;
+void zz_tx_set_error(void)   { _zz_tx_error = 1; }
+void zz_tx_reset_error(void) { _zz_tx_error = 0; }
+int  zz_tx_has_error(void)   { return _zz_tx_error; }
+
+zz_value zz_db_exec_raw(zz_value db, const char *sql, zz_value *binds, size_t nbinds, int *err) {
+    (void)err;
+    if (db.tag != ZZ_DB || !db.db || !sql) return zz_int(0);
+#ifdef ZZ_HAS_SQLITE3
+    sqlite3 *conn = (sqlite3 *)db.db;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(conn, sql, -1, &st, NULL) != SQLITE_OK) return zz_int(0);
+    if (zz_db_bind_all(st, binds, nbinds, err) != SQLITE_OK) { sqlite3_finalize(st); return zz_int(0); }
+    int rc = sqlite3_step(st);
+    int changed = sqlite3_changes(conn);
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW) { zz_tx_set_error(); return zz_int(0); }
+    return zz_int((int64_t)changed);
+#else
+    (void)binds; (void)nbinds;
+    return zz_int(0);
+#endif
+}
+
+zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t nbinds, int *err) {
+    (void)err;
+    zz_value out = zz_array_new();
+    if (db.tag != ZZ_DB || !db.db || !sql) return out;
+#ifdef ZZ_HAS_SQLITE3
+    sqlite3 *conn = (sqlite3 *)db.db;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(conn, sql, -1, &st, NULL) != SQLITE_OK) return out;
+    if (zz_db_bind_all(st, binds, nbinds, err) != SQLITE_OK) { sqlite3_finalize(st); return out; }
+    int ncol = sqlite3_column_count(st);
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        zz_value row = zz_dict_new();
+        for (int i = 0; i < ncol; i++) {
+            /* Use the real SQL column name so ZZ struct field access
+               (e.g. users[0].id) works in AOT mode.  Fall back to
+               the positional "cN" form if the name is unavailable. */
+            const char *cname = sqlite3_column_name(st, i);
+            char fallback[32];
+            if (!cname || !cname[0]) {
+                snprintf(fallback, sizeof fallback, "c%d", i);
+                cname = fallback;
+            }
+            zz_value val;
+            switch (sqlite3_column_type(st, i)) {
+            case SQLITE_INTEGER: val = zz_int(sqlite3_column_int64(st, i)); break;
+            case SQLITE_FLOAT: val = zz_float(sqlite3_column_double(st, i)); break;
+            case SQLITE_TEXT: {
+                const unsigned char *t = sqlite3_column_text(st, i);
+                int n = sqlite3_column_bytes(st, i);
+                val = zz_str_owned(copy_cstr((const char *)t, (size_t)(n < 0 ? 0 : n)));
+                break;
+            }
+            case SQLITE_NULL: val = (zz_value){ZZ_OPTION_NONE, {.payload = NULL}}; break;
+            default: {
+                const unsigned char *t = sqlite3_column_text(st, i);
+                int n = sqlite3_column_bytes(st, i);
+                if (t) val = zz_str_owned(copy_cstr((const char *)t, (size_t)(n < 0 ? 0 : n)));
+                else val = (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
+                break;
+            }
+            }
+            int derr = 0;
+            zz_value k = zz_str_owned(copy_cstr(cname, strlen(cname)));
+            zz_index_set(row, k, val, &derr);
+            (void)derr;
+        }
+        int aerr = 0;
+        out = zz_vec_push(out, row, &aerr);
+        (void)aerr;
+    }
+    sqlite3_finalize(st);
+#else
+    (void)binds; (void)nbinds;
+#endif
+    return out;
+}
+
+zz_value zz_db_close(zz_value db, int *err) {
+    (void)err;
+#ifdef ZZ_HAS_SQLITE3
+    if (db.tag == ZZ_DB && db.db) sqlite3_close((sqlite3 *)db.db);
+#else
+    (void)db;
+#endif
+    return zz_unit();
+}
+
+// Native-convention wrappers: (db, sql_str, binds_array, err).
+// Unpack the binds array into a C slice, then delegate to the raw FFI.
+zz_value zz_db_exec(zz_value db, zz_value sql, zz_value binds, int *err) {
+    const char *tmpl = (sql.tag == ZZ_STR && sql.s) ? zz_str_cptr(sql.s) : "";
+    zz_value *items = NULL;
+    size_t n = 0;
+    if (binds.tag == ZZ_ARRAY && binds.arr) {
+        items = binds.arr->items;
+        n = binds.arr->len;
+    }
+    return zz_db_exec_raw(db, tmpl, items, n, err);
+}
+
+zz_value zz_db_query(zz_value db, zz_value sql, zz_value binds, int *err) {
+    const char *tmpl = (sql.tag == ZZ_STR && sql.s) ? zz_str_cptr(sql.s) : "";
+    zz_value *items = NULL;
+    size_t n = 0;
+    if (binds.tag == ZZ_ARRAY && binds.arr) {
+        items = binds.arr->items;
+        n = binds.arr->len;
+    }
+    return zz_db_query_raw(db, tmpl, items, n, err);
+}
+
+// =====================================================================
 //  Epoll HTTP Server — SO_REUSEPORT Multi-Core Event Loop
 // =====================================================================
 //

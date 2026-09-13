@@ -1261,6 +1261,44 @@ impl Vm {
                             let method = parts.last().unwrap();
                             let recv =
                                 interp.resolve_path_value(&parts[..parts.len() - 1], pspan)?;
+                            // sqlz fast path (CallPath form): Db handle +
+                            // query/exec/close dispatches straight to the
+                            // canonical sqlz.* native (db.* alias fallback).
+                            // lookup_method would also work via the Db
+                            // method_namespace, but this avoids the
+                            // object_field detour entirely.
+                            if matches!(recv, Value::Db(_))
+                                && matches!(method.as_str(), "query" | "exec" | "close")
+                            {
+                                let entry = interp
+                                    .natives
+                                    .get(&format!("sqlz.{method}"))
+                                    .copied()
+                                    .or_else(|| {
+                                        interp.natives.get(&format!("std.sqlz.{method}")).copied()
+                                    })
+                                    .or_else(|| {
+                                        interp.natives.get(&format!("db.{method}")).copied()
+                                    })
+                                    .or_else(|| {
+                                        interp.natives.get(&format!("std.db.{method}")).copied()
+                                    });
+                                match entry {
+                                    Some(e) => {
+                                        let mut arg_vals = vec![recv];
+                                        arg_vals.extend(args);
+                                        self.frames.last_mut().unwrap().ip = ip;
+                                        let result = (e.f)(interp, &mut arg_vals, span)?;
+                                        self.stack.push(result);
+                                        re_cache!();
+                                        continue;
+                                    }
+                                    None => {
+                                        return Err(self
+                                            .error(format!("undefined method `{method}`"), span));
+                                    }
+                                }
+                            }
                             let f = interp.lookup_method(&recv, method, pspan)?;
                             let mut arg_vals = vec![recv];
                             arg_vals.extend(args);
@@ -1285,6 +1323,35 @@ impl Vm {
                     args.reverse();
                     let recv = self.stack.pop().unwrap();
                     self.frames.last_mut().unwrap().ip = ip;
+                    // sqlz fast path: `mydb.query/exec` on a Db handle
+                    // bypasses object_field (Db has no struct fields) and
+                    // dispatches straight to the canonical sqlz.* native
+                    // (db.* alias fallback).
+                    if matches!(recv, Value::Db(_))
+                        && matches!(name.as_str(), "query" | "exec" | "close")
+                    {
+                        let native_name = format!("sqlz.{name}");
+                        let entry = interp
+                            .natives
+                            .get(&native_name)
+                            .copied()
+                            .or_else(|| interp.natives.get(&format!("std.sqlz.{name}")).copied())
+                            .or_else(|| interp.natives.get(&format!("db.{name}")).copied())
+                            .or_else(|| interp.natives.get(&format!("std.db.{name}")).copied());
+                        match entry {
+                            Some(e) => {
+                                let mut arg_vals = vec![recv];
+                                arg_vals.extend(args);
+                                let result = (e.f)(interp, &mut arg_vals, span)?;
+                                self.stack.push(result);
+                                re_cache!();
+                                continue;
+                            }
+                            None => {
+                                return Err(self.error(format!("undefined method `{name}`"), span));
+                            }
+                        }
+                    }
                     match object_field(&recv, name, span) {
                         Ok(f) => self.call_value(f, args, span, interp)?,
                         Err(_) => {
@@ -1322,6 +1389,27 @@ impl Vm {
                     let formatted = crate::runtime::format::format_value_with_spec(&val, &spec_str);
                     self.stack.push(Value::Str(formatted.into()));
                 }
+                Op::DbQuery { nparams, span } => {
+                    // Stack: [template, p1..pn] (template pushed first by
+                    // the compiler). Re-push template then params in order
+                    // so CallNative sees [template, p1..pn].
+                    let n = *nparams as usize;
+                    if self.stack.len() < n + 1 {
+                        return Err(
+                            self.error("db query stack underflow in DbQuery".to_string(), *span)
+                        );
+                    }
+                    let mut params = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        params.push(self.stack.pop().unwrap());
+                    }
+                    params.reverse();
+                    let template = self.stack.pop().unwrap();
+                    self.stack.push(template);
+                    for p in params {
+                        self.stack.push(p);
+                    }
+                }
                 Op::EnterScope => {
                     let scope = Env::with_parent(&interp.env);
                     interp.env = scope;
@@ -1352,10 +1440,13 @@ impl Vm {
                         args.push(self.stack.pop().unwrap());
                     }
                     args.reverse();
-                    let entry = interp
-                        .natives
-                        .get(name)
-                        .ok_or_else(|| EvalError::new(format!("unknown native `{name}`"), span))?;
+                    // sqlz.query/sqlz.exec (+ db.* alias) carry a variable
+                    // number of bound params; resolve the entry without an
+                    // arity gate (Interp::call skips it for sqlz.* too).
+                    let entry =
+                        interp.natives.get(name).copied().ok_or_else(|| {
+                            EvalError::new(format!("unknown native `{name}`"), span)
+                        })?;
                     self.frames.last_mut().unwrap().ip = ip;
                     let result = (entry.f)(interp, &mut args, span)?;
                     self.stack.push(result);

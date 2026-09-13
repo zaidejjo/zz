@@ -32,6 +32,9 @@ pub enum Type {
     Union(Vec<Type>),
     /// Opaque JSON value (produced by `std.json.parse`).
     Json,
+    /// Opaque SQLite database handle (produced by `std.sqlz.open`;
+    /// `std.db.open` is a zero-overhead alias).
+    Db,
     /// Opaque HTTP server handle (produced by `std.http.server`).
     HttpServer,
     /// Opaque TCP stream handle (produced by `std.net.tcp_connect`).
@@ -114,6 +117,7 @@ impl fmt::Display for Type {
                 Ok(())
             }
             Type::Json => write!(f, "json"),
+            Type::Db => write!(f, "db"),
             Type::HttpServer => write!(f, "http.server"),
             Type::TcpStream => write!(f, "tcp.stream"),
             Type::TcpListener => write!(f, "tcp.listener"),

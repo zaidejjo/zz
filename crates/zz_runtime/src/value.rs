@@ -7,7 +7,6 @@ use std::fmt;
 use std::net::{TcpListener, TcpStream};
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
-
 use zz_frontend::ast::{Block, Expr, Param};
 use zz_frontend::span::Span;
 
@@ -39,6 +38,24 @@ pub struct TaskJoinState {
 pub struct ObjectValue {
     pub name: String,
     pub fields: Vec<(String, Value)>,
+}
+
+/// An opaque SQLite database handle. The concrete connection type lives
+/// in `zz_stdlib` (rusqlite) so this crate stays dependency-free; the
+/// handle is type-erased here as `Arc<dyn Any + Send + Sync>`.
+#[derive(Debug, Clone)]
+pub struct DbHandle(pub Arc<DbHandleInner>);
+
+/// Inner payload for [`DbHandle`]: a mutex-guarded type-erased connection.
+#[derive(Debug)]
+pub struct DbHandleInner {
+    pub mutex: Mutex<Box<dyn std::any::Any + Send + Sync>>,
+}
+
+impl PartialEq for DbHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// An integer range `a..b` / `a..b..step` (boxed so `Value` stays small).
@@ -90,6 +107,9 @@ pub enum Value {
     TcpStream(Arc<Mutex<TcpStream>>),
     /// A TCP listener (opaque, wrapped in Arc<Mutex> for clone safety).
     TcpListener(Arc<Mutex<TcpListener>>),
+    /// An opaque SQLite database handle (`std.sqlz.open`;
+    /// `std.db.open` alias).
+    Db(DbHandle),
     /// An HTTP response (status + body + headers).
     Response(Box<Response>),
     /// A struct instance: its type name and insertion-ordered fields.
@@ -305,6 +325,7 @@ impl Value {
             Value::HttpServer(_) => "http.server".to_string(),
             Value::TcpStream(_) => "tcp.stream".to_string(),
             Value::TcpListener(_) => "tcp.listener".to_string(),
+            Value::Db(_) => "db".to_string(),
             Value::Response(_) => "http.response".to_string(),
             Value::Object(o) => o.name.clone(),
             Value::Range(_) => "range".to_string(),
@@ -325,6 +346,7 @@ impl Value {
             Value::Result(_) => Some("result"),
             Value::TcpStream(_) => Some("net"),
             Value::TcpListener(_) => Some("net"),
+            Value::Db(_) => Some("sqlz"),
             Value::Response(_) => Some("http"),
             Value::Chan(_) => Some("chan"),
             Value::TaskJoin(_) => None,
@@ -416,6 +438,7 @@ impl fmt::Display for Value {
             }
             Value::Chan(_) => write!(f, "<chan>"),
             Value::TaskJoin(_) => write!(f, "<task.join>"),
+            Value::Db(_) => write!(f, "<db>"),
         }
     }
 }
@@ -447,6 +470,8 @@ impl PartialEq for Value {
             // Chan and TaskJoin: compare by Arc pointer (identity)
             (Value::Chan(a), Value::Chan(b)) => Arc::ptr_eq(a, b),
             (Value::TaskJoin(a), Value::TaskJoin(b)) => Arc::ptr_eq(a, b),
+            // Db handles: identity (same connection)
+            (Value::Db(a), Value::Db(b)) => a == b,
             _ => false,
         }
     }

@@ -542,6 +542,13 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "net.local_addr" | "std.net.local_addr" => Some("zz_tcp_local_addr"),
         "net.set_read_timeout" | "std.net.set_read_timeout" => Some("zz_tcp_set_read_timeout"),
         "net.set_write_timeout" | "std.net.set_write_timeout" => Some("zz_tcp_set_write_timeout"),
+        // sqlz (AOT: sqlite3 prepared-statement FFI in core.c).
+        // Canonical `sqlz.*` / `std.sqlz.*`; `db.*` / `std.db.*` are
+        // zero-overhead aliases lowering to the same runtime fns.
+        "sqlz.open" | "std.sqlz.open" | "db.open" | "std.db.open" => Some("zz_db_open"),
+        "sqlz.exec" | "std.sqlz.exec" | "db.exec" | "std.db.exec" => Some("zz_db_exec"),
+        "sqlz.query" | "std.sqlz.query" | "db.query" | "std.db.query" => Some("zz_db_query"),
+        "sqlz.close" | "std.sqlz.close" | "db.close" | "std.db.close" => Some("zz_db_close"),
         // channels
         "chan" | "std.chan" => Some("zz_chan_new"),
         "chan.send" | "std.chan.send" => Some("zz_chan_send"),

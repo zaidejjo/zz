@@ -58,6 +58,7 @@ typedef enum {
     ZZ_TCP_STREAM,
     ZZ_TCP_LISTENER,
     ZZ_TUPLE,
+    ZZ_DB,
 } zz_tag;
 
 typedef struct zz_value zz_value;
@@ -130,6 +131,7 @@ struct zz_value {
         zz_value *payload;   // Option/Result inner value (heap-allocated)
         zz_object *obj;      // boxed struct instance
         zz_tcp *net;         // TCP stream or listener (ZZ_TCP_STREAM/LISTENER)
+        void *db;            // opaque sqlite3* handle (ZZ_DB)
     };
 };
 
@@ -561,6 +563,26 @@ zz_value zz_http_response_status(zz_value resp, int *err);
 zz_value zz_http_response_text(zz_value resp, int *err);
 zz_value zz_http_response_json(zz_value resp, int *err);
 zz_value zz_http_response_headers(zz_value resp, int *err);
+
+// ---- std.db SQLite ------------------------------------------------------
+// Opaque handle: sqlite3* boxed as ZZ_DB (refcounted pointer payload).
+// query/exec take a static SQL template (with ?N placeholders) plus
+// bound zz_values; binding uses sqlite3_bind_* (never concatenation).
+// Native call convention: (args..., int *err) so codegen can route via
+// zz_call_nativeN. exec/query pack (db, sql_str, binds_array).
+zz_value zz_db_open(zz_value path, int *err);
+zz_value zz_db_exec(zz_value db, zz_value sql, zz_value binds, int *err);
+zz_value zz_db_query(zz_value db, zz_value sql, zz_value binds, int *err);
+zz_value zz_db_close(zz_value db, int *err);
+// Low-level FFI used by emit_db_call's inline path (kept for tests).
+zz_value zz_db_exec_raw(zz_value db, const char *sql, zz_value *binds, size_t nbinds, int *err);
+zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t nbinds, int *err);
+
+// Transaction error flag — set by zz_db_exec_raw / zz_db_query_raw when
+// a statement fails.  Cleared by the inlined transaction prologue.
+void zz_tx_set_error(void);
+void zz_tx_reset_error(void);
+int  zz_tx_has_error(void);
 
 // ---- option / result ----------------------------------------------------
 zz_value zz_option_expect(zz_value opt, zz_value msg, int *err);

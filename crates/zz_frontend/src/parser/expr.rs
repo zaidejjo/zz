@@ -534,6 +534,13 @@ impl Parser {
                     parts.push(member.text);
                     end = member.span;
                 }
+                // sqlz! macro: `sqlz!{db, """SELECT ... {x}"""}` desugars
+                // directly to `db.query("""...""")` so the whole downstream
+                // pipeline (checker param extraction, runtime bound args,
+                // codegen prepared statements) stays unified.
+                if parts.len() == 1 && parts[0] == "sqlz" && self.at(TokenKind::Bang) {
+                    return self.parse_sqlz_macro(tok.span.join(end));
+                }
                 // Struct construction: `Point{ x: 1 }` or `Point { x: 1 }`.
                 // A `{` is treated as a struct literal when its contents look
                 // like fields (`ident : ...`). Adjacency alone is not enough
@@ -697,6 +704,69 @@ impl Parser {
             name: parts.join("."),
             fields,
             span: start.join(end),
+        }
+    }
+
+    /// `sqlz!{db, """SELECT ... {x}"""}` — desugars to `db.query(sql)`.
+    /// Also accepts `sqlz!(db, sql)` paren form. The `db` receiver may be
+    /// any expression (ident or path); the SQL arg is any expression but
+    /// is normally an interpolated (Fmt) string so `{expr}` segments
+    /// become bound parameters downstream.
+    pub(crate) fn parse_sqlz_macro(&mut self, start: Span) -> Expr {
+        self.advance(); // `!`
+        let is_brace = self.at(TokenKind::LBrace);
+        let is_paren = self.at(TokenKind::LParen);
+        if !is_brace && !is_paren {
+            self.error_here("expected `{` or `(` after `sqlz!`");
+            return dummy_expr(start);
+        }
+        self.advance(); // `{` or `(`
+        self.skip_stmt_ends();
+        let db_expr = self.parse_expr();
+        if !self.eat(TokenKind::Comma) {
+            self.error_here("expected `,` after db handle in `sqlz!{db, sql}`");
+        }
+        self.skip_stmt_ends();
+        let sql_expr = self.parse_expr();
+        self.skip_stmt_ends();
+        let end = if is_brace {
+            if self.eat_close(TokenKind::RBrace) {
+                self.previous().span
+            } else {
+                self.error_here("expected `}` to close `sqlz!{...}`");
+                sql_expr.span()
+            }
+        } else if self.eat_close(TokenKind::RParen) {
+            self.previous().span
+        } else {
+            self.error_here("expected `)` to close `sqlz!(...)`");
+            sql_expr.span()
+        };
+        let span = start.join(end);
+        // Desugar: `sqlz!{db, sql}` -> `db.query(sql)`.
+        let callee = match db_expr {
+            Expr::Ident { name, span: s } => Expr::Path {
+                parts: vec![name, "query".to_string()],
+                span: s.join(span),
+            },
+            Expr::Path { mut parts, span: s } => {
+                parts.push("query".to_string());
+                Expr::Path {
+                    parts,
+                    span: s.join(span),
+                }
+            }
+            other => Expr::Field {
+                obj: Box::new(other),
+                name: "query".to_string(),
+                span,
+            },
+        };
+        Expr::Call {
+            callee: Box::new(callee),
+            args: vec![sql_expr],
+            named: vec![],
+            span,
         }
     }
 

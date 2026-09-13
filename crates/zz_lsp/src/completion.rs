@@ -21,7 +21,7 @@ const KEYWORDS: &[&str] = &[
 // ── Stdlib module names ──────────────────────────────────────────────────
 
 const STDLIB_MODULES: &[&str] = &[
-    "io", "str", "vec", "json", "http", "fs", "env", "math", "time",
+    "io", "str", "vec", "json", "http", "fs", "env", "math", "time", "sqlz", "db",
 ];
 
 // ── Public API ───────────────────────────────────────────────────────────
@@ -212,24 +212,30 @@ fn stdlib_module_completions(
     // using the module's own name.  When the user uses an alias like
     // `import std.math as m`, we need to match against `math.*` keys and
     // present them as `m.*` completions.
-    let module_prefix = format!("{module}.");
+    //
+    // The import namespace itself is also tried: `import std.sqlz.postgres
+    // as pg` registers `pg.connect`, so `pg.` completes from the `pg.`
+    // prefix (likewise any other alias).
+    let prefixes = [format!("{module}."), format!("{obj_name}.")];
     let _user_prefix = format!("{obj_name}.");
     let mut items: Vec<CompletionItem> = cr
         .funcs
         .keys()
-        .filter(|k| k.starts_with(&module_prefix))
-        .map(|k| {
-            let func_name = &k[module_prefix.len()..];
-            CompletionItem {
-                label: func_name.to_string(),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some(format!("{obj_name}.{func_name}")),
-                documentation: Some(tower_lsp::lsp_types::Documentation::String(format!(
-                    "std.{module}.{func_name}"
-                ))),
-                insert_text: Some(func_name.to_string()),
-                ..Default::default()
-            }
+        .filter_map(|k| {
+            prefixes
+                .iter()
+                .find(|p| k.starts_with(p.as_str()))
+                .map(|p| k[p.len()..].to_string())
+        })
+        .map(|func_name| CompletionItem {
+            label: func_name.clone(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some(format!("{obj_name}.{func_name}")),
+            documentation: Some(tower_lsp::lsp_types::Documentation::String(format!(
+                "std.{module}.{func_name}"
+            ))),
+            insert_text: Some(func_name),
+            ..Default::default()
         })
         .filter(|item| item.label.starts_with(partial_prefix))
         .collect();
@@ -257,9 +263,11 @@ fn find_stdlib_module_for_alias(program: &Program, alias: &str) -> Option<String
                 .or_else(|| path.last().cloned())
                 .unwrap_or_default();
             if ns == alias {
-                // Extract the module name from the path (e.g. `std.math` → `math`).
+                // Extract the module name from the path
+                // (`std.math` → `math`, `std.sqlz.postgres` →
+                // `sqlz.postgres`).
                 if path.len() >= 2 && path[0] == "std" {
-                    return Some(path[1].clone());
+                    return Some(path[1..].join("."));
                 }
                 // Direct import like `import math` — assume it's a stdlib module.
                 if path.len() == 1 && STDLIB_MODULES.contains(&path[0].as_str()) {
