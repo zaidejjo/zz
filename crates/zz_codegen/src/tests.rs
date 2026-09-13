@@ -176,6 +176,12 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("std.http.put", "http fixtures skipped in parity"),
     ("std.http.query", "http fixtures skipped in parity"),
     ("std.http.test", "http fixtures skipped in parity"),
+    // PostgreSQL wire driver — VM-only (blocking TCP sockets have no C
+    // runtime counterpart; AOT lowers these to Unit like time.now_ms).
+    ("std.sqlz.postgres.connect", "VM-only; no C socket driver"),
+    ("std.sqlz.postgres.exec", "VM-only; no C socket driver"),
+    ("std.sqlz.postgres.query", "VM-only; no C socket driver"),
+    ("std.sqlz.postgres.close", "VM-only; no C socket driver"),
 ];
 
 #[test]

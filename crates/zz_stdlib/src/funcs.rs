@@ -1735,6 +1735,34 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert("db.close".into(), sig(vec![("db", Type::Db)], Type::Unit));
 
+    // std.sqlz.postgres — async-minded PostgreSQL wire-protocol driver.
+    //
+    // `connect(conninfo) -> db` (URL or keyword form), `exec(db, sql)`,
+    // `query(db, sql) -> [T]`, `close(db)`. Import as
+    // `import std.sqlz.postgres as pg`. Handles are `Type::Db`, so method
+    // syntax (`mydb.query(...)`) dispatches through the shared sqlz path;
+    // `pg.query(db, sql)` is the explicit-receiver spelling.
+    let pg_row_t = Type::Named("T".to_string());
+    m.insert(
+        "std.sqlz.postgres.connect".into(),
+        sig(vec![("conninfo", Type::Str)], Type::Db),
+    );
+    m.insert(
+        "std.sqlz.postgres.exec".into(),
+        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "std.sqlz.postgres.query".into(),
+        sig_t(
+            vec![("db", Type::Db), ("sql", Type::Str)],
+            Type::Array(Box::new(pg_row_t.clone())),
+        ),
+    );
+    m.insert(
+        "std.sqlz.postgres.close".into(),
+        sig(vec![("db", Type::Db)], Type::Unit),
+    );
+
     // std.chan — concurrency primitives
     let t = Type::Named("T".to_string());
     m.insert("std.chan".into(), sig(vec![], Type::Chan));
@@ -1851,12 +1879,16 @@ mod tests {
         assert!(funcs.contains_key("db.exec"));
         assert!(funcs.contains_key("db.query"));
         assert!(funcs.contains_key("db.close"));
+        assert!(funcs.contains_key("std.sqlz.postgres.connect"));
+        assert!(funcs.contains_key("std.sqlz.postgres.exec"));
+        assert!(funcs.contains_key("std.sqlz.postgres.query"));
+        assert!(funcs.contains_key("std.sqlz.postgres.close"));
         // Math constants are static values, not zero-arg functions.
         let consts = stdlib_consts();
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 282);
+        assert_eq!(funcs.len(), 286);
     }
 
     #[test]

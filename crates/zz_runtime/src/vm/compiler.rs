@@ -1453,6 +1453,48 @@ impl Compiler {
         }
     }
 
+    /// Total native argc for a module-namespace call
+    /// (`pg.query(db, sql)`, `sqlz.query(db, sql)`, ...): the handle is a
+    /// normal arg, so argc = db + template + bound params (+1 struct
+    /// marker for query when the checker resolved `[Struct]`, + named).
+    fn module_db_call_argc(&self, args: &[Expr], named: &[(String, Expr)], span: Span) -> usize {
+        let nparams = args.get(1).map(Self::fmt_param_count).unwrap_or(0);
+        let base = 2 + nparams + args.len().saturating_sub(2) + named.len();
+        if self.db_query_struct(span).is_some() {
+            base + 1
+        } else {
+            base
+        }
+    }
+
+    /// Compile `pg.query(db, sql)` / `sqlz.exec(db, sql)` args into
+    /// `[db, template, p1..pn, marker?]` for `CallNative`:
+    /// - args[0] (the handle) as normal,
+    /// - args[1] (the SQL) in DbQuery mode,
+    /// - trailing `__struct:Name` marker for query when typed.
+    fn compile_module_db_args(&mut self, args: &[Expr], named: &[(String, Expr)], span: Span) {
+        if let Some(db) = args.first() {
+            self.compile_expr(db);
+        }
+        if let Some(sql) = args.get(1) {
+            let prev = std::mem::replace(&mut self.in_db_query, true);
+            self.compile_expr(sql);
+            self.in_db_query = prev;
+        }
+        for extra in args.iter().skip(2) {
+            self.compile_expr(extra);
+        }
+        for (_, val) in named {
+            self.compile_expr(val);
+        }
+        // Only `query` carries a struct marker (`exec` returns int).
+        if self.db_query_struct(span).is_some() {
+            self.emit_const(Value::Str(
+                format!("__struct:{}", self.db_query_struct(span).unwrap()).into(),
+            ));
+        }
+    }
+
     /// True when a Path-form call `recv.method` targets a db handle:
     /// either the module-qualified `sqlz.query`/`std.sqlz.query` (or the
     /// `db.*`/`std.db.*` alias, receiver is the module namespace) or a
@@ -1608,18 +1650,46 @@ impl Compiler {
             } => match callee.as_ref() {
                 Expr::Path { parts, span: pspan } => {
                     let func_name = parts.join(".");
-                    // sqlz: `mydb.query(sql)` / `mydb.exec(sql)` — pure
-                    // ident chains parse as Path; the receiver is a local
-                    // (not a module ns). The SQL arg compiles in
-                    // DbQuery mode (template + bound params).
-                    // NOTE: `sqlz.query` / `db.query` (module ns as
-                    // receiver) are NOT db calls — they go through normal
-                    // CallNative/CallPath so `sqlz.open(...)` keeps working.
+                    // Method form: `mydb.query(sql)` / `mydb.exec(sql)` —
+                    // pure ident chains parse as Path; the receiver is a
+                    // local, NOT a module namespace. The SQL arg compiles
+                    // in DbQuery mode (template + bound params).
+                    //
+                    // A leading component that resolves to a slot/env LOCAL
+                    // is a receiver; a module namespace (`sqlz`, `db`,
+                    // `pg`, `postgres`, `std`) takes the free-function
+                    // branch below (`is_module_db_call`).
+                    let leading_is_module_ns =
+                        matches!(parts[0].as_str(), "sqlz" | "db" | "pg" | "postgres" | "std")
+                            && matches!(self.resolve(&parts[0]), Resolved::Env);
                     let is_db_call = parts.len() == 2
                         && matches!(parts[1].as_str(), "query" | "exec")
-                        && parts[0] != "sqlz"
-                        && parts[0] != "db"
+                        && !leading_is_module_ns
                         && self.is_db_path(parts);
+                    // Free-function form with explicit receiver:
+                    // `pg.query(db, sql)`, `sqlz.query(db, sql)`,
+                    // `std.sqlz.postgres.exec(db, sql)`, ... The db handle
+                    // is args[0], the SQL (args[1]) compiles in DbQuery
+                    // mode exactly like the method form.
+                    let db_module_prefix = if parts.len() >= 2 {
+                        parts[..parts.len() - 1].join(".")
+                    } else {
+                        String::new()
+                    };
+                    let is_module_db_call = matches!(
+                        parts.last().map(String::as_str),
+                        Some("query") | Some("exec")
+                    ) && matches!(
+                        db_module_prefix.as_str(),
+                        "sqlz"
+                            | "std.sqlz"
+                            | "db"
+                            | "std.db"
+                            | "pg"
+                            | "postgres"
+                            | "std.sqlz.postgres"
+                    ) && leading_is_module_ns
+                        && args.len() + named.len() >= 2;
                     let is_input = parts.len() == 1
                         && parts[0] == "input"
                         && args.len() <= 1
@@ -1727,11 +1797,11 @@ impl Compiler {
                         });
                     } else {
                         // Env-path receiver (e.g. top-level `mydb` lives in
-                        // env, not a slot). db calls need DbQuery treatment
-                        // here too — same as the slot path above. The
-                        // if/else chain below handles emission; guard each
-                        // generic branch with `!is_db_call` so db args are
-                        // compiled exactly once via compile_db_args.
+                        // env, not a slot). Method-form db calls need
+                        // DbQuery treatment here too — same as the slot
+                        // path above. The if/else chain below handles
+                        // emission; guard each generic branch so db args
+                        // are compiled exactly once.
                         if is_db_call {
                             match self.resolve(&parts[0]) {
                                 Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
@@ -1746,6 +1816,30 @@ impl Compiler {
                                 argc: self.db_call_argc(args, *span) as u16,
                                 span: *span,
                             });
+                        } else if is_module_db_call {
+                            // Free-function form with explicit receiver
+                            // (`pg.query(db, sql)`): handle is a normal
+                            // arg, SQL splits to template + bound params.
+                            self.compile_module_db_args(args, named, *span);
+                            let argc = self.module_db_call_argc(args, named, *span);
+                            if self
+                                .native_names
+                                .as_ref()
+                                .is_some_and(|n| n.contains(&func_name))
+                            {
+                                self.emit(Op::CallNative {
+                                    name: func_name.clone(),
+                                    argc: argc as u16,
+                                    span: *span,
+                                });
+                            } else {
+                                self.emit(Op::CallPath {
+                                    parts: parts.clone(),
+                                    argc: argc as u16,
+                                    span: *span,
+                                    pspan: *pspan,
+                                });
+                            }
                         } else if is_range {
                             if args.len() == 1 {
                                 self.emit_const(Value::Int(0));
@@ -1762,9 +1856,10 @@ impl Compiler {
                             }
                         } else if has_named_or_defaults {
                             self.compile_reordered_args(&func_name, args, named);
-                        } else if !is_db_call {
-                            // (db calls already emitted above with CallMethod;
-                            // compiling args again would duplicate them.)
+                        } else if !is_db_call && !is_module_db_call {
+                            // (db calls already emitted above with CallMethod
+                            // or CallNative; compiling args again would
+                            // duplicate them.)
                             for a in args {
                                 self.compile_expr(a);
                             }
@@ -1772,9 +1867,9 @@ impl Compiler {
                         if is_input {
                             self.emit_const(Value::Str(String::new().into()));
                         }
-                        // (db calls already emitted as CallMethod above —
-                        // skip so we don't emit a second call op.)
-                        if is_db_call {
+                        // (db calls already emitted above — skip so we don't
+                        // emit a second call op.)
+                        if is_db_call || is_module_db_call {
                             // Already emitted. Do nothing.
                         } else if !is_range
                             && !has_named_or_defaults

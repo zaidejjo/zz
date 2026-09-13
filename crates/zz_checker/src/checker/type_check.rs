@@ -1277,11 +1277,21 @@ impl Checker {
             // scalar (int/float/str/bool). Return type unifies with the
             // caller's annotation (`let users: [User] = sqlz.query(...)`).
             //
+            // `pg.query(db, sql)` / `pg.exec(db, sql)` (+ `postgres.*` and
+            // `std.sqlz.postgres.*` spellings) are the explicit-receiver
+            // free-function forms: the SQL is the SECOND user arg.
+            //
             // NOTE: this direct-name path only fires for qualified calls
-            // (`sqlz.query(...)` where `sqlz` is the module namespace). The
-            // common method form (`mydb.query(...)` on a handle) is handled
-            // in the Path-method branch below, which treats the receiver
-            // as implicit.
+            // where the leading component is the module namespace (not a
+            // local). The common method form (`mydb.query(...)` on a
+            // handle) is handled in the Path-method branch below, which
+            // treats the receiver as implicit.
+            let is_pg_call = name == "pg.query"
+                || name == "pg.exec"
+                || name == "postgres.query"
+                || name == "postgres.exec"
+                || name == "std.sqlz.postgres.query"
+                || name == "std.sqlz.postgres.exec";
             if name == "sqlz.query"
                 || name == "std.sqlz.query"
                 || name == "sqlz.exec"
@@ -1290,14 +1300,15 @@ impl Checker {
                 || name == "std.db.query"
                 || name == "db.exec"
                 || name == "std.db.exec"
+                || is_pg_call
             {
                 if let Some(sig) = self.funcs.get(name).cloned() {
-                    // Only take this path when the receiver really is the
-                    // module namespace (first part `db` is NOT a local
-                    // variable). Otherwise fall through to method dispatch.
+                    // Only take this path when the leading component really
+                    // is the module namespace (NOT a local variable).
+                    // Otherwise fall through to method dispatch.
                     let recv_is_module = match callee {
                         Expr::Path { parts, .. } => {
-                            parts.len() == 2 && self.lookup_opt(&parts[0]).is_none()
+                            parts.len() >= 2 && self.lookup_opt(&parts[0]).is_none()
                         }
                         _ => false,
                     };
@@ -1307,7 +1318,11 @@ impl Checker {
                         let pnames: Vec<String> =
                             sig.params.iter().map(|(n, _)| n.clone()).collect();
                         self.check_args_against(&pnames, &ps, &sig.has_default, args, named, span);
-                        if let Some(sql_arg) = args.first() {
+                        // Explicit-receiver forms (`pg.query(db, sql)`,
+                        // `sqlz.query(db, sql)`) carry the SQL second;
+                        // the bare method-namespace form carries it first.
+                        let sql_idx = if is_pg_call || args.len() >= 2 { 1 } else { 0 };
+                        if let Some(sql_arg) = args.get(sql_idx) {
                             self.verify_sql_params(sql_arg, span);
                         }
                         self.validate_bounds(&sig, &subs, span);

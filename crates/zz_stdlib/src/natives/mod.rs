@@ -1447,6 +1447,40 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
+    // std.sqlz.postgres — wire-protocol driver. Import as
+    // `import std.sqlz.postgres as pg`; the namespace copies below happen
+    // per-import via `register_module_namespace`, so only the canonical
+    // `std.sqlz.postgres.*` keys live here (no bare pre-registration:
+    // these are free functions, not method-dispatch targets).
+    m.insert(
+        "std.sqlz.postgres.connect".into(),
+        NativeEntry {
+            arity: 1,
+            f: db::pg_connect,
+        },
+    );
+    m.insert(
+        "std.sqlz.postgres.exec".into(),
+        NativeEntry {
+            arity: 3,
+            f: db::pg_exec,
+        },
+    );
+    m.insert(
+        "std.sqlz.postgres.query".into(),
+        NativeEntry {
+            arity: 3,
+            f: db::pg_query,
+        },
+    );
+    m.insert(
+        "std.sqlz.postgres.close".into(),
+        NativeEntry {
+            arity: 1,
+            f: db::pg_close,
+        },
+    );
+
     // Built-in: `typeof(v)` — the runtime type name of any value.
     m.insert(
         "typeof".into(),

@@ -41,9 +41,25 @@ pub fn stdlib_consts() -> std::collections::HashMap<String, f64> {
 /// The set of known `std.*` module names (second path component).
 /// `sqlz` is the canonical SQLite module; `db` is a zero-overhead alias
 /// pointing directly at `std.sqlz` (see [`canonical_module`]).
+/// `sqlz.postgres` is the nested PostgreSQL wire-protocol submodule
+/// (dotted key; see the loader's multi-component handling).
 pub const STDLIB_MODULES: &[&str] = &[
-    "io", "str", "vec", "json", "http", "fs", "env", "math", "time", "encoding", "net", "chan",
-    "task", "sqlz", "db",
+    "io",
+    "str",
+    "vec",
+    "json",
+    "http",
+    "fs",
+    "env",
+    "math",
+    "time",
+    "encoding",
+    "net",
+    "chan",
+    "task",
+    "sqlz",
+    "db",
+    "sqlz.postgres",
 ];
 
 /// Resolve a module name to its canonical backing module.
@@ -90,13 +106,19 @@ pub fn register_module_namespace(
     let std_funcs = stdlib_funcs();
     let std_natives = stdlib_natives();
     for (k, v) in std_funcs {
+        // Direct members only: `import std.sqlz` must not leak the nested
+        // `std.sqlz.postgres.*` keys (those belong to `sqlz.postgres`).
         if let Some(rest) = k.strip_prefix(&prefix) {
-            funcs.insert(format!("{ns}.{rest}"), v);
+            if !rest.contains('.') {
+                funcs.insert(format!("{ns}.{rest}"), v);
+            }
         }
     }
     for (k, v) in std_natives {
         if let Some(rest) = k.strip_prefix(&prefix) {
-            natives.insert(format!("{ns}.{rest}"), v);
+            if !rest.contains('.') {
+                natives.insert(format!("{ns}.{rest}"), v);
+            }
         }
     }
     // Also copy static constants.
@@ -173,18 +195,25 @@ pub fn register_wildcard_namespace(
     let std_natives = stdlib_natives();
     let std_consts = stdlib_consts();
     for (k, v) in std_funcs {
+        // Direct members only (see `register_module_namespace`).
         if let Some(rest) = k.strip_prefix(&prefix) {
-            funcs.insert(rest.to_string(), v);
+            if !rest.contains('.') {
+                funcs.insert(rest.to_string(), v);
+            }
         }
     }
     for (k, v) in std_natives {
         if let Some(rest) = k.strip_prefix(&prefix) {
-            natives.insert(rest.to_string(), v);
+            if !rest.contains('.') {
+                natives.insert(rest.to_string(), v);
+            }
         }
     }
     for k in std_consts.keys() {
         if let Some(rest) = k.strip_prefix(&prefix) {
-            funcs.insert(rest.to_string(), const_sig(zz_checker::Type::Float));
+            if !rest.contains('.') {
+                funcs.insert(rest.to_string(), const_sig(zz_checker::Type::Float));
+            }
         }
     }
     Ok(())

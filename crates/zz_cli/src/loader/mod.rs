@@ -233,7 +233,12 @@ impl Loader {
         for (imp, imp_alias, imp_items) in imports {
             let is_selective = !imp_items.is_empty();
             if imp.first().map(String::as_str) == Some("std") {
-                let Some(module) = imp.get(1) else { continue };
+                // Dotted module key: `std.sqlz` -> "sqlz",
+                // `std.sqlz.postgres` -> "sqlz.postgres".
+                if imp.len() < 2 {
+                    continue;
+                }
+                let module = imp[1..].join(".");
                 if !STDLIB_MODULES.contains(&module.as_str()) {
                     self.errors.push(LoadError {
                         name: path.display().to_string(),
@@ -255,9 +260,13 @@ impl Loader {
                         .push((canon.clone(), imp.clone(), imp_items, true));
                 } else {
                     // Full module import: copy all symbols under namespace.
-                    let ns = imp_alias.unwrap_or_else(|| module.clone());
+                    // Default namespace is the last component:
+                    // `import std.sqlz.postgres` -> `postgres.*`.
+                    let ns = imp_alias
+                        .clone()
+                        .unwrap_or_else(|| imp.last().cloned().unwrap_or_else(|| module.clone()));
                     if let Err(msg) =
-                        register_module_namespace(module, &ns, &mut self.funcs, &mut self.natives)
+                        register_module_namespace(&module, &ns, &mut self.funcs, &mut self.natives)
                     {
                         self.errors.push(LoadError {
                              name: path.display().to_string(),
@@ -477,17 +486,21 @@ impl Loader {
                 .collect();
             for (_, imp_path, items, is_std) in selective {
                 if is_std {
-                    // Stdlib selective import.
-                    let Some(module) = imp_path.get(1) else {
+                    // Stdlib selective import (dotted key for nested
+                    // modules: `std.sqlz.postgres` -> "sqlz.postgres").
+                    if imp_path.len() < 2 {
                         continue;
-                    };
+                    }
+                    let module = imp_path[1..].join(".");
                     let has_wildcard = items
                         .iter()
                         .any(|i| matches!(i, ImportItem::Wildcard { .. }));
                     if has_wildcard {
-                        if let Err(msg) =
-                            register_wildcard_namespace(module, &mut self.funcs, &mut self.natives)
-                        {
+                        if let Err(msg) = register_wildcard_namespace(
+                            module.as_str(),
+                            &mut self.funcs,
+                            &mut self.natives,
+                        ) {
                             self.errors.push(LoadError {
                                 name: name.clone(),
                                 source: source.clone(),
@@ -509,7 +522,7 @@ impl Loader {
                             })
                             .collect();
                         match register_selective_namespace(
-                            module,
+                            module.as_str(),
                             &name_aliases,
                             &mut self.funcs,
                             &mut self.natives,
