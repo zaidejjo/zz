@@ -746,7 +746,12 @@ zz_value zz_db_open(zz_value path, int *err) {
     sqlite3 *conn = NULL;
     int rc;
     if (strcmp(p, ":memory:") == 0) rc = sqlite3_open(":memory:", &conn);
-    else rc = sqlite3_open(p, &conn);
+    else {
+        /* Strip optional `sqlite://` prefix (scheme routing). */
+        const char *sp = (strncmp(p, "sqlite://", 9) == 0) ? p + 9 : p;
+        if (sp[0] == '\0') rc = sqlite3_open(":memory:", &conn);
+        else rc = sqlite3_open(sp, &conn);
+    }
     if (rc != SQLITE_OK) {
         if (conn) sqlite3_close(conn);
         return (zz_value){ZZ_DB, {.db = NULL}};

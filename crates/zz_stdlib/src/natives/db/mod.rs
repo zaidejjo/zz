@@ -162,7 +162,13 @@ pub(crate) fn db_open(
     let conn = if path == ":memory:" {
         rusqlite::Connection::open_in_memory()
     } else {
-        rusqlite::Connection::open(&path)
+        // Strip optional `sqlite://` prefix (scheme routing).
+        let p = path.strip_prefix("sqlite://").unwrap_or(&path);
+        if p.is_empty() {
+            rusqlite::Connection::open_in_memory()
+        } else {
+            rusqlite::Connection::open(p)
+        }
     }
     .map_err(|e| EvalError::new(format!("sqlz.open failed: {e}"), span))?;
     let inner = DbHandleInner {
