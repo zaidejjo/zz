@@ -9,7 +9,11 @@ pub mod compile;
 pub mod ffi;
 pub mod lower;
 
-pub use compile::{compile_and_run, detect_cc, BuildError, BuildOptions};
+pub use compile::{
+    compile_and_run, compile_and_run_for_target, detect_clang, detect_clang_with,
+    emit_c_plus_script, host_triple, is_macos_target, is_windows_target, validate, BuildError,
+    BuildOptions, Clang, ClangProvider, PgoMode,
+};
 pub use ffi::{ffi_impl, FfiError, FFI_VERSION};
 pub use lower::{mangle, native_supported, LoweredC, Lowerer};
 
@@ -18,6 +22,7 @@ pub use lower::{mangle, native_supported, LoweredC, Lowerer};
 /// in dependency order, and they are concatenated here into one string.
 pub const RUNTIME_H: &str = concat!(
     include_str!("runtime/runtime.h"),
+    include_str!("runtime/platform.h"),
     include_str!("runtime/core.h"),
     include_str!("runtime/memory.h"),
     include_str!("runtime/strings.h"),
@@ -38,17 +43,15 @@ pub const RUNTIME_C: &str = concat!(
 /// Version marker for generated binaries.
 pub const C_BUILD_VERSION: &str = "0.1.0";
 
-/// Build a native binary from a pruned typed program.
+/// Lower a pruned typed program to C without compiling.
 ///
-/// Returns the generated C source (for tests/inspection) and the path to
-/// the compiled binary.
-pub fn build_native(
+/// Used by dev builds (`zz build` default): the C is dumped to `bin/app.c`
+/// for inspection while execution stays on the VM — no toolchain involved.
+pub fn lower_only(
     tp: &zz_hir::TypedProgram,
     reach: &zz_hir::ReachableSet,
     entry_main: &str,
-    opts: BuildOptions,
-    out_path: &std::path::Path,
-) -> Result<LoweredC, BuildError> {
+) -> LoweredC {
     // Only emit reachable natives for which we have a C impl; the rest are
     // pruned by DCE anyway. If a reachable native lacks a C impl, lower to
     // unit (documented limitation of the MVP runtime).
@@ -58,12 +61,45 @@ pub fn build_native(
         entry_main.to_string(),
         tp.clone(),
     );
-    let lowered = lowerer.lower();
+    lowerer.lower()
+}
+
+/// Build a native binary from a pruned typed program.
+///
+/// `target` is the `--target=<triple>` cross triple, or `None` for a
+/// native host build. Returns the generated C source (for
+/// tests/inspection) and the path to the compiled binary.
+pub fn build_native(
+    tp: &zz_hir::TypedProgram,
+    reach: &zz_hir::ReachableSet,
+    entry_main: &str,
+    opts: BuildOptions,
+    target: Option<&str>,
+    out_path: &std::path::Path,
+) -> Result<LoweredC, BuildError> {
+    let lowered = lower_only(tp, reach, entry_main);
     // Programs calling Rust-staticlib natives need the native runtime link
     // even when the caller did not opt in explicitly.
     let mut opts = opts;
     opts.native_rt = opts.native_rt || lowered.needs_native_rt;
-    compile::build(&lowered.source, out_path, opts)?;
+    compile::build(&lowered.source, out_path, opts, target)?;
+    Ok(lowered)
+}
+
+/// [`build_native`] with an explicit Clang provider (honors `--cc`).
+pub fn build_native_with(
+    tp: &zz_hir::TypedProgram,
+    reach: &zz_hir::ReachableSet,
+    entry_main: &str,
+    opts: BuildOptions,
+    target: Option<&str>,
+    clang: &Clang,
+    out_path: &std::path::Path,
+) -> Result<LoweredC, BuildError> {
+    let lowered = lower_only(tp, reach, entry_main);
+    let mut opts = opts;
+    opts.native_rt = opts.native_rt || lowered.needs_native_rt;
+    compile::build_with(&lowered.source, out_path, opts, target, clang)?;
     Ok(lowered)
 }
 

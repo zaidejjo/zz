@@ -27,7 +27,11 @@
 #include <math.h>
 #include <time.h>
 #include <sys/stat.h>
+// platform.h is concatenated before this header in AOT builds and defines
+// ZZ_HAS_CURL; default to 1 when this header is used standalone.
+#if !defined(ZZ_HAS_CURL) || ZZ_HAS_CURL
 #include <curl/curl.h>
+#endif
 #ifdef __GLIBC__
 #include <malloc.h>
 #endif

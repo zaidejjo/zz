@@ -34,11 +34,13 @@ USAGE:
     zz fmt [FLAGS] [PATH]         format ZZ source files in-place
     zz build [FLAGS] <file.zz>    compile a native binary (cached)
 
-BUILD MODES:
-    zz build <file.zz>           dev build (-O1, dynamic)
-    zz build -p <file.zz>        release build (-O3 -flto, dynamic)
-    zz build --static <file.zz>  static build (ThinLTO, DCE, self-contained)
-    zz build --pgo <file.zz>     PGO build (profile-guided optimization)
+BUILD MODES (single Clang backend, always a native binary):
+     zz build <file.zz>           debug build (-O0 -g, fast, dynamic) — the default
+     zz build -p <file.zz>        release build (-O3 -flto=thin, dynamic, stripped)
+     zz build --static <file.zz>  static build (ThinLTO, DCE, self-contained; not on macOS)
+     zz build --pgo <file.zz>     PGO build (profile-guided, native host only)
+     zz build --target <triple> <file.zz>
+                                  cross build via clang --target= (drops -march=native)
 
 FLAGS:
     --check, -c        with fmt, check formatting without writing (exit 1 if changed)
@@ -47,9 +49,12 @@ FLAGS:
     --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
     --interactive, -i  with --fix, prompt for ambiguous fixes interactively
     --native           with run, use the native AOT compiler instead of the VM
-    -p, --release      with build, full optimization (-O3 -flto, dynamic, stripped)
-    --static           with build, static self-contained binary (ThinLTO, DCE)
-    --pgo              with build, profile-guided optimization build
+    -p, --release      with build, full optimization (-O3 -flto=thin, dynamic, stripped)
+    --static           with build, static self-contained binary (ThinLTO, DCE; rejected on macOS)
+    --pgo              with build, profile-guided optimization build (native host only)
+    --target <triple>  with build, cross-compile via clang --target= (same flags as without -p, minus -march=native)
+    --cc <clang|zig>   with build, select the Clang provider
+    --verbose          with build, print the exact clang command line
     --help, -h         show this help
     --version, -V      show version
 
@@ -405,18 +410,55 @@ fn run_native(path: Option<&String>, script_args: &[String]) -> Result<(), Strin
     Ok(())
 }
 
-/// `zz build [FLAGS] <file>`: compile a native binary (cached).
+/// `zz build [FLAGS] <file>`: always a native Clang binary.
+///
+/// Default (`zz build`): fast native debug build (`-O0 -g`, no LTO).
+/// `-p/--release/-O3` upgrades to the optimized build (`-O3 -flto=thin`).
+/// Both paths are real binaries in `bin/` — never VM execution.
+/// (`zz run` is the only command that executes through the VM.)
 fn build_cmd(args: &[String]) -> Result<(), String> {
-    let release = args.iter().any(|a| a == "-p" || a == "--release");
+    if args.iter().any(|a| a == "--dev") {
+        return Err(
+            "`--dev` was removed: `zz build` is a debug build by default\n\
+             hint: drop --dev (use -p/--release for the optimized build)"
+                .to_string(),
+        );
+    }
+    let release = args
+        .iter()
+        .any(|a| a == "-p" || a == "--release" || a == "-O3");
     let is_static = args.iter().any(|a| a == "--static");
     let is_pgo = args.iter().any(|a| a == "--pgo");
-    let path = args.iter().find(|a| !a.starts_with('-')).ok_or_else(|| {
-        "missing file argument\n\n\
-             usage: zz build [-p|--static|--pgo] <file.zz>\n\
+    let verbose = args.iter().any(|a| a == "--verbose");
+    let target = parse_flag_value(args, "--target");
+    let cc = parse_flag_value(args, "--cc");
+    // Positional path: first non-flag arg, skipping values consumed by
+    // `--target <triple>` / `--cc <name>` (space form).
+    let mut skip_next = false;
+    let path = args
+        .iter()
+        .find(|a| {
+            if skip_next {
+                skip_next = false;
+                return false;
+            }
+            if a.as_str() == "--target" || a.as_str() == "--cc" {
+                skip_next = true;
+                return false;
+            }
+            !a.starts_with('-')
+        })
+        .ok_or_else(|| {
+            "missing file argument\n\n\
+             usage: zz build [-p|--release|-O3|--static|--pgo] [--target <triple>] [--cc <clang|zig>] <file.zz>\n\
              hint: provide the path to a .zz file to build"
-            .to_string()
-    })?;
+                .to_string()
+        })?;
     let p = std::path::Path::new(path);
+
+    // Default (no flags) is a fast native debug build; -p upgrades to
+    // optimized. --static/--pgo select their own option sets. Guards
+    // (PGO-cross, static-macOS) in validate() apply uniformly.
     let mode = if is_pgo {
         build::BuildMode::Pgo
     } else if is_static {
@@ -426,14 +468,21 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     } else {
         build::BuildMode::Dev
     };
-    let out = build::build_native(p, mode)?;
-    // Copy the cached binary next to the source (zz build intent).
-    let stem = p
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let dest = p.with_file_name(&stem);
-    std::fs::copy(&out, &dest).map_err(|e| format!("cannot write binary: {e}"))?;
+    let provider = match cc.as_deref() {
+        None => zz_codegen::ClangProvider::Any,
+        Some(name) => zz_codegen::ClangProvider::parse(name).ok_or_else(|| {
+            format!(
+                "unknown --cc provider `{name}`\n\
+                 hint: use --cc clang or --cc zig"
+            )
+        })?,
+    };
+    let rel = build::ReleaseOptions {
+        target,
+        provider,
+        verbose,
+    };
+    let dest = build::build_release(p, mode, &rel)?;
     let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
     let mode_str = match mode {
         build::BuildMode::Dev => "dev",
@@ -448,6 +497,22 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         meta as f64 / 1024.0
     );
     Ok(())
+}
+
+/// Value of a `--flag value` or `--flag=value` CLI flag.
+fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
+    let mut iter = args.iter().peekable();
+    while let Some(a) = iter.next() {
+        if let Some(v) = a.strip_prefix(&format!("{flag}=")) {
+            return Some(v.to_string());
+        }
+        if a == flag {
+            if let Some(v) = iter.next() {
+                return Some(v.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Top-level entry for `zz fmt`.

@@ -1,20 +1,26 @@
 //! Native AOT build / transient-run integration for the `zz` CLI.
 //!
-//! `zz build <file>`        — dev build (-O1, dynamic)
-//! `zz build -p <file>`     — release build (-O3 -flto, dynamic)
-//! `zz build --static`      — static self-contained (ThinLTO, DCE)
-//! `zz build --pgo`         — PGO instrumented build
-//! `zz run --native`        — transient compile → exec → cleanup
+//! Single-backend model (Clang-only), always a native binary:
+//! `zz build <file>`            — debug: native Clang `-O0 -g` (fast, no LTO).
+//! `zz build -p <file>`         — release: native Clang `-O3 -flto=thin`.
+//! `zz build --static`          — static self-contained (ThinLTO, DCE).
+//! `zz build --pgo`             — PGO instrumented build (native host only).
+//! `zz build --target <triple>` — cross build via `clang --target=`
+//!                                (same flags, minus `-march=native`).
+//! `zz run --native`            — transient release compile → exec → cleanup.
 //!
-//! Binaries are cached under `~/.zz/cache` keyed by source-hash + build
-//! options, so unchanged files rebuild instantaneously.
+//! (`zz run` without `--native` is the only VM path.)
+//!
+//! All artifacts live under `bin/` next to the source file. Release binaries
+//! are cached under `~/.zz/cache` keyed by source-hash + build options +
+//! target triple, so unchanged files rebuild instantaneously.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use zz_codegen::BuildOptions;
+use zz_codegen::{BuildOptions, ClangProvider};
 use zz_frontend::span::Span;
 use zz_hir::TypedProgram;
 
@@ -29,6 +35,24 @@ pub enum BuildMode {
     Pgo,
 }
 
+/// Release-build knobs: cross target, provider selection, verbosity.
+#[derive(Debug, Clone, Default)]
+pub struct ReleaseOptions {
+    /// `--target=<triple>` cross triple, or `None` for a native host build.
+    pub target: Option<String>,
+    /// `--cc=` provider preference (clang vs `zig cc`).
+    pub provider: ClangProvider,
+    /// `--verbose`: print the exact clang command line.
+    pub verbose: bool,
+}
+
+impl ReleaseOptions {
+    /// Target as `Option<&str>` for the codegen API.
+    pub fn target_opt(&self) -> Option<&str> {
+        self.target.as_deref()
+    }
+}
+
 /// The cache directory (`~/.zz/cache`).
 pub fn cache_dir() -> PathBuf {
     let home = std::env::var_os("HOME")
@@ -38,13 +62,14 @@ pub fn cache_dir() -> PathBuf {
     home.join(".zz").join("cache")
 }
 
-/// Compute a cache key from source + build options.
-/// Uses BuildOptions fingerprint + runtime file mtimes for automatic cache invalidation.
-fn cache_key(src: &str, opts: BuildOptions) -> String {
+/// Compute a cache key from source + build options + target triple.
+/// Uses BuildOptions fingerprint (target-aware) + runtime file mtimes for
+/// automatic cache invalidation.
+fn cache_key(src: &str, opts: BuildOptions, target: Option<&str>) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     src.hash(&mut hasher);
-    opts.fingerprint().hash(&mut hasher);
+    opts.fingerprint_with(target).hash(&mut hasher);
     // Include runtime file mtimes for automatic cache invalidation
     if let Some(runtime_mtime) = runtime_mtime() {
         runtime_mtime.hash(&mut hasher);
@@ -181,6 +206,39 @@ fn typed_program_for(
     Ok((pruned, reach, main_key))
 }
 
+/// Directory holding build artifacts: `bin/` next to the source file
+/// (or `<cwd>/bin` when the source has no parent).
+pub fn bin_dir_for(src: &Path) -> PathBuf {
+    src.parent()
+        .map(|p| {
+            if p.as_os_str().is_empty() {
+                PathBuf::from("bin")
+            } else {
+                p.join("bin")
+            }
+        })
+        .unwrap_or_else(|| PathBuf::from("bin"))
+}
+
+/// Output binary name: `<stem>`, `<stem>-<triple>` for cross builds,
+/// plus `.exe` for Windows hosts/targets. Uses path components only —
+/// never string-concatenated separators.
+pub fn bin_name(stem: &str, target: Option<&str>) -> String {
+    let mut name = stem.to_string();
+    if let Some(t) = target {
+        name.push('-');
+        name.push_str(t);
+    }
+    let windows = match target {
+        Some(t) => zz_codegen::is_windows_target(t),
+        None => cfg!(windows),
+    };
+    if windows {
+        name.push_str(".exe");
+    }
+    name
+}
+
 /// True when `p` is a file that can be executed: present, non-empty, and
 /// (on unix) carrying at least one execute bit. Protects the cache from
 /// stale artifacts left by interrupted builds, which clang may leave as
@@ -203,25 +261,63 @@ fn is_usable_cache_binary(p: &Path) -> bool {
     }
 }
 
-/// Build a native binary for `path`. Returns the output binary path.
-pub fn build_native(path: &Path, mode: BuildMode) -> Result<PathBuf, String> {
+/// Native Clang build (cached), published to `bin/` next to the source.
+/// Returns the output binary path. `Dev` mode compiles with `-O0 -g`
+/// (fast debug binary); `Release`/`Static`/`Pgo` use their option sets.
+///
+/// When no Clang provider is installed, the generated C + build scripts
+/// are still emitted to `bin/` before the error is returned, so the user
+/// can build manually on a machine with Clang.
+pub fn build_release(
+    path: &Path,
+    mode: BuildMode,
+    rel: &ReleaseOptions,
+) -> Result<PathBuf, String> {
     let entry_ns = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
+    let opts = opts_for(mode);
+    let target = rel.target_opt();
 
-    // Cache: reuse when the same source + build options were built before.
+    // Early validation: exact CLI-contract errors for PGO-cross and
+    // static-macOS, before any cache or toolchain work.
+    if let Err(e) = zz_codegen::validate(&opts, target) {
+        return Err(e.to_string());
+    }
+
+    // Resolve the provider now so a missing toolchain fails fast — but
+    // still leave bin/app.c + scripts behind for manual builds.
+    let clang = match zz_codegen::detect_clang_with(rel.provider) {
+        Some(c) => c,
+        None => {
+            let lowered = zz_codegen::lower_only(&pruned, &reach, &main_key);
+            let dir = bin_dir_for(path);
+            let _ = zz_codegen::emit_c_plus_script(&lowered.source, &dir, target, &opts);
+            return Err(zz_codegen::BuildError::NoClang.to_string());
+        }
+    };
+    if rel.verbose {
+        eprintln!(
+            "zz: {} {}",
+            clang.label,
+            zz_codegen::compile::clang_flags(&opts, target).join(" ")
+        );
+    }
+
+    // Cache: reuse when the same source + build options + target were
+    // built before.
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create cache: {e}"))?;
     let source = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
-    let opts = opts_for(mode);
-    let key = cache_key(&source, opts);
-    let cached = dir.join(format!("{key}-{mode:?}"));
+    let key = cache_key(&source, opts, target);
+    let target_slug = target.unwrap_or("host");
+    let cached = dir.join(format!("{key}-{mode:?}-{target_slug}"));
 
     if is_usable_cache_binary(&cached) {
         // Reuse the cached binary.
-        return Ok(cached);
+        return publish_to_bin(&cached, path, target);
     }
     // Stale artifact (interrupted build, missing exec bit, empty file):
     // drop it so the fresh build below replaces it.
@@ -233,11 +329,13 @@ pub fn build_native(path: &Path, mode: BuildMode) -> Result<PathBuf, String> {
     // observers never see a partially-written or non-executable binary.
     static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
     let tmp = dir.join(format!(
-        "{key}-{mode:?}.{}.{}.tmp",
+        "{key}-{mode:?}-{target_slug}.{}.{}.tmp",
         std::process::id(),
         TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
     ));
-    if let Err(e) = zz_codegen::build_native(&pruned, &reach, &main_key, opts, &tmp) {
+    if let Err(e) =
+        zz_codegen::build_native_with(&pruned, &reach, &main_key, opts, target, &clang, &tmp)
+    {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.to_string());
     }
@@ -262,11 +360,41 @@ pub fn build_native(path: &Path, mode: BuildMode) -> Result<PathBuf, String> {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("cannot publish cache entry: {e}"));
     }
-    Ok(cached)
+    publish_to_bin(&cached, path, target)
 }
 
-/// Transient: compile to a temp path, return (binary path, cleanup fn).
-/// Caller must invoke the closure to remove the artifact.
+/// Copy a cached binary into `bin/` next to the source with the
+/// target-aware name. Returns the `bin/` path.
+fn publish_to_bin(cached: &Path, src: &Path, target: Option<&str>) -> Result<PathBuf, String> {
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "app".to_string());
+    let dir = bin_dir_for(src);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create bin dir: {e}"))?;
+    let dest = dir.join(bin_name(&stem, target));
+    std::fs::copy(cached, &dest).map_err(|e| format!("cannot write binary: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&dest) {
+            let mut perms = meta.permissions();
+            perms.set_mode(perms.mode() | 0o111);
+            let _ = std::fs::set_permissions(&dest, perms);
+        }
+    }
+    Ok(dest)
+}
+
+/// Build a native binary for `path` in release `mode` with default options.
+/// Convenience wrapper over [`build_release`] (native host, auto provider).
+/// Returns the `bin/` output binary path.
+pub fn build_native(path: &Path, mode: BuildMode) -> Result<PathBuf, String> {
+    build_release(path, mode, &ReleaseOptions::default())
+}
+
+/// Transient: compile to a temp path (release opts), return (binary path,
+/// cleanup fn). Caller must invoke the closure to remove the artifact.
 #[allow(dead_code, clippy::type_complexity)]
 pub fn transient_build(path: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), String> {
     let entry_ns = path
@@ -278,8 +406,15 @@ pub fn transient_build(path: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), Stri
     let tmp = std::env::temp_dir().join(format!("zz-native-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).map_err(|e| format!("cannot create tmp: {e}"))?;
     let bin = tmp.join("zz_out");
-    zz_codegen::build_native(&pruned, &reach, &main_key, BuildOptions::dev(), &bin)
-        .map_err(|e| format!("{e}"))?;
+    zz_codegen::build_native(
+        &pruned,
+        &reach,
+        &main_key,
+        BuildOptions::release(),
+        None,
+        &bin,
+    )
+    .map_err(|e| format!("{e}"))?;
 
     let tmp_for_cleanup = tmp.clone();
     let cleanup = Box::new(move || {
@@ -296,4 +431,39 @@ pub fn exec_binary(bin: &Path, script_args: &[String]) -> Result<i32, String> {
         .status()
         .map_err(|e| format!("cannot run binary: {e}"))?;
     Ok(status.code().unwrap_or(-1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bin_naming_host_and_cross() {
+        // Host naming follows the cfg target (this suite runs on unix).
+        let host = bin_name("app", None);
+        assert_eq!(host, if cfg!(windows) { "app.exe" } else { "app" });
+        // Cross builds tag the triple; Windows triples add .exe.
+        assert_eq!(
+            bin_name("app", Some("aarch64-unknown-linux-gnu")),
+            "app-aarch64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            bin_name("app", Some("x86_64-pc-windows-gnu")),
+            "app-x86_64-pc-windows-gnu.exe"
+        );
+        assert_eq!(
+            bin_name("demo", Some("x86_64-apple-darwin")),
+            "demo-x86_64-apple-darwin"
+        );
+    }
+
+    #[test]
+    fn bin_dir_is_pathbuf_joined() {
+        // Never string-concatenated separators: always parent + "bin".
+        assert_eq!(
+            bin_dir_for(Path::new("src/main.zz")),
+            PathBuf::from("src/bin")
+        );
+        assert_eq!(bin_dir_for(Path::new("main.zz")), PathBuf::from("bin"));
+    }
 }

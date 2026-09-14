@@ -48,11 +48,12 @@ func main() {
 
 #[test]
 fn build_dev_produces_runnable_binary() {
+    // Default build is a fast native debug binary (-O0 -g) in bin/.
     let dir = std::env::temp_dir().join(format!("zz-cli-test-{}", std::process::id()));
     let f = write_fixture(&dir, "app.zz", HELLO);
     let (code, out) = run_zz(&["build", f.to_str().unwrap()]);
     assert_eq!(code, 0, "build failed: {out}");
-    let bin = dir.join("app");
+    let bin = dir.join("bin/app");
     assert!(bin.exists(), "binary not produced");
 
     // Run the binary independently.
@@ -68,7 +69,7 @@ fn build_release_is_small_and_works() {
     let f = write_fixture(&dir, "rp.zz", HELLO);
     let (code, out) = run_zz(&["build", "-p", f.to_str().unwrap()]);
     assert_eq!(code, 0, "release build failed: {out}");
-    let bin = dir.join("rp");
+    let bin = dir.join("bin/rp");
     let size = std::fs::metadata(&bin).unwrap().len();
     assert!(
         size < 2_000_000,
@@ -94,11 +95,11 @@ fn run_native_executes_and_outputs() {
 fn build_cache_reuses_fast_on_unchanged_source() {
     let dir = std::env::temp_dir().join(format!("zz-cli-cache-{}", std::process::id()));
     let f = write_fixture(&dir, "rc.zz", HELLO);
-    // First build populates cache.
-    let (code, _) = run_zz(&["build", f.to_str().unwrap()]);
+    // First build populates cache (release; dev builds skip native compile).
+    let (code, _) = run_zz(&["build", "-p", f.to_str().unwrap()]);
     assert_eq!(code, 0);
     // Second build should be instant (cache hit) — just verify success.
-    let (code2, out2) = run_zz(&["build", f.to_str().unwrap()]);
+    let (code2, out2) = run_zz(&["build", "-p", f.to_str().unwrap()]);
     assert_eq!(code2, 0, "cached build failed: {out2}");
     let _ = std::fs::remove_dir_all(&dir);
 }

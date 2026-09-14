@@ -520,8 +520,11 @@ mod tests {
         // includes (headers are concatenated, not on disk).
         let src = crate::lower::strip_quoted_includes(&raw);
         std::fs::write(&c_path, &src).expect("write C");
-        let cc = crate::detect_cc().expect("no C compiler");
+        let cc = crate::detect_clang().expect("no C compiler");
         let mut cmd = Command::new(&cc.path);
+        if cc.zig {
+            cmd.arg("cc");
+        }
         cmd.arg("-O1")
             .arg("-DZZ_HAS_SQLITE3")
             .arg("-o")

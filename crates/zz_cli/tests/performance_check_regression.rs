@@ -52,9 +52,9 @@ fn build_zz_bench(name: &str) -> Option<PathBuf> {
         );
         return None;
     }
-    // zz build writes `<basename>` next to the source; move it.
+    // zz build -p writes `bin/<basename>` next to the source; move it.
     let produced = root
-        .join("bench/performance_check/zz")
+        .join("bench/performance_check/zz/bin")
         .join(format!("bench_{name}"));
     if produced.exists() {
         let _ = std::fs::rename(&produced, &target);

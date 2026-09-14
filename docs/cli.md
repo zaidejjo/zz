@@ -64,6 +64,50 @@ hello
 ()
 ```
 
+### `zz build [FLAGS] <file.zz>`
+
+Single Clang backend. Every `zz build` produces a real native binary and
+requires `clang` (18+) or `zig` on PATH. (`zz run` without `--native` is
+the only VM path.)
+
+```bash
+# Debug (default): fast native build -O0 -g, no LTO
+zz build main.zz
+
+# Release: native Clang -O3 -flto=thin, stripped, cached under ~/.zz/cache
+zz build -p main.zz
+zz build --static main.zz        # self-contained (not on macOS)
+zz build --pgo main.zz           # profile-guided, native host only
+zz build --target aarch64-unknown-linux-gnu main.zz   # cross (implies -p)
+zz build -p --cc zig main.zz     # use `zig cc` as the provider
+zz build -p --verbose main.zz    # print the exact clang command line
+```
+
+All artifacts live in `bin/` next to the source: `bin/app`,
+`bin/app.exe` (Windows), or `bin/app-<triple>[.exe]` for `--target`
+builds, plus `bin/app.c`, `bin/build.sh`, `bin/build.bat` (reproducible
+manual build with a single clang line).
+
+Cross-compilation rules:
+
+| Rule | Behavior |
+|------|----------|
+| `--target` | Drops `-march=native`; Clang uses the triple's safe baseline CPU |
+| `--pgo --target <foreign>` | Rejected: `Error: --pgo requires a native build target` |
+| `--static` on `apple-darwin` | Rejected: `Error: Static binaries are not supported on macOS targets` |
+| Cross link | Adds `-fuse-ld=lld`; Windows triples also link `-lws2_32` |
+
+Release builds apply `-ffast-math` (relaxed FP reassociation) for
+performance; `-p` implies consent. If no Clang provider is installed,
+the build (debug or release) fails after still emitting `bin/app.c` +
+build scripts so the program can be built manually on a machine with
+Clang.
+
+### `zz run --native <file.zz>`
+
+Transient release compile → execute → cleanup (uses the same Clang
+release pipeline as `zz build -p`).
+
 ### `zz check [FLAGS] [PATH]`
 
 Scan files for errors and warnings:

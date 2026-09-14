@@ -8,6 +8,7 @@
 #ifndef ZZ_RUNTIME_H
 #define ZZ_RUNTIME_H
 
+#include "platform.h"
 #include "core.h"
 #include "memory.h"
 #include "strings.h"
