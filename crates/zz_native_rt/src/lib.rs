@@ -28,6 +28,8 @@ pub mod crypto_asym;
 pub mod crypto_core;
 /// `std.crypto` password hashing (Argon2id, bcrypt).
 pub mod crypto_pw;
+/// `std.log` logging + tracing (levels, sinks, JSON, spans).
+pub mod log;
 /// `std.regexp` implementation (safe pool API + `extern "C"` FFI).
 pub mod regexp;
 /// `std.time` high-resolution extension (ns/µs clocks, micro sleeps).

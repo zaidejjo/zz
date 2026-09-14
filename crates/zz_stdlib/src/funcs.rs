@@ -338,6 +338,92 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
     m.insert(
+        "crypto.jwt_decode_ed".into(),
+        sig(vec![("token", Type::Str), ("pk", Type::Str)], result_str2()),
+    );
+
+    // std.log — levels, sinks, spans. Span handles are Opaque("span"),
+    // dispatching `span.end` by tag. Both spellings (like json).
+    let span_t = Type::Opaque("span".to_string());
+    m.insert(
+        "std.log.set_level".into(),
+        sig(vec![("name", Type::Str)], Type::Bool),
+    );
+    m.insert("std.log.get_level".into(), sig(vec![], Type::Str));
+    m.insert(
+        "std.log.set_format".into(),
+        sig(vec![("name", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.log.to_file".into(),
+        sig(vec![("path", Type::Str)], Type::Bool),
+    );
+    m.insert("std.log.to_stderr".into(), sig(vec![], Type::Unit));
+    m.insert(
+        "std.log.trace".into(),
+        sig(vec![("msg", Type::Str)], Type::Unit),
+    );
+    m.insert(
+        "std.log.debug".into(),
+        sig(vec![("msg", Type::Str)], Type::Unit),
+    );
+    m.insert(
+        "std.log.info".into(),
+        sig(vec![("msg", Type::Str)], Type::Unit),
+    );
+    m.insert(
+        "std.log.warn".into(),
+        sig(vec![("msg", Type::Str)], Type::Unit),
+    );
+    m.insert(
+        "std.log.error".into(),
+        sig(vec![("msg", Type::Str)], Type::Unit),
+    );
+    m.insert(
+        "std.log.span_begin".into(),
+        sig(vec![("name", Type::Str)], span_t.clone()),
+    );
+    m.insert(
+        "std.span.end".into(),
+        sig(vec![("sp", span_t.clone())], Type::Int),
+    );
+    m.insert(
+        "log.set_level".into(),
+        sig(vec![("name", Type::Str)], Type::Bool),
+    );
+    m.insert("log.get_level".into(), sig(vec![], Type::Str));
+    m.insert(
+        "log.set_format".into(),
+        sig(vec![("name", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "log.to_file".into(),
+        sig(vec![("path", Type::Str)], Type::Bool),
+    );
+    m.insert("log.to_stderr".into(), sig(vec![], Type::Unit));
+    m.insert(
+        "log.trace".into(),
+        sig(vec![("msg", Type::Str)], Type::Unit),
+    );
+    m.insert(
+        "log.debug".into(),
+        sig(vec![("msg", Type::Str)], Type::Unit),
+    );
+    m.insert("log.info".into(), sig(vec![("msg", Type::Str)], Type::Unit));
+    m.insert("log.warn".into(), sig(vec![("msg", Type::Str)], Type::Unit));
+    m.insert(
+        "log.error".into(),
+        sig(vec![("msg", Type::Str)], Type::Unit),
+    );
+    m.insert(
+        "log.span_begin".into(),
+        sig(vec![("name", Type::Str)], span_t.clone()),
+    );
+    m.insert(
+        "span.end".into(),
+        sig(vec![("sp", span_t.clone())], Type::Int),
+    );
+    m.insert(
         "crypto.jwt_encode_ed".into(),
         sig(
             vec![("payload", Type::Str), ("sk", Type::Str)],
@@ -2265,7 +2351,7 @@ mod tests {
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 363);
+        assert_eq!(funcs.len(), 387);
     }
 
     #[test]
