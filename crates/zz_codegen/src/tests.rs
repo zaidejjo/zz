@@ -170,6 +170,15 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("Regexp.new", "pure ZZ; lowered as ZZ fn"),
     ("std.regexp.is_email", "pure ZZ; lowered as ZZ fn"),
     ("regexp.is_email", "pure ZZ alias"),
+    // Pure-ZZ time helpers — compiled from zz/time/mod.zz, same deal.
+    ("time.micros", "pure ZZ; lowered as ZZ fn"),
+    ("time.millis", "pure ZZ; lowered as ZZ fn"),
+    ("time.secs", "pure ZZ; lowered as ZZ fn"),
+    ("time.to_micros", "pure ZZ; lowered as ZZ fn"),
+    ("time.to_millis", "pure ZZ; lowered as ZZ fn"),
+    ("time.to_secs", "pure ZZ; lowered as ZZ fn"),
+    ("time.to_nanos", "pure ZZ; lowered as ZZ fn"),
+    ("time.sleep", "pure ZZ; lowered as ZZ fn"),
     // Parity-skipped modules (non-deterministic output):
     ("std.http.serve_dir", "http fixtures skipped in parity"),
     ("http.serve_dir", "http fixtures skipped in parity"),

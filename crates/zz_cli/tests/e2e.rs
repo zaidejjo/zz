@@ -210,6 +210,7 @@ e2e_success_test!(
     "crypto_passwords_test.zz"
 );
 e2e_success_test!(e2e_stdlib_crypto_jwt_test, "stdlib", "crypto_jwt_test.zz");
+e2e_success_test!(e2e_stdlib_time_ext_test, "stdlib", "time_ext_test.zz");
 e2e_success_test!(
     e2e_stdlib_concurrent_http_test,
     "stdlib",

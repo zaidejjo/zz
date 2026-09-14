@@ -1933,6 +1933,54 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.time.sleep_ms".into(),
         sig(vec![("ms", Type::Int)], Type::Unit),
     );
+    m.insert("std.time.now_nanos".into(), sig(vec![], Type::Int));
+    m.insert("std.time.now_micros".into(), sig(vec![], Type::Int));
+    m.insert("std.time.monotonic_nanos".into(), sig(vec![], Type::Int));
+    m.insert(
+        "std.time.sleep_micros".into(),
+        sig(vec![("micros", Type::Int)], Type::Unit),
+    );
+    // Bare `time.*` aliases (like `vec.*`): back direct calls, method
+    // dispatch, and references from pure-ZZ helpers (`Duration.sleep`).
+    m.insert("time.now_ms".into(), sig(vec![], Type::Int));
+    m.insert(
+        "time.sleep_ms".into(),
+        sig(vec![("ms", Type::Int)], Type::Unit),
+    );
+    m.insert("time.now_nanos".into(), sig(vec![], Type::Int));
+    m.insert("time.now_micros".into(), sig(vec![], Type::Int));
+    m.insert("time.monotonic_nanos".into(), sig(vec![], Type::Int));
+    m.insert(
+        "time.sleep_micros".into(),
+        sig(vec![("micros", Type::Int)], Type::Unit),
+    );
+    // Pure-ZZ durations (zz/time/mod.zz): spans as integer microseconds.
+    m.insert(
+        "time.micros".into(),
+        sig(vec![("us", Type::Int)], Type::Int),
+    );
+    m.insert(
+        "time.millis".into(),
+        sig(vec![("ms", Type::Int)], Type::Int),
+    );
+    m.insert("time.secs".into(), sig(vec![("s", Type::Int)], Type::Int));
+    m.insert(
+        "time.to_micros".into(),
+        sig(vec![("d", Type::Int)], Type::Int),
+    );
+    m.insert(
+        "time.to_millis".into(),
+        sig(vec![("d", Type::Int)], Type::Int),
+    );
+    m.insert(
+        "time.to_secs".into(),
+        sig(vec![("d", Type::Int)], Type::Int),
+    );
+    m.insert(
+        "time.to_nanos".into(),
+        sig(vec![("d", Type::Int)], Type::Int),
+    );
+    m.insert("time.sleep".into(), sig(vec![("d", Type::Int)], Type::Unit));
 
     // std.sqlz — SQLite foundation (CANONICAL module name).
     //
@@ -2217,7 +2265,7 @@ mod tests {
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 345);
+        assert_eq!(funcs.len(), 363);
     }
 
     #[test]

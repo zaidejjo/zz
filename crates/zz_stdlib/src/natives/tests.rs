@@ -224,6 +224,15 @@ fn every_funcs_key_has_a_native() {
         "Regexp.new",
         "std.regexp.is_email",
         "regexp.is_email",
+        // Duration helpers (pure-ZZ, compiled from zz/time/mod.zz)
+        "time.micros",
+        "time.millis",
+        "time.secs",
+        "time.to_micros",
+        "time.to_millis",
+        "time.to_secs",
+        "time.to_nanos",
+        "time.sleep",
     ];
     let funcs = stdlib_funcs();
     let natives = stdlib_natives();
