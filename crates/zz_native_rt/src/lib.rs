@@ -22,8 +22,12 @@ use std::sync::{LazyLock, Mutex};
 
 /// C ABI mirror of the AOT `zz_value` plus linkable runtime constructors.
 pub mod cabi;
+/// `std.crypto` asymmetric crypto + JWT (Ed25519, RSA-2048, HS256/EdDSA).
+pub mod crypto_asym;
 /// `std.crypto` core primitives (hashing, HMAC, CSPRNG, constant-time eq).
 pub mod crypto_core;
+/// `std.crypto` password hashing (Argon2id, bcrypt).
+pub mod crypto_pw;
 /// `std.regexp` implementation (safe pool API + `extern "C"` FFI).
 pub mod regexp;
 

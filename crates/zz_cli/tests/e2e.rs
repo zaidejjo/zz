@@ -205,6 +205,12 @@ e2e_success_test!(e2e_stdlib_channel_test, "stdlib", "channel_test.zz");
 e2e_success_test!(e2e_stdlib_regexp_test, "stdlib", "regexp_test.zz");
 e2e_success_test!(e2e_stdlib_crypto_test, "stdlib", "crypto_test.zz");
 e2e_success_test!(
+    e2e_stdlib_crypto_passwords_test,
+    "stdlib",
+    "crypto_passwords_test.zz"
+);
+e2e_success_test!(e2e_stdlib_crypto_jwt_test, "stdlib", "crypto_jwt_test.zz");
+e2e_success_test!(
     e2e_stdlib_concurrent_http_test,
     "stdlib",
     "concurrent_http_test.zz"

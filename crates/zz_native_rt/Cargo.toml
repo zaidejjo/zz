@@ -9,7 +9,13 @@ crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 regex = "1"
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["oid"] }
 hmac = "0.12"
 subtle = "2"
 getrandom = "0.3"
+argon2 = "0.5"
+bcrypt = "0.15"
+rand_core = { version = "0.6", features = ["getrandom"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rsa = "0.9"
+serde_json = "1"

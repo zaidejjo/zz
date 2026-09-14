@@ -60,6 +60,22 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "crypto.hmac_sha256" | "std.crypto.hmac_sha256" => Some("zz_crypto_hmac_sha256"),
         "crypto.random_bytes" | "std.crypto.random_bytes" => Some("zz_crypto_random_bytes"),
         "crypto.ct_eq" | "std.crypto.ct_eq" => Some("zz_crypto_ct_eq"),
+        "crypto.argon2_hash" | "std.crypto.argon2_hash" => Some("zz_crypto_argon2_hash"),
+        "crypto.argon2_verify" | "std.crypto.argon2_verify" => Some("zz_crypto_argon2_verify"),
+        "crypto.bcrypt_hash" | "std.crypto.bcrypt_hash" => Some("zz_crypto_bcrypt_hash"),
+        "crypto.bcrypt_verify" | "std.crypto.bcrypt_verify" => Some("zz_crypto_bcrypt_verify"),
+        "crypto.ed25519_keypair" | "std.crypto.ed25519_keypair" => {
+            Some("zz_crypto_ed25519_keypair")
+        }
+        "crypto.ed25519_sign" | "std.crypto.ed25519_sign" => Some("zz_crypto_ed25519_sign"),
+        "crypto.ed25519_verify" | "std.crypto.ed25519_verify" => Some("zz_crypto_ed25519_verify"),
+        "crypto.rsa_keypair" | "std.crypto.rsa_keypair" => Some("zz_crypto_rsa_keypair"),
+        "crypto.rsa_sign" | "std.crypto.rsa_sign" => Some("zz_crypto_rsa_sign"),
+        "crypto.rsa_verify" | "std.crypto.rsa_verify" => Some("zz_crypto_rsa_verify"),
+        "crypto.jwt_encode" | "std.crypto.jwt_encode" => Some("zz_crypto_jwt_encode"),
+        "crypto.jwt_decode" | "std.crypto.jwt_decode" => Some("zz_crypto_jwt_decode"),
+        "crypto.jwt_encode_ed" | "std.crypto.jwt_encode_ed" => Some("zz_crypto_jwt_encode_ed"),
+        "crypto.jwt_decode_ed" | "std.crypto.jwt_decode_ed" => Some("zz_crypto_jwt_decode_ed"),
         _ => None,
     }
 }
@@ -115,6 +131,42 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
         }
         "zz_crypto_random_bytes" => Some("zz_value zz_crypto_random_bytes(zz_value n, int *err);"),
         "zz_crypto_ct_eq" => Some("zz_value zz_crypto_ct_eq(zz_value a, zz_value b, int *err);"),
+        "zz_crypto_argon2_hash" => Some("zz_value zz_crypto_argon2_hash(zz_value pw, int *err);"),
+        "zz_crypto_argon2_verify" => {
+            Some("zz_value zz_crypto_argon2_verify(zz_value hash, zz_value pw, int *err);")
+        }
+        "zz_crypto_bcrypt_hash" => Some("zz_value zz_crypto_bcrypt_hash(zz_value pw, int *err);"),
+        "zz_crypto_bcrypt_verify" => {
+            Some("zz_value zz_crypto_bcrypt_verify(zz_value hash, zz_value pw, int *err);")
+        }
+        "zz_crypto_ed25519_keypair" => {
+            Some("zz_value zz_crypto_ed25519_keypair(zz_value unit, int *err);")
+        }
+        "zz_crypto_ed25519_sign" => {
+            Some("zz_value zz_crypto_ed25519_sign(zz_value sk, zz_value msg, int *err);")
+        }
+        "zz_crypto_ed25519_verify" => Some(
+            "zz_value zz_crypto_ed25519_verify(zz_value pk, zz_value msg, zz_value sig, int *err);",
+        ),
+        "zz_crypto_rsa_keypair" => Some("zz_value zz_crypto_rsa_keypair(zz_value unit, int *err);"),
+        "zz_crypto_rsa_sign" => {
+            Some("zz_value zz_crypto_rsa_sign(zz_value sk, zz_value msg, int *err);")
+        }
+        "zz_crypto_rsa_verify" => Some(
+            "zz_value zz_crypto_rsa_verify(zz_value pk, zz_value msg, zz_value sig, int *err);",
+        ),
+        "zz_crypto_jwt_encode" => {
+            Some("zz_value zz_crypto_jwt_encode(zz_value payload, zz_value secret, int *err);")
+        }
+        "zz_crypto_jwt_decode" => {
+            Some("zz_value zz_crypto_jwt_decode(zz_value token, zz_value secret, int *err);")
+        }
+        "zz_crypto_jwt_encode_ed" => {
+            Some("zz_value zz_crypto_jwt_encode_ed(zz_value payload, zz_value sk, int *err);")
+        }
+        "zz_crypto_jwt_decode_ed" => {
+            Some("zz_value zz_crypto_jwt_decode_ed(zz_value token, zz_value pk, int *err);")
+        }
         _ => None,
     }
 }
@@ -321,27 +373,47 @@ mod tests {
     }
 
     /// End-to-end proof of the AOT link mechanism: build the real static
-    /// library, compile a C program against the real header with the real
-    /// link flags, run it, and check handle alloc/tag/drop across the
-    /// language boundary.
+    /// library, compile a C program that combines the real runtime TU
+    /// (`RUNTIME_C`, exactly as generated programs do) with FFI calls, link
+    /// with the real flags, run it, and check handle alloc/tag/drop plus a
+    /// crypto call (which exercises the linkable `zz_str_*` constructors)
+    /// across the language boundary.
     #[test]
     fn link_staticlib_from_c() {
-        let args = match link_args(false) {
+        let mut args = match link_args(false) {
             Ok(a) => a,
             Err(e) => panic!("link_args failed: {e}"),
         };
+        // Same runtime deps as compile::build.
+        args.push("-lcurl".to_string());
+        args.push("-lsqlite3".to_string());
         let tmp = std::env::temp_dir().join(format!("zz-ffi-test-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).expect("tmpdir");
         let c_path = tmp.join("t.c");
         let bin_path = tmp.join("t");
-        let src = format!(
-            "{FFI_H}\n#include <stdio.h>\n#include <string.h>\nint main(void) {{\n    if (zz_rt_version() != {ver}ULL) return 10;\n    uint64_t live0 = zz_rt_handle_live();\n    uint64_t id = zz_rt_handle_alloc((const uint8_t *)\"regex\", 5);\n    if (id == 0) return 11;\n    if (!zz_rt_handle_tag_eq(id, (const uint8_t *)\"regex\", 5)) return 12;\n    if (zz_rt_handle_tag_eq(id, (const uint8_t *)\"uuid\", 4)) return 13;\n    if (zz_rt_handle_live() != live0 + 1) return 14;\n    if (!zz_rt_handle_drop(id)) return 15;\n    if (zz_rt_handle_tag_eq(id, (const uint8_t *)\"regex\", 5)) return 16;\n    printf(\"ffi_link_ok\\n\");\n    return 0;\n}}\n",
+        let used: HashSet<String> = ["std.crypto.sha256".to_string()].into_iter().collect();
+        let prelude = ffi_prelude(&used);
+        assert!(
+            prelude.contains("zz_crypto_sha256"),
+            "prelude must declare used symbols"
+        );
+        let raw = format!(
+            "{headers}\n{runtime}\n{prelude}\n#include <stdlib.h>\nvoid zz_main(void) {{\n    if (zz_rt_version() != {ver}ULL) exit(10);\n    uint64_t live0 = zz_rt_handle_live();\n    uint64_t id = zz_rt_handle_alloc((const uint8_t *)\"regex\", 5);\n    if (id == 0) exit(11);\n    if (!zz_rt_handle_tag_eq(id, (const uint8_t *)\"regex\", 5)) exit(12);\n    if (zz_rt_handle_tag_eq(id, (const uint8_t *)\"uuid\", 4)) exit(13);\n    if (zz_rt_handle_live() != live0 + 1) exit(14);\n    if (!zz_rt_handle_drop(id)) exit(15);\n    if (zz_rt_handle_tag_eq(id, (const uint8_t *)\"regex\", 5)) exit(16);\n    int err = 0;\n    zz_value digest = zz_crypto_sha256(zz_str_new(\"abc\", 3), &err);\n    const char *ptr = NULL; size_t len = 0;\n    zz_str_view(digest, &ptr, &len);\n    if (err != 0 || len != 64 || ptr == NULL) exit(17);\n    if (memcmp(ptr, \"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\", 64) != 0) exit(18);\n    printf(\"ffi_link_ok\\n\");\n}}\nint zz_call_main(void) {{ return 0; }}\n",
+            headers = crate::RUNTIME_H,
+            runtime = crate::RUNTIME_C,
             ver = FFI_VERSION
         );
+        // Same single-TU assembly as generated programs: drop quoted
+        // includes (headers are concatenated, not on disk).
+        let src = crate::lower::strip_quoted_includes(&raw);
         std::fs::write(&c_path, &src).expect("write C");
         let cc = crate::detect_cc().expect("no C compiler");
         let mut cmd = Command::new(&cc.path);
-        cmd.arg("-O1").arg("-o").arg(&bin_path).arg(&c_path);
+        cmd.arg("-O1")
+            .arg("-DZZ_HAS_SQLITE3")
+            .arg("-o")
+            .arg(&bin_path)
+            .arg(&c_path);
         for a in &args {
             cmd.arg(a);
         }

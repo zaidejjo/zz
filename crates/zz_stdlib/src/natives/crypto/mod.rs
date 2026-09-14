@@ -74,3 +74,192 @@ pub(crate) fn crypto_ct_eq(
         b.as_bytes(),
     )))
 }
+
+pub(crate) fn crypto_argon2_hash(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let pw = expect_str(args, 0, "std.crypto.argon2_hash")?;
+    match zz_native_rt::crypto_pw::argon2_hash(pw.as_bytes()) {
+        Ok(h) => Ok(Value::Str(h.into())),
+        Err(msg) => Err(EvalError::new(msg, span)),
+    }
+}
+
+pub(crate) fn crypto_argon2_verify(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let hash = expect_str(args, 0, "std.crypto.argon2_verify")?;
+    let pw = expect_str(args, 1, "std.crypto.argon2_verify")?;
+    Ok(Value::Bool(zz_native_rt::crypto_pw::argon2_verify(
+        &hash,
+        pw.as_bytes(),
+    )))
+}
+
+pub(crate) fn crypto_bcrypt_hash(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let pw = expect_str(args, 0, "std.crypto.bcrypt_hash")?;
+    match zz_native_rt::crypto_pw::bcrypt_hash(pw.as_bytes()) {
+        Ok(h) => Ok(Value::Str(h.into())),
+        Err(msg) => Err(EvalError::new(msg, span)),
+    }
+}
+
+pub(crate) fn crypto_bcrypt_verify(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let hash = expect_str(args, 0, "std.crypto.bcrypt_verify")?;
+    let pw = expect_str(args, 1, "std.crypto.bcrypt_verify")?;
+    Ok(Value::Bool(zz_native_rt::crypto_pw::bcrypt_verify(
+        &hash,
+        pw.as_bytes(),
+    )))
+}
+
+fn ok_wrap(v: Value) -> Value {
+    Value::Result(Box::new(Ok(v)))
+}
+
+fn err_wrap(msg: String) -> Value {
+    Value::Result(Box::new(Err(Value::Str(msg.into()))))
+}
+
+fn str_pair(a: String, b: String) -> Value {
+    Value::Array(Box::new(vec![Value::Str(a.into()), Value::Str(b.into())]))
+}
+
+pub(crate) fn crypto_ed25519_keypair(
+    _interp: &mut Interp,
+    _args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let (sk, pk) = zz_native_rt::crypto_asym::ed25519_keypair();
+    Ok(str_pair(sk, pk))
+}
+
+pub(crate) fn crypto_ed25519_sign(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let sk = expect_str(args, 0, "std.crypto.ed25519_sign")?;
+    let msg = expect_str(args, 1, "std.crypto.ed25519_sign")?;
+    match zz_native_rt::crypto_asym::ed25519_sign(&sk, msg.as_bytes()) {
+        Ok(sig) => Ok(ok_wrap(Value::Str(sig.into()))),
+        Err(e) => Ok(err_wrap(e)),
+    }
+}
+
+pub(crate) fn crypto_ed25519_verify(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let pk = expect_str(args, 0, "std.crypto.ed25519_verify")?;
+    let msg = expect_str(args, 1, "std.crypto.ed25519_verify")?;
+    let sig = expect_str(args, 2, "std.crypto.ed25519_verify")?;
+    Ok(Value::Bool(zz_native_rt::crypto_asym::ed25519_verify(
+        &pk,
+        msg.as_bytes(),
+        &sig,
+    )))
+}
+
+pub(crate) fn crypto_rsa_keypair(
+    _interp: &mut Interp,
+    _args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    match zz_native_rt::crypto_asym::rsa_keypair() {
+        Ok((sk, pk)) => Ok(ok_wrap(str_pair(sk, pk))),
+        Err(e) => Err(EvalError::new(e, span)),
+    }
+}
+
+pub(crate) fn crypto_rsa_sign(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let sk = expect_str(args, 0, "std.crypto.rsa_sign")?;
+    let msg = expect_str(args, 1, "std.crypto.rsa_sign")?;
+    match zz_native_rt::crypto_asym::rsa_sign(&sk, msg.as_bytes()) {
+        Ok(sig) => Ok(ok_wrap(Value::Str(sig.into()))),
+        Err(e) => Ok(err_wrap(e)),
+    }
+}
+
+pub(crate) fn crypto_rsa_verify(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let pk = expect_str(args, 0, "std.crypto.rsa_verify")?;
+    let msg = expect_str(args, 1, "std.crypto.rsa_verify")?;
+    let sig = expect_str(args, 2, "std.crypto.rsa_verify")?;
+    Ok(Value::Bool(zz_native_rt::crypto_asym::rsa_verify(
+        &pk,
+        msg.as_bytes(),
+        &sig,
+    )))
+}
+
+pub(crate) fn crypto_jwt_encode(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let payload = expect_str(args, 0, "std.crypto.jwt_encode")?;
+    let secret = expect_str(args, 1, "std.crypto.jwt_encode")?;
+    Ok(Value::Str(
+        zz_native_rt::crypto_asym::jwt_encode(&payload, &secret).into(),
+    ))
+}
+
+pub(crate) fn crypto_jwt_decode(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let token = expect_str(args, 0, "std.crypto.jwt_decode")?;
+    let secret = expect_str(args, 1, "std.crypto.jwt_decode")?;
+    match zz_native_rt::crypto_asym::jwt_decode(&token, &secret) {
+        Ok(p) => Ok(ok_wrap(Value::Str(p.into()))),
+        Err(e) => Ok(err_wrap(e)),
+    }
+}
+
+pub(crate) fn crypto_jwt_encode_ed(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let payload = expect_str(args, 0, "std.crypto.jwt_encode_ed")?;
+    let sk = expect_str(args, 1, "std.crypto.jwt_encode_ed")?;
+    match zz_native_rt::crypto_asym::jwt_encode_ed(&payload, &sk) {
+        Ok(t) => Ok(ok_wrap(Value::Str(t.into()))),
+        Err(e) => Ok(err_wrap(e)),
+    }
+}
+
+pub(crate) fn crypto_jwt_decode_ed(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let token = expect_str(args, 0, "std.crypto.jwt_decode_ed")?;
+    let pk = expect_str(args, 1, "std.crypto.jwt_decode_ed")?;
+    match zz_native_rt::crypto_asym::jwt_decode_ed(&token, &pk) {
+        Ok(p) => Ok(ok_wrap(Value::Str(p.into()))),
+        Err(e) => Ok(err_wrap(e)),
+    }
+}
