@@ -1,0 +1,29 @@
+// E2E: std.sys — os, arch, cpu_count, hostname, memory
+import std.sys
+
+// NOTE: top-level bindings only (VM scope limitation, see regexp notes).
+// Values are host-specific, so the fixture asserts shapes and sanity
+// bounds rather than exact strings.
+// NOTE: no binding may share its name with the called function
+// (`arch := sys.arch()` fails to resolve — pre-existing checker
+// shadowing quirk), so names carry a suffix where they would collide.
+os_name := sys.os()
+arch_name := sys.arch()
+cpu := sys.cpu_count()
+host := sys.hostname()
+total := sys.total_mem()
+avail := sys.avail_mem()
+
+println("os: {os_name}")
+println("arch: {arch_name}")
+println("host: {host}")
+println("os_nonempty: {os_name.length() > 0}")
+println("arch_nonempty: {arch_name.length() > 0}")
+println("cpu_ge_1: {cpu >= 1}")
+println("host_nonempty: {host.length() > 0}")
+println("total_gt_0: {total > 0}")
+println("avail_gt_0: {avail > 0}")
+println("avail_le_total: {avail <= total}")
+println("std_spell: {std.sys.os() == os_name}")
+
+println("sys_ok")

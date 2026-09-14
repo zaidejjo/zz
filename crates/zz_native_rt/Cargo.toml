@@ -19,3 +19,4 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rsa = "0.9"
 serde_json = "1"
+sysinfo = "0.30"

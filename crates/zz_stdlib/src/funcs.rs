@@ -423,6 +423,21 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "span.end".into(),
         sig(vec![("sp", span_t.clone())], Type::Int),
     );
+
+    // std.sys — system information. All queries infallible (empty
+    // string / fallback values, never errors). Both spellings.
+    m.insert("std.sys.os".into(), sig(vec![], Type::Str));
+    m.insert("std.sys.arch".into(), sig(vec![], Type::Str));
+    m.insert("std.sys.cpu_count".into(), sig(vec![], Type::Int));
+    m.insert("std.sys.hostname".into(), sig(vec![], Type::Str));
+    m.insert("std.sys.total_mem".into(), sig(vec![], Type::Int));
+    m.insert("std.sys.avail_mem".into(), sig(vec![], Type::Int));
+    m.insert("sys.os".into(), sig(vec![], Type::Str));
+    m.insert("sys.arch".into(), sig(vec![], Type::Str));
+    m.insert("sys.cpu_count".into(), sig(vec![], Type::Int));
+    m.insert("sys.hostname".into(), sig(vec![], Type::Str));
+    m.insert("sys.total_mem".into(), sig(vec![], Type::Int));
+    m.insert("sys.avail_mem".into(), sig(vec![], Type::Int));
     m.insert(
         "crypto.jwt_encode_ed".into(),
         sig(
@@ -2351,7 +2366,7 @@ mod tests {
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 387);
+        assert_eq!(funcs.len(), 399);
     }
 
     #[test]

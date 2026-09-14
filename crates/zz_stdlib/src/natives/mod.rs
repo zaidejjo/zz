@@ -27,6 +27,7 @@ pub(crate) mod option_mod;
 pub(crate) mod regexp;
 pub(crate) mod result_mod;
 pub(crate) mod str_mod;
+pub(crate) mod sys;
 pub(crate) mod time;
 pub(crate) mod vec_mod;
 
@@ -1787,6 +1788,92 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: time::time_sleep_micros,
+        },
+    );
+
+    // std.sys — system information (both spellings each).
+    m.insert(
+        "std.sys.os".into(),
+        NativeEntry {
+            arity: 0,
+            f: sys::sys_os,
+        },
+    );
+    m.insert(
+        "std.sys.arch".into(),
+        NativeEntry {
+            arity: 0,
+            f: sys::sys_arch,
+        },
+    );
+    m.insert(
+        "std.sys.cpu_count".into(),
+        NativeEntry {
+            arity: 0,
+            f: sys::sys_cpu_count,
+        },
+    );
+    m.insert(
+        "std.sys.hostname".into(),
+        NativeEntry {
+            arity: 0,
+            f: sys::sys_hostname,
+        },
+    );
+    m.insert(
+        "std.sys.total_mem".into(),
+        NativeEntry {
+            arity: 0,
+            f: sys::sys_total_mem,
+        },
+    );
+    m.insert(
+        "std.sys.avail_mem".into(),
+        NativeEntry {
+            arity: 0,
+            f: sys::sys_avail_mem,
+        },
+    );
+    m.insert(
+        "sys.os".into(),
+        NativeEntry {
+            arity: 0,
+            f: sys::sys_os,
+        },
+    );
+    m.insert(
+        "sys.arch".into(),
+        NativeEntry {
+            arity: 0,
+            f: sys::sys_arch,
+        },
+    );
+    m.insert(
+        "sys.cpu_count".into(),
+        NativeEntry {
+            arity: 0,
+            f: sys::sys_cpu_count,
+        },
+    );
+    m.insert(
+        "sys.hostname".into(),
+        NativeEntry {
+            arity: 0,
+            f: sys::sys_hostname,
+        },
+    );
+    m.insert(
+        "sys.total_mem".into(),
+        NativeEntry {
+            arity: 0,
+            f: sys::sys_total_mem,
+        },
+    );
+    m.insert(
+        "sys.avail_mem".into(),
+        NativeEntry {
+            arity: 0,
+            f: sys::sys_avail_mem,
         },
     );
 
