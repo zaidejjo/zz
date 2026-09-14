@@ -4,8 +4,8 @@ import std.http
 
 // ── Feature 1: Dynamic routing & path parameters ──
 s := http.server()
-s2 := http.route_get(s, "/users/:id", |req| "user-{req.params.id}")
-s3 := http.route_get(s2, "/posts/:pid/comments/:cid", |req| "post-{req.params.pid}-comment-{req.params.cid}")
+s2 := http.route_get(s, "/users/:id", |req| "user-{http.param(req, "id").expect("id")}")
+s3 := http.route_get(s2, "/posts/:pid/comments/:cid", |req| "post-{http.param(req, "pid").expect("pid")}-comment-{http.param(req, "cid").expect("cid")}")
 
 res1 := http.test(s3, "GET", "/users/42", "")
 println("param1: {res1.text()}")
@@ -14,7 +14,7 @@ res2 := http.test(s3, "GET", "/posts/5/comments/99", "")
 println("param2: {res2.text()}")
 
 // ── Feature 3: Query string parsing ──
-s4 := http.route_get(s3, "/search", |req| "q={req.query.q}")
+s4 := http.route_get(s3, "/search", |req| "q={http.query(req)["q"]}")
 res3 := http.test(s4, "GET", "/search?q=hello+world", "")
 println("query: {res3.text()}")
 

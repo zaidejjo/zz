@@ -5,6 +5,7 @@
 //! binary. `cc`/`clang`/`gcc` are auto-detected; NO manual tooling install
 //! is required on standard systems (they ship with the OS toolchain).
 
+pub mod cache;
 pub mod compile;
 pub mod ffi;
 pub mod lower;
@@ -77,7 +78,14 @@ pub fn build_native(
     target: Option<&str>,
     out_path: &std::path::Path,
 ) -> Result<LoweredC, BuildError> {
-    let lowered = lower_only(tp, reach, entry_main);
+    let mut lowerer = Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        entry_main.to_string(),
+        tp.clone(),
+    );
+    lowerer.set_precompiled(true);
+    let lowered = lowerer.lower();
     // Programs calling Rust-staticlib natives need the native runtime link
     // even when the caller did not opt in explicitly.
     let mut opts = opts;
@@ -96,7 +104,14 @@ pub fn build_native_with(
     clang: &Clang,
     out_path: &std::path::Path,
 ) -> Result<LoweredC, BuildError> {
-    let lowered = lower_only(tp, reach, entry_main);
+    let mut lowerer = Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        entry_main.to_string(),
+        tp.clone(),
+    );
+    lowerer.set_precompiled(true);
+    let lowered = lowerer.lower();
     let mut opts = opts;
     opts.native_rt = opts.native_rt || lowered.needs_native_rt;
     compile::build_with(&lowered.source, out_path, opts, target, clang)?;

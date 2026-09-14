@@ -182,6 +182,10 @@ pub struct Lowerer {
     /// Name of the current loop arena, if any. Used to emit arena-aware
     /// native calls (e.g. str_cast_arena) inside loops.
     pub(crate) current_loop_arena: std::cell::RefCell<Option<String>>,
+    /// When true, the generated C omits the embedded runtime sources
+    /// (`RUNTIME_C`) and only includes headers (`RUNTIME_H`). The C runtime
+    /// is linked from a precompiled static library (`libzz_rt.a`) instead.
+    pub(crate) precompiled: bool,
 }
 
 impl Lowerer {
@@ -204,7 +208,15 @@ impl Lowerer {
             closure_forward_decls: std::cell::RefCell::new(Vec::new()),
             void_context: std::cell::RefCell::new(false),
             current_loop_arena: std::cell::RefCell::new(None),
+            precompiled: false,
         }
+    }
+
+    /// Enable precompiled runtime mode: the generated C omits `RUNTIME_C`
+    /// (the embedded runtime sources) and only includes headers. The
+    /// runtime is linked from a precompiled `libzz_rt.a` instead.
+    pub fn set_precompiled(&mut self, v: bool) {
+        self.precompiled = v;
     }
 
     /// Check if an expression span is classified as non-escaping (arena-safe).

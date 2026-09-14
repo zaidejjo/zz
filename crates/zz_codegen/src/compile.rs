@@ -509,6 +509,20 @@ pub fn build_with(
         .arg("-lsqlite3")
         // sqlz: prepared-statement FFI needs sqlite3 headers.
         .arg("-DZZ_HAS_SQLITE3");
+    // Precompiled C runtime archive: the runtime sources (core.c, strings.c,
+    // collections.c, json.c, memory.c) are compiled once and cached. The
+    // generated C only contains headers (declarations) + user code.
+    match crate::cache::ensure_rt_a(&opts, clang, target) {
+        Ok(rt_a) => {
+            if let Some(parent) = rt_a.parent() {
+                cmd.arg(format!("-L{}", parent.display()));
+            }
+            cmd.arg("-lzz_rt");
+        }
+        Err(e) => {
+            eprintln!("zz: warning: precompiled runtime .a failed: {e}; falling back to embedded");
+        }
+    }
     // Unified Rust native runtime: link the static library providing FFI
     // natives. Fully-static binaries cannot use it (shared libstd), so fail
     // early with a clear message instead of a cryptic `ld` error.

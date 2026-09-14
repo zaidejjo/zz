@@ -329,9 +329,27 @@ fn target_dir(root: &std::path::Path) -> PathBuf {
 
 /// Build (incrementally) and locate `libzz_native_rt.a` for `profile`
 /// (`release = true` → `--release`, matching optimized AOT builds).
+///
+/// Fast-path: if the archive already exists and is newer than every source
+/// file under `crates/zz_native_rt/src/`, skip `cargo build` entirely.
+/// This turns the common case (lib already built) from 0.5-50s → ~0ms.
 pub fn ensure_staticlib(release: bool) -> Result<PathBuf, FfiError> {
     let root = workspace_root()?;
     let profile = if release { "release" } else { "debug" };
+    let lib = target_dir(&root).join(profile).join(lib_file_name());
+
+    // Fast-path: skip cargo build when the archive is already up-to-date.
+    if lib.is_file() {
+        if let Some(lib_mtime) = file_mtime(&lib) {
+            let src_dir = root.join("crates").join("zz_native_rt").join("src");
+            if !src_dir_mtime_newer_than(&src_dir, lib_mtime) {
+                return Ok(lib);
+            }
+        }
+    }
+
+    let release_flag = if release { " --release" } else { "" };
+    eprintln!("zz: building native runtime (cargo build -p zz_native_rt{release_flag})...");
     let mut cmd = Command::new("cargo");
     cmd.arg("build")
         .arg("--manifest-path")
@@ -350,7 +368,6 @@ pub fn ensure_staticlib(release: bool) -> Result<PathBuf, FfiError> {
             String::from_utf8_lossy(&out.stderr)
         )));
     }
-    let lib = target_dir(&root).join(profile).join(lib_file_name());
     if !lib.is_file() {
         return Err(FfiError(format!(
             "static library missing after build: {}",
@@ -358,6 +375,31 @@ pub fn ensure_staticlib(release: bool) -> Result<PathBuf, FfiError> {
         )));
     }
     Ok(lib)
+}
+
+/// Return the modification time of a file, or `None` on error.
+fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}
+
+/// True when any `.rs` file under `dir` is newer than `threshold`.
+fn src_dir_mtime_newer_than(dir: &std::path::Path, threshold: std::time::SystemTime) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.extension().is_some_and(|e| e == "rs") {
+            if let Ok(meta) = std::fs::metadata(&p) {
+                if let Ok(mtime) = meta.modified() {
+                    if mtime > threshold {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Static library file name for the current platform.

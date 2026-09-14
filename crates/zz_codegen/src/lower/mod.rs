@@ -269,10 +269,15 @@ impl Lowerer {
             format!("\n// ---- native-runtime FFI ----\n{ffi_pre}\n")
         };
         let needs_native_rt = crate::ffi::needs_native_rt(&self.reachable_natives);
+        let runtime_c = if self.precompiled {
+            ""
+        } else {
+            crate::RUNTIME_C
+        };
         let source = format!(
             "{runtime_h}\n{runtime_c}\n{ffi_section}\n// ---- struct definitions ----\n{struct_preamble}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset_trim(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
             runtime_h = crate::RUNTIME_H,
-            runtime_c = crate::RUNTIME_C,
+            runtime_c = runtime_c,
             struct_preamble = struct_preamble,
             funcs = funcs,
             closure_defs = self.closure_defs.borrow().join("\n"),
