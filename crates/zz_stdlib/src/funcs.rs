@@ -415,6 +415,30 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert("process.pid".into(), sig(vec![], Type::Int));
 
+    // std.uuid — v4/v7 generation, parse (normalizing), validation.
+    // Both spellings (like json).
+    let result_str3 = || Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+    m.insert("std.uuid.v4".into(), sig(vec![], Type::Str));
+    m.insert("std.uuid.v7".into(), sig(vec![], Type::Str));
+    m.insert(
+        "std.uuid.parse".into(),
+        sig(vec![("s", Type::Str)], result_str3()),
+    );
+    m.insert(
+        "std.uuid.is_valid".into(),
+        sig(vec![("s", Type::Str)], Type::Bool),
+    );
+    m.insert("uuid.v4".into(), sig(vec![], Type::Str));
+    m.insert("uuid.v7".into(), sig(vec![], Type::Str));
+    m.insert(
+        "uuid.parse".into(),
+        sig(vec![("s", Type::Str)], result_str3()),
+    );
+    m.insert(
+        "uuid.is_valid".into(),
+        sig(vec![("s", Type::Str)], Type::Bool),
+    );
+
     // std.log — levels, sinks, spans. Span handles are Opaque("span"),
     // dispatching `span.end` by tag. Both spellings (like json).
     let span_t = Type::Opaque("span".to_string());
@@ -2597,7 +2621,7 @@ mod tests {
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 440);
+        assert_eq!(funcs.len(), 448);
     }
 
     #[test]

@@ -40,6 +40,8 @@ pub mod regexp;
 pub mod sys;
 /// `std.time` high-resolution extension (ns/µs clocks, micro sleeps).
 pub mod time_ext;
+/// `std.uuid` identifier generation (v4 random, v7 time-ordered).
+pub mod uuid;
 
 /// Opaque handle value: the tag of the owning module plus a pool id.
 ///
