@@ -80,6 +80,18 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "time.now_micros" | "std.time.now_micros" => Some("zz_time_now_micros"),
         "time.monotonic_nanos" | "std.time.monotonic_nanos" => Some("zz_time_monotonic_nanos"),
         "time.sleep_micros" | "std.time.sleep_micros" => Some("zz_time_sleep_micros"),
+        "log.set_level" | "std.log.set_level" => Some("zz_log_set_level"),
+        "log.get_level" | "std.log.get_level" => Some("zz_log_get_level"),
+        "log.set_format" | "std.log.set_format" => Some("zz_log_set_format"),
+        "log.to_file" | "std.log.to_file" => Some("zz_log_to_file"),
+        "log.to_stderr" | "std.log.to_stderr" => Some("zz_log_to_stderr"),
+        "log.trace" | "std.log.trace" => Some("zz_log_trace"),
+        "log.debug" | "std.log.debug" => Some("zz_log_debug"),
+        "log.info" | "std.log.info" => Some("zz_log_info"),
+        "log.warn" | "std.log.warn" => Some("zz_log_warn"),
+        "log.error" | "std.log.error" => Some("zz_log_error"),
+        "log.span_begin" | "std.log.span_begin" => Some("zz_log_span_begin"),
+        "span.end" | "std.span.end" => Some("zz_span_end"),
         _ => None,
     }
 }
@@ -177,6 +189,18 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
             Some("zz_value zz_time_monotonic_nanos(zz_value unit, int *err);")
         }
         "zz_time_sleep_micros" => Some("zz_value zz_time_sleep_micros(zz_value n, int *err);"),
+        "zz_log_set_level" => Some("zz_value zz_log_set_level(zz_value name, int *err);"),
+        "zz_log_get_level" => Some("zz_value zz_log_get_level(zz_value unit, int *err);"),
+        "zz_log_set_format" => Some("zz_value zz_log_set_format(zz_value name, int *err);"),
+        "zz_log_to_file" => Some("zz_value zz_log_to_file(zz_value path, int *err);"),
+        "zz_log_to_stderr" => Some("zz_value zz_log_to_stderr(zz_value unit, int *err);"),
+        "zz_log_trace" => Some("zz_value zz_log_trace(zz_value msg, int *err);"),
+        "zz_log_debug" => Some("zz_value zz_log_debug(zz_value msg, int *err);"),
+        "zz_log_info" => Some("zz_value zz_log_info(zz_value msg, int *err);"),
+        "zz_log_warn" => Some("zz_value zz_log_warn(zz_value msg, int *err);"),
+        "zz_log_error" => Some("zz_value zz_log_error(zz_value msg, int *err);"),
+        "zz_log_span_begin" => Some("zz_value zz_log_span_begin(zz_value name, int *err);"),
+        "zz_span_end" => Some("zz_value zz_span_end(zz_value id, int *err);"),
         _ => None,
     }
 }

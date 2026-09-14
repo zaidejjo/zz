@@ -20,6 +20,7 @@ pub(crate) mod http;
 pub(crate) mod io;
 pub(crate) mod iterators;
 pub(crate) mod json;
+pub(crate) mod log;
 pub(crate) mod math;
 pub(crate) mod net;
 pub(crate) mod option_mod;
@@ -941,6 +942,176 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 2,
             f: crypto::crypto_jwt_decode_ed,
+        },
+    );
+
+    // std.log — levels, sinks, spans (both spellings each).
+    m.insert(
+        "std.log.set_level".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_set_level,
+        },
+    );
+    m.insert(
+        "std.log.get_level".into(),
+        NativeEntry {
+            arity: 0,
+            f: log::log_get_level,
+        },
+    );
+    m.insert(
+        "std.log.set_format".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_set_format,
+        },
+    );
+    m.insert(
+        "std.log.to_file".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_to_file,
+        },
+    );
+    m.insert(
+        "std.log.to_stderr".into(),
+        NativeEntry {
+            arity: 0,
+            f: log::log_to_stderr,
+        },
+    );
+    m.insert(
+        "std.log.trace".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_trace,
+        },
+    );
+    m.insert(
+        "std.log.debug".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_debug,
+        },
+    );
+    m.insert(
+        "std.log.info".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_info,
+        },
+    );
+    m.insert(
+        "std.log.warn".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_warn,
+        },
+    );
+    m.insert(
+        "std.log.error".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_error,
+        },
+    );
+    m.insert(
+        "std.log.span_begin".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_span_begin,
+        },
+    );
+    m.insert(
+        "std.span.end".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::span_end,
+        },
+    );
+    m.insert(
+        "log.set_level".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_set_level,
+        },
+    );
+    m.insert(
+        "log.get_level".into(),
+        NativeEntry {
+            arity: 0,
+            f: log::log_get_level,
+        },
+    );
+    m.insert(
+        "log.set_format".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_set_format,
+        },
+    );
+    m.insert(
+        "log.to_file".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_to_file,
+        },
+    );
+    m.insert(
+        "log.to_stderr".into(),
+        NativeEntry {
+            arity: 0,
+            f: log::log_to_stderr,
+        },
+    );
+    m.insert(
+        "log.trace".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_trace,
+        },
+    );
+    m.insert(
+        "log.debug".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_debug,
+        },
+    );
+    m.insert(
+        "log.info".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_info,
+        },
+    );
+    m.insert(
+        "log.warn".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_warn,
+        },
+    );
+    m.insert(
+        "log.error".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_error,
+        },
+    );
+    m.insert(
+        "log.span_begin".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::log_span_begin,
+        },
+    );
+    m.insert(
+        "span.end".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::span_end,
         },
     );
 
