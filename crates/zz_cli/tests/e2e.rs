@@ -214,6 +214,7 @@ e2e_success_test!(e2e_stdlib_time_ext_test, "stdlib", "time_ext_test.zz");
 e2e_success_test!(e2e_stdlib_log_test, "stdlib", "log_test.zz");
 e2e_success_test!(e2e_stdlib_sys_test, "stdlib", "sys_test.zz");
 e2e_success_test!(e2e_stdlib_args_test, "stdlib", "args_test.zz");
+e2e_success_test!(e2e_stdlib_process_test, "stdlib", "process_test.zz");
 e2e_success_test!(
     e2e_stdlib_concurrent_http_test,
     "stdlib",

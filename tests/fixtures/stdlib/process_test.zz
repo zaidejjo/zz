@@ -1,0 +1,67 @@
+// E2E: std.process — run, spawn/wait, env overlay, pid, error paths
+import std.process
+
+// NOTE: top-level bindings only (VM scope limitation); `.err` arms use
+// wildcards (bound err vars do not resolve in interpolation).
+// process.exit is NOT exercised here (it would kill the harness) — it is
+// verified manually via process_exit_test.zz expecting exit code 42.
+echo_cmd := "echo"
+hello := "hello-child"
+empty_argv := []
+false_cmd := "false"
+missing := "zz-no-such-bin"
+dash_c := "-c"
+sh_cmd := "sh"
+sh_body := "echo $ZZ_PROC_TEST"
+env_kv := "ZZ_PROC_TEST=env-ok"
+
+// ── run echo: status + stdout + stderr ──
+r := process.run(echo_cmd, [hello])
+match r {
+    .ok(t) => println("run_status: {t[0]}"),
+    .err(_) => println("run_bad"),
+}
+match r {
+    .ok(t) => println("run_out: {t[1]}"),
+    .err(_) => println("run_bad"),
+}
+match r {
+    .ok(t) => println("run_err: [{t[2]}]"),
+    .err(_) => println("run_bad"),
+}
+
+// ── failing child keeps non-zero status (not .err) ──
+f := process.run(false_cmd, empty_argv)
+match f {
+    .ok(t) => println("false_status: {t[0]}"),
+    .err(_) => println("false_bad"),
+}
+
+// ── env overlay ──
+e := process.run_with_env(sh_cmd, [dash_c, sh_body], [env_kv])
+match e {
+    .ok(t) => println("env_out: {t[1]}"),
+    .err(_) => println("env_bad"),
+}
+
+// ── spawn + wait ──
+s := process.spawn(echo_cmd, [hello])
+match s {
+    .ok(child) => match process.wait(child) {
+        .ok(t) => println("spawn_status: {t[0]}"),
+        .err(_) => println("wait_bad"),
+    },
+    .err(_) => println("spawn_bad"),
+}
+
+// ── missing binary is .err ──
+match process.run(missing, empty_argv) {
+    .ok(_) => println("missing_bad"),
+    .err(_) => println("missing_ok"),
+}
+
+// ── pid + std spelling ──
+println("pid_ok: {process.pid() > 0}")
+println("std_spell: {std.process.pid() > 0}")
+
+println("process_ok")

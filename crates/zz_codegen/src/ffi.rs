@@ -114,6 +114,12 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "args.help" | "std.args.help" => Some("zz_args_help"),
         "args.error" | "std.args.error" => Some("zz_args_error"),
         "args.was_help" | "std.args.was_help" => Some("zz_args_was_help"),
+        "process.run" | "std.process.run" => Some("zz_process_run"),
+        "process.run_with_env" | "std.process.run_with_env" => Some("zz_process_run_with_env"),
+        "process.spawn" | "std.process.spawn" => Some("zz_process_spawn"),
+        "process.wait" | "std.process.wait" => Some("zz_process_wait"),
+        "process.exit" | "std.process.exit" => Some("zz_process_exit"),
+        "process.pid" | "std.process.pid" => Some("zz_process_pid"),
         _ => None,
     }
 }
@@ -258,6 +264,14 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
         "zz_args_help" => Some("zz_value zz_args_help(zz_value h, zz_value prog, int *err);"),
         "zz_args_error" => Some("zz_value zz_args_error(zz_value h, int *err);"),
         "zz_args_was_help" => Some("zz_value zz_args_was_help(zz_value h, int *err);"),
+        "zz_process_run" => Some("zz_value zz_process_run(zz_value cmd, zz_value argv, int *err);"),
+        "zz_process_run_with_env" => {
+            Some("zz_value zz_process_run_with_env(zz_value cmd, zz_value argv, zz_value env, int *err);")
+        }
+        "zz_process_spawn" => Some("zz_value zz_process_spawn(zz_value cmd, zz_value argv, int *err);"),
+        "zz_process_wait" => Some("zz_value zz_process_wait(zz_value id, int *err);"),
+        "zz_process_exit" => Some("zz_value zz_process_exit(zz_value code, int *err);"),
+        "zz_process_pid" => Some("zz_value zz_process_pid(zz_value unit, int *err);"),
         _ => None,
     }
 }

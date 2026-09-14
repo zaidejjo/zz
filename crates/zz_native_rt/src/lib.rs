@@ -32,6 +32,8 @@ pub mod crypto_core;
 pub mod crypto_pw;
 /// `std.log` logging + tracing (levels, sinks, JSON, spans).
 pub mod log;
+/// `std.process` subprocess control (run, spawn/wait, exit, pid).
+pub mod process;
 /// `std.regexp` implementation (safe pool API + `extern "C"` FFI).
 pub mod regexp;
 /// `std.sys` system information (os, arch, cpu, hostname, memory).
