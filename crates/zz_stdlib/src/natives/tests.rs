@@ -233,6 +233,8 @@ fn every_funcs_key_has_a_native() {
         "time.to_secs",
         "time.to_nanos",
         "time.sleep",
+        // ArgsParser constructor (pure-ZZ, compiled from zz/args/mod.zz)
+        "ArgsParser.new",
     ];
     let funcs = stdlib_funcs();
     let natives = stdlib_natives();

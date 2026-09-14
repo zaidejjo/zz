@@ -213,6 +213,7 @@ e2e_success_test!(e2e_stdlib_crypto_jwt_test, "stdlib", "crypto_jwt_test.zz");
 e2e_success_test!(e2e_stdlib_time_ext_test, "stdlib", "time_ext_test.zz");
 e2e_success_test!(e2e_stdlib_log_test, "stdlib", "log_test.zz");
 e2e_success_test!(e2e_stdlib_sys_test, "stdlib", "sys_test.zz");
+e2e_success_test!(e2e_stdlib_args_test, "stdlib", "args_test.zz");
 e2e_success_test!(
     e2e_stdlib_concurrent_http_test,
     "stdlib",
@@ -495,6 +496,39 @@ fn e2e_discover_all_error_fixtures() {
             "{} error fixture(s) failed:\n{}",
             failures.len(),
             failures.join("\n\n"),
+        );
+    }
+}
+
+/// Real-argv flow: `args.get_raw()` must see CLI args after the fixture
+/// path (the standard harness passes none, so this test drives `zz` with
+/// explicit extra args). Covers the VM; AOT real-argv is verified by the
+/// same fixture via `zz run --native` during development.
+#[test]
+fn e2e_stdlib_args_raw_argv() {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let fixture = fixtures_dir().join("stdlib/args_raw_test.zz");
+    let output = Command::new(zz_bin)
+        .arg("run")
+        .arg(&fixture)
+        .arg("--output")
+        .arg("x.out")
+        .arg("--verbose")
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz run args_raw_test.zz`: {e}"));
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    for expected in [
+        "nargs: 3",
+        "a0: --output",
+        "a1: x.out",
+        "a2: --verbose",
+        "args_raw_ok",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing `{expected}` in:\n{stdout}"
         );
     }
 }

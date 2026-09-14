@@ -19,6 +19,7 @@ const VEC_ZZ: &str = include_str!("../zz/collections/vec.zz");
 const JSON_MOD_ZZ: &str = include_str!("../zz/json/mod.zz");
 const REGEXP_MOD_ZZ: &str = include_str!("../zz/regexp/mod.zz");
 const TIME_MOD_ZZ: &str = include_str!("../zz/time/mod.zz");
+const ARGS_MOD_ZZ: &str = include_str!("../zz/args/mod.zz");
 
 /// All embedded source files, in compilation order.
 const ZZ_SOURCES: &[(&str, &str)] = &[
@@ -28,6 +29,7 @@ const ZZ_SOURCES: &[(&str, &str)] = &[
     ("std:json.mod.zz", JSON_MOD_ZZ),
     ("std:regexp.mod.zz", REGEXP_MOD_ZZ),
     ("std:time.mod.zz", TIME_MOD_ZZ),
+    ("std:args.mod.zz", ARGS_MOD_ZZ),
 ];
 
 /// Compiled pure-ZZ stdlib programs, computed once.
@@ -121,9 +123,9 @@ mod tests {
     #[test]
     fn compile_pure_zz_stdlib() {
         let programs = zz_stdlib_programs();
-        // Should have compiled six modules (str, math, collections/vec,
-        // json, regexp, time).
-        assert_eq!(programs.len(), 6, "expected 6 pure-ZZ stdlib modules");
+        // Should have compiled seven modules (str, math, collections/vec,
+        // json, regexp, time, args).
+        assert_eq!(programs.len(), 7, "expected 7 pure-ZZ stdlib modules");
         // Each module should have a non-empty types map.
         for (i, tp) in programs.iter().enumerate() {
             assert!(
@@ -336,5 +338,15 @@ mod tests {
                 "{name} should be defined"
             );
         }
+    }
+
+    #[test]
+    fn pure_zz_args_has_parser() {
+        let programs = zz_stdlib_programs();
+        let args_prog = &programs[6]; // args/mod.zz
+        assert!(
+            args_prog.funcs.contains_key("ArgsParser.new"),
+            "ArgsParser.new should be defined"
+        );
     }
 }

@@ -46,6 +46,8 @@ zz_value zz_clone_arc(zz_value v);
 // ---- refcounting -------------------------------------------------------
 void zz_retain(zz_value *v);
 void zz_release(zz_value *v);
+// FFI bridge (see memory.c): by-value release for Rust staticlib callers.
+void zz_value_release(zz_value v);
 void zz_assign(zz_value *dst, zz_value src);  // release dst, move src in
 zz_value zz_clone(zz_value v);
 

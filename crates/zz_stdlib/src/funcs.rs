@@ -438,6 +438,164 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert("sys.hostname".into(), sig(vec![], Type::Str));
     m.insert("sys.total_mem".into(), sig(vec![], Type::Int));
     m.insert("sys.avail_mem".into(), sig(vec![], Type::Int));
+
+    // std.args — raw argv + flag parser. Parser handles are Opaque("args"),
+    // dispatching `args.*` methods by tag. Both spellings (like json).
+    let args_t = Type::Opaque("args".to_string());
+    m.insert(
+        "std.args.get_raw".into(),
+        sig(vec![], Type::Array(Box::new(Type::Str))),
+    );
+    m.insert("std.args.parser".into(), sig(vec![], args_t.clone()));
+    m.insert(
+        "std.args.str_flag".into(),
+        sig(
+            vec![
+                ("p", args_t.clone()),
+                ("name", Type::Str),
+                ("default", Type::Str),
+            ],
+            Type::Unit,
+        ),
+    );
+    m.insert(
+        "std.args.int_flag".into(),
+        sig(
+            vec![
+                ("p", args_t.clone()),
+                ("name", Type::Str),
+                ("default", Type::Int),
+            ],
+            Type::Unit,
+        ),
+    );
+    m.insert(
+        "std.args.bool_flag".into(),
+        sig(vec![("p", args_t.clone()), ("name", Type::Str)], Type::Unit),
+    );
+    m.insert(
+        "std.args.parse".into(),
+        sig(
+            vec![
+                ("p", args_t.clone()),
+                ("argv", Type::Array(Box::new(Type::Str))),
+            ],
+            Type::Bool,
+        ),
+    );
+    m.insert(
+        "std.args.get_str".into(),
+        sig(vec![("p", args_t.clone()), ("name", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.args.get_int".into(),
+        sig(vec![("p", args_t.clone()), ("name", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "std.args.get_bool".into(),
+        sig(vec![("p", args_t.clone()), ("name", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.args.positional".into(),
+        sig(
+            vec![("p", args_t.clone()), ("i", Type::Int)],
+            Type::Option(Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.args.subcommand".into(),
+        sig(vec![("p", args_t.clone())], Type::Str),
+    );
+    m.insert(
+        "std.args.help".into(),
+        sig(vec![("p", args_t.clone()), ("prog", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.args.error".into(),
+        sig(vec![("p", args_t.clone())], Type::Str),
+    );
+    m.insert(
+        "std.args.was_help".into(),
+        sig(vec![("p", args_t.clone())], Type::Bool),
+    );
+    m.insert(
+        "args.get_raw".into(),
+        sig(vec![], Type::Array(Box::new(Type::Str))),
+    );
+    m.insert("args.parser".into(), sig(vec![], args_t.clone()));
+    m.insert(
+        "args.str_flag".into(),
+        sig(
+            vec![
+                ("p", args_t.clone()),
+                ("name", Type::Str),
+                ("default", Type::Str),
+            ],
+            Type::Unit,
+        ),
+    );
+    m.insert(
+        "args.int_flag".into(),
+        sig(
+            vec![
+                ("p", args_t.clone()),
+                ("name", Type::Str),
+                ("default", Type::Int),
+            ],
+            Type::Unit,
+        ),
+    );
+    m.insert(
+        "args.bool_flag".into(),
+        sig(vec![("p", args_t.clone()), ("name", Type::Str)], Type::Unit),
+    );
+    m.insert(
+        "args.parse".into(),
+        sig(
+            vec![
+                ("p", args_t.clone()),
+                ("argv", Type::Array(Box::new(Type::Str))),
+            ],
+            Type::Bool,
+        ),
+    );
+    m.insert(
+        "args.get_str".into(),
+        sig(vec![("p", args_t.clone()), ("name", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "args.get_int".into(),
+        sig(vec![("p", args_t.clone()), ("name", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "args.get_bool".into(),
+        sig(vec![("p", args_t.clone()), ("name", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "args.positional".into(),
+        sig(
+            vec![("p", args_t.clone()), ("i", Type::Int)],
+            Type::Option(Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "args.subcommand".into(),
+        sig(vec![("p", args_t.clone())], Type::Str),
+    );
+    m.insert(
+        "args.help".into(),
+        sig(vec![("p", args_t.clone()), ("prog", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "args.error".into(),
+        sig(vec![("p", args_t.clone())], Type::Str),
+    );
+    m.insert(
+        "args.was_help".into(),
+        sig(vec![("p", args_t.clone())], Type::Bool),
+    );
+    // Pure-ZZ wrapper (zz/args/mod.zz): ArgsParser constructor namespace.
+    m.insert("ArgsParser.new".into(), sig(vec![], args_t.clone()));
     m.insert(
         "crypto.jwt_encode_ed".into(),
         sig(
@@ -2366,7 +2524,7 @@ mod tests {
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 399);
+        assert_eq!(funcs.len(), 428);
     }
 
     #[test]

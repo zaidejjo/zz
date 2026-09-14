@@ -107,6 +107,10 @@ void zz_retain_array(zz_array *a) {
     __atomic_add_fetch(&a->refs, 1, __ATOMIC_RELAXED);
 }
 
+void zz_value_release(zz_value v) {
+    zz_release(&v);
+}
+
 void zz_release_array(zz_array *a) {
     if (!a) return;
     // Stack-promoted arrays (codegen-set sentinel): header + items buffer

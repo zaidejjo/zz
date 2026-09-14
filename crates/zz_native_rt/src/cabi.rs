@@ -94,12 +94,19 @@ extern "C" {
     pub fn zz_array_new() -> CValue;
     /// Push (clones ARC payloads as needed).
     pub fn zz_array_push(a: *mut c_void, v: CValue);
+    /// Array header length (null-safe on the C side).
+    pub fn zz_array_len(a: *const c_void) -> usize;
     /// Option/Result variant constructors.
     pub fn zz_variant_some(inner: CValue) -> CValue;
     pub fn zz_variant_ok(inner: CValue) -> CValue;
     pub fn zz_variant_err(inner: CValue) -> CValue;
     /// Read string bytes: sets `(*out_ptr, *out_len)`; null/0 for non-strings.
     pub fn zz_str_view(v: CValue, out_ptr: *mut *const u8, out_len: *mut usize);
+    /// Positional array read (cloned item, or unit when out of range).
+    /// The caller owns the clone and must release it with [`zz_release`].
+    pub fn zz_array_at(arr: CValue, i: usize) -> CValue;
+    /// Release one owned `zz_value` (balances a clone from `zz_array_at`).
+    pub fn zz_value_release(v: CValue);
 }
 
 /// Build a `ZZ_STR` from Rust bytes via the runtime allocator.
@@ -135,4 +142,28 @@ pub fn array_push_str(arr: CValue, s: &str) {
         // SAFETY: `ptr` came from a `zz_array_new` value in this call frame.
         unsafe { zz_array_push(ptr, cvalue_str(s.as_bytes())) };
     }
+}
+
+/// Read a `ZZ_ARRAY` of strings into owned Rust strings.
+///
+/// Non-string items become `""` (never fail the whole read on one bad
+/// item); non-arrays yield `None`. Every clone taken through
+/// `zz_array_at` is released after conversion, so no refs leak.
+pub fn cvalue_to_str_vec(v: CValue) -> Option<Vec<String>> {
+    if v.tag != TAG_ARRAY {
+        return None;
+    }
+    let ptr = v.as_array_ptr()?;
+    // SAFETY: `zz_array_len` only reads the header through a valid pointer.
+    let n = unsafe { zz_array_len(ptr) };
+    let mut out = Vec::with_capacity(n.min(1_000_000));
+    for i in 0..n.min(1_000_000) {
+        // SAFETY: `i` is in range; the clone is ours to release.
+        let item = unsafe { zz_array_at(v, i) };
+        let s = cvalue_to_string(item).unwrap_or_default();
+        // SAFETY: balances the clone above.
+        unsafe { zz_value_release(item) };
+        out.push(s);
+    }
+    Some(out)
 }
