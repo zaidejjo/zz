@@ -18,6 +18,7 @@ const MATH_MOD_ZZ: &str = include_str!("../zz/math/mod.zz");
 const VEC_ZZ: &str = include_str!("../zz/collections/vec.zz");
 const JSON_MOD_ZZ: &str = include_str!("../zz/json/mod.zz");
 const REGEXP_MOD_ZZ: &str = include_str!("../zz/regexp/mod.zz");
+const TIME_MOD_ZZ: &str = include_str!("../zz/time/mod.zz");
 
 /// All embedded source files, in compilation order.
 const ZZ_SOURCES: &[(&str, &str)] = &[
@@ -26,6 +27,7 @@ const ZZ_SOURCES: &[(&str, &str)] = &[
     ("std:collections.vec.zz", VEC_ZZ),
     ("std:json.mod.zz", JSON_MOD_ZZ),
     ("std:regexp.mod.zz", REGEXP_MOD_ZZ),
+    ("std:time.mod.zz", TIME_MOD_ZZ),
 ];
 
 /// Compiled pure-ZZ stdlib programs, computed once.
@@ -119,9 +121,9 @@ mod tests {
     #[test]
     fn compile_pure_zz_stdlib() {
         let programs = zz_stdlib_programs();
-        // Should have compiled five modules (str, math, collections/vec,
-        // json, regexp).
-        assert_eq!(programs.len(), 5, "expected 5 pure-ZZ stdlib modules");
+        // Should have compiled six modules (str, math, collections/vec,
+        // json, regexp, time).
+        assert_eq!(programs.len(), 6, "expected 6 pure-ZZ stdlib modules");
         // Each module should have a non-empty types map.
         for (i, tp) in programs.iter().enumerate() {
             assert!(
@@ -313,5 +315,26 @@ mod tests {
             regexp_prog.funcs.contains_key("regexp.is_email"),
             "regexp.is_email should be defined"
         );
+    }
+
+    #[test]
+    fn pure_zz_time_has_duration() {
+        let programs = zz_stdlib_programs();
+        let time_prog = &programs[5]; // time/mod.zz
+        for name in [
+            "time.micros",
+            "time.millis",
+            "time.secs",
+            "time.to_micros",
+            "time.to_millis",
+            "time.to_secs",
+            "time.to_nanos",
+            "time.sleep",
+        ] {
+            assert!(
+                time_prog.funcs.contains_key(name),
+                "{name} should be defined"
+            );
+        }
     }
 }

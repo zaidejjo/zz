@@ -1547,6 +1547,77 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
             f: time::time_sleep_ms,
         },
     );
+    m.insert(
+        "std.time.now_nanos".into(),
+        NativeEntry {
+            arity: 0,
+            f: time::time_now_nanos,
+        },
+    );
+    m.insert(
+        "std.time.now_micros".into(),
+        NativeEntry {
+            arity: 0,
+            f: time::time_now_micros,
+        },
+    );
+    m.insert(
+        "std.time.monotonic_nanos".into(),
+        NativeEntry {
+            arity: 0,
+            f: time::time_monotonic_nanos,
+        },
+    );
+    m.insert(
+        "std.time.sleep_micros".into(),
+        NativeEntry {
+            arity: 1,
+            f: time::time_sleep_micros,
+        },
+    );
+    // Bare `time.*` aliases (mirror the `std.time.*` natives).
+    m.insert(
+        "time.now_ms".into(),
+        NativeEntry {
+            arity: 0,
+            f: time::time_now_ms,
+        },
+    );
+    m.insert(
+        "time.sleep_ms".into(),
+        NativeEntry {
+            arity: 1,
+            f: time::time_sleep_ms,
+        },
+    );
+    m.insert(
+        "time.now_nanos".into(),
+        NativeEntry {
+            arity: 0,
+            f: time::time_now_nanos,
+        },
+    );
+    m.insert(
+        "time.now_micros".into(),
+        NativeEntry {
+            arity: 0,
+            f: time::time_now_micros,
+        },
+    );
+    m.insert(
+        "time.monotonic_nanos".into(),
+        NativeEntry {
+            arity: 0,
+            f: time::time_monotonic_nanos,
+        },
+    );
+    m.insert(
+        "time.sleep_micros".into(),
+        NativeEntry {
+            arity: 1,
+            f: time::time_sleep_micros,
+        },
+    );
 
     // std.chan — concurrency primitives
     m.insert(

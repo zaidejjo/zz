@@ -76,6 +76,10 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "crypto.jwt_decode" | "std.crypto.jwt_decode" => Some("zz_crypto_jwt_decode"),
         "crypto.jwt_encode_ed" | "std.crypto.jwt_encode_ed" => Some("zz_crypto_jwt_encode_ed"),
         "crypto.jwt_decode_ed" | "std.crypto.jwt_decode_ed" => Some("zz_crypto_jwt_decode_ed"),
+        "time.now_nanos" | "std.time.now_nanos" => Some("zz_time_now_nanos"),
+        "time.now_micros" | "std.time.now_micros" => Some("zz_time_now_micros"),
+        "time.monotonic_nanos" | "std.time.monotonic_nanos" => Some("zz_time_monotonic_nanos"),
+        "time.sleep_micros" | "std.time.sleep_micros" => Some("zz_time_sleep_micros"),
         _ => None,
     }
 }
@@ -167,6 +171,12 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
         "zz_crypto_jwt_decode_ed" => {
             Some("zz_value zz_crypto_jwt_decode_ed(zz_value token, zz_value pk, int *err);")
         }
+        "zz_time_now_nanos" => Some("zz_value zz_time_now_nanos(zz_value unit, int *err);"),
+        "zz_time_now_micros" => Some("zz_value zz_time_now_micros(zz_value unit, int *err);"),
+        "zz_time_monotonic_nanos" => {
+            Some("zz_value zz_time_monotonic_nanos(zz_value unit, int *err);")
+        }
+        "zz_time_sleep_micros" => Some("zz_value zz_time_sleep_micros(zz_value n, int *err);"),
         _ => None,
     }
 }

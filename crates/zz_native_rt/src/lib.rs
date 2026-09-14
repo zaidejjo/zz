@@ -30,6 +30,8 @@ pub mod crypto_core;
 pub mod crypto_pw;
 /// `std.regexp` implementation (safe pool API + `extern "C"` FFI).
 pub mod regexp;
+/// `std.time` high-resolution extension (ns/µs clocks, micro sleeps).
+pub mod time_ext;
 
 /// Opaque handle value: the tag of the owning module plus a pool id.
 ///
