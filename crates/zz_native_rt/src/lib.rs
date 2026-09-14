@@ -32,6 +32,8 @@ pub mod crypto_pw;
 pub mod log;
 /// `std.regexp` implementation (safe pool API + `extern "C"` FFI).
 pub mod regexp;
+/// `std.sys` system information (os, arch, cpu, hostname, memory).
+pub mod sys;
 /// `std.time` high-resolution extension (ns/µs clocks, micro sleeps).
 pub mod time_ext;
 

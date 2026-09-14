@@ -92,6 +92,12 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "log.error" | "std.log.error" => Some("zz_log_error"),
         "log.span_begin" | "std.log.span_begin" => Some("zz_log_span_begin"),
         "span.end" | "std.span.end" => Some("zz_span_end"),
+        "sys.os" | "std.sys.os" => Some("zz_sys_os"),
+        "sys.arch" | "std.sys.arch" => Some("zz_sys_arch"),
+        "sys.cpu_count" | "std.sys.cpu_count" => Some("zz_sys_cpu_count"),
+        "sys.hostname" | "std.sys.hostname" => Some("zz_sys_hostname"),
+        "sys.total_mem" | "std.sys.total_mem" => Some("zz_sys_total_mem"),
+        "sys.avail_mem" | "std.sys.avail_mem" => Some("zz_sys_avail_mem"),
         _ => None,
     }
 }
@@ -201,6 +207,12 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
         "zz_log_error" => Some("zz_value zz_log_error(zz_value msg, int *err);"),
         "zz_log_span_begin" => Some("zz_value zz_log_span_begin(zz_value name, int *err);"),
         "zz_span_end" => Some("zz_value zz_span_end(zz_value id, int *err);"),
+        "zz_sys_os" => Some("zz_value zz_sys_os(zz_value unit, int *err);"),
+        "zz_sys_arch" => Some("zz_value zz_sys_arch(zz_value unit, int *err);"),
+        "zz_sys_cpu_count" => Some("zz_value zz_sys_cpu_count(zz_value unit, int *err);"),
+        "zz_sys_hostname" => Some("zz_value zz_sys_hostname(zz_value unit, int *err);"),
+        "zz_sys_total_mem" => Some("zz_value zz_sys_total_mem(zz_value unit, int *err);"),
+        "zz_sys_avail_mem" => Some("zz_value zz_sys_avail_mem(zz_value unit, int *err);"),
         _ => None,
     }
 }
