@@ -11,6 +11,7 @@ use zz_runtime::{EvalError, NativeEntry, Value};
 
 pub(crate) mod builtins;
 pub(crate) mod concurrency;
+pub(crate) mod crypto;
 pub(crate) mod db;
 pub(crate) mod encoding;
 pub(crate) mod env;
@@ -670,6 +671,276 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 2,
             f: regexp::regexp_captures,
+        },
+    );
+
+    // std.crypto — digests (hex), HMAC, CSPRNG, constant-time equality.
+    // Both spellings registered (like `std.json.*` / `json.*`).
+    m.insert(
+        "std.crypto.sha256".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_sha256,
+        },
+    );
+    m.insert(
+        "std.crypto.sha512".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_sha512,
+        },
+    );
+    m.insert(
+        "std.crypto.hmac_sha256".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_hmac_sha256,
+        },
+    );
+    m.insert(
+        "std.crypto.random_bytes".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_random_bytes,
+        },
+    );
+    m.insert(
+        "std.crypto.ct_eq".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_ct_eq,
+        },
+    );
+    m.insert(
+        "crypto.sha256".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_sha256,
+        },
+    );
+    m.insert(
+        "crypto.sha512".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_sha512,
+        },
+    );
+    m.insert(
+        "crypto.hmac_sha256".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_hmac_sha256,
+        },
+    );
+    m.insert(
+        "crypto.random_bytes".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_random_bytes,
+        },
+    );
+    m.insert(
+        "crypto.ct_eq".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_ct_eq,
+        },
+    );
+    m.insert(
+        "std.crypto.argon2_hash".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_argon2_hash,
+        },
+    );
+    m.insert(
+        "std.crypto.argon2_verify".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_argon2_verify,
+        },
+    );
+    m.insert(
+        "std.crypto.bcrypt_hash".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_bcrypt_hash,
+        },
+    );
+    m.insert(
+        "std.crypto.bcrypt_verify".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_bcrypt_verify,
+        },
+    );
+    m.insert(
+        "crypto.argon2_hash".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_argon2_hash,
+        },
+    );
+    m.insert(
+        "crypto.argon2_verify".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_argon2_verify,
+        },
+    );
+    m.insert(
+        "crypto.bcrypt_hash".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_bcrypt_hash,
+        },
+    );
+    m.insert(
+        "crypto.bcrypt_verify".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_bcrypt_verify,
+        },
+    );
+    // Asymmetric crypto + JWT (both spellings each).
+    m.insert(
+        "std.crypto.ed25519_keypair".into(),
+        NativeEntry {
+            arity: 0,
+            f: crypto::crypto_ed25519_keypair,
+        },
+    );
+    m.insert(
+        "std.crypto.ed25519_sign".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_ed25519_sign,
+        },
+    );
+    m.insert(
+        "std.crypto.ed25519_verify".into(),
+        NativeEntry {
+            arity: 3,
+            f: crypto::crypto_ed25519_verify,
+        },
+    );
+    m.insert(
+        "std.crypto.rsa_keypair".into(),
+        NativeEntry {
+            arity: 0,
+            f: crypto::crypto_rsa_keypair,
+        },
+    );
+    m.insert(
+        "std.crypto.rsa_sign".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_rsa_sign,
+        },
+    );
+    m.insert(
+        "std.crypto.rsa_verify".into(),
+        NativeEntry {
+            arity: 3,
+            f: crypto::crypto_rsa_verify,
+        },
+    );
+    m.insert(
+        "std.crypto.jwt_encode".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_jwt_encode,
+        },
+    );
+    m.insert(
+        "std.crypto.jwt_decode".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_jwt_decode,
+        },
+    );
+    m.insert(
+        "std.crypto.jwt_encode_ed".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_jwt_encode_ed,
+        },
+    );
+    m.insert(
+        "std.crypto.jwt_decode_ed".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_jwt_decode_ed,
+        },
+    );
+    m.insert(
+        "crypto.ed25519_keypair".into(),
+        NativeEntry {
+            arity: 0,
+            f: crypto::crypto_ed25519_keypair,
+        },
+    );
+    m.insert(
+        "crypto.ed25519_sign".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_ed25519_sign,
+        },
+    );
+    m.insert(
+        "crypto.ed25519_verify".into(),
+        NativeEntry {
+            arity: 3,
+            f: crypto::crypto_ed25519_verify,
+        },
+    );
+    m.insert(
+        "crypto.rsa_keypair".into(),
+        NativeEntry {
+            arity: 0,
+            f: crypto::crypto_rsa_keypair,
+        },
+    );
+    m.insert(
+        "crypto.rsa_sign".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_rsa_sign,
+        },
+    );
+    m.insert(
+        "crypto.rsa_verify".into(),
+        NativeEntry {
+            arity: 3,
+            f: crypto::crypto_rsa_verify,
+        },
+    );
+    m.insert(
+        "crypto.jwt_encode".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_jwt_encode,
+        },
+    );
+    m.insert(
+        "crypto.jwt_decode".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_jwt_decode,
+        },
+    );
+    m.insert(
+        "crypto.jwt_encode_ed".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_jwt_encode_ed,
+        },
+    );
+    m.insert(
+        "crypto.jwt_decode_ed".into(),
+        NativeEntry {
+            arity: 2,
+            f: crypto::crypto_jwt_decode_ed,
         },
     );
 

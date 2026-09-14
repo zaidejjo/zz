@@ -315,7 +315,7 @@ impl Lowerer {
 /// into one translation unit, so quoted includes (which reference files
 /// that do not exist at compile time) must be dropped. System includes
 /// (`<...>`) are preserved.
-fn strip_quoted_includes(src: &str) -> String {
+pub(crate) fn strip_quoted_includes(src: &str) -> String {
     src.lines()
         .filter(|line| {
             let t = line.trim_start();

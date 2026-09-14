@@ -234,6 +234,120 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             Type::Str,
         ),
     );
+    // Asymmetric crypto + JWT. Keypairs cross as `[secret, public]`;
+    // signing is fallible (malformed keys), verification is total.
+    let str_arr = || Type::Array(Box::new(Type::Str));
+    let result_str2 = || Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+    m.insert("std.crypto.ed25519_keypair".into(), sig(vec![], str_arr()));
+    m.insert(
+        "std.crypto.ed25519_sign".into(),
+        sig(vec![("sk", Type::Str), ("msg", Type::Str)], result_str2()),
+    );
+    m.insert(
+        "std.crypto.ed25519_verify".into(),
+        sig(
+            vec![("pk", Type::Str), ("msg", Type::Str), ("sig", Type::Str)],
+            Type::Bool,
+        ),
+    );
+    m.insert(
+        "std.crypto.rsa_keypair".into(),
+        sig(
+            vec![],
+            Type::Result(Box::new(str_arr()), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.crypto.rsa_sign".into(),
+        sig(vec![("sk", Type::Str), ("msg", Type::Str)], result_str2()),
+    );
+    m.insert(
+        "std.crypto.rsa_verify".into(),
+        sig(
+            vec![("pk", Type::Str), ("msg", Type::Str), ("sig", Type::Str)],
+            Type::Bool,
+        ),
+    );
+    m.insert(
+        "std.crypto.jwt_encode".into(),
+        sig(
+            vec![("payload", Type::Str), ("secret", Type::Str)],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "std.crypto.jwt_decode".into(),
+        sig(
+            vec![("token", Type::Str), ("secret", Type::Str)],
+            result_str2(),
+        ),
+    );
+    m.insert(
+        "std.crypto.jwt_encode_ed".into(),
+        sig(
+            vec![("payload", Type::Str), ("sk", Type::Str)],
+            result_str2(),
+        ),
+    );
+    m.insert(
+        "std.crypto.jwt_decode_ed".into(),
+        sig(vec![("token", Type::Str), ("pk", Type::Str)], result_str2()),
+    );
+    m.insert("crypto.ed25519_keypair".into(), sig(vec![], str_arr()));
+    m.insert(
+        "crypto.ed25519_sign".into(),
+        sig(vec![("sk", Type::Str), ("msg", Type::Str)], result_str2()),
+    );
+    m.insert(
+        "crypto.ed25519_verify".into(),
+        sig(
+            vec![("pk", Type::Str), ("msg", Type::Str), ("sig", Type::Str)],
+            Type::Bool,
+        ),
+    );
+    m.insert(
+        "crypto.rsa_keypair".into(),
+        sig(
+            vec![],
+            Type::Result(Box::new(str_arr()), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "crypto.rsa_sign".into(),
+        sig(vec![("sk", Type::Str), ("msg", Type::Str)], result_str2()),
+    );
+    m.insert(
+        "crypto.rsa_verify".into(),
+        sig(
+            vec![("pk", Type::Str), ("msg", Type::Str), ("sig", Type::Str)],
+            Type::Bool,
+        ),
+    );
+    m.insert(
+        "crypto.jwt_encode".into(),
+        sig(
+            vec![("payload", Type::Str), ("secret", Type::Str)],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "crypto.jwt_decode".into(),
+        sig(
+            vec![("token", Type::Str), ("secret", Type::Str)],
+            result_str2(),
+        ),
+    );
+    m.insert(
+        "crypto.jwt_encode_ed".into(),
+        sig(
+            vec![("payload", Type::Str), ("sk", Type::Str)],
+            result_str2(),
+        ),
+    );
+    m.insert(
+        "crypto.jwt_decode_ed".into(),
+        sig(vec![("token", Type::Str), ("pk", Type::Str)], result_str2()),
+    );
     m.insert(
         "std.str.pad_right".into(),
         sig(
@@ -894,6 +1008,83 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "json.is_empty".into(),
         sig(vec![("j", json_t.clone())], Type::Bool),
+    );
+
+    // std.crypto — digests (hex strings), HMAC, CSPRNG, constant-time eq.
+    // Both spellings registered (like json).
+    m.insert(
+        "std.crypto.sha256".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.crypto.sha512".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.crypto.hmac_sha256".into(),
+        sig(vec![("key", Type::Str), ("msg", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.crypto.random_bytes".into(),
+        sig(vec![("n", Type::Int)], Type::Str),
+    );
+    m.insert(
+        "std.crypto.ct_eq".into(),
+        sig(vec![("a", Type::Str), ("b", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "crypto.sha256".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "crypto.sha512".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "crypto.hmac_sha256".into(),
+        sig(vec![("key", Type::Str), ("msg", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "crypto.random_bytes".into(),
+        sig(vec![("n", Type::Int)], Type::Str),
+    );
+    m.insert(
+        "crypto.ct_eq".into(),
+        sig(vec![("a", Type::Str), ("b", Type::Str)], Type::Bool),
+    );
+    // Password hashing (Argon2id + bcrypt). Hashes are PHC strings;
+    // verification is total (malformed input verifies as false).
+    m.insert(
+        "std.crypto.argon2_hash".into(),
+        sig(vec![("pw", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.crypto.argon2_verify".into(),
+        sig(vec![("hash", Type::Str), ("pw", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.crypto.bcrypt_hash".into(),
+        sig(vec![("pw", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.crypto.bcrypt_verify".into(),
+        sig(vec![("hash", Type::Str), ("pw", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "crypto.argon2_hash".into(),
+        sig(vec![("pw", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "crypto.argon2_verify".into(),
+        sig(vec![("hash", Type::Str), ("pw", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "crypto.bcrypt_hash".into(),
+        sig(vec![("pw", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "crypto.bcrypt_verify".into(),
+        sig(vec![("hash", Type::Str), ("pw", Type::Str)], Type::Bool),
     );
 
     // std.encoding
@@ -2026,7 +2217,7 @@ mod tests {
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 307);
+        assert_eq!(funcs.len(), 345);
     }
 
     #[test]
