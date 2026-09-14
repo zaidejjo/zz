@@ -31,6 +31,7 @@ pub(crate) mod result_mod;
 pub(crate) mod str_mod;
 pub(crate) mod sys;
 pub(crate) mod time;
+pub(crate) mod uuid;
 pub(crate) mod vec_mod;
 
 /// All standard library native functions, keyed by qualified name.
@@ -2160,6 +2161,64 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 0,
             f: process::process_pid,
+        },
+    );
+
+    // std.uuid — v4/v7 generation, parse, validation (both spellings).
+    m.insert(
+        "std.uuid.v4".into(),
+        NativeEntry {
+            arity: 0,
+            f: uuid::uuid_v4,
+        },
+    );
+    m.insert(
+        "std.uuid.v7".into(),
+        NativeEntry {
+            arity: 0,
+            f: uuid::uuid_v7,
+        },
+    );
+    m.insert(
+        "std.uuid.parse".into(),
+        NativeEntry {
+            arity: 1,
+            f: uuid::uuid_parse,
+        },
+    );
+    m.insert(
+        "std.uuid.is_valid".into(),
+        NativeEntry {
+            arity: 1,
+            f: uuid::uuid_is_valid,
+        },
+    );
+    m.insert(
+        "uuid.v4".into(),
+        NativeEntry {
+            arity: 0,
+            f: uuid::uuid_v4,
+        },
+    );
+    m.insert(
+        "uuid.v7".into(),
+        NativeEntry {
+            arity: 0,
+            f: uuid::uuid_v7,
+        },
+    );
+    m.insert(
+        "uuid.parse".into(),
+        NativeEntry {
+            arity: 1,
+            f: uuid::uuid_parse,
+        },
+    );
+    m.insert(
+        "uuid.is_valid".into(),
+        NativeEntry {
+            arity: 1,
+            f: uuid::uuid_is_valid,
         },
     );
 

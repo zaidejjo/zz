@@ -120,6 +120,10 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "process.wait" | "std.process.wait" => Some("zz_process_wait"),
         "process.exit" | "std.process.exit" => Some("zz_process_exit"),
         "process.pid" | "std.process.pid" => Some("zz_process_pid"),
+        "uuid.v4" | "std.uuid.v4" => Some("zz_uuid_v4"),
+        "uuid.v7" | "std.uuid.v7" => Some("zz_uuid_v7"),
+        "uuid.parse" | "std.uuid.parse" => Some("zz_uuid_parse"),
+        "uuid.is_valid" | "std.uuid.is_valid" => Some("zz_uuid_is_valid"),
         _ => None,
     }
 }
@@ -272,6 +276,10 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
         "zz_process_wait" => Some("zz_value zz_process_wait(zz_value id, int *err);"),
         "zz_process_exit" => Some("zz_value zz_process_exit(zz_value code, int *err);"),
         "zz_process_pid" => Some("zz_value zz_process_pid(zz_value unit, int *err);"),
+        "zz_uuid_v4" => Some("zz_value zz_uuid_v4(zz_value unit, int *err);"),
+        "zz_uuid_v7" => Some("zz_value zz_uuid_v7(zz_value unit, int *err);"),
+        "zz_uuid_parse" => Some("zz_value zz_uuid_parse(zz_value s, int *err);"),
+        "zz_uuid_is_valid" => Some("zz_value zz_uuid_is_valid(zz_value s, int *err);"),
         _ => None,
     }
 }
@@ -444,7 +452,7 @@ mod tests {
         assert!(!needs_native_rt(&natives));
         assert_eq!(ffi_prelude(&natives), "");
         // Unknown future names without a registry entry stay embedded-only.
-        assert_eq!(ffi_impl("std.uuid.v4"), None);
+        assert_eq!(ffi_impl("std.quic.connect"), None);
     }
 
     #[test]

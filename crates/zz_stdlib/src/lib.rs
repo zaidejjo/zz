@@ -64,6 +64,7 @@ pub const STDLIB_MODULES: &[&str] = &[
     "sys",
     "args",
     "process",
+    "uuid",
     "sqlz",
     "db",
     "sqlz.postgres",
