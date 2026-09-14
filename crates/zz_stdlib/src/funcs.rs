@@ -341,6 +341,79 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "crypto.jwt_decode_ed".into(),
         sig(vec![("token", Type::Str), ("pk", Type::Str)], result_str2()),
     );
+    // Process result triples `[status, stdout, stderr]` (heterogeneous).
+    let process_t = Type::Opaque("process".to_string());
+    let str_arr2 = || Type::Array(Box::new(Type::Str));
+    let triple_t = || Type::Array(Box::new(Type::Union(vec![Type::Int, Type::Str, Type::Str])));
+    let result_triple = || Type::Result(Box::new(triple_t()), Box::new(Type::Str));
+    m.insert(
+        "std.process.run".into(),
+        sig(
+            vec![("cmd", Type::Str), ("argv", str_arr2())],
+            result_triple(),
+        ),
+    );
+    m.insert(
+        "std.process.run_with_env".into(),
+        sig(
+            vec![
+                ("cmd", Type::Str),
+                ("argv", str_arr2()),
+                ("env", str_arr2()),
+            ],
+            result_triple(),
+        ),
+    );
+    m.insert(
+        "std.process.spawn".into(),
+        sig(
+            vec![("cmd", Type::Str), ("argv", str_arr2())],
+            Type::Result(Box::new(process_t.clone()), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.process.wait".into(),
+        sig(vec![("child", process_t.clone())], result_triple()),
+    );
+    m.insert(
+        "std.process.exit".into(),
+        sig(vec![("code", Type::Int)], Type::Unit),
+    );
+    m.insert("std.process.pid".into(), sig(vec![], Type::Int));
+    m.insert(
+        "process.run".into(),
+        sig(
+            vec![("cmd", Type::Str), ("argv", str_arr2())],
+            result_triple(),
+        ),
+    );
+    m.insert(
+        "process.run_with_env".into(),
+        sig(
+            vec![
+                ("cmd", Type::Str),
+                ("argv", str_arr2()),
+                ("env", str_arr2()),
+            ],
+            result_triple(),
+        ),
+    );
+    m.insert(
+        "process.spawn".into(),
+        sig(
+            vec![("cmd", Type::Str), ("argv", str_arr2())],
+            Type::Result(Box::new(process_t.clone()), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "process.wait".into(),
+        sig(vec![("child", process_t.clone())], result_triple()),
+    );
+    m.insert(
+        "process.exit".into(),
+        sig(vec![("code", Type::Int)], Type::Unit),
+    );
+    m.insert("process.pid".into(), sig(vec![], Type::Int));
 
     // std.log — levels, sinks, spans. Span handles are Opaque("span"),
     // dispatching `span.end` by tag. Both spellings (like json).
@@ -2524,7 +2597,7 @@ mod tests {
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 428);
+        assert_eq!(funcs.len(), 440);
     }
 
     #[test]

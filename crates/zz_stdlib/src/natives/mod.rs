@@ -25,6 +25,7 @@ pub(crate) mod log;
 pub(crate) mod math;
 pub(crate) mod net;
 pub(crate) mod option_mod;
+pub(crate) mod process;
 pub(crate) mod regexp;
 pub(crate) mod result_mod;
 pub(crate) mod str_mod;
@@ -2073,6 +2074,92 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: args::args_was_help,
+        },
+    );
+
+    // std.process — run/spawn/wait/exit/pid (both spellings each).
+    m.insert(
+        "std.process.run".into(),
+        NativeEntry {
+            arity: 2,
+            f: process::process_run,
+        },
+    );
+    m.insert(
+        "std.process.run_with_env".into(),
+        NativeEntry {
+            arity: 3,
+            f: process::process_run_with_env,
+        },
+    );
+    m.insert(
+        "std.process.spawn".into(),
+        NativeEntry {
+            arity: 2,
+            f: process::process_spawn,
+        },
+    );
+    m.insert(
+        "std.process.wait".into(),
+        NativeEntry {
+            arity: 1,
+            f: process::process_wait,
+        },
+    );
+    m.insert(
+        "std.process.exit".into(),
+        NativeEntry {
+            arity: 1,
+            f: process::process_exit,
+        },
+    );
+    m.insert(
+        "std.process.pid".into(),
+        NativeEntry {
+            arity: 0,
+            f: process::process_pid,
+        },
+    );
+    m.insert(
+        "process.run".into(),
+        NativeEntry {
+            arity: 2,
+            f: process::process_run,
+        },
+    );
+    m.insert(
+        "process.run_with_env".into(),
+        NativeEntry {
+            arity: 3,
+            f: process::process_run_with_env,
+        },
+    );
+    m.insert(
+        "process.spawn".into(),
+        NativeEntry {
+            arity: 2,
+            f: process::process_spawn,
+        },
+    );
+    m.insert(
+        "process.wait".into(),
+        NativeEntry {
+            arity: 1,
+            f: process::process_wait,
+        },
+    );
+    m.insert(
+        "process.exit".into(),
+        NativeEntry {
+            arity: 1,
+            f: process::process_exit,
+        },
+    );
+    m.insert(
+        "process.pid".into(),
+        NativeEntry {
+            arity: 0,
+            f: process::process_pid,
         },
     );
 
