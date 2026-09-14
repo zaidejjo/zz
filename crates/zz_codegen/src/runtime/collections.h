@@ -65,6 +65,8 @@ static inline zz_value zz_array_get(const zz_array *a, zz_value idx, int *err) {
 }
 void zz_array_set(zz_array *a, zz_value idx, zz_value v, int *err);
 size_t zz_array_len(const zz_array *a);
+// FFI bridge (see collections.c): positional read for Rust callers.
+zz_value zz_array_at(zz_value arr, size_t i);
 zz_value zz_array_slice(const zz_array *a, zz_value start, zz_value end, int *err);
 zz_value zz_array_dup(const zz_array *a);
 

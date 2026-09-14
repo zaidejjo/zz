@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use zz_runtime::{EvalError, NativeEntry, Value};
 
+pub(crate) mod args;
 pub(crate) mod builtins;
 pub(crate) mod concurrency;
 pub(crate) mod crypto;
@@ -1874,6 +1875,204 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 0,
             f: sys::sys_avail_mem,
+        },
+    );
+
+    // std.args — raw argv + flag parser (both spellings each).
+    m.insert(
+        "std.args.get_raw".into(),
+        NativeEntry {
+            arity: 0,
+            f: args::args_get_raw,
+        },
+    );
+    m.insert(
+        "std.args.parser".into(),
+        NativeEntry {
+            arity: 0,
+            f: args::args_parser,
+        },
+    );
+    m.insert(
+        "std.args.str_flag".into(),
+        NativeEntry {
+            arity: 3,
+            f: args::args_str_flag,
+        },
+    );
+    m.insert(
+        "std.args.int_flag".into(),
+        NativeEntry {
+            arity: 3,
+            f: args::args_int_flag,
+        },
+    );
+    m.insert(
+        "std.args.bool_flag".into(),
+        NativeEntry {
+            arity: 2,
+            f: args::args_bool_flag,
+        },
+    );
+    m.insert(
+        "std.args.parse".into(),
+        NativeEntry {
+            arity: 2,
+            f: args::args_parse,
+        },
+    );
+    m.insert(
+        "std.args.get_str".into(),
+        NativeEntry {
+            arity: 2,
+            f: args::args_get_str,
+        },
+    );
+    m.insert(
+        "std.args.get_int".into(),
+        NativeEntry {
+            arity: 2,
+            f: args::args_get_int,
+        },
+    );
+    m.insert(
+        "std.args.get_bool".into(),
+        NativeEntry {
+            arity: 2,
+            f: args::args_get_bool,
+        },
+    );
+    m.insert(
+        "std.args.positional".into(),
+        NativeEntry {
+            arity: 2,
+            f: args::args_positional,
+        },
+    );
+    m.insert(
+        "std.args.subcommand".into(),
+        NativeEntry {
+            arity: 1,
+            f: args::args_subcommand,
+        },
+    );
+    m.insert(
+        "std.args.help".into(),
+        NativeEntry {
+            arity: 2,
+            f: args::args_help,
+        },
+    );
+    m.insert(
+        "std.args.error".into(),
+        NativeEntry {
+            arity: 1,
+            f: args::args_error,
+        },
+    );
+    m.insert(
+        "std.args.was_help".into(),
+        NativeEntry {
+            arity: 1,
+            f: args::args_was_help,
+        },
+    );
+    m.insert(
+        "args.get_raw".into(),
+        NativeEntry {
+            arity: 0,
+            f: args::args_get_raw,
+        },
+    );
+    m.insert(
+        "args.parser".into(),
+        NativeEntry {
+            arity: 0,
+            f: args::args_parser,
+        },
+    );
+    m.insert(
+        "args.str_flag".into(),
+        NativeEntry {
+            arity: 3,
+            f: args::args_str_flag,
+        },
+    );
+    m.insert(
+        "args.int_flag".into(),
+        NativeEntry {
+            arity: 3,
+            f: args::args_int_flag,
+        },
+    );
+    m.insert(
+        "args.bool_flag".into(),
+        NativeEntry {
+            arity: 2,
+            f: args::args_bool_flag,
+        },
+    );
+    m.insert(
+        "args.parse".into(),
+        NativeEntry {
+            arity: 2,
+            f: args::args_parse,
+        },
+    );
+    m.insert(
+        "args.get_str".into(),
+        NativeEntry {
+            arity: 2,
+            f: args::args_get_str,
+        },
+    );
+    m.insert(
+        "args.get_int".into(),
+        NativeEntry {
+            arity: 2,
+            f: args::args_get_int,
+        },
+    );
+    m.insert(
+        "args.get_bool".into(),
+        NativeEntry {
+            arity: 2,
+            f: args::args_get_bool,
+        },
+    );
+    m.insert(
+        "args.positional".into(),
+        NativeEntry {
+            arity: 2,
+            f: args::args_positional,
+        },
+    );
+    m.insert(
+        "args.subcommand".into(),
+        NativeEntry {
+            arity: 1,
+            f: args::args_subcommand,
+        },
+    );
+    m.insert(
+        "args.help".into(),
+        NativeEntry {
+            arity: 2,
+            f: args::args_help,
+        },
+    );
+    m.insert(
+        "args.error".into(),
+        NativeEntry {
+            arity: 1,
+            f: args::args_error,
+        },
+    );
+    m.insert(
+        "args.was_help".into(),
+        NativeEntry {
+            arity: 1,
+            f: args::args_was_help,
         },
     );
 

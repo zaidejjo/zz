@@ -62,6 +62,7 @@ pub const STDLIB_MODULES: &[&str] = &[
     "crypto",
     "log",
     "sys",
+    "args",
     "sqlz",
     "db",
     "sqlz.postgres",

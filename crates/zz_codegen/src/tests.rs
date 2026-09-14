@@ -168,6 +168,7 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // Pure-ZZ regexp helpers — compiled from zz/regexp/mod.zz and merged
     // into AOT builds as ZZ functions (no C/FFI native needed).
     ("Regexp.new", "pure ZZ; lowered as ZZ fn"),
+    ("ArgsParser.new", "pure ZZ; lowered as ZZ fn"),
     ("std.regexp.is_email", "pure ZZ; lowered as ZZ fn"),
     ("regexp.is_email", "pure ZZ alias"),
     // Pure-ZZ time helpers — compiled from zz/time/mod.zz, same deal.

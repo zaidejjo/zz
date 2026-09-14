@@ -1,0 +1,24 @@
+// Pure-ZZ args helpers — the ArgsParser constructor namespace.
+// Module: std.args
+//
+// Flag registration, parsing, and queries stay as native Rust in
+// src/natives/args/mod.rs (VM) and zz_native_rt/src/args.rs (AOT FFI).
+// This file only namespaces the constructor, like Regexp.new.
+//
+// Usage:
+//   p := ArgsParser.new()
+//   p.str_flag("output", "a.out")
+//   p.int_flag("count", 1)
+//   p.bool_flag("verbose")
+//   if p.parse(args.get_raw()) {
+//       println(p.get_str("output"))
+//   } else {
+//       println(p.help("myapp"))
+//   }
+struct ArgsParser {}
+
+impl ArgsParser {
+    func new() {
+        args.parser()
+    }
+}

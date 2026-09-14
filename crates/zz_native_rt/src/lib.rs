@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
+/// `std.args` CLI argument parsing (raw access + flag parser).
+pub mod args;
 /// C ABI mirror of the AOT `zz_value` plus linkable runtime constructors.
 pub mod cabi;
 /// `std.crypto` asymmetric crypto + JWT (Ed25519, RSA-2048, HS256/EdDSA).

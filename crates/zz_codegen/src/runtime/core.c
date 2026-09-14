@@ -1482,6 +1482,11 @@ zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_valu
 }
 
 // ---- entry --------------------------------------------------------------
+// Process argv for env.args()/args.get_raw(): argv[0] is the binary,
+// everything after is script args (mirrors the VM's interp.args).
+static int zz_g_argc = 0;
+static char **zz_g_argv = NULL;
+
 int zz_run(void) {
     zz_main();
     int main_err = 0;
@@ -1490,7 +1495,9 @@ int zz_run(void) {
     return main_err;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    zz_g_argc = argc;
+    zz_g_argv = argv;
     return zz_run();
 }
 // ---- codegen shims ------------------------------------------------------
@@ -1980,9 +1987,14 @@ zz_value zz_env_var(zz_value name, int *err) {
 // env.args() — returns command-line arguments (excludes argv[0] binary name)
 zz_value zz_env_args(zz_value unused, int *err) {
     (void)unused; (void)err;
-    // C main() in generated code doesn't receive argc/argv yet.
-    // Return an empty array for now.
-    return zz_array_new();
+    zz_value out = zz_array_new();
+    for (int i = 1; i < zz_g_argc; i++) {
+        zz_array_push(
+            out.arr,
+            zz_str_new(zz_g_argv[i], strlen(zz_g_argv[i]))
+        );
+    }
+    return out;
 }
 
 // dict.len(d)

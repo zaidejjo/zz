@@ -98,6 +98,22 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "sys.hostname" | "std.sys.hostname" => Some("zz_sys_hostname"),
         "sys.total_mem" | "std.sys.total_mem" => Some("zz_sys_total_mem"),
         "sys.avail_mem" | "std.sys.avail_mem" => Some("zz_sys_avail_mem"),
+        // Raw argv shares the fixed `zz_env_args` symbol (one source of
+        // truth for both spellings and both engines).
+        "args.get_raw" | "std.args.get_raw" => Some("zz_env_args"),
+        "args.parser" | "std.args.parser" => Some("zz_args_parser"),
+        "args.str_flag" | "std.args.str_flag" => Some("zz_args_str_flag"),
+        "args.int_flag" | "std.args.int_flag" => Some("zz_args_int_flag"),
+        "args.bool_flag" | "std.args.bool_flag" => Some("zz_args_bool_flag"),
+        "args.parse" | "std.args.parse" => Some("zz_args_parse"),
+        "args.get_str" | "std.args.get_str" => Some("zz_args_get_str"),
+        "args.get_int" | "std.args.get_int" => Some("zz_args_get_int"),
+        "args.get_bool" | "std.args.get_bool" => Some("zz_args_get_bool"),
+        "args.positional" | "std.args.positional" => Some("zz_args_positional"),
+        "args.subcommand" | "std.args.subcommand" => Some("zz_args_subcommand"),
+        "args.help" | "std.args.help" => Some("zz_args_help"),
+        "args.error" | "std.args.error" => Some("zz_args_error"),
+        "args.was_help" | "std.args.was_help" => Some("zz_args_was_help"),
         _ => None,
     }
 }
@@ -106,8 +122,14 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
 /// rather than the embedded C runtime. The build links `libzz_native_rt.a`
 /// exactly in that case (plus an explicit opt-in via
 /// [`crate::BuildOptions::native_rt`]).
+///
+/// Note: `args.get_raw` maps to the embedded `zz_env_args` symbol, so it
+/// alone never triggers the staticlib link (keeps `--static` working).
 pub fn needs_native_rt(natives: &HashSet<String>) -> bool {
-    natives.iter().any(|n| ffi_impl(n).is_some())
+    natives
+        .iter()
+        .filter_map(|n| ffi_impl(n))
+        .any(|s| s != "zz_env_args")
 }
 
 /// `extern` declarations to inject into generated C: the handle-primitive
@@ -213,6 +235,29 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
         "zz_sys_hostname" => Some("zz_value zz_sys_hostname(zz_value unit, int *err);"),
         "zz_sys_total_mem" => Some("zz_value zz_sys_total_mem(zz_value unit, int *err);"),
         "zz_sys_avail_mem" => Some("zz_value zz_sys_avail_mem(zz_value unit, int *err);"),
+        "zz_args_parser" => Some("zz_value zz_args_parser(zz_value unit, int *err);"),
+        "zz_args_str_flag" => {
+            Some("zz_value zz_args_str_flag(zz_value h, zz_value name, zz_value def, int *err);")
+        }
+        "zz_args_int_flag" => {
+            Some("zz_value zz_args_int_flag(zz_value h, zz_value name, zz_value def, int *err);")
+        }
+        "zz_args_bool_flag" => {
+            Some("zz_value zz_args_bool_flag(zz_value h, zz_value name, int *err);")
+        }
+        "zz_args_parse" => Some("zz_value zz_args_parse(zz_value h, zz_value argv, int *err);"),
+        "zz_args_get_str" => Some("zz_value zz_args_get_str(zz_value h, zz_value name, int *err);"),
+        "zz_args_get_int" => Some("zz_value zz_args_get_int(zz_value h, zz_value name, int *err);"),
+        "zz_args_get_bool" => {
+            Some("zz_value zz_args_get_bool(zz_value h, zz_value name, int *err);")
+        }
+        "zz_args_positional" => {
+            Some("zz_value zz_args_positional(zz_value h, zz_value i, int *err);")
+        }
+        "zz_args_subcommand" => Some("zz_value zz_args_subcommand(zz_value h, int *err);"),
+        "zz_args_help" => Some("zz_value zz_args_help(zz_value h, zz_value prog, int *err);"),
+        "zz_args_error" => Some("zz_value zz_args_error(zz_value h, int *err);"),
+        "zz_args_was_help" => Some("zz_value zz_args_was_help(zz_value h, int *err);"),
         _ => None,
     }
 }
