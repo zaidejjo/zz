@@ -37,7 +37,7 @@ fn native_run(src: &str) -> (i32, String) {
     let tmp = std::env::temp_dir().join(format!("zz-test-{}-{uniq}-out", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     let bin = tmp.join("zz_out");
-    build_native(&pruned, &reach, "main", BuildOptions::dev(), &bin)
+    build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
     let r = compile::run_binary(&bin, &[]).unwrap();
     let _ = std::fs::remove_dir_all(&tmp);
@@ -427,7 +427,7 @@ func main() {
     let tmp = std::env::temp_dir().join(format!("zz-test-input-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     let bin = tmp.join("zz_out");
-    build_native(&pruned, &reach, "main", BuildOptions::dev(), &bin)
+    build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
 
     // Pipe "Alice\n" into stdin; capture both stdout and stderr.
@@ -475,7 +475,7 @@ func main() {
     let tmp = std::env::temp_dir().join(format!("zz-test-range-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     let bin = tmp.join("zz_out");
-    build_native(&pruned, &reach, "main", BuildOptions::dev(), &bin)
+    build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
     let (_, out) = compile::run_binary(&bin, &[]).unwrap();
     let _ = std::fs::remove_dir_all(&tmp);

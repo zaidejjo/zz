@@ -455,6 +455,15 @@ zz_value zz_task_join_recv(zz_value join_val, int *err) {
 // Route handlers are not supported in AOT (no interpreter to call closures).
 
 #include <pthread.h>
+// platform.h is concatenated before this TU and defines ZZ_OS_WINDOWS on
+// Windows targets, where Winsock replaces the POSIX socket headers.
+// Linux/macOS keep the existing POSIX set (epoll is Linux-only; other
+// targets use the poll/select paths below).
+#ifdef ZZ_OS_WINDOWS
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -466,13 +475,29 @@ zz_value zz_task_join_recv(zz_value join_val, int *err) {
 #include <strings.h>
 #include <errno.h>
 #include <signal.h>
+#ifdef __linux__
 #include <sys/epoll.h>
+#include <sys/syscall.h>
+#include <sched.h>
+#endif
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <sys/syscall.h>
-#include <sched.h>
 #include <poll.h>
+#endif
+
+// One-time network startup (WSAStartup on Windows, no-op on POSIX).
+// Called lazily from the TCP natives so binaries pay nothing when the
+// net module is unused.
+#ifdef ZZ_OS_WINDOWS
+static int zz_net_started = 0;
+void zz_net_init(void) {
+    if (!zz_net_started) {
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) == 0) zz_net_started = 1;
+    }
+}
+#endif
 
 struct zz_tcp {
     int fd;

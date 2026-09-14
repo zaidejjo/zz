@@ -1,0 +1,7 @@
+// bench: string concat + allocation. 500 x "abc" -> len 1500.
+s := ""
+for _i in range(500) {
+    s = s + "abc"
+}
+println(s.len())
+println(s.contains("abcabc"))

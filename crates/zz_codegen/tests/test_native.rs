@@ -55,6 +55,7 @@ fn native_run(src: &str) -> (i32, String) {
         &reach,
         "main",
         zz_codegen::BuildOptions::dev(),
+        None,
         &bin,
     )
     .unwrap_or_else(|e| panic!("build failed: {e}"));
