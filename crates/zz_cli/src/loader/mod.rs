@@ -67,6 +67,9 @@ pub struct LoadResult {
     /// aliases).  Keys are bare names like `"pi"`, values are the float.
     pub consts: HashMap<String, f64>,
     pub errors: Vec<LoadError>,
+    /// `import std.X as alias` renames for stdlib modules — needed to mirror
+    /// pure-ZZ Env bindings under the alias (e.g. `colors.red` → `cl.red`).
+    pub stdlib_aliases: Vec<(String, String)>,
 }
 
 struct Loader {
@@ -98,6 +101,8 @@ struct Loader {
     /// Bare constant names (including aliases) to inject into the runtime env.
     /// Populated during selective import processing in finish().
     selected_consts: HashMap<String, f64>,
+    /// Mirrors LoadResult::stdlib_aliases while loading.
+    stdlib_aliases: Vec<(String, String)>,
 }
 
 /// Load an entry file and all of its imports.
@@ -128,6 +133,7 @@ pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
         entry,
         selective_imports: Vec::new(),
         selected_consts: HashMap::new(),
+        stdlib_aliases: Vec::new(),
     };
     loader.load_file(main_path, None)?;
     Ok(loader.finish())
@@ -298,6 +304,7 @@ impl Loader {
                         continue;
                     }
                     self.register_ns(&ns, &PathBuf::from(format!("std:{module}")), path, &source);
+                    self.stdlib_aliases.push((module.clone(), ns.clone()));
                 }
                 continue;
             }
@@ -946,6 +953,7 @@ impl Loader {
             natives: self.natives,
             consts: self.selected_consts,
             errors: self.errors,
+            stdlib_aliases: self.stdlib_aliases,
         }
     }
 }
