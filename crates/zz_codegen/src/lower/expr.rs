@@ -849,6 +849,14 @@ impl Lowerer {
                 }
                 comp
             }
+            Expr::Break { .. } => {
+                out.push_str("    break;\n");
+                "zz_unit()".to_string()
+            }
+            Expr::Continue { .. } => {
+                out.push_str("    continue;\n");
+                "zz_unit()".to_string()
+            }
             Expr::Closure { params, body, .. } => {
                 let mut defs = self.closure_defs.borrow_mut();
                 let cid = defs.len().min(1_000_000);
@@ -2024,8 +2032,73 @@ impl Lowerer {
         let result_tmp = names.fresh("_mresult");
         out.push_str(&format!("    zz_value {result_tmp} = zz_unit();\n"));
 
-        for (i, arm) in arms.iter().enumerate() {
-            let is_last_arm = i == arms.len() - 1;
+        // Desugar or-patterns (`a | b`) into separate arms sharing the
+        // same body/guard, expanding nested ors (variant args, tuples).
+        fn expand_pat(pat: &Pattern) -> Vec<Pattern> {
+            match pat {
+                Pattern::Or { pats, .. } => pats.iter().flat_map(expand_pat).collect(),
+                Pattern::Variant {
+                    name,
+                    arg: Some(a),
+                    span,
+                } => {
+                    let inner = expand_pat(a);
+                    if inner.len() <= 1 {
+                        vec![pat.clone()]
+                    } else {
+                        inner
+                            .into_iter()
+                            .map(|e| Pattern::Variant {
+                                name: name.clone(),
+                                arg: Some(Box::new(e)),
+                                span: *span,
+                            })
+                            .collect()
+                    }
+                }
+                Pattern::Variant { .. } => vec![pat.clone()],
+                Pattern::Tuple { pats, span } => {
+                    let mut acc: Vec<Vec<Pattern>> = vec![Vec::new()];
+                    for p in pats {
+                        let exp = expand_pat(p);
+                        let mut next = Vec::new();
+                        for prefix in &acc {
+                            for e in &exp {
+                                let mut v = prefix.clone();
+                                v.push(e.clone());
+                                next.push(v);
+                            }
+                        }
+                        acc = next;
+                    }
+                    if acc.len() <= 1 {
+                        vec![pat.clone()]
+                    } else {
+                        acc.into_iter()
+                            .map(|v| Pattern::Tuple {
+                                pats: v,
+                                span: *span,
+                            })
+                            .collect()
+                    }
+                }
+                _ => vec![pat.clone()],
+            }
+        }
+        let mut flat: Vec<MatchArm> = Vec::new();
+        for arm in arms {
+            for p in expand_pat(&arm.pat) {
+                flat.push(MatchArm {
+                    pat: p,
+                    guard: arm.guard.clone(),
+                    body: arm.body.clone(),
+                    span: arm.span,
+                });
+            }
+        }
+
+        for (i, arm) in flat.iter().enumerate() {
+            let is_last_arm = i == flat.len() - 1;
             let arm_needs_else_prefix = i > 0;
             let arm_closes_block = match &arm.pat {
                 Pattern::Binding { .. } | Pattern::Wildcard { .. } | Pattern::Variant { .. } => {
@@ -2167,6 +2240,11 @@ impl Lowerer {
                 }
                 Pattern::Tuple { .. } => {
                     out.push_str("    // unsupported match pattern (tuple)\n");
+                }
+                Pattern::Or { .. } => {
+                    // Unreachable: or-patterns are expanded into separate
+                    // arms above.
+                    out.push_str("    // unsupported match pattern (or)\n");
                 }
             }
         }

@@ -570,6 +570,41 @@ fn mixed_pub_private_items() {
 }
 
 #[test]
+fn func_matching_file_stem_still_namespaced() {
+    // `func main` in `main.zz` must rewrite to `main.main` (not stay
+    // bare `main`): the `zz run` auto-call looks up `<stem>.main`.
+    // Same for a struct whose name equals the file stem.
+    let dir = temp_project(&[(
+        "main.zz",
+        "struct Main { v: int }\nfunc main() { 1 }\nfunc helper() -> int { 2 }",
+    )]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    let entry = result.programs.last().unwrap();
+    let mut saw_main_fn = false;
+    let mut saw_helper_fn = false;
+    let mut saw_struct = false;
+    for stmt in &entry.stmts {
+        if let zz_frontend::ast::Stmt::Func { name, .. } = stmt {
+            if name.join(".") == "main.main" {
+                saw_main_fn = true;
+            }
+            if name.join(".") == "main.helper" {
+                saw_helper_fn = true;
+            }
+        }
+        if let zz_frontend::ast::Stmt::Struct { name, .. } = stmt {
+            if name.join(".") == "main.Main" {
+                saw_struct = true;
+            }
+        }
+    }
+    assert!(saw_main_fn, "func main should rewrite to main.main");
+    assert!(saw_helper_fn, "func helper should rewrite to main.helper");
+    assert!(saw_struct, "struct Main should rewrite to main.Main");
+}
+
+#[test]
 fn pub_item_unused_no_warning() {
     // pub items must NOT generate unused-variable warnings.
     let dir = temp_project(&[(

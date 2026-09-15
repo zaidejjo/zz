@@ -42,6 +42,10 @@ pub enum Pattern {
         pats: Vec<Pattern>,
         span: Span,
     },
+    Or {
+        pats: Vec<Pattern>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -214,6 +218,15 @@ pub enum Expr {
         filter: Option<Box<Expr>>,
         span: Span,
     },
+    /// `break` used as an expression (e.g. as a match arm body).
+    /// Semantically identical to the `break` statement.
+    Break {
+        span: Span,
+    },
+    /// `continue` used as an expression (e.g. as a match arm body).
+    Continue {
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -245,6 +258,8 @@ impl Expr {
             | Expr::Index { span, .. }
             | Expr::Slice { span, .. }
             | Expr::ListComp { span, .. }
+            | Expr::Break { span }
+            | Expr::Continue { span }
             | Expr::Tuple { span, .. } => *span,
             Expr::Block(b) => b.span,
         }
@@ -259,6 +274,7 @@ impl Pattern {
             Pattern::Literal { span, .. } => *span,
             Pattern::Variant { span, .. } => *span,
             Pattern::Tuple { span, .. } => *span,
+            Pattern::Or { span, .. } => *span,
         }
     }
 }

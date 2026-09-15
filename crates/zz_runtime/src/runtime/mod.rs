@@ -27,6 +27,8 @@ pub struct EvalError {
     pub span: Span,
     /// Call stack at the time of the error: (function_name, call_site_span).
     pub backtrace: Vec<(String, Span)>,
+    /// Extra `= ...` note lines rendered under the error (e.g. hints).
+    pub notes: Vec<String>,
 }
 
 impl EvalError {
@@ -35,11 +37,22 @@ impl EvalError {
             message: message.into(),
             span,
             backtrace: Vec::new(),
+            notes: Vec::new(),
         }
     }
 
     pub fn with_backtrace(mut self, bt: Vec<(String, Span)>) -> Self {
         self.backtrace = bt;
+        self
+    }
+
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.notes.push(note.into());
+        self
+    }
+
+    pub fn with_notes(mut self, notes: Vec<String>) -> Self {
+        self.notes.extend(notes);
         self
     }
 }

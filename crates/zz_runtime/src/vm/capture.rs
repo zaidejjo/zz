@@ -5,6 +5,8 @@ pub(crate) fn pattern_binds(pat: &Pattern) -> bool {
     match pat {
         Pattern::Binding { .. } => true,
         Pattern::Variant { arg: Some(p), .. } => pattern_binds(p),
+        Pattern::Tuple { pats, .. } => pats.iter().any(pattern_binds),
+        Pattern::Or { pats, .. } => pats.iter().any(pattern_binds),
         _ => false,
     }
 }
@@ -185,7 +187,12 @@ pub(crate) fn scan_expr_captured(
                 scan_expr_captured(e, defined, free);
             }
         }
-        Expr::Int { .. } | Expr::Float { .. } | Expr::Str { .. } | Expr::Bool { .. } => {}
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Str { .. }
+        | Expr::Bool { .. }
+        | Expr::Break { .. }
+        | Expr::Continue { .. } => {}
         // A dotted path may reference a namespaced top-level binding
         // (`ns.var`) or a struct field. Treat the full joined name as a
         // potential free variable so namespaced top-level vars referenced
@@ -271,6 +278,11 @@ pub(crate) fn collect_pattern_bindings(
         }
         Pattern::Variant { arg: Some(p), .. } => collect_pattern_bindings(p, defined),
         Pattern::Tuple { pats, .. } => {
+            for p in pats {
+                collect_pattern_bindings(p, defined);
+            }
+        }
+        Pattern::Or { pats, .. } => {
             for p in pats {
                 collect_pattern_bindings(p, defined);
             }

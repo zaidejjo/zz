@@ -464,6 +464,14 @@ impl Parser {
     pub(crate) fn parse_primary(&mut self) -> Expr {
         let tok = self.peek().clone();
         match tok.kind {
+            TokenKind::Break => {
+                self.advance();
+                Expr::Break { span: tok.span }
+            }
+            TokenKind::Continue => {
+                self.advance();
+                Expr::Continue { span: tok.span }
+            }
             TokenKind::Int => {
                 self.advance();
                 let cleaned = tok.text.replace('_', "");
@@ -1094,6 +1102,23 @@ impl Parser {
     // --- patterns ---------------------------------------------------------
 
     pub(crate) fn parse_pattern(&mut self) -> Pattern {
+        let first = self.parse_single_pattern();
+        if !self.at(TokenKind::Pipe) {
+            return first;
+        }
+        let mut pats = vec![first];
+        while self.eat(TokenKind::Pipe) {
+            pats.push(self.parse_single_pattern());
+        }
+        let span = pats
+            .first()
+            .map(|p| p.span())
+            .unwrap_or(self.peek().span)
+            .join(pats.last().map(|p| p.span()).unwrap_or(self.peek().span));
+        Pattern::Or { pats, span }
+    }
+
+    fn parse_single_pattern(&mut self) -> Pattern {
         let tok = self.peek().clone();
         match tok.kind {
             TokenKind::Ident if tok.text == "_" => {

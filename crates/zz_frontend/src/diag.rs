@@ -306,76 +306,94 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
             let source: &str = file.source().as_ref();
             let start = span.start as usize;
             let end = span.end as usize;
-            let (line_num, col) = line_col_for(source, start);
-            let _ = write!(out, "\n  --> {}:{line_num}:{}", name, col + 1);
+            // A span that doesn't fit the loaded source (e.g. a runtime
+            // error rendered against a fallback/empty source) must not
+            // panic the renderer: emit the message without context.
+            if start > end
+                || end > source.len()
+                || !source.is_char_boundary(start)
+                || !source.is_char_boundary(end)
+            {
+                let (line_num, col) = line_col_for(source, start.min(source.len()));
+                let _ = write!(out, "\n  --> {}:{line_num}:{}", name, col + 1);
+            } else {
+                let (line_num, col) = line_col_for(source, start);
+                let _ = write!(out, "\n  --> {}:{line_num}:{}", name, col + 1);
 
-            // Gutter width must fit the widest line number shown (the
-            // secondary label may sit on a different line than the primary).
-            let mut gutter = format!("{line_num:>4}").len();
-            if let Some(sec) = &raw.secondary {
-                if sec.span.end as usize <= source.len() {
-                    let (sec_line_num, _) = line_col_for(source, sec.span.start as usize);
-                    gutter = gutter.max(format!("{sec_line_num:>4}").len());
+                // Gutter width must fit the widest line number shown (the
+                // secondary label may sit on a different line than the primary).
+                let mut gutter = format!("{line_num:>4}").len();
+                if let Some(sec) = &raw.secondary {
+                    if sec.span.end as usize <= source.len() {
+                        let (sec_line_num, _) = line_col_for(source, sec.span.start as usize);
+                        gutter = gutter.max(format!("{sec_line_num:>4}").len());
+                    }
                 }
-            }
-            let _ = write!(out, "\n    |");
+                let _ = write!(out, "\n    |");
 
-            // Secondary label first: source line + `-` carets + message.
-            // When the span points outside the current source (e.g. a const
-            // defined in an earlier REPL snippet), fall back to a note.
-            if let Some(sec) = &raw.secondary {
-                if sec.span.end as usize <= source.len() {
-                    let (sec_line_num, _) = line_col_for(source, sec.span.start as usize);
-                    let sec_lstart = line_start_for(source, sec.span.start as usize);
-                    let sec_lend = line_end_for(source, sec.span.start as usize);
-                    let sec_line_text = &source[sec_lstart..sec_lend];
-                    let sec_pad = format!("{sec_line_num:>4}");
-                    let _ = write!(out, "\n {sec_pad} | {sec_line_text}");
-                    let sec_col_offset = sec.span.start as usize - sec_lstart;
-                    let sec_len = (sec.span.end - sec.span.start) as usize;
-                    let sec_spaces = " ".repeat(sec_col_offset);
-                    let sec_dashes = "-".repeat(sec_len);
+                // Secondary label first: source line + `-` carets + message.
+                // When the span points outside the current source (e.g. a const
+                // defined in an earlier REPL snippet), fall back to a note.
+                if let Some(sec) = &raw.secondary {
+                    if sec.span.end as usize <= source.len() {
+                        let (sec_line_num, _) = line_col_for(source, sec.span.start as usize);
+                        let sec_lstart = line_start_for(source, sec.span.start as usize);
+                        let sec_lend = line_end_for(source, sec.span.start as usize);
+                        let sec_line_text = &source[sec_lstart..sec_lend];
+                        let sec_pad = format!("{sec_line_num:>4}");
+                        let _ = write!(out, "\n {sec_pad} | {sec_line_text}");
+                        let sec_col_offset = sec.span.start as usize - sec_lstart;
+                        let sec_len = (sec.span.end - sec.span.start) as usize;
+                        let sec_spaces = " ".repeat(sec_col_offset);
+                        let sec_dashes = "-".repeat(sec_len);
+                        let _ = write!(
+                            out,
+                            "\n {:>width$} | {sec_spaces}{sec_dashes} {}",
+                            "",
+                            sec.message.cyan(),
+                            width = gutter,
+                        );
+                    } else {
+                        secondary_note = Some(sec.message.clone());
+                    }
+                }
+
+                // Source line
+                let lstart = line_start_for(source, start);
+                let lend = line_end_for(source, start);
+                let line_text = &source[lstart..lend];
+                let pad = format!("{line_num:>4}");
+                let _ = write!(out, "\n {pad} | {line_text}");
+
+                // Carets under the span + inline fixit hint.
+                // Multi-line spans only underline the visible first line —
+                // a 200-char underline for a triple-quoted string is noise.
+                let col_offset = start - lstart;
+                let first_line_len = lend
+                    .saturating_sub(lstart)
+                    .saturating_sub(col_offset)
+                    .max(1);
+                let len = (end - start).max(1).min(first_line_len);
+                let spaces = " ".repeat(col_offset);
+                let carets = "^".repeat(len);
+                let colored_carets = match raw.severity {
+                    Severity::Error => carets.red().bold(),
+                    Severity::Warning => carets.yellow().bold(),
+                    Severity::Help => carets.cyan().bold(),
+                };
+                // Inline the first fixit hint directly under the carets
+                // Use blank padding matching the source line prefix width
+                let blank_pad = format!("{:>width$}", "", width = gutter);
+                if let Some(fixit) = raw.fixits.first() {
+                    let hint = format!(" help: replace with `{}`", fixit.replacement);
                     let _ = write!(
                         out,
-                        "\n {:>width$} | {sec_spaces}{sec_dashes} {}",
-                        "",
-                        sec.message.cyan(),
-                        width = gutter,
+                        "\n {blank_pad} | {spaces}{colored_carets}{}",
+                        hint.cyan()
                     );
                 } else {
-                    secondary_note = Some(sec.message.clone());
+                    let _ = write!(out, "\n {blank_pad} | {spaces}{colored_carets}");
                 }
-            }
-
-            // Source line
-            let lstart = line_start_for(source, start);
-            let lend = line_end_for(source, start);
-            let line_text = &source[lstart..lend];
-            let pad = format!("{line_num:>4}");
-            let _ = write!(out, "\n {pad} | {line_text}");
-
-            // Carets under the span + inline fixit hint
-            let col_offset = start - lstart;
-            let len = (end - start).max(1);
-            let spaces = " ".repeat(col_offset);
-            let carets = "^".repeat(len);
-            let colored_carets = match raw.severity {
-                Severity::Error => carets.red().bold(),
-                Severity::Warning => carets.yellow().bold(),
-                Severity::Help => carets.cyan().bold(),
-            };
-            // Inline the first fixit hint directly under the carets
-            // Use blank padding matching the source line prefix width
-            let blank_pad = format!("{:>width$}", "", width = gutter);
-            if let Some(fixit) = raw.fixits.first() {
-                let hint = format!(" help: replace with `{}`", fixit.replacement);
-                let _ = write!(
-                    out,
-                    "\n {blank_pad} | {spaces}{colored_carets}{}",
-                    hint.cyan()
-                );
-            } else {
-                let _ = write!(out, "\n {blank_pad} | {spaces}{colored_carets}");
             }
         }
     }

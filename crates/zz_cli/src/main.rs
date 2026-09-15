@@ -338,6 +338,9 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
                         diag = diag.with_note(format!("  at {name}"));
                     }
                 }
+                for note in &e.notes {
+                    diag = diag.with_note(note.clone());
+                }
                 let diags = vec![diag];
                 eprint!("{}", render_to_string(&files, id, &diags));
                 return Err("program failed".to_string());
@@ -371,13 +374,24 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
         match interp.call(Value::Func(Box::new(fv)), call_args, span) {
             Ok(_) => {}
             Err(e) => {
+                // Render against the entry file's real source (entry is
+                // last in load order). An empty source would panic the
+                // renderer on any non-empty error span.
+                let (name, source) = loaded
+                    .files
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| (path.clone(), String::new()));
                 let mut files = Files::new();
-                let id = files.add(path.clone(), String::new());
+                let id = files.add(name, source);
                 let mut diag = error_at(e.message.clone(), e.span);
                 for (name, _) in &e.backtrace {
                     if !name.is_empty() {
                         diag = diag.with_note(format!("  at {name}"));
                     }
+                }
+                for note in &e.notes {
+                    diag = diag.with_note(note.clone());
                 }
                 let diags = vec![diag];
                 eprint!("{}", render_to_string(&files, id, &diags));

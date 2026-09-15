@@ -132,6 +132,51 @@ fn parses_match_multiline() {
 }
 
 #[test]
+fn parses_match_or_pattern() {
+    let p = parse_ok("match x { 1 | 2 => 1, _ => 0 }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Match { arms, .. }) => {
+            assert_eq!(arms.len(), 2);
+            assert!(
+                matches!(arms[0].pat, zz_frontend::ast::Pattern::Or { ref pats, .. } if pats.len() == 2)
+            );
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_match_or_pattern_in_variant_arg() {
+    let p = parse_ok("match x { .some(\"a\" | \"b\") => 1, .none => 0 }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Match { arms, .. }) => {
+            assert_eq!(arms.len(), 2);
+            match &arms[0].pat {
+                zz_frontend::ast::Pattern::Variant { arg: Some(a), .. } => {
+                    assert!(matches!(a.as_ref(), zz_frontend::ast::Pattern::Or { .. }));
+                }
+                other => panic!("unexpected pattern: {other:?}"),
+            }
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_break_as_match_arm_body() {
+    let p = parse_ok("while true { match x { 1 => break, _ => 0 } }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::While { body, .. }) => match &body.stmts[0] {
+            zz_frontend::ast::Stmt::Expr(E::Match { arms, .. }) => {
+                assert!(matches!(arms[0].body, E::Break { .. }));
+            }
+            other => panic!("unexpected: {other:?}"),
+        },
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
 fn parses_if_let() {
     let p = parse_ok("if let .some(x) = opt { x } else { 0 }");
     match &p.stmts[0] {

@@ -331,6 +331,20 @@ impl Checker {
                 value,
                 span: _,
             } => {
+                fn has_or(pat: &Pattern) -> bool {
+                    match pat {
+                        Pattern::Or { .. } => true,
+                        Pattern::Variant { arg: Some(a), .. } => has_or(a),
+                        Pattern::Tuple { pats, .. } => pats.iter().any(has_or),
+                        _ => false,
+                    }
+                }
+                if has_or(pat) {
+                    self.errors.push(error_at(
+                        "or-patterns (`|`) are only allowed in match arms",
+                        pat.span(),
+                    ));
+                }
                 let vt = self.check_expr(value);
                 let vt = self.unifier.resolve(&vt);
                 self.bind_pattern(pat, &vt);
@@ -890,6 +904,20 @@ impl Checker {
                 let key_t = self.merge_types(key_types);
                 let val_t = self.merge_types(val_types);
                 Type::Dict(Box::new(key_t), Box::new(val_t))
+            }
+            Expr::Break { span } => {
+                if self.loop_depth == 0 {
+                    self.errors
+                        .push(error_at("`break` outside of a loop", *span));
+                }
+                Type::Unit
+            }
+            Expr::Continue { span } => {
+                if self.loop_depth == 0 {
+                    self.errors
+                        .push(error_at("`continue` outside of a loop", *span));
+                }
+                Type::Unit
             }
             Expr::Variant { name, arg, span } => {
                 let arg_t = arg.as_ref().map(|a| self.check_expr(a));
@@ -1924,6 +1952,11 @@ impl Checker {
             }
             let bt = self.check_expr(&arm.body);
             self.pop_scope();
+            // `break`/`continue` arms diverge (never produce a value),
+            // so they don't constrain the match's result type.
+            if matches!(arm.body, Expr::Break { .. } | Expr::Continue { .. }) {
+                continue;
+            }
             match &result {
                 Some(r) => {
                     if let Err(e) = self.unifier.unify(&bt, r) {
@@ -2058,6 +2091,56 @@ impl Checker {
                     self.bind_pattern(&p, &inner);
                 }
             }
+            Pattern::Or { pats, span } => {
+                if pats.is_empty() {
+                    return;
+                }
+                // Snapshot current scope keys so we can diff what the
+                // first alternative binds.
+                let before: std::collections::HashSet<String> = self
+                    .env
+                    .last()
+                    .map(|m| m.keys().cloned().collect())
+                    .unwrap_or_default();
+                self.bind_pattern(&pats[0], ty);
+                let first_new: std::collections::HashMap<String, Type> = self
+                    .env
+                    .last()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|(k, _)| !before.contains(k))
+                    .collect();
+                let first_names: std::collections::HashSet<String> =
+                    first_new.keys().cloned().collect();
+                for alt in &pats[1..] {
+                    // Bind alternative in a throwaway scope (no unused
+                    // warnings) to collect its bindings for comparison.
+                    self.env.push(std::collections::HashMap::new());
+                    self.defined_names.push(std::collections::HashMap::new());
+                    self.const_env.push(std::collections::HashMap::new());
+                    self.bind_pattern(alt, ty);
+                    let alt_map = self.env.pop().unwrap_or_default();
+                    self.defined_names.pop();
+                    self.const_env.pop();
+                    let alt_names: std::collections::HashSet<String> =
+                        alt_map.keys().cloned().collect();
+                    if alt_names != first_names {
+                        self.errors.push(error_at(
+                            "or-pattern alternatives must bind the same names",
+                            *span,
+                        ));
+                        continue;
+                    }
+                    for (name, alt_ty) in alt_map {
+                        if let Some(first_ty) = first_new.get(&name) {
+                            if let Err(e) = self.unifier.unify(&alt_ty, first_ty) {
+                                self.report_mismatch(e, alt.span());
+                            }
+                        }
+                    }
+                }
+            }
             Pattern::Tuple { pats, span } => {
                 let rt = self.unifier.resolve(ty);
                 match rt {
@@ -2103,10 +2186,14 @@ impl Checker {
         arms: &[zz_frontend::ast::MatchArm],
         span: Span,
     ) {
-        if arms
-            .iter()
-            .any(|a| matches!(a.pat, Pattern::Wildcard { .. }))
-        {
+        fn pat_is_wildcard(pat: &Pattern) -> bool {
+            match pat {
+                Pattern::Wildcard { .. } => true,
+                Pattern::Or { pats, .. } => pats.iter().any(pat_is_wildcard),
+                _ => false,
+            }
+        }
+        if arms.iter().any(|a| pat_is_wildcard(&a.pat)) {
             return;
         }
         let needs: Option<Vec<&str>> = match st {
@@ -2123,17 +2210,25 @@ impl Checker {
             _ => return,
         };
         let Some(needs) = needs else { return };
-        let have: Vec<String> = arms
-            .iter()
-            .filter_map(|a| match &a.pat {
-                Pattern::Variant { name, .. } => Some(name.clone()),
+        fn pat_tags(pat: &Pattern, out: &mut Vec<String>) {
+            match pat {
+                Pattern::Variant { name, .. } => out.push(name.clone()),
                 Pattern::Literal {
                     value: Lit::Bool(b),
                     ..
-                } => Some(if *b { "true" } else { "false" }.to_string()),
-                _ => None,
-            })
-            .collect();
+                } => out.push(if *b { "true" } else { "false" }.to_string()),
+                Pattern::Or { pats, .. } => {
+                    for p in pats {
+                        pat_tags(p, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut have: Vec<String> = Vec::new();
+        for a in arms {
+            pat_tags(&a.pat, &mut have);
+        }
         let missing: Vec<&str> = needs
             .iter()
             .filter(|n| !have.iter().any(|h| h == *n))

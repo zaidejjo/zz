@@ -911,8 +911,9 @@ impl Compiler {
                     self.compile_destructure(pat);
                 }
             }
-            Pattern::Literal { .. } | Pattern::Variant { .. } => {
+            Pattern::Literal { .. } | Pattern::Variant { .. } | Pattern::Or { .. } => {
                 // These are match-only patterns, not valid in destructuring
+                // (or-patterns in destructuring are rejected by the checker).
                 self.emit(Op::Pop);
             }
         }
@@ -1567,6 +1568,12 @@ impl Compiler {
             Expr::Float { value, .. } => self.emit_const(Value::Float(*value)),
             Expr::Str { value, .. } => self.emit_const(Value::Str(value.clone().into())),
             Expr::Bool { value, .. } => self.emit_const(Value::Bool(*value)),
+            Expr::Break { span } => {
+                self.emit(Op::Break(*span));
+            }
+            Expr::Continue { span } => {
+                self.emit(Op::Continue(*span));
+            }
             Expr::Ident { name, span } => match self.resolve(name) {
                 Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
                 Resolved::Env => self.emit(Op::LoadVar(name.clone(), *span)),

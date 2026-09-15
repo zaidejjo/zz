@@ -99,7 +99,9 @@ pub fn walk_expr<'a>(
         | Expr::Str { .. }
         | Expr::Bool { .. }
         | Expr::Ident { .. }
-        | Expr::Path { .. } => {}
+        | Expr::Path { .. }
+        | Expr::Break { .. }
+        | Expr::Continue { .. } => {}
         Expr::Fmt { parts, .. } => {
             for p in parts {
                 if let zz_frontend::ast::FmtPart::Expr(inner, _) = p {

@@ -289,6 +289,9 @@ fn eval_error_to_diag(e: &EvalError) -> Vec<RawDiag> {
             diag = diag.with_note(format!("  at {name}"));
         }
     }
+    for note in &e.notes {
+        diag = diag.with_note(note.clone());
+    }
     vec![diag]
 }
 

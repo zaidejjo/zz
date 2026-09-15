@@ -155,6 +155,40 @@ fn match_result() {
 }
 
 #[test]
+fn match_or_pattern() {
+    assert_eq!(
+        eval_src("match 2 { 1 | 2 => 10, _ => 0 }").unwrap(),
+        Value::Int(10)
+    );
+    assert_eq!(
+        eval_src("match 3 { 1 | 2 => 10, _ => 0 }").unwrap(),
+        Value::Int(0)
+    );
+    assert_eq!(
+        eval_src(
+            "v := .some(\"yes\")\nmatch v { .some(\"done\" | \"yes\" | \"true\") => 1, .some(_) => 0, .none => 0 }"
+        )
+        .unwrap(),
+        Value::Int(1)
+    );
+    assert_eq!(
+        eval_src(
+            "v := .some(\"no\")\nmatch v { .some(\"done\" | \"yes\" | \"true\") => 1, .some(_) => 0, .none => 0 }"
+        )
+        .unwrap(),
+        Value::Int(0)
+    );
+}
+
+#[test]
+fn match_break_arm_body() {
+    assert_eq!(
+        eval_src("i := 0\nwhile true { i = i + 1\nmatch i { 3 => break, _ => 0 } }\ni").unwrap(),
+        Value::Int(3)
+    );
+}
+
+#[test]
 fn if_let() {
     assert_eq!(
         eval_src("v := .some(3)\nif let .some(n) = v { n } else { 0 }").unwrap(),

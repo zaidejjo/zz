@@ -48,6 +48,17 @@ impl Env {
         self.vars.get_mut(name)
     }
 
+    /// Copy all local bindings from `child` into this scope. Used for
+    /// or-pattern matching: alternatives are tried in a throwaway child
+    /// scope so failed alternatives leave no bindings behind; on success
+    /// the winning alternative's bindings are merged here.
+    pub fn absorb_locals(&mut self, child: &Rc<RefCell<Env>>) {
+        let vars = child.borrow().vars.clone();
+        for (k, v) in vars {
+            self.vars.insert(k, v);
+        }
+    }
+
     /// The parent scope, if any (used by the VM to leave a scope).
     pub fn parent_rc(&self) -> Option<Rc<RefCell<Env>>> {
         self.parent.clone()

@@ -778,6 +778,8 @@ impl Interp {
                 }
             }
             Expr::Block(b) => self.eval_block(b),
+            Expr::Break { span } => Ok(Flow::Break(*span)),
+            Expr::Continue { span } => Ok(Flow::Continue(*span)),
             Expr::Array { elems, .. } => {
                 let mut vs = Vec::with_capacity(elems.len());
                 for e in elems {
@@ -1041,6 +1043,18 @@ impl Interp {
                 } else {
                     false
                 }
+            }
+            Pattern::Or { pats, .. } => {
+                for p in pats {
+                    // Try each alternative in a throwaway child scope so
+                    // failed alternatives leave no bindings behind.
+                    let trial = Env::with_parent(scope);
+                    if self.match_pattern(p, value, &trial) {
+                        scope.borrow_mut().absorb_locals(&trial);
+                        return true;
+                    }
+                }
+                false
             }
         }
     }

@@ -422,6 +422,47 @@ fn match_arm_type_mismatch_errors() {
 }
 
 #[test]
+fn match_or_pattern_literals() {
+    let r = check_src("x := match 2 { 1 | 2 => 10, _ => 0 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Int);
+}
+
+#[test]
+fn match_or_pattern_in_variant_arg() {
+    let r = check_src(
+        "v := .some(\"yes\")\nx := match v { .some(\"done\" | \"yes\" | \"true\") => 1, .some(_) => 0, .none => 0 }",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Int);
+}
+
+#[test]
+fn match_or_pattern_bool_exhaustive() {
+    let r = check_src("b := true\nx := match b { true | false => 1 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn match_or_pattern_binding_mismatch_errors() {
+    errors_contain(
+        "v := .some(1)\nmatch v { .some(x) | .none => x, _ => 0 }",
+        "same names",
+    );
+}
+
+#[test]
+fn match_break_arm_body() {
+    let r = check_src("i := 0\nwhile true { i = i + 1\nmatch i { 3 => break, _ => 0 } }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn match_break_outside_loop_errors() {
+    errors_contain("match 1 { 1 => break, _ => 0 }", "outside of a loop");
+}
+
+#[test]
 fn if_let_binds() {
     let r = check_src("v := .some(5)\nx := if let .some(n) = v { n } else { 0 }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);

@@ -24,17 +24,37 @@ use zz_runtime::{EvalError, Interp, Span, Value};
 
 use crate::natives::{arg, expect_str};
 
+pub(crate) mod hints;
 pub(crate) mod mysql_conn;
 pub(crate) mod mysql_wire;
 pub(crate) mod pg_conn;
 pub(crate) mod pg_wire;
 pub(crate) mod placeholders;
 
+use hints::{dialect_hints, Backend};
 use mysql_conn::{MyConn, MyConnInfo};
 use mysql_wire::{col_type_kind, MyKind, MyParam};
 use pg_conn::{ConnInfo, PgConn, PgParam};
 use pg_wire::{col_oid_kind, ColKind};
 use placeholders::PlaceholderStyle;
+
+/// Build a statement-failure error with smart dialect hints attached as
+/// `hint: ...` notes (see [`hints::dialect_hints`]).
+fn db_fail(
+    native: &str,
+    backend: Backend,
+    sql: &str,
+    err: impl std::fmt::Display,
+    span: Span,
+) -> EvalError {
+    let msg = err.to_string();
+    let base = EvalError::new(format!("`{native}` failed: {msg}"), span);
+    let notes: Vec<String> = dialect_hints(backend, sql, &msg)
+        .into_iter()
+        .map(|h| format!("hint: {h}"))
+        .collect();
+    base.with_notes(notes)
+}
 
 /// Concrete connections stored type-erased inside `Value::Db`.
 /// `Sqlite` backs `sqlz.open` file/memory paths, `Pg` backs
@@ -241,10 +261,10 @@ pub(crate) fn db_exec(
             })?;
             let mut stmt = clock
                 .prepare(&sql)
-                .map_err(|e| EvalError::new(format!("`std.sqlz.exec` failed: {e}"), span))?;
+                .map_err(|e| db_fail("std.sqlz.exec", Backend::Sqlite, &sql, e, span))?;
             let n = stmt
                 .execute(rusqlite::params_from_iter(bound.iter()))
-                .map_err(|e| EvalError::new(format!("`std.sqlz.exec` failed: {e}"), span))?;
+                .map_err(|e| db_fail("std.sqlz.exec", Backend::Sqlite, &sql, e, span))?;
             Ok(Value::Int(n as i64))
         }
         DbConn::Pg(conn) => {
@@ -255,7 +275,7 @@ pub(crate) fn db_exec(
             })?;
             let n = clock
                 .exec(&sql, &pg_params)
-                .map_err(|e| EvalError::new(format!("`std.sqlz.exec` failed: {e}"), span))?;
+                .map_err(|e| db_fail("std.sqlz.exec", Backend::Postgres, &sql, e, span))?;
             Ok(Value::Int(n))
         }
         DbConn::My(conn) => {
@@ -266,7 +286,7 @@ pub(crate) fn db_exec(
             })?;
             let n = clock
                 .exec(&sql, &my_params)
-                .map_err(|e| EvalError::new(format!("`std.sqlz.exec` failed: {e}"), span))?;
+                .map_err(|e| db_fail("std.sqlz.exec", Backend::Mysql, &sql, e, span))?;
             Ok(Value::Int(n))
         }
     }
@@ -330,7 +350,7 @@ pub(crate) fn db_query(
             })?;
             let mut stmt = clock
                 .prepare(&sql)
-                .map_err(|e| EvalError::new(format!("`std.sqlz.query` failed: {e}"), span))?;
+                .map_err(|e| db_fail("std.sqlz.query", Backend::Sqlite, &sql, e, span))?;
             let col_count = stmt.column_count();
             check_arity(&fields, col_count, span)?;
             let raw = stmt
@@ -339,7 +359,7 @@ pub(crate) fn db_query(
                         .map(|i| row.get::<_, rusqlite::types::Value>(i))
                         .collect::<Result<Vec<_>, _>>()
                 })
-                .map_err(|e| EvalError::new(format!("`std.sqlz.query` failed: {e}"), span))?;
+                .map_err(|e| db_fail("std.sqlz.query", Backend::Sqlite, &sql, e, span))?;
             let mut out = Vec::new();
             for r in raw {
                 let cols: Vec<rusqlite::types::Value> =
@@ -356,7 +376,7 @@ pub(crate) fn db_query(
             })?;
             let (cols, raw) = clock
                 .query(&sql, &pg_params)
-                .map_err(|e| EvalError::new(format!("`std.sqlz.query` failed: {e}"), span))?;
+                .map_err(|e| db_fail("std.sqlz.query", Backend::Postgres, &sql, e, span))?;
             check_arity(&fields, cols.len(), span)?;
             raw.into_iter()
                 .map(|row| {
@@ -375,7 +395,7 @@ pub(crate) fn db_query(
             })?;
             let (cols, raw) = clock
                 .query(&sql, &my_params)
-                .map_err(|e| EvalError::new(format!("`std.sqlz.query` failed: {e}"), span))?;
+                .map_err(|e| db_fail("std.sqlz.query", Backend::Mysql, &sql, e, span))?;
             check_arity(&fields, cols.len(), span)?;
             raw.into_iter()
                 .map(|row| {

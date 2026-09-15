@@ -723,6 +723,14 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 }
                 self.text(")");
             }
+            Pattern::Or { pats, .. } => {
+                for (i, p) in pats.iter().enumerate() {
+                    if i > 0 {
+                        self.text(" | ");
+                    }
+                    self.emit_pattern(p);
+                }
+            }
         }
     }
 
@@ -1074,6 +1082,8 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.text(")");
                 }
             }
+            Expr::Break { .. } => self.text("break"),
+            Expr::Continue { .. } => self.text("continue"),
             Expr::Array { elems, .. } => {
                 self.text("[");
                 for (i, e) in elems.iter().enumerate() {

@@ -431,6 +431,12 @@ fn collect_expr_tokens(expr: &Expr, source: &str, out: &mut Vec<RawToken>) {
                 collect_expr_tokens(e, source, out);
             }
         }
+        Expr::Break { span } => {
+            push_token("break", *span, TokenType::Keyword, source, out);
+        }
+        Expr::Continue { span } => {
+            push_token("continue", *span, TokenType::Keyword, source, out);
+        }
     }
 }
 
@@ -481,6 +487,12 @@ fn collect_pattern_tokens(pat: &zz_frontend::ast::Pattern, source: &str, out: &m
             collect_pattern_tokens(a, source, out);
         }
         zz_frontend::ast::Pattern::Variant { .. } => {}
+        zz_frontend::ast::Pattern::Tuple { pats, .. }
+        | zz_frontend::ast::Pattern::Or { pats, .. } => {
+            for p in pats {
+                collect_pattern_tokens(p, source, out);
+            }
+        }
         _ => {}
     }
 }

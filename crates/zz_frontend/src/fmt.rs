@@ -662,6 +662,8 @@ impl<'a> FmtCtx<'a> {
                     self.write_str(")");
                 }
             }
+            Expr::Break { .. } => self.write_str("break"),
+            Expr::Continue { .. } => self.write_str("continue"),
             Expr::IfLet {
                 pat,
                 value,
@@ -728,6 +730,14 @@ impl<'a> FmtCtx<'a> {
                     self.fmt_pattern(p, source);
                 }
                 self.write_str(")");
+            }
+            Pattern::Or { pats, .. } => {
+                for (i, p) in pats.iter().enumerate() {
+                    if i > 0 {
+                        self.write_str(" | ");
+                    }
+                    self.fmt_pattern(p, source);
+                }
             }
         }
     }

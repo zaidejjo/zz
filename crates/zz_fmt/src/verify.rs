@@ -298,6 +298,14 @@ fn fp_pattern(p: &Pattern, out: &mut String) {
             }
             out.push(')');
         }
+        Pattern::Or { pats, .. } => {
+            out.push('(');
+            for p in pats {
+                fp_pattern(p, out);
+                out.push('|');
+            }
+            out.push(')');
+        }
     }
 }
 
@@ -592,6 +600,8 @@ fn fp_expr(e: &Expr, out: &mut String) {
                 out.push(')');
             }
         }
+        Expr::Break { .. } => out.push_str("Break"),
+        Expr::Continue { .. } => out.push_str("Continue"),
         Expr::Array { elems, .. } => {
             out.push_str("Array[");
             for e in elems {

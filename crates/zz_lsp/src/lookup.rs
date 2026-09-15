@@ -260,6 +260,11 @@ fn collect_pattern_defs(pat: &Pattern, defs: &mut HashMap<u32, Definition>) {
         Pattern::Variant {
             arg: Some(inner), ..
         } => collect_pattern_defs(inner, defs),
+        Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
+            for p in pats {
+                collect_pattern_defs(p, defs);
+            }
+        }
         _ => {}
     }
 }
@@ -406,7 +411,7 @@ fn walk_pattern<'a>(pat: &'a Pattern, _source: &str, offset: u32, result: &mut N
             result.name = Some(name.name.clone());
             result.name_span = Some(name.span);
         }
-        Pattern::Tuple { pats, .. } => {
+        Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
             for p in pats {
                 walk_pattern(p, _source, offset, result);
             }
