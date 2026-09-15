@@ -89,6 +89,48 @@ fn comparisons_and_logic() {
 }
 
 #[test]
+fn bool_and_generic_equality() {
+    // Regression: `single == false` (Bool == Bool) used to fail with
+    // "arithmetic on non-numeric value".
+    assert_eq!(eval_src("true == true").unwrap(), Value::Bool(true));
+    assert_eq!(eval_src("true == false").unwrap(), Value::Bool(false));
+    assert_eq!(eval_src("false == false").unwrap(), Value::Bool(true));
+    assert_eq!(eval_src("true != false").unwrap(), Value::Bool(true));
+    assert_eq!(eval_src("false != false").unwrap(), Value::Bool(false));
+    assert_eq!(
+        eval_src("single := true\nsingle == false").unwrap(),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        eval_src("single := true\nsingle != false").unwrap(),
+        Value::Bool(true)
+    );
+    // Same-type numerics and strings still work.
+    assert_eq!(eval_src("1.5 == 1.5").unwrap(), Value::Bool(true));
+    assert_eq!(eval_src("\"a\" == \"a\"").unwrap(), Value::Bool(true));
+    assert_eq!(eval_src("\"a\" != \"b\"").unwrap(), Value::Bool(true));
+    // Mixed int/float compares as floats.
+    assert_eq!(eval_src("1 == 1.0").unwrap(), Value::Bool(true));
+    assert_eq!(eval_src("1 != 1.5").unwrap(), Value::Bool(true));
+    assert_eq!(eval_src("1 < 1.5").unwrap(), Value::Bool(true));
+    // Mismatched types compare as unequal, not an arithmetic error.
+    assert_eq!(eval_src("1 == \"1\"").unwrap(), Value::Bool(false));
+    assert_eq!(eval_src("1 != \"1\"").unwrap(), Value::Bool(true));
+    assert_eq!(eval_src("true == 1").unwrap(), Value::Bool(false));
+    assert_eq!(eval_src("true != 1").unwrap(), Value::Bool(true));
+    // Compound values use deep equality.
+    assert_eq!(eval_src("[1, 2] == [1, 2]").unwrap(), Value::Bool(true));
+    assert_eq!(eval_src("[1, 2] != [1, 3]").unwrap(), Value::Bool(true));
+    // Ordering on bools reports the operator, not generic arithmetic.
+    let err = eval_src("true < false").unwrap_err();
+    assert!(
+        err.message.contains("operator `<` is not supported"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[test]
 fn if_expression() {
     assert_eq!(eval_src("if true { 1 } else { 2 }").unwrap(), Value::Int(1));
     assert_eq!(

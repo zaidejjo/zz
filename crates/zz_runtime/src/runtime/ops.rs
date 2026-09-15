@@ -280,8 +280,32 @@ pub(crate) fn eval_int_binary(op: BinOp, a: i64, b: i64, span: Span) -> Result<V
 }
 
 /// Evaluate a binary operation, promoting mixed int/float to float.
+///
+/// Equality (`==` / `!=`) works for every value via [`Value`]'s `PartialEq`
+/// (bools, units, arrays, dicts, options, structs, ...). Mismatched types
+/// compare as unequal. Numeric `int`/`float` mixes compare as floats.
 #[inline(always)]
 pub(crate) fn eval_binary(op: BinOp, l: Value, r: Value, span: Span) -> Result<Value, EvalError> {
+    // Equality first: covers Bool and every other non-numeric (or
+    // mismatched) pair that the typed arms below would otherwise reject
+    // with a misleading "arithmetic on non-numeric value" error.
+    match op {
+        BinOp::Eq | BinOp::Ne => {
+            // Exact integer equality (no float rounding for large i64).
+            if let (Value::Int(a), Value::Int(b)) = (&l, &r) {
+                let eq = a == b;
+                return Ok(Value::Bool(if op == BinOp::Eq { eq } else { !eq }));
+            }
+            if let (Some(a), Some(b)) = (l.to_float(), r.to_float()) {
+                // Mixed int/float numerics: compare as floats.
+                let eq = a == b;
+                return Ok(Value::Bool(if op == BinOp::Eq { eq } else { !eq }));
+            }
+            let eq = l == r;
+            return Ok(Value::Bool(if op == BinOp::Eq { eq } else { !eq }));
+        }
+        _ => {}
+    }
     // Mixed int/float arithmetic promotes to float.
     match (l, r) {
         (Value::Int(a), Value::Int(b)) => eval_int_binary(op, a, b, span),
@@ -317,17 +341,33 @@ pub(crate) fn eval_binary(op: BinOp, l: Value, r: Value, span: Span) -> Result<V
             )),
         },
         (l, r) => {
-            let (a, b) = match (l.to_float(), r.to_float()) {
-                (Some(a), Some(b)) => (a, b),
-                _ => return Err(EvalError::new("arithmetic on non-numeric value", span)),
-            };
+            if let (Some(a), Some(b)) = (l.to_float(), r.to_float()) {
+                return match op {
+                    BinOp::Add => Ok(Value::Float(a + b)),
+                    BinOp::Sub => Ok(Value::Float(a - b)),
+                    BinOp::Mul => Ok(Value::Float(a * b)),
+                    BinOp::Div => Ok(Value::Float(a / b)),
+                    BinOp::Rem => Ok(Value::Float(a % b)),
+                    BinOp::Pow => Ok(Value::Float(a.powf(b))),
+                    BinOp::Lt => Ok(Value::Bool(a < b)),
+                    BinOp::Gt => Ok(Value::Bool(a > b)),
+                    BinOp::Le => Ok(Value::Bool(a <= b)),
+                    BinOp::Ge => Ok(Value::Bool(a >= b)),
+                    // `==` / `!=` return early above; `&&` / `||` short-circuit
+                    // in eval. Unreachable here.
+                    _ => Err(EvalError::new("arithmetic on non-numeric value", span)),
+                };
+            }
             match op {
-                BinOp::Add => Ok(Value::Float(a + b)),
-                BinOp::Sub => Ok(Value::Float(a - b)),
-                BinOp::Mul => Ok(Value::Float(a * b)),
-                BinOp::Div => Ok(Value::Float(a / b)),
-                BinOp::Rem => Ok(Value::Float(a % b)),
-                BinOp::Pow => Ok(Value::Float(a.powf(b))),
+                BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => Err(EvalError::new(
+                    format!(
+                        "operator `{}` is not supported for {} and {}",
+                        op.symbol(),
+                        l.type_name(),
+                        r.type_name()
+                    ),
+                    span,
+                )),
                 _ => Err(EvalError::new("arithmetic on non-numeric value", span)),
             }
         }
