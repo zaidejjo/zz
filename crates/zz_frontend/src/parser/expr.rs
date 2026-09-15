@@ -405,11 +405,14 @@ impl Parser {
             return (args, named);
         }
         loop {
-            // Peek for `IDENT : expr` pattern (named argument).
-            // Only treat as named arg if current token is ident AND next is colon.
-            if self.at(TokenKind::Ident) && self.peek_kind_at(1) == TokenKind::Colon {
+            // Peek for `IDENT : expr` or `IDENT = expr` pattern (named argument).
+            // `:` is canonical ZZ syntax (`greeting: "Hi"`); `=` is accepted as an
+            // alias so `@test(should_panic = true)` (spec style) also parses.
+            let is_named = self.at(TokenKind::Ident)
+                && matches!(self.peek_kind_at(1), TokenKind::Colon | TokenKind::Assign);
+            if is_named {
                 let name = self.advance().text;
-                self.advance(); // consume `:`
+                self.advance(); // consume `:` or `=`
                 let value = self.parse_expr();
                 named.push((name, value));
             } else {

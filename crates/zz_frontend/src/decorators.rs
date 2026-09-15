@@ -19,12 +19,18 @@
 //! ordinary functions plus ordinary calls) work unchanged. Type checking
 //! happens on the expanded calls, which enforces decorator/target
 //! compatibility with standard mismatch diagnostics.
+//!
+//! Test decorators (`@test`, `@setup`, `@teardown`) are *exempt* from
+//! lowering: they are preserved on the `Func` node and validated by
+//! [`crate::test_attr`] instead. Mixing them with ordinary decorators on the
+//! same function is diagnosed as an error.
 
 use std::collections::HashSet;
 
 use crate::ast::{Block, Decorator, Expr, Program, Stmt};
 use crate::diag::{error_at, RawDiag};
 use crate::span::Span;
+use crate::test_attr as test_attr_mod;
 
 /// Expand all decorated functions in `program`.
 ///
@@ -88,6 +94,29 @@ fn expand_stmts(
                         span: *span,
                         pub_: *pub_,
                         decorators: Vec::new(),
+                    });
+                    continue;
+                }
+                // Test-like decorators are preserved verbatim and validated
+                // separately — they never lower to `__inner` wrappers.
+                if decorators.iter().any(test_attr_mod::is_test_like) {
+                    // Validate + emit diagnostics (unknown args, mixing, etc.).
+                    test_attr_mod::validate_test_decorator_list(
+                        decorators,
+                        *span,
+                        generics.is_empty(),
+                        errors,
+                    );
+                    taken.insert(name.join("."));
+                    out.push(Stmt::Func {
+                        name: name.clone(),
+                        generics: generics.clone(),
+                        params: params.clone(),
+                        ret: ret.clone(),
+                        body: expand_block(body, taken, errors),
+                        span: *span,
+                        pub_: *pub_,
+                        decorators: decorators.clone(),
                     });
                     continue;
                 }
@@ -169,6 +198,28 @@ fn expand_stmts(
                                     span: *mspan,
                                     pub_: *mpub,
                                     decorators: Vec::new(),
+                                });
+                                continue;
+                            }
+                            // Preserve test-like impl methods without lowering.
+                            if decorators.iter().any(test_attr_mod::is_test_like) {
+                                test_attr_mod::validate_test_decorator_list(
+                                    decorators,
+                                    *mspan,
+                                    generics.is_empty(),
+                                    errors,
+                                );
+                                sibling.insert(mn.join("."));
+                                taken.insert(format!("{tname}.{}", mn.join(".")));
+                                expanded_methods.push(Stmt::Func {
+                                    name: mn.clone(),
+                                    generics: generics.clone(),
+                                    params: params.clone(),
+                                    ret: ret.clone(),
+                                    body: expand_block(body, taken, errors),
+                                    span: *mspan,
+                                    pub_: *mpub,
+                                    decorators: decorators.clone(),
                                 });
                                 continue;
                             }
