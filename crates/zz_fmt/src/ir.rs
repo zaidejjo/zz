@@ -382,8 +382,40 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 params,
                 ret,
                 body,
+                decorators,
                 ..
             } => {
+                for dec in decorators {
+                    self.text("@");
+                    for (i, p) in dec.path.iter().enumerate() {
+                        if i > 0 {
+                            self.text(".");
+                        }
+                        self.text(p);
+                    }
+                    if !dec.args.is_empty() || !dec.named.is_empty() {
+                        self.text("(");
+                        let mut first = true;
+                        for arg in &dec.args {
+                            if !first {
+                                self.text(", ");
+                            }
+                            first = false;
+                            self.emit_expr(arg);
+                        }
+                        for (aname, arg) in &dec.named {
+                            if !first {
+                                self.text(", ");
+                            }
+                            first = false;
+                            self.text(aname.clone());
+                            self.text(": ");
+                            self.emit_expr(arg);
+                        }
+                        self.text(")");
+                    }
+                    self.hard_line();
+                }
                 if stmt_is_pub(stmt) {
                     self.text("pub");
                     self.space();

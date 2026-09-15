@@ -303,3 +303,103 @@ fn missing_stmt_end_reports_error() {
     let parsed = zz_frontend::parse("x := 1 y := 2");
     assert_eq!(parsed.errors.len(), 1);
 }
+
+#[test]
+fn parses_bare_decorator() {
+    let p = parse_ok("@login_required\nfunc secret(name: str) -> str { return name }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func {
+            name, decorators, ..
+        } => {
+            assert_eq!(name, &vec!["secret".to_string()]);
+            assert_eq!(decorators.len(), 1);
+            assert_eq!(decorators[0].path, vec!["login_required".to_string()]);
+            assert!(decorators[0].args.is_empty());
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_decorator_with_args() {
+    let p = parse_ok("@route(\"/hello\")\nfunc hello(name: str) -> str { return name }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func {
+            name, decorators, ..
+        } => {
+            assert_eq!(name, &vec!["hello".to_string()]);
+            assert_eq!(decorators.len(), 1);
+            assert_eq!(decorators[0].path, vec!["route".to_string()]);
+            assert_eq!(decorators[0].args.len(), 1);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_stacked_decorators() {
+    let p = parse_ok("@logging\n@route(\"/hello\")\nfunc hello(name: str) -> str { return name }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { decorators, .. } => {
+            assert_eq!(decorators.len(), 2);
+            assert_eq!(decorators[0].path, vec!["logging".to_string()]);
+            assert_eq!(decorators[1].path, vec!["route".to_string()]);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_decorator_on_pub_func() {
+    let p = parse_ok("@logged\npub func hello(name: str) -> str { return name }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func {
+            name,
+            decorators,
+            pub_,
+            ..
+        } => {
+            assert_eq!(name, &vec!["hello".to_string()]);
+            assert!(*pub_);
+            assert_eq!(decorators.len(), 1);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn link_directive_still_parses() {
+    let p = parse_ok("@link(\"sqlite3\")");
+    assert!(matches!(&p.stmts[0], zz_frontend::ast::Stmt::Link { .. }));
+}
+
+#[test]
+fn decorator_expands_to_inner_and_wrapper() {
+    let parsed = parse_ok("@logging\nfunc hello(name: str) -> str { return name }");
+    let (expanded, errors) = zz_frontend::decorators::expand_program(&parsed);
+    assert!(errors.is_empty());
+    assert_eq!(expanded.stmts.len(), 2);
+    match (&expanded.stmts[0], &expanded.stmts[1]) {
+        (
+            zz_frontend::ast::Stmt::Func { name: inner, .. },
+            zz_frontend::ast::Stmt::Func {
+                name: outer,
+                decorators,
+                ..
+            },
+        ) => {
+            assert_eq!(inner, &vec!["hello__inner".to_string()]);
+            assert_eq!(outer, &vec!["hello".to_string()]);
+            assert!(decorators.is_empty());
+        }
+        other => panic!("unexpected expansion: {other:?}"),
+    }
+}
+
+#[test]
+fn decorator_on_generic_func_errors() {
+    let parsed = parse_ok("@logging\nfunc id<T>(x: T) -> T { return x }");
+    let (_, errors) = zz_frontend::decorators::expand_program(&parsed);
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].message.contains("generic"));
+}

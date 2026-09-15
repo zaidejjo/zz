@@ -1,7 +1,7 @@
 //! Statement parsing.
 
 use crate::ast::{
-    Block, ExternFunc, Ident, ImportItem, Param, Pattern, Stmt, TraitBound, TypeParam,
+    Block, Decorator, ExternFunc, Ident, ImportItem, Param, Pattern, Stmt, TraitBound, TypeParam,
 };
 use crate::diag::error_at;
 use crate::span::Span;
@@ -80,9 +80,18 @@ impl Parser {
                             self.parse_stmt()
                         }
                     }
+                    // `pub @dec func ...` — decorators after `pub`.
+                    TokenKind::At => {
+                        if self.is_link_directive() {
+                            self.error_here("cannot use `pub` on `@link`");
+                            self.parse_link()
+                        } else {
+                            self.parse_decorated_func(true)
+                        }
+                    }
                     _ => {
                         self.error_here(
-                            "expected `func`, `struct`, `impl`, `import`, or declaration after `pub`",
+                            "expected `func`, `struct`, `impl`, `import`, decorator, or declaration after `pub`",
                         );
                         self.parse_stmt()
                     }
@@ -121,7 +130,13 @@ impl Parser {
             }
             TokenKind::Struct => self.parse_struct(false),
             TokenKind::Impl => self.parse_impl(false),
-            TokenKind::At => self.parse_link(),
+            TokenKind::At => {
+                if self.is_link_directive() {
+                    self.parse_link()
+                } else {
+                    self.parse_decorated_func(false)
+                }
+            }
             TokenKind::Extern => self.parse_extern_block(),
             TokenKind::For => self.parse_for(),
             TokenKind::Break => {
@@ -209,6 +224,20 @@ impl Parser {
                 Stmt::Expr(expr)
             }
         }
+    }
+
+    /// True when the upcoming tokens form a `@link` directive rather than a
+    /// function decorator: `@` `link` followed by `(` or a string literal.
+    /// A bare `@link` followed by `func` is a decorator named `link`.
+    pub(crate) fn is_link_directive(&self) -> bool {
+        if self.peek_kind() != TokenKind::At {
+            return false;
+        }
+        let next = self.toks.get(self.pos + 1);
+        let after = self.toks.get(self.pos + 2);
+        matches!((next, after), (Some(n), Some(a)) if n.kind == TokenKind::Ident
+            && n.text == "link"
+            && (a.kind == TokenKind::LParen || a.kind == TokenKind::Str))
     }
 
     pub(crate) fn parse_link(&mut self) -> Stmt {
@@ -405,8 +434,18 @@ impl Parser {
                     let _pub_tok = self.advance();
                     if self.peek_kind() == TokenKind::Func {
                         methods.push(self.parse_func(true));
+                    } else if self.peek_kind() == TokenKind::At && !self.is_link_directive() {
+                        methods.push(self.parse_decorated_func(true));
                     } else {
                         self.error_here("expected `func` after `pub` in impl block");
+                    }
+                }
+                TokenKind::At => {
+                    if self.is_link_directive() {
+                        self.error_here("`@link` is not allowed inside `impl` blocks");
+                        self.parse_link();
+                    } else {
+                        methods.push(self.parse_decorated_func(false));
                     }
                 }
                 _ => {
@@ -701,7 +740,95 @@ impl Parser {
             body,
             span,
             pub_,
+            decorators: Vec::new(),
         }
+    }
+
+    /// Parse `@name` / `@name(args)` decorators followed by `func`.
+    ///
+    /// Grammar: (`@` dotted_ident (`(` call_args `)`)? StmtEnd*)+ (`pub`)? `func`.
+    /// `@link(...)` is NOT a decorator — it is handled before calling here.
+    pub(crate) fn parse_decorated_func(&mut self, pub_: bool) -> Stmt {
+        let mut decorators = self.parse_decorator_list();
+        self.skip_stmt_ends();
+        // `pub` may appear after the decorators: `@dec pub func f()`.
+        let is_pub = if self.at(TokenKind::Pub) {
+            self.advance();
+            true
+        } else {
+            pub_
+        };
+        if self.peek_kind() != TokenKind::Func {
+            self.error_here("expected `func` after decorator (e.g. `@dec func foo() { ... }`)");
+            // Recover with an empty function so later passes terminate.
+            let span = decorators
+                .first()
+                .map(|d: &Decorator| d.span)
+                .unwrap_or_else(|| self.peek().span);
+            return Stmt::Func {
+                name: vec![String::new()],
+                generics: Vec::new(),
+                params: Vec::new(),
+                ret: None,
+                body: Block {
+                    stmts: Vec::new(),
+                    span,
+                },
+                span,
+                pub_: is_pub,
+                decorators: Vec::new(),
+            };
+        }
+        let mut stmt = self.parse_func(is_pub);
+        if let Stmt::Func {
+            decorators: ref mut slot,
+            span: ref mut func_span,
+            ..
+        } = stmt
+        {
+            if !decorators.is_empty() {
+                let first = decorators.first().unwrap().span;
+                func_span.start = func_span.start.min(first.start);
+            }
+            *slot = std::mem::take(&mut decorators);
+        }
+        stmt
+    }
+
+    /// Parse one or more `@path` / `@path(args)` lines. The caller must have
+    /// excluded `@link(...)`. Each decorator must start at `At`; blank lines
+    /// (StmtEnd) between decorators are skipped.
+    fn parse_decorator_list(&mut self) -> Vec<Decorator> {
+        let mut out = Vec::new();
+        while self.at(TokenKind::At) {
+            let at_tok = self.advance();
+            // `parse_dotted_ident` emits its own diagnostic on failure.
+            let path = self.parse_dotted_ident();
+            let (args, named, end) = if self.eat(TokenKind::LParen) {
+                let (args, named) = self.parse_call_args();
+                let end = if self.eat_close(TokenKind::RParen) {
+                    self.previous().span
+                } else {
+                    self.error_here("expected `)` to close decorator arguments");
+                    self.peek().span
+                };
+                (args, named, end)
+            } else {
+                (Vec::new(), Vec::new(), self.previous().span)
+            };
+            out.push(Decorator {
+                path,
+                args,
+                named,
+                span: at_tok.span.join(end),
+            });
+            self.skip_stmt_ends();
+            // A second `@` continues the list; anything else ends it.
+            if !self.at(TokenKind::At) {
+                break;
+            }
+        }
+        out
     }
 
     pub(crate) fn parse_param_list(&mut self) -> Vec<Param> {
@@ -826,6 +953,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
             body,
             span: mut sp,
             pub_,
+            decorators,
         } => {
             span(&mut sp);
             Stmt::Func {
@@ -836,6 +964,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
                 body,
                 span: sp,
                 pub_,
+                decorators,
             }
         }
         Stmt::Struct {

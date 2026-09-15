@@ -71,6 +71,24 @@ pub enum ImportItem {
     },
 }
 
+/// An explicit, compile-time decorator on a function definition.
+///
+/// `@name` applies `name` directly; `@name(args)` first calls `name(args)`
+/// as a factory and applies the result. Application order is bottom-up
+/// (closest to `func` applies first), matching Python semantics without any
+/// runtime reflection: the desugar pass rewrites the decorated function
+/// into an `__inner` function plus a wrapper with the original name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decorator {
+    /// Dotted decorator path, e.g. `["auth", "login_required"]`.
+    pub path: Vec<String>,
+    /// Positional factory arguments (`@route("/path")`).
+    pub args: Vec<Expr>,
+    /// Named factory arguments.
+    pub named: Vec<(String, Expr)>,
+    pub span: Span,
+}
+
 /// A single function signature inside `extern "C" { ... }`.
 /// No body — the implementation lives in C and is linked natively.
 #[derive(Debug, Clone, PartialEq)]
@@ -115,6 +133,9 @@ pub enum Stmt {
         body: Block,
         span: Span,
         pub_: bool,
+        /// Explicit decorators (`@name` / `@name(args)`) awaiting the
+        /// compile-time desugar pass. Always empty after expansion.
+        decorators: Vec<Decorator>,
     },
     Return {
         value: Option<Expr>,

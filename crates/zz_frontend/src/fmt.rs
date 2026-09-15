@@ -79,8 +79,33 @@ impl<'a> FmtCtx<'a> {
                 ret,
                 body,
                 pub_,
+                decorators,
                 ..
             } => {
+                for dec in decorators {
+                    self.write_indent();
+                    self.write_str("@");
+                    self.write_str(&dec.path.join("."));
+                    if !dec.args.is_empty() || !dec.named.is_empty() {
+                        self.write_str("(");
+                        for (i, arg) in dec.args.iter().enumerate() {
+                            if i > 0 {
+                                self.write_str(", ");
+                            }
+                            self.fmt_expr(arg, source);
+                        }
+                        for (i, (aname, arg)) in dec.named.iter().enumerate() {
+                            if i > 0 || !dec.args.is_empty() {
+                                self.write_str(", ");
+                            }
+                            self.write_str(aname);
+                            self.write_str(": ");
+                            self.fmt_expr(arg, source);
+                        }
+                        self.write_str(")");
+                    }
+                    self.write_line();
+                }
                 self.write_indent();
                 if *pub_ {
                     self.write_str("pub ");

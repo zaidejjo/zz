@@ -216,6 +216,24 @@ impl Loader {
             return Ok(());
         }
 
+        // Expand explicit decorators before import scanning and namespacing
+        // so decorator references are ordinary call expressions when the
+        // namespace rewriter runs.
+        let (expanded_program, decorator_errors) =
+            zz_frontend::decorators::expand_program(&parsed.program);
+        if !decorator_errors.is_empty() {
+            self.errors.push(LoadError {
+                name: path.display().to_string(),
+                source,
+                diags: decorator_errors,
+            });
+            return Ok(());
+        }
+        let parsed = zz_frontend::Parsed {
+            program: expanded_program,
+            errors: Vec::new(),
+        };
+
         self.visiting.insert(canon.clone());
 
         let imports: Vec<(Vec<String>, Option<String>, Vec<ImportItem>)> = parsed

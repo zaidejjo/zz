@@ -59,15 +59,19 @@ pub fn build_program(
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
 ) -> TypedResult {
+    // Expand decorators before checking so the typed program (consumed by
+    // codegen) contains the lowered `__inner` + wrapper functions. The
+    // checker re-expands idempotently; diagnostics merge in order.
+    let (expanded, mut diags) = zz_frontend::decorators::expand_program(program);
     let (checked, span_types) =
-        check_program_typed(program, initial_bindings, initial_funcs, initial_structs);
-    let diags = checked.errors.clone();
+        check_program_typed(&expanded, initial_bindings, initial_funcs, initial_structs);
+    diags.extend(checked.errors.clone());
     let bindings = checked.bindings.clone();
     let funcs = checked.funcs.clone();
     let structs = checked.structs.clone();
     TypedResult {
         program: TypedProgram {
-            program: program.clone(),
+            program: expanded,
             types: span_types,
             bindings,
             funcs,

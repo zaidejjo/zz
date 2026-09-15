@@ -139,9 +139,29 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
             params,
             ret,
             body,
+            decorators,
             ..
         } => {
             out.push_str("Func-kw[");
+            for dec in decorators {
+                out.push('@');
+                for p in &dec.path {
+                    out.push_str(p);
+                    out.push('.');
+                }
+                out.push('(');
+                for a in &dec.args {
+                    fp_expr(a, out);
+                    out.push(',');
+                }
+                for (n, v) in &dec.named {
+                    out.push_str(n);
+                    out.push(':');
+                    fp_expr(v, out);
+                    out.push(',');
+                }
+                out.push(')');
+            }
             for p in name {
                 out.push_str(p);
                 out.push('.');

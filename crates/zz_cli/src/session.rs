@@ -145,6 +145,26 @@ impl Session {
             };
         }
 
+        // Expand explicit decorators before checking/running so the REPL
+        // sees the same lowered `__inner` + wrapper functions as `zz run`.
+        let (expanded_program, decorator_errors) =
+            zz_frontend::decorators::expand_program(&parsed.program);
+        if !decorator_errors.is_empty() {
+            self.last_had_errors = true;
+            return EvalOutput {
+                output: String::new(),
+                errors: Some(render_to_string(
+                    &self.files,
+                    self.file_id,
+                    &decorator_errors,
+                )),
+            };
+        }
+        let parsed = zz_frontend::Parsed {
+            program: expanded_program,
+            errors: Vec::new(),
+        };
+
         // Process imports: register `std.*` modules under their namespace
         // (or alias) in both the checker seed and the interpreter. Relative
         // imports need a file context and are rejected in the REPL.

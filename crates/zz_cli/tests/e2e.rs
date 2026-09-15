@@ -155,6 +155,7 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_syntax_struct_impl, "syntax", "struct_impl.zz");
 e2e_success_test!(e2e_syntax_function_types, "syntax", "function_types.zz");
+e2e_success_test!(e2e_syntax_decorators, "syntax", "decorators.zz");
 
 // Type fixtures
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
@@ -277,6 +278,7 @@ e2e_error_test!(e2e_err_int_float_cmp, "int_float_cmp.zz");
 e2e_error_test!(e2e_err_generic_unbound, "generic_unbound.zz");
 e2e_error_test!(e2e_err_pg_connect_refused, "pg_connect_refused.zz");
 e2e_error_test!(e2e_err_mysql_connect_refused, "mysql_connect_refused.zz");
+e2e_error_test!(e2e_err_decorator_mismatch, "decorator_mismatch.zz");
 
 // ---------------------------------------------------------------------------
 // Eval tests: inline code via `zz eval`
