@@ -615,6 +615,37 @@ impl<'a> Lexer<'a> {
                         value.push('}');
                         self.bump_char();
                     }
+                    // ESC (ASCII 27): `"\e[31m"` for ANSI terminal colors.
+                    Some('e') => {
+                        value.push('\x1b');
+                        self.bump_char();
+                    }
+                    // Hex byte: `\xHH` (e.g. `\x1b` == ESC). Exactly two
+                    // hex digits; anything else is a lex error.
+                    Some('x') => {
+                        let hi = self.peek_char_at(1);
+                        let lo = self.peek_char_at(2);
+                        match (hi, lo) {
+                            (Some(h), Some(l))
+                                if h.is_ascii_hexdigit() && l.is_ascii_hexdigit() =>
+                            {
+                                let byte =
+                                    h.to_digit(16).unwrap_or(0) * 16 + l.to_digit(16).unwrap_or(0);
+                                value.push(char::from_u32(byte).unwrap_or('\u{FFFD}'));
+                                self.bump_char();
+                                self.bump_char();
+                                self.bump_char();
+                            }
+                            _ => {
+                                let span = Span::new((self.pos - 1) as u32, (self.pos + 1) as u32);
+                                self.errors.push(error_at(
+                                    "invalid hex escape `\\x`: expected two hex digits (e.g. `\\x1b`)",
+                                    span,
+                                ));
+                                self.bump_char();
+                            }
+                        }
+                    }
                     Some(other) => {
                         let span =
                             Span::new((self.pos - 1) as u32, (self.pos + other.len_utf8()) as u32);
@@ -767,6 +798,37 @@ impl<'a> Lexer<'a> {
                     Some('}') => {
                         value.push('}');
                         self.bump_char();
+                    }
+                    // ESC (ASCII 27): `"\e[31m"` for ANSI terminal colors.
+                    Some('e') => {
+                        value.push('\x1b');
+                        self.bump_char();
+                    }
+                    // Hex byte: `\xHH` (e.g. `\x1b` == ESC). Exactly two
+                    // hex digits; anything else is a lex error.
+                    Some('x') => {
+                        let hi = self.peek_char_at(1);
+                        let lo = self.peek_char_at(2);
+                        match (hi, lo) {
+                            (Some(h), Some(l))
+                                if h.is_ascii_hexdigit() && l.is_ascii_hexdigit() =>
+                            {
+                                let byte =
+                                    h.to_digit(16).unwrap_or(0) * 16 + l.to_digit(16).unwrap_or(0);
+                                value.push(char::from_u32(byte).unwrap_or('\u{FFFD}'));
+                                self.bump_char();
+                                self.bump_char();
+                                self.bump_char();
+                            }
+                            _ => {
+                                let span = Span::new((self.pos - 1) as u32, (self.pos + 1) as u32);
+                                self.errors.push(error_at(
+                                    "invalid hex escape `\\x`: expected two hex digits (e.g. `\\x1b`)",
+                                    span,
+                                ));
+                                self.bump_char();
+                            }
+                        }
                     }
                     Some(other) => {
                         let span =

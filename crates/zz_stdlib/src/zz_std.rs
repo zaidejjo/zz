@@ -20,6 +20,7 @@ const JSON_MOD_ZZ: &str = include_str!("../zz/json/mod.zz");
 const REGEXP_MOD_ZZ: &str = include_str!("../zz/regexp/mod.zz");
 const TIME_MOD_ZZ: &str = include_str!("../zz/time/mod.zz");
 const ARGS_MOD_ZZ: &str = include_str!("../zz/args/mod.zz");
+const COLORS_MOD_ZZ: &str = include_str!("../zz/colors/mod.zz");
 
 /// All embedded source files, in compilation order.
 const ZZ_SOURCES: &[(&str, &str)] = &[
@@ -30,6 +31,7 @@ const ZZ_SOURCES: &[(&str, &str)] = &[
     ("std:regexp.mod.zz", REGEXP_MOD_ZZ),
     ("std:time.mod.zz", TIME_MOD_ZZ),
     ("std:args.mod.zz", ARGS_MOD_ZZ),
+    ("std:colors.mod.zz", COLORS_MOD_ZZ),
 ];
 
 /// Compiled pure-ZZ stdlib programs, computed once.
@@ -123,9 +125,9 @@ mod tests {
     #[test]
     fn compile_pure_zz_stdlib() {
         let programs = zz_stdlib_programs();
-        // Should have compiled seven modules (str, math, collections/vec,
-        // json, regexp, time, args).
-        assert_eq!(programs.len(), 7, "expected 7 pure-ZZ stdlib modules");
+        // Should have compiled eight modules (str, math, collections/vec,
+        // json, regexp, time, args, colors).
+        assert_eq!(programs.len(), 8, "expected 8 pure-ZZ stdlib modules");
         // Each module should have a non-empty types map.
         for (i, tp) in programs.iter().enumerate() {
             assert!(
@@ -348,5 +350,40 @@ mod tests {
             args_prog.funcs.contains_key("ArgsParser.new"),
             "ArgsParser.new should be defined"
         );
+    }
+
+    #[test]
+    fn pure_zz_colors_has_palette() {
+        let programs = zz_stdlib_programs();
+        let colors_prog = &programs[7]; // colors/mod.zz
+        for name in [
+            "colors.red",
+            "colors.green",
+            "colors.blue",
+            "colors.yellow",
+            "colors.magenta",
+            "colors.cyan",
+            "colors.white",
+            "colors.black",
+            "colors.bright_red",
+            "colors.bg_blue",
+            "colors.bold",
+            "colors.dim",
+            "colors.italic",
+            "colors.underline",
+            "colors.reset",
+            "colors.strip",
+            "colors.rgb",
+            "colors.bg_rgb",
+            "colors.hex",
+            "colors.hex6",
+            "colors.hex3",
+            "colors.clamp255",
+        ] {
+            assert!(
+                colors_prog.funcs.contains_key(name),
+                "{name} should be defined"
+            );
+        }
     }
 }

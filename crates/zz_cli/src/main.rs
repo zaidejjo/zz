@@ -319,6 +319,28 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
             return Err("stdlib initialization failed".to_string());
         }
     }
+    // Mirror pure-ZZ Env bindings for `import std.X as alias` renames
+    // (e.g. `colors.red` → `cl.red`). Natives are already aliased via
+    // `loaded.natives`; pure-ZZ funcs live in Env and need the same.
+    {
+        let snap = interp.env.borrow().flatten();
+        for (module, ns) in &loaded.stdlib_aliases {
+            let src_prefix = module.rsplit('.').next().unwrap_or(module);
+            if ns == src_prefix {
+                continue;
+            }
+            for (k, v) in &snap {
+                if k == src_prefix || k.starts_with(&format!("{src_prefix}.")) {
+                    let alias_key = if k == src_prefix {
+                        ns.clone()
+                    } else {
+                        format!("{ns}{}", &k[src_prefix.len()..])
+                    };
+                    interp.env.borrow_mut().define(&alias_key, v.clone());
+                }
+            }
+        }
+    }
 
     let mut last = Value::Unit;
     for (i, program) in loaded.programs.iter().enumerate() {

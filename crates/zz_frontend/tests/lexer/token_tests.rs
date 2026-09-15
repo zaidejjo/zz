@@ -1,6 +1,6 @@
 //! Lexer token tests.
 
-use zz_frontend::tests::common::{lex_kinds, parse_ok};
+use zz_frontend::tests::common::lex_kinds;
 use zz_frontend::token::TokenKind as K;
 
 #[test]
@@ -113,8 +113,10 @@ fn underscores_in_numbers() {
 
 #[test]
 fn unexpected_character_errors() {
+    // `@` is the decorator sigil — it lexes cleanly, not as an error.
     let lexed = zz_frontend::lex("1 @ 2");
-    assert_eq!(lexed.errors.len(), 1);
+    assert!(lexed.errors.is_empty(), "errors: {:?}", lexed.errors);
+    assert_eq!(lex_kinds("1 @ 2"), vec![K::Int, K::At, K::Int, K::Eof]);
 }
 
 #[test]
@@ -183,6 +185,34 @@ fn unterminated_string_errors() {
 #[test]
 fn unknown_escape_errors() {
     let lexed = zz_frontend::lex(r#""\q""#);
+    assert_eq!(lexed.errors.len(), 1);
+}
+
+#[test]
+fn esc_escape_is_ascii_27() {
+    let lexed = zz_frontend::lex(r#""\e[31m""#);
+    assert!(lexed.errors.is_empty(), "errors: {:?}", lexed.errors);
+    assert_eq!(lexed.tokens[0].kind, K::Str);
+    assert_eq!(lexed.tokens[0].text, "\u{1b}[31m");
+}
+
+#[test]
+fn hex_escape_parses_byte() {
+    let lexed = zz_frontend::lex(r#""\x1b[31m""#);
+    assert!(lexed.errors.is_empty(), "errors: {:?}", lexed.errors);
+    assert_eq!(lexed.tokens[0].kind, K::Str);
+    assert_eq!(lexed.tokens[0].text, "\u{1b}[31m");
+    // Uppercase digits + mid-range byte.
+    let lexed = zz_frontend::lex(r#""A\x41B""#);
+    assert!(lexed.errors.is_empty(), "errors: {:?}", lexed.errors);
+    assert_eq!(lexed.tokens[0].text, "AAB");
+}
+
+#[test]
+fn hex_escape_requires_two_digits() {
+    let lexed = zz_frontend::lex(r#""\x1""#);
+    assert_eq!(lexed.errors.len(), 1);
+    let lexed = zz_frontend::lex(r#""\xzz""#);
     assert_eq!(lexed.errors.len(), 1);
 }
 

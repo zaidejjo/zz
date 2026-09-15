@@ -2338,6 +2338,101 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert("time.sleep".into(), sig(vec![("d", Type::Int)], Type::Unit));
 
+    // std.colors — pure-ZZ ANSI styling (zz/colors/mod.zz). Every wrapper
+    // takes the text first so it composes with `|>` pipelines. Both
+    // spellings registered (like `std.json.*` / `json.*`).
+    let color_wraps = [
+        "black",
+        "red",
+        "green",
+        "yellow",
+        "blue",
+        "magenta",
+        "cyan",
+        "white",
+        "bright_black",
+        "bright_red",
+        "bright_green",
+        "bright_yellow",
+        "bright_blue",
+        "bright_magenta",
+        "bright_cyan",
+        "bright_white",
+        "bg_black",
+        "bg_red",
+        "bg_green",
+        "bg_yellow",
+        "bg_blue",
+        "bg_magenta",
+        "bg_cyan",
+        "bg_white",
+        "bold",
+        "dim",
+        "italic",
+        "underline",
+        "reset",
+        "strip",
+    ];
+    for name in color_wraps {
+        let s = sig(vec![("s", Type::Str)], Type::Str);
+        m.insert(format!("std.colors.{name}"), s.clone());
+        m.insert(format!("colors.{name}"), s);
+    }
+    for (name, params, ret) in [
+        ("clamp255", vec![("v", Type::Int)], Type::Int),
+        (
+            "rgb",
+            vec![
+                ("s", Type::Str),
+                ("r", Type::Int),
+                ("g", Type::Int),
+                ("b", Type::Int),
+            ],
+            Type::Str,
+        ),
+        (
+            "bg_rgb",
+            vec![
+                ("s", Type::Str),
+                ("r", Type::Int),
+                ("g", Type::Int),
+                ("b", Type::Int),
+            ],
+            Type::Str,
+        ),
+        ("hex_val", vec![("c", Type::Str)], Type::Int),
+        (
+            "hex_byte",
+            vec![("hi", Type::Str), ("lo", Type::Str)],
+            Type::Int,
+        ),
+        (
+            "hex",
+            vec![("s", Type::Str), ("code", Type::Str)],
+            Type::Str,
+        ),
+        (
+            "hex6",
+            vec![
+                ("s", Type::Str),
+                ("digits", Type::Array(Box::new(Type::Str))),
+            ],
+            Type::Str,
+        ),
+        (
+            "hex3",
+            vec![
+                ("s", Type::Str),
+                ("digits", Type::Array(Box::new(Type::Str))),
+            ],
+            Type::Str,
+        ),
+    ] {
+        let s = sig(params, ret);
+        m.insert(format!("std.colors.{name}"), s.clone());
+        m.insert(format!("colors.{name}"), s);
+    }
+
     // std.sqlz — SQLite foundation (CANONICAL module name).
     //
     // `open(path) -> db`, `exec(db, sql) -> int` (rows changed),
@@ -2621,7 +2716,13 @@ mod tests {
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
-        assert_eq!(funcs.len(), 448);
+        assert!(funcs.contains_key("std.colors.red"));
+        assert!(funcs.contains_key("std.colors.rgb"));
+        assert!(funcs.contains_key("std.colors.hex"));
+        assert!(funcs.contains_key("colors.red"));
+        assert!(funcs.contains_key("colors.bold"));
+        assert!(funcs.contains_key("colors.strip"));
+        assert_eq!(funcs.len(), 524);
     }
 
     #[test]

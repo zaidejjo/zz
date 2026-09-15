@@ -231,6 +231,27 @@ impl Session {
                         )),
                     };
                 }
+                // Mirror pure-ZZ Env bindings under the alias (e.g. `colors.red`
+                // → `cl.red` for `import std.colors as cl`). Natives are handled
+                // by register_module_namespace; pure-ZZ funcs live in Env.
+                let src_prefix = module.rsplit('.').next().unwrap_or(&module);
+                if ns != src_prefix {
+                    let snap = self.interp.env.borrow().flatten();
+                    let keys: Vec<(String, zz_runtime::Value)> = snap
+                        .into_iter()
+                        .filter(|(k, _)| {
+                            k == src_prefix || k.starts_with(&format!("{src_prefix}."))
+                        })
+                        .collect();
+                    for (k, v) in keys {
+                        let alias_key = if k == src_prefix {
+                            ns.clone()
+                        } else {
+                            format!("{ns}{}", &k[src_prefix.len()..])
+                        };
+                        self.interp.env.borrow_mut().define(&alias_key, v);
+                    }
+                }
             }
         }
 
