@@ -716,11 +716,16 @@ impl Lowerer {
             }
             Expr::Variant { name, arg, .. } => {
                 // `.ok(x)`, `.err(e)`, `.some(x)`, `.none`
+                // Payloads arrive as `zz_value`: box raw-scalar args
+                // (unboxed int/float/bool locals, literals, scalar
+                // arithmetic) so `zz_variant_ok(v1)` never receives a
+                // bare `int64_t`.
                 match name.as_str() {
                     "some" => {
                         if let Some(a) = arg {
                             let inner = self.emit_expr(a, names, out);
-                            format!("zz_variant_some({inner})")
+                            let boxed = box_scalar_operand(a, names, &inner);
+                            format!("zz_variant_some({boxed})")
                         } else {
                             "(zz_value){ZZ_OPTION_NONE, {0}}".to_string()
                         }
@@ -729,7 +734,8 @@ impl Lowerer {
                     "ok" => {
                         if let Some(a) = arg {
                             let inner = self.emit_expr(a, names, out);
-                            format!("zz_variant_ok({inner})")
+                            let boxed = box_scalar_operand(a, names, &inner);
+                            format!("zz_variant_ok({boxed})")
                         } else {
                             "(zz_value){ZZ_RESULT_OK, {0}}".to_string()
                         }
@@ -737,7 +743,8 @@ impl Lowerer {
                     "err" => {
                         if let Some(a) = arg {
                             let inner = self.emit_expr(a, names, out);
-                            format!("zz_variant_err({inner})")
+                            let boxed = box_scalar_operand(a, names, &inner);
+                            format!("zz_variant_err({boxed})")
                         } else {
                             "(zz_value){ZZ_RESULT_ERR, {0}}".to_string()
                         }
@@ -870,7 +877,7 @@ impl Lowerer {
                 drop(defs);
                 format!("zz_closure_make(zz_closure_{cid})")
             }
-            _ => "zz_unit()".to_string(),
+            Expr::Try { expr: inner, span } => self.emit_try(inner, *span, names, out),
         }
     }
 
@@ -923,6 +930,100 @@ impl Lowerer {
         o.push_str(&format!("    return {val};\n"));
         o.push_str("}\n");
         o
+    }
+
+    /// Lower `try inner` / `inner?`: unwrap Option/Result or early-return.
+    ///
+    /// Emission strategy (zero-overhead, mirrors the VM `TryOp` logic):
+    /// the inner value is hoisted into a `zz_value` temp; on the error
+    /// arm we `return` the converted error, otherwise the expression
+    /// evaluates to the unwrapped payload (`zz_match_some` / `zz_match_ok`).
+    ///
+    /// Conversion (`try_resolutions` with different source/target error
+    /// types) calls the checker's `convert_to_` impl as a direct C call:
+    /// impl methods go through the struct-pointer convention
+    /// (`zz_fn_T__convert_to_U(&err, NULL, 0)`), plain functions through
+    /// the args-array convention.
+    pub(super) fn emit_try(
+        &self,
+        inner: &Expr,
+        span: zz_frontend::span::Span,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        let inner_val = self.emit_expr(inner, names, out);
+        let inner_boxed = box_scalar_operand(inner, names, &inner_val);
+        let tmp = names.fresh("_try");
+        out.push_str(&format!("    zz_value {tmp} = {inner_boxed};\n"));
+
+        // Conversion target for this `try` site (`None` = identity).
+        let convert: Option<String> = self.tp.try_converts.get(&span).cloned().unwrap_or(None);
+
+        // Emit the early-return for a `Result` error payload held in `tmp`.
+        let emit_result_err_return = |out: &mut String, names: &mut NameCtx| {
+            if let Some(fname) = convert.clone() {
+                let err_tmp = names.fresh("_try_err");
+                let conv_tmp = names.fresh("_try_conv");
+                let cf = format!("zz_fn_{}", mangle(&fname));
+                let is_impl = self
+                    .tp
+                    .funcs
+                    .get(&fname)
+                    .and_then(|sig| sig.params.first().map(|(_, t)| t.clone()))
+                    .map(|t| matches!(&t, zz_checker::Type::Struct(_)))
+                    .unwrap_or(false);
+                out.push_str(&format!(
+                    "        zz_value {err_tmp} = zz_match_err({tmp});\n"
+                ));
+                if is_impl {
+                    out.push_str(&format!(
+                        "        zz_value {conv_tmp} = {cf}(&{err_tmp}, NULL, 0);\n"
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "        zz_value {conv_tmp} = {cf}((zz_value[]){{ {err_tmp} }}, 1);\n"
+                    ));
+                }
+                out.push_str(&format!("        return zz_variant_err({conv_tmp});\n"));
+            } else {
+                out.push_str(&format!("        return {tmp};\n"));
+            }
+        };
+
+        match self.tp.types.get(&inner.span()) {
+            Some(zz_checker::Type::Option(_)) => {
+                out.push_str(&format!("    if ({tmp}.tag == ZZ_OPTION_NONE) {{\n"));
+                out.push_str("        return (zz_value){ZZ_OPTION_NONE, {0}};\n");
+                out.push_str("    }\n");
+                format!("zz_match_some({tmp})")
+            }
+            Some(zz_checker::Type::Result(_, _)) => {
+                out.push_str(&format!("    if ({tmp}.tag == ZZ_RESULT_ERR) {{\n"));
+                emit_result_err_return(out, names);
+                out.push_str("    }\n");
+                format!("zz_match_ok({tmp})")
+            }
+            // Unresolved/dynamic operand: guard both tags. The error arm
+            // applies the conversion when one was resolved; otherwise the
+            // value is already the correct error variant to return as-is.
+            // The happy path dispatches on the runtime tag into a result
+            // temp (the checker rejects `?` on uninferred types, so this
+            // arm is defensive-only).
+            _ => {
+                out.push_str(&format!("    if ({tmp}.tag == ZZ_RESULT_ERR) {{\n"));
+                emit_result_err_return(out, names);
+                out.push_str("    }\n");
+                out.push_str(&format!("    if ({tmp}.tag == ZZ_OPTION_NONE) {{\n"));
+                out.push_str("        return (zz_value){ZZ_OPTION_NONE, {0}};\n");
+                out.push_str("    }\n");
+                let res_tmp = names.fresh("_try_ok");
+                out.push_str(&format!("    zz_value {res_tmp};\n"));
+                out.push_str(&format!(
+                    "    if ({tmp}.tag == ZZ_OPTION_SOME) {{ {res_tmp} = zz_match_some({tmp}); }} else {{ {res_tmp} = zz_match_ok({tmp}); }}\n"
+                ));
+                res_tmp
+            }
+        }
     }
 
     pub(super) fn emit_call(

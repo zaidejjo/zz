@@ -462,6 +462,13 @@ pub fn reachable(tp: &TypedProgram, entry_main: &str) -> ReachableSet {
     if tp.bindings.contains_key(entry_main) || tp.funcs.contains_key(entry_main) {
         roots.push(entry_main);
     }
+    // Keep implicit `try` conversion edges alive here too (see `dce`).
+    let converts: Vec<String> = tp.try_converts.values().filter_map(|o| o.clone()).collect();
+    for c in &converts {
+        if !roots.contains(&c.as_str()) {
+            roots.push(c.as_str());
+        }
+    }
     reachable_from(tp, &cg, &roots)
 }
 
@@ -533,6 +540,7 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
         bindings: tp.bindings.clone(),
         funcs: tp.funcs.clone(),
         structs: tp.structs.clone(),
+        try_converts: tp.try_converts.clone(),
     }
 }
 
@@ -543,6 +551,15 @@ pub fn dce(tp: &TypedProgram, entry_main: &str) -> (TypedProgram, ReachableSet) 
     let mut roots: Vec<&str> = vec![TOP];
     if tp.bindings.contains_key(entry_main) || tp.funcs.contains_key(entry_main) {
         roots.push(entry_main);
+    }
+    // `try` error conversions are implicit call edges (no `Call` node in
+    // the AST): seed every conversion target as a root so DCE keeps the
+    // `convert_to_` method and its transitive callees.
+    let converts: Vec<String> = tp.try_converts.values().filter_map(|o| o.clone()).collect();
+    for c in &converts {
+        if !roots.contains(&c.as_str()) {
+            roots.push(c.as_str());
+        }
     }
     let reach = reachable_from(tp, &cg, &roots);
     let pruned = prune_program(tp, &reach);

@@ -58,6 +58,11 @@ pub struct CheckResult {
     pub structs: HashMap<String, StructSig>,
     /// `try` site span → conversion impl span (`None` = identity).
     pub try_resolutions: HashMap<Span, Option<Span>>,
+    /// `try` site span → conversion function name (`None` = identity).
+    /// Resolved from `try_resolutions` + the `convert_to_` registry so
+    /// downstream passes (HIR, native codegen) can emit the conversion
+    /// call without re-deriving it. Mirrors `try_resolutions` 1:1.
+    pub try_converts: HashMap<Span, Option<String>>,
     /// Native libraries requested via `@link("lib")`, in source order, deduped.
     pub link_libs: Vec<String>,
     /// Top-level `const` bindings and their declaration spans. Used to seed
@@ -466,6 +471,33 @@ fn check_program_impl(
     let const_bindings: HashMap<String, Span> =
         checker.const_env.first().cloned().unwrap_or_default();
 
+    // Resolve each `try` site to its conversion function name so native
+    // codegen can emit the call directly. `try_resolutions` holds the impl
+    // span; join it against the `convert_to_` registries:
+    //   1. inherent `convert_impls` (span match → func_name),
+    //   2. extension methods (span match → `Type.method`),
+    //   3. anything else → identity (matches the checker's fallbacks).
+    let mut try_converts: HashMap<Span, Option<String>> = HashMap::new();
+    for (span, impl_span) in &checker.try_resolutions {
+        let func_name: Option<String> = match impl_span {
+            None => None,
+            Some(ispan) => {
+                if let Some(c) = checker.convert_impls.iter().find(|c| c.span == *ispan) {
+                    Some(c.func_name.clone())
+                } else if let Some(((tkey, mname), _)) = checker
+                    .ext_methods
+                    .iter()
+                    .find(|(_, (_, mspan))| *mspan == *ispan)
+                {
+                    Some(format!("{tkey}.{mname}"))
+                } else {
+                    None
+                }
+            }
+        };
+        try_converts.insert(*span, func_name);
+    }
+
     CheckerOutcome {
         result: CheckResult {
             errors: checker.errors,
@@ -473,6 +505,7 @@ fn check_program_impl(
             funcs: checker.funcs,
             structs: checker.structs,
             try_resolutions: checker.try_resolutions,
+            try_converts,
             link_libs: checker.link_libs,
             const_bindings,
             pub_bindings,

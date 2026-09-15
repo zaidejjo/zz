@@ -203,27 +203,6 @@ fn typed_program_for(
     }
     let main_key = format!("{entry_ns}.main");
     let (pruned, reach) = zz_hir::dce(&res.program, &main_key);
-    // `try`/`?` has no AOT lowering yet (codegen emits `unit` for unhandled
-    // nodes — a silent miscompile). Fail loudly here so `--native` never
-    // produces a wrong binary. VM (`zz run`) is the supported path.
-    // Follow-up: lower `Try` to early-return + conversion call in
-    // `zz_codegen/src/lower/expr.rs` (mirroring the VM `TryOp` logic).
-    let mut uses_try = false;
-    zz_hir::walk_exprs(&pruned, &mut |te| {
-        if matches!(te.expr, zz_frontend::ast::Expr::Try { .. }) {
-            uses_try = true;
-            false
-        } else {
-            true
-        }
-    });
-    if uses_try {
-        return Err(
-            "`try`/`?` is not yet supported in native builds (`zz build`, `zz run --native`)\n\
-             hint: run with the VM instead (`zz run <file>`); native `try` lowering is tracked future work"
-                .into(),
-        );
-    }
     Ok((pruned, reach, main_key))
 }
 

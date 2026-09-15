@@ -41,6 +41,10 @@ pub struct TypedProgram {
     pub funcs: HashMap<String, FuncSig>,
     /// Top-level struct signatures.
     pub structs: HashMap<String, StructSig>,
+    /// `try` site span → conversion function name (`None` = identity).
+    /// Mirrors the checker's `try_converts`; consulted by native codegen
+    /// to emit error-conversion calls on early return.
+    pub try_converts: HashMap<Span, Option<String>>,
 }
 
 /// Result of building a [`TypedProgram`]: the typed program plus any checker
@@ -69,6 +73,7 @@ pub fn build_program(
     let bindings = checked.bindings.clone();
     let funcs = checked.funcs.clone();
     let structs = checked.structs.clone();
+    let try_converts = checked.try_converts.clone();
     TypedResult {
         program: TypedProgram {
             program: expanded,
@@ -76,6 +81,7 @@ pub fn build_program(
             bindings,
             funcs,
             structs,
+            try_converts,
         },
         diagnostics: diags,
     }
