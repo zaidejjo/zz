@@ -122,12 +122,19 @@ fn check_program_impl(
     initial_structs: HashMap<String, StructSig>,
     initial_consts: HashMap<String, Span>,
 ) -> CheckerOutcome {
+    // Resolve explicit decorators first: `@dec func f` becomes `f__inner` +
+    // a same-signature wrapper, so all downstream passes see ordinary
+    // functions and calls. Idempotent — already-expanded programs pass
+    // through unchanged.
+    let (expanded, mut decorator_errors) = zz_frontend::decorators::expand_program(program);
+    let program = &expanded;
     let mut checker = Checker::new(
         initial_bindings,
         initial_funcs,
         initial_structs,
         initial_consts,
     );
+    checker.errors.append(&mut decorator_errors);
 
     // Track which items are pub (for cross-module export).
     let mut pub_bindings_set: std::collections::HashSet<String> = std::collections::HashSet::new();

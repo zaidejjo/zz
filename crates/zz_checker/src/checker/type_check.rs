@@ -1789,7 +1789,24 @@ impl Checker {
                     }
                 } else {
                     let at = self.check_expr(arg);
-                    if let Err(e) = self.unifier.unify(&at, &ps[i]) {
+                    let at = self.unifier.resolve(&at);
+                    let expected = self.unifier.resolve(&ps[i]);
+                    // A named function passed where a `func(...)` value is
+                    // expected (e.g. decorator application `dec(target)` or
+                    // HOFs like `map(xs, double)`): expand the signature so
+                    // structural unification applies instead of failing on
+                    // `Named` vs `Func`.
+                    let at = match (&at, &expected) {
+                        (Type::Named(n), Type::Func(_, _)) => match self.funcs.get(n).cloned() {
+                            Some(sig) => {
+                                let (sps, sret, _) = self.instantiate(&sig);
+                                Type::Func(sps, Box::new(sret))
+                            }
+                            None => at,
+                        },
+                        _ => at,
+                    };
+                    if let Err(e) = self.unifier.unify(&at, &expected) {
                         self.report_mismatch(e, arg.span());
                     }
                 }
