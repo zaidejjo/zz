@@ -1,0 +1,75 @@
+// E2E: std.colors — ANSI colors, styles, RGB/HEX, pipelines
+// 
+// Each feature prints its COLORED output (visible in a terminal) followed by
+// boolean assertions (`strip` recovers the visible text, equality checks pin
+// exact escape sequences).
+import std.colors
+import std.str
+
+// ── basic function form: red/green/blue print in color ──
+println(colors.red("HELLO"))
+println(colors.green("go"))
+println(colors.blue("sky"))
+println(colors.strip(colors.red("HELLO")) == "HELLO")
+println(colors.strip(colors.green("go")) == "go")
+println(colors.strip(colors.blue("sky")) == "sky")
+
+// ── pipeline form: piped value becomes first arg ──
+fail := "TEST FAIL" |> colors.red() |> colors.bold()
+println(fail)
+pass := "TEST PASS" |> colors.green() |> colors.bold()
+println(pass)
+println(colors.strip(fail) == "TEST FAIL")
+println(colors.strip(pass) == "TEST PASS")
+
+// ── styles print in color ──
+println(colors.bold("bold"))
+println(colors.dim("dim"))
+println(colors.italic("italic"))
+println(colors.underline("underline"))
+println(colors.bright_red("bright-red"))
+println(colors.bg_blue("bg-blue"))
+println(colors.strip(colors.bold("b")) == "b")
+println(colors.strip(colors.dim("d")) == "d")
+println(colors.strip(colors.italic("i")) == "i")
+println(colors.strip(colors.underline("u")) == "u")
+println(colors.strip(colors.bright_red("br")) == "br")
+println(colors.strip(colors.bg_blue("bg")) == "bg")
+
+// ── RGB prints in truecolor ──
+println(colors.rgb("rgb-orange", 255, 87, 51))
+println(colors.rgb("rgb-clamped", 300, 0 - 5, 128))
+println(colors.strip(colors.rgb("hi", 255, 87, 51)) == "hi")
+println(colors.strip(colors.rgb("clamped", 300, 0 - 5, 128)) == "clamped")
+
+// ── HEX prints in truecolor (long, short, no-hash) ──
+println(colors.hex("hex-long", "#FF5733"))
+println(colors.hex("hex-short", "#F53"))
+println(colors.hex("hex-nohash", "FF5733"))
+println(colors.strip(colors.hex("hi", "#FF5733")) == "hi")
+println(colors.strip(colors.hex("hi", "FF5733")) == "hi")
+println(colors.strip(colors.hex("hi", "#F53")) == "hi")
+
+// ── HEX fallback: bad input returns original ──
+println(colors.hex("hi", "zzz"))
+println(colors.hex("hi", "#12"))
+
+// ── HEX matches RGB for the same channels ──
+println(colors.hex("x", "#FF5733") == colors.rgb("x", 255, 87, 51))
+println(colors.hex("x", "FF5733") == colors.rgb("x", 255, 87, 51))
+println(colors.hex("x", "#F53") == colors.rgb("x", 255, 85, 51))
+
+// ── RGB clamps out-of-range channels ──
+println(colors.rgb("x", 300, 0 - 5, 128) == colors.rgb("x", 255, 0, 128))
+
+// ── styled output keeps reset terminator ──
+styled := colors.red("x")
+println(styled)
+println(str.ends_with(styled, "\e[0m"))
+
+// ── inline interpolation inside println ──
+ok_word := "ok"
+bad_word := "bad"
+println("status: {colors.green(ok_word)} and {colors.red(bad_word)}")
+
+println("colors_demo_ok")

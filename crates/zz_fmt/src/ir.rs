@@ -1299,13 +1299,15 @@ fn format_float(value: f64) -> String {
 }
 
 /// Re-escape a decoded string value so the emitted literal source matches
-/// the lexer's accepted escapes (`\n`, `\t`, `\r`, `\\`, `\"`, `\{`, `\}`).
-/// The parser stores decoded text; re-escaping keeps significant-token
-/// verification green and output parseable.
+/// the lexer's accepted escapes (`\n`, `\t`, `\r`, `\\`, `\"`, `\{`, `\}`,
+/// `\e`, `\xHH`). The parser stores decoded text; re-escaping keeps
+/// significant-token verification green and output parseable.
 ///
 /// `{` is always escaped: a literal `{` followed by an identifier character
 /// would otherwise re-lex as the start of an interpolation. `}` needs no
-/// escape — outside an interpolation it is always literal text.
+/// escape — outside an interpolation it is always literal text. Other C0
+/// control bytes (including ESC) use `\e` / `\xHH` so no raw control bytes
+/// ever land in formatted source.
 fn escape_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -1316,6 +1318,10 @@ fn escape_str(s: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
             '{' => out.push_str("\\{"),
+            '\x1b' => out.push_str("\\e"),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
             _ => out.push(c),
         }
     }
@@ -1334,6 +1340,10 @@ fn escape_str_triple(s: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
+            '\x1b' => out.push_str("\\e"),
+            c if (*c as u32) < 0x20 || (*c as u32) == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", *c as u32));
+            }
             '"' => {
                 let adjacent_quote =
                     (i > 0 && chars[i - 1] == '"') || (i + 1 < chars.len() && chars[i + 1] == '"');
