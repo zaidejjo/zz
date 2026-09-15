@@ -372,7 +372,16 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
             ))]
         };
         match interp.call(Value::Func(Box::new(fv)), call_args, span) {
-            Ok(_) => {}
+            Ok(v) => {
+                // `func main() -> Result<(), E>`: `Err(e)` prints to stderr
+                // and fails the run (exit 1). `Ok`/`Unit` are success.
+                if let Value::Result(r) = v {
+                    if let Err(e) = &*r {
+                        eprintln!("{e}");
+                        return Err("program failed".to_string());
+                    }
+                }
+            }
             Err(e) => {
                 // Render against the entry file's real source (entry is
                 // last in load order). An empty source would panic the

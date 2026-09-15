@@ -1096,9 +1096,21 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.emit_expr(e);
                 }
             }
-            Expr::Try { expr, .. } => {
-                self.emit_expr(expr);
-                self.text("?");
+            Expr::Try { expr, span } => {
+                // Preserve the source form: prefix `try <chain>` stays prefix
+                // (keeps `try a.b() + c` unambiguous), postfix `expr?` stays
+                // postfix. Both lower to the same node, so sniff the keyword.
+                let is_prefix = self
+                    .source
+                    .get(span.start as usize..)
+                    .is_some_and(|s| s.starts_with("try ") || s.starts_with("try("));
+                if is_prefix {
+                    self.text("try ");
+                    self.emit_expr(expr);
+                } else {
+                    self.emit_expr(expr);
+                    self.text("?");
+                }
             }
             Expr::Block(b) => {
                 self.text("{");

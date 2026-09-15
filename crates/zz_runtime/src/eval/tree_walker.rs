@@ -450,6 +450,69 @@ impl Interp {
         Err(EvalError::new(format!("undefined method `{method}`"), span))
     }
 
+    /// Receiver key for conversion lookup (`str`, `vec`, struct name, ...).
+    fn convert_recv_key(recv: &Value) -> Option<String> {
+        match recv {
+            Value::Str(_) => Some("str".to_string()),
+            Value::Array(_) => Some("vec".to_string()),
+            Value::Option(_) => Some("option".to_string()),
+            Value::Result(_) => Some("result".to_string()),
+            Value::Int(_) => Some("int".to_string()),
+            Value::Float(_) => Some("float".to_string()),
+            Value::Bool(_) => Some("bool".to_string()),
+            Value::Object(o) => Some(o.name.clone()),
+            _ => recv.method_namespace().map(str::to_string),
+        }
+    }
+
+    /// V1 `try` error conversion: single `Type.convert_to_*` candidate for the
+    /// error source type is called; zero candidates propagate unchanged.
+    fn try_convert_err(&mut self, err: Value, span: Span) -> Result<Value, EvalError> {
+        let Some(key) = Self::convert_recv_key(&err) else {
+            return Ok(err);
+        };
+        let prefix = format!("{key}.convert_to_");
+        let mut hits: Vec<(String, Value)> = Vec::new();
+        // Bare (same-module) keys first, then namespaced cross-module keys.
+        for (name, fv) in &self.funcs.clone() {
+            if name.starts_with(&prefix) {
+                hits.push((name.clone(), Value::Func(Box::new(fv.clone()))));
+            }
+        }
+        if hits.is_empty() {
+            // Cross-module structs register as `ns.Type.convert_to_X`.
+            let suffix = format!(".{prefix}");
+            for (name, fv) in &self.funcs.clone() {
+                if name.contains(&suffix)
+                    || name
+                        .split('.')
+                        .skip(1)
+                        .collect::<Vec<_>>()
+                        .join(".")
+                        .starts_with(&prefix)
+                {
+                    hits.push((name.clone(), Value::Func(Box::new(fv.clone()))));
+                }
+            }
+        }
+        match hits.len() {
+            0 => Ok(err),
+            1 => {
+                let (_, f) = hits.into_iter().next().unwrap();
+                self.call(f, vec![err], span)
+            }
+            // Checker rejects ambiguous converts at compile time; if one slips
+            // through (multi-module), fail loudly instead of picking randomly.
+            _ => Err(EvalError::new(
+                format!(
+                    "ambiguous conversion for error value ({} candidates)",
+                    hits.len()
+                ),
+                span,
+            )),
+        }
+    }
+
     fn write_back(&mut self, target: &Expr, new_value: Value) -> Result<(), EvalError> {
         match target {
             Expr::Ident { name, span } => {
@@ -768,7 +831,15 @@ impl Interp {
                     Value::Option(None) => Ok(Flow::Return(Value::Option(None))),
                     Value::Result(r) => match &*r {
                         Ok(inner) => Ok(Flow::Value(inner.clone())),
-                        Err(e) => Ok(Flow::Return(Value::Result(Box::new(Err(e.clone()))))),
+                        Err(e) => {
+                            // V1 error conversion: if the program defines a
+                            // single `convert_to_*` for this error source type,
+                            // call it; otherwise propagate unchanged (identity).
+                            // The checker guarantees at most one conversion per
+                            // source type, so single-candidate dispatch is sound.
+                            let converted = self.try_convert_err(e.clone(), *span)?;
+                            Ok(Flow::Return(Value::Result(Box::new(Err(converted)))))
+                        }
                     },
 
                     other => Err(EvalError::new(

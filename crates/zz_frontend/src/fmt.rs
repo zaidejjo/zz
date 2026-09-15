@@ -607,9 +607,17 @@ impl<'a> FmtCtx<'a> {
                 self.write_str("..");
                 self.fmt_expr(end, source);
             }
-            Expr::Try { expr, .. } => {
-                self.fmt_expr(expr, source);
-                self.write_str("?");
+            Expr::Try { expr, span } => {
+                let is_prefix = source
+                    .get(span.start as usize..)
+                    .is_some_and(|s| s.starts_with("try ") || s.starts_with("try("));
+                if is_prefix {
+                    self.write_str("try ");
+                    self.fmt_expr(expr, source);
+                } else {
+                    self.fmt_expr(expr, source);
+                    self.write_str("?");
+                }
             }
             Expr::Fmt { parts, .. } => {
                 self.write_str("\"");

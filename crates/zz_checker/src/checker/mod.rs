@@ -34,6 +34,19 @@ pub struct StructSig {
     pub fields: Vec<(String, Type)>,
 }
 
+/// Minimal error-conversion registration (V1, error-only — not a general trait system).
+/// Declared via `impl From { func convert_to_To(self) -> To { ... } }`.
+/// V1 rule: at most one conversion per source type (keeps runtime dispatch sound).
+#[derive(Debug, Clone)]
+pub struct ConvertImpl {
+    pub from: Type,
+    pub from_name: String,
+    pub to: Type,
+    pub to_name: String,
+    pub func_name: String,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone)]
 pub struct CheckResult {
     pub errors: Vec<RawDiag>,
@@ -43,6 +56,13 @@ pub struct CheckResult {
     pub funcs: HashMap<String, FuncSig>,
     /// Top-level struct definitions.
     pub structs: HashMap<String, StructSig>,
+    /// `try` site span → conversion impl span (`None` = identity).
+    pub try_resolutions: HashMap<Span, Option<Span>>,
+    /// `try` site span → conversion function name (`None` = identity).
+    /// Resolved from `try_resolutions` + the `convert_to_` registry so
+    /// downstream passes (HIR, native codegen) can emit the conversion
+    /// call without re-deriving it. Mirrors `try_resolutions` 1:1.
+    pub try_converts: HashMap<Span, Option<String>>,
     /// Native libraries requested via `@link("lib")`, in source order, deduped.
     pub link_libs: Vec<String>,
     /// Top-level `const` bindings and their declaration spans. Used to seed
@@ -169,12 +189,19 @@ fn check_program_impl(
     }
 
     // Pass 1b: register impl method signatures so method calls resolve.
-    // Impl methods are registered as `TypeName.method_name` functions with
-    // `self` typed as the struct type.
+    // Inherent (`impl KnownStruct`) → `funcs[Type.method]` (existing).
+    // Extension (`impl` on builtins or unknown/cross-module types) →
+    // `ext_methods[(TypeKey, method)]`, merged into `funcs` when no conflict.
+    // Priority downstream: inherent → extension → stdlib. Builtin-wins and
+    // orphan duplicates are compile errors here, not last-wins.
     let mut seen = HashMap::new();
     for stmt in &program.stmts {
         if let Stmt::Impl { name, methods, .. } = stmt {
             let type_name = name.join(".");
+            let is_known_struct = checker.structs.contains_key(&type_name);
+            let builtin_key = Checker::builtin_ext_key(&type_name);
+            let is_extension = builtin_key.is_some() || !is_known_struct;
+            let type_key = builtin_key.unwrap_or_else(|| type_name.clone());
             for method in methods {
                 if let Stmt::Func {
                     name: mname,
@@ -185,20 +212,24 @@ fn check_program_impl(
                     ..
                 } = method
                 {
-                    let full_name = format!("{}.{}", type_name, mname.join("."));
+                    let method_name = mname.join(".");
+                    let full_name = format!("{}.{}", type_key, method_name);
                     let gen_names: Vec<String> =
                         generics.iter().map(|g| g.name.name.clone()).collect();
                     let gen_bounds: Vec<(String, Vec<zz_frontend::ast::TraitBound>)> = generics
                         .iter()
                         .map(|g| (g.name.name.clone(), g.bounds.clone()))
                         .collect();
-                    // Build params, replacing `self` with the struct type
+                    // Build params, replacing `self` with the receiver type
+                    // (builtin mapped, else struct by name).
+                    let self_ty =
+                        Checker::self_type_for_impl(&type_name, &type_key, &mut checker.unifier);
                     let sig_params: Vec<(String, Type)> = params
                         .iter()
                         .enumerate()
                         .map(|(i, p)| {
                             let ty = if i == 0 && p.name.name == "self" {
-                                Type::Struct(type_name.clone())
+                                self_ty.clone()
                             } else {
                                 match &p.ty {
                                     Some(t) => checker.ast_to_type(t, &gen_names),
@@ -214,6 +245,56 @@ fn check_program_impl(
                         Some(t) => checker.ast_to_type(t, &gen_names),
                         None => checker.unifier.fresh_var(),
                     };
+                    let sig = crate::checker::FuncSig {
+                        generics: gen_names,
+                        bounds: gen_bounds,
+                        params: sig_params,
+                        has_default,
+                        ret: sig_ret.clone(),
+                        is_extern: false,
+                    };
+                    // `convert_to_X` methods double as error-conversion impls.
+                    if let Some(to_name) = method_name.strip_prefix("convert_to_") {
+                        if to_name.is_empty() {
+                            checker.errors.push(zz_frontend::diag::error_at(
+                                "`convert_to_` must name a target type (e.g. `convert_to_MyErr`)",
+                                method.span(),
+                            ));
+                        } else if matches!(sig_ret, Type::Var(_)) {
+                            checker.errors.push(zz_frontend::diag::error_at(
+                                "conversion method must declare an explicit return type",
+                                method.span(),
+                            ));
+                        } else if let Some(prev) = checker
+                            .convert_impls
+                            .iter()
+                            .find(|c| c.from_name == type_key)
+                        {
+                            // V1: one conversion per source type (covers the
+                            // spec's same-pair ambiguity and keeps runtime
+                            // single-candidate dispatch sound).
+                            checker.errors.push(zz_frontend::diag::error_at(
+                                format!(
+                                    "ambiguous conversion from `{}`: already converts to `{}`",
+                                    type_key, prev.to_name
+                                ),
+                                method.span(),
+                            ));
+                            checker.errors.push(zz_frontend::diag::error_at(
+                                "previous conversion here",
+                                prev.span,
+                            ));
+                        } else {
+                            checker.convert_impls.push(ConvertImpl {
+                                from: self_ty.clone(),
+                                from_name: type_key.clone(),
+                                to: sig_ret.clone(),
+                                to_name: to_name.to_string(),
+                                func_name: full_name.clone(),
+                                span: method.span(),
+                            });
+                        }
+                    }
                     if let Some(prev) = seen.insert(full_name.clone(), method.span()) {
                         checker.errors.push(zz_frontend::diag::error_at(
                             format!("duplicate definition of method `{}`", full_name),
@@ -223,18 +304,53 @@ fn check_program_impl(
                             "previous definition here",
                             prev,
                         ));
+                        continue;
                     }
-                    checker.funcs.insert(
-                        full_name.clone(),
-                        crate::checker::FuncSig {
-                            generics: gen_names,
-                            bounds: gen_bounds,
-                            params: sig_params,
-                            has_default,
-                            ret: sig_ret,
-                            is_extern: false,
-                        },
-                    );
+                    if !is_extension {
+                        // Inherent methods keep historical last-wins across
+                        // modules (pure-ZZ stdlib defines e.g. `Regexp.new`
+                        // in more than one source); within-module duplicates
+                        // are still rejected via `seen` above.
+                        checker.funcs.insert(full_name.clone(), sig);
+                    } else {
+                        // Builtin-wins: an extension colliding with an existing
+                        // inherent/stdlib method is an error naming the origin.
+                        if checker.funcs.contains_key(&full_name) {
+                            let origin = if Checker::is_stdlib_method(&full_name) {
+                                "defined in the standard library"
+                            } else {
+                                "already defined in another module (orphan rule: same (Type, method) in two modules)"
+                            };
+                            checker.errors.push(zz_frontend::diag::error_at(
+                                format!(
+                                    "extension method `{}` conflicts with an existing method {}",
+                                    full_name, origin
+                                ),
+                                method.span(),
+                            ));
+                            continue;
+                        }
+                        if let Some((_, prev_span)) = checker
+                            .ext_methods
+                            .get(&(type_key.clone(), method_name.clone()))
+                        {
+                            checker.errors.push(zz_frontend::diag::error_at(
+                                format!("duplicate extension method `{}` (orphan rule)", full_name),
+                                method.span(),
+                            ));
+                            checker.errors.push(zz_frontend::diag::error_at(
+                                "previous definition here",
+                                *prev_span,
+                            ));
+                            continue;
+                        }
+                        checker.ext_methods.insert(
+                            (type_key.clone(), method_name.clone()),
+                            (sig.clone(), method.span()),
+                        );
+                        // Merge so HIR/callgraph/codegen/runtime resolve it.
+                        checker.funcs.insert(full_name.clone(), sig);
+                    }
                     // Only `pub` methods are visible cross-module. `pub impl`
                     // is rejected by the parser, so `pub` goes on the method.
                     if *m_pub {
@@ -355,12 +471,41 @@ fn check_program_impl(
     let const_bindings: HashMap<String, Span> =
         checker.const_env.first().cloned().unwrap_or_default();
 
+    // Resolve each `try` site to its conversion function name so native
+    // codegen can emit the call directly. `try_resolutions` holds the impl
+    // span; join it against the `convert_to_` registries:
+    //   1. inherent `convert_impls` (span match → func_name),
+    //   2. extension methods (span match → `Type.method`),
+    //   3. anything else → identity (matches the checker's fallbacks).
+    let mut try_converts: HashMap<Span, Option<String>> = HashMap::new();
+    for (span, impl_span) in &checker.try_resolutions {
+        let func_name: Option<String> = match impl_span {
+            None => None,
+            Some(ispan) => {
+                if let Some(c) = checker.convert_impls.iter().find(|c| c.span == *ispan) {
+                    Some(c.func_name.clone())
+                } else if let Some(((tkey, mname), _)) = checker
+                    .ext_methods
+                    .iter()
+                    .find(|(_, (_, mspan))| *mspan == *ispan)
+                {
+                    Some(format!("{tkey}.{mname}"))
+                } else {
+                    None
+                }
+            }
+        };
+        try_converts.insert(*span, func_name);
+    }
+
     CheckerOutcome {
         result: CheckResult {
             errors: checker.errors,
             bindings,
             funcs: checker.funcs,
             structs: checker.structs,
+            try_resolutions: checker.try_resolutions,
+            try_converts,
             link_libs: checker.link_libs,
             const_bindings,
             pub_bindings,
@@ -383,6 +528,15 @@ pub(crate) struct Checker {
     pub(crate) errors: Vec<zz_frontend::diag::RawDiag>,
     pub(crate) funcs: HashMap<String, FuncSig>,
     pub(crate) structs: HashMap<String, StructSig>,
+    /// Extension methods (separate table): (TypeName, method) → (sig, def span).
+    /// Holds `impl` on builtins and cross-type extensions. Lookup priority:
+    /// inherent (`funcs`) → extension (here) → stdlib namespace.
+    pub(crate) ext_methods: HashMap<(String, String), (FuncSig, Span)>,
+    /// Minimal `convert_to_` registry for `try` error conversion.
+    pub(crate) convert_impls: Vec<ConvertImpl>,
+    /// `try` site span → convert impl span (`None` = identity, no conversion).
+    /// Consumed by LSP hover to show the resolved conversion.
+    pub(crate) try_resolutions: HashMap<Span, Option<Span>>,
     pub(crate) env: Vec<HashMap<String, Type>>,
     /// Names declared `const` in each scope, mapped to their declaration
     /// span (for the "defined as immutable here" secondary label). Parallel
@@ -431,6 +585,9 @@ impl Checker {
             errors: Vec::new(),
             funcs,
             structs,
+            ext_methods: HashMap::new(),
+            convert_impls: Vec::new(),
+            try_resolutions: HashMap::new(),
             env,
             const_env: vec![initial_consts],
             new_bindings: HashMap::new(),
@@ -453,6 +610,86 @@ impl Checker {
         match stmt {
             Stmt::Func { name, .. } => name.join("."),
             _ => unreachable!(),
+        }
+    }
+
+    /// Canonical extension key for builtin receiver names.
+    /// `str`→`str`, `Array`/`vec`→`vec`, `Option`/`option`→`option`,
+    /// `Result`/`result`→`result`, scalars map to themselves.
+    pub(crate) fn builtin_ext_key(type_name: &str) -> Option<String> {
+        match type_name {
+            "str" => Some("str".to_string()),
+            "int" => Some("int".to_string()),
+            "float" => Some("float".to_string()),
+            "bool" => Some("bool".to_string()),
+            "vec" | "Array" => Some("vec".to_string()),
+            "option" | "Option" => Some("option".to_string()),
+            "result" | "Result" => Some("result".to_string()),
+            _ => None,
+        }
+    }
+
+    /// Receiver type for `self` in an `impl` block.
+    pub(crate) fn self_type_for_impl(
+        type_name: &str,
+        type_key: &str,
+        unifier: &mut crate::unify::Unifier,
+    ) -> Type {
+        match type_key {
+            "str" => Type::Str,
+            "int" => Type::Int,
+            "float" => Type::Float,
+            "bool" => Type::Bool,
+            "vec" => Type::Array(Box::new(unifier.fresh_var())),
+            "option" => Type::Option(Box::new(unifier.fresh_var())),
+            "result" => Type::Result(Box::new(unifier.fresh_var()), Box::new(unifier.fresh_var())),
+            _ => Type::Struct(type_name.to_string()),
+        }
+    }
+
+    /// True when `Type.method` is a stdlib-provided builtin (builtin-wins).
+    /// The namespace list mirrors `STDLIB_MODULES` in `zz_stdlib/src/lib.rs`
+    /// plus the method-dispatch namespaces used by `check_call`
+    /// (`option`/`result`/`net`/`db`) — i.e. every namespace whose `ns.method`
+    /// keys can arrive via the seeded `funcs` map. Collision *coverage* does
+    /// not depend on this list (any seeded `funcs` key collides); this only
+    /// decides the message wording (stdlib vs another module).
+    pub(crate) fn is_stdlib_method(full_name: &str) -> bool {
+        if let Some((ns, _)) = full_name.rsplit_once('.') {
+            // Strip a leading `std.` (`std.str.length` → `str`) and compare
+            // the first segment (`sqlz.postgres.query` → `sqlz`).
+            let short = ns.strip_prefix("std.").unwrap_or(ns);
+            let head = short.split('.').next().unwrap_or(short);
+            let head = head.to_lowercase();
+            matches!(
+                head.as_str(),
+                "io" | "str"
+                    | "vec"
+                    | "json"
+                    | "http"
+                    | "fs"
+                    | "env"
+                    | "math"
+                    | "time"
+                    | "encoding"
+                    | "net"
+                    | "chan"
+                    | "task"
+                    | "regexp"
+                    | "regex"
+                    | "crypto"
+                    | "log"
+                    | "sys"
+                    | "args"
+                    | "process"
+                    | "uuid"
+                    | "sqlz"
+                    | "db"
+                    | "option"
+                    | "result"
+            )
+        } else {
+            false
         }
     }
 }

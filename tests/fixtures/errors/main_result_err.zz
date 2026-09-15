@@ -1,0 +1,4 @@
+// `func main() -> Result<T, E>` failure path — Err prints to stderr, exit 1.
+func main() -> Result<int, str> {
+    .err("boom from main")
+}

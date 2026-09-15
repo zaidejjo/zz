@@ -164,8 +164,53 @@ fn dot_access_completions(
 
     // 1. Try struct field access (existing logic).
     let obj_type = resolve_obj_type(program, cr, obj_name);
-    let struct_name = match obj_type {
+    let struct_name = match obj_type.clone() {
         Some(Type::Struct(name)) => name,
+        Some(other) => {
+            // Receiver-typed method completions (`str.`, `vec.`, scalar ext
+            // methods, ...): list `ns.method` entries from the merged funcs
+            // table (inherent → extension → stdlib).
+            let nss = match &other {
+                Type::Str => vec!["str"],
+                Type::Array(_) => vec!["vec"],
+                Type::Option(_) => vec!["option"],
+                Type::Result(_, _) => vec!["result"],
+                Type::Int => vec!["int"],
+                Type::Float => vec!["float"],
+                Type::Bool => vec!["bool"],
+                Type::Response | Type::HttpServer => vec!["http"],
+                Type::TcpStream | Type::TcpListener => vec!["net"],
+                Type::Json => vec!["json"],
+                Type::Db => vec!["sqlz", "db"],
+                Type::Chan => vec!["chan"],
+                _ => vec![],
+            };
+            let mut items: Vec<CompletionItem> = Vec::new();
+            for ns in nss {
+                let prefix = format!("{ns}.");
+                for k in cr.funcs.keys() {
+                    if let Some(m) = k.strip_prefix(&prefix) {
+                        if m.starts_with(partial_prefix) && !m.contains('.') {
+                            items.push(CompletionItem {
+                                label: m.to_string(),
+                                kind: Some(CompletionItemKind::METHOD),
+                                detail: Some(format!("{ns}.{m}")),
+                                insert_text: Some(m.to_string()),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+            }
+            if !items.is_empty() {
+                items.sort_by(|a, b| a.label.cmp(&b.label));
+                items.dedup_by(|a, b| a.label == b.label);
+                return items;
+            }
+            // 2. Not a struct — check if obj_name is an imported stdlib module
+            //    alias (e.g. `math` after `import std.math as math`).
+            return stdlib_module_completions(program, cr, obj_name, partial_prefix);
+        }
         _ => {
             // 2. Not a struct — check if obj_name is an imported stdlib module
             //    alias (e.g. `math` after `import std.math as math`).
@@ -178,7 +223,8 @@ fn dot_access_completions(
         None => return Vec::new(),
     };
 
-    sig.fields
+    let mut items: Vec<CompletionItem> = sig
+        .fields
         .iter()
         .filter(|(fname, _)| fname.starts_with(partial_prefix))
         .map(|(fname, fty)| CompletionItem {
@@ -188,7 +234,24 @@ fn dot_access_completions(
             insert_text: Some(fname.clone()),
             ..Default::default()
         })
-        .collect()
+        .collect();
+    // Struct methods (inherent + extensions, merged in `funcs`).
+    let prefix = format!("{struct_name}.");
+    for k in cr.funcs.keys() {
+        if let Some(m) = k.strip_prefix(&prefix) {
+            if m.starts_with(partial_prefix) && !m.contains('.') {
+                items.push(CompletionItem {
+                    label: m.to_string(),
+                    kind: Some(CompletionItemKind::METHOD),
+                    detail: Some(format!("{struct_name}.{m}")),
+                    insert_text: Some(m.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
 }
 
 /// Provide completions for stdlib module access (`math.`, `str.`, etc.).

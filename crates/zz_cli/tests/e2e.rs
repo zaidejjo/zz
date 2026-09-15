@@ -156,6 +156,12 @@ e2e_success_test!(
 e2e_success_test!(e2e_syntax_struct_impl, "syntax", "struct_impl.zz");
 e2e_success_test!(e2e_syntax_function_types, "syntax", "function_types.zz");
 e2e_success_test!(e2e_syntax_decorators, "syntax", "decorators.zz");
+e2e_success_test!(
+    e2e_syntax_extension_methods,
+    "syntax",
+    "extension_methods.zz"
+);
+e2e_success_test!(e2e_syntax_main_result, "syntax", "main_result.zz");
 
 // Type fixtures
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
@@ -163,6 +169,8 @@ e2e_success_test!(e2e_types_generics, "types", "generics.zz");
 e2e_success_test!(e2e_types_generic_bounds, "types", "generic_bounds.zz");
 e2e_success_test!(e2e_types_variants, "types", "variants.zz");
 e2e_success_test!(e2e_types_type_inference, "types", "type_inference.zz");
+e2e_success_test!(e2e_types_smart_try, "types", "smart_try.zz");
+e2e_success_test!(e2e_types_smart_try_convert, "types", "smart_try_convert.zz");
 
 // Stdlib fixtures
 e2e_success_test!(e2e_stdlib_strings, "stdlib", "strings.zz");
@@ -279,6 +287,14 @@ e2e_error_test!(e2e_err_generic_unbound, "generic_unbound.zz");
 e2e_error_test!(e2e_err_pg_connect_refused, "pg_connect_refused.zz");
 e2e_error_test!(e2e_err_mysql_connect_refused, "mysql_connect_refused.zz");
 e2e_error_test!(e2e_err_decorator_mismatch, "decorator_mismatch.zz");
+e2e_error_test!(e2e_err_try_outside_result, "try_outside_result.zz");
+e2e_error_test!(e2e_err_try_no_convert, "try_no_convert.zz");
+e2e_error_test!(e2e_err_try_ambiguous_convert, "try_ambiguous_convert.zz");
+e2e_error_test!(e2e_err_try_closure_no_annot, "try_closure_no_annot.zz");
+e2e_error_test!(e2e_err_ext_orphan_dup, "ext_orphan_dup.zz");
+e2e_error_test!(e2e_err_ext_builtin_collision, "ext_builtin_collision.zz");
+e2e_error_test!(e2e_err_main_result_err, "main_result_err.zz");
+e2e_error_test!(e2e_err_try_double_unwrap, "try_double_unwrap.zz");
 
 // ---------------------------------------------------------------------------
 // Eval tests: inline code via `zz eval`

@@ -90,6 +90,28 @@ pub(crate) async fn handle_hover(backend: &Backend, params: HoverParams) -> Resu
 
     let offset = doc.line_index.position_to_offset(&doc.source, pos);
     let node = crate::lookup::find_node_at(program, &doc.source, offset);
+
+    // Hover on `?` / `try`: show the resolved error conversion (identity vs
+    // `convert_to_` impl). `try_resolutions` is keyed by the `Try` span.
+    if let Some(Expr::Try { span, .. }) = node.expr {
+        if let Some(res) = check_result.try_resolutions.get(span) {
+            let contents = match res {
+                None => "**`try`**: identity conversion (same error type, zero-cost)".to_string(),
+                Some(impl_span) => format!(
+                    "**`try`**: converts via `convert_to_` impl defined at offset {}",
+                    impl_span.start
+                ),
+            };
+            return Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: contents,
+                }),
+                range: None,
+            }));
+        }
+    }
+
     let name = match &node.name {
         Some(n) => n.clone(),
         None => return Ok(None),

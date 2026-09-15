@@ -500,7 +500,7 @@ fn try_on_plain_int_errors() {
 fn try_error_type_mismatch() {
     errors_contain(
         "func a() -> Result<int, str> { .ok(1) }\nfunc b() -> Result<int, int> { x := a()?; .ok(x) }",
-        "type mismatch",
+        "no conversion path",
     );
 }
 
