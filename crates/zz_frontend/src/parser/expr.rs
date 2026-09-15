@@ -239,6 +239,20 @@ impl Parser {
     }
 
     pub(crate) fn parse_unary(&mut self) -> Expr {
+        // Prefix `try <postfix-chain>` — sugar for postfix `?`.
+        // `try a.b().c()` = `Try(a.b().c())`; `try a.b() + c` = `Try(a.b()) + c`
+        // because we only consume one postfix chain here.
+        // `try try x` nests via recursion. Bare `try` as identifier (followed
+        // by a terminator) still parses as `Ident` to avoid breaking existing code.
+        if self.at_ident("try") && !self.try_is_bare_ident() {
+            let try_tok = self.advance();
+            let inner = self.parse_unary();
+            let span = try_tok.span.join(inner.span());
+            return Expr::Try {
+                expr: Box::new(inner),
+                span,
+            };
+        }
         let op = match self.peek_kind() {
             TokenKind::Minus => UnOp::Neg,
             TokenKind::Plus => UnOp::Pos,
@@ -349,6 +363,21 @@ impl Parser {
             }
         }
         expr
+    }
+
+    /// `try` followed by a terminator is a plain identifier, not the prefix operator.
+    fn try_is_bare_ident(&self) -> bool {
+        matches!(
+            self.peek_kind_at(1),
+            TokenKind::Eof
+                | TokenKind::StmtEnd
+                | TokenKind::RParen
+                | TokenKind::RBracket
+                | TokenKind::RBrace
+                | TokenKind::Comma
+                | TokenKind::Colon
+                | TokenKind::Arrow
+        )
     }
 
     #[allow(dead_code)]

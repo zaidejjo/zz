@@ -154,7 +154,8 @@ pub enum Expr {
         els: Option<Box<Expr>>,
         span: Span,
     },
-    /// Postfix `?`: unwrap Option/Result or propagate.
+    /// `?` postfix or prefix `try <postfix-chain>`: unwrap Option/Result or propagate.
+    /// `try a.b().c()` = whole chain; `try a.b() + c` = only `a.b()`.
     Try {
         expr: Box<Expr>,
         span: Span,

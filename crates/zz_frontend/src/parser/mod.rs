@@ -30,7 +30,12 @@
 //! relational     := additive (('<'|'>'|'<='|'>=') additive)*
 //! additive       := multiplicative (('+'|'-') multiplicative)*
 //! multiplicative := unary (('*'|'/'|'%') unary)*
-//! unary          := ('-'|'+'|'!') unary | postfix
+//! unary          := 'try' unary | ('-'|'+'|'!') unary | postfix
+//!                // 'try' binds one postfix chain:
+//!                // `try a.b().c()` = try(a.b().c())
+//!                // `try a.b() + c` = try(a.b()) + c
+//!                // `try f()?` = try(try(f())) — postfix `?` binds tighter,
+//!                // so redundant double-unwrap is a *type* error, not special syntax
 //! postfix        := primary (call | '?' | '.' IDENT | '[' expr (':' expr)? ']')*
 //! primary        := literal | IDENT | '(' expr ')' | '[' expr_list ']' | dict_or_block
 //!                | closure | 'if' | 'while' | 'match' | '.' variant

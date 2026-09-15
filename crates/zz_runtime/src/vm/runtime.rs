@@ -75,6 +75,10 @@ pub struct Vm {
     /// value and remaining deferred closures. `None` when not in a defer-
     /// execution sequence.
     defer_return: Option<DeferReturn>,
+    /// Frame depths (frames.len() after push) of pending `try` error-conversion
+    /// calls. When such a frame returns, the value is wrapped in `Err` and the
+    /// *caller* frame unwinds (early return) instead of continuing.
+    try_convert_depths: Vec<usize>,
 }
 
 /// State saved during defer-before-return execution.
@@ -105,6 +109,7 @@ impl Vm {
             loops: Vec::new(),
             defer_stack: Vec::new(),
             defer_return: None,
+            try_convert_depths: Vec::new(),
         }
     }
 
@@ -230,6 +235,23 @@ impl Vm {
                     } else {
                         let saved = std::mem::take(&mut self.defer_return).unwrap();
                         self.defer_stack = saved.parent_defers;
+                        // A `try`-conversion frame finishing its defers: wrap
+                        // in `Err` and unwind the caller.
+                        if self.try_convert_depths.last() == Some(&self.frames.len())
+                            && !self.frames.is_empty()
+                        {
+                            self.try_convert_depths.pop();
+                            match self.unwind_frame(
+                                Flow::Return(Value::Result(Box::new(Err(saved.return_value)))),
+                                interp,
+                            ) {
+                                Unwind::Continue => {}
+                                Unwind::Escaped(flow) => return Ok(flow),
+                                Unwind::Error(e) => return Err(e),
+                            }
+                            re_cache!();
+                            continue;
+                        }
                         if saved.from_return {
                             match self.unwind_frame(Flow::Return(saved.return_value), interp) {
                                 Unwind::Continue => {}
@@ -261,6 +283,19 @@ impl Vm {
                 }
 
                 self.defer_stack = parent_defers;
+
+                // Implicit chunk-end return of a `try`-conversion frame: the
+                // frame was already popped above, so its depth is len()+1.
+                if self.try_convert_depths.last() == Some(&(self.frames.len() + 1)) {
+                    self.try_convert_depths.pop();
+                    match self.unwind_frame(Flow::Return(Value::Result(Box::new(Err(v)))), interp) {
+                        Unwind::Continue => {}
+                        Unwind::Escaped(flow) => return Ok(flow),
+                        Unwind::Error(e) => return Err(e),
+                    }
+                    re_cache!();
+                    continue;
+                }
 
                 if self.frames.is_empty() {
                     return Ok(Flow::Value(v));
@@ -664,6 +699,22 @@ impl Vm {
                     let v = self.stack.pop().unwrap();
                     let defers: Vec<Value> = self.defer_stack.drain(..).collect();
                     if defers.is_empty() {
+                        // A `try`-conversion call returns here (no defers of its
+                        // own): wrap in `Err` and unwind the caller instead of
+                        // continuing. With defers, the flag stays set and the
+                        // defer-completion path wraps after they run.
+                        if self.pop_try_convert_flag() {
+                            match self
+                                .unwind_frame(Flow::Return(Value::Result(Box::new(Err(v)))), interp)
+                            {
+                                Unwind::Continue => {
+                                    re_cache!();
+                                }
+                                Unwind::Escaped(flow) => return Ok(flow),
+                                Unwind::Error(e) => return Err(e),
+                            }
+                            continue;
+                        }
                         match self.unwind_frame(Flow::Return(v), interp) {
                             Unwind::Continue => {
                                 re_cache!();
@@ -1168,15 +1219,63 @@ impl Vm {
                         Value::Result(r) => match &*r {
                             Ok(inner) => self.stack.push(inner.clone()),
                             Err(e) => {
-                                match self.unwind_frame(
-                                    Flow::Return(Value::Result(Box::new(Err(e.clone())))),
-                                    interp,
-                                ) {
-                                    Unwind::Continue => {
-                                        re_cache!();
+                                // V1 conversion: single `convert_to_*` candidate
+                                // for the error source type is called; the flag
+                                // makes its return unwind as `Err` (see Return).
+                                let conv = self.find_convert_name(e, interp);
+                                match conv {
+                                    None => match self.unwind_frame(
+                                        Flow::Return(Value::Result(Box::new(Err(e.clone())))),
+                                        interp,
+                                    ) {
+                                        Unwind::Continue => {
+                                            re_cache!();
+                                        }
+                                        Unwind::Escaped(flow) => return Ok(flow),
+                                        Unwind::Error(err) => return Err(err),
+                                    },
+                                    Some(fname) => {
+                                        let Some(fv) = interp.funcs.get(&fname).cloned() else {
+                                            match self.unwind_frame(
+                                                Flow::Return(Value::Result(Box::new(Err(
+                                                    e.clone()
+                                                )))),
+                                                interp,
+                                            ) {
+                                                Unwind::Continue => {
+                                                    re_cache!();
+                                                }
+                                                Unwind::Escaped(flow) => return Ok(flow),
+                                                Unwind::Error(err) => return Err(err),
+                                            }
+                                            continue;
+                                        };
+                                        let span_c = *span;
+                                        let err_c = e.clone();
+                                        if fv.chunk.is_some() {
+                                            self.frames.last_mut().unwrap().ip = ip;
+                                            let callee = Value::Func(Box::new(fv));
+                                            self.call_value(callee, vec![err_c], span_c, interp)?;
+                                            self.try_convert_depths.push(self.frames.len());
+                                            re_cache!();
+                                        } else {
+                                            let callee = Value::Func(Box::new(fv));
+                                            let converted =
+                                                interp.call(callee, vec![err_c], span_c)?;
+                                            match self.unwind_frame(
+                                                Flow::Return(Value::Result(Box::new(Err(
+                                                    converted,
+                                                )))),
+                                                interp,
+                                            ) {
+                                                Unwind::Continue => {
+                                                    re_cache!();
+                                                }
+                                                Unwind::Escaped(flow) => return Ok(flow),
+                                                Unwind::Error(err) => return Err(err),
+                                            }
+                                        }
                                     }
-                                    Unwind::Escaped(flow) => return Ok(flow),
-                                    Unwind::Error(err) => return Err(err),
                                 }
                             }
                         },
@@ -1495,6 +1594,58 @@ impl Vm {
                 self.stack.push(result);
                 Ok(())
             }
+        }
+    }
+
+    /// Receiver key for `try` conversion lookup (mirrors tree-walker).
+    fn convert_recv_key(recv: &Value) -> Option<String> {
+        match recv {
+            Value::Str(_) => Some("str".to_string()),
+            Value::Array(_) => Some("vec".to_string()),
+            Value::Option(_) => Some("option".to_string()),
+            Value::Result(_) => Some("result".to_string()),
+            Value::Int(_) => Some("int".to_string()),
+            Value::Float(_) => Some("float".to_string()),
+            Value::Bool(_) => Some("bool".to_string()),
+            Value::Object(o) => Some(o.name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Single `Type.convert_to_*` candidate for an error value, if any.
+    /// Returns the function name; the caller resolves it to a `Value`.
+    fn find_convert_name(&self, err: &Value, interp: &Interp) -> Option<String> {
+        let key = Self::convert_recv_key(err)?;
+        let prefix = format!("{key}.convert_to_");
+        let mut hits: Vec<String> = interp
+            .funcs
+            .keys()
+            .filter(|n| n.starts_with(&prefix))
+            .cloned()
+            .collect();
+        if hits.is_empty() {
+            let suffix = format!(".{prefix}");
+            hits = interp
+                .funcs
+                .keys()
+                .filter(|n| n.contains(&suffix))
+                .cloned()
+                .collect();
+        }
+        if hits.len() == 1 {
+            hits.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    /// True when the current frame return belongs to a pending `try` conversion.
+    fn pop_try_convert_flag(&mut self) -> bool {
+        if self.try_convert_depths.last() == Some(&self.frames.len()) {
+            self.try_convert_depths.pop();
+            true
+        } else {
+            false
         }
     }
 

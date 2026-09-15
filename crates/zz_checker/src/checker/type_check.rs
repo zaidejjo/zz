@@ -608,6 +608,9 @@ impl Checker {
                             Type::Array(_) => Some("vec"),
                             Type::Option(_) => Some("option"),
                             Type::Result(_, _) => Some("result"),
+                            Type::Int => Some("int"),
+                            Type::Float => Some("float"),
+                            Type::Bool => Some("bool"),
                             _ => None,
                         };
                         if let Some(ns) = ns {
@@ -1235,6 +1238,11 @@ impl Checker {
                         Type::Result(_, _) => {
                             sig = self.funcs.get(&format!("result.{method}")).cloned()
                         }
+                        // Scalar extensions (`impl int/float/bool`) live in
+                        // the same merged table; no stdlib namespace here.
+                        Type::Int => sig = self.funcs.get(&format!("int.{method}")).cloned(),
+                        Type::Float => sig = self.funcs.get(&format!("float.{method}")).cloned(),
+                        Type::Bool => sig = self.funcs.get(&format!("bool.{method}")).cloned(),
                         Type::Response => sig = self.funcs.get(&format!("http.{method}")).cloned(),
                         Type::TcpStream => sig = self.funcs.get(&format!("net.{method}")).cloned(),
                         Type::TcpListener => {
@@ -1511,6 +1519,15 @@ impl Checker {
                         }
                         Type::Result(_, _) => {
                             sig = self.funcs.get(&format!("result.{method}")).cloned();
+                        }
+                        Type::Int => {
+                            sig = self.funcs.get(&format!("int.{method}")).cloned();
+                        }
+                        Type::Float => {
+                            sig = self.funcs.get(&format!("float.{method}")).cloned();
+                        }
+                        Type::Bool => {
+                            sig = self.funcs.get(&format!("bool.{method}")).cloned();
                         }
                         Type::Response => {
                             sig = self.funcs.get(&format!("http.{method}")).cloned();
@@ -1927,6 +1944,14 @@ impl Checker {
             ptypes.push(ty);
         }
         // Allow `return` inside closures — same semantics as named functions.
+        // `try` inside a closure without an explicit `-> Result/Option`
+        // annotation is a compile error (innermost enclosing scope rule).
+        if ret_ty.is_none() && Self::expr_contains_try(body) {
+            self.errors.push(error_at(
+                "closure must declare `-> Result<T, E>` to use `try`",
+                body.span(),
+            ));
+        }
         let ret_var = self.unifier.fresh_var();
         let prev_ret = self.current_ret.replace(ret_var.clone());
         let bt = self.check_expr(body);
@@ -1993,7 +2018,7 @@ impl Checker {
             Some(r) => self.unifier.resolve(r),
             None => {
                 self.errors.push(error_at(
-                    "`?` can only be used inside a function returning `Result` or `Option`",
+                    "`?`/`try` can only be used inside a function returning `Result` or `Option`",
                     span,
                 ));
                 return Type::Unit;
@@ -2001,9 +2026,13 @@ impl Checker {
         };
         match ot {
             Type::Option(t) => match &ret {
-                Type::Option(_) => *t,
+                Type::Option(_) => {
+                    self.try_resolutions.insert(span, None);
+                    *t
+                }
                 Type::Var(id) => {
                     self.unifier.bind(*id, Type::Option(t.clone()));
+                    self.try_resolutions.insert(span, None);
                     *t
                 }
                 other => {
@@ -2016,18 +2045,63 @@ impl Checker {
             },
             Type::Result(t, e) => match &ret {
                 Type::Result(_, ret_e) => {
-                    if let Err(err) = self.unifier.unify(&e, ret_e) {
-                        self.report_mismatch(err, span);
+                    let ein = self.unifier.resolve(&e);
+                    let eout = self.unifier.resolve(ret_e);
+                    if ein == eout {
+                        // Identity conversion: zero-cost, inlined away.
+                        self.try_resolutions.insert(span, None);
+                        if let Err(err) = self.unifier.unify(&e, ret_e) {
+                            self.report_mismatch(err, span);
+                        }
+                    } else if matches!(ein, Type::Var(_)) || matches!(eout, Type::Var(_)) {
+                        if let Err(err) = self.unifier.unify(&e, ret_e) {
+                            self.report_mismatch(err, span);
+                        }
+                        self.try_resolutions.insert(span, None);
+                    } else {
+                        // Different error types: need a `convert_to_` impl.
+                        let hits = self.find_converts(&ein, &eout);
+                        match hits.len() {
+                            1 => {
+                                self.try_resolutions
+                                    .insert(span, hits.into_iter().next().unwrap_or(None));
+                            }
+                            0 => {
+                                self.errors.push(error_at(
+                                    format!(
+                                        "no conversion path for `try`: error type `{ein}` cannot convert to `{eout}`\n\
+                                         hint: add `impl {ein} {{ func convert_to_{eout}(self) -> {eout} {{ ... }} }}`",
+                                    ),
+                                    span,
+                                ));
+                            }
+                            _ => {
+                                // Defensive: V1 registration rejects a second
+                                // convert from the same source type, and the
+                                // seeded-funcs fallback stops at the first hit,
+                                // so multiple hits are currently unconstructible.
+                                // Kept so a future relaxed registry still fails
+                                // loudly at the `try` site per spec.
+                                self.errors.push(error_at(
+                                    format!(
+                                        "ambiguous conversion for `try`: {} impls convert `{ein}` to `{eout}`",
+                                        hits.len()
+                                    ),
+                                    span,
+                                ));
+                            }
+                        }
                     }
                     *t
                 }
                 Type::Var(id) => {
                     self.unifier.bind(*id, Type::Result(t.clone(), e.clone()));
+                    self.try_resolutions.insert(span, None);
                     *t
                 }
                 other => {
                     self.errors.push(error_at(
-                        format!("`?` on `Result` cannot propagate through a function returning `{other}`"),
+                        format!("`?` on `Result` cannot propagate through a function returning `{other}`\nhelp: enclosing function must return `Result<T, E>` to use `try`"),
                         span,
                     ));
                     *t
@@ -2048,6 +2122,159 @@ impl Checker {
                 Type::Unit
             }
         }
+    }
+
+    /// True when an expression tree contains a `Try` (`?` / `try`) node.
+    fn expr_contains_try(e: &Expr) -> bool {
+        match e {
+            Expr::Try { .. } => true,
+            Expr::Binary { left, right, .. } => {
+                Self::expr_contains_try(left) || Self::expr_contains_try(right)
+            }
+            Expr::Unary { expr, .. } => Self::expr_contains_try(expr),
+            Expr::Call {
+                callee,
+                args,
+                named,
+                ..
+            } => {
+                Self::expr_contains_try(callee)
+                    || args.iter().any(Self::expr_contains_try)
+                    || named.iter().any(|(_, v)| Self::expr_contains_try(v))
+            }
+            Expr::Field { obj, .. } => Self::expr_contains_try(obj),
+            Expr::Index { obj, index, .. } => {
+                Self::expr_contains_try(obj) || Self::expr_contains_try(index)
+            }
+            Expr::Slice {
+                obj, start, end, ..
+            } => {
+                Self::expr_contains_try(obj)
+                    || start.as_ref().is_some_and(|s| Self::expr_contains_try(s))
+                    || end.as_ref().is_some_and(|s| Self::expr_contains_try(s))
+            }
+            Expr::Array { elems, .. } => elems.iter().any(Self::expr_contains_try),
+            Expr::Dict { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| Self::expr_contains_try(k) || Self::expr_contains_try(v)),
+            Expr::Tuple { items, .. } => items.iter().any(Self::expr_contains_try),
+            Expr::If {
+                cond, then, els, ..
+            } => {
+                Self::expr_contains_try(cond)
+                    || then.stmts.iter().any(Self::stmt_contains_try)
+                    || els.as_ref().is_some_and(|x| Self::expr_contains_try(x))
+            }
+            Expr::While { cond, body, .. } => {
+                Self::expr_contains_try(cond) || body.stmts.iter().any(Self::stmt_contains_try)
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                Self::expr_contains_try(scrutinee)
+                    || arms.iter().any(|a| {
+                        Self::expr_contains_try(&a.body)
+                            || a.guard.as_ref().is_some_and(Self::expr_contains_try)
+                    })
+            }
+            Expr::IfLet {
+                value, then, els, ..
+            } => {
+                Self::expr_contains_try(value)
+                    || then.stmts.iter().any(Self::stmt_contains_try)
+                    || els.as_ref().is_some_and(|x| Self::expr_contains_try(x))
+            }
+            Expr::Block(b) => b.stmts.iter().any(Self::stmt_contains_try),
+            // Nested closures/fns establish their own return scope and get
+            // their own `check_closure` diagnostic — don't attribute their
+            // `try` to the enclosing closure.
+            Expr::Closure { .. } => false,
+            Expr::Fmt { parts, .. } => parts.iter().any(|p| match p {
+                FmtPart::Expr(x, _) => Self::expr_contains_try(x),
+                _ => false,
+            }),
+            Expr::Paren { expr, .. } => Self::expr_contains_try(expr),
+            Expr::StructInit { fields, .. } => {
+                fields.iter().any(|(_, v)| Self::expr_contains_try(v))
+            }
+            Expr::Variant { arg, .. } => arg.as_ref().is_some_and(|a| Self::expr_contains_try(a)),
+            Expr::ListComp {
+                body, iter, filter, ..
+            } => {
+                Self::expr_contains_try(body)
+                    || Self::expr_contains_try(iter)
+                    || filter.as_ref().is_some_and(|f| Self::expr_contains_try(f))
+            }
+            Expr::Range { start, end, .. } => {
+                Self::expr_contains_try(start) || Self::expr_contains_try(end)
+            }
+            _ => false,
+        }
+    }
+
+    fn stmt_contains_try(s: &Stmt) -> bool {
+        match s {
+            Stmt::Expr(e) => Self::expr_contains_try(e),
+            Stmt::Decl { value, .. } => Self::expr_contains_try(value),
+            Stmt::Assign { value, target, .. } => {
+                Self::expr_contains_try(value) || Self::expr_contains_try(target)
+            }
+            Stmt::Destructure { value, .. } => Self::expr_contains_try(value),
+            Stmt::Return { value, .. } => value.as_ref().is_some_and(Self::expr_contains_try),
+            Stmt::For { iter, body, .. } => {
+                Self::expr_contains_try(iter) || body.stmts.iter().any(Self::stmt_contains_try)
+            }
+            Stmt::Defer { expr, .. } => Self::expr_contains_try(expr),
+            // Nested named functions/methods own their return scope.
+            Stmt::Func { .. } | Stmt::Impl { .. } => false,
+            _ => false,
+        }
+    }
+
+    /// Find conversion impl spans from `from` to `to`.
+    /// Checks the local `convert_impls` registry plus seeded `ext_methods` /
+    /// `funcs` (cross-module `convert_to_` methods) so multi-file programs work.
+    fn find_converts(&self, from: &Type, to: &Type) -> Vec<Option<Span>> {
+        let mut out = Vec::new();
+        let from_s = from.to_string();
+        let to_s = to.to_string();
+        for c in &self.convert_impls {
+            if c.from == *from && c.to == *to {
+                out.push(Some(c.span));
+            }
+        }
+        if !out.is_empty() {
+            return out;
+        }
+        // Fallback: scan merged registries for `X.convert_to_Y` with matching sig.
+        let mut seen_fn = std::collections::HashSet::new();
+        for ((tkey, mname), (sig, mspan)) in &self.ext_methods {
+            if !mname.starts_with("convert_to_") || sig.params.is_empty() {
+                continue;
+            }
+            if sig.params[0].1 == *from && sig.ret == *to {
+                let _ = tkey;
+                if seen_fn.insert(sig.ret.to_string() + &from_s + &to_s) {
+                    out.push(Some(*mspan));
+                }
+            }
+        }
+        if !out.is_empty() {
+            return out;
+        }
+        for (fname, sig) in &self.funcs {
+            if let Some((tkey, mname)) = fname.rsplit_once('.') {
+                if !mname.starts_with("convert_to_") || sig.params.is_empty() {
+                    continue;
+                }
+                let _ = tkey;
+                if sig.params[0].1 == *from && sig.ret == *to {
+                    out.push(None);
+                    break;
+                }
+            }
+        }
+        out
     }
 
     // --- patterns ---------------------------------------------------------
