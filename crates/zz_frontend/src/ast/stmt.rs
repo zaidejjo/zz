@@ -221,4 +221,20 @@ impl Stmt {
             Stmt::Expr(e) => e.span(),
         }
     }
+
+    /// Returns the function name parts, or `None` if not a `Func`.
+    pub fn func_name(&self) -> Option<&[String]> {
+        match self {
+            Stmt::Func { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Returns the decorators on a `Func` node, or `None` if not a `Func`.
+    pub fn func_decorators(&self) -> Option<&[Decorator]> {
+        match self {
+            Stmt::Func { decorators, .. } => Some(decorators),
+            _ => None,
+        }
+    }
 }

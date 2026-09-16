@@ -13,6 +13,7 @@ mod build;
 mod loader;
 mod repl;
 mod session;
+mod test_runner;
 
 use zz_frontend::diag::{error_at, render_to_string, Files};
 use zz_frontend::span::Span;
@@ -29,6 +30,7 @@ USAGE:
     zz                            start the interactive REPL
     zz eval <source>              evaluate source and print the result
     zz run <file.zz>              type-check and run a file
+    zz test <file.zz | dir>       run @test-annotated functions
     zz check [FLAGS] [PATH]       scan for errors/warnings (file or directory)
     zz fix [FLAGS] [PATH]         apply auto-fixes (shortcut for check --fix)
     zz fmt [FLAGS] [PATH]         format ZZ source files in-place
@@ -184,6 +186,13 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("test") => match test_runner::test_command(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
         Some("--help") | Some("-h") => {
             print!("{USAGE}");
             ExitCode::SUCCESS

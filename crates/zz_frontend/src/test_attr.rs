@@ -43,7 +43,7 @@ pub struct TestMeta {
 }
 
 impl TestMeta {
-    fn empty(span: Span) -> Self {
+    pub fn empty(span: Span) -> Self {
         Self {
             should_panic: false,
             ignore: false,

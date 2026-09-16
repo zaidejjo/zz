@@ -1711,7 +1711,6 @@ impl Compiler {
                         && parts[0] == "range"
                         && args.len() + named.len() < 3
                         && named.is_empty();
-
                     let has_named_or_defaults = !named.is_empty()
                         || self
                             .func_info

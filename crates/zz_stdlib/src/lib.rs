@@ -70,6 +70,7 @@ pub const STDLIB_MODULES: &[&str] = &[
     "sqlz.postgres",
     "sqlz.mysql",
     "colors",
+    "test",
 ];
 
 /// Resolve a module name to its canonical backing module.
