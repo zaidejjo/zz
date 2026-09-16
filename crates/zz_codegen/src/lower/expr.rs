@@ -382,12 +382,34 @@ impl Lowerer {
                 "zz_unit()".to_string()
             }
             Expr::Block(b) => {
-                self.emit_block(b, names, out);
-                // If the block's last statement was captured into a __tail
-                // temp (e.g. a match expression inside a match arm body),
-                // return that value instead of unit.
-                if let Some((tmp, _)) = names.stack.get("__tail").and_then(|s| s.last()) {
-                    tmp.clone()
+                // Value-position block: evaluate statements, yield the tail.
+                // Unlike `emit_block` (statement position, truncates `__tail`
+                // so inner temps never leak), exactly the tail temp THIS
+                // block created is popped into the value; leaf tails skipped
+                // by `emit_stmt` are evaluated directly. If-tails stay unit
+                // (branch-value lowering, same as before).
+                names.clear_array_lens();
+                let tail_saved = names.stack.get("__tail").map(|v| v.len()).unwrap_or(0);
+                let n = b.stmts.len();
+                for (i, stmt) in b.stmts.iter().enumerate() {
+                    self.emit_stmt(stmt, names, out, i == n - 1);
+                }
+                let tail_tmp = names.stack.get_mut("__tail").and_then(|v| {
+                    if v.len() > tail_saved {
+                        v.pop().map(|(t, _)| t)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(tmp) = tail_tmp {
+                    tmp
+                } else if let Some(Stmt::Expr(e)) = b.stmts.last() {
+                    if matches!(e, Expr::If { .. }) {
+                        "zz_unit()".to_string()
+                    } else {
+                        let v = self.emit_expr(e, names, out);
+                        box_scalar_operand(e, names, &v)
+                    }
                 } else {
                     "zz_unit()".to_string()
                 }
@@ -865,17 +887,50 @@ impl Lowerer {
                 "zz_unit()".to_string()
             }
             Expr::Closure { params, body, .. } => {
-                let mut defs = self.closure_defs.borrow_mut();
-                let cid = defs.len().min(1_000_000);
-                let body_c = self.emit_closure(params, body, cid, names, out);
-                defs.push(body_c);
+                // Allocate the id up front (not from `closure_defs.len()`):
+                // lowering the body re-enters this arm for nested literals
+                // while no borrow is held, so ids stay unique.
+                let cid = {
+                    let n = self.closure_seq.get();
+                    self.closure_seq.set(n + 1);
+                    n
+                };
+                // Free variables bound outside the closure become shared
+                // heap cells in the environment (match VM by-reference
+                // capture). Names resolving to nothing here (plain function
+                // names, namespaces) are skipped.
+                let param_names: Vec<String> = params.iter().map(|p| p.name.name.clone()).collect();
+                let globals = self.global_name_set();
+                let mut caps: Vec<(String, String, String, Option<zz_checker::Type>)> = Vec::new();
+                for fv in zz_hir::closure_free_vars(&param_names, body, &globals) {
+                    let Some(ptr) = names.cell_ptr(&fv) else {
+                        continue;
+                    };
+                    let ctype = names.lookup_type(&fv).unwrap_or("zz_value").to_string();
+                    let checker = names.checker_types.get(&fv).cloned();
+                    caps.push((fv, ptr, ctype, checker));
+                }
+                let body_c = self.emit_closure(params, body, cid, &caps, names, out);
+                self.closure_defs.borrow_mut().push(body_c);
                 // Emit a forward declaration so the closure is visible to
                 // call sites that appear before the closure definition.
                 self.closure_forward_decls.borrow_mut().push(format!(
-                    "static zz_value zz_closure_{cid}(zz_value *args, size_t argc);\n"
+                    "static zz_value zz_closure_{cid}(zz_value *args, size_t argc, void **env, size_t nenv);\n"
                 ));
-                drop(defs);
-                format!("zz_closure_make(zz_closure_{cid})")
+                if caps.is_empty() {
+                    format!("zz_closure_make(zz_closure_{cid})")
+                } else {
+                    let cap_arr = names.fresh("_cap");
+                    let ptrs: Vec<String> = caps.iter().map(|(_, p, _, _)| p.clone()).collect();
+                    out.push_str(&format!(
+                        "    void *{cap_arr}[] = {{{}}};\n",
+                        ptrs.join(", ")
+                    ));
+                    format!(
+                        "zz_closure_make_ex(zz_closure_{cid}, {cap_arr}, {})",
+                        caps.len()
+                    )
+                }
             }
             Expr::Try { expr: inner, span } => self.emit_try(inner, *span, names, out),
         }
@@ -883,33 +938,80 @@ impl Lowerer {
 
     /// Emit a C static function for a closure literal `|p1, p2| body` and
     /// return the closure's C body text. Param values arrive boxed in `args[]`;
-    /// the body expression is lowered against them and returned.
+    /// captured variables arrive as shared cells in `env[]` (see the creation
+    /// site, which passes the same `caps` layout). The body expression is
+    /// lowered against params + captures and returned.
     pub(super) fn emit_closure(
         &self,
         params: &[Param],
         body: &Expr,
         cid: usize,
+        caps: &[(String, String, String, Option<zz_checker::Type>)],
         _outer_names: &mut NameCtx,
         _out: &mut String,
     ) -> String {
         let mut names = NameCtx::new();
+        self.seed_globals(&mut names);
+        for (i, (name, _, ctype, checker)) in caps.iter().enumerate() {
+            let ptr = format!("env[{i}]");
+            let deref = NameCtx::cap_deref_of(&ptr, ctype);
+            names.insert_capture(name, &ptr, &deref, ctype, checker.clone());
+        }
+        // Bindings of THIS body captured by a deeper closure literal.
+        {
+            let param_names: Vec<String> = params.iter().map(|p| p.name.name.clone()).collect();
+            names.capture_set = self.expr_capture_set(&param_names, body);
+        }
         let mut o = String::new();
         o.push_str(&format!(
-            "static zz_value zz_closure_{cid}(zz_value *args, size_t argc) {{\n"
+            "static zz_value zz_closure_{cid}(zz_value *args, size_t argc, void **env, size_t nenv) {{\n"
         ));
         o.push_str("    (void)argc;\n");
+        o.push_str("    (void)nenv;\n");
+        if caps.is_empty() {
+            o.push_str("    (void)env;\n");
+        }
         o.push_str("    zz_arena _arena;\n");
         o.push_str("    zz_arena_init(&_arena, 65536);\n");
         o.push_str("    int __defers[32];\n");
         o.push_str("    int __defer_n = 0;\n");
         for (i, p) in params.iter().enumerate() {
-            let cid_enter = names.enter(&p.name.name);
-            o.push_str(&format!("    zz_value {cid_enter} = args[{i}];\n"));
+            if names.capture_set.contains(&p.name.name) {
+                // Captured param: heap cell shared with nested closures.
+                let n = names.bump_counter();
+                let ptr = format!("_cell{n}");
+                let deref = NameCtx::owner_deref(&ptr);
+                o.push_str(&format!(
+                    "    zz_value *{ptr} = (zz_value*)malloc(sizeof(zz_value));\n"
+                ));
+                o.push_str(&format!("    {deref} = args[{i}];\n"));
+                names.enter_cell(&p.name.name, &ptr, &deref, "zz_value", n);
+            } else {
+                let cid_enter = names.enter(&p.name.name);
+                o.push_str(&format!("    zz_value {cid_enter} = args[{i}];\n"));
+            }
         }
         let mut body_out = String::new();
-        let val = self.emit_expr(body, &mut names, &mut body_out);
-        o.push_str(&body_out);
-        let val = box_scalar_operand(body, &names, &val);
+        // Block bodies use function-style tail handling so a trailing value
+        // expression (e.g. `{ count = count + d; count }`) becomes the return
+        // value instead of unit. Bare-expression bodies evaluate inline.
+        let block_body: Option<zz_frontend::ast::Block> = match body {
+            Expr::Block(b) => Some(b.clone()),
+            _ => None,
+        };
+        let val = match &block_body {
+            Some(b) => {
+                self.emit_func_block(b, &mut names, &mut body_out);
+                o.push_str(&body_out);
+                // Defer runner lands before the tail returns below.
+                String::new()
+            }
+            None => {
+                let v = self.emit_expr(body, &mut names, &mut body_out);
+                o.push_str(&body_out);
+                box_scalar_operand(body, &names, &v)
+            }
+        };
         {
             let mut slots = self.defer_slots.borrow_mut();
             if !slots.is_empty() {
@@ -926,8 +1028,14 @@ impl Lowerer {
                 o.push_str("    }\n");
             }
         }
+        if let Some(b) = &block_body {
+            if self.last_stmt_value(b, &mut names, &mut o).is_none() {
+                o.push_str("    return zz_unit();\n");
+            }
+        } else {
+            o.push_str(&format!("    return {val};\n"));
+        }
         o.push_str("    zz_arena_reset_trim(&_arena);\n");
-        o.push_str(&format!("    return {val};\n"));
         o.push_str("}\n");
         o
     }
@@ -1688,9 +1796,13 @@ impl Lowerer {
         }
         // A native may be bound under `std.io.println` (stdlib_funcs) while
         // the source calls `io.println` (namespace-registered). Match either.
+        // Also recognize namespace-qualified names from method dispatch
+        // (e.g. `vec.map`) that have a C runtime impl even though
+        // `reachable_natives` only tracks the bare name (`map`).
         let std_name = format!("std.{cname_for_native}");
         let is_native = self.reachable_natives.contains(&cname_for_native)
-            || self.reachable_natives.contains(&std_name);
+            || self.reachable_natives.contains(&std_name)
+            || native_supported(&cname_for_native);
         let native_rt = if is_native {
             // Embedded C runtime first, Rust staticlib second (Phase 1+).
             native_impl(&cname_for_native).or_else(|| crate::ffi_impl(&cname_for_native))
@@ -1791,6 +1903,57 @@ impl Lowerer {
                 joined = arg_items.join(", "),
                 n = arg_items.len()
             );
+        }
+
+        // Indirect closure call: `f(args)` where `f` is a local/global
+        // holding a closure value, not a statically-known func. Previously
+        // this fell through to `zz_unit()`, so any first-class closure
+        // invocation (`f := make_adder(); f(5)`) silently returned unit.
+        // Dispatch through the null-safe `zz_call_closure` helper: genuine
+        // closures get called, non-closure values keep the old unit result.
+        if method_receiver.is_none() {
+            // Resolve first (immutable borrow ends), then emit (mutable borrow).
+            enum Indirect {
+                Known,
+                Other,
+                No,
+            }
+            let kind = match callee {
+                Expr::Ident { name, .. } => {
+                    if names.lookup(name).is_some() {
+                        Indirect::Known
+                    } else {
+                        Indirect::No
+                    }
+                }
+                Expr::Path { parts, .. } => {
+                    let joined = parts.join(".");
+                    if names.lookup(&joined).is_some() {
+                        Indirect::Known
+                    } else {
+                        Indirect::No
+                    }
+                }
+                // Arbitrary callee expression (e.g. `make_adder()(5)`):
+                // evaluate it, then dispatch. `Field` callees are method-ish
+                // and keep the old unit fallback.
+                _ if !matches!(callee, Expr::Field { .. }) => Indirect::Other,
+                _ => Indirect::No,
+            };
+            let closure_val: Option<String> = match kind {
+                Indirect::No => None,
+                Indirect::Known | Indirect::Other => Some(self.emit_expr(callee, names, out)),
+            };
+            if let Some(cv) = closure_val {
+                if arg_items.is_empty() {
+                    return format!("zz_call_closure({cv}, NULL, 0)");
+                }
+                return format!(
+                    "zz_call_closure({cv}, (zz_value[]){{ {joined} }}, {n})",
+                    joined = arg_items.join(", "),
+                    n = arg_items.len()
+                );
+            }
         }
 
         "zz_unit()".to_string()

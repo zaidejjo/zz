@@ -154,8 +154,21 @@ impl Checker {
                 }
                 Type::Unit
             }
-            Stmt::Func { .. } => {
-                let sig = self.funcs.get(&Self::func_name(stmt)).unwrap().clone();
+            Stmt::Func { span, .. } => {
+                let fname = Self::func_name(stmt);
+                let sig = match self.funcs.get(&fname) {
+                    Some(s) => s.clone(),
+                    None => {
+                        self.errors.push(zz_frontend::diag::error_at(
+                            format!(
+                                "nested function `{}` is not supported; use a closure (`|params| body`) instead",
+                                fname
+                            ),
+                            *span,
+                        ));
+                        return Type::Unit;
+                    }
+                };
                 // Extern functions have no ZZ body — already registered in Pass 1d.
                 if sig.is_extern {
                     return Type::Unit;

@@ -196,20 +196,62 @@ zz_value zz_call(zz_value fn, zz_value *args, size_t argc, int *err) {
 }
 
 // ---- closures -----------------------------------------------------------
-// A closure value is a ZZ_NATIVE whose payload points to a heap slot holding
-// a generated `zz_dispatch_fn` pointer. Not refcounted; released as a no-op.
+// A closure value is a ZZ_NATIVE whose payload points to a heap struct
+// holding a generated `zz_dispatch_fn` pointer plus the captured
+// environment (array of shared heap-cell pointers). Not refcounted;
+// released as a no-op.
+typedef struct {
+    zz_dispatch_fn fn;
+    size_t nenv;
+    void *env[];
+} zz_closure_rep;
+
 zz_value zz_closure_make(zz_dispatch_fn f) {
-    zz_dispatch_fn *slot = (zz_dispatch_fn *)malloc(sizeof(zz_dispatch_fn));
-    *slot = f;
+    zz_closure_rep *rep =
+        (zz_closure_rep *)malloc(sizeof(zz_closure_rep));
+    if (!rep) return zz_unit();
+    rep->fn = f;
+    rep->nenv = 0;
     zz_value v;
     v.tag = ZZ_NATIVE;
-    v.payload = (zz_value *)slot;
+    v.payload = (zz_value *)rep;
+    return v;
+}
+
+zz_value zz_closure_make_ex(zz_dispatch_fn f, void **cells, size_t nenv) {
+    zz_closure_rep *rep = (zz_closure_rep *)malloc(
+        sizeof(zz_closure_rep) + nenv * sizeof(void *));
+    if (!rep) return zz_unit();
+    rep->fn = f;
+    rep->nenv = nenv;
+    for (size_t i = 0; i < nenv; i++) rep->env[i] = cells[i];
+    zz_value v;
+    v.tag = ZZ_NATIVE;
+    v.payload = (zz_value *)rep;
     return v;
 }
 
 zz_dispatch_fn zz_closure_target(zz_value v) {
     if (v.tag != ZZ_NATIVE || !v.payload) return NULL;
-    return *(zz_dispatch_fn *)(void *)v.payload;
+    return ((zz_closure_rep *)(void *)v.payload)->fn;
+}
+
+void **zz_closure_env(zz_value v, size_t *nenv) {
+    if (v.tag != ZZ_NATIVE || !v.payload) {
+        if (nenv) *nenv = 0;
+        return NULL;
+    }
+    zz_closure_rep *rep = (zz_closure_rep *)(void *)v.payload;
+    if (nenv) *nenv = rep->nenv;
+    return rep->nenv ? rep->env : NULL;
+}
+
+zz_value zz_call_closure(zz_value f, zz_value *args, size_t argc) {
+    zz_dispatch_fn fn = zz_closure_target(f);
+    if (!fn) return zz_unit();
+    size_t nenv = 0;
+    void **env = zz_closure_env(f, &nenv);
+    return fn(args, argc, env, nenv);
 }
 
 zz_value zz_io_println(zz_value v, int *err) {

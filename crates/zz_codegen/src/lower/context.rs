@@ -7,10 +7,31 @@
 //! lowerers.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use zz_frontend::ast::Expr;
 
 use super::mangle;
+
+/// Extract the creation counter from a C identifier for scope tracking.
+/// Plain locals are `vN`; owner-cell derefs are `(*_cellN)`. Anything else
+/// (temps like `__tail1`, global ids) returns `usize::MAX` so `pop_scope`
+/// drops it with the current scope.
+fn cid_counter(cid: &str) -> usize {
+    if let Some(rest) = cid.strip_prefix('v') {
+        if let Ok(n) = rest.parse::<usize>() {
+            return n;
+        }
+    }
+    if let Some(rest) = cid.strip_prefix("(*_cell") {
+        if let Some(num) = rest.strip_suffix(')') {
+            if let Ok(n) = num.parse::<usize>() {
+                return n;
+            }
+        }
+    }
+    usize::MAX
+}
 
 /// Scope-aware C identifier allocator (handles shadowing).
 #[derive(Default, Clone)]
@@ -18,6 +39,27 @@ pub struct NameCtx {
     /// zz var name → stack of active (C identifier, C type) tuples (innermost last).
     pub(crate) stack: HashMap<String, Vec<(String, String)>>,
     pub(crate) counter: usize,
+    /// Module-level globals: zz name → (C global id, C type).
+    /// Checked after the local stack, so locals shadow globals.
+    /// Never cleared by push/pop_scope.
+    pub(crate) globals: HashMap<String, (String, String)>,
+    /// Owner-cell pointers for closure-captured locals: zz name → stack of
+    /// (creation counter, pointer expr, deref expr). The stack entry pushed
+    /// alongside holds the deref expr as its C id, so ordinary reads/writes
+    /// go through the shared cell with no special-casing at use sites.
+    pub(crate) cell_ptrs: HashMap<String, Vec<(usize, String, String)>>,
+    /// Closure environment captures: zz name → (deref expr, C type).
+    /// Checked after the local stack (locals shadow captures), before globals.
+    /// Never cleared by push/pop_scope: the env outlives inner scopes.
+    pub(crate) cap_deref: HashMap<String, (String, String)>,
+    /// Closure environment cell pointers: zz name → pointer expr (`env[i]`).
+    /// Used when a nested closure captures an outer capture (shared cell).
+    pub(crate) cap_ptrs: HashMap<String, String>,
+    /// Names in the current body captured by a nested closure literal.
+    /// Bindings for these names are heap-cell-allocated so the closure
+    /// environment shares them (match VM by-reference capture semantics).
+    /// Set once per function/closure body; never modified by push/pop.
+    pub(crate) capture_set: HashSet<String>,
     /// Stack of counter snapshots for scope tracking. `push_scope` records
     /// the current counter; `pop_scope` removes all entries whose C id was
     /// created at or after that counter value.
@@ -37,6 +79,11 @@ impl NameCtx {
         NameCtx {
             stack: HashMap::new(),
             counter: 0,
+            globals: HashMap::new(),
+            cell_ptrs: HashMap::new(),
+            cap_deref: HashMap::new(),
+            cap_ptrs: HashMap::new(),
+            capture_set: HashSet::new(),
             scope_markers: Vec::new(),
             array_lens: HashMap::new(),
             checker_types: HashMap::new(),
@@ -73,20 +120,139 @@ impl NameCtx {
         cid
     }
 
-    /// Look up the variable's C identifier.
-    pub(super) fn lookup(&self, name: &str) -> Option<&str> {
-        self.stack
-            .get(name)
-            .and_then(|vec| vec.last())
-            .map(|(ident, _)| ident.as_str())
+    /// Register a module-level global. Locals (stack) always shadow globals.
+    pub(super) fn insert_global(
+        &mut self,
+        name: &str,
+        cid: &str,
+        ctype: &str,
+        checker_ty: Option<zz_checker::Type>,
+    ) {
+        self.globals
+            .insert(name.to_string(), (cid.to_string(), ctype.to_string()));
+        if let Some(ct) = checker_ty {
+            self.checker_types.insert(name.to_string(), ct);
+        }
     }
 
-    /// Look up the variable's C type.
+    /// Look up the variable's C identifier: locals, then closure captures,
+    /// then module globals. Cell locals hold their deref expr (`(*_cellN)`)
+    /// as the C id so reads/writes transparently go through shared cells.
+    pub(super) fn lookup(&self, name: &str) -> Option<&str> {
+        if let Some((ident, _)) = self.stack.get(name).and_then(|vec| vec.last()) {
+            return Some(ident.as_str());
+        }
+        if let Some((deref, _)) = self.cap_deref.get(name) {
+            return Some(deref.as_str());
+        }
+        self.globals.get(name).map(|(ident, _)| ident.as_str())
+    }
+
+    /// Look up the variable's C type (same fallback chain as [`lookup`]).
     pub(super) fn lookup_type(&self, name: &str) -> Option<&str> {
+        if let Some((_, typ)) = self.stack.get(name).and_then(|vec| vec.last()) {
+            return Some(typ.as_str());
+        }
+        if let Some((_, typ)) = self.cap_deref.get(name) {
+            return Some(typ.as_str());
+        }
+        self.globals.get(name).map(|(_, typ)| typ.as_str())
+    }
+
+    /// Deref expr for an owner cell pointer of C type `ctype`.
+    pub(super) fn owner_deref(ptr: &str) -> String {
+        format!("(*{ptr})")
+    }
+
+    /// Deref expr for a closure-env slot of C type `ctype`.
+    pub(super) fn cap_deref_of(ptr: &str, ctype: &str) -> String {
+        format!("(*({ctype}*){ptr})")
+    }
+
+    /// Register an owner cell for a captured local: pushes a stack entry
+    /// holding the deref expr (transparent at use sites) and records the
+    /// pointer for environment building. `ctr` must be the current
+    /// [`counter`](Self::counter) so `pop_scope` retires it with its scope.
+    pub(super) fn enter_cell(
+        &mut self,
+        name: &str,
+        ptr: &str,
+        deref: &str,
+        ctype: &str,
+        ctr: usize,
+    ) {
         self.stack
+            .entry(name.to_string())
+            .or_default()
+            .push((deref.to_string(), ctype.to_string()));
+        self.cell_ptrs.entry(name.to_string()).or_default().push((
+            ctr,
+            ptr.to_string(),
+            deref.to_string(),
+        ));
+    }
+
+    /// Pop one owner-cell record for `name` (mirrors a manual [`leave`](Self::leave)).
+    pub(super) fn pop_cell(&mut self, name: &str) {
+        if let Some(vec) = self.cell_ptrs.get_mut(name) {
+            vec.pop();
+            if vec.is_empty() {
+                self.cell_ptrs.remove(name);
+            }
+        }
+    }
+
+    /// Whether the active binding for `name` is an owner cell (i.e. the
+    /// stack top holds the cell's deref, not a shadowing plain local).
+    pub(super) fn is_owner_cell(&self, name: &str) -> bool {
+        let top_deref = self
+            .stack
             .get(name)
-            .and_then(|vec| vec.last())
-            .map(|(_, typ)| typ.as_str())
+            .and_then(|v| v.last())
+            .map(|(cid, _)| cid.as_str());
+        let cell_deref = self
+            .cell_ptrs
+            .get(name)
+            .and_then(|v| v.last())
+            .map(|(_, _, d)| d.as_str());
+        matches!((top_deref, cell_deref), (Some(a), Some(b)) if a == b)
+    }
+
+    /// Shared-cell pointer expr for `name`: the owner cell when active,
+    /// else an outer closure capture. Used to build nested environments.
+    /// Returns `None` for plain locals, globals, and unknowns.
+    pub(super) fn cell_ptr(&self, name: &str) -> Option<String> {
+        if self.is_owner_cell(name) {
+            return self
+                .cell_ptrs
+                .get(name)
+                .and_then(|v| v.last())
+                .map(|(_, p, _)| p.clone());
+        }
+        // A shadowing plain local wins over an outer capture.
+        if self.stack.get(name).and_then(|v| v.last()).is_some() {
+            return None;
+        }
+        self.cap_ptrs.get(name).cloned()
+    }
+
+    /// Register a closure-environment capture: value reads use `deref`
+    /// (transparent via [`lookup`](Self::lookup)); `ptr` is shared into
+    /// nested environments.
+    pub(super) fn insert_capture(
+        &mut self,
+        name: &str,
+        ptr: &str,
+        deref: &str,
+        ctype: &str,
+        checker_ty: Option<zz_checker::Type>,
+    ) {
+        self.cap_deref
+            .insert(name.to_string(), (deref.to_string(), ctype.to_string()));
+        self.cap_ptrs.insert(name.to_string(), ptr.to_string());
+        if let Some(ct) = checker_ty {
+            self.checker_types.insert(name.to_string(), ct);
+        }
     }
 
     /// Advance and return the next fresh counter value. Used by helpers
@@ -106,23 +272,26 @@ impl NameCtx {
     }
 
     /// Push a scope marker. All entries created after this call (via
-    /// `enter`/`enter_with_type`/`fresh`) will be removed by `pop_scope`.
+    /// `enter`/`enter_with_type`/`fresh`/`enter_cell`) will be removed by
+    /// `pop_scope`.
     pub(super) fn push_scope(&mut self) {
         self.scope_markers.push(self.counter);
     }
 
     /// Pop all entries whose C identifier was created at or after the
-    /// matching `push_scope` marker.  This correctly handles redeclarations
-    /// inside loop bodies (e.g. `total := total + item` inside a for-loop).
+    /// matching `push_scope` marker. Cell derefs (`(*_cellN)`) carry their
+    /// creation counter; owner-cell records retire with the same rule.
+    /// Captures (`cap_deref`) and globals survive: environments outlive
+    /// inner scopes.
     pub(super) fn pop_scope(&mut self) {
         if let Some(marker) = self.scope_markers.pop() {
             for vec in self.stack.values_mut() {
-                vec.retain(|(cid, _)| {
-                    // C ids are "vN" where N is the counter at creation time.
-                    let n: usize = cid[1..].parse().unwrap_or(usize::MAX);
-                    n < marker
-                });
+                vec.retain(|(cid, _)| cid_counter(cid) < marker);
             }
+            for vec in self.cell_ptrs.values_mut() {
+                vec.retain(|(ctr, _, _)| *ctr < marker);
+            }
+            self.cell_ptrs.retain(|_, v| !v.is_empty());
         }
     }
 
@@ -175,6 +344,11 @@ pub struct Lowerer {
     pub(crate) closure_defs: std::cell::RefCell<Vec<String>>,
     /// Forward declarations for closure static functions.
     pub(crate) closure_forward_decls: std::cell::RefCell<Vec<String>>,
+    /// Monotonic closure id counter. Allocated BEFORE lowering the body
+    /// (not derived from `closure_defs.len()`) so nested closure literals
+    /// — which re-enter lowering while the outer literal is being built —
+    /// still get unique ids.
+    pub(crate) closure_seq: std::cell::Cell<usize>,
     /// True when emitting a call expression whose return value is discarded
     /// (statement position). Enables in-place mutations like `zz_vec_append`
     /// instead of copy-on-write `zz_vec_push`.
@@ -206,6 +380,7 @@ impl Lowerer {
             defer_slots: std::cell::RefCell::new(Vec::new()),
             closure_defs: std::cell::RefCell::new(Vec::new()),
             closure_forward_decls: std::cell::RefCell::new(Vec::new()),
+            closure_seq: std::cell::Cell::new(0),
             void_context: std::cell::RefCell::new(false),
             current_loop_arena: std::cell::RefCell::new(None),
             precompiled: false,
@@ -245,6 +420,10 @@ impl Lowerer {
         match expr {
             Expr::Str { .. } => true,
             Expr::Ident { name, .. } => names.lookup_type(name) == Some("string"),
+            Expr::Path { parts, .. } => {
+                let joined = parts.join(".");
+                names.lookup_type(&joined) == Some("string")
+            }
             _ => false,
         }
     }
@@ -360,6 +539,86 @@ impl Lowerer {
                 }
             }
             _ => "zz_value".to_string(),
+        }
+    }
+
+    /// C identifier for a module-level global: `zz_global_<mangled>`.
+    pub(super) fn global_cid(zz_name: &str) -> String {
+        format!("zz_global_{}", mangle(zz_name))
+    }
+
+    /// Names visible as C globals (module-level bindings). Closure free
+    /// variables matching these need no environment cell.
+    pub(super) fn global_name_set(&self) -> std::collections::HashSet<String> {
+        self.tp.bindings.keys().cloned().collect()
+    }
+
+    /// Names in `block` captured by a nested closure literal: bindings for
+    /// these must be heap-cell-allocated so environments share them.
+    pub(super) fn body_capture_set(
+        &self,
+        params: &[String],
+        block: &zz_frontend::ast::Block,
+    ) -> std::collections::HashSet<String> {
+        let globals = self.global_name_set();
+        zz_hir::captured_in_block(params, block, &globals)
+    }
+
+    /// Same as [`body_capture_set`](Self::body_capture_set) for closure
+    /// bodies that are bare expressions rather than blocks.
+    pub(super) fn expr_capture_set(
+        &self,
+        params: &[String],
+        body: &zz_frontend::ast::Expr,
+    ) -> std::collections::HashSet<String> {
+        let globals = self.global_name_set();
+        zz_hir::captured_in_expr(params, body, &globals)
+    }
+
+    /// Emit a heap cell allocation + initialization for a captured binding.
+    /// `init` is the already-lowered (and scalar-unboxed, if applicable)
+    /// initializer value of C type `ctype`.
+    pub(super) fn emit_cell_alloc(&self, ptr: &str, ctype: &str, init: &str, out: &mut String) {
+        out.push_str(&format!(
+            "    {ctype} *{ptr} = ({ctype}*)malloc(sizeof({ctype}));\n"
+        ));
+        out.push_str(&format!("    *{ptr} = {init};\n"));
+    }
+
+    /// Collect module-level globals from top-level `Decl` statements.
+    /// Returns sorted (zz_name, C id, C type, checker type) tuples.
+    /// Types come from `tp.bindings` (checker-resolved); fallback zz_value.
+    pub(super) fn collect_globals(
+        &self,
+    ) -> Vec<(String, String, String, Option<zz_checker::Type>)> {
+        use zz_frontend::ast::Stmt;
+        let mut names: Vec<String> = Vec::new();
+        for stmt in self.tp.stmts() {
+            if let Stmt::Decl { name, .. } = stmt {
+                if !names.contains(&name.name) {
+                    names.push(name.name.clone());
+                }
+            }
+        }
+        names.sort();
+        names
+            .into_iter()
+            .map(|n| {
+                let checker_ty = self.tp.bindings.get(&n).cloned();
+                let ctype = checker_ty
+                    .as_ref()
+                    .map(|t| self.type_to_c(t))
+                    .unwrap_or_else(|| "zz_value".to_string());
+                let cid = Self::global_cid(&n);
+                (n, cid, ctype, checker_ty)
+            })
+            .collect()
+    }
+
+    /// Seed a NameCtx with all module-level globals.
+    pub(super) fn seed_globals(&self, names: &mut NameCtx) {
+        for (zz_name, cid, ctype, checker_ty) in self.collect_globals() {
+            names.insert_global(&zz_name, &cid, &ctype, checker_ty);
         }
     }
 
@@ -670,7 +929,8 @@ pub(crate) fn is_dup_safe(e: &Expr) -> bool {
         | Expr::Float { .. }
         | Expr::Bool { .. }
         | Expr::Str { .. }
-        | Expr::Ident { .. } => true,
+        | Expr::Ident { .. }
+        | Expr::Path { .. } => true,
         Expr::Paren { expr, .. } => is_dup_safe(expr),
         _ => false,
     }
@@ -681,6 +941,7 @@ pub(crate) fn is_dup_safe(e: &Expr) -> bool {
 ///   - Int literal  → `"int64_t"`
 ///   - Float literal (whole-number form, like `1.0` / `2.5`) → `"double"`
 ///   - Ident mapped to `int64_t`/`double`/`bool` in NameCtx
+///   - Path (e.g. `main.x` global) mapped to scalar in NameCtx
 ///   - Negation of any of the above
 ///
 ///   Used by the Binary emit path to detect when both sides are scalar and
@@ -701,6 +962,26 @@ pub(crate) fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static 
             "bool" => Some("bool"),
             _ => None,
         },
+        Expr::Path { parts, .. } => {
+            // Globals lower as `ns.name`; struct field access (p.x) is not scalar.
+            // Only treat as scalar when the joined name resolves to a scalar global
+            // and it is NOT a struct-typed base (field access handled elsewhere).
+            let joined = parts.join(".");
+            // If base resolves to a struct type, this is field access, not a scalar var.
+            if parts.len() == 2 {
+                if let Some(base_ty) = names.lookup_type(&parts[0]) {
+                    if base_ty.starts_with("zz_struct_") {
+                        return None;
+                    }
+                }
+            }
+            match names.lookup_type(&joined)? {
+                "int64_t" => Some("int64_t"),
+                "double" => Some("double"),
+                "bool" => Some("bool"),
+                _ => None,
+            }
+        }
         Expr::Unary { op, expr, .. } => {
             let inner = scalar_operand_type(expr, names)?;
             match op {
@@ -793,10 +1074,14 @@ pub(crate) fn box_scalar_operand(e: &Expr, names: &NameCtx, emitted: &str) -> St
                 //
                 // `names.lookup_type` takes the original ZZ name, but we
                 // only have the emitted C identifier here. The emitted
-                // identifier is unique, so we scan the stack for any entry
+                // identifier is unique, so we scan the scope for any entry
                 // whose C identifier matches `emitted` and whose type is
-                // a scalar.
-                if is_simple_ident(emitted) {
+                // a scalar. Cell derefs (`(*_cellN)`, `(*(T*)env[i])`) are
+                // matched the same way so captured scalars box correctly.
+                if is_simple_ident(emitted)
+                    || emitted.starts_with("zz_global_")
+                    || emitted.starts_with("(*")
+                {
                     for entries in names.stack.values() {
                         if let Some((cid, ty)) = entries.last() {
                             if cid == emitted {
@@ -806,6 +1091,26 @@ pub(crate) fn box_scalar_operand(e: &Expr, names: &NameCtx, emitted: &str) -> St
                                     "bool" => return format!("zz_bool({emitted})"),
                                     _ => {}
                                 }
+                            }
+                        }
+                    }
+                    for (cid, ty) in names.globals.values() {
+                        if cid == emitted {
+                            match ty.as_str() {
+                                "int64_t" => return format!("zz_int({emitted})"),
+                                "double" => return format!("zz_float({emitted})"),
+                                "bool" => return format!("zz_bool({emitted})"),
+                                _ => {}
+                            }
+                        }
+                    }
+                    for (cid, ty) in names.cap_deref.values() {
+                        if cid == emitted {
+                            match ty.as_str() {
+                                "int64_t" => return format!("zz_int({emitted})"),
+                                "double" => return format!("zz_float({emitted})"),
+                                "bool" => return format!("zz_bool({emitted})"),
+                                _ => {}
                             }
                         }
                     }
@@ -830,14 +1135,32 @@ pub(crate) fn emit_guard_expr(
 ) -> String {
     match e {
         Expr::Ident { name, .. } => {
-            // Look up the C identifier in the names stack. If found with a
-            // scalar type, use it directly. Otherwise, fall back to unboxing
-            // scrut_tmp based on scrut_type.
-            if let Some((cid, ty)) = names.stack.get(name).and_then(|v| v.last()) {
-                match ty.as_str() {
-                    "int64_t" => format!("({cid}).i"),
-                    "double" => format!("({cid}).f"),
-                    "bool" => format!("({cid}).b"),
+            // Look up via stack first, then globals. Scalar globals emit raw.
+            if let Some(cid) = names.lookup(name) {
+                let ty = names.lookup_type(name);
+                match ty {
+                    Some("int64_t") | Some("double") | Some("bool") => {
+                        // Globals are raw scalars; locals may be boxed zz_value.
+                        // If cid is a global (zz_global_), use directly.
+                        if cid.starts_with("zz_global_") {
+                            cid.to_string()
+                        } else if let Some((_, t)) = names.stack.get(name).and_then(|v| v.last()) {
+                            match t.as_str() {
+                                "int64_t" => format!("({cid}).i"),
+                                "double" => format!("({cid}).f"),
+                                "bool" => format!("({cid}).b"),
+                                _ => scrut_tmp.to_string(),
+                            }
+                        } else if let Some((_, t)) = names.cap_deref.get(name) {
+                            // Closure capture: scalar captures already read raw.
+                            match t.as_str() {
+                                "int64_t" | "double" | "bool" => cid.to_string(),
+                                _ => scrut_tmp.to_string(),
+                            }
+                        } else {
+                            cid.to_string()
+                        }
+                    }
                     _ => scrut_tmp.to_string(),
                 }
             } else {
@@ -848,6 +1171,18 @@ pub(crate) fn emit_guard_expr(
                     Some("bool") => format!("({scrut_tmp}).b"),
                     _ => format!("({scrut_tmp}).i"), // default int
                 }
+            }
+        }
+        Expr::Path { parts, .. } => {
+            let joined = parts.join(".");
+            if let Some(cid) = names.lookup(&joined) {
+                let ty = names.lookup_type(&joined);
+                match ty {
+                    Some("int64_t") | Some("double") | Some("bool") => cid.to_string(),
+                    _ => scrut_tmp.to_string(),
+                }
+            } else {
+                scrut_tmp.to_string()
             }
         }
         Expr::Int { value, .. } => value.to_string(),
@@ -916,6 +1251,10 @@ pub(crate) fn scalar_operand_c(e: &Expr, names: &NameCtx) -> Option<String> {
             }
         }
         Expr::Ident { name, .. } => names.lookup(name).map(|s| s.to_string()),
+        Expr::Path { parts, .. } => {
+            let joined = parts.join(".");
+            names.lookup(&joined).map(|s| s.to_string())
+        }
         Expr::Unary { op, expr, .. } => {
             let inner = scalar_operand_c(expr, names)?;
             match op {

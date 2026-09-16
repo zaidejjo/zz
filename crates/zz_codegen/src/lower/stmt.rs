@@ -34,9 +34,18 @@ impl Lowerer {
                 {
                     if self.is_unboxed_struct(struct_name) {
                         let c_type = self.struct_c_type(struct_name);
-                        let cid = names.enter_with_type(&name.name, &c_type);
                         let val = self.emit_expr(value, names, out);
-                        out.push_str(&format!("    {c_type} {cid} = {val};\n"));
+                        if names.capture_set.contains(&name.name) {
+                            // Captured struct: heap cell holding the unboxed value.
+                            let n = names.bump_counter();
+                            let ptr = format!("_cell{n}");
+                            let deref = NameCtx::owner_deref(&ptr);
+                            self.emit_cell_alloc(&ptr, &c_type, &val, out);
+                            names.enter_cell(&name.name, &ptr, &deref, &c_type, n);
+                        } else {
+                            let cid = names.enter_with_type(&name.name, &c_type);
+                            out.push_str(&format!("    {c_type} {cid} = {val};\n"));
+                        }
                         return;
                     }
                 }
@@ -51,18 +60,7 @@ impl Lowerer {
                 // For scalars, use enter_with_type so that any subsequent code
                 // (e.g. the loop body in a for-loop) sees the correct type
                 // during scalar_operand_type lookups.
-                let cid = if matches!(ctype.as_str(), "int64_t" | "double" | "bool") {
-                    names.enter_with_type(&name.name, &ctype)
-                } else {
-                    names.enter(&name.name)
-                };
-                // Update the name ctx with the correct type (covers non-scalar
-                // types and any type not yet set).
-                if let Some(vec) = names.stack.get_mut(&name.name) {
-                    if let Some((_, existing_ty)) = vec.last_mut() {
-                        *existing_ty = ctype.clone();
-                    }
-                }
+                //
                 // For scalar types, extract the underlying value from the zz_value
                 // UNLESS the emitted expression is already unboxed (e.g., a binary
                 // op on unboxed scalars produces a raw int64_t, not a zz_value).
@@ -75,7 +73,30 @@ impl Lowerer {
                     "bool" if !val_is_unboxed => format!("({val}).b"),
                     _ => val,
                 };
-                out.push_str(&format!("    {ctype} {cid} = {final_val};\n"));
+                // Captured bindings become shared heap cells instead of plain
+                // locals: the stack entry holds the deref expr so every use
+                // site transparently reads/writes the shared cell.
+                if names.capture_set.contains(&name.name) {
+                    let n = names.bump_counter();
+                    let ptr = format!("_cell{n}");
+                    let deref = NameCtx::owner_deref(&ptr);
+                    self.emit_cell_alloc(&ptr, &ctype, &final_val, out);
+                    names.enter_cell(&name.name, &ptr, &deref, &ctype, n);
+                } else {
+                    let cid = if matches!(ctype.as_str(), "int64_t" | "double" | "bool") {
+                        names.enter_with_type(&name.name, &ctype)
+                    } else {
+                        names.enter(&name.name)
+                    };
+                    // Update the name ctx with the correct type (covers non-scalar
+                    // types and any type not yet set).
+                    if let Some(vec) = names.stack.get_mut(&name.name) {
+                        if let Some((_, existing_ty)) = vec.last_mut() {
+                            *existing_ty = ctype.clone();
+                        }
+                    }
+                    out.push_str(&format!("    {ctype} {cid} = {final_val};\n"));
+                }
                 // Track array literals so `len(v)` can fold to the arity.
                 if let Expr::Array { elems, .. } = value {
                     names.set_array_len(&name.name, elems.len());
@@ -189,15 +210,17 @@ impl Lowerer {
                 let value_needs_unbox = !val_is_actually_scalar;
                 match target {
                     Expr::Ident { name, .. } => {
-                        if let Some(cid) = names.lookup(name.as_str()) {
+                        if let Some(cid) = names.lookup(name.as_str()).map(|s| s.to_string()) {
                             // Check if the target variable is a scalar type
-                            if let Some(ctype) = names.lookup_type(name.as_str()) {
-                                match ctype {
+                            if let Some(ctype) =
+                                names.lookup_type(name.as_str()).map(|s| s.to_string())
+                            {
+                                match ctype.as_str() {
                                     "int64_t" | "double" | "bool" => {
                                         if value_is_scalar && !value_needs_unbox {
                                             out.push_str(&format!("    {cid} = {val};\n"));
                                         } else {
-                                            let field = match ctype {
+                                            let field = match ctype.as_str() {
                                                 "int64_t" => ".i",
                                                 "double" => ".f",
                                                 "bool" => ".b",
@@ -205,6 +228,18 @@ impl Lowerer {
                                             };
                                             out.push_str(&format!("    {cid} = ({val}){field};\n"));
                                         }
+                                    }
+                                    ct if ct.starts_with("zz_struct_")
+                                        && names.cell_ptrs.contains_key(name.as_str()) =>
+                                    {
+                                        // Struct cell: `zz_assign` expects `zz_value *` but
+                                        // struct cells are `zz_struct_X *`.  Use a named
+                                        // temporary + memcpy to avoid type mismatch.
+                                        let tmp = names.fresh("_sval");
+                                        out.push_str(&format!(
+                                            "    {ct} {tmp} = {val};\n\
+                                             memcpy(&{cid}, &{tmp}, sizeof({ct}));\n"
+                                        ));
                                     }
                                     _ => {
                                         out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
@@ -562,6 +597,23 @@ impl Lowerer {
                 out.push_str(&s);
             }
             // Loop body is never a function tail.
+            // A captured loop variable gets a per-iteration shared cell so
+            // closures created inside the loop each see their own iteration.
+            // Body writes go to the cell; the raw loop variable keeps driving
+            // iteration.
+            let loop_cell: Option<String> = if names.capture_set.contains(v) {
+                let n = names.bump_counter();
+                let ptr = format!("_cell{n}");
+                let deref = NameCtx::owner_deref(&ptr);
+                out.push_str(&format!(
+                    "    int64_t *{ptr} = (int64_t*)malloc(sizeof(int64_t));\n"
+                ));
+                out.push_str(&format!("    {deref} = {cid};\n"));
+                names.enter_cell(v, &ptr, &deref, "int64_t", n);
+                Some(v.clone())
+            } else {
+                None
+            };
             if let Some(ref name) = loop_arena {
                 self.loop_arenas.borrow_mut().push(name.clone());
                 *self.current_loop_arena.borrow_mut() = Some(name.clone());
@@ -584,6 +636,11 @@ impl Lowerer {
             // Free the sub-arena's buffer once the loop completes.
             if let Some(ref name) = loop_arena {
                 out.push_str(&format!("    zz_arena_destroy(&{name});\n"));
+            }
+            if let Some(cell_name) = loop_cell {
+                // Pop the per-iteration cell shadow, then the raw loop var.
+                names.leave(&cell_name);
+                names.pop_cell(&cell_name);
             }
             names.leave(v);
         } else {
@@ -619,6 +676,17 @@ impl Lowerer {
                      ? zz_clone({iter_tmp}.arr->items[{idx}])\n\
                      : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}};\n"
                 ));
+                // Captured iteration variable: per-iteration shared cell.
+                if names.capture_set.contains(v) {
+                    let n = names.bump_counter();
+                    let ptr = format!("_cell{n}");
+                    let deref = NameCtx::owner_deref(&ptr);
+                    out.push_str(&format!(
+                        "        zz_value *{ptr} = (zz_value*)malloc(sizeof(zz_value));\n"
+                    ));
+                    out.push_str(&format!("        {deref} = {cid};\n"));
+                    names.enter_cell(v, &ptr, &deref, "zz_value", n);
+                }
                 for bstmt in &body.stmts {
                     self.emit_stmt(bstmt, names, out, false);
                 }
@@ -654,6 +722,22 @@ impl Lowerer {
                 out.push_str(&format!(
                     "        zz_value {v_cid} = zz_clone({iter_tmp}.dict->entries[{idx}].val);\n"
                 ));
+                // Captured iteration variables: per-iteration shared cells.
+                for (lname, raw) in [
+                    (k_name.as_str(), k_cid.as_str()),
+                    (v_name.as_str(), v_cid.as_str()),
+                ] {
+                    if names.capture_set.contains(lname) {
+                        let n = names.bump_counter();
+                        let ptr = format!("_cell{n}");
+                        let deref = NameCtx::owner_deref(&ptr);
+                        out.push_str(&format!(
+                            "        zz_value *{ptr} = (zz_value*)malloc(sizeof(zz_value));\n"
+                        ));
+                        out.push_str(&format!("        {deref} = {raw};\n"));
+                        names.enter_cell(lname, &ptr, &deref, "zz_value", n);
+                    }
+                }
                 for bstmt in &body.stmts {
                     self.emit_stmt(bstmt, names, out, false);
                 }

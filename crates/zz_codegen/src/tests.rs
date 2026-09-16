@@ -593,6 +593,76 @@ io.println(p.x)
 }
 
 #[test]
+fn native_closure_env_capture() {
+    // Closures capture by reference (match the VM): mutations through the
+    // closure are visible to the owner, late owner writes are visible to
+    // the closure, and nested closures share outer cells.
+    let src = r#"
+func make_counter() {
+    count := 0
+    inc := |d| { count = count + d; count }
+    inc(5)
+    inc(3)
+}
+func nested() {
+    x := 1
+    mid := |a| {
+        y := a + x
+        inner := |b| x + y + b
+        inner(10)
+    }
+    mid(100)
+}
+func late() {
+    a := 10
+    add_a := |x| x + a
+    r1 := add_a(5)
+    a = 100
+    r1 + add_a(5)
+}
+io.println(make_counter())
+io.println(nested())
+io.println(late())
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "8\n112\n120\n");
+}
+
+#[test]
+fn native_method_form_hof() {
+    // Method-form dispatch for higher-order functions: xs.map(f) should
+    // produce the same result as map(xs, f).
+    let src = r#"
+func main() {
+    xs := [1, 2, 3]
+    ys := xs.map(|x| x + 1)
+    io.println(ys[0] + ys[1] + ys[2])
+    zs := xs.filter(|x| x > 1)
+    io.println(zs[0] + zs[1])
+    io.println(len(xs.enumerate()))
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "9\n5\n3\n");
+}
+
+#[test]
+fn native_struct_field_in_closure() {
+    // Struct field access (p.x) inside closures should resolve and
+    // lower correctly without intermediate local bindings.
+    let src = r#"
+struct Point { x: int, y: int }
+func main() {
+    p := Point { x: 3, y: 4 }
+    f := |s| p.x * s + p.y
+    io.println(f(10))
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "34\n");
+}
+
+#[test]
 fn native_json_extended_matches_vm() {
     // Mirrors tests/fixtures/stdlib/json_extended_test.zz: exercises the
     // json.* natives that have C runtime impls (type, len, keys, has,

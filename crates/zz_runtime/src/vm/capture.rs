@@ -194,12 +194,18 @@ pub(crate) fn scan_expr_captured(
         | Expr::Break { .. }
         | Expr::Continue { .. } => {}
         // A dotted path may reference a namespaced top-level binding
-        // (`ns.var`) or a struct field. Treat the full joined name as a
-        // potential free variable so namespaced top-level vars referenced
-        // from closures stay in the environment.
+        // (`ns.var`), a struct field access (`p.x`), or a nested module
+        // path.  The *root* variable (`parts[0]`) is what must be
+        // captured from the enclosing scope; the full joined name is
+        // kept as a fallback for namespaced top-level bindings stored as
+        // single slots.
         Expr::Path { parts, .. } => {
+            let root = parts[0].clone();
+            if !defined.contains(&root) {
+                free.insert(root);
+            }
             let full = parts.join(".");
-            if !defined.contains(&full) {
+            if full != parts[0] && !defined.contains(&full) {
                 free.insert(full);
             }
         }

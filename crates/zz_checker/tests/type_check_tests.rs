@@ -1394,3 +1394,12 @@ fn opaque_handle_tag_mismatch_errors() {
     let r = check_src_with_funcs("u := uuid.v4()\nok := regex.is_match(u, \"abc\")", funcs);
     assert!(has_errors(&r), "expected tag mismatch, got {:?}", r.errors);
 }
+
+#[test]
+fn nested_func_rejected() {
+    // Nested named func declarations should produce a clean error, not a panic.
+    errors_contain(
+        "func outer() {\n  func inner() {  }\n  inner()\n}",
+        "nested function `inner` is not supported",
+    );
+}

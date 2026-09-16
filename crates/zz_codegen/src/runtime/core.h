@@ -438,13 +438,26 @@ zz_value zz_not(zz_value a);
 bool zz_truthy(zz_value v);
 
 // ---- calls --------------------------------------------------------------
-typedef zz_value (*zz_dispatch_fn)(zz_value *args, size_t argc);
+// Closure entry point: args, argc, then the captured environment (array of
+// shared heap-cell pointers, one per free variable at the creation site).
+typedef zz_value (*zz_dispatch_fn)(zz_value *args, size_t argc, void **env, size_t nenv);
 
 // Build a callable closure value from a generated function pointer. The
 // payload stores the function pointer (not a refcounted object).
 zz_value zz_closure_make(zz_dispatch_fn f);
+// Build a closure value with a captured environment: `cells` (array of
+// `nenv` shared-cell pointers) is copied into the heap payload so the
+// environment outlives the creating scope. Cells themselves are shared,
+// never copied — owner and closures read/write the same storage.
+zz_value zz_closure_make_ex(zz_dispatch_fn f, void **cells, size_t nenv);
 // Extract the generated function pointer from a closure value.
 zz_dispatch_fn zz_closure_target(zz_value v);
+// Extract the captured environment from a closure value (NULL + 0 when none).
+void **zz_closure_env(zz_value v, size_t *nenv);
+// Call a closure value with args. Returns unit when `f` is not a closure
+// (null target) so unresolvable callees keep the old unit behavior
+// instead of crashing.
+zz_value zz_call_closure(zz_value f, zz_value *args, size_t argc);
 
 zz_value zz_call(zz_value fn, zz_value *args, size_t argc, int *err);
 
