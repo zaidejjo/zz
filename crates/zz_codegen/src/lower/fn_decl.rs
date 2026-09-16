@@ -40,6 +40,15 @@ impl Lowerer {
         o.push_str("    zz_arena _arena;\n");
         o.push_str("    zz_arena_init(&_arena, 65536);\n"); // 64KB default
         let mut names = NameCtx::new();
+        // Module-level globals are visible inside every function.
+        // Locals (params + body decls) shadow them via the stack.
+        self.seed_globals(&mut names);
+        // Bindings captured by a nested closure literal become shared heap
+        // cells (match VM by-reference capture semantics).
+        {
+            let param_names: Vec<String> = params.iter().map(|p| p.name.name.clone()).collect();
+            names.capture_set = self.body_capture_set(&param_names, block);
+        }
         // Look up the function's parameter types from the type checker.
         // Used to register each param under its actual C type so
         // subsequent expression lowering (field access, binop, ...)
@@ -60,18 +69,45 @@ impl Lowerer {
             // (passed as `*self`); the remaining params live in `args`.
             if is_impl_method && i == 0 {
                 let ctype = self.type_to_c(&pt);
-                let cid = names.enter_with_type(&p.name.name, &ctype);
-                o.push_str(&format!("    {ctype} {cid} = *self;\n"));
+                if names.capture_set.contains(&p.name.name) {
+                    // Captured receiver: heap cell so closures share it.
+                    let n = names.bump_counter();
+                    let ptr = format!("_cell{n}");
+                    let deref = NameCtx::owner_deref(&ptr);
+                    o.push_str(&format!(
+                        "    {ctype} *{ptr} = ({ctype}*)malloc(sizeof({ctype}));\n"
+                    ));
+                    o.push_str(&format!("    {deref} = *self;\n"));
+                    names.enter_cell(&p.name.name, &ptr, &deref, &ctype, n);
+                } else {
+                    let cid = names.enter_with_type(&p.name.name, &ctype);
+                    o.push_str(&format!("    {ctype} {cid} = *self;\n"));
+                }
             } else {
                 // Non-self params always live in the `args[]` array
                 // which holds `zz_value`s. Keep them as `zz_value`
                 // (boxed) — scalar unboxing happens at point of use
                 // via `scalar_operand_type` / `box_scalar_operand`.
-                let cid = names.enter(&p.name.name);
-                o.push_str(&format!(
-                    "    zz_value {cid} = args[{idx}];\n",
-                    idx = i - arg_offset
-                ));
+                if names.capture_set.contains(&p.name.name) {
+                    // Captured param: heap cell shared with closures.
+                    let n = names.bump_counter();
+                    let ptr = format!("_cell{n}");
+                    let deref = NameCtx::owner_deref(&ptr);
+                    o.push_str(&format!(
+                        "    zz_value *{ptr} = (zz_value*)malloc(sizeof(zz_value));\n"
+                    ));
+                    o.push_str(&format!(
+                        "    {deref} = args[{idx}];\n",
+                        idx = i - arg_offset
+                    ));
+                    names.enter_cell(&p.name.name, &ptr, &deref, "zz_value", n);
+                } else {
+                    let cid = names.enter(&p.name.name);
+                    o.push_str(&format!(
+                        "    zz_value {cid} = args[{idx}];\n",
+                        idx = i - arg_offset
+                    ));
+                }
             }
         }
         // Bit of per-function state for `defer` support: a fixed-size array

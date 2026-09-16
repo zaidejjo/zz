@@ -87,6 +87,7 @@ fn needs_temp(e: &Expr) -> bool {
         Expr::Unary { .. }
             | Expr::If { .. }
             | Expr::Block(_)
+            | Expr::Closure { .. }
             | Expr::Array { .. }
             | Expr::Range { .. }
             | Expr::Fmt { .. }
@@ -159,9 +160,19 @@ impl Lowerer {
     pub fn lower(&self) -> LoweredC {
         let mut funcs = String::new();
         let mut body = String::new();
-        // One NameCtx shared across ALL top-level statements: top-level vars
-        // remain visible across statements (like zz_main's single frame).
+        // Module-level vars become C globals so every function can see them.
+        // `collect_globals` gathers all top-level Decl names with checker types.
+        let globals = self.collect_globals();
+        let mut globals_decl = String::new();
+        for (_, cid, ctype, _) in &globals {
+            globals_decl.push_str(&format!("static {ctype} {cid};\n"));
+        }
+        // One NameCtx shared across ALL top-level statements, pre-seeded with
+        // globals. Top-level Decl assigns into its global (no local redecl).
         let mut names = NameCtx::new();
+        self.seed_globals(&mut names);
+        let mut global_init_done: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         for stmt in self.tp.stmts() {
             match stmt {
@@ -201,6 +212,59 @@ impl Lowerer {
                     }
                 }
                 Stmt::Struct { .. } | Stmt::Import { .. } => {}
+                Stmt::Decl { name, value, .. } => {
+                    // Top-level `x := <rhs>` → assign into `zz_global_*`.
+                    // The global is pre-declared; zz_main only initializes it.
+                    let zz_name = &name.name;
+                    let Some((gid, gtype)) = names
+                        .globals
+                        .get(zz_name)
+                        .map(|(a, b)| (a.clone(), b.clone()))
+                    else {
+                        // Not a tracked global (should not happen): fall back.
+                        let mut out = String::new();
+                        self.emit_stmt(stmt, &mut names, &mut out, false);
+                        body.push_str(&out);
+                        continue;
+                    };
+                    let mut out = String::new();
+                    // Struct-init fast path mirrors emit_stmt Decl.
+                    if let Expr::StructInit {
+                        name: struct_name, ..
+                    } = value
+                    {
+                        if self.is_unboxed_struct(struct_name) {
+                            let val = self.emit_expr(value, &mut names, &mut out);
+                            out.push_str(&format!("    {gid} = {val};\n"));
+                            body.push_str(&out);
+                            global_init_done.insert(zz_name.clone());
+                            continue;
+                        }
+                    }
+                    let val = self.emit_expr(value, &mut names, &mut out);
+                    let val_is_unboxed = val.starts_with("(int64_t)(")
+                        || val.starts_with("(double)(")
+                        || val.starts_with("(bool)(");
+                    let final_val = match gtype.as_str() {
+                        "int64_t" if !val_is_unboxed => format!("({val}).i"),
+                        "double" if !val_is_unboxed => format!("({val}).f"),
+                        "bool" if !val_is_unboxed => format!("({val}).b"),
+                        _ => val,
+                    };
+                    let first_init = !global_init_done.contains(zz_name);
+                    if first_init {
+                        out.push_str(&format!("    {gid} = {final_val};\n"));
+                        global_init_done.insert(zz_name.clone());
+                    } else if matches!(gtype.as_str(), "int64_t" | "double" | "bool") {
+                        out.push_str(&format!("    {gid} = {final_val};\n"));
+                    } else {
+                        out.push_str(&format!("    zz_assign(&{gid}, {final_val});\n"));
+                    }
+                    if let Expr::Array { elems, .. } = value {
+                        names.set_array_len(zz_name, elems.len());
+                    }
+                    body.push_str(&out);
+                }
                 other => {
                     let mut out = String::new();
                     self.emit_stmt(other, &mut names, &mut out, false);
@@ -275,10 +339,11 @@ impl Lowerer {
             crate::RUNTIME_C
         };
         let source = format!(
-            "{runtime_h}\n{runtime_c}\n{ffi_section}\n// ---- struct definitions ----\n{struct_preamble}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset_trim(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
+            "{runtime_h}\n{runtime_c}\n{ffi_section}\n// ---- struct definitions ----\n{struct_preamble}\n// ---- module globals ----\n{globals_decl}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset_trim(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
             runtime_h = crate::RUNTIME_H,
             runtime_c = runtime_c,
             struct_preamble = struct_preamble,
+            globals_decl = globals_decl,
             funcs = funcs,
             closure_defs = self.closure_defs.borrow().join("\n"),
             body = body,
@@ -412,10 +477,10 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "printz" | "io.printz" | "std.io.printz" => Some("zz_io_print"),
         "input" | "io.read_line" | "std.io.read_line" | "main_io.input" => Some("zz_io_input"),
         "len" => Some("zz_len"),
-        "map" => Some("zz_iter_map"),
-        "filter" => Some("zz_iter_filter"),
-        "enumerate" => Some("zz_iter_enumerate"),
-        "zip" => Some("zz_iter_zip"),
+        "map" | "vec.map" | "std.vec.map" => Some("zz_iter_map"),
+        "filter" | "vec.filter" | "std.vec.filter" => Some("zz_iter_filter"),
+        "enumerate" | "vec.enumerate" | "std.vec.enumerate" => Some("zz_iter_enumerate"),
+        "zip" | "vec.zip" | "std.vec.zip" => Some("zz_iter_zip"),
         "append" => Some("zz_vec_push"),
         "range" => Some("zz_range3"),
         "typeof" => Some("zz_typeof"),

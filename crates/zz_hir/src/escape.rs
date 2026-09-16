@@ -58,11 +58,22 @@ pub fn analyze(tp: &TypedProgram) -> EscapeResult {
                 let fname = name.join(".");
                 let param_names: HashSet<String> =
                     params.iter().map(|p| p.name.name.clone()).collect();
+                // Closure-captured bindings outlive the function scope (the
+                // environment holds shared cells), so their initializers
+                // must be heap-allocated, never arena/stack.
+                let captured = crate::capture::captured_in_block(
+                    &params
+                        .iter()
+                        .map(|p| p.name.name.clone())
+                        .collect::<Vec<_>>(),
+                    body,
+                    &global_names,
+                );
                 let mut ctx = FuncCtx {
                     global_names: &global_names,
                     param_names,
                     func_name: &fname,
-                    escaped_names: HashSet::new(),
+                    escaped_names: captured,
                 };
                 analyze_block_impl(body, tp, &mut ctx, &mut result, true);
                 // Propagate escaping to initializer expressions of escaped variables.

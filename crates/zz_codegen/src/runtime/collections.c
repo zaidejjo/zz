@@ -353,12 +353,14 @@ static zz_value zz_iter_items(zz_value v) {
 zz_value zz_iter_map(zz_value items, zz_value f, int *err) {
     (void)err;
     zz_dispatch_fn fn = zz_closure_target(f);
+    size_t nenv = 0;
+    void **env = zz_closure_env(f, &nenv);
     zz_value arr = zz_iter_items(items);
     zz_value out = zz_array_new();
     if (!fn) return out;
     for (size_t i = 0; i < arr.arr->len; i++) {
         zz_value a1[] = { arr.arr->items[i] };
-        zz_value r = fn(a1, 1);
+        zz_value r = fn(a1, 1, env, nenv);
         zz_array_push(out.arr, r);
     }
     zz_release(&arr);
@@ -369,12 +371,14 @@ zz_value zz_iter_map(zz_value items, zz_value f, int *err) {
 zz_value zz_iter_filter(zz_value items, zz_value f, int *err) {
     (void)err;
     zz_dispatch_fn fn = zz_closure_target(f);
+    size_t nenv = 0;
+    void **env = zz_closure_env(f, &nenv);
     zz_value arr = zz_iter_items(items);
     zz_value out = zz_array_new();
     if (!fn) return out;
     for (size_t i = 0; i < arr.arr->len; i++) {
         zz_value a1[] = { arr.arr->items[i] };
-        zz_value r = fn(a1, 1);
+        zz_value r = fn(a1, 1, env, nenv);
         if (zz_truthy(r)) {
             zz_array_push(out.arr, zz_clone(arr.arr->items[i]));
         }
