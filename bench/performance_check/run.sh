@@ -34,8 +34,8 @@ DIM=$'\e[2m'
 ZZ="$ROOT/target/release/zz"
 [ -x "$ZZ" ] || ZZ="$ROOT/target/debug/zz"
 if [ ! -x "$ZZ" ]; then
-	echo "${RED}error${RST}: zz binary not found"
-	exit 1
+  echo "${RED}error${RST}: zz binary not found"
+  exit 1
 fi
 
 # Check tools
@@ -58,36 +58,47 @@ echo "${BLD}${CYN}━━ building ━━${RST}"
 
 GO_BIN="$HERE/.bin/bench_go"
 if [ "$HAVE_GO" -eq 1 ]; then
-	(cd "$HERE/go" && go build -o "$GO_BIN" .) >"$LOG_DIR/go_build.log" 2>&1 || HAVE_GO=0
-	[ ! -x "$GO_BIN" ] && HAVE_GO=0
+  (cd "$HERE/go" && go build -o "$GO_BIN" .) >"$LOG_DIR/go_build.log" 2>&1 || HAVE_GO=0
+  [ ! -x "$GO_BIN" ] && HAVE_GO=0
 fi
 
 RUST_BIN="$HERE/.bin/bench_rust"
 if [ "$HAVE_RUST" -eq 1 ]; then
-	(cd "$HERE/rust" && cargo build --release --quiet) >"$LOG_DIR/rust_build.log" 2>&1
-	if [ -x "$HERE/rust/target/release/bench_stress" ]; then
-		cp -f "$HERE/rust/target/release/bench_stress" "$RUST_BIN" && chmod +x "$RUST_BIN"
-	else
-		HAVE_RUST=0
-	fi
-	[ ! -x "$RUST_BIN" ] && HAVE_RUST=0
+  (cd "$HERE/rust" && cargo build --release --quiet) >"$LOG_DIR/rust_build.log" 2>&1
+  if [ -x "$HERE/rust/target/release/bench_stress" ]; then
+    cp -f "$HERE/rust/target/release/bench_stress" "$RUST_BIN" && chmod +x "$RUST_BIN"
+  else
+    HAVE_RUST=0
+  fi
+  [ ! -x "$RUST_BIN" ] && HAVE_RUST=0
 fi
 
 declare -A ZZ_AOT_BIN
 for bench in cpu_intensive concurrency_stress http_throughput memory_alloc memory_leak string_concats; do
-	src="$HERE/zz/bench_${bench}.zz"
-	out="$ZZ_BIN_DIR/bench_${bench}_aot"
-	rm -f "$out"
-	if "$ZZ" build -p "$src" >"$LOG_DIR/zz_build_${bench}.log" 2>&1; then
-		srcbin="$HERE/zz/bench_${bench}"
-		if [ -x "$srcbin" ]; then
-			mv -f "$srcbin" "$out" && chmod +x "$out" && ZZ_AOT_BIN[$bench]="$out"
-		else
-			echo "${YLW}warn${RST}: no binary for $bench"
-		fi
-	else
-		echo "${YLW}warn${RST}: zz build failed for $bench"
-	fi
+  src="$HERE/zz/bench_${bench}.zz"
+  out="$ZZ_BIN_DIR/bench_${bench}_aot"
+  rm -f "$out"
+
+  "$ZZ" build -p "$src" >"$LOG_DIR/zz_build_${bench}.log" 2>&1 || true
+
+  srcbin=""
+  for candidate in \
+    "$HERE/zz/bin/bench_${bench}" \
+    "$HERE/zz/bench_${bench}" \
+    "$HERE/zz/bin/bench_${bench}.exe" \
+    "$HERE/zz/bench_${bench}.exe"; do
+    if [ -x "$candidate" ]; then
+      srcbin="$candidate"
+      break
+    fi
+  done
+
+  if [ -n "$srcbin" ]; then
+    cp -f "$srcbin" "$out" && chmod +x "$out" && ZZ_AOT_BIN[$bench]="$out"
+    echo "${DIM}  ✓ $bench ← $srcbin${RST}"
+  else
+    echo "${YLW}warn${RST}: no binary for $bench (looked in zz/bin/ and zz/)"
+  fi
 done
 
 # ---------------------------------------------------------------------

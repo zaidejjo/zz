@@ -285,6 +285,19 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("sqlz.transaction", "AOT-inlined; no native C impl"),
     ("std.db.transaction", "AOT-inlined; no native C impl"),
     ("db.transaction", "AOT-inlined; no native C impl"),
+    // Test assertions — VM-only builtins; no C codegen needed.
+    ("assert", "test assertion; VM-only"),
+    ("assert_eq", "test assertion; VM-only"),
+    ("assert_ne", "test assertion; VM-only"),
+    ("assert_approx_eq", "test assertion; VM-only"),
+    ("fail", "test fail; VM-only"),
+    ("panic", "test fail; VM-only"),
+    ("std.test.assert", "test assertion; VM-only"),
+    ("std.test.assert_eq", "test assertion; VM-only"),
+    ("std.test.assert_ne", "test assertion; VM-only"),
+    ("std.test.assert_approx_eq", "test assertion; VM-only"),
+    ("std.test.fail", "test fail; VM-only"),
+    ("std.test.panic", "test fail; VM-only"),
 ];
 
 #[test]

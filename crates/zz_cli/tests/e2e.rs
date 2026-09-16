@@ -79,6 +79,22 @@ fn find_fixtures(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Run `zz test <file>` and return (exit_code, stdout, stderr).
+fn run_zz_test(file: &Path) -> (i32, String, String) {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("test")
+        .arg(file)
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz test {file:?}`: {e}"));
+
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    (exit_code, stdout, stderr)
+}
+
 // ---------------------------------------------------------------------------
 // Success fixtures: must exit 0
 // ---------------------------------------------------------------------------
@@ -552,4 +568,185 @@ fn e2e_stdlib_args_raw_argv() {
             "missing `{expected}` in:\n{stdout}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Test fixtures: `zz test` must exit 0 (all @test functions pass)
+// ---------------------------------------------------------------------------
+
+macro_rules! e2e_test_success {
+    ($name:ident, $file:expr) => {
+        #[test]
+        fn $name() {
+            let fixtures = fixtures_dir();
+            let path = fixtures.join("test").join($file);
+            assert!(path.exists(), "fixture not found: {}", path.display());
+
+            let (exit, stdout, stderr) = run_zz_test(&path);
+            assert_eq!(
+                exit,
+                0,
+                "fixture {} should exit 0 but got {}.\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                path.display(),
+                exit,
+            );
+        }
+    };
+}
+
+e2e_test_success!(e2e_test_basic_assertions, "basic_assertions.zz");
+
+// --- Test framework feature tests ---
+
+e2e_test_success!(e2e_test_setup_teardown, "setup_teardown.zz");
+e2e_test_success!(e2e_test_cases, "cases.zz");
+e2e_test_success!(e2e_test_should_panic, "should_panic.zz");
+e2e_test_success!(e2e_test_ignore, "ignore.zz");
+e2e_test_success!(e2e_test_tags, "tags.zz");
+e2e_test_success!(e2e_test_assertions, "assertions.zz");
+e2e_test_success!(e2e_test_timeout, "timeout.zz");
+e2e_test_success!(e2e_test_retry, "retry.zz");
+
+// --- CLI flag integration tests ---
+
+#[test]
+fn e2e_test_list_flag() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("tags.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("test")
+        .arg(&path)
+        .arg("--list")
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .expect("failed to exec zz test --list");
+
+    let exit = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert_eq!(
+        exit,
+        0,
+        "--list should exit 0. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("test_fast_1"),
+        "--list should show test_fast_1. stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("test_slow_1"),
+        "--list should show test_slow_1. stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("4 tests found"),
+        "--list should show count. stdout: {stdout}"
+    );
+}
+
+#[test]
+fn e2e_test_filter_flag() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("tags.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("test")
+        .arg(&path)
+        .arg("--filter")
+        .arg("fast")
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .expect("failed to exec zz test --filter");
+
+    let exit = output.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(exit, 0, "--filter fast should exit 0. stderr: {stderr}");
+    assert!(
+        stderr.contains("2 passed"),
+        "should pass 2 fast tests. stderr: {stderr}"
+    );
+}
+
+#[test]
+fn e2e_test_tag_flag() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("tags.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("test")
+        .arg(&path)
+        .arg("--tag")
+        .arg("slow")
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .expect("failed to exec zz test --tag");
+
+    let exit = output.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(exit, 0, "--tag slow should exit 0. stderr: {stderr}");
+    assert!(
+        stderr.contains("1 passed"),
+        "should pass 1 slow test. stderr: {stderr}"
+    );
+}
+
+#[test]
+fn e2e_test_skip_flag() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("tags.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("test")
+        .arg(&path)
+        .arg("--skip")
+        .arg("slow")
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .expect("failed to exec zz test --skip");
+
+    let exit = output.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(exit, 0, "--skip slow should exit 0. stderr: {stderr}");
+    // Should pass 3 tests (2 fast + 1 untagged), skip 1 slow
+    assert!(
+        stderr.contains("3 passed"),
+        "should pass 3 tests. stderr: {stderr}"
+    );
+}
+
+#[test]
+fn e2e_test_repeat_flag() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("assertions.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("test")
+        .arg(&path)
+        .arg("--repeat")
+        .arg("2")
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .expect("failed to exec zz test --repeat");
+
+    let exit = output.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(exit, 0, "--repeat 2 should exit 0. stderr: {stderr}");
+    assert!(
+        stderr.contains("iteration 1/2"),
+        "should show iteration. stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("aggregate"),
+        "should show aggregate. stderr: {stderr}"
+    );
 }

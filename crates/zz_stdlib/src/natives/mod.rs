@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use zz_runtime::{EvalError, NativeEntry, Value};
 
 pub(crate) mod args;
+pub(crate) mod assert;
 pub(crate) mod builtins;
 pub(crate) mod concurrency;
 pub(crate) mod crypto;
@@ -83,6 +84,69 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
             f: io::read_line,
         },
     );
+    // Test assertions — top-level builtins available without import.
+    // `assert(cond)` = arity 1; `assert(cond, msg)` not supported at VM level
+    // (arity is fixed for natives). The 2-arg form is via `std.test.assert`
+    // which the checker allows via has_default; for simplicity we register
+    // a single-arg `assert` native. Users wanting messages use `fail()` or
+    // `assert_eq` for richer output.
+    m.insert(
+        "assert".into(),
+        NativeEntry {
+            arity: 1,
+            f: assert::assert_fn,
+        },
+    );
+    m.insert(
+        "assert_eq".into(),
+        NativeEntry {
+            arity: 2,
+            f: assert::assert_eq_fn,
+        },
+    );
+    m.insert(
+        "assert_ne".into(),
+        NativeEntry {
+            arity: 2,
+            f: assert::assert_ne_fn,
+        },
+    );
+    m.insert(
+        "assert_approx_eq".into(),
+        NativeEntry {
+            arity: 3,
+            f: assert::assert_approx_eq_fn,
+        },
+    );
+    m.insert(
+        "fail".into(),
+        NativeEntry {
+            arity: 1,
+            f: assert::fail_fn,
+        },
+    );
+    m.insert(
+        "panic".into(),
+        NativeEntry {
+            arity: 1,
+            f: assert::fail_fn,
+        },
+    );
+    // `std.test` namespace — same implementations.
+    for (short, arity, func) in [
+        (
+            "std.test.assert",
+            1_usize,
+            assert::assert_fn as zz_runtime::NativeFn,
+        ),
+        ("std.test.assert_eq", 2, assert::assert_eq_fn),
+        ("std.test.assert_ne", 2, assert::assert_ne_fn),
+        ("std.test.assert_approx_eq", 3, assert::assert_approx_eq_fn),
+        ("std.test.fail", 1, assert::fail_fn),
+        ("std.test.panic", 1, assert::fail_fn),
+    ] {
+        m.insert(short.into(), NativeEntry { arity, f: func });
+    }
 
     // Range and iterator builtins
     m.insert(

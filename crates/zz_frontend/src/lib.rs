@@ -14,6 +14,7 @@ pub mod lexer;
 pub mod parser;
 pub mod printer;
 pub mod span;
+pub mod test_attr;
 pub mod tests;
 pub mod token;
 

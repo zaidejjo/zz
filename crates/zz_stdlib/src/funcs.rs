@@ -2612,6 +2612,75 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig_t(vec![("handle", Type::TaskJoin)], t.clone()),
     );
 
+    // ── Test assertions (lockstep with natives/assert) ──────────────
+    // Top-level builtins available without import; also `std.test.*`.
+    let assert_sig = FuncSig {
+        generics: Vec::new(),
+        bounds: Vec::new(),
+        params: vec![("cond".to_string(), Type::Bool)],
+        has_default: vec![false],
+        ret: Type::Unit,
+        is_extern: false,
+    };
+    for name in ["assert", "std.test.assert"] {
+        m.insert(name.into(), assert_sig.clone());
+    }
+    let t_eq = Type::Named("T".to_string());
+    let assert_eq_sig = FuncSig {
+        generics: vec!["T".to_string()],
+        bounds: Vec::new(),
+        params: vec![
+            ("left".to_string(), t_eq.clone()),
+            ("right".to_string(), t_eq.clone()),
+        ],
+        has_default: vec![false, false],
+        ret: Type::Unit,
+        is_extern: false,
+    };
+    for name in ["assert_eq", "std.test.assert_eq"] {
+        m.insert(name.into(), assert_eq_sig.clone());
+    }
+    let assert_ne_sig = FuncSig {
+        generics: vec!["T".to_string()],
+        bounds: Vec::new(),
+        params: vec![
+            ("left".to_string(), t_eq.clone()),
+            ("right".to_string(), t_eq.clone()),
+        ],
+        has_default: vec![false, false],
+        ret: Type::Unit,
+        is_extern: false,
+    };
+    for name in ["assert_ne", "std.test.assert_ne"] {
+        m.insert(name.into(), assert_ne_sig.clone());
+    }
+    let approx_sig = FuncSig {
+        generics: Vec::new(),
+        bounds: Vec::new(),
+        params: vec![
+            ("left".to_string(), Type::Float),
+            ("right".to_string(), Type::Float),
+            ("epsilon".to_string(), Type::Float),
+        ],
+        has_default: vec![false, false, false],
+        ret: Type::Unit,
+        is_extern: false,
+    };
+    for name in ["assert_approx_eq", "std.test.assert_approx_eq"] {
+        m.insert(name.into(), approx_sig.clone());
+    }
+    let fail_sig = FuncSig {
+        generics: Vec::new(),
+        bounds: Vec::new(),
+        params: vec![("msg".to_string(), Type::Str)],
+        has_default: vec![false],
+        ret: Type::Unit,
+        is_extern: false,
+    };
+    for name in ["fail", "panic", "std.test.fail", "std.test.panic"] {
+        m.insert(name.into(), fail_sig.clone());
+    }
+
     m
 }
 
@@ -2722,7 +2791,7 @@ mod tests {
         assert!(funcs.contains_key("colors.red"));
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
-        assert_eq!(funcs.len(), 524);
+        assert_eq!(funcs.len(), 536);
     }
 
     #[test]

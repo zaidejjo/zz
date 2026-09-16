@@ -787,6 +787,32 @@ fn normalize_func_types(seq: &[String]) -> Vec<String> {
     out
 }
 
+/// Treat `=` and `:` as equivalent when they separate named arguments.
+/// This lets `@test(should_panic = true)` (spec style) and
+/// `@test(should_panic: true)` (canonical ZZ) compare equal under the
+/// formatter's token-sequence check. Both are accepted by the parser.
+fn normalize_named_arg_sep(seq: &[String]) -> Vec<String> {
+    // Only `=` inside parentheses/brackets (call arguments / decorators) is
+    // canonicalized so top-level assignments (`x = 1`) remain distinct.
+    let mut out = Vec::with_capacity(seq.len());
+    let mut depth: i32 = 0;
+    for tok in seq {
+        match tok.as_str() {
+            "(" | "[" => {
+                depth += 1;
+                out.push(tok.clone());
+            }
+            ")" | "]" => {
+                depth = (depth - 1).max(0);
+                out.push(tok.clone());
+            }
+            "=" if depth > 0 => out.push(":".to_string()),
+            _ => out.push(tok.clone()),
+        }
+    }
+    out
+}
+
 /// Comma is "arm-start" when the next token begins a match arm or closes a
 /// container: `_`, `.variant`, literal, string, or a closing delimiter.
 fn arm_start(tok: &str) -> bool {
@@ -918,12 +944,15 @@ pub fn verify(
     // 3. Significant-token sequences must match. Trailing commas are
     //    normalized on both sides (the emitter never produces them) and
     //    imports are compared as an order-insensitive set (the emitter
-    //    hoists them to the top of the file).
-    let orig_tokens = normalize_func_types(&normalize_trailing_commas(
+    //    hoists them to the top of the file). Named-arg separators `:` and
+    //    `=` are treated as equivalent so `@test(should_panic = true)` and
+    //    `@test(should_panic: true)` verify as identical — see
+    //    `parse_call_args` alias for test decorators.
+    let orig_tokens = normalize_func_types(&normalize_trailing_commas(&normalize_named_arg_sep(
         &significant_token_sequence(original_src),
-    ));
-    let new_tokens = normalize_func_types(&normalize_trailing_commas(&significant_token_sequence(
-        formatted_src,
+    )));
+    let new_tokens = normalize_func_types(&normalize_trailing_commas(&normalize_named_arg_sep(
+        &significant_token_sequence(formatted_src),
     )));
     let (orig_imports, orig_rest) = split_imports(&orig_tokens);
     let (new_imports, new_rest) = split_imports(&new_tokens);
