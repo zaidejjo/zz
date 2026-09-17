@@ -107,6 +107,19 @@ struct Loader {
 
 /// Load an entry file and all of its imports.
 pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
+    load_program_with_plugins(main_path, &[])
+}
+
+/// Load an entry file and all of its imports, merging additional function
+/// signatures from plugin manifests.
+///
+/// `plugin_funcs` is a slice of `(package_name, FuncSig)` pairs loaded from
+/// `.zzi` plugin manifests. These are merged into the checker's function table
+/// alongside the stdlib, making them available for type-checking and codegen.
+pub fn load_program_with_plugins(
+    main_path: &Path,
+    plugin_funcs: &[(String, FuncSig)],
+) -> Result<LoadResult, String> {
     let entry = main_path.canonicalize().map_err(|e| {
         format!(
             "cannot read entry file `{}`: {e}\n\
@@ -135,6 +148,10 @@ pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
         selected_consts: HashMap::new(),
         stdlib_aliases: Vec::new(),
     };
+    // Merge plugin manifest function signatures into the checker's function table.
+    for (name, sig) in plugin_funcs {
+        loader.funcs.insert(name.clone(), sig.clone());
+    }
     loader.load_file(main_path, None)?;
     Ok(loader.finish())
 }

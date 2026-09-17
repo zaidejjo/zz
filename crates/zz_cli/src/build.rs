@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use zz_codegen::{BuildOptions, ClangProvider};
 use zz_frontend::span::Span;
 use zz_hir::TypedProgram;
+use zz_plugin::load_manifest;
 
 use crate::loader;
 
@@ -71,7 +72,7 @@ pub fn cache_dir() -> PathBuf {
 fn cache_key(
     source_path: &Path,
     src: &str,
-    opts: BuildOptions,
+    opts: &BuildOptions,
     target: Option<&str>,
 ) -> Result<String, String> {
     let runtime_mtime = runtime_mtime();
@@ -151,13 +152,151 @@ fn opts_for(mode: BuildMode) -> BuildOptions {
     }
 }
 
+/// Discover plugin manifests (`.zzi` files) from installed dependencies.
+///
+/// Reads `zz.lock` from the project directory, looks up each dependency's CAS
+/// entry, and loads any `plugin.zzi` file found. Returns a flat list of
+/// `(function_name, FuncSig)` pairs ready to merge into the checker.
+fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_checker::FuncSig)> {
+    let mut plugin_funcs = Vec::new();
+
+    // Find the project root by looking for zz.lock
+    let lock_path = project_path
+        .parent()
+        .and_then(|p| zz_pm::lock::Lockfile::load(&p.join("zz.lock")).ok());
+
+    let lock = match lock_path {
+        Some(l) => l,
+        None => return plugin_funcs, // no lock file, no plugins
+    };
+
+    for dep in &lock.deps {
+        let cas_dir = zz_pm::paths::cas_entry(&dep.hash);
+        let manifest_path = cas_dir.join("plugin.zzi");
+        if !manifest_path.exists() {
+            continue;
+        }
+        match load_manifest(&manifest_path) {
+            Ok(manifest) => {
+                for (name, sig) in manifest.funcs {
+                    plugin_funcs.push((name, sig));
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to load plugin manifest for `{}`: {e}",
+                    dep.name
+                );
+            }
+        }
+    }
+
+    plugin_funcs
+}
+
+/// Discover and invoke build hooks for plugin packages with native code.
+///
+/// Reads `zz.lock`, finds dependencies that have a `plugin.zzi` and a
+/// `zz.toml` with a `[native]` section, invokes their build hooks, and
+/// returns the paths to compiled artifacts (`.o` / `.a` files).
+fn discover_native_artifacts(project_path: &Path) -> Vec<PathBuf> {
+    let mut artifacts = Vec::new();
+
+    let lock_path = project_path
+        .parent()
+        .and_then(|p| zz_pm::lock::Lockfile::load(&p.join("zz.lock")).ok());
+
+    let lock = match lock_path {
+        Some(l) => l,
+        None => return artifacts,
+    };
+
+    for dep in &lock.deps {
+        let cas_dir = zz_pm::paths::cas_entry(&dep.hash);
+
+        // Check for plugin.zzi (this is a native package)
+        if !cas_dir.join("plugin.zzi").exists() {
+            continue;
+        }
+
+        // Read the package's zz.toml for [native] section
+        let manifest_path = cas_dir.join("zz.toml");
+        let manifest = match zz_pm::manifest::Manifest::load(&manifest_path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        let native = match &manifest.native {
+            Some(n) => n,
+            None => continue,
+        };
+
+        // Invoke the build hook
+        let build_script = cas_dir.join(&native.build);
+        if !build_script.exists() {
+            eprintln!(
+                "warning: plugin `{}` build script not found: {}",
+                dep.name,
+                build_script.display()
+            );
+            continue;
+        }
+
+        eprintln!("zz: building plugin `{}` via {}...", dep.name, native.build);
+        let output = std::process::Command::new("bash")
+            .arg(&build_script)
+            .current_dir(&cas_dir)
+            .output();
+
+        match output {
+            Ok(o) => {
+                if !o.status.success() {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    eprintln!("warning: plugin `{}` build failed: {}", dep.name, stderr);
+                    continue;
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to run plugin `{}` build hook: {e}",
+                    dep.name
+                );
+                continue;
+            }
+        }
+
+        // Collect artifacts from the build output directory
+        let build_dir = cas_dir.join("build");
+        if build_dir.exists() {
+            for entry in std::fs::read_dir(&build_dir).into_iter().flatten() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext == "o" || ext == "a" {
+                        artifacts.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    artifacts
+}
+
 /// Type-check + DCE all modules to a typed program, entry-main name, and
 /// reachable set.
 fn typed_program_for(
     path: &Path,
     entry_ns: &str,
 ) -> Result<(TypedProgram, zz_hir::ReachableSet, String), String> {
-    let loaded = loader::load_program(path)?;
+    // Discover plugin manifests from installed dependencies and merge their
+    // function signatures into the checker's function table.
+    let plugin_funcs = discover_plugin_manifests(path);
+    let loaded = if plugin_funcs.is_empty() {
+        loader::load_program(path)?
+    } else {
+        loader::load_program_with_plugins(path, &plugin_funcs)?
+    };
     let mut has_errors = false;
     for e in &loaded.errors {
         let mut files = zz_frontend::diag::Files::new();
@@ -290,8 +429,11 @@ pub fn build_release(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
-    let opts = opts_for(mode);
+    let mut opts = opts_for(mode);
     let target = rel.target_opt();
+
+    // Discover and build plugin native artifacts (compiled .o / .a files).
+    opts.plugin_artifacts = discover_native_artifacts(path);
 
     // Early validation: exact CLI-contract errors for PGO-cross and
     // static-macOS, before any cache or toolchain work.
@@ -323,7 +465,7 @@ pub fn build_release(
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create cache: {e}"))?;
     let source = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
-    let key = cache_key(path, &source, opts, target)?;
+    let key = cache_key(path, &source, &opts, target)?;
     let target_slug = target.unwrap_or("host");
     let cached = dir.join(format!("{key}-{mode:?}-{target_slug}"));
 

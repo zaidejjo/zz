@@ -271,7 +271,7 @@ pub enum PgoMode {
 }
 
 /// Build options.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct BuildOptions {
     /// Optimization level: false = `-O0 -g` (dev inspection), true = release.
     pub optimize: bool,
@@ -289,6 +289,10 @@ pub struct BuildOptions {
     /// Link the Rust native runtime (`libzz_native_rt.a`) for FFI natives.
     /// Set automatically from the lowered program; tests can opt in directly.
     pub native_rt: bool,
+    /// Extra object files / static libraries from plugin packages to link
+    /// into the final binary. Each entry is a path to a `.o` or `.a` file
+    /// produced by a plugin's build hook.
+    pub plugin_artifacts: Vec<std::path::PathBuf>,
 }
 
 impl BuildOptions {
@@ -303,6 +307,7 @@ impl BuildOptions {
             thin_lto: false,
             pgo: PgoMode::None,
             native_rt: false,
+            plugin_artifacts: Vec::new(),
         }
     }
 
@@ -317,6 +322,7 @@ impl BuildOptions {
             thin_lto: true,
             pgo: PgoMode::None,
             native_rt: false,
+            plugin_artifacts: Vec::new(),
         }
     }
 
@@ -331,6 +337,7 @@ impl BuildOptions {
             thin_lto: true,
             pgo: PgoMode::None,
             native_rt: false,
+            plugin_artifacts: Vec::new(),
         }
     }
 
@@ -345,6 +352,7 @@ impl BuildOptions {
             thin_lto: true,
             pgo: PgoMode::Generate,
             native_rt: false,
+            plugin_artifacts: Vec::new(),
         }
     }
 
@@ -359,6 +367,7 @@ impl BuildOptions {
             thin_lto: true,
             pgo: PgoMode::Use,
             native_rt: false,
+            plugin_artifacts: Vec::new(),
         }
     }
 }
@@ -383,6 +392,10 @@ impl BuildOptions {
         self.thin_lto.hash(&mut h);
         self.pgo.hash(&mut h);
         self.native_rt.hash(&mut h);
+        // Hash plugin artifact paths so cache invalidates when plugins change.
+        for p in &self.plugin_artifacts {
+            p.hash(&mut h);
+        }
         target.unwrap_or("host").hash(&mut h);
         h.finish()
     }
@@ -539,6 +552,10 @@ pub fn build_with(
         for a in &extra {
             cmd.arg(a);
         }
+    }
+    // Link plugin package artifacts (compiled .o / .a from build hooks).
+    for artifact in &opts.plugin_artifacts {
+        cmd.arg(artifact);
     }
 
     let out = cmd.output().map_err(BuildError::Io)?;

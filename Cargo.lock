@@ -3273,6 +3273,7 @@ dependencies = [
  "zz_fmt",
  "zz_frontend",
  "zz_hir",
+ "zz_plugin",
  "zz_pm",
  "zz_runtime",
  "zz_stdlib",
@@ -3352,6 +3353,16 @@ dependencies = [
  "subtle",
  "sysinfo",
  "uuid",
+]
+
+[[package]]
+name = "zz_plugin"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 1.0.69",
+ "zz_checker",
+ "zz_frontend",
 ]
 
 [[package]]

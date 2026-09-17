@@ -25,6 +25,9 @@ pub struct Manifest {
     pub package: PackageSpec,
     #[serde(default)]
     pub dependencies: HashMap<String, DepSpec>,
+    /// Native build configuration for packages that provide C/Rust extensions.
+    #[serde(default)]
+    pub native: Option<NativeSpec>,
 }
 
 impl Default for Manifest {
@@ -35,6 +38,7 @@ impl Default for Manifest {
                 version: "0.1.0".to_string(),
             },
             dependencies: HashMap::new(),
+            native: None,
         }
     }
 }
@@ -44,6 +48,16 @@ impl Default for Manifest {
 pub struct PackageSpec {
     pub name: String,
     pub version: String,
+}
+
+/// Native build configuration for packages that provide C/Rust extensions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NativeSpec {
+    /// Build hook script (relative to package root).
+    pub build: String,
+    /// Optional pkg-config dependency declaration.
+    #[serde(default)]
+    pub pkg_config: Option<String>,
 }
 
 /// Dependency specification — three variants.
@@ -129,6 +143,7 @@ impl Manifest {
                 version: "0.1.0".to_string(),
             },
             dependencies: HashMap::new(),
+            native: None,
         };
         let path = dir.join("zz.toml");
         manifest.save(&path)?;
@@ -208,6 +223,7 @@ mod tests {
                 );
                 d
             },
+            native: None,
         };
 
         let d = tmp_dir("round_trip");
