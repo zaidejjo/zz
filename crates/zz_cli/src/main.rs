@@ -321,6 +321,76 @@ fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
     (path, flags)
 }
 
+/// Load plugin shared libraries for VM-based native dispatch.
+///
+/// Reads `zz.lock` from the project directory, finds dependencies with
+/// `plugin.zzi` and shared libraries in their `build/` directory, loads
+/// them via dlopen, and registers their native functions.
+#[cfg(unix)]
+fn load_vm_plugins(
+    project_dir: &std::path::Path,
+    natives: &mut std::collections::HashMap<String, zz_runtime::NativeEntry>,
+) -> Result<(), String> {
+    use zz_pm::lock::Lockfile;
+
+    let lock_path = project_dir.join("zz.lock");
+    let lock = match Lockfile::load(&lock_path) {
+        Ok(l) => l,
+        Err(_) => return Ok(()), // no lock file, no plugins
+    };
+
+    for dep in &lock.deps {
+        let cas_dir = zz_pm::paths::cas_entry(&dep.hash);
+
+        // Only load plugins that have a plugin.zzi manifest
+        if !cas_dir.join("plugin.zzi").exists() {
+            continue;
+        }
+
+        // Look for shared library in build/ directory
+        let build_dir = cas_dir.join("build");
+        if !build_dir.exists() {
+            continue;
+        }
+
+        // Try common shared library names
+        let lib_names = [
+            format!("lib{}.so", dep.name.replace('-', "_")),
+            format!("lib{}.dylib", dep.name.replace('-', "_")),
+            format!("{}.so", dep.name.replace('-', "_")),
+            format!("{}.dylib", dep.name.replace('-', "_")),
+        ];
+
+        for lib_name in &lib_names {
+            let lib_path = build_dir.join(lib_name);
+            if lib_path.exists() {
+                match zz_plugin::load_plugin(&lib_path, natives) {
+                    Ok(_handle) => {
+                        // Plugin loaded successfully; _handle keeps the library alive
+                        eprintln!("zz: loaded plugin `{}`", dep.name);
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("zz: warning: failed to load plugin `{}`: {e}", dep.name);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Non-Unix stub for VM plugin loading.
+#[cfg(not(unix))]
+fn load_vm_plugins(
+    _project_dir: &std::path::Path,
+    _natives: &mut std::collections::HashMap<String, zz_runtime::NativeEntry>,
+) -> Result<(), String> {
+    // dlopen not supported on this platform yet
+    Ok(())
+}
+
 fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String> {
     let path = path.ok_or_else(|| {
         "missing file argument\n\n\
@@ -346,6 +416,14 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
         return Err("program failed\n\n\
                    hint: fix the errors shown above and try again"
             .to_string());
+    }
+
+    // Load plugin shared libraries for VM-based native dispatch.
+    let mut natives = loaded.natives.clone();
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if let Err(e) = crate::load_vm_plugins(parent, &mut natives) {
+            eprintln!("zz: warning: {e}");
+        }
     }
 
     // Build the typed program (HIR) to get the resolved type map.
@@ -375,7 +453,7 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
     let types = std::sync::Arc::new(typed.program.types);
     let structs = typed.program.structs;
 
-    let mut interp = Interp::with_natives(loaded.natives.clone());
+    let mut interp = Interp::with_natives(natives);
     interp.args = script_args.to_vec();
 
     // Inject math constants as static float values in the runtime env.

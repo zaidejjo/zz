@@ -289,6 +289,7 @@ mod tests {
                 version: "0.1.0".into(),
             },
             dependencies: deps,
+            native: None,
         };
 
         let manifest_hash = manifest.deps_hash();

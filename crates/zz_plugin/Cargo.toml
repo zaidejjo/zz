@@ -7,7 +7,11 @@ license.workspace = true
 [dependencies]
 zz_frontend = { path = "../zz_frontend" }
 zz_checker = { path = "../zz_checker" }
+zz_runtime = { path = "../zz_runtime" }
 thiserror = "1"
+
+[target.'cfg(unix)'.dependencies]
+libloading = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
