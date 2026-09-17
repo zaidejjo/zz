@@ -11,6 +11,7 @@ use std::process::ExitCode;
 
 mod build;
 mod loader;
+mod pm;
 mod repl;
 mod session;
 mod test_runner;
@@ -36,6 +37,18 @@ USAGE:
     zz fmt [FLAGS] [PATH]         format ZZ source files in-place
     zz build [FLAGS] <file.zz>    compile a native binary (cached)
 
+PACKAGE MANAGER:
+    zz init [--template T]        initialize zz.toml + src/main.zz in cwd
+    zz new <name> [--template T]  create a new project directory
+    zz add <pkg>[@ver]            add a dependency to zz.toml
+    zz install, zz i              resolve deps, fetch into CAS, link
+    zz remove <pkg>               remove a dependency
+    zz update [pkg]               re-resolve floating versions
+    zz login                      authenticate for publishing
+    zz publish                    validate and pack for publishing
+    zz cache gc                   garbage-collect unused CAS entries
+    zz cache clean                clear build cache
+
 BUILD MODES (single Clang backend, always a native binary):
      zz build <file.zz>           debug build (-O0 -g, fast, dynamic) — the default
      zz build -p <file.zz>        release build (-O3 -flto=thin, dynamic, stripped)
@@ -57,6 +70,10 @@ FLAGS:
     --target <triple>  with build, cross-compile via clang --target= (same flags as without -p, minus -march=native)
     --cc <clang|zig>   with build, select the Clang provider
     --verbose          with build, print the exact clang command line
+    --template <T>     with init/new, template: cli (default), lib, or web
+    --git <url>        with add, git URL for dependency
+    --rev <rev>        with add, git revision (branch, tag, or commit)
+    --path <path>      with add, local path dependency
     --help, -h         show this help
     --version, -V      show version
 
@@ -68,6 +85,14 @@ PATH can be a single .zz file or a directory (recursively scans all .zz files).
 Defaults to `.` (current directory) if omitted.
 
 EXAMPLES:
+    zz init                           initialize project in current directory
+    zz new myapp                      create new project 'myapp'
+    zz new mylib --template lib       create new library project
+    zz add foo@^1.2.0                 add semver-range dependency
+    zz add bar --git URL --rev main   add git dependency
+    zz add baz --path ../baz          add path dependency
+    zz install                        resolve and fetch all dependencies
+    zz remove foo                     remove a dependency
     zz check .                       scan current directory
     zz check src/ --fix             fix all safe issues in src/
     zz fix hello.zz                  fix a single file
@@ -187,6 +212,70 @@ fn main() -> ExitCode {
             }
         }
         Some("test") => match test_runner::test_command(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        // Package manager commands
+        Some("init") => match pm::init(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("new") => match pm::new(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("add") => match pm::add(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("install") | Some("i") => match pm::install(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("remove") | Some("uninstall") => match pm::remove(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("update") => match pm::update(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("login") => match pm::login(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("publish") => match pm::publish(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("cache") => match pm::cache(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("zz: {msg}");

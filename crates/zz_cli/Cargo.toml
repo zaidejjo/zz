@@ -16,6 +16,7 @@ zz_runtime = { path = "../zz_runtime" }
 zz_stdlib = { path = "../zz_stdlib" }
 zz_codegen = { path = "../zz_codegen" }
 zz_fmt = { path = "../zz_fmt" }
+zz_pm = { path = "../zz_pm" }
 codespan-reporting = "0.11"
 reedline = "0.51"
 dirs = "6"

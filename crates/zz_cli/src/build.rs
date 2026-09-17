@@ -63,18 +63,30 @@ pub fn cache_dir() -> PathBuf {
 }
 
 /// Compute a cache key from source + build options + target triple.
-/// Uses BuildOptions fingerprint (target-aware) + runtime file mtimes for
-/// automatic cache invalidation.
-fn cache_key(src: &str, opts: BuildOptions, target: Option<&str>) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    src.hash(&mut hasher);
-    opts.fingerprint_with(target).hash(&mut hasher);
-    // Include runtime file mtimes for automatic cache invalidation
-    if let Some(runtime_mtime) = runtime_mtime() {
-        runtime_mtime.hash(&mut hasher);
-    }
-    format!("{:016x}", hasher.finish())
+/// Uses the new typed CacheKey from zz_pm which includes live path-dep hashing.
+///
+/// Returns `Err` if `zz.toml` exists but is unparseable — the build must
+/// not silently degrade to a key that ignores path-dep content, as that
+/// would serve stale cached artifacts (Amendment 2, Round 4).
+fn cache_key(
+    source_path: &Path,
+    src: &str,
+    opts: BuildOptions,
+    target: Option<&str>,
+) -> Result<String, String> {
+    let runtime_mtime = runtime_mtime();
+    let build_fingerprint = opts.fingerprint_with(target);
+
+    // Use the new CacheKey which hashes path deps from live disk content
+    // (Amendment 2, Round 4: path-dep changes must invalidate the cache)
+    let key = zz_pm::cache_key::CacheKey::compute(
+        source_path,
+        src,
+        build_fingerprint,
+        target,
+        runtime_mtime,
+    )?;
+    Ok(key.to_slug())
 }
 
 /// Get modification time of every input that affects native output, for
@@ -311,7 +323,7 @@ pub fn build_release(
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create cache: {e}"))?;
     let source = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
-    let key = cache_key(&source, opts, target);
+    let key = cache_key(path, &source, opts, target)?;
     let target_slug = target.unwrap_or("host");
     let cached = dir.join(format!("{key}-{mode:?}-{target_slug}"));
 
