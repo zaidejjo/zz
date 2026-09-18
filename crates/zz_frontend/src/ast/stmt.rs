@@ -91,11 +91,17 @@ pub struct Decorator {
 
 /// A single function signature inside `extern "C" { ... }`.
 /// No body — the implementation lives in C and is linked natively.
+///
+/// `name` is the ZZ-visible name, optionally dotted for namespaced plugins
+/// (e.g. `zimg.resize`). `c_symbol` is the underlying C symbol; `None`
+/// means "derive from the ZZ name by replacing `.` with `_`"
+/// (`zimg.resize` → `zimg_resize`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExternFunc {
     pub name: Ident,
     pub params: Vec<Param>,
     pub ret: Option<Ty>,
+    pub c_symbol: Option<String>,
     pub span: Span,
 }
 

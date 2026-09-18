@@ -165,6 +165,18 @@ impl Checker {
                     Type::Json
                 } else if name == "db" || name == "sqlz" {
                     Type::Db
+                } else if name == "chan" {
+                    Type::Chan
+                } else if name == "task.join" {
+                    Type::TaskJoin
+                } else if name == "http.server" {
+                    Type::HttpServer
+                } else if name == "tcp.stream" {
+                    Type::TcpStream
+                } else if name == "tcp.listener" {
+                    Type::TcpListener
+                } else if name == "http.response" {
+                    Type::Response
                 } else {
                     self.errors
                         .push(error_at(format!("unknown type `{name}`"), ty.span));

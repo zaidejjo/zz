@@ -114,8 +114,12 @@ impl Vm {
     }
 
     /// Push a value onto the VM stack. Used by `Interp::call_func` to set up
-    /// compiled closure parameters before calling `run_chunk_with_base`.
-    pub(crate) fn push(&mut self, v: Value) {
+    /// compiled closure parameters before calling `run_chunk_with_base`,
+    /// and by `task.spawn` to seat Unit args for worker closures (see
+    /// `zz_stdlib::concurrency::spawn`: running a chunk with no args
+    /// seated misaligns slot-indexed locals — every `LoadSlot` reads one
+    /// slot off, yielding wrong values or out-of-bounds panics).
+    pub fn push(&mut self, v: Value) {
         self.stack.push(v);
     }
 
@@ -154,8 +158,9 @@ impl Vm {
 
     /// Like `run_chunk`, but allows the caller to specify `stack_base`
     /// explicitly. Used by `Interp::call_func` to run compiled closures
-    /// where args are already on the stack at index 0..n.
-    pub(crate) fn run_chunk_with_base(
+    /// where args are already on the stack at index 0..n, and by
+    /// `task.spawn` to seat worker args at the stack bottom.
+    pub fn run_chunk_with_base(
         &mut self,
         chunk: &Arc<Chunk>,
         interp: &mut Interp,

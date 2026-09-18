@@ -46,6 +46,7 @@ impl Checker {
                 has_default,
                 ret: sig_ret,
                 is_extern: false,
+                extern_c_symbol: None,
             },
         );
     }
@@ -57,6 +58,7 @@ impl Checker {
         name: &zz_frontend::ast::Ident,
         params: &[zz_frontend::ast::Param],
         ret: &Option<zz_frontend::ast::Ty>,
+        c_symbol: Option<String>,
     ) {
         let mut sig_params = Vec::with_capacity(params.len());
         for p in params {
@@ -66,7 +68,7 @@ impl Checker {
                     if !Self::is_c_abi_type(&ct) {
                         self.errors.push(zz_frontend::diag::error_at(
                             format!(
-                                "extern function `{}`: parameter `{}` has non-C type `{}` (allowed: int, float, bool, *const T, *mut T, void, ())",
+                                "extern function `{}`: parameter `{}` has non-C type `{}` (allowed: int, float, bool, str, *const T, *mut T, void, ())",
                                 name.name, p.name.name, ct
                             ),
                             p.span,
@@ -90,10 +92,18 @@ impl Checker {
         let sig_ret = match ret {
             Some(t) => {
                 let ct = self.ast_to_type(t, &[]);
-                if !Self::is_c_abi_type(&ct) {
+                if matches!(ct, Type::Str) {
                     self.errors.push(zz_frontend::diag::error_at(
                         format!(
-                            "extern function `{}` has non-C return type `{}` (allowed: int, float, bool, *const T, *mut T, void, ())",
+                            "plugin extern function `{}` returns str, which is not yet supported — return an int status code and use a getter pattern instead",
+                            name.name
+                        ),
+                        t.span,
+                    ));
+                } else if !Self::is_c_abi_type(&ct) {
+                    self.errors.push(zz_frontend::diag::error_at(
+                        format!(
+                            "extern function `{}` has non-C return type `{}` (allowed: int, float, bool, str, *const T, *mut T, void, ())",
                             name.name, ct
                         ),
                         t.span,
@@ -119,6 +129,7 @@ impl Checker {
                 has_default: vec![false; params.len()],
                 ret: sig_ret,
                 is_extern: true,
+                extern_c_symbol: c_symbol,
             },
         );
     }
@@ -126,6 +137,7 @@ impl Checker {
     fn is_c_abi_type(ty: &Type) -> bool {
         match ty {
             Type::Int | Type::Float | Type::Bool | Type::Unit | Type::Void | Type::Error => true,
+            Type::Str => true,
             Type::Ptr { inner, .. } => Self::is_c_abi_scalar(inner),
             _ => false,
         }

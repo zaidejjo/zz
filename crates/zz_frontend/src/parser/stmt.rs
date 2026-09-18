@@ -304,9 +304,19 @@ impl Parser {
                 continue;
             }
             let func_tok = self.advance(); // `func`
-            let name = self
+            let mut name = self
                 .expect_ident()
                 .unwrap_or_else(|| dummy_ident(self.peek().span));
+            // Dotted ZZ-visible names for namespaced plugins
+            // (`func zimg.resize(...)`).
+            while self.eat(TokenKind::Dot) {
+                let part = self
+                    .expect_ident()
+                    .unwrap_or_else(|| dummy_ident(self.peek().span));
+                name.name.push('.');
+                name.name.push_str(&part.name);
+                name.span = name.span.join(part.span);
+            }
             if self.at(TokenKind::Lt) {
                 self.error_here("extern functions cannot have generic parameters");
             }
@@ -326,6 +336,20 @@ impl Parser {
             } else {
                 None
             };
+            // Optional explicit C symbol override:
+            // `func zimg.resize(...) -> int = "zimg_resize_impl";`
+            // Absent = derive from the ZZ name (`.` → `_`).
+            // Note: `=` lexes as Assign (Eq is `==`).
+            let c_symbol = if self.eat(TokenKind::Assign) {
+                if self.at(TokenKind::Str) {
+                    Some(self.advance().text)
+                } else {
+                    self.error_here("expected string literal for C symbol name");
+                    None
+                }
+            } else {
+                None
+            };
             // Extern signatures have no body — must end the statement here.
             let span = func_tok.span.join(
                 ret.as_ref()
@@ -336,6 +360,7 @@ impl Parser {
                 name,
                 params,
                 ret,
+                c_symbol,
                 span,
             });
             // A trailing `{` means the user wrote a body — reject it.

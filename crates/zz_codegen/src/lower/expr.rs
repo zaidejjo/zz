@@ -1484,6 +1484,18 @@ impl Lowerer {
             }
         };
 
+        // Plugin `extern "C"` call: direct C invocation with unboxed
+        // scalars, bypassing the zz_value calling convention. Only for
+        // bare-name calls (externs have no receivers); anything
+        // unsupported degrades to `zz_unit()` inside.
+        if method_receiver.is_none() {
+            if let Some(sig) = self.tp.funcs.get(&cname).cloned() {
+                if sig.is_extern {
+                    return self.emit_extern_call(&cname, &sig, &ordered_args, names, out);
+                }
+            }
+        }
+
         let mut arg_items: Vec<String> = Vec::new();
         // sqlz early-out: sqlz.query/sqlz.exec (+ db.* alias) lower via
         // emit_db_call, which needs the raw Exprs (Fmt split into template

@@ -62,11 +62,15 @@ impl Lowerer {
                 // during scalar_operand_type lookups.
                 //
                 // For scalar types, extract the underlying value from the zz_value
-                // UNLESS the emitted expression is already unboxed (e.g., a binary
-                // op on unboxed scalars produces a raw int64_t, not a zz_value).
-                let val_is_unboxed = val.starts_with("(int64_t)(")
-                    || val.starts_with("(double)(")
-                    || val.starts_with("(bool)(");
+                // UNLESS the emitted expression is already unboxed (a binary
+                // op on unboxed scalars produces a raw int64_t, not a zz_value;
+                // a raw scalar variable likewise needs no extraction).
+                let ident = match value {
+                    Expr::Ident { name, .. } => Some(name.as_str()),
+                    _ => None,
+                };
+                let val_is_unboxed =
+                    crate::lower::context::emitted_is_raw_scalar(&val, names, ident);
                 let final_val = match ctype.as_str() {
                     "int64_t" if !val_is_unboxed => format!("({val}).i"),
                     "double" if !val_is_unboxed => format!("({val}).f"),
@@ -202,10 +206,13 @@ impl Lowerer {
                 // of raw arithmetic). Cross-check against the emitted
                 // string to avoid assigning a zz_value to an int64_t.
                 let ast_says_scalar = expr_emits_raw_scalar(value);
-                let val_is_actually_scalar = val.starts_with("(int64_t)(")
-                    || val.starts_with("(double)(")
-                    || val.starts_with("(bool)(")
-                    || (ast_says_scalar && !val.starts_with("zz_"));
+                let ident = match value {
+                    Expr::Ident { name, .. } => Some(name.as_str()),
+                    _ => None,
+                };
+                let val_is_actually_scalar =
+                    crate::lower::context::emitted_is_raw_scalar(&val, names, ident)
+                        || (ast_says_scalar && !val.starts_with("zz_"));
                 let value_is_scalar = ast_says_scalar || val_is_actually_scalar;
                 let value_needs_unbox = !val_is_actually_scalar;
                 match target {

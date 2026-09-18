@@ -19,6 +19,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "io.println".into(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: vec!["T".into()],
             bounds: Vec::new(),
             params: vec![("v".into(), t_any.clone())],
@@ -30,6 +31,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "io.print".into(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: vec!["T".into()],
             bounds: Vec::new(),
             params: vec![("v".into(), t_any.clone())],
@@ -42,6 +44,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "http.get".into(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: vec![],
             bounds: Vec::new(),
             params: vec![("url".into(), Type::Str)],
@@ -53,6 +56,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "http.server".into(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: vec![],
             bounds: Vec::new(),
             params: vec![],
@@ -65,6 +69,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "str.len".into(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: vec![],
             bounds: Vec::new(),
             params: vec![("self".into(), Type::Str)],
@@ -76,6 +81,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "str.trim".into(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: vec![],
             bounds: Vec::new(),
             params: vec![("self".into(), Type::Str)],
@@ -88,6 +94,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "vec.push".into(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: vec!["T".into()],
             bounds: Vec::new(),
             params: vec![

@@ -98,6 +98,7 @@ fn const_sig(ret: zz_checker::Type) -> zz_checker::FuncSig {
         has_default: vec![],
         ret,
         is_extern: false,
+        extern_c_symbol: None,
     }
 }
 

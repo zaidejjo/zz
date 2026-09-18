@@ -186,3 +186,137 @@ fn release_native_builds_and_runs() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// e2e_pm_offline_cold: `zz build` with unfetched dependencies fails with a
+/// clear error — no network call attempted, no hang, no silent failure.
+///
+/// Production-readiness gate: user runs `zz build` before `zz install`,
+/// must get a clear error, not a git clone hanging on network.
+#[test]
+fn e2e_pm_offline_cold() {
+    use std::fs;
+
+    let dir = temp_project();
+
+    // Set ZZ_HOME to a fresh disposable dir so CAS is empty
+    let zz_home = std::env::temp_dir().join(format!(
+        "zz_e2e_offline_cold_{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = fs::remove_dir_all(&zz_home);
+
+    // Create a project with a git dependency in zz.toml
+    fs::write(
+        dir.join("zz.toml"),
+        r#"
+[package]
+name = "offline_test"
+version = "0.1.0"
+
+[dependencies]
+some_dep = { version = "^1.0", git = "https://github.com/example/nonexistent_repo.git", rev = "main" }
+"#,
+    )
+    .expect("write zz.toml");
+
+    // Create zz.lock with a pinned commit (simulating a prior install)
+    fs::write(
+        dir.join("zz.lock"),
+        r#"
+version = 1
+
+[[deps]]
+name = "some_dep"
+version = "^1.0"
+source = "git+https://github.com/example/nonexistent_repo.git#main"
+hash = ""
+commit = "abc123def456789abc123def456789abc123def"
+"#,
+    )
+    .expect("write zz.lock");
+
+    // Create a minimal source file that imports the dependency
+    fs::write(
+        dir.join("hello.zz"),
+        "import some_dep\nprintln(\"hello\")\n",
+    )
+    .expect("write source");
+
+    // Try to build — should fail because CAS entry doesn't exist
+    // Spawn with a timeout to ensure we don't hang on network
+    let start = std::time::Instant::now();
+    let child = Command::new(zz())
+        .args(["build", "hello.zz"])
+        .current_dir(&dir)
+        .env("ZZ_HOME", &zz_home)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn zz");
+
+    let timeout = std::time::Duration::from_secs(10);
+    let child_handle = child; // rename for clarity
+    let child_thread = std::thread::spawn(move || child_handle.wait_with_output());
+
+    // Wait with timeout
+    let deadline = std::time::Instant::now() + timeout;
+    let output = loop {
+        if std::time::Instant::now() >= deadline {
+            break None;
+        }
+        if child_thread.is_finished() {
+            break Some(child_thread.join().expect("child thread panicked"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let elapsed = start.elapsed();
+
+    match output {
+        Some(Ok(output)) => {
+            let code = output.status.code().unwrap_or(-1);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            assert_ne!(
+                code, 0,
+                "build must fail when CAS entry is missing.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+
+            // Error should mention the missing dependency or import failure
+            let combined = format!("{stdout}{stderr}");
+            assert!(
+                combined.contains("missing")
+                    || combined.contains("not found")
+                    || combined.contains("CAS")
+                    || combined.contains("install")
+                    || combined.contains("abc123")
+                    || combined.contains("cannot read")
+                    || combined.contains("No such file"),
+                "error message should mention missing dep or import failure.\nstderr:\n{stderr}"
+            );
+
+            // Should NOT have attempted a git clone (would hang on network)
+            assert!(
+                !combined.contains("Cloning into"),
+                "should not attempt git clone in offline mode.\nstderr:\n{stderr}"
+            );
+        }
+        None => {
+            panic!("zz build timed out after {timeout:?} — possible network hang");
+        }
+        Some(Err(e)) => {
+            eprintln!("command failed: {e}");
+        }
+    }
+
+    // Verify it completed quickly (< 15s) — no network hang
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "build took too long ({elapsed:?}), possible network hang"
+    );
+
+    // Clean up
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&zz_home);
+}
