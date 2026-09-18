@@ -147,7 +147,40 @@ impl Manifest {
         };
         let path = dir.join("zz.toml");
         manifest.save(&path)?;
+        Self::ensure_gitignore(dir)?;
         Ok(manifest)
+    }
+
+    /// Entries every ZZ project gitignores: fetched deps, native build
+    /// outputs, and compiled binaries. `zz.toml` and `zz.lock` are
+    /// deliberately absent — both are committed (lockfile = reproducibility
+    /// source of truth, same convention as Cargo).
+    const GITIGNORE_ENTRIES: &[&str] = &["vendor/", "build/", "src/bin/"];
+
+    /// Create `.gitignore` if absent, or append missing ZZ entries if
+    /// present. Existing content is never removed or reordered.
+    pub fn ensure_gitignore(dir: &Path) -> Result<(), String> {
+        let path = dir.join(".gitignore");
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let present: std::collections::HashSet<&str> = existing.lines().map(str::trim).collect();
+        let missing: Vec<&&str> = Self::GITIGNORE_ENTRIES
+            .iter()
+            .filter(|e| !present.contains(**e))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let mut out = existing;
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("\n# zz: fetched deps, native build outputs, compiled binaries\n");
+        for entry in missing {
+            out.push_str(entry);
+            out.push('\n');
+        }
+        std::fs::write(&path, out).map_err(|e| format!("cannot write .gitignore: {e}"))?;
+        Ok(())
     }
 
     /// Create a new project directory with manifest and starter code.
@@ -338,6 +371,44 @@ foo = "^1.0"
         let project = Manifest::create_new(&d, "myweb", Some("web")).unwrap();
         let src = fs::read_to_string(project.join("src/main.zz")).unwrap();
         assert!(src.contains("http.server"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn gitignore_created_when_absent() {
+        let d = tmp_dir("gi_new");
+        Manifest::ensure_gitignore(&d).unwrap();
+        let content = fs::read_to_string(d.join(".gitignore")).unwrap();
+        assert!(content.contains("vendor/"));
+        assert!(content.contains("build/"));
+        assert!(content.contains("src/bin/"));
+        assert!(!content.contains("zz.toml"));
+        assert!(!content.contains("zz.lock"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn gitignore_appends_without_clobbering() {
+        let d = tmp_dir("gi_append");
+        fs::write(d.join(".gitignore"), "target/\nvendor/\n").unwrap();
+        Manifest::ensure_gitignore(&d).unwrap();
+        let content = fs::read_to_string(d.join(".gitignore")).unwrap();
+        assert!(content.contains("target/"));
+        assert_eq!(content.matches("vendor/").count(), 1);
+        assert!(content.contains("build/"));
+        assert!(content.contains("src/bin/"));
+        // Idempotent: second run changes nothing.
+        Manifest::ensure_gitignore(&d).unwrap();
+        let again = fs::read_to_string(d.join(".gitignore")).unwrap();
+        assert_eq!(content, again);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn create_init_writes_gitignore() {
+        let d = tmp_dir("init_gi");
+        Manifest::create_init(&d, "myapp").unwrap();
+        assert!(d.join(".gitignore").exists());
         let _ = fs::remove_dir_all(&d);
     }
 }

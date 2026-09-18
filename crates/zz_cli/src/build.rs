@@ -79,14 +79,20 @@ fn cache_key(
     let build_fingerprint = opts.fingerprint_with(target);
 
     // Use the new CacheKey which hashes path deps from live disk content
-    // (Amendment 2, Round 4: path-dep changes must invalidate the cache)
-    let key = zz_pm::cache_key::CacheKey::compute(
+    // (Amendment 2, Round 4: path-dep changes must invalidate the cache).
+    // The plugin artifact signature joins it: a native rebuild (fresh
+    // .o/.a mtimes, changed flags content) must bust entries linked
+    // against the older artifacts.
+    let mut key = zz_pm::cache_key::CacheKey::compute(
         source_path,
         src,
         build_fingerprint,
         target,
         runtime_mtime,
     )?;
+    let (artifact_hash, artifact_flags) = zz_pm::cache_key::artifact_sig(&opts.plugin_artifacts);
+    key.artifact_hash = artifact_hash;
+    key.artifact_flags = artifact_flags;
     Ok(key.to_slug())
 }
 
@@ -154,31 +160,59 @@ fn opts_for(mode: BuildMode) -> BuildOptions {
 
 /// Discover plugin manifests (`.zzi` files) from installed dependencies.
 ///
-/// Reads `zz.lock` from the project directory, looks up each dependency's CAS
-/// entry, and loads any `plugin.zzi` file found. Returns a flat list of
+/// Reads `zz.lock` and `zz.toml` from the project directory, looks up each
+/// dependency's package directory (CAS for git deps, `vendor/<name>/` for path
+/// deps), and loads any `plugin.zzi` file found. Returns a flat list of
 /// `(function_name, FuncSig)` pairs ready to merge into the checker.
-fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_checker::FuncSig)> {
+pub(crate) fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_checker::FuncSig)> {
     let mut plugin_funcs = Vec::new();
 
-    // Find the project root by looking for zz.lock
-    let lock_path = project_path
-        .parent()
-        .and_then(|p| zz_pm::lock::Lockfile::load(&p.join("zz.lock")).ok());
-
-    let lock = match lock_path {
-        Some(l) => l,
-        None => return plugin_funcs, // no lock file, no plugins
+    // Walk up from the source file to find the project root (has zz.lock)
+    let mut dir = project_path.parent().unwrap_or(project_path);
+    let project_root = loop {
+        if dir.join("zz.lock").exists() {
+            break dir.to_path_buf();
+        }
+        dir = match dir.parent() {
+            Some(d) => d,
+            None => return plugin_funcs,
+        };
     };
 
+    let lock = match zz_pm::lock::Lockfile::load(&project_root.join("zz.lock")) {
+        Ok(l) => l,
+        Err(_) => return plugin_funcs,
+    };
+
+    // Load manifest to check for path deps
+    let manifest_path = project_root.join("zz.toml");
+    let manifest = zz_pm::manifest::Manifest::load(&manifest_path).ok();
+
     for dep in &lock.deps {
-        let cas_dir = zz_pm::paths::cas_entry(&dep.hash);
-        let manifest_path = cas_dir.join("plugin.zzi");
+        // Resolve package directory: path deps use vendor/<name>/, git deps use CAS
+        let pkg_dir = if dep.source == "path" {
+            if let Some(ref m) = manifest {
+                if let Some(zz_pm::manifest::DepSpec::Path(ref path_dep)) =
+                    m.dependencies.get(&dep.name)
+                {
+                    project_root.join(&path_dep.path)
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        } else {
+            zz_pm::paths::cas_entry(&dep.hash)
+        };
+
+        let manifest_path = pkg_dir.join("plugin.zzi");
         if !manifest_path.exists() {
             continue;
         }
         match load_manifest(&manifest_path) {
-            Ok(manifest) => {
-                for (name, sig) in manifest.funcs {
+            Ok(m) => {
+                for (name, sig) in m.funcs {
                     plugin_funcs.push((name, sig));
                 }
             }
@@ -196,43 +230,72 @@ fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_checker::Fu
 
 /// Discover and invoke build hooks for plugin packages with native code.
 ///
-/// Reads `zz.lock`, finds dependencies that have a `plugin.zzi` and a
-/// `zz.toml` with a `[native]` section, invokes their build hooks, and
-/// returns the paths to compiled artifacts (`.o` / `.a` files).
-fn discover_native_artifacts(project_path: &Path) -> Vec<PathBuf> {
+/// Reads `zz.lock` and `zz.toml`, finds dependencies that have a `plugin.zzi`
+/// and a `zz.toml` with a `[native]` section, invokes their build hooks, and
+/// returns the paths to compiled artifacts (`.o` / `.a` files) plus the raw
+/// linker flags from each package's `build/ldflags.txt` (e.g. `-lvips ...`).
+fn discover_native_artifacts(project_path: &Path) -> (Vec<PathBuf>, Vec<String>) {
     let mut artifacts = Vec::new();
+    let mut link_args: Vec<String> = Vec::new();
 
-    let lock_path = project_path
-        .parent()
-        .and_then(|p| zz_pm::lock::Lockfile::load(&p.join("zz.lock")).ok());
-
-    let lock = match lock_path {
-        Some(l) => l,
-        None => return artifacts,
+    // Walk up from the source file to find the project root (has zz.lock)
+    let mut dir = project_path.parent().unwrap_or(project_path);
+    let project_root = loop {
+        if dir.join("zz.lock").exists() {
+            break dir.to_path_buf();
+        }
+        dir = match dir.parent() {
+            Some(d) => d,
+            None => return (artifacts, link_args),
+        };
     };
 
+    let lock = match zz_pm::lock::Lockfile::load(&project_root.join("zz.lock")) {
+        Ok(l) => l,
+        Err(_) => return (artifacts, link_args),
+    };
+
+    // Load manifest to check for path deps
+    let manifest_path = project_root.join("zz.toml");
+    let manifest = zz_pm::manifest::Manifest::load(&manifest_path).ok();
+
     for dep in &lock.deps {
-        let cas_dir = zz_pm::paths::cas_entry(&dep.hash);
+        // Resolve package directory: path deps use the local path, git deps use CAS
+        let pkg_dir = if dep.source == "path" {
+            if let Some(ref m) = manifest {
+                if let Some(zz_pm::manifest::DepSpec::Path(ref path_dep)) =
+                    m.dependencies.get(&dep.name)
+                {
+                    project_root.join(&path_dep.path)
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        } else {
+            zz_pm::paths::cas_entry(&dep.hash)
+        };
 
         // Check for plugin.zzi (this is a native package)
-        if !cas_dir.join("plugin.zzi").exists() {
+        if !pkg_dir.join("plugin.zzi").exists() {
             continue;
         }
 
         // Read the package's zz.toml for [native] section
-        let manifest_path = cas_dir.join("zz.toml");
-        let manifest = match zz_pm::manifest::Manifest::load(&manifest_path) {
+        let dep_manifest_path = pkg_dir.join("zz.toml");
+        let dep_manifest = match zz_pm::manifest::Manifest::load(&dep_manifest_path) {
             Ok(m) => m,
             Err(_) => continue,
         };
 
-        let native = match &manifest.native {
+        let native = match &dep_manifest.native {
             Some(n) => n,
             None => continue,
         };
 
         // Invoke the build hook
-        let build_script = cas_dir.join(&native.build);
+        let build_script = pkg_dir.join(&native.build);
         if !build_script.exists() {
             eprintln!(
                 "warning: plugin `{}` build script not found: {}",
@@ -245,7 +308,7 @@ fn discover_native_artifacts(project_path: &Path) -> Vec<PathBuf> {
         eprintln!("zz: building plugin `{}` via {}...", dep.name, native.build);
         let output = std::process::Command::new("bash")
             .arg(&build_script)
-            .current_dir(&cas_dir)
+            .current_dir(&pkg_dir)
             .output();
 
         match output {
@@ -265,8 +328,8 @@ fn discover_native_artifacts(project_path: &Path) -> Vec<PathBuf> {
             }
         }
 
-        // Collect artifacts from the build output directory
-        let build_dir = cas_dir.join("build");
+        // Collect artifacts and linker flags from the build output dir
+        let build_dir = pkg_dir.join("build");
         if build_dir.exists() {
             for entry in std::fs::read_dir(&build_dir).into_iter().flatten() {
                 let entry = entry.unwrap();
@@ -277,10 +340,108 @@ fn discover_native_artifacts(project_path: &Path) -> Vec<PathBuf> {
                     }
                 }
             }
+            // Raw linker flags emitted by the build hook (e.g. `-lvips ...`).
+            let ldflags_path = build_dir.join("ldflags.txt");
+            if let Ok(flags) = std::fs::read_to_string(&ldflags_path) {
+                for flag in flags.split_whitespace() {
+                    if !link_args.iter().any(|f| f == flag) {
+                        link_args.push(flag.to_string());
+                    }
+                }
+            }
         }
     }
 
-    artifacts
+    // Archives often bundle the same objects that are also emitted loose
+    // (e.g. libzimg_native.a contains zimg_wrapper.o alongside
+    // build/zimg_wrapper.o). Linking both yields "multiple definition"
+    // errors, so thin the archives: copy each conflicting archive next
+    // to the original and delete the members shadowed by loose objects.
+    // The loose object is authoritative (build hooks recompile it every
+    // run, while archives may be cargo-cached and stale).
+    thin_shadowed_archive_members(&mut artifacts);
+
+    (artifacts, link_args)
+}
+
+/// Copy archives that duplicate loose `.o` files and delete the shadowed
+/// members from the copies, replacing the archive paths in `artifacts`.
+/// When `ar` is unavailable the list is left untouched.
+fn thin_shadowed_archive_members(artifacts: &mut [PathBuf]) {
+    let loose_stems: std::collections::HashSet<String> = artifacts
+        .iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("o"))
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(String::from))
+        .collect();
+    if loose_stems.is_empty() {
+        return;
+    }
+    // replacement per archive.
+    let mut replacements: Vec<(usize, PathBuf)> = Vec::new();
+    for (i, archive) in artifacts.iter().enumerate() {
+        if archive.extension().and_then(|e| e.to_str()) != Some("a") {
+            continue;
+        }
+        let output = match std::process::Command::new("ar")
+            .arg("t")
+            .arg(archive)
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            _ => continue,
+        };
+        let mut shadowed: Vec<String> = Vec::new();
+        for member in String::from_utf8_lossy(&output.stdout).lines() {
+            let member = member.trim();
+            let Some(base) = member.strip_suffix(".o") else {
+                continue;
+            };
+            // Rust archive members are `<hash>-<file>.o`; plain objects
+            // are `<file>.o`. Match either the full stem or the suffix
+            // after the last `-`.
+            let hit = loose_stems.contains(base)
+                || base
+                    .rsplit('-')
+                    .next()
+                    .is_some_and(|s| loose_stems.contains(s));
+            if hit {
+                shadowed.push(member.to_string());
+            }
+        }
+        if shadowed.is_empty() {
+            continue;
+        }
+        let thin_name = archive
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| format!("{n}.zz-thin.a"))
+            .unwrap_or_else(|| "zz-thin.a".to_string());
+        let thin_path = archive.with_file_name(&thin_name);
+        // Reuse a thin copy that is newer than the archive itself.
+        let reuse = std::fs::metadata(&thin_path)
+            .and_then(|m| m.modified())
+            .ok()
+            .zip(std::fs::metadata(archive).and_then(|m| m.modified()).ok())
+            .is_some_and(|(thin_mtime, arch_mtime)| thin_mtime >= arch_mtime);
+        if !reuse {
+            if std::fs::copy(archive, &thin_path).is_err() {
+                continue;
+            }
+            let mut cmd = std::process::Command::new("ar");
+            cmd.arg("d").arg(&thin_path);
+            for member in &shadowed {
+                cmd.arg(member);
+            }
+            if !cmd.output().is_ok_and(|o| o.status.success()) {
+                let _ = std::fs::remove_file(&thin_path);
+                continue;
+            }
+        }
+        replacements.push((i, thin_path));
+    }
+    for (i, thin_path) in replacements {
+        artifacts[i] = thin_path;
+    }
 }
 
 /// Type-check + DCE all modules to a typed program, entry-main name, and
@@ -432,8 +593,11 @@ pub fn build_release(
     let mut opts = opts_for(mode);
     let target = rel.target_opt();
 
-    // Discover and build plugin native artifacts (compiled .o / .a files).
-    opts.plugin_artifacts = discover_native_artifacts(path);
+    // Discover and build plugin native artifacts (compiled .o / .a files
+    // plus dependency link flags from each package's ldflags.txt).
+    let (plugin_artifacts, plugin_link_args) = discover_native_artifacts(path);
+    opts.plugin_artifacts = plugin_artifacts;
+    opts.plugin_link_args = plugin_link_args;
 
     // Early validation: exact CLI-contract errors for PGO-cross and
     // static-macOS, before any cache or toolchain work.

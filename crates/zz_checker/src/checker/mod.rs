@@ -26,6 +26,21 @@ pub struct FuncSig {
     pub ret: Type,
     /// True for `extern "C"` declarations — no ZZ body, linked natively.
     pub is_extern: bool,
+    /// Explicit C symbol override from the manifest (`= "..."`). `None`
+    /// means "derive from the ZZ-visible name" via [`FuncSig::c_symbol`].
+    pub extern_c_symbol: Option<String>,
+}
+
+impl FuncSig {
+    /// Resolve the underlying C symbol for an extern signature keyed by
+    /// its ZZ-visible name: the explicit override when present, otherwise
+    /// the ZZ name with `.` replaced by `_` (`zimg.resize` → `zimg_resize`,
+    /// flat `add` → `add`).
+    pub fn c_symbol(&self, zz_name: &str) -> String {
+        self.extern_c_symbol
+            .clone()
+            .unwrap_or_else(|| zz_name.replace('.', "_"))
+    }
 }
 
 /// A registered struct definition: field names and their types.
@@ -252,6 +267,7 @@ fn check_program_impl(
                         has_default,
                         ret: sig_ret.clone(),
                         is_extern: false,
+                        extern_c_symbol: None,
                     };
                     // `convert_to_X` methods double as error-conversion impls.
                     if let Some(to_name) = method_name.strip_prefix("convert_to_") {
@@ -397,7 +413,7 @@ fn check_program_impl(
                         prev,
                     ));
                 }
-                checker.collect_extern(&item.name, &item.params, &item.ret);
+                checker.collect_extern(&item.name, &item.params, &item.ret, item.c_symbol.clone());
             }
         }
         // `@link` is collected in Pass 2 (check_stmt) to preserve order/dedup.

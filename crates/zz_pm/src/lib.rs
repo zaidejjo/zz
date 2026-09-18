@@ -20,6 +20,9 @@
 //! - `auth` — login, credentials.toml with 0600 permissions
 //! - `publish` — validate (no path deps), run zz test, pack artifact
 //! - `gc` — reverse-refs.json-driven CAS garbage collection
+//!
+//! Local alias modules:
+//! - `registry` — ~/.zz/registry.toml name → {path|git} aliases (no server)
 
 pub mod auth;
 pub mod build_cache;
@@ -33,4 +36,5 @@ pub mod lock;
 pub mod manifest;
 pub mod paths;
 pub mod publish;
+pub mod registry;
 pub mod resolve;

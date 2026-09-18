@@ -5,6 +5,10 @@ use zz_frontend::ast::{Block, Expr, FmtPart, Pattern, Stmt, Ty, TyKind};
 pub(crate) struct Rewriter<'a> {
     pub(crate) ns: &'a str,
     pub(crate) top: &'a HashSet<String>,
+    /// Imported namespace heads (`ops` from `import ops`, `io` from
+    /// `import std.io`, explicit aliases). Calls through them
+    /// (`ops.resize(...)`) already resolve and must not be rewritten.
+    pub(crate) imports: HashSet<String>,
     /// Stack of shadowing scopes; each holds names declared so far.
     pub(crate) scopes: Vec<HashSet<String>>,
 }
@@ -14,6 +18,7 @@ impl<'a> Rewriter<'a> {
         Rewriter {
             ns,
             top,
+            imports: HashSet::new(),
             scopes: vec![HashSet::new()],
         }
     }
@@ -236,9 +241,16 @@ impl<'a> Rewriter<'a> {
             Expr::Call { callee, args, .. } => {
                 // Method call: `p.dist()` — the method name is the last path
                 // component; qualify it like a bare function reference so the
-                // checker/runtime can resolve `ns.dist`.
+                // checker/runtime can resolve `ns.dist`. Only when the head
+                // is neither a local value (true method call: `b.resize()`)
+                // nor an imported namespace (`ops.resize(...)`) — qualifying
+                // either corrupts the path whenever the caller's module
+                // happens to define its own same-named function.
                 if let Expr::Path { parts, .. } = callee.as_mut() {
-                    if parts.len() >= 2 {
+                    if parts.len() >= 2
+                        && !self.is_shadowed(&parts[0])
+                        && !self.imports.contains(&parts[0])
+                    {
                         if let Some(last) = parts.last_mut() {
                             if self.top.contains(last) && !self.is_shadowed(last) {
                                 *last = format!("{}.{}", self.ns, last);

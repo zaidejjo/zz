@@ -185,6 +185,8 @@ mod tests {
             build_fingerprint: 42,
             target: "host".to_string(),
             runtime_mtime: None,
+            artifact_hash: String::new(),
+            artifact_flags: String::new(),
         }
     }
 

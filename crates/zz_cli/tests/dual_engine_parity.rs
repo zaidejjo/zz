@@ -374,6 +374,7 @@ parity_strict!(parity_syntax_fstrings, "syntax", "fstrings.zz");
 parity_strict!(parity_syntax_dicts, "syntax", "dicts.zz");
 parity_strict!(parity_syntax_string_blocks, "syntax", "string_blocks.zz");
 parity_strict!(parity_syntax_pipe_elvis, "syntax", "pipe_elvis.zz");
+parity_strict!(parity_syntax_scalar_copy, "syntax", "scalar_copy.zz");
 
 // Types
 parity_strict!(parity_types_generics, "types", "generics.zz");

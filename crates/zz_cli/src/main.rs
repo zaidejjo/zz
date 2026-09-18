@@ -91,6 +91,9 @@ EXAMPLES:
     zz add foo@^1.2.0                 add semver-range dependency
     zz add bar --git URL --rev main   add git dependency
     zz add baz --path ../baz          add path dependency
+    zz add qux                        add via local registry alias (~/.zz/registry.toml)
+    zz registry add qux --path ../qux  register a local alias (no server; share the file via dotfiles)
+    zz registry list                  list local aliases
     zz install                        resolve and fetch all dependencies
     zz remove foo                     remove a dependency
     zz check .                       scan current directory
@@ -261,6 +264,13 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("registry") => match pm::registry(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
         Some("login") => match pm::login(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
@@ -323,13 +333,18 @@ fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
 
 /// Load plugin shared libraries for VM-based native dispatch.
 ///
-/// Reads `zz.lock` from the project directory, finds dependencies with
-/// `plugin.zzi` and shared libraries in their `build/` directory, loads
+/// Reads `zz.lock` and `zz.toml` from the project directory, finds dependencies
+/// with `plugin.zzi` and shared libraries in their `build/` directory, loads
 /// them via dlopen, and registers their native functions.
+///
+/// `plugin_funcs` carries the manifest signatures keyed by ZZ-visible name;
+/// after loading, C-symbol registrations are aliased to those ZZ names so
+/// VM dispatch and AOT lowering resolve identically.
 #[cfg(unix)]
 fn load_vm_plugins(
     project_dir: &std::path::Path,
     natives: &mut std::collections::HashMap<String, zz_runtime::NativeEntry>,
+    plugin_funcs: &[(String, zz_checker::FuncSig)],
 ) -> Result<(), String> {
     use zz_pm::lock::Lockfile;
 
@@ -339,21 +354,43 @@ fn load_vm_plugins(
         Err(_) => return Ok(()), // no lock file, no plugins
     };
 
+    // Load manifest to resolve path deps
+    let manifest_path = project_dir.join("zz.toml");
+    let manifest = zz_pm::manifest::Manifest::load(&manifest_path).ok();
+
     for dep in &lock.deps {
-        let cas_dir = zz_pm::paths::cas_entry(&dep.hash);
+        // Resolve package directory: path deps use local path, git deps use CAS
+        let pkg_dir = if dep.source == "path" {
+            if let Some(ref m) = manifest {
+                if let Some(zz_pm::manifest::DepSpec::Path(ref path_dep)) =
+                    m.dependencies.get(&dep.name)
+                {
+                    project_dir.join(&path_dep.path)
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        } else {
+            zz_pm::paths::cas_entry(&dep.hash)
+        };
 
         // Only load plugins that have a plugin.zzi manifest
-        if !cas_dir.join("plugin.zzi").exists() {
+        if !pkg_dir.join("plugin.zzi").exists() {
             continue;
         }
 
         // Look for shared library in build/ directory
-        let build_dir = cas_dir.join("build");
+        let build_dir = pkg_dir.join("build");
         if !build_dir.exists() {
             continue;
         }
 
-        // Try common shared library names
+        // Try common shared library names, then any .so/.dylib the
+        // build hook actually produced (e.g. libzimg_native.so — never
+        // assume lib<name>.so).
+        let mut lib_paths: Vec<std::path::PathBuf> = Vec::new();
         let lib_names = [
             format!("lib{}.so", dep.name.replace('-', "_")),
             format!("lib{}.dylib", dep.name.replace('-', "_")),
@@ -363,22 +400,67 @@ fn load_vm_plugins(
 
         for lib_name in &lib_names {
             let lib_path = build_dir.join(lib_name);
-            if lib_path.exists() {
-                match zz_plugin::load_plugin(&lib_path, natives) {
-                    Ok(_handle) => {
-                        // Plugin loaded successfully; _handle keeps the library alive
-                        eprintln!("zz: loaded plugin `{}`", dep.name);
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!("zz: warning: failed to load plugin `{}`: {e}", dep.name);
-                    }
+            if lib_path.exists() && !lib_paths.contains(&lib_path) {
+                lib_paths.push(lib_path);
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(&build_dir) {
+            let mut scanned: Vec<std::path::PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    matches!(p.extension().and_then(|e| e.to_str()), Some("so" | "dylib"))
+                        && !lib_paths.contains(p)
+                })
+                .collect();
+            scanned.sort();
+            lib_paths.extend(scanned);
+        }
+
+        for lib_path in &lib_paths {
+            match zz_plugin::load_plugin(lib_path, natives) {
+                Ok(handle) => {
+                    // The handle MUST stay alive: dropping it unloads the
+                    // library, unmapping the registered function pointers.
+                    keep_plugin_alive(handle);
+                    eprintln!("zz: loaded plugin `{}`", dep.name);
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("zz: warning: failed to load plugin `{}`: {e}", dep.name);
                 }
             }
         }
     }
 
+    // Alias C-symbol registrations to ZZ-visible dotted names so VM
+    // dispatch resolves exactly what AOT lowering calls.
+    for (zz_name, sig) in plugin_funcs {
+        if natives.contains_key(zz_name) {
+            continue;
+        }
+        let c_sym = sig.c_symbol(zz_name);
+        if let Some(entry) = natives.get(&c_sym).cloned() {
+            natives.insert(zz_name.clone(), entry);
+        }
+    }
+
     Ok(())
+}
+
+/// Loaded plugin libraries, kept alive for the process lifetime.
+/// Dropping a `PluginLib` unloads its `.so`, unmapping every registered
+/// function pointer — so handles are never released once loaded.
+static PLUGIN_LIBS: std::sync::OnceLock<std::sync::Mutex<Vec<zz_plugin::PluginLib>>> =
+    std::sync::OnceLock::new();
+
+/// Retain a loaded plugin library for the rest of the process.
+fn keep_plugin_alive(handle: zz_plugin::PluginLib) {
+    PLUGIN_LIBS
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .expect("plugin registry lock")
+        .push(handle);
 }
 
 /// Non-Unix stub for VM plugin loading.
@@ -386,6 +468,7 @@ fn load_vm_plugins(
 fn load_vm_plugins(
     _project_dir: &std::path::Path,
     _natives: &mut std::collections::HashMap<String, zz_runtime::NativeEntry>,
+    _plugin_funcs: &[(String, zz_checker::FuncSig)],
 ) -> Result<(), String> {
     // dlopen not supported on this platform yet
     Ok(())
@@ -399,7 +482,24 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
             .to_string()
     })?;
 
-    let loaded = loader::load_program(std::path::Path::new(path))?;
+    let script_path = std::path::Path::new(path);
+    // Project root: walk up from the script (entry files usually live in
+    // `src/`; `zz.lock` sits at the root). Falls back to the script dir.
+    let project_root = loader::find_project_root(script_path).unwrap_or_else(|| {
+        script_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf()
+    });
+    // Discover plugin manifest signatures so `zz run` type-checks the
+    // same dotted names the AOT path merges.
+    let plugin_funcs = crate::build::discover_plugin_manifests(script_path);
+
+    let loaded = if plugin_funcs.is_empty() {
+        loader::load_program(script_path)?
+    } else {
+        loader::load_program_with_plugins(script_path, &plugin_funcs)?
+    };
     let mut has_errors = false;
     for e in &loaded.errors {
         let mut files = Files::new();
@@ -420,10 +520,8 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
 
     // Load plugin shared libraries for VM-based native dispatch.
     let mut natives = loaded.natives.clone();
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        if let Err(e) = crate::load_vm_plugins(parent, &mut natives) {
-            eprintln!("zz: warning: {e}");
-        }
+    if let Err(e) = crate::load_vm_plugins(&project_root, &mut natives, &plugin_funcs) {
+        eprintln!("zz: warning: {e}");
     }
 
     // Build the typed program (HIR) to get the resolved type map.

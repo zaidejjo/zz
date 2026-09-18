@@ -245,6 +245,16 @@ fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), S
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
+            // Skip common build artifact directories
+            let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if dir_name == "target"
+                || dir_name == "build"
+                || dir_name == "node_modules"
+                || dir_name == ".git"
+                || dir_name == "vendor"
+            {
+                continue;
+            }
             collect_files_recursive(&path, files)?;
         } else if path.is_file() {
             files.push(path);

@@ -369,6 +369,40 @@ io.println(10.0 / 4)
 }
 
 #[test]
+fn native_scalar_copy_matches_vm() {
+    // Scalar-to-scalar copies (`s := sx` Decl, `s = sy` Assign between raw
+    // scalar locals) once miscompiled to `(v).f` on a plain `double`, so
+    // the fresh native build below failed at C compile time. `native_run`
+    // rebuilds from scratch every call (no artifact cache), so this test
+    // cannot go green behind a stale binary the way a cached `zz run
+    // --native` can.
+    let src = r#"
+func fit(cur_w: int, cur_h: int, want_w: int, want_h: int) -> float {
+    sx := float(want_w) / float(cur_w)
+    sy := float(want_h) / float(cur_h)
+    s := sx
+    if sy < sx {
+        s = sy
+    }
+    s
+}
+func pick(a: int, b: int, cond: bool) -> int {
+    x := a
+    if cond {
+        x = b
+    }
+    x
+}
+io.println(fit(640, 480, 320, 240))
+io.println(fit(640, 480, 200, 200))
+io.println(pick(10, 20, true))
+io.println(pick(10, 20, false))
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "0.5\n0.3125\n20\n10\n");
+}
+
+#[test]
 fn native_string_concat_matches_vm() {
     let src = r#"
 io.println("hello" + " " + "world")

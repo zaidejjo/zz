@@ -895,6 +895,39 @@ impl Lowerer {
     }
 }
 
+/// True if an emitted C expression is already a raw scalar (not a boxed
+/// `zz_value` needing `.{i,f,b}` extraction): an explicit scalar cast, or
+/// a bare variable whose known C type is scalar. `ident` is the ZZ source
+/// name when the expression is a plain variable (C ids differ from ZZ
+/// names, so the emitted string alone cannot be looked up). Without this
+/// check, scalar-to-scalar copies (`s := sx`, `s = sy` between raw
+/// locals) miscompile to `(v).f` on a plain `double`.
+pub(crate) fn emitted_is_raw_scalar(emitted: &str, names: &NameCtx, ident: Option<&str>) -> bool {
+    if emitted.starts_with("(int64_t)(")
+        || emitted.starts_with("(double)(")
+        || emitted.starts_with("(bool)(")
+    {
+        return true;
+    }
+    let mut candidates = Vec::new();
+    if let Some(name) = ident {
+        candidates.push(name);
+    }
+    if !emitted.is_empty()
+        && emitted
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        candidates.push(emitted);
+    }
+    candidates.into_iter().any(|key| {
+        matches!(
+            names.lookup_type(key),
+            Some("int64_t") | Some("double") | Some("bool")
+        )
+    })
+}
+
 /// Auto-box an unboxed scalar expression to a `zz_value` C expression.
 /// If the expression is already a `zz_value` (i.e., the variable's C type is
 /// `zz_value` or unknown), it is returned as-is. Otherwise, the appropriate

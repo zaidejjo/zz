@@ -802,6 +802,7 @@ fn typeof_any_value() {
         "typeof".to_string(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: vec!["T".to_string()],
             bounds: Vec::new(),
             params: vec![("v".to_string(), Type::Named("T".to_string()))],
@@ -830,6 +831,7 @@ fn method_funcs() -> HashMap<String, FuncSig> {
         "dist".to_string(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: Vec::new(),
             bounds: Vec::new(),
             params: vec![
@@ -901,6 +903,7 @@ fn method_call_namespaced_by_struct_type() {
         "shapes.dist".to_string(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: Vec::new(),
             bounds: Vec::new(),
             params: vec![("p".to_string(), Type::Struct("shapes.Point".to_string()))],
@@ -933,6 +936,7 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
         "str".to_string(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: vec!["T".to_string()],
             bounds: Vec::new(),
             params: vec![("v".to_string(), t.clone())],
@@ -944,6 +948,7 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
         "int".to_string(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: vec!["T".to_string()],
             bounds: Vec::new(),
             params: vec![("v".to_string(), t.clone())],
@@ -955,6 +960,7 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
         "float".to_string(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: vec!["T".to_string()],
             bounds: Vec::new(),
             params: vec![("v".to_string(), t.clone())],
@@ -1028,6 +1034,7 @@ fn typo_suggestion_variable() {
         "println".to_string(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: vec![],
             bounds: Vec::new(),
             params: vec![("msg".to_string(), Type::Str)],
@@ -1341,6 +1348,7 @@ fn opaque_test_funcs() -> HashMap<String, FuncSig> {
         "regex.compile".to_string(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: Vec::new(),
             bounds: Vec::new(),
             params: vec![("pat".to_string(), Type::Str)],
@@ -1352,6 +1360,7 @@ fn opaque_test_funcs() -> HashMap<String, FuncSig> {
         "regex.is_match".to_string(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: Vec::new(),
             bounds: Vec::new(),
             params: vec![
@@ -1384,6 +1393,7 @@ fn opaque_handle_tag_mismatch_errors() {
         "uuid.v4".to_string(),
         FuncSig {
             is_extern: false,
+            extern_c_symbol: None,
             generics: Vec::new(),
             bounds: Vec::new(),
             params: vec![],

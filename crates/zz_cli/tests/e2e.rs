@@ -150,6 +150,7 @@ e2e_success_test!(
 e2e_success_test!(e2e_syntax_return_in_loops, "syntax", "return_in_loops.zz");
 e2e_success_test!(e2e_syntax_dict_iteration, "syntax", "dict_iteration.zz");
 e2e_success_test!(e2e_syntax_pipe_elvis, "syntax", "pipe_elvis.zz");
+e2e_success_test!(e2e_syntax_scalar_copy, "syntax", "scalar_copy.zz");
 e2e_success_test!(e2e_syntax_empty_infer, "syntax", "empty_infer.zz");
 e2e_success_test!(
     e2e_syntax_closure_annotations,

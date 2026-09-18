@@ -340,6 +340,11 @@ impl<'a> FmtCtx<'a> {
                             self.write_str(" -> ");
                             self.fmt_ty(ret, source);
                         }
+                        if let Some(sym) = &item.c_symbol {
+                            self.write_str(" = \"");
+                            self.write_str(sym);
+                            self.write_str("\"");
+                        }
                         self.write_line();
                     }
                     self.indent -= 1;

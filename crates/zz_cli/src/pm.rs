@@ -32,6 +32,7 @@ pub fn init(args: &[String]) -> Result<(), String> {
 
     println!("initialized project `{}` in {}", name, dir.display());
     println!("  zz.toml: created");
+    println!("  .gitignore: ensured (vendor/, build/, src/bin/)");
     if !dir.join("src/main.zz").exists() {
         println!("  src/main.zz: created");
     }
@@ -52,6 +53,7 @@ pub fn new(args: &[String]) -> Result<(), String> {
     println!("created project `{}` at {}", name, project_dir.display());
     println!("  zz.toml: created");
     println!("  src/main.zz: created");
+    println!("  .gitignore: ensured (vendor/, build/, src/bin/)");
     Ok(())
 }
 
@@ -83,7 +85,14 @@ pub fn add(args: &[String]) -> Result<(), String> {
             rev,
         })
     } else {
-        zz_pm::manifest::DepSpec::Version(version.unwrap_or_else(|| "^1.0".into()))
+        // Bare name: consult the local registry before falling back to a
+        // plain version range (which needs a hosted registry to resolve).
+        if let Some(spec) = registry_lookup(&pkg_name) {
+            println!("resolved `{pkg_name}` via local registry (~/.zz/registry.toml)");
+            spec
+        } else {
+            zz_pm::manifest::DepSpec::Version(version.unwrap_or_else(|| "^1.0".into()))
+        }
     };
 
     manifest.dependencies.insert(pkg_name.clone(), dep_spec);
@@ -94,6 +103,87 @@ pub fn add(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve a bare `zz add <name>` via the local registry
+/// (`~/.zz/registry.toml`). Returns `None` when no alias exists.
+fn registry_lookup(name: &str) -> Option<zz_pm::manifest::DepSpec> {
+    zz_pm::registry::Registry::load()
+        .ok()
+        .and_then(|reg| reg.resolve(name))
+}
+
+/// Handle `zz registry add|list|remove`.
+///
+/// Local alias file only (`~/.zz/registry.toml`): name → {path | git}.
+/// No server, no publishing — share the file via dotfiles for teams.
+pub fn registry(args: &[String]) -> Result<(), String> {
+    let sub = args.first().map(String::as_str).unwrap_or("list");
+    match sub {
+        "add" => {
+            let rest = args.get(1..).unwrap_or(&[]);
+            let name = rest
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .ok_or("missing package name\n\nhint: usage: zz registry add <name> [--path PATH | --git URL [--rev REV]]")?;
+            let path = parse_flag_value(rest, "--path");
+            let git = parse_flag_value(rest, "--git");
+            let rev = parse_flag_value(rest, "--rev");
+            if path.is_none() && git.is_none() {
+                return Err("missing source\n\
+                    hint: usage: zz registry add <name> [--path PATH | --git URL [--rev REV]]"
+                    .to_string());
+            }
+            let mut reg = zz_pm::registry::Registry::load()?;
+            reg.add(
+                name.clone(),
+                zz_pm::registry::RegistryEntry {
+                    path,
+                    git,
+                    rev,
+                    version: None,
+                },
+            );
+            reg.save()?;
+            println!("registry: added `{name}`");
+            Ok(())
+        }
+        "list" => {
+            let reg = zz_pm::registry::Registry::load()?;
+            if reg.packages.is_empty() {
+                println!("registry is empty (~/.zz/registry.toml)");
+                println!("hint: zz registry add <name> [--path PATH | --git URL]");
+                return Ok(());
+            }
+            for name in reg.names() {
+                let entry = &reg.packages[name];
+                if let Some(p) = &entry.path {
+                    println!("{name} -> path {p}");
+                } else if let Some(g) = &entry.git {
+                    let rev = entry.rev.as_deref().unwrap_or("main");
+                    println!("{name} -> git {g}#{rev}");
+                }
+            }
+            Ok(())
+        }
+        "remove" => {
+            let rest = args.get(1..).unwrap_or(&[]);
+            let name = rest
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .ok_or("missing package name\n\nhint: usage: zz registry remove <name>")?;
+            let mut reg = zz_pm::registry::Registry::load()?;
+            if !reg.remove(name) {
+                return Err(format!("`{name}` is not in the registry"));
+            }
+            reg.save()?;
+            println!("registry: removed `{name}`");
+            Ok(())
+        }
+        other => Err(format!(
+            "unknown registry subcommand `{other}`\n\
+              hint: usage: zz registry add|list|remove"
+        )),
+    }
+}
 /// Handle `zz install` / `zz i`.
 pub fn install(_args: &[String]) -> Result<(), String> {
     let dir = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;

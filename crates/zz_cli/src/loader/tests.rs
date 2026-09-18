@@ -1165,3 +1165,88 @@ fn import_alias_reexport() {
     assert!(no_errors(&result), "errors: {:?}", result.errors);
     assert_eq!(result.bindings["main.z"], Type::Int);
 }
+
+#[test]
+fn plugin_import_merges_dotted_names() {
+    // `import toy` resolves a path dependency shipping plugin.zzi and
+    // merges its dotted signatures (no bare aliases).
+    let dir = temp_project(&[
+        (
+            "zz.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies.toy]\npath = \"toy\"\n",
+        ),
+        (
+            "toy/plugin.zzi",
+            "// Version: 1\n// Rustc: 1.85.0\n// Plugin-version: 0.1.0\n\nextern \"C\" {\n    func toy.add(a: int, b: int) -> int\n}\n",
+        ),
+        ("src/main.zz", "import toy\nx := toy.add(1, 2)"),
+    ]);
+    let mut lock = zz_pm::lock::Lockfile::new();
+    lock.upsert(zz_pm::lock::LockedDep {
+        name: "toy".to_string(),
+        version: "*".to_string(),
+        source: "path".to_string(),
+        hash: "test".to_string(),
+        commit: None,
+    });
+    lock.save(&dir.join("zz.lock")).unwrap();
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert!(result.funcs.contains_key("toy.add"));
+    assert!(!result.funcs.contains_key("add"));
+}
+
+#[test]
+fn plugin_import_alias_copies_namespace() {
+    // `import toy as t` exposes `t.*` alongside `toy.*`, never bare names.
+    let dir = temp_project(&[
+        (
+            "zz.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies.toy]\npath = \"toy\"\n",
+        ),
+        (
+            "toy/plugin.zzi",
+            "// Version: 1\n// Rustc: 1.85.0\n// Plugin-version: 0.1.0\n\nextern \"C\" {\n    func toy.add(a: int, b: int) -> int\n}\n",
+        ),
+        ("src/main.zz", "import toy as t\nx := t.add(1, 2)"),
+    ]);
+    let mut lock = zz_pm::lock::Lockfile::new();
+    lock.upsert(zz_pm::lock::LockedDep {
+        name: "toy".to_string(),
+        version: "*".to_string(),
+        source: "path".to_string(),
+        hash: "test".to_string(),
+        commit: None,
+    });
+    lock.save(&dir.join("zz.lock")).unwrap();
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert!(result.funcs.contains_key("t.add"));
+    assert!(result.funcs.contains_key("toy.add"));
+    assert!(!result.funcs.contains_key("add"));
+}
+
+#[test]
+fn method_call_not_rewritten_when_free_fn_collides() {
+    // `b.resize()` must stay a method call even though the CALLER's
+    // module defines its own free `resize` — the rewriter must not
+    // qualify the method name when the receiver is a local value.
+    // (Method and free function live in different modules here, so
+    // their namespaced keys do not collide.)
+    let dir = temp_project(&[
+        (
+            "main.zz",
+            "import shapes\nimport ops\nw := shapes.wrap(40)\nx := ops.go(w)\nprintln(x)",
+        ),
+        (
+            "shapes.zz",
+            "pub struct Box { v: int }\nimpl Box {\n    pub func resize(self, n: int) -> int {\n        self.v + n\n    }\n}\npub func wrap(v: int) -> Box {\n    Box{v: v}\n}\n",
+        ),
+        (
+            "ops.zz",
+            "import shapes\npub func resize(a: int, b: int) -> int {\n    a * b\n}\npub func go(b: shapes.Box) -> int {\n    b.resize(2)\n}\n",
+        ),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+}

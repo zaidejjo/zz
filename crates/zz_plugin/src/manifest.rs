@@ -35,6 +35,9 @@ pub enum ManifestError {
         func: String,
         ty: String,
     },
+
+    #[error("manifest `{path}`: plugin extern function `{func}` returns str, which is not yet supported — return an int status code and use a getter pattern instead")]
+    StrReturn { path: String, func: String },
 }
 
 /// Parsed metadata from a `.zzi` manifest header.
@@ -180,6 +183,12 @@ fn extern_func_to_sig(
     let ret = match &ef.ret {
         Some(t) => {
             let ty = ast_to_c_type(t);
+            if matches!(ty, Type::Str) {
+                return Err(ManifestError::StrReturn {
+                    path: path.to_string(),
+                    func: ef.name.name.clone(),
+                });
+            }
             if !is_c_abi_type(&ty) {
                 return Err(ManifestError::NonCType {
                     path: path.to_string(),
@@ -199,6 +208,7 @@ fn extern_func_to_sig(
         has_default,
         ret,
         is_extern: true,
+        extern_c_symbol: ef.c_symbol.clone(),
     })
 }
 
@@ -220,11 +230,17 @@ fn ast_to_c_type(t: &zz_frontend::ast::Ty) -> Type {
     }
 }
 
-/// Check if a type is C-ABI-compatible (scalar, pointer, void, or unit).
+/// Check if a type is C-ABI-compatible (scalar, string, pointer, void, or unit).
 fn is_c_abi_type(t: &Type) -> bool {
     matches!(
         t,
-        Type::Int | Type::Float | Type::Bool | Type::Void | Type::Unit | Type::Ptr { .. }
+        Type::Int
+            | Type::Float
+            | Type::Bool
+            | Type::Str
+            | Type::Void
+            | Type::Unit
+            | Type::Ptr { .. }
     )
 }
 

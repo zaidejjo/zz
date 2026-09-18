@@ -156,6 +156,49 @@ pub fn load_program_with_plugins(
     Ok(loader.finish())
 }
 
+/// Walk up from `start` (a file or directory) to the project root —
+/// the nearest ancestor (or self) holding `zz.toml`.
+pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
+    // Canonicalize so relative starts (e.g. `src/main.zz` with cwd at
+    // the project root) walk up through real ancestors.
+    let canonical = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    let mut dir = if canonical.is_file() {
+        canonical.parent()?.to_path_buf()
+    } else {
+        canonical
+    };
+    loop {
+        if dir.join("zz.toml").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// Resolve a plugin dependency's package directory for `import <dep>`.
+/// Returns the package dir only when the dep exists in `zz.lock` and
+/// ships a `plugin.zzi` manifest.
+fn resolve_plugin_pkg(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
+    let manifest = zz_pm::manifest::Manifest::load(&project_root.join("zz.toml")).ok()?;
+    let lock = zz_pm::lock::Lockfile::load(&project_root.join("zz.lock")).ok()?;
+    let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
+    let pkg_dir = if locked.source == "path" {
+        match manifest.dependencies.get(dep_name) {
+            Some(zz_pm::manifest::DepSpec::Path(p)) => project_root.join(&p.path),
+            _ => return None,
+        }
+    } else {
+        zz_pm::paths::cas_entry(&locked.hash)
+    };
+    if pkg_dir.join("plugin.zzi").exists() {
+        Some(pkg_dir)
+    } else {
+        None
+    }
+}
+
 /// The namespace a module is bound to: its alias, or its file stem.
 fn module_ns(alias: Option<&str>, path: &Path) -> String {
     alias.map(str::to_string).unwrap_or_else(|| {
@@ -325,6 +368,34 @@ impl Loader {
                 }
                 continue;
             }
+            // Plugin dependency import (`import zimg`): the dep ships a
+            // `plugin.zzi` manifest. Merge its signatures under their
+            // declared ZZ names and register the namespace. Unlike std,
+            // no bare aliases are created — two plugins must never
+            // collide on short names.
+            if imp.len() == 1 {
+                if !imp_items.is_empty() {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source: source.clone(),
+                        diags: vec![error_at(
+                            format!(
+                                "selective imports from plugin `{}` are not supported\n\
+                                 hint: `import {0}` imports the full module; call `{}.*` qualified",
+                                imp[0], imp[0]
+                            ),
+                            Span::new(0, 0),
+                        )],
+                    });
+                    continue;
+                }
+                if let Some(root) = find_project_root(&canon) {
+                    if let Some(pkg_dir) = resolve_plugin_pkg(&root, &imp[0]) {
+                        self.import_plugin(&imp[0], imp_alias.as_deref(), &pkg_dir, path, &source);
+                        continue;
+                    }
+                }
+            }
             // Local file import.
             let rel = canon
                 .parent()
@@ -392,6 +463,67 @@ impl Loader {
             self.order.push(canon);
         }
         Ok(())
+    }
+
+    /// Import a plugin dependency (`import zimg`): merge its manifest
+    /// signatures under their declared ZZ names. With an alias
+    /// (`import zimg as z`), names under the `<dep>.` prefix are also
+    /// copied to `<alias>.`. Bare short names are never created.
+    fn import_plugin(
+        &mut self,
+        dep: &str,
+        alias: Option<&str>,
+        pkg_dir: &Path,
+        importer: &Path,
+        source: &str,
+    ) {
+        let manifest = match zz_plugin::load_manifest(&pkg_dir.join("plugin.zzi")) {
+            Ok(m) => m,
+            Err(e) => {
+                self.errors.push(LoadError {
+                    name: importer.display().to_string(),
+                    source: source.to_string(),
+                    diags: vec![error_at(
+                        format!("cannot load plugin `{dep}` manifest: {e}"),
+                        Span::new(0, 0),
+                    )],
+                });
+                return;
+            }
+        };
+        for (name, sig) in &manifest.funcs {
+            self.funcs.insert(name.clone(), sig.clone());
+        }
+        let ns = alias.unwrap_or(dep);
+        if ns != dep {
+            let prefix = format!("{dep}.");
+            let aliased: Vec<(String, zz_checker::FuncSig)> = manifest
+                .funcs
+                .iter()
+                .filter(|(n, _)| n.starts_with(&prefix))
+                .map(|(n, s)| (format!("{ns}.{}", &n[prefix.len()..]), s.clone()))
+                .collect();
+            for (name, sig) in aliased {
+                self.funcs.insert(name, sig);
+            }
+        }
+        // Ergonomic layer: a `<dep>.zz` entry file in the package root
+        // (or `src/`, the conventional code dir) is loaded as a module
+        // under the import namespace, so `import zimg` also brings in
+        // `zimg.resize(...)` etc. Its relative imports resolve inside
+        // the package. Manifest-only packages skip this and only record
+        // the namespace.
+        let entry = [format!("{dep}.zz"), format!("src/{dep}.zz")]
+            .into_iter()
+            .map(|rel| pkg_dir.join(rel))
+            .find(|p| p.exists());
+        if let Some(entry) = entry {
+            // load_file records its own diagnostics; the entry exists.
+            let _ = self.load_file(&entry, Some(ns));
+        } else {
+            // Namespace bookkeeping (re-import diagnostics stay consistent).
+            self.register_ns(ns, &pkg_dir.join("plugin.zzi"), importer, source);
+        }
     }
 
     /// Register a namespace → module mapping, detecting collisions. Returns
@@ -994,6 +1126,17 @@ fn namespace_program(program: &mut Program, ns: &str) {
         }
     }
     let mut rw = rewrite::Rewriter::new(ns, &top);
+    // Imported namespace heads resolve on their own; the Call rewriter
+    // must leave `alias.func(...)` paths untouched.
+    for stmt in &program.stmts {
+        if let Stmt::Import { path, alias, .. } = stmt {
+            if let Some(a) = alias {
+                rw.imports.insert(a.clone());
+            } else if let Some(last) = path.last() {
+                rw.imports.insert(last.clone());
+            }
+        }
+    }
     for stmt in &mut program.stmts {
         rw.rewrite_stmt(stmt);
     }

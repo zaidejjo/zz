@@ -169,3 +169,58 @@ extern "C" {
     assert!(manifest.funcs.contains_key("f3"));
     assert!(manifest.funcs.contains_key("f4"));
 }
+
+#[test]
+fn test_manifest_dotted_names_with_override() {
+    let f = write_manifest(
+        r#"// Version: 1
+// Rustc: 1.85.0
+// Plugin-version: 0.1.0
+
+extern "C" {
+    func toy.add(a: int, b: int) -> int = "toy_add_impl";
+    func toy.starts_with(s: str, prefix: str) -> int
+    func toy.noop()
+}
+"#,
+    );
+
+    let manifest = zz_plugin::load_manifest(f.path()).unwrap();
+    assert_eq!(manifest.funcs.len(), 3);
+
+    // Keyed by ZZ-visible dotted name.
+    let add = manifest.funcs.get("toy.add").unwrap();
+    assert!(add.is_extern);
+    assert_eq!(add.extern_c_symbol.as_deref(), Some("toy_add_impl"));
+    assert_eq!(add.c_symbol("toy.add"), "toy_add_impl");
+
+    // No override: C symbol derives from dots-to-underscores.
+    let sw = manifest.funcs.get("toy.starts_with").unwrap();
+    assert_eq!(sw.extern_c_symbol, None);
+    assert_eq!(sw.c_symbol("toy.starts_with"), "toy_starts_with");
+    assert!(matches!(sw.params[0].1, zz_checker::Type::Str));
+
+    let noop = manifest.funcs.get("toy.noop").unwrap();
+    assert!(matches!(noop.ret, zz_checker::Type::Void));
+}
+
+#[test]
+fn test_manifest_str_return_rejected_with_guidance() {
+    let f = write_manifest(
+        r#"// Version: 1
+// Rustc: 1.85.0
+// Plugin-version: 0.1.0
+
+extern "C" {
+    func toy.greet(name: str) -> str
+}
+"#,
+    );
+
+    let err = zz_plugin::load_manifest(f.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("returns str") && msg.contains("getter pattern"),
+        "expected str-return guidance, got: {msg}"
+    );
+}

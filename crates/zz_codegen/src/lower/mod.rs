@@ -12,6 +12,7 @@
 
 mod context;
 mod expr;
+mod extern_call;
 mod fn_decl;
 mod stmt;
 
@@ -302,6 +303,18 @@ impl Lowerer {
             if !seen.insert(fname.clone()) {
                 continue;
             }
+            // Plugin `extern "C"` functions have no ZZ body: they are
+            // declared (with real C types) in the extern prelude below
+            // and called directly, never wrapped as `zz_fn_*`.
+            if self
+                .tp
+                .funcs
+                .get(fname)
+                .map(|sig| sig.is_extern)
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let first_struct_c = self
                 .tp
                 .funcs
@@ -323,6 +336,15 @@ impl Lowerer {
         }
 
         let closure_fwd = self.closure_forward_decls.borrow().join("");
+        // Plugin extern prelude: real C declarations for reachable
+        // `extern "C"` functions. Empty when none, keeping generated C
+        // for existing programs byte-identical.
+        let extern_pre = self.extern_prelude();
+        let extern_section = if extern_pre.is_empty() {
+            String::new()
+        } else {
+            format!("\n// ---- plugin externs ----\n{extern_pre}\n")
+        };
         // FFI prelude: `extern` declarations for Rust-staticlib natives used
         // by this program. Empty when none, keeping generated C for existing
         // programs byte-identical.
@@ -339,7 +361,7 @@ impl Lowerer {
             crate::RUNTIME_C
         };
         let source = format!(
-            "{runtime_h}\n{runtime_c}\n{ffi_section}\n// ---- struct definitions ----\n{struct_preamble}\n// ---- module globals ----\n{globals_decl}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset_trim(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
+            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n// ---- module globals ----\n{globals_decl}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset_trim(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
             runtime_h = crate::RUNTIME_H,
             runtime_c = runtime_c,
             struct_preamble = struct_preamble,

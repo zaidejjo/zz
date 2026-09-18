@@ -26,12 +26,19 @@ Every plugin ships a `plugin.zzi` file declaring its native interface. The `.zzi
 // Plugin-version: 0.1.0
 
 extern "C" {
-    func my_init() -> int
-    func my_process(handle: *mut void, data: int) -> int
-    func my_release(handle: *mut void)
-    func my_get_result() -> *mut void
+    func my.init() -> int
+    func my.process(handle: int, data: int) -> int
+    func my.release(handle: int)
+    func my.get_result() -> int
+    // Explicit C symbol override (optional):
+    func my.add(a: int, b: int) -> int = "my_add_impl";
 }
 ```
+
+Names are ZZ-visible and should be dotted (`my.process`): consumers call
+them qualified after `import my`. The C symbol defaults to the ZZ name
+with `.` replaced by `_` (`my.process` → `my_process`); `= "..."` overrides
+it. Bare short names are never auto-exposed, so two plugins cannot collide.
 
 ### Metadata Header
 
@@ -51,16 +58,15 @@ Only C-ABI-safe types are permitted in plugin functions:
 
 | ZZ Type | C Equivalent | Notes |
 |---------|--------------|-------|
-| `int` | `int64_t` / `long long` | 64-bit integer |
+| `int` | `int64_t` | 64-bit integer (C `int` params work for values fitting i32; compare status codes with `!= 0`, never `== -1`) |
 | `float` | `double` | 64-bit float |
-| `bool` | `int` (0 or 1) | Integer boolean |
+| `bool` | `bool` | |
+| `str` | `const char *` | Borrowed for the call only (NUL-terminated, same `zz_str_cptr(v.s)` convention stdlib natives use); the C side must not retain it. Not allowed as a return type |
 | `*const void` | `const void*` | Opaque pointer (read-only) |
 | `*mut void` | `void*` | Opaque pointer (mutable) |
 | `void` | (no return) | Functions returning nothing |
 
-**Not allowed:** `str`, `String`, `Vec<T>`, arrays, structs, enums, `Option`, `Result`, closures, function pointers.
-
-Strings: `str` is not a C ABI type. Pass string data as `*const void` (pointer to null-terminated C string) or `*mut void` (buffer pointer + separate length parameter).
+**Not allowed:** arrays, structs, enums, `Option`, `Result`, closures, function pointers, `str` returns.
 
 ---
 
@@ -83,6 +89,9 @@ my-plugin/
 ├── plugin.zzi          Interface declarations
 ├── zz.toml             Package manifest with [native] section
 ├── build.sh            Build hook (optional)
+├── my.zz               Ergonomic entry (optional; or src/my.zz) — loaded
+│                       as a module on `import my`, so `my.resize(...)`
+│                       resolves alongside the manifest signatures
 ├── native/             Rust crate producing .so/.a
 │   ├── Cargo.toml
 │   ├── build.rs        Build script (optional)
@@ -160,13 +169,14 @@ cc -c csrc/wrapper.c \
     -o build/wrapper.o \
     $CFLAGS -Wall -Wextra -Werror -fPIC
 
-# Compile Rust native crate
+# Compile Rust native crate (see "cdylib link discipline" below)
 cd native
-cargo build --release
-
-# Copy artifacts
+cargo rustc --release --lib --crate-type cdylib -- \
+	-C link-args=-Wl,--exclude-libs,ALL \
+	-C link-args=-Wl,-z,lazy
+cp target/release/deps/libmy_plugin.so build/  # or .dylib on macOS
+cargo build --release  # staticlib for AOT (plain flags)
 cp target/release/libmy_plugin.a build/
-cp target/release/libmy_plugin.so build/  # or .dylib on macOS
 
 # Save flags
 echo "$CFLAGS" > build/cflags.txt
@@ -180,6 +190,34 @@ echo "$LIBS" > build/ldflags.txt
 - stderr output is shown to the user on failure
 - stdout output is captured (not displayed)
 - `build/` directory is created by the hook (or by `zz build` if it doesn't exist)
+- If both `build/<x>.o` and an archive containing `<x>.o` exist, `zz build`
+  thins the archive (loose objects win — hooks recompile them every run,
+  archives may be cargo-cached and stale)
+
+### cdylib Link Discipline (VM plugins, required)
+
+The cdylib is `dlopen`'d by `zz run`, whose host process never provides C
+runtime symbols. Two flags are mandatory on the cdylib link (scoped via
+`cargo rustc --lib` so build scripts are unaffected):
+
+- `--exclude-libs,ALL` — localizes whole-archived rlib members. Only the
+  crate's own objects stay exported, so dead `zz_native_rt` items
+  (referencing the AOT-only C runtime, e.g. `zz_str_new`) are
+  garbage-collected instead of dangling at load.
+- `-z,lazy` — Rust links cdylibs `-z now`; plugins must bind lazily.
+
+Real missing dependencies still fail loudly: `DT_NEEDED` libraries resolve
+eagerly regardless of these flags.
+
+### Single Result Slot Pattern (recommended)
+
+If producing calls stash their output in one module-static slot consumed
+via a getter, guard overwrites in debug builds: track a pending flag set
+on produce and cleared on consume, and `abort()` with
+`result slot overwritten before consumption` when a produce runs while the
+flag is set. Compile the check out with `NDEBUG` for production. See
+zimg's `csrc/zimg_wrapper.c` (`ZIMG_SLOT_GUARD`) for the reference
+implementation.
 
 ---
 
@@ -259,6 +297,11 @@ pub extern "C" fn zz_plugin_register(callback: RegisterCallback) {
    ```
 4. **No Rust types across FFI** — use `i64`/`f64`/`i32` for scalars, `*mut void` for opaque handles
 5. **Suppress FFI warnings** — add `#[allow(improper_ctypes_definitions)]` to the `RegisterCallback` type and `zz_plugin_register` function (because `NativeFn` is a Rust function pointer, not a C-ABI type, but works in practice)
+6. **Register dotted ZZ names** — the same names declared in `plugin.zzi`
+   (`my.process`, not `my_process`). `zz run` dispatches on them directly;
+   a C-symbol key is aliased automatically when present, but dotted is canonical.
+7. **VM handles stay loaded** — the host retains every loaded `.so` for the
+   process lifetime, so registration-time function pointers stay valid.
 
 ---
 
@@ -296,36 +339,28 @@ dlopen loads .so/.dylib → validates ABI version → calls zz_plugin_register
 
 ## 7. Handling Strings
 
-Strings are not C-ABI-safe. Two approaches:
-
-### Approach A: C-string pointer (null-terminated)
+`str` is a first-class extern parameter type (but never a return type).
+AOT lowers it to `const char *` via `zz_str_cptr(v.s)` — borrowed for the
+call only; the C side must not retain it. VM glue receives
+`Value::Str(String)`; copy through `CString::new` (Rust strings are not
+NUL-terminated) and reject interior NULs with an `EvalError`:
 
 ```zz
 // plugin.zzi
 extern "C" {
-    func my_load(path: *const void) -> int
+    func my.starts_with(s: str, prefix: str) -> int
 }
 ```
 
 ```rust
-// In lib.rs
-fn native_my_load(
-    _interp: &mut zz_runtime::eval::Interp,
-    args: &mut Vec<zz_runtime::Value>,
-    _span: zz_runtime::Span,
-) -> Result<zz_runtime::Value, zz_runtime::EvalError> {
-    // Convert ZZ int handle to pointer
-    let path_ptr = match &args[0] {
-        zz_runtime::Value::Int(i) => *i as *const i8,
-        _ => return Err(zz_runtime::EvalError::new("expected pointer", zz_runtime::Span::new(0, 0))),
-    };
-    let path = unsafe { CStr::from_ptr(path_ptr) };
-    // ... use path ...
-    Ok(zz_runtime::Value::Int(0))
-}
+// In lib.rs (VM glue)
+let cs = CString::new(s).map_err(|_| EvalError::new("interior NUL", span))?;
+let r = unsafe { my_starts_with(cs.as_ptr(), cp.as_ptr()) };
 ```
 
-### Approach B: Pointer + length (buffer)
+Legacy alternative: raw `*const void` + length params (still supported).
+
+### Pointer + length (buffers)
 
 ```zz
 extern "C" {
@@ -467,13 +502,12 @@ mod tests {
 
 ```zz
 // test.zz
-import my-plugin
+import my
 
-fn main() {
-    let handle = my-plugin.init()
-    assert handle == 0
-    my-plugin.release(handle)
-    print("plugin_ok")
+func main() {
+    code := my.init()
+    assert(code == 0)
+    println("plugin_ok")
 }
 ```
 
@@ -490,9 +524,11 @@ zz run test.zz
 
 ## 14. Common Gotchas
 
-### `str` is not C-ABI
+### `str` crosses as borrowed `const char *`
 
-`str` is a Rust string slice — it cannot cross FFI boundaries. Use `*const void` (pointer to C string) or `*mut void` (buffer pointer + length).
+`str` params lower to `zz_str_cptr(v.s)` (AOT) or arrive as `Value::Str`
+(VM glue: copy through `CString::new`, reject interior NULs). Never retain
+the pointer; `str` returns are unsupported.
 
 ### No `Copy` on `Value`
 
@@ -512,7 +548,10 @@ The `RegisterCallback` type and `zz_plugin_register` function produce `improper_
 
 ### Plugin libraries are never unloaded
 
-In v1, loaded plugin shared libraries stay in memory for the process lifetime. Dropping a `PluginLib` handle is safe but does not actually unload the library.
+Loaded plugin shared libraries stay in memory for the process lifetime —
+the host retains every `PluginLib` handle in a global registry. Dropping a
+handle would unmap registered function pointers (use-after-dlclose), so
+handles are never released once loaded.
 
 ---
 

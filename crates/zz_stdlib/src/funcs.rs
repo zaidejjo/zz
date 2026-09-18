@@ -16,6 +16,7 @@ fn sig(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
         has_default: vec![],
         ret,
         is_extern: false,
+        extern_c_symbol: None,
     }
 }
 
@@ -31,6 +32,7 @@ fn sig_t(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
         has_default: vec![],
         ret,
         is_extern: false,
+        extern_c_symbol: None,
     }
 }
 
@@ -46,6 +48,7 @@ fn sig_tu(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
         has_default: vec![],
         ret,
         is_extern: false,
+        extern_c_symbol: None,
     }
 }
 
@@ -1043,6 +1046,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             has_default: vec![],
             ret: t.clone(),
             is_extern: false,
+            extern_c_symbol: None,
         },
     );
     m.insert(
@@ -1057,6 +1061,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             has_default: vec![],
             ret: t.clone(),
             is_extern: false,
+            extern_c_symbol: None,
         },
     );
     m.insert(
@@ -1071,6 +1076,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             has_default: vec![],
             ret: t,
             is_extern: false,
+            extern_c_symbol: None,
         },
     );
 
@@ -2621,6 +2627,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false],
         ret: Type::Unit,
         is_extern: false,
+        extern_c_symbol: None,
     };
     for name in ["assert", "std.test.assert"] {
         m.insert(name.into(), assert_sig.clone());
@@ -2636,6 +2643,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false, false],
         ret: Type::Unit,
         is_extern: false,
+        extern_c_symbol: None,
     };
     for name in ["assert_eq", "std.test.assert_eq"] {
         m.insert(name.into(), assert_eq_sig.clone());
@@ -2650,6 +2658,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false, false],
         ret: Type::Unit,
         is_extern: false,
+        extern_c_symbol: None,
     };
     for name in ["assert_ne", "std.test.assert_ne"] {
         m.insert(name.into(), assert_ne_sig.clone());
@@ -2665,6 +2674,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false, false, false],
         ret: Type::Unit,
         is_extern: false,
+        extern_c_symbol: None,
     };
     for name in ["assert_approx_eq", "std.test.assert_approx_eq"] {
         m.insert(name.into(), approx_sig.clone());
@@ -2676,6 +2686,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false],
         ret: Type::Unit,
         is_extern: false,
+        extern_c_symbol: None,
     };
     for name in ["fail", "panic", "std.test.fail", "std.test.panic"] {
         m.insert(name.into(), fail_sig.clone());
