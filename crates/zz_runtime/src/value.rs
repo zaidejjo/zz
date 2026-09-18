@@ -133,6 +133,12 @@ pub enum Value {
 // but all cross-thread usage operates on self-contained copies.
 unsafe impl Send for Value {}
 unsafe impl Sync for Value {}
+// SAFETY: `FuncValue` is safe to send across threads only when its env
+// is self-contained (see `snapshot_funcs`, the sole cross-thread path:
+// every captured env is flattened into a fresh, unshared copy before the
+// move). Never move a `FuncValue` whose env aliases another thread's
+// scope chain. Same discipline as `Send for Value` above.
+unsafe impl Send for FuncValue {}
 
 /// Flatten a captured environment into a self-contained `HashMap`.
 ///
@@ -151,13 +157,18 @@ pub fn snapshot_env(env: &Rc<RefCell<crate::env::Env>>) -> HashMap<String, Value
 /// Each `FuncValue`'s captured env is flattened into a self-contained copy.
 pub fn snapshot_funcs(funcs: &HashMap<String, FuncValue>) -> HashMap<String, FuncValue> {
     let mut out = HashMap::new();
+    // ONE memo map for the whole table: module scopes share envs, so a
+    // fresh map per value re-clones shared graphs exponentially (165
+    // funcs hung spawn outright). Same ptr = same object, so sharing
+    // the map is exactly as correct, linear instead of exponential.
+    let mut seen: HashMap<usize, Value> = HashMap::new();
     for (name, fv) in funcs {
         let flat = fv.env.borrow().flatten();
         let new_env = Rc::new(RefCell::new(crate::env::Env::new()));
         {
             let mut e = new_env.borrow_mut();
             for (k, v) in flat {
-                e.define(&k, deep_clone_value(v, &mut HashMap::new()));
+                e.define(&k, deep_clone_value(v, &mut seen));
             }
         }
         out.insert(

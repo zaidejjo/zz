@@ -181,6 +181,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build"
 mkdir -p "$BUILD_DIR"
 
+# Stamp the toolchain version into plugin.zzi (idempotent): hand-written
+# `// Rustc:` stamps rot. The loader records it for diagnostics; ABI
+# refusal keys off ZZ_PLUGIN_ABI_VERSION, not this string.
+if command -v rustc >/dev/null 2>&1; then
+	RV=$(rustc -V | awk '{print $2}')
+	if [ -n "$RV" ] && [ -f "$SCRIPT_DIR/plugin.zzi" ]; then
+		sed -i.bak "s|^// Rustc: .*|// Rustc: $RV|" "$SCRIPT_DIR/plugin.zzi"
+		rm -f "$SCRIPT_DIR/plugin.zzi.bak"
+	fi
+fi
+
 cd "$SCRIPT_DIR/native"
 # cdylib with plugin link discipline: localize archive symbols so dead
 # host-runtime references GC away; lazy bind since the host never

@@ -155,23 +155,45 @@ pub(crate) fn spawn(
             span,
         )
     })?;
+    let param_count = fv.params.len();
 
     // 1. Snapshot captured env → self-contained flat map.
     let snapshot = snapshot_env(&fv.env);
 
-    // 2. Clone read-only globals.
+    // 2. Clone read-only globals + snapshot the ZZ function table so
+    // workers can call ordinary ZZ functions (not just natives).
+    // `snapshot_funcs` flattens every captured env into a fresh copy;
+    // moving those across threads is covered by `Send for FuncValue`.
     let natives = interp.natives.clone();
     let structs = interp.structs.clone();
+    let funcs = zz_runtime::value::snapshot_funcs(&interp.funcs);
 
-    // 3. Prepare shared result slot.
-    let result = Arc::new(Mutex::new(None));
-    let handle_for_thread = Arc::clone(&result);
-    let handle_for_join = Arc::clone(&result);
+    // 3. Prepare shared result state. The worker thread gets a clone
+    // of the WHOLE state (not just the result mutex): it must signal
+    // the condvar after storing, or `task.join` sleeps forever.
+    let state = Arc::new(TaskJoinState {
+        result: Arc::new(Mutex::new(None)),
+        cvar: Condvar::new(),
+    });
+    let state_for_thread = Arc::clone(&state);
 
     // 4. Spawn OS thread.
     std::thread::spawn(move || {
         let mut new_interp = Interp::with_natives(natives);
         new_interp.structs = structs;
+        new_interp.funcs = funcs;
+
+        // Seat one Unit arg per closure param at the stack bottom:
+        // slot-indexed locals address base+slot, so base must precede
+        // the seated args (running on an empty stack shifts every slot
+        // and corrupts locals or panics out of bounds). `spawn` takes
+        // no inputs by contract, so Unit is the only sane default;
+        // `|_|` closures ignore it.
+        let mut vm = zz_runtime::vm::Vm::new();
+        for _ in 0..param_count {
+            vm.push(Value::Unit);
+        }
+        let base = 0;
 
         // Seed env from snapshot.
         {
@@ -181,20 +203,26 @@ pub(crate) fn spawn(
             }
         }
 
-        let mut vm = zz_runtime::vm::Vm::new();
-        let outcome = match vm.run_chunk(&chunk, &mut new_interp) {
-            Ok(zz_runtime::runtime::Flow::Value(v)) => Ok(v),
-            Ok(_) => Ok(Value::Unit),
-            Err(e) => Err(e.message),
+        // A panicking worker must still resolve the join handle: without
+        // this, `task.join` (documented to yield `.err` on panic) would
+        // block forever and chan-based joins would deadlock silently.
+        let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vm.run_chunk_with_base(&chunk, &mut new_interp, base)
+        })) {
+            Ok(Ok(zz_runtime::runtime::Flow::Value(v))) => Ok(v),
+            Ok(Ok(_)) => Ok(Value::Unit),
+            Ok(Err(e)) => Err(e.message),
+            Err(_) => Err("spawned task panicked".to_string()),
         };
-        *handle_for_thread.lock().unwrap() = Some(outcome);
+        *state_for_thread.result.lock().unwrap() = Some(outcome);
+        // Wake the joiner: without this, `task.join` sleeps on the
+        // condvar forever (spurious wakeups aside). This was the silent
+        // hang behind every spawn+join workload.
+        state_for_thread.cvar.notify_one();
     });
 
     #[allow(clippy::arc_with_non_send_sync)]
-    Ok(Value::TaskJoin(Arc::new(TaskJoinState {
-        result: handle_for_join,
-        cvar: Condvar::new(),
-    })))
+    Ok(Value::TaskJoin(state))
 }
 
 /// `task.join(handle)` — blocking receive on a task join handle.

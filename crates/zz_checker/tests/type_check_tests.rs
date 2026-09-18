@@ -1413,3 +1413,26 @@ fn nested_func_rejected() {
         "nested function `inner` is not supported",
     );
 }
+
+#[test]
+fn opaque_handle_types_resolve_in_annotations() {
+    // Regression: opaque handle types (chan, task.join, http.server,
+    // tcp.stream, tcp.listener, http.response) were valid Types but had
+    // no name resolution — `func w(c: chan)` failed with "unknown type".
+    // Same gap class as json/db, fixed alongside.
+    for (ann, want) in [
+        ("chan", Type::Chan),
+        ("task.join", Type::TaskJoin),
+        ("http.server", Type::HttpServer),
+        ("tcp.stream", Type::TcpStream),
+        ("tcp.listener", Type::TcpListener),
+        ("http.response", Type::Response),
+    ] {
+        let src = format!("func w(c: {ann}) {{ }}\n");
+        let r = check_src(&src);
+        assert!(!has_errors(&r), "{ann}: errors: {:?}", r.errors);
+        let sig = r.funcs.get("w").unwrap_or_else(|| panic!("{ann}: func w missing"));
+        assert_eq!(sig.params.len(), 1, "{ann}: arity");
+        assert_eq!(sig.params[0].1, want, "{ann}: param type");
+    }
+}
