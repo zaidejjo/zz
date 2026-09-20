@@ -59,13 +59,29 @@ unsafe impl Send for GreenTask {}
 
 /// Registry slot for a task: the parked task (absent while running) plus a
 /// delivery slot where wakers leave the blocking call's real value.
+/// Shells recycle through per-shard pools (see `RegistryShard`).
 struct TaskEntry {
     task: Mutex<Option<GreenTask>>,
     deliver: Mutex<Option<Value>>,
 }
 
+/// One registry shard: id-keyed entries plus a bounded pool of recycled
+/// shells. Sharding (16-way by task id) turns the 3-mutex-ops-per-task
+/// lifecycle (insert / lookup / remove) from one contended lock into 16
+/// uncontended ones; pooling reuses the `Arc` + two `Mutex`es instead of
+/// reallocating them per spawn (~0.5µs saved where it matters: bursts).
+struct RegistryShard {
+    map: HashMap<TaskId, Arc<TaskEntry>>,
+    pool: Vec<Arc<TaskEntry>>,
+}
+
+const REGISTRY_SHARDS: usize = 16;
+/// Max pooled shells per shard (16 × 64 caps retained memory while
+/// covering any realistic parked-task population).
+const SHARD_POOL_CAP: usize = 64;
+
 pub(crate) struct Executor {
-    registry: Mutex<HashMap<TaskId, Arc<TaskEntry>>>,
+    registry: [Mutex<RegistryShard>; REGISTRY_SHARDS],
     next_id: AtomicU64,
     /// Global overflow queue: main-thread spawns and anything enqueued off
     /// a worker land here. Workers steal from it when their local deque
@@ -122,7 +138,12 @@ impl Executor {
                 workers.push(w);
             }
             let ex = Executor {
-                registry: Mutex::new(HashMap::new()),
+                registry: std::array::from_fn(|_| {
+                    Mutex::new(RegistryShard {
+                        map: HashMap::new(),
+                        pool: Vec::new(),
+                    })
+                }),
                 next_id: AtomicU64::new(1),
                 injector: Injector::new(),
                 stealers,
@@ -330,6 +351,12 @@ impl Executor {
         }
     }
 
+    /// Shard for a task id (power-of-two mask — ids are a dense counter,
+    /// so shards balance exactly).
+    fn shard(id: TaskId) -> usize {
+        (id as usize) & (REGISTRY_SHARDS - 1)
+    }
+
     /// Enqueue a fresh task. Returns its id.
     pub(crate) fn spawn_task(
         vm: Vm,
@@ -339,18 +366,36 @@ impl Executor {
     ) -> TaskId {
         let ex = Executor::global();
         let id = ex.next_id.fetch_add(1, Ordering::Relaxed);
-        let entry = Arc::new(TaskEntry {
-            task: Mutex::new(Some(GreenTask {
-                id,
-                vm,
-                interp,
-                chunk,
-                handle,
-                started: false,
-            })),
-            deliver: Mutex::new(None),
-        });
-        ex.registry.lock().unwrap().insert(id, Arc::clone(&entry));
+        // Checkout a pooled shell when available (task/deliver are empty
+        // by construction — see `complete`), else allocate fresh. Single
+        // shard-lock hold for checkout + insert.
+        let mut shard = ex.registry[Self::shard(id)].lock().unwrap();
+        let entry = match shard.pool.pop() {
+            Some(e) => {
+                *e.task.lock().unwrap() = Some(GreenTask {
+                    id,
+                    vm,
+                    interp,
+                    chunk,
+                    handle,
+                    started: false,
+                });
+                e
+            }
+            None => Arc::new(TaskEntry {
+                task: Mutex::new(Some(GreenTask {
+                    id,
+                    vm,
+                    interp,
+                    chunk,
+                    handle,
+                    started: false,
+                })),
+                deliver: Mutex::new(None),
+            }),
+        };
+        shard.map.insert(id, Arc::clone(&entry));
+        drop(shard);
         // Routed to the current worker's deque when spawning nested
         // (LIFO warmth), else the global injector. Cannot fail: queues
         // are unbounded and live for the process.
@@ -379,7 +424,7 @@ impl Executor {
                 })
                 .or_else(|| chan.ring.try_dequeue())
         };
-        let entry = match ex.registry.lock().unwrap().get(&wid) {
+        let entry = match ex.registry[Self::shard(wid)].lock().unwrap().map.get(&wid) {
             Some(e) => Arc::clone(e),
             None => return,
         };
@@ -403,7 +448,12 @@ impl Executor {
     /// completion or the next yield, then complete or park it.
     fn run_slice(id: TaskId) {
         let profile = std::env::var("ZZ_SPAWN_PROFILE").is_ok();
-        let entry = match Executor::global().registry.lock().unwrap().get(&id) {
+        let entry = match Executor::global().registry[Self::shard(id)]
+            .lock()
+            .unwrap()
+            .map
+            .get(&id)
+        {
             Some(e) => Arc::clone(e),
             None => return, // Completed and reaped between enqueue and run.
         };
@@ -472,7 +522,12 @@ impl Executor {
     /// with the real value or register + put back.
     fn park(task: GreenTask, reason: YieldReason) {
         let ex = Executor::global();
-        let entry = match ex.registry.lock().unwrap().get(&task.id) {
+        let entry = match ex.registry[Self::shard(task.id)]
+            .lock()
+            .unwrap()
+            .map
+            .get(&task.id)
+        {
             Some(e) => Arc::clone(e),
             None => {
                 // Reaped?? Only completion reaps, and completion implies the
@@ -665,23 +720,38 @@ impl Executor {
         drop(task.vm);
         drop(task.interp);
         drop(task.chunk);
-        ex.registry.lock().unwrap().remove(&id);
+        // Reap + recycle: remove the entry, scrub any deliver residue
+        // (defense: a stale deliver would corrupt the next occupant's
+        // stack via `replace_top`), and pool the shell when there is
+        // room. The task slot is already None (taken by the final slice).
+        let mut shard = ex.registry[Self::shard(id)].lock().unwrap();
+        if let Some(entry) = shard.map.remove(&id) {
+            *entry.deliver.lock().unwrap() = None;
+            if shard.pool.len() < SHARD_POOL_CAP {
+                shard.pool.push(entry);
+            }
+        }
+        drop(shard);
         let mut inner = handle.result.lock().unwrap();
         let waiters = std::mem::take(&mut inner.green_waiters);
         inner.result = Some(outcome.clone());
         inner.completed = true;
         drop(inner);
-        // Batched wakeups: resolve every waiter under a single registry
-        // lock instead of one lock per waiter, then deliver + enqueue.
-        // Fan-in completions (N waiters) drop from N registry round-trips
-        // to one.
-        let targets: Vec<(Arc<TaskEntry>, TaskId)> = {
-            let reg = ex.registry.lock().unwrap();
-            waiters
-                .into_iter()
-                .filter_map(|wid| reg.get(&wid).map(|e| (Arc::clone(e), wid)))
-                .collect()
-        };
+        // Batched wakeups: resolve every waiter (per-shard locks instead
+        // of one lock per waiter), then deliver + enqueue. Fan-in
+        // completions (N waiters) drop from N global round-trips to
+        // uncontended shard hits.
+        let targets: Vec<(Arc<TaskEntry>, TaskId)> = waiters
+            .into_iter()
+            .filter_map(|wid| {
+                ex.registry[Self::shard(wid)]
+                    .lock()
+                    .unwrap()
+                    .map
+                    .get(&wid)
+                    .map(|e| (Arc::clone(e), wid))
+            })
+            .collect();
         for (wentry, wid) in targets {
             *wentry.deliver.lock().unwrap() = Some(outcome_to_value(outcome.clone()));
             // Direct handoff: waiters land on the completing worker's own

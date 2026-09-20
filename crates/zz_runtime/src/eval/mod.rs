@@ -47,6 +47,12 @@ pub struct Interp {
     /// filter decision is cached but every kept value is cloned fresh per
     /// spawn.
     pub spawn_keep_cache: crate::value::SpawnKeepCache,
+    /// Reachability cache per spawn-site chunk (see
+    /// [`ReachCacheEntry`](crate::value::ReachCacheEntry)): loop spawns
+    /// reuse one chunk `Arc`, so steady state skips the op walk +
+    /// per-candidate table scan (~1µs/spawn). Cleared on table version
+    /// change or past 64 sites.
+    pub reach_cache: HashMap<usize, crate::value::ReachCacheEntry>,
     /// Green-thread task mode: this interpreter belongs to an executor task.
     /// Blocking natives yield instead of parking, and interpreted
     /// (tree-walker) calls are rejected — interpreter frames live on the
@@ -73,6 +79,7 @@ impl Interp {
             funcs_version: 0,
             spawn_funcs_cache: None,
             spawn_keep_cache: None,
+            reach_cache: HashMap::new(),
             task_mode: false,
         }
     }
@@ -88,6 +95,7 @@ impl Interp {
             funcs_version: 0,
             spawn_funcs_cache: None,
             spawn_keep_cache: None,
+            reach_cache: HashMap::new(),
             task_mode: false,
         }
     }
@@ -106,6 +114,7 @@ impl Interp {
             funcs_version: 0,
             spawn_funcs_cache: None,
             spawn_keep_cache: None,
+            reach_cache: HashMap::new(),
             task_mode: false,
         }
     }

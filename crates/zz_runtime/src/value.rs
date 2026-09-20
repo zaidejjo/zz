@@ -21,6 +21,19 @@ use crate::vm::{Chunk, Op};
 /// names to clone)`. See `Interp::spawn_keep_cache`.
 pub type SpawnKeepCache = Option<(Vec<(usize, usize)>, HashSet<String>, Vec<String>)>;
 
+/// Cached reachability for one spawn-site chunk: the chunk `Arc` is held
+/// so its address can never be reused while cached (kills the
+/// use-after-free key-collision class outright), and hits require the
+/// current [`Interp::funcs_version`](crate::Interp::funcs_version) — a new
+/// runtime-defined function transparently invalidates.
+#[derive(Debug, Clone)]
+pub struct ReachCacheEntry {
+    pub chunk: std::sync::Arc<Chunk>,
+    pub version: u64,
+    pub reachable: HashSet<String>,
+    pub loads: HashSet<String>,
+}
+
 /// Inner state for a thread-safe channel: lock-free ring fast path +
 /// mutex spillover for bursts past ring capacity (+ condvar).
 ///
@@ -313,6 +326,15 @@ pub fn snapshot_env_pruned(
     loads: &HashSet<String>,
     keep_cache: &mut SpawnKeepCache,
 ) -> HashMap<String, Value> {
+    // Empty-capture fast path: nothing reachable and nothing loadable
+    // means an empty snapshot — skip the chain-shape walk, the keep-cache
+    // dance, and every allocation. The common case for fire-and-forget
+    // tasks (measured ~2µs of ~5µs snapshot time for zero entries).
+    // Stale `keep_cache` entries are harmless: later non-empty spawns
+    // key on `(shape, reachable)` and recompute on mismatch.
+    if reachable.is_empty() && loads.is_empty() {
+        return HashMap::new();
+    }
     // ONE memo for all entries: captured values routinely share envs (e.g.
     // every stdlib func aliases its module scope). A fresh memo per entry
     // re-clones the shared graph once per entry (measured 130ms/spawn for

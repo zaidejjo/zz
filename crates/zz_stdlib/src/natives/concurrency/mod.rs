@@ -309,7 +309,32 @@ pub(crate) fn spawn(
     // object the table slice carries, or never referenced — are dropped
     // before cloning.
     let t0 = profiling.then(std::time::Instant::now);
-    let (reachable, loads) = zz_runtime::value::reachable_refs(&chunk, &interp.funcs);
+    // Reachability is cached per spawn-site chunk (the same `Arc` serves
+    // every loop iteration): steady state skips the op walk + table scan.
+    // The entry holds the chunk `Arc` (address reuse impossible) and the
+    // table version (new runtime functions invalidate).
+    let chunk_key = Arc::as_ptr(&chunk) as *const () as usize;
+    let (reachable, loads) = match interp.reach_cache.get(&chunk_key) {
+        Some(e) if e.version == interp.funcs_version && Arc::ptr_eq(&e.chunk, &chunk) => {
+            (e.reachable.clone(), e.loads.clone())
+        }
+        _ => {
+            if interp.reach_cache.len() >= 64 {
+                interp.reach_cache.clear();
+            }
+            let (reachable, loads) = zz_runtime::value::reachable_refs(&chunk, &interp.funcs);
+            interp.reach_cache.insert(
+                chunk_key,
+                zz_runtime::value::ReachCacheEntry {
+                    chunk: Arc::clone(&chunk),
+                    version: interp.funcs_version,
+                    reachable: reachable.clone(),
+                    loads: loads.clone(),
+                },
+            );
+            (reachable, loads)
+        }
+    };
     let dt_reach = t0.map(|t| t.elapsed());
     let t0 = profiling.then(std::time::Instant::now);
     let snapshot = snapshot_env_pruned(
