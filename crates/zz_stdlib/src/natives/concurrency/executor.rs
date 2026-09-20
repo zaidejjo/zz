@@ -15,12 +15,15 @@
 //! transferred via the queue (which provides the happens-before edge).
 //! Snapshots are fully detached before handoff (see `snapshot_funcs`).
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
+
+use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 
 use zz_runtime::runtime::Flow;
 use zz_runtime::value::{
@@ -64,8 +67,34 @@ struct TaskEntry {
 pub(crate) struct Executor {
     registry: Mutex<HashMap<TaskId, Arc<TaskEntry>>>,
     next_id: AtomicU64,
-    tx: crossbeam_channel::Sender<TaskId>,
-    rx: crossbeam_channel::Receiver<TaskId>,
+    /// Global overflow queue: main-thread spawns and anything enqueued off
+    /// a worker land here. Workers steal from it when their local deque
+    /// runs dry (Phase 2 work-stealing).
+    injector: Injector<TaskId>,
+    /// One stealer per founding worker (fixed at init). Top-up threads
+    /// carry private deques and steal from these, but are never stolen
+    /// from themselves — their work is always theirs to run.
+    stealers: Vec<Stealer<TaskId>>,
+    /// All worker threads (for wakeups) + sleeping-worker count. Injector
+    /// pushes unpark sleepers; the park token protocol (std
+    /// `park`/`unpark`) makes missed wakeups impossible — see worker loop.
+    parkers: Mutex<Vec<std::thread::Thread>>,
+    sleepers: AtomicUsize,
+    /// Round-robin cursor for single-sleeper wakeups (see
+    /// `unpark_sleepers`).
+    wake_next: AtomicUsize,
+}
+
+/// This thread's work-stealing state. `None` off workers (main thread):
+/// enqueues then route to the global injector instead of a local deque.
+struct LocalState {
+    worker: Worker<TaskId>,
+    /// xorshift64 seed for random steal-victim order (no dep, no lock).
+    rng: Cell<u64>,
+}
+
+thread_local! {
+    static LOCAL: RefCell<Option<LocalState>> = const { RefCell::new(None) };
 }
 
 /// Spin quantum for park paths (see `spin_for_value`): how long a worker
@@ -83,81 +112,221 @@ impl Executor {
                 .map(|n| n.get())
                 .unwrap_or(4)
                 .max(2);
-            let (tx, rx) = crossbeam_channel::unbounded::<TaskId>();
+            // Build workers + stealers first so every thread sees the
+            // full victim set from its first steal round.
+            let mut workers = Vec::with_capacity(size);
+            let mut stealers = Vec::with_capacity(size);
+            for _ in 0..size {
+                let w = Worker::<TaskId>::new_lifo();
+                stealers.push(w.stealer());
+                workers.push(w);
+            }
             let ex = Executor {
                 registry: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
-                tx,
-                rx,
+                injector: Injector::new(),
+                stealers,
+                parkers: Mutex::new(Vec::new()),
+                sleepers: AtomicUsize::new(0),
+                wake_next: AtomicUsize::new(0),
             };
-            for _ in 0..size {
-                std::thread::spawn(Executor::worker_loop);
+            for (index, worker) in workers.into_iter().enumerate() {
+                std::thread::spawn(move || Self::run_worker(worker, index));
             }
             ex
         })
     }
 
-    /// Park more executor capacity: spawn a replacement thread running the
-    /// worker loop. Used when an executor thread must block the old way
+    /// Park more executor capacity: spawn a replacement thread with a
+    /// private deque. Used when an executor thread must block the old way
     /// (nested interpreter frames above a blocking native, or blocking I/O
-    /// natives) so throughput never collapses to zero.
+    /// natives) so throughput never collapses to zero. The top-up deque
+    /// is never stolen from — its work is always its own to run — but it
+    /// steals from everyone else like any worker.
     pub(crate) fn top_up() {
         let _ = Executor::global();
-        std::thread::spawn(Executor::worker_loop);
+        std::thread::spawn(|| Self::run_worker(Worker::new_lifo(), usize::MAX));
     }
 
-    fn worker_loop() {
-        // Each worker holds its own receiver clone: crossbeam recv needs
-        // no global lock, so workers never serialize on the ready queue
-        // (the old `Mutex<Receiver>` made every slice take the same lock).
-        let rx = Executor::global().rx.clone();
-        // Hot spin while work flows: a worker that just ran a slice spins
-        // on `try_recv` before falling back to the blocking `recv`, so a
-        // rendezvous arriving within ~100µs costs PAUSEs instead of a
-        // futex sleep + wake pair (~2-4µs). Cold workers (idle >1ms)
-        // block immediately — no CPU burn at rest (REPL, sleeps).
-        //
-        // Adaptive budget (miss-streak backoff): spinning helps only with
-        // a spare core for the peer. On a loaded machine spins just steal
-        // the peer's timeslice and backfire (measured worse than blocking),
-        // so consecutive misses halve the budget down to near-zero and a
-        // hit restores it. Self-tuning both ways, no knobs.
+    /// Route a task id to a queue: the current worker's local deque when
+    /// running on one (LIFO: the waker thread very likely runs it next —
+    /// hot cache, no cross-thread hop), else the global injector. This is
+    /// the direct-handoff path: completions and wakeups land where the
+    /// progress just happened.
+    fn enqueue(id: TaskId) {
+        let pushed_local = LOCAL
+            .try_with(|cell| {
+                if let Some(st) = cell.borrow().as_ref() {
+                    st.worker.push(id);
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+        if !pushed_local {
+            let ex = Executor::global();
+            ex.injector.push(id);
+            Self::unpark_sleepers(ex);
+        }
+    }
+
+    /// Wake a sleeping worker after an injector push. Round-robin ONE
+    /// sleeper per push — never all: unpark-all thunders the herd
+    /// (measured +10µs/spawn on bursts — every spawn woke 4 threads for
+    /// 1 task). One wakeup per push is enough; woken workers that find
+    /// nothing re-park via the announce-then-verify sleep path, and the
+    /// pending park token makes missed wakeups impossible either way.
+    /// Skipped entirely when nobody sleeps (the hot steady state).
+    fn unpark_sleepers(ex: &Executor) {
+        if ex.sleepers.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        let parkers = ex.parkers.lock().unwrap();
+        if !parkers.is_empty() {
+            // `wake_next` doubles as the round-robin cursor (wraps by
+            // construction — no modulo needed on overflow).
+            let cursor = ex.wake_next.fetch_add(1, Ordering::Relaxed);
+            parkers[cursor % parkers.len()].unpark();
+        }
+    }
+
+    /// xorshift64 step (per-worker steal order — no dep, no lock).
+    fn next_rand(seed: &Cell<u64>) -> u64 {
+        let mut x = seed.get().max(0x9E3779B97F4A7C15);
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        seed.set(x);
+        x
+    }
+
+    /// Fetch one task: own pop first (LIFO hot), else a single steal
+    /// from a random victim, else one from the injector.
+    ///
+    /// Siblings-before-injector: sibling deques hold requeued/wakeup
+    /// tasks (cache-hot continuations), the injector holds fresh bursts.
+    /// Trying siblings first keeps continuations local; bursts still
+    /// drain fine one steal later. (Measured: injector-first is slower —
+    /// all workers hammering one queue head beats no one.)
+    ///
+    /// Deliberately single-task (no batching): batch moves proved
+    /// pathological under contention — a worker grabbing half a sibling's
+    /// deep queue just gets re-stolen in halves by the others, so tasks
+    /// migrate deque-to-deque with full CAS storms instead of running.
+    /// One move per task (injector/sibling → here) keeps traffic minimal;
+    /// the LIFO local deque still gives cache-hot runs whenever wakeups
+    /// land directly on it (see `enqueue`).
+    fn fetch(ex: &Executor, worker: &Worker<TaskId>, seed: &Cell<u64>) -> Option<TaskId> {
+        if let Some(id) = worker.pop() {
+            return Some(id);
+        }
+        let n = ex.stealers.len();
+        if n > 0 {
+            let start = (Self::next_rand(seed) as usize) % n;
+            for k in 0..n {
+                match ex.stealers[(start + k) % n].steal() {
+                    Steal::Success(id) => return Some(id),
+                    Steal::Empty | Steal::Retry => {}
+                }
+            }
+        }
+        match ex.injector.steal() {
+            Steal::Success(id) => Some(id),
+            Steal::Empty | Steal::Retry => None,
+        }
+    }
+
+    fn run_worker(worker: Worker<TaskId>, index: usize) {
+        let ex = Executor::global();
+        ex.parkers.lock().unwrap().push(std::thread::current());
+        LOCAL.with(|cell| {
+            *cell.borrow_mut() = Some(LocalState {
+                worker,
+                rng: Cell::new(
+                    (index as u64)
+                        .wrapping_mul(0x9E3779B97F4A7C15)
+                        .wrapping_add(1),
+                ),
+            });
+        });
+        // Hot spin while work flows: local pop + steal rounds on PAUSEs
+        // before sleeping, so a rendezvous arriving within ~100µs costs
+        // no futex pair. Cold workers (idle >1ms) skip to the park —
+        // no CPU burn at rest. Adaptive budget (miss-streak backoff):
+        // consecutive empty rounds halve the budget to near-zero and a
+        // hit restores it, so loaded machines degrade to blocking
+        // instead of spin-backfiring. Self-tuning, no knobs.
         thread_local! {
             static MISS_STREAK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
         }
         let mut last_active = Instant::now();
         loop {
-            let mut id = None;
-            if last_active.elapsed() < Duration::from_millis(1) {
+            let mut id = LOCAL.with(|cell| {
+                let st = cell.borrow();
+                st.as_ref().and_then(|st| st.worker.pop())
+            });
+            if id.is_none() && last_active.elapsed() < Duration::from_millis(1) {
                 let budget_us: u64 = 100 >> MISS_STREAK.with(|s| s.get().min(7));
                 if budget_us > 0 {
+                    // Light spin: own-deque pops only (thread-private, zero
+                    // shared traffic), batched fetch every 16th iteration.
+                    // A fetch hammers shared atomics; doing it per PAUSE
+                    // starves the very threads (main's spawn snapshots)
+                    // whose progress we are waiting for.
                     let spin_start = Instant::now();
                     let budget = Duration::from_micros(budget_us);
-                    while spin_start.elapsed() < budget {
-                        match rx.try_recv() {
-                            Ok(got) => {
-                                id = Some(got);
-                                MISS_STREAK.with(|s| s.set(0));
-                                break;
-                            }
-                            Err(crossbeam_channel::TryRecvError::Disconnected) => return,
-                            Err(crossbeam_channel::TryRecvError::Empty) => std::hint::spin_loop(),
+                    let mut iters = 0u32;
+                    while id.is_none() && spin_start.elapsed() < budget {
+                        id = LOCAL.with(|cell| {
+                            let st = cell.borrow();
+                            st.as_ref().and_then(|st| {
+                                st.worker.pop().or_else(|| {
+                                    iters += 1;
+                                    if iters & 15 == 0 {
+                                        Self::fetch(ex, &st.worker, &st.rng)
+                                    } else {
+                                        None
+                                    }
+                                })
+                            })
+                        });
+                        if id.is_none() {
+                            std::hint::spin_loop();
                         }
                     }
-                    if id.is_none() {
+                    if id.is_some() {
+                        MISS_STREAK.with(|s| s.set(0));
+                    } else {
                         MISS_STREAK.with(|s| s.set(s.get() + 1));
                     }
                 }
             }
-            let got = match id {
-                Some(got) => got,
-                None => match rx.recv() {
-                    Ok(got) => got,
-                    Err(_) => return, // Senders gone (teardown): exit.
-                },
-            };
-            last_active = Instant::now();
-            Executor::run_slice(got);
+            if let Some(got) = id {
+                last_active = Instant::now();
+                Executor::run_slice(got);
+                continue;
+            }
+            // Cold: announce sleep, re-verify (announce-then-verify vs
+            // injector pushes — a push landing between our last steal and
+            // the park is caught here), then sleep on the park token.
+            ex.sleepers.fetch_add(1, Ordering::AcqRel);
+            let found = LOCAL.with(|cell| {
+                let st = cell.borrow();
+                st.as_ref()
+                    .and_then(|st| Self::fetch(ex, &st.worker, &st.rng))
+            });
+            match found {
+                Some(got) => {
+                    ex.sleepers.fetch_sub(1, Ordering::AcqRel);
+                    last_active = Instant::now();
+                    Executor::run_slice(got);
+                }
+                None => {
+                    std::thread::park();
+                    ex.sleepers.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
         }
     }
 
@@ -182,10 +351,10 @@ impl Executor {
             deliver: Mutex::new(None),
         });
         ex.registry.lock().unwrap().insert(id, Arc::clone(&entry));
-        // Receivers live forever (detached threads), so this cannot fail in
-        // practice; if it ever does the task is stranded — loud panic, never
-        // a silent hang.
-        ex.tx.send(id).expect("executor queue gone");
+        // Routed to the current worker's deque when spawning nested
+        // (LIFO warmth), else the global injector. Cannot fail: queues
+        // are unbounded and live for the process.
+        Self::enqueue(id);
         if std::env::var("ZZ_SPAWN_PROFILE").is_ok() {
             eprintln!("[exec] spawn id={id}");
         }
@@ -217,7 +386,7 @@ impl Executor {
         match value {
             Some(v) => {
                 *entry.deliver.lock().unwrap() = Some(v);
-                ex.tx.send(wid).ok();
+                Self::enqueue(wid);
             }
             None => {
                 // Out-raced for the value (a concurrent fast pop stole
@@ -245,7 +414,7 @@ impl Executor {
                 // elsewhere (shouldn't happen — single ownership) or was
                 // just parked after a racing wakeup. Requeue and yield so
                 // the racing park lands first.
-                Executor::global().tx.send(id).ok();
+                Self::enqueue(id);
                 std::thread::yield_now();
                 return;
             }
@@ -324,7 +493,7 @@ impl Executor {
                 // protocol — put back and requeue so siblings run.
                 let id = task.id;
                 *entry.task.lock().unwrap() = Some(task);
-                Executor::global().tx.send(id).ok();
+                Self::enqueue(id);
             }
         }
     }
@@ -418,7 +587,7 @@ impl Executor {
                     return;
                 }
                 *entry.task.lock().unwrap() = Some(task);
-                Executor::global().tx.send(id).ok();
+                Self::enqueue(id);
             }
             None => {
                 *entry.task.lock().unwrap() = Some(task);
@@ -473,7 +642,7 @@ impl Executor {
                     return;
                 }
                 *entry.task.lock().unwrap() = Some(task);
-                Executor::global().tx.send(id).ok();
+                Self::enqueue(id);
             }
             None => {
                 *entry.task.lock().unwrap() = Some(task);
@@ -515,7 +684,10 @@ impl Executor {
         };
         for (wentry, wid) in targets {
             *wentry.deliver.lock().unwrap() = Some(outcome_to_value(outcome.clone()));
-            ex.tx.send(wid).ok();
+            // Direct handoff: waiters land on the completing worker's own
+            // deque (LIFO) — the thread that made progress very likely
+            // runs them next, hot cache, no global-queue hop.
+            Self::enqueue(wid);
         }
         handle.cvar.notify_all();
     }

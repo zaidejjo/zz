@@ -3,6 +3,11 @@
 Green threads: `task.spawn` creates a task in ~3µs and the executor
 multiplexes thousands of them onto one OS thread per CPU. Tasks run until
 they complete or block; blocking suspends the task, never the thread.
+Scheduling is work-stealing: each executor thread owns a Chase–Lev deque
+(LIFO local pop), spawns from other threads land in a global injector,
+and idle workers steal from random victims. Wakeups land on the waking
+worker's own deque (direct handoff — the thread that made progress very
+likely resumes the waiter next, hot cache).
 
 ## Model: snapshot isolation
 
