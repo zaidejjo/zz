@@ -27,8 +27,14 @@ pub(crate) fn chan_new(
     _args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use zz_runtime::lf_chan::LfRing;
     #[allow(clippy::arc_with_non_send_sync)]
     let state = Arc::new(ChanState {
+        ring: LfRing::new(),
+        spill: AtomicUsize::new(0),
+        green_parked: AtomicBool::new(false),
+        cvar_waiters: AtomicUsize::new(0),
         inner: Mutex::new(ChanInner {
             queue: VecDeque::new(),
             green_waiters: Vec::new(),
@@ -55,30 +61,66 @@ pub(crate) fn chan_send(
 
     match ch {
         Value::Chan(state) => {
-            let mut guard = state
+            use std::sync::atomic::Ordering;
+            // Enqueue lock-free; waiter service always takes the mutex.
+            // (An earlier revision skipped servicing when the parked flag
+            // read clear — unsound: a lock-free enqueue racing a park
+            // registration can strand the waiter with a value present but
+            // nobody coming. The mutex pairs registration against drain,
+            // closing the window; uncontended it costs ~25ns, no futex.)
+            // `try_enqueue` hands the value back on failure, so the spill
+            // path below moves the *returned* value, never a copy.
+            if let Err(back) = state.ring.try_enqueue(v) {
+                // Ring full — spill under the mutex (channels stay
+                // unbounded no matter how deep the burst).
+                let mut guard = state
+                    .inner
+                    .lock()
+                    .map_err(|e| EvalError::new(format!("chan.send: lock poisoned: {e}"), span))?;
+                guard.queue.push_back(back);
+                state.spill.fetch_add(1, Ordering::Release);
+                service_chan_waiters(&state, guard, span);
+                return Ok(Value::Unit);
+            }
+            let guard = state
                 .inner
                 .lock()
                 .map_err(|e| EvalError::new(format!("chan.send: lock poisoned: {e}"), span))?;
-            guard.queue.push_back(v);
-            // Wake green waiters first: each takes one queued value at park
-            // time (or via its deliver slot), so every waiter consumes.
-            // Main-thread blockers share the same mutex + condvar below.
-            if !guard.green_waiters.is_empty() {
-                let waiters = std::mem::take(&mut guard.green_waiters);
-                drop(guard);
-                for wid in waiters {
-                    Executor::wake_chan_waiter(&state, wid);
-                }
-            } else {
-                drop(guard);
-            }
-            state.cvar.notify_one();
+            service_chan_waiters(&state, guard, span);
             Ok(Value::Unit)
         }
         other => Err(EvalError::new(
             format!("chan.send: expected a channel, found `{other}`"),
             span,
         )),
+    }
+}
+
+/// Serve channel waiters after an enqueue (caller holds no lock on entry;
+/// takes it): wake every parked green waiter (each takes one value at
+/// park time or via its deliver slot) and notify main-thread sleepers.
+/// Clears `green_parked` when the list drains empty — both directions
+/// hold the mutex, so no registration slips between the take and the
+/// clear. Called with the value already published (ring or spill), which
+/// is what makes the wakeup sound.
+fn service_chan_waiters(
+    state: &Arc<ChanState>,
+    mut guard: std::sync::MutexGuard<'_, ChanInner>,
+    _span: Span,
+) {
+    use std::sync::atomic::Ordering;
+    // The take empties the list while we hold the mutex, so no
+    // registration slips between: the flag can go clear unconditionally.
+    let waiters = std::mem::take(&mut guard.green_waiters);
+    state.green_parked.store(false, Ordering::Release);
+    drop(guard);
+    for wid in waiters {
+        Executor::wake_chan_waiter(state, wid);
+    }
+    // Notify main-thread sleepers only when some exist: an empty futex
+    // wake is pure overhead on the fast path.
+    if state.cvar_waiters.load(Ordering::Acquire) > 0 {
+        state.cvar.notify_one();
     }
 }
 
@@ -103,34 +145,80 @@ pub(crate) fn chan_recv(
 
     match ch {
         Value::Chan(state) => {
+            use std::sync::atomic::Ordering;
+            // Fast path: no waiter can exist and the spill is empty — pop
+            // straight from the ring, zero locks. Sound because waiters
+            // only register on empty (under the mutex), and every enqueue
+            // after a registration wakes or notifies before returning: a
+            // fast pop can never steal a waiter-promised value.
+            if !state.green_parked.load(Ordering::Acquire)
+                && state.cvar_waiters.load(Ordering::Acquire) == 0
+                && state.spill.load(Ordering::Acquire) == 0
+            {
+                if let Some(v) = state.ring.try_dequeue() {
+                    return Ok(v);
+                }
+            }
             let mut guard = state
                 .inner
                 .lock()
                 .map_err(|e| EvalError::new(format!("chan.recv: lock poisoned: {e}"), span))?;
-            if let Some(v) = guard.queue.pop_front() {
-                return Ok(v);
-            }
-            if on_executor() && interp_depth() == 0 {
-                // Suspend: the executor re-checks under this same lock at
-                // park time, so no send can slip between the check above
-                // and the park. Dummy result replaced before resume.
-                request_yield(YieldReason::ChanWait {
-                    chan: Arc::clone(&state),
+            // Slow loop: spill first (older than anything that arrived
+            // while the ring was full), then the ring. A ring miss with
+            // both tiers nominally non-empty is transient (a publisher
+            // mid-claim) — loop and re-check rather than parking on a
+            // value that is already on its way.
+            loop {
+                if let Some(v) = guard.queue.pop_front() {
+                    state.spill.fetch_sub(1, Ordering::Release);
+                    return Ok(v);
+                }
+                if let Some(v) = state.ring.try_dequeue() {
+                    return Ok(v);
+                }
+                if on_executor() && interp_depth() == 0 {
+                    // Suspend: the executor re-checks under this same lock
+                    // at park time, so no send can slip between the check
+                    // above and the park. Dummy replaced before resume.
+                    request_yield(YieldReason::ChanWait {
+                        chan: Arc::clone(&state),
+                    });
+                    return Ok(Value::Unit);
+                }
+                // Main thread (or nested interpreter): spin briefly for a
+                // value already on its way before paying a condvar sleep.
+                // Same no-steal gate as the fast path — a concurrent green
+                // registration aborts the spin into the locked path below.
+                if let Some(v) = Executor::spin_for_value(|| {
+                    if state.green_parked.load(Ordering::Acquire)
+                        || state.cvar_waiters.load(Ordering::Acquire) != 0
+                        || state.spill.load(Ordering::Acquire) != 0
+                    {
+                        return None;
+                    }
+                    state.ring.try_dequeue()
+                }) {
+                    return Ok(v);
+                }
+                // Legacy park. On an executor thread (nested interpreter
+                // frames above us) top up a replacement so throughput
+                // never collapses.
+                if on_executor() {
+                    Executor::top_up();
+                }
+                // Counted sleepers: sends notify the condvar only when
+                // this is non-zero, so waiter-free traffic pays no futex
+                // wake. Re-checked after every wake (spurious wakeups and
+                // racing consumers just loop).
+                state.cvar_waiters.fetch_add(1, Ordering::AcqRel);
+                let waited = state.cvar.wait_while(guard, |inner| {
+                    inner.queue.is_empty() && state.ring.len_estimate() == 0
                 });
-                return Ok(Value::Unit);
-            }
-            // Legacy park. On an executor thread (nested interpreter frames
-            // above us) top up a replacement so throughput never collapses.
-            if on_executor() {
-                Executor::top_up();
-            }
-            let mut guard = state
-                .cvar
-                .wait_while(guard, |inner| inner.queue.is_empty())
-                .map_err(|e| {
+                state.cvar_waiters.fetch_sub(1, Ordering::AcqRel);
+                guard = waited.map_err(|e| {
                     EvalError::new(format!("chan.recv: condvar wait failed: {e}"), span)
                 })?;
-            Ok(guard.queue.pop_front().expect("queue non-empty after wait"))
+            }
         }
         other => Err(EvalError::new(
             format!("chan.recv: expected a channel, found `{other}`"),
@@ -152,11 +240,17 @@ pub(crate) fn chan_try_recv(
 
     match ch {
         Value::Chan(state) => {
+            use std::sync::atomic::Ordering;
             let mut guard = state
                 .inner
                 .lock()
                 .map_err(|e| EvalError::new(format!("chan.try_recv: lock poisoned: {e}"), span))?;
-            Ok(match guard.queue.pop_front() {
+            // Spill first (older), then the ring — same order as recv.
+            if let Some(v) = guard.queue.pop_front() {
+                state.spill.fetch_sub(1, Ordering::Release);
+                return Ok(Value::Option(Some(Box::new(v))));
+            }
+            Ok(match state.ring.try_dequeue() {
                 Some(v) => Value::Option(Some(Box::new(v))),
                 None => Value::Option(None),
             })

@@ -16,14 +16,16 @@
 //! Snapshots are fully detached before handoff (see `snapshot_funcs`).
 
 use std::collections::HashMap;
-use std::sync::mpsc;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex, OnceLock,
 };
+use std::time::{Duration, Instant};
 
 use zz_runtime::runtime::Flow;
-use zz_runtime::value::{with_executor_task, ChanState, TaskId, TaskJoinState, YieldReason};
+use zz_runtime::value::{
+    with_executor_task, ChanInner, ChanState, TaskId, TaskJoinState, YieldReason,
+};
 use zz_runtime::vm::Vm;
 use zz_runtime::{Interp, Value};
 
@@ -62,9 +64,16 @@ struct TaskEntry {
 pub(crate) struct Executor {
     registry: Mutex<HashMap<TaskId, Arc<TaskEntry>>>,
     next_id: AtomicU64,
-    tx: mpsc::Sender<TaskId>,
-    rx: Mutex<mpsc::Receiver<TaskId>>,
+    tx: crossbeam_channel::Sender<TaskId>,
+    rx: crossbeam_channel::Receiver<TaskId>,
 }
+
+/// Spin quantum for park paths (see `spin_for_value`): how long a worker
+/// burns PAUSEs re-checking an object before registering as a waiter and
+/// sleeping. Sized so a peer arriving from a fresh wakeup usually lands
+/// inside the spin (peer handoff ~1µs) while a truly absent peer costs at
+/// most this much extra before the futex sleep it would have paid anyway.
+const SPIN_QUANTUM: Duration = Duration::from_micros(3);
 
 impl Executor {
     fn global() -> &'static Executor {
@@ -74,12 +83,12 @@ impl Executor {
                 .map(|n| n.get())
                 .unwrap_or(4)
                 .max(2);
-            let (tx, rx) = mpsc::channel::<TaskId>();
+            let (tx, rx) = crossbeam_channel::unbounded::<TaskId>();
             let ex = Executor {
                 registry: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
                 tx,
-                rx: Mutex::new(rx),
+                rx,
             };
             for _ in 0..size {
                 std::thread::spawn(Executor::worker_loop);
@@ -98,15 +107,57 @@ impl Executor {
     }
 
     fn worker_loop() {
+        // Each worker holds its own receiver clone: crossbeam recv needs
+        // no global lock, so workers never serialize on the ready queue
+        // (the old `Mutex<Receiver>` made every slice take the same lock).
+        let rx = Executor::global().rx.clone();
+        // Hot spin while work flows: a worker that just ran a slice spins
+        // on `try_recv` before falling back to the blocking `recv`, so a
+        // rendezvous arriving within ~100µs costs PAUSEs instead of a
+        // futex sleep + wake pair (~2-4µs). Cold workers (idle >1ms)
+        // block immediately — no CPU burn at rest (REPL, sleeps).
+        //
+        // Adaptive budget (miss-streak backoff): spinning helps only with
+        // a spare core for the peer. On a loaded machine spins just steal
+        // the peer's timeslice and backfire (measured worse than blocking),
+        // so consecutive misses halve the budget down to near-zero and a
+        // hit restores it. Self-tuning both ways, no knobs.
+        thread_local! {
+            static MISS_STREAK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        let mut last_active = Instant::now();
         loop {
-            let id = {
-                let guard = Executor::global().rx.lock().unwrap();
-                guard.recv()
-            };
-            match id {
-                Ok(id) => Executor::run_slice(id),
-                Err(_) => return, // Senders gone (process teardown): exit.
+            let mut id = None;
+            if last_active.elapsed() < Duration::from_millis(1) {
+                let budget_us: u64 = 100 >> MISS_STREAK.with(|s| s.get().min(7));
+                if budget_us > 0 {
+                    let spin_start = Instant::now();
+                    let budget = Duration::from_micros(budget_us);
+                    while spin_start.elapsed() < budget {
+                        match rx.try_recv() {
+                            Ok(got) => {
+                                id = Some(got);
+                                MISS_STREAK.with(|s| s.set(0));
+                                break;
+                            }
+                            Err(crossbeam_channel::TryRecvError::Disconnected) => return,
+                            Err(crossbeam_channel::TryRecvError::Empty) => std::hint::spin_loop(),
+                        }
+                    }
+                    if id.is_none() {
+                        MISS_STREAK.with(|s| s.set(s.get() + 1));
+                    }
+                }
             }
+            let got = match id {
+                Some(got) => got,
+                None => match rx.recv() {
+                    Ok(got) => got,
+                    Err(_) => return, // Senders gone (teardown): exit.
+                },
+            };
+            last_active = Instant::now();
+            Executor::run_slice(got);
         }
     }
 
@@ -147,7 +198,18 @@ impl Executor {
     /// next send retries).
     pub(crate) fn wake_chan_waiter(chan: &Arc<ChanState>, wid: TaskId) {
         let ex = Executor::global();
-        let value = chan.inner.lock().unwrap().queue.pop_front();
+        // Spill first (older than ring arrivals during full episodes),
+        // then the ring — same order as every other pop site.
+        let value = {
+            let mut inner = chan.inner.lock().unwrap();
+            inner
+                .queue
+                .pop_front()
+                .inspect(|_| {
+                    chan.spill.fetch_sub(1, Ordering::Release);
+                })
+                .or_else(|| chan.ring.try_dequeue())
+        };
         let entry = match ex.registry.lock().unwrap().get(&wid) {
             Some(e) => Arc::clone(e),
             None => return,
@@ -158,7 +220,12 @@ impl Executor {
                 ex.tx.send(wid).ok();
             }
             None => {
-                chan.inner.lock().unwrap().green_waiters.push(wid);
+                // Out-raced for the value (a concurrent fast pop stole
+                // it): re-park WITH the flag set, or nobody will ever
+                // service this waiter again.
+                let mut inner = chan.inner.lock().unwrap();
+                inner.green_waiters.push(wid);
+                chan.green_parked.store(true, Ordering::Release);
             }
         }
     }
@@ -178,9 +245,6 @@ impl Executor {
                 // elsewhere (shouldn't happen — single ownership) or was
                 // just parked after a racing wakeup. Requeue and yield so
                 // the racing park lands first.
-                if profile {
-                    eprintln!("[exec] run_slice id={id} EMPTY (requeue)");
-                }
                 Executor::global().tx.send(id).ok();
                 std::thread::yield_now();
                 return;
@@ -265,20 +329,86 @@ impl Executor {
         }
     }
 
-    /// Park on a channel: pop under the queue lock when possible (immediate
-    /// resume), else register as a waiter and put back.
+    /// Spin-then-check: burn PAUSEs re-trying a non-blocking `check`
+    /// until it yields `Some` or the quantum expires. `check` must be
+    /// lock-free on the fast path (`try_lock`-based, never blocking):
+    /// each attempt is ~25ns uncontended, so a peer arriving from a
+    /// wakeup is usually caught with zero futex ops and zero registry
+    /// churn. Returns the value on a hit, `None` on quantum expiry
+    /// (caller falls back to registering + sleeping).
+    ///
+    /// Shared with the main-thread legacy park (`chan.recv`): the main
+    /// thread has no slice to run while waiting, so spinning briefly
+    /// before the condvar sleep avoids the futex pair the same way.
+    pub(crate) fn spin_for_value<F>(mut check: F) -> Option<Value>
+    where
+        F: FnMut() -> Option<Value>,
+    {
+        // Cheap attempts first: no clock read at all — an immediately
+        // ready peer resolves here in nanoseconds.
+        for _ in 0..64 {
+            if let Some(v) = check() {
+                return Some(v);
+            }
+            std::hint::spin_loop();
+        }
+        // Then clock-gated spinning to the quantum: one ~20ns
+        // `Instant::now` amortized over 64 attempts.
+        let start = Instant::now();
+        loop {
+            for _ in 0..64 {
+                if let Some(v) = check() {
+                    return Some(v);
+                }
+                std::hint::spin_loop();
+            }
+            if start.elapsed() >= SPIN_QUANTUM {
+                return None;
+            }
+        }
+    }
+
+    /// Park on a channel: spin for an arriving value first (fast path),
+    /// else pop under the queue lock when possible (immediate resume),
+    /// else register as a waiter and put back (slow path: sleep).
     fn park_chan(chan: &Arc<ChanState>, entry: &Arc<TaskEntry>, mut task: GreenTask) {
         let id = task.id;
-        let value = {
-            let mut inner = chan.inner.lock().unwrap();
-            match inner.queue.pop_front() {
-                Some(v) => Some(v),
-                None => {
-                    inner.green_waiters.push(id);
-                    None
-                }
+        // Lock-free spin: only while no waiter can exist and the spill
+        // is empty — a fast pop here must never steal a value already
+        // promised to a parked waiter (see `ChanState` docs).
+        let value = Self::spin_for_value(|| {
+            if chan.green_parked.load(Ordering::Acquire)
+                || chan.cvar_waiters.load(Ordering::Acquire) != 0
+                || chan.spill.load(Ordering::Acquire) != 0
+            {
+                return None;
             }
-        };
+            chan.ring.try_dequeue()
+        });
+        let value = value.or_else(|| {
+            let mut inner = chan.inner.lock().unwrap();
+            // Announce-then-verify: register FIRST, then check the tiers
+            // under the same lock hold. Sends publish lock-free and skip
+            // servicing when the parked flag reads clear, so checking
+            // tiers before registering leaves a lost-wakeup window (send
+            // enqueues + skips between our check and our store). With the
+            // flag stored first, every later send drains us, and every
+            // earlier send is visible to the check below; a hit unparks
+            // (fast pops back off the moment the flag is set, so nothing
+            // can steal between our store and our check).
+            inner.green_waiters.push(id);
+            chan.green_parked.store(true, Ordering::Release);
+            if let Some(v) = inner.queue.pop_front() {
+                chan.spill.fetch_sub(1, Ordering::Release);
+                Self::unpark_chan_waiter(&mut inner, chan, id);
+                Some(v)
+            } else if let Some(v) = chan.ring.try_dequeue() {
+                Self::unpark_chan_waiter(&mut inner, chan, id);
+                Some(v)
+            } else {
+                None
+            }
+        });
         match value {
             Some(v) => {
                 // Value arrived between the native's check and the park:
@@ -296,6 +426,16 @@ impl Executor {
         }
     }
 
+    /// Remove a self-registration made moments ago (park re-check hit):
+    /// caller holds the channel lock; clears the parked flag when the
+    /// list drains empty so fast paths resume.
+    fn unpark_chan_waiter(inner: &mut ChanInner, chan: &Arc<ChanState>, id: TaskId) {
+        inner.green_waiters.retain(|&w| w != id);
+        if inner.green_waiters.is_empty() {
+            chan.green_parked.store(false, Ordering::Release);
+        }
+    }
+
     /// Park on a join handle: take a completed result when present
     /// (immediate resume), else register as a waiter and put back.
     ///
@@ -303,18 +443,32 @@ impl Executor {
     /// joiners (plus one main-thread take) resolve from a single completion.
     fn park_join(handle: &Arc<TaskJoinState>, entry: &Arc<TaskEntry>, mut task: GreenTask) {
         let id = task.id;
-        let outcome = {
+        // Fast path: completions usually land within microseconds of the
+        // wait — spin first, register only on a genuinely slow task.
+        // Green waiters clone, never consume (see below), so the inline
+        // hit needs no bookkeeping beyond the resume itself.
+        let outcome = Self::spin_for_value(|| {
+            handle
+                .result
+                .try_lock()
+                .ok()?
+                .result
+                .clone()
+                .map(outcome_to_value)
+        });
+        let outcome = outcome.or_else(|| {
             let mut inner = handle.result.lock().unwrap();
-            if inner.result.is_some() {
-                inner.result.clone()
-            } else {
-                inner.green_waiters.push(id);
-                None
+            match inner.result.clone() {
+                Some(o) => Some(outcome_to_value(o)),
+                None => {
+                    inner.green_waiters.push(id);
+                    None
+                }
             }
-        };
+        });
         match outcome {
             Some(o) => {
-                if !task.vm.replace_top(outcome_to_value(o)) {
+                if !task.vm.replace_top(o) {
                     Self::complete(task, Err("internal error: yield with empty stack".into()));
                     return;
                 }
@@ -348,11 +502,18 @@ impl Executor {
         inner.result = Some(outcome.clone());
         inner.completed = true;
         drop(inner);
-        for wid in waiters {
-            let wentry = match ex.registry.lock().unwrap().get(&wid) {
-                Some(e) => Arc::clone(e),
-                None => continue,
-            };
+        // Batched wakeups: resolve every waiter under a single registry
+        // lock instead of one lock per waiter, then deliver + enqueue.
+        // Fan-in completions (N waiters) drop from N registry round-trips
+        // to one.
+        let targets: Vec<(Arc<TaskEntry>, TaskId)> = {
+            let reg = ex.registry.lock().unwrap();
+            waiters
+                .into_iter()
+                .filter_map(|wid| reg.get(&wid).map(|e| (Arc::clone(e), wid)))
+                .collect()
+        };
+        for (wentry, wid) in targets {
             *wentry.deliver.lock().unwrap() = Some(outcome_to_value(outcome.clone()));
             ex.tx.send(wid).ok();
         }

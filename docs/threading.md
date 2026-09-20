@@ -88,11 +88,24 @@ frames) it is a `sched_yield` courtesy so siblings get scheduled.
 
 ## Performance (release `zz`, 4-core Linux/x86_64)
 
+Parking is spin-then-sleep: a worker burns PAUSEs re-checking the
+object for ~3µs before registering as a waiter, so rendezvous arriving
+inside the quantum cost ~100ns with zero futex ops or registry churn.
+Channels add a lock-free MPMC ring fast path (Vyukov, 1024 deep, each
+cell cache-line padded) with mutex spillover past capacity, so
+green-to-green traffic takes zero locks while depth fits. Executor
+threads hot-spin on the ready queue while work flows (adaptive
+miss-streak backoff: consecutive misses halve the budget, a hit
+restores it — calm machines see zero futex sleeps, loaded ones degrade
+to blocking instead of backfiring). Longer quanta backfire (the spinner
+steals the peer's core); the remaining floor is thread-hop + VM
+dispatch (Phase 2 territory: work-stealing).
+
 | op | ZZ | comparison |
 |---|---|---|
 | `spawn` dispatch | ~3µs | Rust `spawn+join` 86µs/op; Go `spawn+join` 723ns/op |
 | `spawn+join` round-trip | ~25µs | pool-era ZZ was ~250ms (10,000× ago) |
-| `chan.send+recv` | ~0.6µs each | Go chan ~0.2µs/op |
+| `chan.send+recv` round-trip | ~2.7µs release (was 25µs pre-spin) | Go chan ~1.5µs/rt |
 | 64 parallel tasks | linear speedup | real parallelism, not just concurrency |
 
 Measure your own hardware with `ZZ_SPAWN_PROFILE=1 zz run prog.zz`

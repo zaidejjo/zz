@@ -6,21 +6,37 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::{TcpListener, TcpStream};
 use std::rc::Rc;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize},
+    Arc, Condvar, Mutex,
+};
 use zz_frontend::ast::{Block, Expr, Param};
 use zz_frontend::span::Span;
 
 use crate::env::Env;
+use crate::lf_chan::LfRing;
 use crate::vm::{Chunk, Op};
 
 /// Cached keep-set for worker env snapshots: `(chain shape, reachable set,
 /// names to clone)`. See `Interp::spawn_keep_cache`.
 pub type SpawnKeepCache = Option<(Vec<(usize, usize)>, HashSet<String>, Vec<String>)>;
 
-/// Inner state for a thread-safe channel (unbounded queue + condvar).
+/// Inner state for a thread-safe channel: lock-free ring fast path +
+/// mutex spillover for bursts past ring capacity (+ condvar).
+///
+/// Two tiers, one FIFO: `ring` (Vyukov MPMC, `RING_CAP` deep) serves all
+/// traffic while it fits; overflow spills to `queue` under the mutex.
+/// Receivers drain the spill first whenever `spill` (atomic count) is
+/// non-zero, so cross-tier order is preserved. Fast paths are allowed
+/// only when no waiter can exist (`green_parked` clear and `cvar_waiters`
+/// zero) — otherwise a fast pop could steal a value already promised to
+/// a parked waiter (lost-wakeup hang class).
+///
 /// The Condvar lives outside the Mutex so `wait_while` can be called cleanly.
 #[derive(Debug)]
 pub struct ChanInner {
+    /// Overflow queue: values that missed the full ring. Drained before
+    /// the ring whenever non-empty (see `ChanState::spill`).
     pub queue: VecDeque<Value>,
     /// Green-thread waiters parked in `chan.recv`, woken (moved to the
     /// executor ready queue) by `chan.send`. Main-thread blockers use the
@@ -29,9 +45,22 @@ pub struct ChanInner {
     pub green_waiters: Vec<u64>,
 }
 
-/// Channel pair: the mutex-protected queue and its signaling condvar.
+/// Channel pair: lock-free ring + spill counter + waiter flags (all
+/// lock-free) plus the mutex-protected spill queue and signaling condvar.
 #[derive(Debug)]
 pub struct ChanState {
+    /// Fast path: zero-lock enqueue/dequeue while depth fits.
+    pub ring: LfRing,
+    /// Number of values sitting in the spill queue. Written only while
+    /// holding `inner`; read lock-free by fast paths (Release/Acquire).
+    pub spill: AtomicUsize,
+    /// Set while `green_waiters` may be non-empty (under `inner` both
+    /// ways); fast pops require it clear so no waiter is robbed.
+    pub green_parked: AtomicBool,
+    /// Main-thread condvar sleepers in flight. Sends notify the condvar
+    /// only when this is non-zero (otherwise the futex wake is pure
+    /// overhead on the fast path).
+    pub cvar_waiters: AtomicUsize,
     pub inner: Mutex<ChanInner>,
     pub cvar: Condvar,
 }
