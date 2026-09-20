@@ -203,6 +203,10 @@ zz_value zz_call(zz_value fn, zz_value *args, size_t argc, int *err) {
 typedef struct {
     zz_dispatch_fn fn;
     size_t nenv;
+    // Per-cell kind (`ZZ_CELL_VALUE`/`ZZ_CELL_RAW`) and byte size for RAW
+    // cells. NULL when nenv == 0. Owned by the rep (copied at creation).
+    unsigned char *cell_kind;
+    size_t *cell_size;
     void *env[];
 } zz_closure_rep;
 
@@ -219,16 +223,56 @@ zz_value zz_closure_make(zz_dispatch_fn f) {
 }
 
 zz_value zz_closure_make_ex(zz_dispatch_fn f, void **cells, size_t nenv) {
+    return zz_closure_make_ex_typed(f, cells, NULL, NULL, nenv);
+}
+
+zz_value zz_closure_make_ex_typed(
+    zz_dispatch_fn f,
+    void **cells,
+    const unsigned char *kinds,
+    const size_t *sizes,
+    size_t nenv)
+{
     zz_closure_rep *rep = (zz_closure_rep *)malloc(
         sizeof(zz_closure_rep) + nenv * sizeof(void *));
     if (!rep) return zz_unit();
     rep->fn = f;
     rep->nenv = nenv;
-    for (size_t i = 0; i < nenv; i++) rep->env[i] = cells[i];
+    rep->cell_kind = NULL;
+    rep->cell_size = NULL;
+    if (nenv) {
+        rep->cell_kind = (unsigned char *)malloc(nenv * sizeof(unsigned char));
+        rep->cell_size = (size_t *)malloc(nenv * sizeof(size_t));
+        if (!rep->cell_kind || !rep->cell_size) {
+            free(rep->cell_kind);
+            free(rep->cell_size);
+            free(rep);
+            return zz_unit();
+        }
+        for (size_t i = 0; i < nenv; i++) {
+            rep->cell_kind[i] = kinds ? kinds[i] : ZZ_CELL_VALUE;
+            rep->cell_size[i] =
+                sizes ? sizes[i] : sizeof(zz_value);
+        }
+        for (size_t i = 0; i < nenv; i++) rep->env[i] = cells[i];
+    }
     zz_value v;
     v.tag = ZZ_NATIVE;
     v.payload = (zz_value *)rep;
     return v;
+}
+
+// Cell kind/size of a closure value's i-th env slot (defaults: VALUE,
+// sizeof(zz_value) — covers reps built before typing existed).
+static void zz_closure_cell_info(zz_value v, size_t i,
+                                 unsigned char *kind, size_t *size) {
+    *kind = ZZ_CELL_VALUE;
+    *size = sizeof(zz_value);
+    if (v.tag != ZZ_NATIVE || !v.payload) return;
+    zz_closure_rep *rep = (zz_closure_rep *)(void *)v.payload;
+    if (i >= rep->nenv) return;
+    if (rep->cell_kind) *kind = rep->cell_kind[i];
+    if (rep->cell_size) *size = rep->cell_size[i];
 }
 
 zz_dispatch_fn zz_closure_target(zz_value v) {
@@ -323,10 +367,238 @@ zz_value zz_time_sleep_ms(zz_value ms, int *err) {
     return zz_unit();
 }
 // =====================================================================
+//  Deep copy for thread boundaries (snapshot isolation)
+//
+//  `zz_clone` shares heap objects via refcounts — wrong when a value moves
+//  to another thread: sharing the string refcount is racy (now atomic, but
+//  sharing arena pointers is fatal — arenas are thread-local), and sharing
+//  closure cells aliases mutable state across threads. `zz_value_dup`
+//  instead builds a fully independent, heap-owned copy: the receiving
+//  thread can free or mutate it without touching the sender's memory.
+//  Handles (channels, join handles, sockets, db) are intentionally shared
+//  by pointer — they are the communication mechanism itself.
+// =====================================================================
+
+// Pointer memo so cyclic values (arrays/dicts/closures referencing
+// themselves) terminate and shared subgraphs stay shared within one copy.
+typedef struct {
+    const void *src;
+    zz_value dst;
+} zz_dup_entry;
+
+typedef struct {
+    zz_dup_entry *items;
+    size_t len;
+    size_t cap;
+} zz_dup_memo;
+
+static int zz_dup_memo_get(zz_dup_memo *m, const void *src, zz_value *out) {
+    for (size_t i = 0; i < m->len; i++) {
+        if (m->items[i].src == src) {
+            *out = m->items[i].dst;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void zz_dup_memo_put(zz_dup_memo *m, const void *src, zz_value dst) {
+    if (m->len == m->cap) {
+        size_t nc = m->cap == 0 ? 8 : m->cap * 2;
+        m->items = (zz_dup_entry *)realloc(m->items, nc * sizeof(zz_dup_entry));
+        m->cap = nc;
+    }
+    m->items[m->len].src = src;
+    m->items[m->len].dst = dst;
+    m->len++;
+}
+
+static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
+    switch (v.tag) {
+    case ZZ_INT:
+    case ZZ_FLOAT:
+    case ZZ_BOOL:
+    case ZZ_UNIT:
+        return v;
+    case ZZ_STR: {
+        if (!v.s) return v;
+        // Interned literals are immortal process singletons: share freely.
+        if (v.s->interned) return v;
+        // Otherwise build an independent heap-owned copy. This also heals
+        // arena strings (refs==0 sentinel): the copy is a normal refcounted
+        // heap string, safe to free on any thread.
+        zz_str *s = str_alloc(v.s->len);
+        memcpy(zz_str_ptr(s), zz_str_cptr(v.s), v.s->len);
+        zz_str_ptr(s)[v.s->len] = '\0';
+        zz_value out;
+        out.tag = ZZ_STR;
+        out.s = s;
+        return out;
+    }
+    case ZZ_ARRAY: {
+        if (!v.arr) return v;
+        zz_value hit;
+        if (zz_dup_memo_get(m, v.arr, &hit)) return hit;
+        zz_value out = zz_array_new();
+        // Memoize before recursing so self-referential arrays terminate.
+        zz_dup_memo_put(m, v.arr, out);
+        for (size_t i = 0; i < v.arr->len; i++) {
+            // NOTE: zz_array_push moves (no clone) — ownership transfers.
+            zz_array_push(out.arr, zz_value_dup_inner(v.arr->items[i], m));
+        }
+        return out;
+    }
+    case ZZ_DICT: {
+        if (!v.dict) return v;
+        zz_value hit;
+        if (zz_dup_memo_get(m, v.dict, &hit)) return hit;
+        zz_value out = zz_dict_new();
+        zz_dup_memo_put(m, v.dict, out);
+        for (size_t i = 0; i < v.dict->len; i++) {
+            zz_value k = zz_value_dup_inner(
+                (zz_value){ZZ_STR, {.s = v.dict->entries[i].key}}, m);
+            zz_value val = zz_value_dup_inner(v.dict->entries[i].val, m);
+            // Fresh dict: keys unique, always the new-entry path (moves).
+            if (k.tag == ZZ_STR) zz_dict_set(out.dict, k, val);
+            else { zz_release(&k); zz_release(&val); }
+        }
+        return out;
+    }
+    case ZZ_TUPLE:
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON: {
+        if (!v.payload) return v;
+        zz_value *p = (zz_value *)malloc(sizeof(zz_value));
+        *p = zz_value_dup_inner(*v.payload, m);
+        zz_value out = v;
+        out.payload = p;
+        return out;
+    }
+    case ZZ_OBJECT: {
+        if (!v.obj) return v;
+        zz_value hit;
+        if (zz_dup_memo_get(m, v.obj, &hit)) return hit;
+        size_t n = v.obj->len;
+        zz_object *o = (zz_object *)malloc(sizeof(zz_object) + n * 2 * sizeof(zz_value));
+        o->refs = 1;
+        o->type_name = v.obj->type_name; // static C string: share
+        o->len = n;
+        zz_value out;
+        out.tag = ZZ_OBJECT;
+        out.obj = o;
+        zz_dup_memo_put(m, v.obj, out);
+        for (size_t i = 0; i < n * 2; i++) {
+            o->fields[i] = zz_value_dup_inner(v.obj->fields[i], m);
+        }
+        return out;
+    }
+    case ZZ_FUNC: {
+        if (!v.fn) return v;
+        zz_value hit;
+        if (zz_dup_memo_get(m, v.fn, &hit)) return hit;
+        zz_func *f = (zz_func *)malloc(sizeof(zz_func));
+        f->refs = 1;
+        f->fn = zz_value_dup_inner(v.fn->fn, m);
+        f->env_len = v.fn->env_len;
+        f->env = f->env_len ? (zz_value *)malloc(f->env_len * sizeof(zz_value)) : NULL;
+        zz_value out;
+        out.tag = ZZ_FUNC;
+        out.fn = f;
+        zz_dup_memo_put(m, v.fn, out);
+        for (size_t i = 0; i < f->env_len; i++) {
+            f->env[i] = zz_value_dup_inner(v.fn->env[i], m);
+        }
+        return out;
+    }
+    case ZZ_NATIVE: {
+        // Closure value: duplicate the rep with FRESH cells holding
+        // duplicates of the captured values. VALUE cells deep-copy;
+        // RAW cells (unboxed int/bool/double/struct captures) get a
+        // fresh cell with the same bytes — the worker's writes stay
+        // invisible to the spawner (and vice versa) either way. This is
+        // the core of spawn snapshot isolation. Memoized: closures shared
+        // between cells stay shared within one copy.
+        zz_dispatch_fn fn = zz_closure_target(v);
+        if (!fn) return v;
+        size_t nenv = 0;
+        void **env = zz_closure_env(v, &nenv);
+        if (!env || nenv == 0) return zz_closure_make(fn);
+        // Memo key: the rep payload (shared closures dedup).
+        zz_value hit;
+        if (v.payload && zz_dup_memo_get(m, v.payload, &hit)) return hit;
+        void **cells = (void **)malloc(nenv * sizeof(void *));
+        unsigned char *kinds = (unsigned char *)malloc(nenv);
+        size_t *sizes = (size_t *)malloc(nenv * sizeof(size_t));
+        if (!cells || !kinds || !sizes) {
+            free(cells);
+            free(kinds);
+            free(sizes);
+            return v;
+        }
+        for (size_t i = 0; i < nenv; i++) {
+            unsigned char kind;
+            size_t size;
+            zz_closure_cell_info(v, i, &kind, &size);
+            kinds[i] = kind;
+            sizes[i] = size;
+            if (kind == ZZ_CELL_RAW) {
+                // Unboxed cell: bitwise copy into a fresh cell. (Interior
+                // pointers, e.g. refcounted strings inside unboxed struct
+                // cells, are shared — documented limitation; never
+                // misread as zz_value, which segfaulted.)
+                void *cell = malloc(size ? size : 1);
+                if (!cell) {
+                    for (size_t j = 0; j < i; j++) free(cells[j]);
+                    free(cells);
+                    free(kinds);
+                    free(sizes);
+                    return v;
+                }
+                memcpy(cell, env[i], size);
+                cells[i] = cell;
+            } else {
+                zz_value *cell = (zz_value *)malloc(sizeof(zz_value));
+                if (!cell) {
+                    for (size_t j = 0; j < i; j++) free(cells[j]);
+                    free(cells);
+                    free(kinds);
+                    free(sizes);
+                    return v;
+                }
+                *cell = zz_value_dup_inner(*(zz_value *)env[i], m);
+                cells[i] = cell;
+            }
+        }
+        zz_value out =
+            zz_closure_make_ex_typed(fn, cells, kinds, sizes, nenv);
+        free(cells);
+        free(kinds);
+        free(sizes);
+        if (v.payload) zz_dup_memo_put(m, v.payload, out);
+        return out;
+    }
+    default:
+        // Handles (chan, task join, tcp, db) and anything else: shared by
+        // pointer. They are the communication mechanism, not data.
+        return v;
+    }
+}
+
+// Deep-copy a value for transfer across a thread boundary. See above.
+zz_value zz_value_dup(zz_value v) {
+    zz_dup_memo m = {0};
+    zz_value out = zz_value_dup_inner(v, &m);
+    free(m.items);
+    return out;
+}
+// =====================================================================
 //  Thread-safe channels (pthread-based)
 // =====================================================================
 
-zz_value zz_chan_new(int *err) {
+zz_value zz_chan_new(zz_value unused, int *err) {
+    (void)unused;
     (void)err;
     zz_chan *ch = (zz_chan *)malloc(sizeof(zz_chan));
     if (!ch) {
@@ -373,7 +645,7 @@ zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
         ch->head = 0;
         ch->tail = ch->len;
     }
-    ch->queue[ch->tail] = zz_clone(val);
+    ch->queue[ch->tail] = zz_value_dup(val);
     ch->tail = (ch->tail + 1) % ch->cap;
     ch->len++;
     pthread_cond_signal(&ch->cond);
@@ -403,22 +675,25 @@ zz_value zz_chan_try_recv(zz_value chan, int *err) {
     pthread_mutex_lock(&ch->lock);
     if (ch->len == 0) {
         pthread_mutex_unlock(&ch->lock);
-        *err = 1;  // No message available.
-        return zz_unit();
+        // Match the VM (`chan.try_recv` yields `.none`): return the variant
+        // directly instead of signaling through `err` (the call shims drop
+        // `err`, which used to turn empty channels into a bare unit).
+        *err = 0;
+        return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
     }
     zz_value v = ch->queue[ch->head];
     ch->head = (ch->head + 1) % ch->cap;
     ch->len--;
     pthread_mutex_unlock(&ch->lock);
     *err = 0;
-    return v;
+    return zz_variant_some(v);
 }
 
 // =====================================================================
 //  Spawn / task join (pthread-based)
 // =====================================================================
 
-// Thread trampoline: calls zz_call on the function and stores the result.
+// Thread trampoline: calls the closure and stores the result.
 typedef struct {
     zz_value fn;
     zz_task_join *join;
@@ -427,22 +702,27 @@ typedef struct {
 static void *zz_spawn_trampoline(void *arg) {
     zz_spawn_ctx *ctx = (zz_spawn_ctx *)arg;
     zz_task_join *join = ctx->join;
-    // Call the function (zero args for now).
-    int err = 0;
-    zz_value result = zz_call(ctx->fn, NULL, 0, &err);
+    // Closures take boxed args; `spawn` passes no inputs by contract,
+    // so seat a single Unit (mirrors VM worker setup). Zero-param
+    // closures ignore it; `|_|` closures read it as Unit.
+    zz_value unit_arg = zz_unit();
+    zz_value args[1] = {unit_arg};
+    zz_value result = zz_call_closure(ctx->fn, args, 1);
     // Store result and signal completion.
     pthread_mutex_lock(&join->lock);
     join->result = result;
     join->completed = 1;
     pthread_cond_signal(&join->cond);
     pthread_mutex_unlock(&join->lock);
-    // Free the context (fn was cloned into join->result via zz_clone at spawn time).
+    // Free the context (the fn snapshot is owned by this thread).
     free(ctx);
     return NULL;
 }
 
 zz_value zz_spawn(zz_value fn, int *err) {
-    if (fn.tag != ZZ_FUNC) { *err = 1; return zz_unit(); }
+    // Closures lower to ZZ_NATIVE (zz_closure_make); ZZ_FUNC is the
+    // legacy named-fn box. Accept both.
+    if (fn.tag != ZZ_FUNC && fn.tag != ZZ_NATIVE) { *err = 1; return zz_unit(); }
     // Create task join handle.
     zz_task_join *join = (zz_task_join *)malloc(sizeof(zz_task_join));
     if (!join) {
@@ -453,16 +733,25 @@ zz_value zz_spawn(zz_value fn, int *err) {
     pthread_cond_init(&join->cond, NULL);
     join->result = zz_unit();
     join->completed = 0;
+    join->consumed = 0;
     // Create spawn context passed to trampoline.
     zz_spawn_ctx *ctx = (zz_spawn_ctx *)malloc(sizeof(zz_spawn_ctx));
     if (!ctx) {
         fprintf(stderr, "zz: out of memory (spawn context)\n");
         exit(1);
     }
-    ctx->fn = zz_clone(fn);  // Keep a ref for the thread.
+    ctx->fn = zz_value_dup(fn);  // Independent copy for the thread.
     ctx->join = join;
-    // Create the thread.
-    if (pthread_create(&join->thread, NULL, zz_spawn_trampoline, ctx) != 0) {
+    // Small stacks: ZZ values live on the heap and closure calls use
+    // shallow C frames, so 1MB is ample — and it makes 10k+ parallel
+    // tasks feasible (8MB default stacks need 400GB virtual for 50k
+    // tasks). Very deep C recursion inside tasks is the known tradeoff.
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 1024 * 1024);
+    int spawn_rc = pthread_create(&join->thread, &attr, zz_spawn_trampoline, ctx);
+    pthread_attr_destroy(&attr);
+    if (spawn_rc != 0) {
         free(ctx);
         free(join);
         *err = 1;
@@ -489,6 +778,57 @@ zz_value zz_task_join_recv(zz_value join_val, int *err) {
     // The handle is leaked at process exit (acceptable for now).
     *err = 0;
     return result;
+}
+
+// `task.try_join(handle)` — non-blocking check: `.some(result)` when the
+// task finished (consuming, like the VM), `.none` while it is still running.
+// Never blocks, never touches `err` (the call shims drop it).
+zz_value zz_task_try_join(zz_value join_val, int *err) {
+    (void)err;
+    if (join_val.tag != ZZ_TASK_JOIN) {
+        return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
+    }
+    zz_task_join *join = join_val.task;
+    pthread_mutex_lock(&join->lock);
+    if (!join->completed || join->consumed) {
+        pthread_mutex_unlock(&join->lock);
+        return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
+    }
+    join->consumed = 1;
+    zz_value result = zz_clone(join->result);
+    pthread_mutex_unlock(&join->lock);
+    return zz_variant_some(result);
+}
+
+// ---- cooperative safepoints ----------------------------------------------
+// Called at AOT loop tops. Budget-guarded: one thread-local counter
+// decrement per iteration, clock read once per 1024. On quantum expiry
+// (1ms of looping without blocking) yields the OS thread so sibling task
+// threads get scheduled — the AOT answer to the VM executor's Timeslice
+// requeue (C frames cannot suspend, so this is a courtesy yield, not a
+// task switch). Steady-state cost ~0.02ns/iter.
+#ifndef ZZ_OS_WINDOWS
+#include <sched.h>
+#endif
+
+static __thread unsigned zz_sp_budget = 1024;
+static __thread long long zz_sp_start_ns = 0;
+
+void zz_safepoint(void) {
+    if (zz_sp_budget != 0) { zz_sp_budget--; return; }
+    zz_sp_budget = 1024;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long long now_ns = (long long)now.tv_sec * 1000000000LL + now.tv_nsec;
+    if (zz_sp_start_ns == 0) { zz_sp_start_ns = now_ns; return; }
+    if (now_ns - zz_sp_start_ns >= 1000000LL) {
+        zz_sp_start_ns = now_ns;
+#ifdef ZZ_OS_WINDOWS
+        SwitchToThread();
+#else
+        sched_yield();
+#endif
+    }
 }
 
 // ---- http AOT server -------------------------------------------------------

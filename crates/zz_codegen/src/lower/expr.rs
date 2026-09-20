@@ -345,6 +345,11 @@ impl Lowerer {
                     *self.current_loop_arena.borrow_mut() = Some(name.clone());
                 }
                 out.push_str("    while (1) {\n");
+                // Cooperative safepoint at the loop top (mirrors the VM's
+                // `Op::Safepoint`): budget-guarded `zz_safepoint()` yields
+                // the OS thread on quantum expiry so sibling AOT task
+                // threads get scheduled.
+                out.push_str("        zz_safepoint();\n");
                 let c = self.emit_expr(cond, names, out);
                 let c = box_scalar_operand(cond, names, &c);
                 out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
@@ -926,8 +931,33 @@ impl Lowerer {
                         "    void *{cap_arr}[] = {{{}}};\n",
                         ptrs.join(", ")
                     ));
+                    // Cell layout for the rep: boxed `zz_value` cells
+                    // deep-copy on spawn; anything else (unboxed int /
+                    // double / bool / struct cells) copies byte-wise.
+                    // `zz_value_dup` reads this — without it every cell
+                    // is misread as `zz_value*` (spawn segfault class).
+                    let kind_arr = names.fresh("_capkind");
+                    let kinds: Vec<String> = caps
+                        .iter()
+                        .map(|(_, _, ctype, _)| {
+                            if ctype == "zz_value" { "0" } else { "1" }.to_string()
+                        })
+                        .collect();
+                    out.push_str(&format!(
+                        "    unsigned char {kind_arr}[] = {{{}}};\n",
+                        kinds.join(", ")
+                    ));
+                    let size_arr = names.fresh("_capsz");
+                    let sizes: Vec<String> = caps
+                        .iter()
+                        .map(|(_, _, ctype, _)| format!("sizeof({ctype})"))
+                        .collect();
+                    out.push_str(&format!(
+                        "    size_t {size_arr}[] = {{{}}};\n",
+                        sizes.join(", ")
+                    ));
                     format!(
-                        "zz_closure_make_ex(zz_closure_{cid}, {cap_arr}, {})",
+                        "zz_closure_make_ex_typed(zz_closure_{cid}, {cap_arr}, {kind_arr}, {size_arr}, {})",
                         caps.len()
                     )
                 }

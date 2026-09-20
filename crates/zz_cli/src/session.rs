@@ -219,7 +219,7 @@ impl Session {
                     &module,
                     &ns,
                     &mut self.funcs,
-                    &mut self.interp.natives,
+                    std::sync::Arc::make_mut(&mut self.interp.natives),
                 ) {
                     self.last_had_errors = true;
                     return EvalOutput {

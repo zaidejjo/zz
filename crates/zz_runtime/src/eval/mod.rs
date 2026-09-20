@@ -20,10 +20,39 @@ pub use crate::runtime::{EvalError, NativeEntry, NativeFn, RuntimeState};
 pub struct Interp {
     pub env: Rc<RefCell<Env>>,
     pub funcs: HashMap<String, FuncValue>,
-    pub natives: HashMap<String, NativeEntry>,
+    /// Native registry, reference-counted: registrations happen at load
+    /// time, after which the map is effectively frozen and freely shared
+    /// with worker threads (`task.spawn` clones the `Arc`, not the 400+
+    /// entry map). Late mutation (REPL imports) uses copy-on-write via
+    /// [`Arc::make_mut`].
+    pub natives: Arc<HashMap<String, NativeEntry>>,
     pub structs: HashMap<String, Vec<String>>,
     pub args: Vec<String>,
     pub defer_stacks: Vec<Vec<Value>>,
+    /// Mutation counter for [`Interp::funcs`], bumped on every insert.
+    /// `task.spawn` caches a detached snapshot of the function table and
+    /// reuses it while this version is unchanged, so spawn cost in a loop
+    /// drops from a full re-snapshot to a detach-clone. Runtime-defined
+    /// functions (`MakeFunc`) bump the version and transparently
+    /// invalidate the cache.
+    pub funcs_version: u64,
+    /// Detached snapshot of [`Interp::funcs`] at [`Interp::funcs_version`],
+    /// populated on first spawn. Never mutated after insert; workers each
+    /// receive a fresh detach-clone, so no state is shared across threads.
+    pub spawn_funcs_cache: Option<(u64, HashMap<String, FuncValue>)>,
+    /// Cached keep-set for worker env snapshots (see
+    /// [`SpawnKeepCache`](crate::value::SpawnKeepCache)): the *set* of
+    /// visible names rarely changes between spawns from one site (loop
+    /// iterations reuse the same scopes), while *values* always do — so the
+    /// filter decision is cached but every kept value is cloned fresh per
+    /// spawn.
+    pub spawn_keep_cache: crate::value::SpawnKeepCache,
+    /// Green-thread task mode: this interpreter belongs to an executor task.
+    /// Blocking natives yield instead of parking, and interpreted
+    /// (tree-walker) calls are rejected — interpreter frames live on the
+    /// Rust call stack and cannot be suspended. Compiled code is unaffected
+    /// (every function has a chunk in the unified pipeline).
+    pub task_mode: bool,
 }
 
 impl Default for Interp {
@@ -37,10 +66,14 @@ impl Interp {
         Interp {
             env: Rc::new(RefCell::new(Env::new())),
             funcs: HashMap::new(),
-            natives: HashMap::new(),
+            natives: Arc::new(HashMap::new()),
             structs: HashMap::new(),
             args: Vec::new(),
             defer_stacks: Vec::new(),
+            funcs_version: 0,
+            spawn_funcs_cache: None,
+            spawn_keep_cache: None,
+            task_mode: false,
         }
     }
 
@@ -48,10 +81,32 @@ impl Interp {
         Interp {
             env: Rc::new(RefCell::new(Env::new())),
             funcs: HashMap::new(),
+            natives: Arc::new(natives),
+            structs: HashMap::new(),
+            args: Vec::new(),
+            defer_stacks: Vec::new(),
+            funcs_version: 0,
+            spawn_funcs_cache: None,
+            spawn_keep_cache: None,
+            task_mode: false,
+        }
+    }
+
+    /// [`with_natives`](Self::with_natives) without copying the registry:
+    /// the worker shares the parent's map. Sound because registrations
+    /// only happen at load time (see field docs).
+    pub fn with_natives_shared(natives: Arc<HashMap<String, NativeEntry>>) -> Self {
+        Interp {
+            env: Rc::new(RefCell::new(Env::new())),
+            funcs: HashMap::new(),
             natives,
             structs: HashMap::new(),
             args: Vec::new(),
             defer_stacks: Vec::new(),
+            funcs_version: 0,
+            spawn_funcs_cache: None,
+            spawn_keep_cache: None,
+            task_mode: false,
         }
     }
 
@@ -67,6 +122,12 @@ impl Interp {
             )),
             Flow::Break(span) => Err(EvalError::new("`break` outside of a loop", span)),
             Flow::Continue(span) => Err(EvalError::new("`continue` outside of a loop", span)),
+            // Main-thread entry points never yield (no executor TLS); a
+            // Yield here means a task escaped its executor — loud bug.
+            Flow::Yield(_) => Err(EvalError::new(
+                "internal error: green-thread yield escaped its executor",
+                Span::new(0, 0),
+            )),
         }
     }
 
@@ -98,6 +159,10 @@ impl Interp {
             )),
             Flow::Break(span) => Err(EvalError::new("`break` outside of a loop", span)),
             Flow::Continue(span) => Err(EvalError::new("`continue` outside of a loop", span)),
+            Flow::Yield(_) => Err(EvalError::new(
+                "internal error: green-thread yield escaped its executor",
+                Span::new(0, 0),
+            )),
         }
     }
 

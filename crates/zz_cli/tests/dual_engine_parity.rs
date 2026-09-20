@@ -6,7 +6,7 @@
 //! - **Strict parity**: both engines must produce identical output
 //! - **Known native failure**: tracked bugs in the native engine (test passes
 //!   if native fails as expected; panics if the bug is fixed so we can remove it)
-//! - **Skipped**: non-deterministic output (HTTP closures, timing, concurrency)
+//! - **Skipped**: non-deterministic output (HTTP closures, timing)
 //!
 //! Run with: `cargo test -p zz_cli --test dual_engine_parity`
 
@@ -137,9 +137,6 @@ fn native_skip_reason(file: &Path) -> Option<&'static str> {
         "time_ops" | "time_test" | "bench_memory_arena" => {
             Some("output contains time.now_ms() — non-deterministic timestamps")
         }
-        "concurrency_spawn_test" | "channel_test" => {
-            Some("thread scheduling makes output non-deterministic")
-        }
         _ => None,
     }
 }
@@ -161,6 +158,7 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "variants" => Some("C codegen: undeclared variable in match + else scope error"),
 
         // --- Output differences (native runs but output differs) ---
+        "concurrency_panic_test" => Some("native: panic/fail inside task closures lowers to unit (no err plumbing through zz_call_closure); VM yields .err"),
         "encoding_test" => Some("native: different error message format for bad base64/hex/url"),
         "math_extended_test" => Some("native: float precision + error message differences"),
         "functions" => Some("native: string concatenation with '+' drops first operand"),
@@ -390,6 +388,37 @@ parity_strict!(
     "stdlib",
     "str_extended_test.zz"
 );
+parity_strict!(
+    parity_stdlib_concurrency_spawn_test,
+    "stdlib",
+    "concurrency_spawn_test.zz"
+);
+parity_strict!(parity_stdlib_channel_test, "stdlib", "channel_test.zz");
+parity_strict!(
+    parity_stdlib_concurrency_tasks_test,
+    "stdlib",
+    "concurrency_tasks_test.zz"
+);
+parity_strict!(
+    parity_stdlib_concurrency_stress_test,
+    "stdlib",
+    "concurrency_stress_test.zz"
+);
+parity_strict!(
+    parity_stdlib_concurrency_try_join_test,
+    "stdlib",
+    "concurrency_try_join_test.zz"
+);
+parity_strict!(
+    parity_stdlib_concurrency_capture_test,
+    "stdlib",
+    "concurrency_capture_test.zz"
+);
+parity_known_failure!(
+    parity_stdlib_concurrency_panic_test,
+    "stdlib",
+    "concurrency_panic_test.zz"
+);
 
 // Error fixtures (both must error)
 parity_strict_error!(parity_err_type_mismatch, "type_mismatch.zz");
@@ -459,7 +488,6 @@ parity_strict_error!(parity_err_missing_field, "missing_field.zz");
 // Listed here for documentation:
 // - HTTP: http_server_test, http_client_test, http_phase5b_test, concurrent_http_test
 // - Timing: time_ops, time_test, bench_memory_arena
-// - Concurrency: concurrency_spawn_test, channel_test
 // - Str stdlib: str_extended_test (already strict — passes)
 
 // ===========================================================================

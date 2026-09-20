@@ -394,6 +394,7 @@ impl Compiler {
             Op::WhileCond { .. } => -1,
             Op::Break(_) | Op::Continue(_) => 0,
             Op::SetLoopResult => -1,
+            Op::Safepoint => 0,
             Op::MakeArray(n) => 1 - *n as i64,
             Op::UnpackTuple(n) => *n as i64 - 1,
             Op::ArrayPush(_) => -1,
@@ -1028,6 +1029,9 @@ impl Compiler {
                     num_vars: num_vars_u8,
                 });
                 let header = self.chunk.code.len();
+                // Safepoint at the header (not the back-edge) so `continue`
+                // cannot skip the cooperative yield check.
+                self.emit(Op::Safepoint);
                 // Determine if any var is captured by an inner closure
                 let any_captured = vars.iter().any(|v| self.captured.contains(&v.name));
                 let var_names: Vec<String> = vars.iter().map(|v| v.name.clone()).collect();
@@ -1048,7 +1052,11 @@ impl Compiler {
                     self.emit(Op::EnterScope);
                 }
                 self.scope_depth += 1;
-                self.compile_block_body(body);
+                if self.compile_block_body(body) {
+                    // Trailing slot declaration (see `compile_block_body`):
+                    // supply the loop-result value `SetLoopResult` pops.
+                    self.emit_const(Value::Unit);
+                }
                 self.scope_depth -= 1;
                 if body_needs_env {
                     self.emit(Op::ExitScope);
@@ -1290,7 +1298,13 @@ impl Compiler {
         }
     }
 
-    fn compile_block_body(&mut self, block: &Block) {
+    /// Compile a block body, cleaning up its locals. Returns `true` when the
+    /// body's final statement left slot storage that `PopN` consumed: loop
+    /// callers (`for`/`while`, which pop one more value via `SetLoopResult`
+    /// for the loop result) must then emit a `Unit` to stay balanced.
+    /// Other callers (plain blocks, function bodies) ignore the return and
+    /// keep existing behavior.
+    fn compile_block_body(&mut self, block: &Block) -> bool {
         let scope_base = self.locals.len();
         let mut last = StmtValue::None;
         for (i, stmt) in block.stmts.iter().enumerate() {
@@ -1309,7 +1323,15 @@ impl Compiler {
         if n > 0 {
             self.emit(Op::PopN(n as u16));
         }
+        // A trailing slot declaration's value doubles as its slot storage:
+        // `PopN` just consumed it, so a loop result pop would eat into the
+        // loop frame (the `ForNext on non-iterable` misalignment). An
+        // env-captured (`in_env`) trailing declaration instead leaves its
+        // `DefineVar` value behind, which already serves as the result.
+        let need_result_unit = matches!(last, StmtValue::Keep)
+            && self.locals[scope_base..].last().is_some_and(|l| !l.in_env);
         self.locals.truncate(scope_base);
+        need_result_unit
     }
 
     fn compile_func_body(&mut self, block: &Block, params: &[Param]) -> Arc<Chunk> {
@@ -1328,6 +1350,10 @@ impl Compiler {
             if sub.captured.contains(&p.name.name) {
                 sub.emit(Op::LoadSlot(i as u16));
                 sub.emit(Op::DefineVar(p.name.name.clone()));
+                // DefineVar re-pushes the value; discard the leftover or
+                // every later slot in this frame shifts by one per
+                // captured param (spooky `h` reads `n`-class bugs).
+                sub.emit(Op::Pop);
                 sub.locals.push(Local {
                     name: p.name.name.clone(),
                     slot: i,
@@ -1541,6 +1567,9 @@ impl Compiler {
             if sub.captured.contains(&p.name.name) {
                 sub.emit(Op::LoadSlot(i as u16));
                 sub.emit(Op::DefineVar(p.name.name.clone()));
+                // DefineVar re-pushes the value; discard (see
+                // `compile_func_body` — same one-slot-per-capture shift).
+                sub.emit(Op::Pop);
                 sub.locals.push(Local {
                     name: p.name.name.clone(),
                     slot: i,
@@ -2091,6 +2120,9 @@ impl Compiler {
                 self.emit(Op::WhileSetup { exit: 0, header: 0 });
                 self.emit_const(Value::Unit);
                 let header = self.chunk.code.len();
+                // Safepoint at the header (not the back-edge) so `continue`
+                // cannot skip the cooperative yield check.
+                self.emit(Op::Safepoint);
                 // Fast path: `a < b` / `a < N` on local slots -> single
                 // fused comparison op instead of LoadSlot/LoadSlot/BinOp.
                 if let Some(op) = self.try_slot_compare(cond) {
@@ -2104,7 +2136,11 @@ impl Compiler {
                     self.emit(Op::EnterScope);
                 }
                 self.scope_depth += 1;
-                self.compile_block_body(body);
+                if self.compile_block_body(body) {
+                    // Trailing slot declaration (see `compile_block_body`):
+                    // supply the loop-result value `SetLoopResult` pops.
+                    self.emit_const(Value::Unit);
+                }
                 self.scope_depth -= 1;
                 if body_needs_env {
                     self.emit(Op::ExitScope);

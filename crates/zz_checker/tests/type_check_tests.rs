@@ -1431,7 +1431,10 @@ fn opaque_handle_types_resolve_in_annotations() {
         let src = format!("func w(c: {ann}) {{ }}\n");
         let r = check_src(&src);
         assert!(!has_errors(&r), "{ann}: errors: {:?}", r.errors);
-        let sig = r.funcs.get("w").unwrap_or_else(|| panic!("{ann}: func w missing"));
+        let sig = r
+            .funcs
+            .get("w")
+            .unwrap_or_else(|| panic!("{ann}: func w missing"));
         assert_eq!(sig.params.len(), 1, "{ann}: arity");
         assert_eq!(sig.params[0].1, want, "{ann}: param type");
     }

@@ -1,0 +1,14 @@
+// E2E: task panic — a panicking worker resolves its join as `.err`.
+// Deterministic: no timing dependence.
+import std.io
+import std.task
+
+func main() {
+    h := task.spawn(|_| { panic("kaboom") })
+    r: Result<int, str> = task.join(h)
+    match r {
+        .ok(v) => io.println("unexpected_ok"),
+        .err(e) => io.println("panic_err:{e}"),
+    }
+    io.println("panic_ok")
+}

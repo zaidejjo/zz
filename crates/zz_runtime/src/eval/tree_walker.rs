@@ -26,6 +26,7 @@ impl Interp {
                 Flow::Return(v) => Ok(Flow::Return(v)),
                 Flow::Break(span) => Ok(Flow::Break(span)),
                 Flow::Continue(span) => Ok(Flow::Continue(span)),
+                Flow::Yield(_) => Err(EvalError::yield_escape()),
             },
             Stmt::Import { .. } => Ok(Flow::Value(Value::Unit)),
             Stmt::ExternBlock { .. } => Ok(Flow::Value(Value::Unit)),
@@ -40,6 +41,7 @@ impl Interp {
                     chunk: None,
                 };
                 self.funcs.insert(name.join("."), fv.clone());
+                self.funcs_version = self.funcs_version.wrapping_add(1);
                 self.env
                     .borrow_mut()
                     .define(&name.join("."), Value::Func(Box::new(fv)));
@@ -51,6 +53,7 @@ impl Interp {
                     Flow::Return(v) => Ok(Flow::Return(v)),
                     Flow::Break(span) => Ok(Flow::Break(span)),
                     Flow::Continue(span) => Ok(Flow::Continue(span)),
+                    Flow::Yield(_) => Err(EvalError::yield_escape()),
                 },
                 None => Ok(Flow::Return(Value::Unit)),
             },
@@ -79,6 +82,7 @@ impl Interp {
                             chunk: None,
                         };
                         self.funcs.insert(full_name.clone(), fv.clone());
+                        self.funcs_version = self.funcs_version.wrapping_add(1);
                         self.env
                             .borrow_mut()
                             .define(&full_name, Value::Func(Box::new(fv)));
@@ -107,6 +111,7 @@ impl Interp {
                                 Flow::Return(v) => return Ok(Flow::Return(v)),
                                 Flow::Break(_) => break,
                                 Flow::Continue(_) => {}
+                                Flow::Yield(_) => return Err(EvalError::yield_escape()),
                             }
                         }
                         Ok(Flow::Value(result))
@@ -127,6 +132,7 @@ impl Interp {
                                     Flow::Return(v) => return Ok(Flow::Return(v)),
                                     Flow::Break(_) => break,
                                     Flow::Continue(_) => {}
+                                    Flow::Yield(_) => return Err(EvalError::yield_escape()),
                                 }
                                 i += step;
                             }
@@ -142,6 +148,7 @@ impl Interp {
                                     Flow::Return(v) => return Ok(Flow::Return(v)),
                                     Flow::Break(_) => break,
                                     Flow::Continue(_) => {}
+                                    Flow::Yield(_) => return Err(EvalError::yield_escape()),
                                 }
                                 i += step;
                             }
@@ -169,6 +176,7 @@ impl Interp {
                                 Flow::Return(v) => return Ok(Flow::Return(v)),
                                 Flow::Break(_) => break,
                                 Flow::Continue(_) => {}
+                                Flow::Yield(_) => return Err(EvalError::yield_escape()),
                             }
                         }
                         Ok(Flow::Value(result))
@@ -768,6 +776,7 @@ impl Interp {
                         Flow::Return(v) => return Ok(Flow::Return(v)),
                         Flow::Break(_) => break,
                         Flow::Continue(_) => {}
+                        Flow::Yield(_) => return Err(EvalError::yield_escape()),
                     }
                 }
                 Ok(Flow::Value(result))
@@ -1211,13 +1220,27 @@ impl Interp {
                 vm.run_chunk_with_base(chunk, self, 0)
             }
             None => {
-                self.defer_stacks.push(Vec::new());
-                let r = self.eval(&fv.body);
-                let defers = self.defer_stacks.pop().unwrap();
-                for closure in defers.into_iter().rev() {
-                    let _ = self.call(closure, vec![], span)?;
+                // Green-thread tasks cannot run interpreted code: yields
+                // cannot unwind Rust call-stack frames. Compiled callers
+                // never reach here (every function has a chunk); anything
+                // else is a loud error, not a silent hang or corruption.
+                if self.task_mode {
+                    return Err(EvalError::new(
+                        "spawned task cannot call an interpreted function (no compiled chunk)",
+                        span,
+                    ));
                 }
-                r
+                // Track interpreter depth so blocking natives on executor
+                // threads park instead of yielding across these frames.
+                crate::value::with_interp_depth(|| {
+                    self.defer_stacks.push(Vec::new());
+                    let r = self.eval(&fv.body);
+                    let defers = self.defer_stacks.pop().unwrap();
+                    for closure in defers.into_iter().rev() {
+                        let _ = self.call(closure, vec![], span)?;
+                    }
+                    r
+                })
             }
         };
         self.env = prev;
@@ -1226,6 +1249,7 @@ impl Interp {
             Flow::Return(v) => Ok(v),
             Flow::Break(span) => Err(EvalError::new("`break` outside of a loop", span)),
             Flow::Continue(span) => Err(EvalError::new("`continue` outside of a loop", span)),
+            Flow::Yield(_) => Err(EvalError::yield_escape()),
         }
     }
 }

@@ -16,6 +16,15 @@ use crate::runtime::ops::{
 use crate::runtime::Flow;
 use crate::value::{FuncValue, NativeFunc, ObjectValue, RangeValue, Value};
 
+/// Safepoint budget: iterations between timeslice clock reads. One counter
+/// decrement + branch per iteration; the clock (`Instant::now`, ~20ns) runs
+/// once per budget, so steady-state cost is ~0.02ns/iter — unmeasurable.
+const SAFEPOINT_BUDGET: u32 = 1024;
+/// Cooperative timeslice: a task that loops this long without blocking
+/// yields its executor thread so siblings run. 1ms keeps interactive
+/// (channel ping) latency low while requeue churn stays negligible.
+const SAFEPOINT_QUANTUM_MS: u128 = 1;
+
 /// One active call frame.
 struct Frame {
     chunk: Arc<Chunk>,
@@ -79,6 +88,13 @@ pub struct Vm {
     /// calls. When such a frame returns, the value is wrapped in `Err` and the
     /// *caller* frame unwinds (early return) instead of continuing.
     try_convert_depths: Vec<usize>,
+    /// Safepoint budget: iterations remaining before the next timeslice
+    /// clock read. Reset to `SAFEPOINT_BUDGET` on expiry.
+    slice_budget: u32,
+    /// Start of the current cooperative timeslice. `None` until the first
+    /// safepoint expiry (lazy: programs without loops never pay for a
+    /// clock read, not even in `Vm::new`).
+    slice_start: Option<std::time::Instant>,
 }
 
 /// State saved during defer-before-return execution.
@@ -110,6 +126,8 @@ impl Vm {
             defer_stack: Vec::new(),
             defer_return: None,
             try_convert_depths: Vec::new(),
+            slice_budget: SAFEPOINT_BUDGET,
+            slice_start: None,
         }
     }
 
@@ -121,6 +139,20 @@ impl Vm {
     /// slot off, yielding wrong values or out-of-bounds panics).
     pub fn push(&mut self, v: Value) {
         self.stack.push(v);
+    }
+
+    /// Replace the top of the stack. Used by the green-thread executor to
+    /// deliver a blocking call's real result over the dummy value left by
+    /// the yielded call op. Returns `false` when the stack is empty (a
+    /// protocol violation — the executor treats it as a loud bug, never
+    /// silent corruption).
+    pub fn replace_top(&mut self, v: Value) -> bool {
+        if let Some(top) = self.stack.last_mut() {
+            *top = v;
+            true
+        } else {
+            false
+        }
     }
 
     /// Push a deferred closure's chunk as a new frame for inline execution.
@@ -176,20 +208,30 @@ impl Vm {
             func_span: Span::default(),
         });
 
+        self.run_loop(interp)
+    }
+
+    /// Resume a suspended green-thread task: continue the existing frames
+    /// without pushing a new one. Suspension preserved every frame's `ip`,
+    /// so the loop picks up exactly where it yielded. (Pushing again here
+    /// would re-execute the chunk from the start — the classic resume bug:
+    /// duplicate spawns plus slot-index corruption from two frames sharing
+    /// one stack base.)
+    pub fn resume_chunk(&mut self, interp: &mut Interp) -> Result<Flow, EvalError> {
+        self.run_loop(interp)
+    }
+
+    /// The interpreter loop shared by fresh and resumed execution.
+    fn run_loop(&mut self, interp: &mut Interp) -> Result<Flow, EvalError> {
         // Cache chunk pointers locally to avoid re-fetching from frames on
-        // every instruction.  `ip` stays in a register; we only sync it back
+        // every instruction. `ip` stays in a register; we only sync it back
         // to the Frame struct at frame-change points (Call/Return/defer).
-        let mut cached_code: *const Vec<Op> = {
-            let f = self.frames.last().unwrap();
-            let c = unsafe { &*Arc::as_ptr(&f.chunk) };
-            &c.code
-        };
-        let mut cached_constants: *const Vec<Value> = {
-            let f = self.frames.last().unwrap();
-            let c = unsafe { &*Arc::as_ptr(&f.chunk) };
-            &c.constants
-        };
-        let mut ip: usize = 0;
+        // Declared uninitialized: `re_cache!()` below fills all three from
+        // the top frame (fresh frames start at ip 0; resumed tasks pick up
+        // exactly where they yielded).
+        let mut cached_code: *const Vec<Op>;
+        let mut cached_constants: *const Vec<Value>;
+        let mut ip: usize;
 
         // Re-cache from the current top frame (after any frame push/pop).
         macro_rules! re_cache {
@@ -201,6 +243,30 @@ impl Vm {
                 ip = f.ip;
             }};
         }
+
+        // Green-thread suspension: blocking natives (`chan.recv`,
+        // `task.join`) request a yield instead of parking the thread when
+        // running on the executor. The call op already completed (its dummy
+        // result sits atop the stack for the executor to replace); the
+        // frame ip was synced pre-call, so resumption continues right after
+        // this op without any re-cache. Only the executor interprets
+        // `Flow::Yield`.
+        macro_rules! yield_check {
+            () => {{
+                if let Some(reason) = crate::value::take_yield() {
+                    return Ok(Flow::Yield(reason));
+                }
+            }};
+        }
+
+        // Restore the register from the top frame. Fresh execution pushes
+        // its frame with ip 0 (no-op here); resumed tasks continue exactly
+        // where they yielded. Without this, every resume restarts the
+        // chunk at 0 — re-running ForSetup, growing the stack, and
+        // re-reading stale slots (latent until tasks first yielded
+        // mid-chunk *and* resumed, which no test did before loop
+        // safepoints made mid-chunk yields routine).
+        re_cache!();
 
         loop {
             // SAFETY: cached_code/cached_constants point into the current
@@ -512,6 +578,7 @@ impl Vm {
                         chunk: Some(Arc::clone(fchunk)),
                     };
                     interp.funcs.insert(name.clone(), fv.clone());
+                    interp.funcs_version = interp.funcs_version.wrapping_add(1);
                     interp
                         .env
                         .borrow_mut()
@@ -678,6 +745,30 @@ impl Vm {
                 }
                 Op::Jump(target) => {
                     ip = *target;
+                }
+                Op::Safepoint => {
+                    // Cooperative safepoint (see `Op::Safepoint` docs): one
+                    // counter decrement per iteration, clock read once per
+                    // budget. `ip` already advanced past this op, so a
+                    // yield here resumes after it — but the frame's saved
+                    // ip must be synced first (the register is only
+                    // written back at frame-change points otherwise).
+                    if self.slice_budget == 0 {
+                        self.slice_budget = SAFEPOINT_BUDGET;
+                        let now = std::time::Instant::now();
+                        let expired = self.slice_start.is_none_or(|t| {
+                            now.duration_since(t).as_millis() >= SAFEPOINT_QUANTUM_MS
+                        });
+                        if expired {
+                            self.slice_start = Some(now);
+                            if crate::value::on_executor() {
+                                self.frames.last_mut().unwrap().ip = ip;
+                                return Ok(Flow::Yield(crate::value::YieldReason::Timeslice));
+                            }
+                        }
+                    } else {
+                        self.slice_budget -= 1;
+                    }
                 }
                 Op::JumpIfFalse(target) => {
                     let v = self.stack.pop().unwrap();
@@ -1341,6 +1432,7 @@ impl Vm {
                     self.frames.last_mut().unwrap().ip = ip;
                     self.call_value(callee, args, span, interp)?;
                     re_cache!();
+                    yield_check!();
                 }
                 Op::CallPath {
                     parts,
@@ -1395,6 +1487,7 @@ impl Vm {
                                         let result = (e.f)(interp, &mut arg_vals, span)?;
                                         self.stack.push(result);
                                         re_cache!();
+                                        yield_check!();
                                         continue;
                                     }
                                     None => {
@@ -1409,6 +1502,7 @@ impl Vm {
                             self.frames.last_mut().unwrap().ip = ip;
                             self.call_value(f, arg_vals, span, interp)?;
                             re_cache!();
+                            yield_check!();
                             continue;
                         }
                     }
@@ -1416,6 +1510,7 @@ impl Vm {
                     self.frames.last_mut().unwrap().ip = ip;
                     self.call_value(callee, args, span, interp)?;
                     re_cache!();
+                    yield_check!();
                 }
                 Op::CallMethod { name, argc, span } => {
                     let argc = *argc;
@@ -1449,6 +1544,7 @@ impl Vm {
                                 let result = (e.f)(interp, &mut arg_vals, span)?;
                                 self.stack.push(result);
                                 re_cache!();
+                                yield_check!();
                                 continue;
                             }
                             None => {
@@ -1466,6 +1562,7 @@ impl Vm {
                         }
                     }
                     re_cache!();
+                    yield_check!();
                 }
                 Op::Concat(n) => {
                     let mut parts = Vec::with_capacity(*n as usize);
@@ -1555,6 +1652,7 @@ impl Vm {
                     let result = (entry.f)(interp, &mut args, span)?;
                     self.stack.push(result);
                     re_cache!();
+                    yield_check!();
                 }
             }
         }
@@ -1659,6 +1757,7 @@ impl Vm {
             Flow::Return(v) => v.clone(),
             Flow::Break(_) | Flow::Continue(_) => Value::Unit,
             Flow::Value(_) => unreachable!("unwind_frame on a plain value"),
+            Flow::Yield(_) => return Unwind::Error(crate::runtime::EvalError::yield_escape()),
         };
         let f = self.frames.pop().unwrap();
         self.loops.retain(|li| li.frame_idx < self.frames.len());
@@ -1675,6 +1774,7 @@ impl Vm {
             Flow::Break(span) => Unwind::Error(self.error("`break` outside of a loop", span)),
             Flow::Continue(span) => Unwind::Error(self.error("`continue` outside of a loop", span)),
             Flow::Value(_) => unreachable!(),
+            Flow::Yield(_) => Unwind::Error(crate::runtime::EvalError::yield_escape()),
         }
     }
 

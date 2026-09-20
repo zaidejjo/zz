@@ -663,8 +663,9 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "chan.recv" | "std.chan.recv" => Some("zz_chan_recv"),
         "chan.try_recv" | "std.chan.try_recv" => Some("zz_chan_try_recv"),
         // spawn / task join
-        "spawn" | "std.spawn" | "std.task.spawn" => Some("zz_spawn"),
+        "spawn" | "std.spawn" | "task.spawn" | "std.task.spawn" => Some("zz_spawn"),
         "task.recv" | "std.task.recv" | "task.join" | "std.task.join" => Some("zz_task_join_recv"),
+        "task.try_join" | "std.task.try_join" => Some("zz_task_try_join"),
         // http (AOT: minimal thread-per-connection server returning OK)
         "http.server" | "std.http.server" => Some("zz_http_server"),
         "http.route_get" | "std.http.route_get" => Some("zz_http_route_get"),

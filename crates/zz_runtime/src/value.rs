@@ -1,8 +1,8 @@
 //! Runtime values for the Phase 1 tree-walker.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::{TcpListener, TcpStream};
 use std::rc::Rc;
@@ -11,12 +11,22 @@ use zz_frontend::ast::{Block, Expr, Param};
 use zz_frontend::span::Span;
 
 use crate::env::Env;
+use crate::vm::{Chunk, Op};
+
+/// Cached keep-set for worker env snapshots: `(chain shape, reachable set,
+/// names to clone)`. See `Interp::spawn_keep_cache`.
+pub type SpawnKeepCache = Option<(Vec<(usize, usize)>, HashSet<String>, Vec<String>)>;
 
 /// Inner state for a thread-safe channel (unbounded queue + condvar).
 /// The Condvar lives outside the Mutex so `wait_while` can be called cleanly.
 #[derive(Debug)]
 pub struct ChanInner {
     pub queue: VecDeque<Value>,
+    /// Green-thread waiters parked in `chan.recv`, woken (moved to the
+    /// executor ready queue) by `chan.send`. Main-thread blockers use the
+    /// condvar as before; both sets are served under the same mutex, so no
+    /// wakeup can slip between the empty-check and the park.
+    pub green_waiters: Vec<u64>,
 }
 
 /// Channel pair: the mutex-protected queue and its signaling condvar.
@@ -29,8 +39,106 @@ pub struct ChanState {
 /// Inner state for a task join handle.
 #[derive(Debug)]
 pub struct TaskJoinState {
-    pub result: Arc<Mutex<Option<Result<Value, String>>>>,
+    pub result: Arc<Mutex<TaskJoinInner>>,
     pub cvar: Condvar,
+}
+
+/// Mutex-guarded join payload: the task outcome plus green-thread waiters
+/// parked in `task.join` / `task.try_join`-style waits.
+///
+/// `result` is consumed by the first main-thread `task.join`/`task.try_join`
+/// take; `completed` stays set so late joiners get a loud "already consumed"
+/// error instead of hanging forever on a result that will never arrive.
+/// Green-thread waiters always receive clones at completion time and never
+/// consume.
+#[derive(Debug, Default)]
+pub struct TaskJoinInner {
+    pub result: Option<Result<Value, String>>,
+    pub completed: bool,
+    pub green_waiters: Vec<u64>,
+}
+
+/// A green-thread task identifier. Allocated from a process-wide counter by
+/// the executor; `0` is reserved as "no task" (main thread).
+pub type TaskId = u64;
+
+/// Why a green-thread task yielded its executor thread. The task made no
+/// progress since (parked immediately), so resumption continues right after
+/// the blocking call — with the call's dummy result replaced by the real
+/// value under the channel/handle lock before requeue.
+#[derive(Debug, Clone)]
+pub enum YieldReason {
+    /// Parked in `chan.recv` on an empty channel.
+    ChanWait { chan: Arc<ChanState> },
+    /// Parked in `task.join` on an incomplete task.
+    JoinWait { handle: Arc<TaskJoinState> },
+    /// Cooperative quantum expiry at a loop safepoint (`Op::Safepoint`):
+    /// the task ran longer than its timeslice without blocking. No object
+    /// is involved — the executor just requeues it so siblings run.
+    Timeslice,
+}
+
+// ── Executor thread-locals ────────────────────────────────────────────────
+//
+// Cooperatively scheduled ("green") tasks run on executor threads and must
+// never block them: `chan.recv`/`task.join` yield instead of waiting when
+// the conditions below hold. Main-thread execution never yields.
+
+thread_local! {
+    /// Task currently running on this executor thread (`None` on main and
+    /// pool-fallback threads). Set by the executor around each task slice.
+    static EXECUTOR_TASK: std::cell::Cell<Option<TaskId>> = const { std::cell::Cell::new(None) };
+    /// Pending yield request, set by `chan.recv`/`task.join` instead of
+    /// blocking. The VM loop takes it after the call op and suspends.
+    static PENDING_YIELD: RefCell<Option<YieldReason>> = const { RefCell::new(None) };
+    /// Tree-walker (interpreted) evaluation depth on this thread. Yields are
+    /// only sound directly under the VM loop: interpreter frames cannot be
+    /// resumed (Rust call stack), so blocking natives fall back to parking
+    /// the thread whenever this is nonzero.
+    static INTERP_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The green-thread task running on this thread, if any.
+pub fn executor_task() -> Option<TaskId> {
+    EXECUTOR_TASK.with(|c| c.get())
+}
+
+/// True when this thread runs green-thread tasks (yield protocol active).
+pub fn on_executor() -> bool {
+    executor_task().is_some()
+}
+
+/// Request suspension of the current task. No-op semantics for the caller:
+/// the VM loop converts this into `Flow::Yield` right after the call op.
+pub fn request_yield(reason: YieldReason) {
+    PENDING_YIELD.with(|c| *c.borrow_mut() = Some(reason));
+}
+
+/// Take a pending yield request, if the last call op left one.
+pub fn take_yield() -> Option<YieldReason> {
+    PENDING_YIELD.with(|c| c.borrow_mut().take())
+}
+
+/// Current interpreter-nesting depth (see `INTERP_DEPTH`).
+pub fn interp_depth() -> usize {
+    INTERP_DEPTH.with(|c| c.get())
+}
+
+/// Run `f` with the interpreter depth bumped (tree-walker frames above any
+/// blocking native make yielding unsound — the thread parks instead).
+pub fn with_interp_depth<R>(f: impl FnOnce() -> R) -> R {
+    INTERP_DEPTH.with(|c| c.set(c.get() + 1));
+    let r = f();
+    INTERP_DEPTH.with(|c| c.set(c.get() - 1));
+    r
+}
+
+/// Run `f` as green-thread `task` on this executor thread.
+pub fn with_executor_task<R>(task: TaskId, f: impl FnOnce() -> R) -> R {
+    EXECUTOR_TASK.with(|c| c.set(Some(task)));
+    let r = f();
+    EXECUTOR_TASK.with(|c| c.set(None));
+    r
 }
 
 /// A struct instance payload (boxed so `Value` stays small).
@@ -148,9 +256,96 @@ unsafe impl Send for FuncValue {}
 /// result safe to move across thread boundaries.
 pub fn snapshot_env(env: &Rc<RefCell<crate::env::Env>>) -> HashMap<String, Value> {
     let flat = env.borrow().flatten();
+    // ONE memo for all entries: captured values routinely share envs (e.g.
+    // every stdlib func aliases its module scope). A fresh memo per entry
+    // re-clones the shared graph once per entry (measured 130ms/spawn for
+    // 131 entries); sharing makes it linear.
+    let mut seen: HashMap<usize, Value> = HashMap::new();
     flat.into_iter()
-        .map(|(k, v)| (k, deep_clone_value(v, &mut HashMap::new())))
+        .map(|(k, v)| (k, deep_clone_value(v, &mut seen)))
         .collect()
+}
+
+/// Flatten a captured environment into a self-contained `HashMap`, keeping
+/// only what the worker chunk may reference.
+///
+/// `loads` (from [`reachable_refs`]) names every environment resolution
+/// the worker can perform — loads, path heads, and store targets (a store
+/// to a missing name errors, so targets stay). A `Func` entry under a
+/// referenced name is still dropped when it is the same object the table
+/// slice carries (resolution falls through to the table); shadowing
+/// definitions (different captured object) are always kept. This shrinks
+/// the worker env from the whole module namespace (~130 entries, ~13k
+/// deep-clone visits) to the closure's actual references (often ~zero).
+pub fn snapshot_env_pruned(
+    env: &Rc<RefCell<crate::env::Env>>,
+    funcs: &HashMap<String, FuncValue>,
+    reachable: &HashSet<String>,
+    loads: &HashSet<String>,
+    keep_cache: &mut SpawnKeepCache,
+) -> HashMap<String, Value> {
+    // ONE memo for all entries: captured values routinely share envs (e.g.
+    // every stdlib func aliases its module scope). A fresh memo per entry
+    // re-clones the shared graph once per entry (measured 130ms/spawn for
+    // 131 entries); sharing makes it linear.
+    // Keep-set cache: the filter decision depends only on the chain shape
+    // (scope identities + binding counts — any new binding changes the
+    // shape) and the reachable set. Loop iterations from one spawn site
+    // hit this and skip the visit walk; values are always cloned fresh.
+    let shape = crate::env::Env::chain_shape(env);
+    let keep: Vec<String> = match keep_cache {
+        // `loads` is a pure function of the spawn-site chunk, so keying on
+        // `(shape, reachable)` covers it: same site + same table membership
+        // ⇒ same loads.
+        Some((s, r, names)) if *s == shape && *r == *reachable => names.clone(),
+        _ => {
+            // Two phases: decide keep/drop under the chain borrows
+            // (predicate only reads), then clone after all borrows are
+            // released. Cloning inside the visit could re-borrow a visited
+            // scope (a kept value may capture it) and trip the RefCell
+            // dynamic check.
+            let mut fresh: Vec<String> = Vec::new();
+            crate::env::Env::visit_flat(env, |k, v| {
+                // Unreferenced names are never resolved: drop, whatever
+                // they hold. (Calls resolve through `reachable` names, and
+                // every call path is also a load.)
+                if !loads.contains(k.as_str()) {
+                    return;
+                }
+                if let Value::Func(fv) = v {
+                    let covered = reachable.contains(k.as_str())
+                        && funcs
+                            .get(k.as_str())
+                            .is_some_and(|tf| Rc::as_ptr(&tf.env) == Rc::as_ptr(&fv.env));
+                    if covered {
+                        return;
+                    }
+                }
+                fresh.push(k.clone());
+            });
+            *keep_cache = Some((shape, reachable.clone(), fresh.clone()));
+            fresh
+        }
+    };
+    // Debug aid (ZZ_SPAWN_PROFILE=2, see spawn profiler): kept inventory.
+    if std::env::var("ZZ_SPAWN_PROFILE")
+        .map(|v| v == "2")
+        .unwrap_or(false)
+    {
+        eprintln!("[snap-env] keep {keep:?}");
+    }
+    let mut seen: HashMap<usize, Value> = HashMap::new();
+    let mut out = HashMap::with_capacity(keep.len());
+    for k in keep {
+        // Borrow released before `deep_clone_value` runs: a kept value may
+        // capture this very scope, and cloning it re-borrows the chain.
+        // `get` resolves leaf-most — same binding the visit decided on.
+        let v = env.borrow().get(&k);
+        if let Some(v) = v {
+            out.insert(k, deep_clone_value(v, &mut seen));
+        }
+    }
+    out
 }
 
 /// Snapshot a function table so it is safe to send across thread boundaries.
@@ -162,7 +357,54 @@ pub fn snapshot_funcs(funcs: &HashMap<String, FuncValue>) -> HashMap<String, Fun
     // funcs hung spawn outright). Same ptr = same object, so sharing
     // the map is exactly as correct, linear instead of exponential.
     let mut seen: HashMap<usize, Value> = HashMap::new();
+    // Memoize flatten per env: many funcs alias the same module scopes, and
+    // `flatten` clones every layer per call. Without this the table snapshot
+    // re-walks shared chains once per func (measured 100ms+/spawn for 98
+    // funcs). Same ptr = same scope chain, so reuse is exactly as correct.
+    // NOTE: the cached flat maps are consumed read-only below; the per-entry
+    // deep clones still produce independent worker-owned values.
+    let mut flats: HashMap<usize, HashMap<String, Value>> = HashMap::new();
     for (name, fv) in funcs {
+        let key = Rc::as_ptr(&fv.env) as *const () as usize;
+        // Borrow dance: compute the flat map only on first sight of an env.
+        let flat = flats
+            .entry(key)
+            .or_insert_with(|| fv.env.borrow().flatten());
+        let new_env = Rc::new(RefCell::new(crate::env::Env::new()));
+        {
+            let mut e = new_env.borrow_mut();
+            for (k, v) in flat {
+                e.define(k, deep_clone_value(v.clone(), &mut seen));
+            }
+        }
+        out.insert(
+            name.clone(),
+            FuncValue {
+                params: fv.params.clone(),
+                body: Expr::Block(Block {
+                    stmts: Vec::new(),
+                    span: Span::new(0, 0),
+                }),
+                env: new_env,
+                chunk: fv.chunk.clone(),
+            },
+        );
+    }
+    out
+}
+
+/// Clone a cached (already detached) function-table snapshot for one worker.
+///
+/// The cached entries are self-contained, so no flattening is needed — but
+/// the nested `Rc` envs must still be re-detached per worker, or workers
+/// would alias each other's (and the cache's) environments. A single memo
+/// is shared across the whole table, same discipline as [`snapshot_funcs`].
+pub fn detach_cached_funcs(cached: &HashMap<String, FuncValue>) -> HashMap<String, FuncValue> {
+    let mut seen: HashMap<usize, Value> = HashMap::new();
+    let mut out = HashMap::with_capacity(cached.len());
+    for (name, fv) in cached {
+        // Cached envs are single-scope (built by `snapshot_funcs`), so a
+        // plain flatten is a one-layer copy — no chain walk.
         let flat = fv.env.borrow().flatten();
         let new_env = Rc::new(RefCell::new(crate::env::Env::new()));
         {
@@ -185,6 +427,152 @@ pub fn snapshot_funcs(funcs: &HashMap<String, FuncValue>) -> HashMap<String, Fun
         );
     }
     out
+}
+
+/// Compute the function-table names plus the environment names a worker
+/// chunk may reference.
+///
+/// Scans the root chunk (plus transitively referenced function bodies and
+/// inline closure chunks) for name operands:
+/// - `funcs`: candidates that name (or method-match) table entries, for
+///   the worker's table slice. Conservative: exact names plus dotted
+///   joins/prefixes for paths, plus a `.{method}` suffix rule so
+///   struct/impl method calls (`rect.area()` → `Shape.area`) resolve
+///   without knowing the receiver's runtime type.
+/// - `loads`: names the worker must resolve through its environment
+///   (variable loads, path heads, store targets — a store to a missing
+///   name errors, so targets are included). The env snapshot keeps exactly
+///   these (plus shadowing definitions); everything else the worker never
+///   asks for. Under-inclusion would be a loud resolve error, never silent
+///   wrong behavior — and the scan covers every name-carrying op, including
+///   method tails (env-first method fallback) and transitive bodies.
+pub fn reachable_refs(
+    root: &Arc<Chunk>,
+    funcs: &HashMap<String, FuncValue>,
+) -> (HashSet<String>, HashSet<String>) {
+    let mut names: HashSet<String> = HashSet::new();
+    let mut loads: HashSet<String> = HashSet::new();
+    // Worklist of chunks to scan; `visited` keys chunk identity so shared
+    // bodies (and cycles via MakeFunc) are scanned once.
+    let mut stack: Vec<Arc<Chunk>> = vec![Arc::clone(root)];
+    let mut visited: HashSet<usize> = HashSet::new();
+
+    // Admit one candidate name: if it names (or method-matches) table
+    // entries, include them and enqueue their bodies for transitives.
+    //
+    // Nested fn to keep borrowck happy (borrows `funcs`/`names`/`stack`
+    // mutably across the scan loop).
+    fn admit(
+        cand: &str,
+        funcs: &HashMap<String, FuncValue>,
+        names: &mut HashSet<String>,
+        stack: &mut Vec<Arc<Chunk>>,
+    ) {
+        // Suffix rule needs the dotted form: `area` also matches `Shape.area`.
+        let suffix = format!(".{cand}");
+        for (key, fv) in funcs.iter() {
+            if (key == cand || key.ends_with(suffix.as_str())) && names.insert(key.clone()) {
+                if let Some(ch) = fv.chunk.as_ref() {
+                    stack.push(Arc::clone(ch));
+                }
+            }
+        }
+    }
+
+    while let Some(ch) = stack.pop() {
+        let ptr = Arc::as_ptr(&ch) as *const () as usize;
+        if !visited.insert(ptr) {
+            continue;
+        }
+        for op in ch.code.iter() {
+            match op {
+                // Value loads and store targets resolve through the env.
+                Op::LoadVar(n, _) | Op::StoreVar(n, _) => {
+                    loads.insert(n.clone());
+                    admit(n, funcs, &mut names, &mut stack);
+                }
+                Op::LoadPath(parts, _) | Op::StorePath(parts, _) => {
+                    if parts.is_empty() {
+                        continue;
+                    }
+                    // Every component: heads resolve as values, and the tail
+                    // can name a method looked up bare in the env
+                    // (`lookup_method` checks the env first).
+                    loads.insert(parts.join("."));
+                    for p in parts {
+                        loads.insert(p.clone());
+                    }
+                    admit(&parts.join("."), funcs, &mut names, &mut stack);
+                    admit(&parts[0], funcs, &mut names, &mut stack);
+                }
+                Op::CallPath { parts, .. } => {
+                    if parts.is_empty() {
+                        continue;
+                    }
+                    // Callee path resolves like a load (env → funcs →
+                    // natives), so its names join the load set — including
+                    // the tail, which `lookup_method` may resolve bare.
+                    loads.insert(parts.join("."));
+                    for p in parts {
+                        loads.insert(p.clone());
+                    }
+                    admit(&parts.join("."), funcs, &mut names, &mut stack);
+                    admit(&parts[0], funcs, &mut names, &mut stack);
+                }
+                // Method names can resolve bare through the env
+                // (`lookup_method` fallback), so they join the load set.
+                // Native names resolve via the registry only.
+                Op::CallMethod { name: n, .. } => {
+                    loads.insert(n.clone());
+                    admit(n, funcs, &mut names, &mut stack);
+                }
+                Op::CallNative { name: n, .. } | Op::GetField(n, _) | Op::SetField(n, _) => {
+                    admit(n, funcs, &mut names, &mut stack)
+                }
+                // Definitions bind locally; the body chunk may reference.
+                Op::MakeFunc { chunk, .. } => {
+                    stack.push(Arc::clone(chunk));
+                }
+                Op::MakeClosure { chunk, .. } => stack.push(Arc::clone(chunk)),
+                Op::DefineVar(_) => {}
+                _ => {}
+            }
+        }
+    }
+    (names, loads)
+}
+
+/// Snapshot a subset of the function table (see [`snapshot_funcs`]).
+///
+/// Used with [`reachable_func_names`] so a spawn carries only the functions
+/// its worker can call instead of the whole table.
+pub fn snapshot_funcs_subset(
+    funcs: &HashMap<String, FuncValue>,
+    names: &HashSet<String>,
+) -> HashMap<String, FuncValue> {
+    let filtered: HashMap<String, FuncValue> = funcs
+        .iter()
+        .filter(|(k, _)| names.contains(k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    snapshot_funcs(&filtered)
+}
+
+/// Detach a subset of a cached table snapshot for one worker (see
+/// [`detach_cached_funcs`]).
+pub fn detach_cached_subset(
+    cached: &HashMap<String, FuncValue>,
+    names: &HashSet<String>,
+) -> HashMap<String, FuncValue> {
+    if names.len() == cached.len() {
+        return detach_cached_funcs(cached);
+    }
+    let filtered: HashMap<String, FuncValue> = cached
+        .iter()
+        .filter(|(k, _)| names.contains(k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    detach_cached_funcs(&filtered)
 }
 
 /// Deep-clone a value, rewriting any `Value::Func` so its captured env is
