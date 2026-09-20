@@ -77,26 +77,93 @@ impl Env {
         }
     }
 
+    /// Shape fingerprint of the scope chain: per-scope `(identity, binding
+    /// count)` leaf→root. The *set* of visible names can only change when a
+    /// binding is added (count changes) or a scope is replaced (identity
+    /// changes), so snapshots can cache name-filter decisions against this
+    /// key while always cloning values fresh.
+    pub fn chain_shape(env: &Rc<RefCell<Env>>) -> Vec<(usize, usize)> {
+        let mut shape = Vec::new();
+        let mut cur: Option<Rc<RefCell<Env>>> = Some(Rc::clone(env));
+        while let Some(rc) = cur {
+            let (key, parent, len) = {
+                let borrowed = rc.borrow();
+                (
+                    Rc::as_ptr(&rc) as *const () as usize,
+                    borrowed.parent.clone(),
+                    borrowed.vars.len(),
+                )
+            };
+            shape.push((key, len));
+            cur = parent;
+        }
+        shape
+    }
+
+    /// Visit shadowing-resolved `(name, value)` pairs root→leaf without
+    /// cloning. Leaf values shadow root values: each name is visited once
+    /// (leaf-most). Used by spawn snapshots to filter entries *before*
+    /// paying for clones.
+    ///
+    /// `f` must not retain the refs it receives (copy/clone inside `f`):
+    /// each node is borrowed only for its own iteration.
+    pub fn visit_flat(env: &Rc<RefCell<Env>>, mut f: impl FnMut(&String, &Value)) {
+        // Collect the chain leaf→root (Rc clones keep nodes alive), then
+        // walk root→leaf tracking seen names so leaves win.
+        let mut chain: Vec<Rc<RefCell<Env>>> = Vec::new();
+        let mut cur: Option<Rc<RefCell<Env>>> = Some(Rc::clone(env));
+        while let Some(rc) = cur {
+            let parent = rc.borrow().parent.clone();
+            chain.push(rc);
+            cur = parent;
+        }
+        let mut seen_names: HashMap<String, ()> = HashMap::new();
+        // Debug aid (ZZ_SPAWN_PROFILE=1, see spawn profiler): chain shape.
+        let profile = std::env::var("ZZ_SPAWN_PROFILE").is_ok();
+        let mut depth = 0usize;
+        let mut node_entries = 0usize;
+        for node in chain.iter().rev() {
+            depth += 1;
+            let borrowed = node.borrow();
+            node_entries += borrowed.vars.len();
+            for (k, v) in borrowed.vars.iter() {
+                if seen_names.contains_key(k) {
+                    continue;
+                }
+                seen_names.insert(k.clone(), ());
+                f(k, v);
+            }
+        }
+        if profile {
+            eprintln!("[visit-flat] depth={depth} node_entries={node_entries}");
+        }
+    }
+
     /// Flatten the scope chain root→leaf into a `HashMap`. Leaf values shadow
     /// root values, matching normal scope semantics.
     pub fn flatten(&self) -> HashMap<String, Value> {
-        // Walk root→leaf, collecting each scope's bindings into layers.
-        let mut layers: Vec<HashMap<String, Value>> = Vec::new();
-        layers.push(self.vars.clone());
+        // Collect the chain leaf→root, then insert root→leaf so leaf values
+        // override. Single clone per entry per layer (no intermediate layer
+        // copies).
+        let mut chain: Vec<HashMap<String, Value>> = Vec::new();
+        // NOTE: cannot borrow across the loop (RefCell), so each layer is
+        // cloned once here; shadowed entries are simply overwritten below.
+        chain.push(self.vars.clone());
         let mut cur = self.parent.clone();
         while let Some(rc) = cur {
             let parent_opt = {
                 let env = rc.borrow();
-                layers.push(env.vars.clone());
+                chain.push(env.vars.clone());
                 env.parent.clone()
             };
             cur = parent_opt;
         }
-        // Walk root→leaf so leaf values override root values.
-        let mut flat = HashMap::new();
-        for layer in layers.iter().rev() {
-            for (k, v) in layer {
-                flat.insert(k.clone(), v.clone());
+        let mut flat = HashMap::with_capacity(chain.iter().map(|l| l.len()).sum());
+        // Drain root→leaf: each entry moves exactly once; leaf values
+        // overwrite root values via plain insert.
+        for mut layer in chain.into_iter().rev() {
+            for (k, v) in layer.drain() {
+                flat.insert(k, v);
             }
         }
         flat

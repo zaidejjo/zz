@@ -225,6 +225,7 @@ struct zz_task_join {
     pthread_t       thread;
     zz_value        result;
     int             completed;
+    int             consumed;   // set once `task.try_join` takes the result
     pthread_mutex_t lock;
     pthread_cond_t  cond;
 };
@@ -290,7 +291,9 @@ static inline zz_value zz_bool(bool b) {
 }
 
 // ---- refcount fast path ------------------------------------------------
-// Unified refcounting inlined: strings use plain (non-atomic) refcounts,
+// Unified refcounting inlined: strings use atomic refcounts (plain would
+// race when a value crosses threads via channels or spawn captures —
+// channel send/recv and spawn/closure paths share strings across threads),
 // arrays/dicts/funcs delegate to the out-of-line atomic ARC helpers.
 // Inlining removes a call + switch dispatch on every boxed touch
 // (clone/assign/index-load) in hot loops; the atomic slow paths stay
@@ -311,7 +314,7 @@ static inline void zz_retain(zz_value *v) {
     switch (v->tag) {
     case ZZ_STR:
         if (v->s && !v->s->interned && v->s->refs > 0) {
-            v->s->refs++;
+            __atomic_add_fetch(&v->s->refs, 1, __ATOMIC_RELAXED);
         }
         break;
     case ZZ_ARRAY:
@@ -342,7 +345,7 @@ static inline void zz_release(zz_value *v) {
             if (v->s->refs == 0) {
                 return;
             }
-            if (--v->s->refs == 0) {
+            if (__atomic_sub_fetch(&v->s->refs, 1, __ATOMIC_ACQ_REL) == 0) {
                 // SSO strings (cap==0) have no separate heap buffer.
                 // Heap strings (cap>0) store data in a separate malloc'd buffer.
                 if (v->s->cap > 0) free(v->s->heap);
@@ -393,8 +396,10 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
 static inline zz_value zz_clone(zz_value v) {
     switch (v.tag) {
     case ZZ_STR:
-        if (v.s && !v.s->interned) {
-            v.s->refs++;
+        // The refs>0 guard matters: arena strings (refs==0 sentinel) must
+        // never be promoted to heap ownership by a bare bump.
+        if (v.s && !v.s->interned && v.s->refs > 0) {
+            __atomic_add_fetch(&v.s->refs, 1, __ATOMIC_RELAXED);
         }
         break;
     case ZZ_ARRAY:
@@ -437,8 +442,7 @@ zz_value zz_neg(zz_value a);
 zz_value zz_not(zz_value a);
 bool zz_truthy(zz_value v);
 
-// ---- calls --------------------------------------------------------------
-// Closure entry point: args, argc, then the captured environment (array of
+// ---- calls --------------------------------------------------------------// Closure entry point: args, argc, then the captured environment (array of
 // shared heap-cell pointers, one per free variable at the creation site).
 typedef zz_value (*zz_dispatch_fn)(zz_value *args, size_t argc, void **env, size_t nenv);
 
@@ -450,6 +454,19 @@ zz_value zz_closure_make(zz_dispatch_fn f);
 // environment outlives the creating scope. Cells themselves are shared,
 // never copied — owner and closures read/write the same storage.
 zz_value zz_closure_make_ex(zz_dispatch_fn f, void **cells, size_t nenv);
+// Typed variant: `kinds[i]`/`sizes[i]` describe `cells[i]` (`ZZ_CELL_VALUE`
+// = boxed `zz_value*` cell, deep-copied by `zz_value_dup`; `ZZ_CELL_RAW` =
+// scalar/struct cell of `sizes[i]` bytes, copied with a fresh memcpy).
+// NULL `kinds`/`sizes` means every cell is `ZZ_CELL_VALUE`. The rep owns
+// its copies of both arrays.
+#define ZZ_CELL_VALUE 0
+#define ZZ_CELL_RAW 1
+zz_value zz_closure_make_ex_typed(
+    zz_dispatch_fn f,
+    void **cells,
+    const unsigned char *kinds,
+    const size_t *sizes,
+    size_t nenv);
 // Extract the generated function pointer from a closure value.
 zz_dispatch_fn zz_closure_target(zz_value v);
 // Extract the captured environment from a closure value (NULL + 0 when none).
@@ -545,12 +562,22 @@ zz_value zz_encoding_hex_encode(zz_value s, int *err);
 zz_value zz_encoding_hex_decode(zz_value s, int *err);
 
 // ---- channels / spawn ---------------------------------------------------
-zz_value zz_chan_new(int *err);
+// Deep copy for thread boundaries (snapshot isolation): heap-owned,
+// fully independent of the source (arena pointers healed, closure cells
+// duplicated). Handles are shared, never duplicated.
+zz_value zz_value_dup(zz_value v);
+zz_value zz_chan_new(zz_value unused, int *err);
 zz_value zz_chan_send(zz_value chan, zz_value val, int *err);
 zz_value zz_chan_recv(zz_value chan, int *err);
 zz_value zz_chan_try_recv(zz_value chan, int *err);
 zz_value zz_spawn(zz_value fn, int *err);
 zz_value zz_task_join_recv(zz_value join, int *err);
+zz_value zz_task_try_join(zz_value join, int *err);
+// Cooperative safepoint for loop tops (emitted by the AOT lowerer for
+// every `for`/`while`). Budget-guarded courtesy yield: lets sibling task
+// threads run on quantum expiry. No task switch — C frames cannot suspend
+// like VM frames (see executor docs for the VM counterpart).
+void zz_safepoint(void);
 
 // ---- std.net TCP --------------------------------------------------------
 zz_value zz_tcp_listen(zz_value addr, int *err);

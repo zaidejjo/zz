@@ -12,5 +12,6 @@ task.spawn(|_| {
 })
 a:int = std.chan.recv(results)
 b:int = std.chan.recv(results)
-io.println("{a} {b}")
+// Recv order follows thread scheduling — print min/max so VM/AOT match.
+if a < b { io.println("{a} {b}") } else { io.println("{b} {a}") }
 io.println("spawn_ok")

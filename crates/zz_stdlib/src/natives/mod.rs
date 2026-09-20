@@ -2331,6 +2331,13 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
             f: concurrency::task_join,
         },
     );
+    m.insert(
+        "std.task.try_join".into(),
+        NativeEntry {
+            arity: 1,
+            f: concurrency::task_try_join,
+        },
+    );
 
     // std.net — TCP networking
     m.insert(

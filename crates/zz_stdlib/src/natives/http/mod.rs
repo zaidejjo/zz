@@ -1023,7 +1023,7 @@ struct ServerSnapshot {
     middleware: Vec<FuncSnapshot>,
     log_enabled: bool,
     static_dir: Option<String>,
-    natives: HashMap<String, NativeEntry>,
+    natives: Arc<HashMap<String, NativeEntry>>,
     structs: HashMap<String, Vec<String>>,
 }
 
@@ -1081,10 +1081,10 @@ impl ServerSnapshot {
         }
     }
 
-    /// Create a fresh `Interp` on the current thread with cloned natives
-    /// and structs but an empty environment.
+    /// Create a fresh `Interp` on the current thread with shared natives
+    /// and cloned structs but an empty environment.
     fn fresh_interp(&self) -> Interp {
-        let mut interp = Interp::with_natives(self.natives.clone());
+        let mut interp = Interp::with_natives_shared(Arc::clone(&self.natives));
         interp.structs = self.structs.clone();
         interp
     }

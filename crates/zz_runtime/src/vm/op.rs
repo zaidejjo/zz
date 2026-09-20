@@ -146,6 +146,13 @@ pub enum Op {
     Continue(Span),
     /// Pop a value and store it as the innermost loop's result.
     SetLoopResult,
+    /// Cooperative safepoint at a loop header (emitted by the compiler for
+    /// every `for`/`while`). Stack-neutral: decrements the VM's slice
+    /// budget, and once per budget worth of iterations checks the timeslice
+    /// clock — yielding to the executor when the task overruns its quantum
+    /// so CPU-bound loops cannot starve sibling tasks. Header (not
+    /// back-edge) placement so `continue` cannot skip the check.
+    Safepoint,
 
     // ---- collections ----
     /// Pop `n` values and push an array.

@@ -41,6 +41,17 @@ impl EvalError {
         }
     }
 
+    /// Loud internal error for a green-thread `Yield` that reached code
+    /// which cannot suspend (interpreter frames live on the Rust call
+    /// stack). Blocking natives park the thread instead whenever such
+    /// frames are above them, so this is always a bug.
+    pub fn yield_escape() -> Self {
+        EvalError::new(
+            "internal error: green-thread yield across interpreter frames",
+            Span::new(0, 0),
+        )
+    }
+
     pub fn with_backtrace(mut self, bt: Vec<(String, Span)>) -> Self {
         self.backtrace = bt;
         self
@@ -59,13 +70,16 @@ impl EvalError {
 
 /// Result of evaluating an expression or statement. `Return` unwinds the
 /// call stack until the enclosing function call catches it; `Break` and
-/// `Continue` unwind to the enclosing loop.
+/// `Continue` unwind to the enclosing loop. `Yield` suspends a green-thread
+/// task at a blocking call (`chan.recv`/`task.join` on an unready object);
+/// only the executor produces or consumes it.
 #[derive(Debug)]
 pub enum Flow {
     Value(Value),
     Return(Value),
     Break(Span),
     Continue(Span),
+    Yield(crate::value::YieldReason),
 }
 
 impl Flow {
@@ -78,6 +92,10 @@ impl Flow {
             )),
             Flow::Break(span) => Err(EvalError::new("`break` outside of a loop", span)),
             Flow::Continue(span) => Err(EvalError::new("`continue` outside of a loop", span)),
+            Flow::Yield(_) => Err(EvalError::new(
+                "internal error: green-thread yield escaped its executor",
+                Span::new(0, 0),
+            )),
         }
     }
 }

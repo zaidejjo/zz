@@ -408,6 +408,30 @@ impl Lowerer {
                     }
                     // leaf tails skipped (no side effect)
                 } else if matches!(e, Expr::Call { .. }) {
+                    // Mutating-method write-back (mirrors the VM compiler and
+                    // tree-walker): `arr.sort()` as a statement must store
+                    // the returned array back, since AOT natives take the
+                    // array by value and return a new one. `push`/`append`
+                    // are already in-place (`zz_vec_append`) and excluded.
+                    if let Some((obj, method)) = mutating_method_target(e, names) {
+                        // NB: `push`/`append` lower in void context to
+                        // in-place `zz_vec_append`, which returns Unit —
+                        // writing that back would destroy the array.
+                        const WRITEBACK_METHODS: &[&str] =
+                            &["pop", "insert", "remove", "reverse", "sort"];
+                        let is_struct = names
+                            .lookup_type(&obj)
+                            .is_some_and(|t| t.starts_with("zz_struct_"));
+                        if !is_struct && WRITEBACK_METHODS.contains(&method.as_str()) {
+                            if let Some(cid) = names.lookup(&obj).map(|s| s.to_string()) {
+                                *self.void_context.borrow_mut() = true;
+                                let val = self.emit_expr(e, names, out);
+                                *self.void_context.borrow_mut() = false;
+                                out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
+                                return;
+                            }
+                        }
+                    }
                     *self.void_context.borrow_mut() = true;
                     let val = self.emit_expr(e, names, out);
                     *self.void_context.borrow_mut() = false;
@@ -591,6 +615,8 @@ impl Lowerer {
                     "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++) {{\n"
                 );
                 out.push_str(&s);
+                // Loop-top safepoint (mirrors the VM's `Op::Safepoint`).
+                out.push_str("    zz_safepoint();\n");
             } else {
                 // Slow path: both bounds are general expressions, use boxed loop
                 let sv_boxed = sv;
@@ -599,7 +625,8 @@ impl Lowerer {
                     "{{ zz_value _s = {sv_boxed}; zz_value _e = {ev_boxed};\n    \
                      if (_s.tag == ZZ_INT && _e.tag == ZZ_INT) {{\n        \
                      for (int64_t {cid}_i = _s.i; {cid}_i < _e.i; {cid}_i++) {{\n            \
-                     int64_t {cid} = {cid}_i;\n"
+                     int64_t {cid} = {cid}_i;\n            \
+                     zz_safepoint();\n"
                 );
                 out.push_str(&s);
             }
@@ -678,6 +705,7 @@ impl Lowerer {
                      : ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
                 ));
                 out.push_str(&format!("    for (; {idx} < {len}; {idx}++) {{\n"));
+                out.push_str("    zz_safepoint();\n");
                 out.push_str(&format!(
                     "        zz_value {cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
                      ? zz_clone({iter_tmp}.arr->items[{idx}])\n\
@@ -723,6 +751,7 @@ impl Lowerer {
                     "    int64_t {len} = ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
                 ));
                 out.push_str(&format!("    for (; {idx} < {len}; {idx}++) {{\n"));
+                out.push_str("    zz_safepoint();\n");
                 out.push_str(&format!(
                     "        zz_value {k_cid} = (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}};\n"
                 ));
@@ -843,5 +872,29 @@ impl Lowerer {
                 out.push_str(&format!("    return {val};\n"));
             }
         }
+    }
+}
+
+/// Detect `obj.method(args)` calls on a plain local variable, mirroring the
+/// VM compiler's mutating-method interception (which also handles the
+/// `Field{obj: Ident}` shape). Returns `(object_name, method_name)`.
+fn mutating_method_target(e: &Expr, names: &NameCtx) -> Option<(String, String)> {
+    let Expr::Call { callee, .. } = e else {
+        return None;
+    };
+    match callee.as_ref() {
+        // `arr.push(x)` parsed as a two-part path where the head is a local.
+        Expr::Path { parts, .. } if parts.len() == 2 => {
+            let (obj, method) = (&parts[0], &parts[1]);
+            names.lookup(obj).map(|_| (obj.clone(), method.clone()))
+        }
+        // `arr.push(x)` parsed as a field access on an identifier.
+        Expr::Field { obj, name, .. } => match obj.as_ref() {
+            Expr::Ident { name: obj_name, .. } => names
+                .lookup(obj_name)
+                .map(|_| (obj_name.clone(), name.clone())),
+            _ => None,
+        },
+        _ => None,
     }
 }

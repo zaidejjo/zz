@@ -228,6 +228,31 @@ e2e_success_test!(
     "concurrency_spawn_test.zz"
 );
 e2e_success_test!(e2e_stdlib_channel_test, "stdlib", "channel_test.zz");
+e2e_success_test!(
+    e2e_stdlib_concurrency_tasks_test,
+    "stdlib",
+    "concurrency_tasks_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_concurrency_stress_test,
+    "stdlib",
+    "concurrency_stress_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_concurrency_panic_test,
+    "stdlib",
+    "concurrency_panic_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_concurrency_try_join_test,
+    "stdlib",
+    "concurrency_try_join_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_concurrency_capture_test,
+    "stdlib",
+    "concurrency_capture_test.zz"
+);
 e2e_success_test!(e2e_stdlib_regexp_test, "stdlib", "regexp_test.zz");
 e2e_success_test!(e2e_stdlib_crypto_test, "stdlib", "crypto_test.zz");
 e2e_success_test!(

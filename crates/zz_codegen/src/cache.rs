@@ -105,8 +105,16 @@ pub fn ensure_rt_a(
 
     let path = dir.join("libzz_rt.a");
 
-    if path.exists() {
-        return Ok(path);
+    // A usable archive is never tiny: parallel builds used to race on
+    // shared temp paths and publish corrupt (observed: 8-byte) archives.
+    // Treat those as missing so they rebuild instead of poisoning every
+    // later link with `undefined reference to main`.
+    const MIN_ARCHIVE_BYTES: u64 = 1024;
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() >= MIN_ARCHIVE_BYTES {
+            return Ok(path);
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     compile_rt_a(opts, clang, target, Some(&path))
@@ -128,9 +136,19 @@ fn compile_rt_a(
     let raw = format!("{}\n{}", crate::RUNTIME_H, crate::RUNTIME_C);
     let src = crate::lower::strip_quoted_includes(&raw);
 
+    // Unique temporaries per call: parallel test threads (and processes)
+    // share the pid + key namespace, and identical `zz-rt-*` paths used to
+    // make concurrent clang/ar invocations clobber each other into corrupt
+    // (e.g. 8-byte) archives. The counter + thread id disambiguate; the
+    // final `rename` below publishes atomically.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let uniq = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
     let tmpbase = std::env::temp_dir().join(format!(
-        "zz-rt-{}-{}",
+        "zz-rt-{}-{:?}-{}-{}",
         std::process::id(),
+        std::thread::current().id(),
+        uniq,
         &key[..16.min(key.len())]
     ));
     let c_path = tmpbase.with_extension("c");
@@ -173,10 +191,19 @@ fn compile_rt_a(
     let default_dir = cache_dir().join(&key);
     let default_path = default_dir.join("libzz_rt.a");
     let archive_path = dest.unwrap_or(&default_path);
+    if let Some(parent) = archive_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Build the archive at a unique temp path, then atomically rename over
+    // the cache entry: concurrent compilers never observe (or publish) a
+    // half-written archive. The pid + counter keep parallel processes and
+    // threads from colliding.
+    let tmp_archive =
+        archive_path.with_file_name(format!(".libzz_rt.{}.{}.tmp", std::process::id(), uniq));
     let ar_out = Command::new("ar")
         .args([
             "rcs",
-            archive_path.to_str().unwrap(),
+            tmp_archive.to_str().unwrap(),
             o_path.to_str().unwrap(),
         ])
         .output()
@@ -184,9 +211,14 @@ fn compile_rt_a(
     if !ar_out.status.success() {
         let _ = std::fs::remove_file(&c_path);
         let _ = std::fs::remove_file(&o_path);
+        let _ = std::fs::remove_file(&tmp_archive);
         return Err(BuildError::CompileFailed {
             stderr: String::from_utf8_lossy(&ar_out.stderr).into_owned(),
         });
+    }
+    if std::fs::rename(&tmp_archive, archive_path).is_err() {
+        // Lost a publish race with an identical archive: adopt whatever won.
+        let _ = std::fs::remove_file(&tmp_archive);
     }
 
     // Cleanup temporaries.

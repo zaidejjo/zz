@@ -2617,6 +2617,16 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.task.join".into(),
         sig_t(vec![("handle", Type::TaskJoin)], t.clone()),
     );
+    m.insert(
+        "std.task.try_join".into(),
+        sig_t(
+            vec![("handle", Type::TaskJoin)],
+            Type::Option(Box::new(Type::Result(
+                Box::new(t.clone()),
+                Box::new(Type::Str),
+            ))),
+        ),
+    );
 
     // ── Test assertions (lockstep with natives/assert) ──────────────
     // Top-level builtins available without import; also `std.test.*`.
@@ -2763,6 +2773,7 @@ mod tests {
         assert!(funcs.contains_key("append"));
         assert!(funcs.contains_key("std.task.spawn"));
         assert!(funcs.contains_key("std.task.join"));
+        assert!(funcs.contains_key("std.task.try_join"));
         assert!(funcs.contains_key("std.sqlz.open"));
         assert!(funcs.contains_key("std.sqlz.exec"));
         assert!(funcs.contains_key("std.sqlz.query"));
@@ -2802,7 +2813,7 @@ mod tests {
         assert!(funcs.contains_key("colors.red"));
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
-        assert_eq!(funcs.len(), 536);
+        assert_eq!(funcs.len(), 537);
     }
 
     #[test]

@@ -29,6 +29,11 @@ typedef struct {
 
 static zz_intern_entry zz_intern_table[ZZ_INTERN_BUCKETS];
 
+// Spawned threads evaluate string literals too, so interning must be
+// thread-safe: one mutex around lookup-or-create (first touch per literal
+// is rare; steady-state hits are a single locked probe chain).
+static pthread_mutex_t zz_intern_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static uint32_t fnv1a(const char *s, size_t len) {
     uint32_t h = 2166136261u;
     for (size_t i = 0; i < len; i++) {
@@ -39,38 +44,56 @@ static uint32_t fnv1a(const char *s, size_t len) {
 }
 
 static zz_str *intern_lookup_or_create(const char *src, size_t len) {
+    pthread_mutex_lock(&zz_intern_lock);
     uint32_t h = fnv1a(src, len);
     uint32_t idx = h % ZZ_INTERN_BUCKETS;
+    zz_str *found = NULL;
     for (uint32_t probe = 0; probe < ZZ_INTERN_BUCKETS; probe++) {
         uint32_t i = (idx + probe) % ZZ_INTERN_BUCKETS;
         zz_intern_entry *e = &zz_intern_table[i];
         if (e->src == NULL) {
-            // Empty slot: build singleton via str_alloc (handles SSO).
-            zz_str *s = str_alloc(len);
-            s->interned = 1;
-            memcpy(zz_str_ptr(s), src, len);
-            zz_str_ptr(s)[len] = '\0';
-            e->src = src;
-            e->len = len;
-            e->singleton = s;
-            return s;
+            break; // absent — fall through to create below
         }
         if (e->len == len && e->src == src) {
             // Same literal pointer: guaranteed match.
-            return e->singleton;
+            found = e->singleton;
+            break;
         }
         if (e->len == len && memcmp(e->src, src, len) == 0) {
             // Same bytes, different .rodata address (e.g., the same literal
             // duplicated by the compiler or by string concatenation in C).
-            return e->singleton;
+            found = e->singleton;
+            break;
         }
     }
-    // Table full: fall back to a fresh allocation via str_alloc.
-    zz_str *s = str_alloc(len);
-    s->interned = 1;
-    memcpy(zz_str_ptr(s), src, len);
-    zz_str_ptr(s)[len] = '\0';
-    return s;
+    if (!found) {
+        // Absent (or table full — then the singleton is simply not cached):
+        // build an immortal copy via str_alloc.
+        for (uint32_t probe = 0; probe < ZZ_INTERN_BUCKETS; probe++) {
+            uint32_t i = (idx + probe) % ZZ_INTERN_BUCKETS;
+            zz_intern_entry *e = &zz_intern_table[i];
+            if (e->src == NULL) {
+                zz_str *s = str_alloc(len);
+                s->interned = 1;
+                memcpy(zz_str_ptr(s), src, len);
+                zz_str_ptr(s)[len] = '\0';
+                e->src = src;
+                e->len = len;
+                e->singleton = s;
+                found = s;
+                break;
+            }
+        }
+        if (!found) {
+            zz_str *s = str_alloc(len);
+            s->interned = 1;
+            memcpy(zz_str_ptr(s), src, len);
+            zz_str_ptr(s)[len] = '\0';
+            found = s;
+        }
+    }
+    pthread_mutex_unlock(&zz_intern_lock);
+    return found;
 }
 
 // ---- string helpers ----------------------------------------------------

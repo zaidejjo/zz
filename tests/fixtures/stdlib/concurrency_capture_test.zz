@@ -1,0 +1,43 @@
+// E2E: capture — closures capturing outer params/loop vars, spawn + join.
+// Regression: the capture prologue left DefineVar values on the stack,
+// shifting every later slot by one per captured param (`h` read `n`);
+// and AOT `zz_value_dup` misread unboxed int cells as `zz_value*`
+// (spawn segfault). Deterministic: exact sums, no timing dependence.
+import std.io
+import std.task
+import std.chan
+
+func work(n: int) -> int {
+    h := task.spawn(|_| {
+        s := 0
+        for i in 0..n {
+            s = s + i
+        }
+        s
+    })
+    r := 0
+    r = task.join(h)
+    r
+}
+
+func fan(n: int) -> int {
+    c := std.chan()
+    for i in 0..n {
+        task.spawn(|_| {
+            std.chan.send(c, i)
+        })
+    }
+    sum := 0
+    for i in 0..n {
+        v := 0
+        v = std.chan.recv(c)
+        sum = sum + v
+    }
+    sum
+}
+
+func main() {
+    io.println("{work(100)}")
+    io.println("{fan(10)}")
+    io.println("capture_ok")
+}

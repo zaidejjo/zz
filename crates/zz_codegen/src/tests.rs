@@ -53,7 +53,12 @@ fn vm_run(src: &str) -> (i32, String) {
     let mut interp = zz_runtime::Interp::with_natives(zz_stdlib::stdlib_natives());
     // Register io module namespace like the loader does.
     let mut funcs = HashMap::new();
-    let _ = zz_stdlib::register_module_namespace("io", "io", &mut funcs, &mut interp.natives);
+    let _ = zz_stdlib::register_module_namespace(
+        "io",
+        "io",
+        &mut funcs,
+        std::sync::Arc::make_mut(&mut interp.natives),
+    );
     match interp.run(&parsed) {
         Ok(_) => (0, String::new()),
         Err(e) => (1, e.message),
