@@ -30,8 +30,8 @@ pub type SpawnKeepCache = Option<(Vec<(usize, usize)>, HashSet<String>, Vec<Stri
 pub struct ReachCacheEntry {
     pub chunk: std::sync::Arc<Chunk>,
     pub version: u64,
-    pub reachable: HashSet<String>,
-    pub loads: HashSet<String>,
+    pub reachable: std::sync::Arc<HashSet<String>>,
+    pub loads: std::sync::Arc<HashSet<String>>,
 }
 
 /// Inner state for a thread-safe channel: lock-free ring fast path +
@@ -78,10 +78,18 @@ pub struct ChanState {
     pub cvar: Condvar,
 }
 
-/// Inner state for a task join handle.
+/// Inner state for a task join handle: outcome slot + signaling condvar.
+/// One `Mutex` (not `Arc<Mutex>` — the handle itself is already an `Arc`)
+/// plus a counted sleeper protocol so completions with no waiters store
+/// by move and skip the condvar notify entirely (the fire-and-forget
+/// fast path: no clone, no syscall).
 #[derive(Debug)]
 pub struct TaskJoinState {
-    pub result: Arc<Mutex<TaskJoinInner>>,
+    pub result: Mutex<TaskJoinInner>,
+    /// Main-thread condvar sleepers in flight. Completions notify only
+    /// when non-zero; same soundness shape as channel sleepers (announce
+    /// before the predicate check under the lock).
+    pub cvar_waiters: AtomicUsize,
     pub cvar: Condvar,
 }
 

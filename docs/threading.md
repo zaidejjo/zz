@@ -109,12 +109,15 @@ dispatch (Phase 2 territory: work-stealing).
 Spawning is pool-aware: registry entries recycle through per-shard
 pools, the registry itself is 16-way sharded (insert/lookup/remove never
 share a lock across shards), empty-capture spawns skip snapshotting
-entirely, and reachability is cached per spawn-site chunk (the cached
-`Arc` pins the address — no key-reuse hazard).
+entirely, reachability sets are `Arc`-shared per spawn-site chunk, and
+completions with no waiters store by move and skip the condvar notify.
+(Full per-chain epoch validation was tried and reverted: loop-var
+redefinition churns any global epoch, and per-scope tracking cost more
+than the chain walk it replaced — the filter walk stays, at ~2µs.)
 
 | op | ZZ | comparison |
 |---|---|---|
-| `spawn` dispatch | ~3µs (~70k spawns/sec sustained; 50k burst in 0.59s) | Go 50k burst in 0.66s |
+| `spawn` dispatch | ~3µs (~88k fan-in/s; 50k burst in 0.46s) | Go 50k burst in 0.66s, 185k fan-in/s |
 | `spawn+join` round-trip | ~25µs | pool-era ZZ was ~250ms (10,000× ago) |
 | `chan.send+recv` round-trip | ~1.9µs release (was 25µs pre-spin) | Go chan ~1.5µs/rt |
 | 64 parallel tasks | linear speedup | real parallelism, not just concurrency |

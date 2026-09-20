@@ -13,7 +13,7 @@
 pub(crate) mod executor;
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{atomic::AtomicUsize, Arc, Condvar, Mutex};
 
 use zz_runtime::{EvalError, Interp, Span, Value};
 
@@ -316,20 +316,23 @@ pub(crate) fn spawn(
     let chunk_key = Arc::as_ptr(&chunk) as *const () as usize;
     let (reachable, loads) = match interp.reach_cache.get(&chunk_key) {
         Some(e) if e.version == interp.funcs_version && Arc::ptr_eq(&e.chunk, &chunk) => {
-            (e.reachable.clone(), e.loads.clone())
+            // Arc clones: steady state shares the sets, never recopies
+            // (deref coercion passes them as `&HashSet` below).
+            (Arc::clone(&e.reachable), Arc::clone(&e.loads))
         }
         _ => {
             if interp.reach_cache.len() >= 64 {
                 interp.reach_cache.clear();
             }
             let (reachable, loads) = zz_runtime::value::reachable_refs(&chunk, &interp.funcs);
+            let (reachable, loads) = (Arc::new(reachable), Arc::new(loads));
             interp.reach_cache.insert(
                 chunk_key,
                 zz_runtime::value::ReachCacheEntry {
                     chunk: Arc::clone(&chunk),
                     version: interp.funcs_version,
-                    reachable: reachable.clone(),
-                    loads: loads.clone(),
+                    reachable: Arc::clone(&reachable),
+                    loads: Arc::clone(&loads),
                 },
             );
             (reachable, loads)
@@ -376,25 +379,32 @@ pub(crate) fn spawn(
     // set (often empty) instead of a full-table snapshot, and later spawns
     // with new reachability extend rather than rebuild. A version change
     // (runtime-defined function) resets the base.
-    if interp.spawn_funcs_cache.as_ref().map(|(v, _)| *v) != Some(interp.funcs_version) {
-        interp.spawn_funcs_cache = Some((interp.funcs_version, HashMap::new()));
-    }
-    {
-        let base = &mut interp.spawn_funcs_cache.as_mut().expect("just reset").1;
-        let missing: std::collections::HashSet<String> = reachable
-            .iter()
-            .filter(|n| !base.contains_key(n.as_str()))
-            .cloned()
-            .collect();
-        if !missing.is_empty() {
-            let extra = zz_runtime::value::snapshot_funcs_subset(&interp.funcs, &missing);
-            base.extend(extra);
+    // Empty-reachable fast path: no table entries can be referenced, so
+    // the detached subset is empty — skip the version check, the
+    // per-spawn `missing` set allocation, and the detach walk.
+    let funcs = if reachable.is_empty() {
+        HashMap::new()
+    } else {
+        if interp.spawn_funcs_cache.as_ref().map(|(v, _)| *v) != Some(interp.funcs_version) {
+            interp.spawn_funcs_cache = Some((interp.funcs_version, HashMap::new()));
         }
-    }
-    let funcs = zz_runtime::value::detach_cached_subset(
-        &interp.spawn_funcs_cache.as_ref().expect("reset above").1,
-        &reachable,
-    );
+        {
+            let base = &mut interp.spawn_funcs_cache.as_mut().expect("just reset").1;
+            let missing: std::collections::HashSet<String> = reachable
+                .iter()
+                .filter(|n| !base.contains_key(n.as_str()))
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                let extra = zz_runtime::value::snapshot_funcs_subset(&interp.funcs, &missing);
+                base.extend(extra);
+            }
+        }
+        zz_runtime::value::detach_cached_subset(
+            &interp.spawn_funcs_cache.as_ref().expect("reset above").1,
+            &reachable,
+        )
+    };
     let dt_funcs = t0.map(|t| t.elapsed());
     if profiling {
         let mut loads_sorted: Vec<&String> = loads.iter().collect();
@@ -418,7 +428,8 @@ pub(crate) fn spawn(
     // completion and wakes every waiter (green waiters via the ready queue,
     // main-thread joiners via the condvar).
     let state = Arc::new(TaskJoinState {
-        result: Arc::new(Mutex::new(zz_runtime::value::TaskJoinInner::default())),
+        result: Mutex::new(zz_runtime::value::TaskJoinInner::default()),
+        cvar_waiters: AtomicUsize::new(0),
         cvar: Condvar::new(),
     });
 
@@ -494,13 +505,18 @@ pub(crate) fn task_join(
             }
             // Wait for completion (not just result presence): a consumed
             // result (`try_join` took it) never comes back, and waiting on
-            // it would hang forever.
-            let mut guard = state
+            // it would hang forever. Counted sleepers let completions
+            // skip the condvar notify when nobody waits (same protocol
+            // as channel sleepers).
+            use std::sync::atomic::Ordering;
+            state.cvar_waiters.fetch_add(1, Ordering::AcqRel);
+            let waited = state
                 .cvar
-                .wait_while(guard, |inner| inner.result.is_none() && !inner.completed)
-                .map_err(|e| {
-                    EvalError::new(format!("task.join: condvar wait failed: {e}"), span)
-                })?;
+                .wait_while(guard, |inner| inner.result.is_none() && !inner.completed);
+            state.cvar_waiters.fetch_sub(1, Ordering::AcqRel);
+            let mut guard = waited.map_err(|e| {
+                EvalError::new(format!("task.join: condvar wait failed: {e}"), span)
+            })?;
             match guard.result.take() {
                 Some(Ok(v)) => Ok(v),
                 Some(Err(msg)) => Ok(Value::Result(Box::new(Err(Value::Str(Box::new(msg)))))),

@@ -734,6 +734,14 @@ impl Executor {
         drop(shard);
         let mut inner = handle.result.lock().unwrap();
         let waiters = std::mem::take(&mut inner.green_waiters);
+        // Fast path: nobody ever waited — store by move (no clone) and
+        // skip the condvar notify (no syscall). Fire-and-forget tasks
+        // (channel fan-in) always land here.
+        if waiters.is_empty() && handle.cvar_waiters.load(Ordering::Acquire) == 0 {
+            inner.result = Some(outcome);
+            inner.completed = true;
+            return;
+        }
         inner.result = Some(outcome.clone());
         inner.completed = true;
         drop(inner);
@@ -759,7 +767,11 @@ impl Executor {
             // runs them next, hot cache, no global-queue hop.
             Self::enqueue(wid);
         }
-        handle.cvar.notify_all();
+        // Notify main-thread joiners only when some exist (same counted-
+        // sleeper protocol as channels).
+        if handle.cvar_waiters.load(Ordering::Acquire) > 0 {
+            handle.cvar.notify_all();
+        }
     }
 }
 
