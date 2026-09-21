@@ -13,13 +13,13 @@
 pub(crate) mod executor;
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{atomic::AtomicUsize, Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use zz_runtime::{EvalError, Interp, Span, Value};
 
 use executor::Executor;
 use zz_runtime::value::snapshot_env_cow;
-use zz_runtime::value::{ChanInner, ChanState, TaskJoinState};
+use zz_runtime::value::{ChanInner, ChanState};
 
 /// `chan()` — create a new unbounded channel.
 pub(crate) fn chan_new(
@@ -459,20 +459,17 @@ fn spawn_from_parts(
         );
     }
 
-    // 3. Shared result state. The executor publishes the outcome here on
-    // completion and wakes every waiter (green waiters via the ready queue,
-    // main-thread joiners via the condvar).
-    let state = Arc::new(TaskJoinState {
-        result: Mutex::new(zz_runtime::value::TaskJoinInner::default()),
-        cvar_waiters: AtomicUsize::new(0),
-        cvar: Condvar::new(),
-    });
+    // 3. Shared result state: checked out from the join-state pool when
+    // available (see `checkout_join_state`). The executor publishes the
+    // outcome here on completion and wakes every waiter (green waiters
+    // via the ready queue, main-thread joiners via the condvar).
+    let state = Executor::checkout_join_state();
 
     // 4. Build the green task: an owned VM + task-mode interpreter seeded
     // from the snapshots, then hand it to the executor. The snapshots are
     // fully detached, so no state is shared with the spawner or other
     // tasks (`Send` rests on that construction — see `GreenTask`).
-    let mut new_interp = Interp::with_natives_shared(natives);
+    let mut new_interp = Interp::with_natives_shared_env(natives, Executor::checkout_env());
     new_interp.structs = structs;
     new_interp.funcs = funcs;
     new_interp.task_mode = true;

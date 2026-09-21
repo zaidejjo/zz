@@ -19,15 +19,16 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
-    Arc, Mutex, OnceLock,
+    Arc, Condvar, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 
+use zz_runtime::env::EnvLink;
 use zz_runtime::runtime::Flow;
 use zz_runtime::value::{
-    with_executor_task, ChanInner, ChanState, TaskId, TaskJoinState, YieldReason,
+    with_executor_task, ChanInner, ChanState, TaskId, TaskJoinInner, TaskJoinState, YieldReason,
 };
 use zz_runtime::vm::Vm;
 use zz_runtime::{Interp, Value};
@@ -120,11 +121,42 @@ pub(crate) struct Executor {
     /// (~25ns) to save ~300ns of reallocation — net win. Bounded; the
     /// reset shells hold only capacities, no task values.
     shells: Mutex<Vec<VmShell>>,
+    /// Join-state pool (Phase A4): `TaskJoinState` shells (`Arc` + Mutex
+    /// + Condvar construction) recycle the same way.
+    ///
+    /// Only unaliased shells return (see `checkin_join_state` for the
+    /// soundness argument); aliased ones drop normally.
+    join_pool: Mutex<Vec<Arc<TaskJoinState>>>,
+    /// Env shell pool (Phase A2): reset worker-leaf scopes with warmed
+    /// map tables. Values never survive (`reset_shell` clears); one lock
+    /// per checkout/checkin to save the `Rc`/`RefCell`/rehash
+    /// allocations per spawn.
+    env_pool: Mutex<Vec<EnvShell>>,
 }
 
 /// Max pooled VM shells (each holds warmed Vecs worth KBs — caps retained
 /// memory while covering any realistic completion rate).
 const VM_POOL_CAP: usize = 128;
+
+/// Max pooled join-state shells (same rationale as `VM_POOL_CAP`).
+const JOIN_POOL_CAP: usize = 128;
+
+/// Max pooled env shells (warmed map tables; values never survive —
+/// `reset_shell` clears).
+const ENV_POOL_CAP: usize = 128;
+
+/// A reset env shell for the pool. `EnvLink` is `!Send` (owned links
+/// hold `Rc`s), but a pooled shell just passed `reset_shell` — no
+/// bindings, no parent, no shared state — and crosses threads by
+/// exclusive ownership exactly once per handoff. Same discipline as
+/// `VmShell`/`GreenTask`; the wrapper keeps the unsafe claim off the
+/// general-purpose type.
+struct EnvShell(EnvLink);
+
+// SAFETY: see above. A shell in flight is an empty owned scope by
+// construction (`reset_shell` runs before pooling and `is_empty` +
+// parentless is debug-asserted at checkout).
+unsafe impl Send for EnvShell {}
 
 /// A reset VM shell for the pool. `Vm` is `!Send` (frames hold
 /// `Rc`-shared envs), but a pooled shell is always freshly `reset()` —
@@ -188,6 +220,8 @@ impl Executor {
                 sleepers: AtomicUsize::new(0),
                 wake_next: AtomicUsize::new(0),
                 shells: Mutex::new(Vec::new()),
+                join_pool: Mutex::new(Vec::new()),
+                env_pool: Mutex::new(Vec::new()),
             };
             for (index, worker) in workers.into_iter().enumerate() {
                 std::thread::spawn(move || Self::run_worker(worker, index));
@@ -417,6 +451,75 @@ impl Executor {
         let mut shells = Executor::global().shells.lock().unwrap();
         if shells.len() < VM_POOL_CAP {
             shells.push(VmShell(vm));
+        }
+    }
+
+    /// Check out a join-state shell: pooled when available, fresh
+    /// otherwise. The caller shares it between the task handle and the
+    /// green task; it returns via `checkin_join_state` at completion
+    /// (only when unaliased).
+    pub(crate) fn checkout_join_state() -> Arc<TaskJoinState> {
+        Executor::global()
+            .join_pool
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_else(|| {
+                Arc::new(TaskJoinState {
+                    result: Mutex::new(TaskJoinInner::default()),
+                    cvar_waiters: AtomicUsize::new(0),
+                    cvar: Condvar::new(),
+                })
+            })
+    }
+
+    /// Return a join-state shell to the pool. Soundness: only shells with
+    /// `strong_count == 1` return — i.e., nobody but the completing task
+    /// references them. Cloning an `Arc` requires an existing reference,
+    /// so at count 1 no other thread *can* clone it later: spawners that
+    /// kept the handle (joiners) hold count ≥ 2 and their shells drop
+    /// normally. The reset clears outcome/completion/waiters, so the next
+    /// occupant observes a pristine shell; the `Condvar` needs no reset
+    /// (count 1 proves no sleepers — a sleeper holds a handle `Arc`).
+    fn checkin_join_state(handle: &Arc<TaskJoinState>) {
+        if Arc::strong_count(handle) != 1 {
+            return;
+        }
+        {
+            let mut inner = handle.result.lock().unwrap();
+            inner.result = None;
+            inner.completed = false;
+            debug_assert!(inner.green_waiters.is_empty());
+            debug_assert_eq!(handle.cvar_waiters.load(Ordering::Acquire), 0);
+        }
+        let mut pool = Executor::global().join_pool.lock().unwrap();
+        if pool.len() < JOIN_POOL_CAP {
+            pool.push(Arc::clone(handle));
+        }
+    }
+
+    /// Check out an env shell: pooled (empty, parentless, warmed table)
+    /// when available, fresh otherwise. The caller sets the frozen
+    /// parent and defines the leaf bindings; it returns via
+    /// `checkin_env` at completion.
+    pub(crate) fn checkout_env() -> EnvLink {
+        Executor::global()
+            .env_pool
+            .lock()
+            .unwrap()
+            .pop()
+            .map(|shell| shell.0)
+            .unwrap_or_default()
+    }
+
+    /// Return an env shell to the pool (see `checkout_env`). Resets
+    /// first (drops worker bindings, retains the table); drops the shell
+    /// when the pool is full.
+    fn checkin_env(mut link: EnvLink) {
+        link.reset_shell();
+        let mut pool = Executor::global().env_pool.lock().unwrap();
+        if pool.len() < ENV_POOL_CAP {
+            pool.push(EnvShell(link));
         }
     }
 
@@ -778,17 +881,27 @@ impl Executor {
     /// safely resolve to "reaped".
     fn complete(task: GreenTask, outcome: Result<Value, String>) {
         let ex = Executor::global();
-        let handle = task.handle.clone();
         let id = task.id;
         // Heavy per-task state (interpreter envs) dies here; only the slim
         // outcome + handle survive for joiners. The VM shell returns to
         // the pool with warmed buffers (see `checkout_vm`) instead of
-        // freeing every stack/frame Vec per task.
+        // freeing every stack/frame Vec per task. The handle moves out
+        // (no `Arc` clone — the task already owns one).
         let GreenTask {
-            vm, interp, chunk, ..
+            vm,
+            mut interp,
+            chunk,
+            handle,
+            ..
         } = task;
+        // The env shell returns to the pool (warmed table); everything
+        // else about the worker interpreter dies here. A fresh empty
+        // link takes its place for the drop below (one small alloc —
+        // far cheaper than the table it saves).
+        let env_link = std::mem::replace(&mut interp.env, EnvLink::new());
         drop(interp);
         drop(chunk);
+        Self::checkin_env(env_link);
         // `checkin_vm` resets (drops leftover stack values) and pools the
         // shell when there is room.
         Self::checkin_vm(vm);
@@ -806,9 +919,25 @@ impl Executor {
         drop(shard);
         let mut inner = handle.result.lock().unwrap();
         let waiters = std::mem::take(&mut inner.green_waiters);
+        // Unobserved fast path: no green waiters AND nobody holds the
+        // handle (`strong_count == 1` — only this completion does).
+        // Cloning an `Arc` requires an existing reference, so at count 1
+        // no other thread can ever observe the outcome: skip the store
+        // entirely and pool the pristine shell (nothing was written — no
+        // reset needed). Fire-and-forget tasks (channel fan-in) always
+        // land here. Joiners hold count ≥ 2 (their handle value), so
+        // their outcomes still store normally below.
+        if waiters.is_empty() && Arc::strong_count(&handle) == 1 {
+            drop(inner);
+            let mut pool = ex.join_pool.lock().unwrap();
+            if pool.len() < JOIN_POOL_CAP {
+                pool.push(handle);
+            }
+            return;
+        }
         // Fast path: nobody ever waited — store by move (no clone) and
-        // skip the condvar notify (no syscall). Fire-and-forget tasks
-        // (channel fan-in) always land here.
+        // skip the condvar notify (no syscall). Main-thread joiners that
+        // already hold the handle land here.
         if waiters.is_empty() && handle.cvar_waiters.load(Ordering::Acquire) == 0 {
             inner.result = Some(outcome);
             inner.completed = true;
@@ -844,6 +973,8 @@ impl Executor {
         if handle.cvar_waiters.load(Ordering::Acquire) > 0 {
             handle.cvar.notify_all();
         }
+        // Recycle the shell when unaliased (see `checkin_join_state`).
+        Self::checkin_join_state(&handle);
     }
 }
 

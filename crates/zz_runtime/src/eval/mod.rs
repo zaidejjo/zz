@@ -140,6 +140,22 @@ impl Interp {
         }
     }
 
+    /// [`with_natives_shared`](Self::with_natives_shared) with a caller-
+    /// provided environment (pooled worker shells — saves the per-spawn
+    /// `Rc`/`RefCell`/map-table allocations; see the executor shell
+    /// pool). The env must be reset (no bindings, no parent); debug
+    /// builds assert this.
+    pub fn with_natives_shared_env(
+        natives: Arc<HashMap<String, NativeEntry>>,
+        env: crate::env::EnvLink,
+    ) -> Self {
+        debug_assert!(env.is_empty());
+        debug_assert!(env.parent_link().is_none());
+        let mut this = Self::with_natives_shared(natives);
+        this.env = env;
+        this
+    }
+
     /// Compile and execute a raw AST program (no type information).
     pub fn run(&mut self, program: &Program) -> Result<Value, EvalError> {
         let chunk = Arc::new(crate::vm::Compiler::compile_program(program));
