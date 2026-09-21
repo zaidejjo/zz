@@ -280,6 +280,29 @@ zz_dispatch_fn zz_closure_target(zz_value v) {
     return ((zz_closure_rep *)(void *)v.payload)->fn;
 }
 
+// Release a closure value's rep: VALUE cells release their duplicated
+// values, RAW cells are plain bytes, then the kinds/sizes arrays and the
+// rep itself are freed. The old pthread-per-task path leaked all of this
+// per spawn (the whole spawn context went unfreed); the M:N executor
+// frees it here after each run.
+static void zz_closure_release_rep(zz_value v) {
+    if (v.tag != ZZ_NATIVE || !v.payload) return;
+    zz_closure_rep *rep = (zz_closure_rep *)(void *)v.payload;
+    for (size_t i = 0; i < rep->nenv; i++) {
+        if (!rep->env[i]) continue;
+        unsigned char kind = ZZ_CELL_VALUE;
+        if (rep->cell_kind) kind = rep->cell_kind[i];
+        if (kind == ZZ_CELL_VALUE) {
+            zz_value cellval = *(zz_value *)rep->env[i];
+            zz_release(&cellval);
+        }
+        free(rep->env[i]);
+    }
+    free(rep->cell_kind);
+    free(rep->cell_size);
+    free(rep);
+}
+
 void **zz_closure_env(zz_value v, size_t *nenv) {
     if (v.tag != ZZ_NATIVE || !v.payload) {
         if (nenv) *nenv = 0;
@@ -597,6 +620,13 @@ zz_value zz_value_dup(zz_value v) {
 //  Thread-safe channels (pthread-based)
 // =====================================================================
 
+// Forward declarations for the M:N executor below (defined after the
+// spawn code): worker-thread flag and park-capacity gate for top-up
+// discipline.
+static __thread int zz_is_worker;
+static void zz_executor_top_up(void);
+static size_t zz_executor_parked(void);
+
 zz_value zz_chan_new(zz_value unused, int *err) {
     (void)unused;
     (void)err;
@@ -605,6 +635,18 @@ zz_value zz_chan_new(zz_value unused, int *err) {
         fprintf(stderr, "zz: out of memory (channel)\n");
         exit(1);
     }
+    ch->ring = (zz_ring_cell *)malloc(sizeof(zz_ring_cell) * ZZ_RING_CAP);
+    if (!ch->ring) {
+        free(ch);
+        fprintf(stderr, "zz: out of memory (channel ring)\n");
+        exit(1);
+    }
+    // Cell i starts with sequence i (first lap ready); counters at 0.
+    for (size_t i = 0; i < ZZ_RING_CAP; i++) {
+        __atomic_store_n(&ch->ring[i].seq, i, __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&ch->ring_head, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ch->ring_tail, 0, __ATOMIC_RELAXED);
     pthread_mutex_init(&ch->lock, NULL);
     pthread_cond_init(&ch->cond, NULL);
     ch->len = 0;
@@ -613,21 +655,111 @@ zz_value zz_chan_new(zz_value unused, int *err) {
     ch->tail = 0;
     ch->queue = (zz_value *)malloc(sizeof(zz_value) * ch->cap);
     if (!ch->queue) {
+        free(ch->ring);
+        free(ch);
         fprintf(stderr, "zz: out of memory (channel buffer)\n");
         exit(1);
     }
+    __atomic_store_n(&ch->sleepers, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ch->spill_count, 0, __ATOMIC_RELAXED);
     zz_value v;
     v.tag = ZZ_CHAN;
     v.chan = ch;
     return v;
 }
 
+// Vyukov MPMC bounded-ring enqueue, non-blocking. Returns 1 on success
+// (ownership of `v` transferred into the cell); 0 when full or contended
+// past the retry budget (caller spills to the mutex queue — value NOT
+// consumed). Bounded retries: a racing peer usually settles in one or
+// two; sustained contention means the slow path is the right call.
+static int zz_ring_try_enqueue(zz_chan *ch, zz_value v) {
+    for (int attempt = 0; attempt < 4; attempt++) {
+        size_t pos = __atomic_load_n(&ch->ring_tail, __ATOMIC_RELAXED);
+        zz_ring_cell *cell = &ch->ring[pos & ZZ_RING_MASK];
+        // seq == pos: our slot. seq < pos: full. seq > pos: a racing
+        // producer claimed ahead — reload and retry.
+        size_t seq = __atomic_load_n(&cell->seq, __ATOMIC_ACQUIRE);
+        long dif = (long)(seq - pos);
+        if (dif == 0) {
+            if (__atomic_compare_exchange_n(&ch->ring_tail, &pos, pos + 1, 1,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+                // Claimed: exclusive owner until publish (only the CAS
+                // winner writes a cell whose seq matched).
+                cell->value = v;
+                __atomic_store_n(&cell->seq, pos + 1, __ATOMIC_RELEASE);
+                return 1;
+            }
+            // CAS lost: another producer won — retry with fresh pos.
+        } else if (dif < 0) {
+            return 0;
+        }
+        // dif > 0: fall through to reload.
+    }
+    return 0;
+}
+
+// Vyukov MPMC bounded-ring dequeue, non-blocking. Returns 1 with the
+// value moved into `*out` on success; 0 when empty or contended past
+// the retry budget (caller re-checks under the channel mutex before
+// parking — no lost wakeups by construction).
+static int zz_ring_try_dequeue(zz_chan *ch, zz_value *out) {
+    for (int attempt = 0; attempt < 4; attempt++) {
+        size_t pos = __atomic_load_n(&ch->ring_head, __ATOMIC_RELAXED);
+        zz_ring_cell *cell = &ch->ring[pos & ZZ_RING_MASK];
+        // seq == pos+1: value published for us. Less: the producer hasn't
+        // published this lap yet (empty). Greater: a racing consumer
+        // claimed ahead — reload and retry.
+        size_t seq = __atomic_load_n(&cell->seq, __ATOMIC_ACQUIRE);
+        long dif = (long)(seq - (pos + 1));
+        if (dif == 0) {
+            if (__atomic_compare_exchange_n(&ch->ring_head, &pos, pos + 1, 1,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+                // Claimed: take ownership, then free the cell for lap
+                // pos+CAP (seq skips a full capacity ahead so neither
+                // side mistakes laps).
+                *out = cell->value;
+                __atomic_store_n(&cell->seq, pos + ZZ_RING_CAP, __ATOMIC_RELEASE);
+                return 1;
+            }
+        } else if (dif < 0) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+// Estimated ring depth (concurrent producers/consumers make this stale on
+// arrival — only for sleep predicates that re-check; never for protocol
+// decisions).
+static size_t zz_ring_len_estimate(zz_chan *ch) {
+    size_t tail = __atomic_load_n(&ch->ring_tail, __ATOMIC_ACQUIRE);
+    size_t head = __atomic_load_n(&ch->ring_head, __ATOMIC_ACQUIRE);
+    size_t n = tail - head;
+    return n > ZZ_RING_CAP ? ZZ_RING_CAP : n;
+}
+
 zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
     if (chan.tag != ZZ_CHAN) { *err = 1; return zz_unit(); }
     zz_chan *ch = chan.chan;
+    // Fast path: lock-free ring. The dup happens before publish either
+    // way (ownership transfers into the cell, exactly like the old queue
+    // push — the receiving thread frees or keeps it without touching
+    // the sender's memory).
+    zz_value owned = zz_value_dup(val);
+    if (zz_ring_try_enqueue(ch, owned)) {
+        // Notify sleepers only when some exist: an empty futex wake is
+        // pure overhead on the fast path.
+        if (__atomic_load_n(&ch->sleepers, __ATOMIC_ACQUIRE) > 0) {
+            pthread_mutex_lock(&ch->lock);
+            pthread_cond_signal(&ch->cond);
+            pthread_mutex_unlock(&ch->lock);
+        }
+        return zz_unit();
+    }
+    // Slow path: ring full — spill under the mutex (channels stay
+    // unbounded no matter how deep the burst). Same grow logic as before.
     pthread_mutex_lock(&ch->lock);
-    // Grow if needed. The live items may wrap around `tail`, so copy
-    // them back into linear order in the new buffer.
     if (ch->len == ch->cap) {
         size_t new_cap = ch->cap * 2;
         zz_value *new_queue = (zz_value *)malloc(sizeof(zz_value) * new_cap);
@@ -645,9 +777,10 @@ zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
         ch->head = 0;
         ch->tail = ch->len;
     }
-    ch->queue[ch->tail] = zz_value_dup(val);
+    ch->queue[ch->tail] = owned;
     ch->tail = (ch->tail + 1) % ch->cap;
     ch->len++;
+    __atomic_add_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
     pthread_cond_signal(&ch->cond);
     pthread_mutex_unlock(&ch->lock);
     return zz_unit();
@@ -657,72 +790,534 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
     (void)err;
     if (chan.tag != ZZ_CHAN) { *err = 1; return zz_unit(); }
     zz_chan *ch = chan.chan;
-    pthread_mutex_lock(&ch->lock);
-    while (ch->len == 0) {
-        pthread_cond_wait(&ch->cond, &ch->lock);
+    // Fast path: lock-free ring pop, zero locks. Valid only while the
+    // spill is empty — spilled values are older than anything that
+    // arrived while the ring was full.
+    zz_value v;
+    if (__atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0
+        && zz_ring_try_dequeue(ch, &v)) {
+        return v;
     }
-    // O(1) pop from the head — no memmove.
-    zz_value v = ch->queue[ch->head];
-    ch->head = (ch->head + 1) % ch->cap;
-    ch->len--;
-    pthread_mutex_unlock(&ch->lock);
-    return v;
+    pthread_mutex_lock(&ch->lock);
+    // Slow loop: spill first (older than anything that arrived while the
+    // ring was full), then the ring. A ring miss with both tiers
+    // nominally non-empty is transient (a publisher mid-claim) — loop
+    // and re-check rather than sleeping on a value already on its way.
+    // Counted sleepers: sends skip the condvar notify when this is zero,
+    // so waiter-free traffic pays no futex wake. Re-checked after every
+    // wake (spurious wakeups and racing consumers just loop).
+    //
+    // Top-up discipline: only when genuinely about to park (value
+    // confirmed absent above — never on mere slow-path entry), at most
+    // once per call, and only when no executor worker is already parked
+    // to absorb the stranded deque (see zz_executor_top_up's own cap).
+    // Unconditional top-up here spawned one immortal 1MB-stack thread
+    // per blocking recv — 100k latency round-trips = 100k threads.
+    int topped_up = 0;
+    for (;;) {
+        if (ch->len > 0) {
+            // O(1) pop from the spill head — no memmove.
+            v = ch->queue[ch->head];
+            ch->head = (ch->head + 1) % ch->cap;
+            ch->len--;
+            __atomic_sub_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
+            pthread_mutex_unlock(&ch->lock);
+            return v;
+        }
+        if (zz_ring_try_dequeue(ch, &v)) {
+            pthread_mutex_unlock(&ch->lock);
+            return v;
+        }
+        if (zz_is_worker && !topped_up) {
+            topped_up = 1;
+            zz_executor_top_up();
+        }
+        __atomic_add_fetch(&ch->sleepers, 1, __ATOMIC_ACQ_REL);
+        while (ch->len == 0 && zz_ring_len_estimate(ch) == 0) {
+            pthread_cond_wait(&ch->cond, &ch->lock);
+        }
+        __atomic_sub_fetch(&ch->sleepers, 1, __ATOMIC_ACQ_REL);
+    }
 }
 
 zz_value zz_chan_try_recv(zz_value chan, int *err) {
     if (chan.tag != ZZ_CHAN) { *err = 1; return zz_unit(); }
     zz_chan *ch = chan.chan;
-    pthread_mutex_lock(&ch->lock);
-    if (ch->len == 0) {
-        pthread_mutex_unlock(&ch->lock);
-        // Match the VM (`chan.try_recv` yields `.none`): return the variant
-        // directly instead of signaling through `err` (the call shims drop
-        // `err`, which used to turn empty channels into a bare unit).
+    zz_value v;
+    // Fast path: zero spill count means every queued value sits in the
+    // ring in FIFO order — a lock-free pop is exactly ordered.
+    if (__atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0
+        && zz_ring_try_dequeue(ch, &v)) {
         *err = 0;
-        return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
+        return zz_variant_some(v);
     }
-    zz_value v = ch->queue[ch->head];
-    ch->head = (ch->head + 1) % ch->cap;
-    ch->len--;
+    pthread_mutex_lock(&ch->lock);
+    // Spill first (older), then the ring — same order as recv.
+    if (ch->len > 0) {
+        v = ch->queue[ch->head];
+        ch->head = (ch->head + 1) % ch->cap;
+        ch->len--;
+        __atomic_sub_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
+        pthread_mutex_unlock(&ch->lock);
+        *err = 0;
+        return zz_variant_some(v);
+    }
+    if (zz_ring_try_dequeue(ch, &v)) {
+        pthread_mutex_unlock(&ch->lock);
+        *err = 0;
+        return zz_variant_some(v);
+    }
     pthread_mutex_unlock(&ch->lock);
+    // Match the VM (`chan.try_recv` yields `.none`): return the variant
+    // directly instead of signaling through `err` (the call shims drop
+    // `err`, which used to turn empty channels into a bare unit).
     *err = 0;
-    return zz_variant_some(v);
+    return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
 }
 
 // =====================================================================
-//  Spawn / task join (pthread-based)
+//  M:N task executor (Phase B2)
 // =====================================================================
+// Fixed worker pool (one per CPU) with Chase–Lev work-stealing deques,
+// a global injector for main-thread spawns, and park-token sleeping —
+// a direct C port of the VM executor's proven design. Spawning enqueues
+// (~1µs) instead of creating a pthread (~40µs); tasks multiplex onto a
+// few OS threads. Overflow past fixed deque capacity spills to the
+// injector (same two-tier spirit as the channel ring).
+//
+// Workers never block without replacement: any blocking wait on a
+// worker thread (channel recv, task join) tops up a replacement worker
+// first, so throughput never collapses. Top-up workers carry private
+// deques and steal like everyone else, but are never stolen from
+// (their work is always theirs to run) — again mirroring the VM.
 
-// Thread trampoline: calls the closure and stores the result.
+#define ZZ_DEQUE_CAP 4096
+#define ZZ_DEQUE_MASK (ZZ_DEQUE_CAP - 1)
+
+// One unit of work: a dup'd closure plus its join handle.
 typedef struct {
     zz_value fn;
     zz_task_join *join;
-} zz_spawn_ctx;
+} zz_task_t;
 
-static void *zz_spawn_trampoline(void *arg) {
-    zz_spawn_ctx *ctx = (zz_spawn_ctx *)arg;
-    zz_task_join *join = ctx->join;
-    // Closures take boxed args; `spawn` passes no inputs by contract,
-    // so seat a single Unit (mirrors VM worker setup). Zero-param
-    // closures ignore it; `|_|` closures read it as Unit.
+// Chase–Lev work-stealing deque: the owner pushes/pops the bottom
+// (lock-free fast path); thieves steal the top via CAS. Fixed capacity
+// with injector spillover (never reallocates under thieves — the ABA
+// class the VM pool designs avoid by the same rule).
+typedef struct {
+    zz_task_t *buf;   // ZZ_DEQUE_CAP slots, owner-written
+    size_t top;       // __atomic: steal end
+    size_t bottom;    // owner end (plain owner access + fences)
+} zz_deque_t;
+
+// 1 when running on an executor worker (set per thread): blocking waits
+// top up a replacement before parking so throughput never collapses.
+static __thread int zz_is_worker = 0;
+
+typedef struct {
+    zz_deque_t *deques;     // one per founding worker (fixed at init)
+    size_t nworkers;
+    // Global injector: main-thread spawns + deque overflow. Mutex-guarded
+    // (spawns are rarer than steals; one uncontended lock ~25ns).
+    pthread_mutex_t inj_lock;
+    pthread_cond_t inj_cond;
+    zz_task_t *inj_buf;
+    size_t inj_len;
+    size_t inj_cap;
+    size_t inj_head;
+    size_t sleepers;        // __atomic: parked workers (skip wake if 0)
+} zz_executor_t;
+
+static zz_executor_t zz_executor;
+static pthread_once_t zz_executor_once = PTHREAD_ONCE_INIT;
+// This thread's deque (NULL off workers, e.g. the main thread).
+static __thread zz_deque_t *zz_local_deque = NULL;
+// This thread's steal seed (xorshift64 — no dep, no lock).
+static __thread unsigned long long zz_steal_seed = 0;
+
+static unsigned long long zz_next_rand(void) {
+    unsigned long long x = zz_steal_seed;
+    if (x == 0) x = 0x9E3779B97F4A7C15ULL;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    zz_steal_seed = x;
+    return x;
+}
+
+// Owner push: bottom end, no atomics needed (single owner) beyond the
+// release store that publishes to thieves.
+static void zz_deque_push(zz_deque_t *dq, zz_task_t task) {
+    size_t bottom = dq->bottom;
+    dq->buf[bottom & ZZ_DEQUE_MASK] = task;
+    __atomic_store_n(&dq->bottom, bottom + 1, __ATOMIC_RELEASE);
+}
+
+// Owner pop: LIFO hot path. Returns 1 with the task, 0 when empty.
+static int zz_deque_pop(zz_deque_t *dq, zz_task_t *out) {
+    size_t bottom = dq->bottom;
+    if (bottom == 0) return 0;
+    bottom--;
+    dq->bottom = bottom;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    size_t top = __atomic_load_n(&dq->top, __ATOMIC_RELAXED);
+    if (top > bottom) {
+        // Empty (a thief took the last one): restore and report empty.
+        dq->bottom = bottom + 1;
+        return 0;
+    }
+    *out = dq->buf[bottom & ZZ_DEQUE_MASK];
+    if (top == bottom) {
+        // Single element: race thieves for it via CAS.
+        size_t expect = top;
+        if (!__atomic_compare_exchange_n(&dq->top, &expect, top + 1, 0,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            // Lost: a thief won it. Restore and report empty.
+            dq->bottom = bottom + 1;
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// Steal one task from the top (FIFO — oldest first, the right victim
+// choice: big subtrees migrate, small continuations stay local).
+// Returns 1 on success, 0 when empty or on a lost CAS race (caller
+// moves to the next victim; the next round retries).
+static int zz_deque_steal(zz_deque_t *dq, zz_task_t *out) {
+    size_t top = __atomic_load_n(&dq->top, __ATOMIC_ACQUIRE);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    size_t bottom = __atomic_load_n(&dq->bottom, __ATOMIC_ACQUIRE);
+    if (top >= bottom) return 0;
+    *out = dq->buf[top & ZZ_DEQUE_MASK];
+    size_t expect = top;
+    return __atomic_compare_exchange_n(&dq->top, &expect, top + 1, 0,
+                                       __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)
+        ? 1
+        : 0;
+}
+
+// Injector push (main-thread spawns, deque overflow): one mutex, plus a
+// sleeper wake when someone sleeps (skipped entirely when nobody does).
+static void zz_injector_push(zz_task_t task) {
+    zz_executor_t *ex = &zz_executor;
+    pthread_mutex_lock(&ex->inj_lock);
+    if (ex->inj_len == ex->inj_cap) {
+        size_t new_cap = ex->inj_cap == 0 ? 64 : ex->inj_cap * 2;
+        zz_task_t *nb =
+            (zz_task_t *)realloc(ex->inj_buf, new_cap * sizeof(zz_task_t));
+        if (!nb) {
+            fprintf(stderr, "zz: out of memory (injector)\n");
+            exit(1);
+        }
+        // Linearize any wrap before growing.
+        if (ex->inj_head != 0) {
+            zz_task_t *tmp =
+                (zz_task_t *)malloc(ex->inj_len * sizeof(zz_task_t));
+            if (!tmp) {
+                fprintf(stderr, "zz: out of memory (injector)\n");
+                exit(1);
+            }
+            for (size_t i = 0; i < ex->inj_len; i++) {
+                tmp[i] = nb[(ex->inj_head + i) % ex->inj_cap];
+            }
+            for (size_t i = 0; i < ex->inj_len; i++) nb[i] = tmp[i];
+            free(tmp);
+        }
+        ex->inj_buf = nb;
+        ex->inj_cap = new_cap;
+        ex->inj_head = 0;
+    }
+    ex->inj_buf[(ex->inj_head + ex->inj_len) % ex->inj_cap] = task;
+    ex->inj_len++;
+    // Wake one sleeper per push (round-robin thundering is pointless for
+    // a single task); skipped when nobody sleeps.
+    int wake = __atomic_load_n(&ex->sleepers, __ATOMIC_ACQUIRE) > 0;
+    pthread_mutex_unlock(&ex->inj_lock);
+    if (wake) {
+        pthread_mutex_lock(&ex->inj_lock);
+        pthread_cond_signal(&ex->inj_cond);
+        pthread_mutex_unlock(&ex->inj_lock);
+    }
+}
+
+// Injector pop-from-front for stealers. Returns 1 on success.
+static int zz_injector_steal(zz_task_t *out) {
+    zz_executor_t *ex = &zz_executor;
+    int got = 0;
+    pthread_mutex_lock(&ex->inj_lock);
+    if (ex->inj_len > 0) {
+        *out = ex->inj_buf[ex->inj_head];
+        ex->inj_head = (ex->inj_head + 1) % ex->inj_cap;
+        ex->inj_len--;
+        got = 1;
+    }
+    pthread_mutex_unlock(&ex->inj_lock);
+    return got;
+}
+
+// Route a task: the current worker's local deque (LIFO warmth — the
+// thread that made progress very likely runs it next) when on a worker,
+// else the global injector. Deque overflow spills to the injector.
+static void zz_enqueue_task(zz_task_t task) {
+    if (zz_local_deque != NULL) {
+        zz_deque_t *dq = zz_local_deque;
+        size_t bottom = dq->bottom;
+        size_t top = __atomic_load_n(&dq->top, __ATOMIC_ACQUIRE);
+        if (bottom - top < ZZ_DEQUE_CAP) {
+            zz_deque_push(dq, task);
+            // A parked worker never sees a local push (it sleeps on the
+            // injector condvar) — wake one so the task can't strand on
+            // this deque while its owner is parked. Skipped when nobody
+            // sleeps (the hot steady state): one atomic load. The signal
+            // goes out under `inj_lock` so it is airtight against the
+            // park path's verify-then-wait (same discipline as the
+            // injector push below): publish happens-before the lock, and
+            // the parker verifies every sibling deque while holding it.
+            if (__atomic_load_n(&zz_executor.sleepers, __ATOMIC_ACQUIRE)
+                > 0) {
+                pthread_mutex_lock(&zz_executor.inj_lock);
+                pthread_cond_signal(&zz_executor.inj_cond);
+                pthread_mutex_unlock(&zz_executor.inj_lock);
+            }
+            return;
+        }
+        // Full: spill to the injector (rare — 4096 deep per worker).
+    }
+    zz_injector_push(task);
+}
+
+// One steal round over founding-worker siblings only (lock-free CAS;
+// never touches the injector lock — safe to call while holding
+// `inj_lock`, unlike the full round below).
+static int zz_steal_siblings(zz_task_t *out) {
+    zz_executor_t *ex = &zz_executor;
+    size_t n = ex->nworkers;
+    if (n == 0) return 0;
+    size_t start = (size_t)(zz_next_rand() % n);
+    for (size_t k = 0; k < n; k++) {
+        if (zz_deque_steal(&ex->deques[(start + k) % n], out)) return 1;
+    }
+    return 0;
+}
+
+// One steal round: random-victim siblings first (cache-hot
+// continuations stay local), then the injector (fresh bursts).
+// Takes `inj_lock` via the injector — NEVER call while holding it.
+static int zz_steal_round(zz_task_t *out) {
+    if (zz_steal_siblings(out)) return 1;
+    return zz_injector_steal(out);
+}
+
+// Run one task: call the closure (Unit-seated, like the VM worker
+// setup), publish the outcome, free the context.
+static void zz_run_task(zz_task_t task) {
     zz_value unit_arg = zz_unit();
     zz_value args[1] = {unit_arg};
-    zz_value result = zz_call_closure(ctx->fn, args, 1);
-    // Store result and signal completion.
-    pthread_mutex_lock(&join->lock);
-    join->result = result;
-    join->completed = 1;
-    pthread_cond_signal(&join->cond);
-    pthread_mutex_unlock(&join->lock);
-    // Free the context (the fn snapshot is owned by this thread).
-    free(ctx);
+    zz_value result = zz_call_closure(task.fn, args, 1);
+    pthread_mutex_lock(&task.join->lock);
+    task.join->result = result;
+    task.join->completed = 1;
+    pthread_cond_signal(&task.join->cond);
+    pthread_mutex_unlock(&task.join->lock);
+    // Free the dup'd closure snapshot (owned by this execution).
+    if (task.fn.tag == ZZ_NATIVE) {
+        zz_closure_release_rep(task.fn);
+    } else {
+        zz_release(&task.fn);
+    }
+}
+
+// Park more executor capacity: a replacement worker with a private
+// deque. Used when a worker must block (channel recv, task join) so
+// throughput never collapses. The top-up deque is never stolen from —
+// its work is always its own — but it steals from everyone else.
+//
+// Two gates keep this bounded (unbounded top-up = one immortal
+// 1MB-stack thread per blocking wait; the 100k-round-trip latency
+// probe alone spawned ~100k threads / ~440MB RSS):
+//   1. Parked workers absorb first: if any executor worker is already
+//      parked on the injector, it will steal the stranded deque's work
+//      — no replacement needed.
+//   2. Hard cap: extra workers beyond 4x CPU (clamped to [32, 256])
+//      are refused; the blocker then just parks and throughput degrades
+//      gracefully instead of OOMing. B3 state machines remove the need
+//      for top-up entirely (tasks suspend instead of parking threads).
+static size_t zz_topup_count; // __atomic: replacement workers spawned
+static size_t zz_topup_cap;   // set once at executor init
+static void *zz_worker_loop(void *arg);
+
+static size_t zz_executor_parked(void) {
+    return __atomic_load_n(&zz_executor.sleepers, __ATOMIC_ACQUIRE);
+}
+
+static void zz_executor_top_up(void) {
+    if (zz_executor_parked() > 0) {
+        return;
+    }
+    size_t had =
+        __atomic_fetch_add(&zz_topup_count, 1, __ATOMIC_ACQ_REL);
+    if (had >= zz_topup_cap) {
+        __atomic_sub_fetch(&zz_topup_count, 1, __ATOMIC_ACQ_REL);
+        return;
+    }
+    zz_deque_t *dq = (zz_deque_t *)calloc(1, sizeof(zz_deque_t));
+    if (!dq) {
+        __atomic_sub_fetch(&zz_topup_count, 1, __ATOMIC_ACQ_REL);
+        return;
+    }
+    dq->buf = (zz_task_t *)calloc(ZZ_DEQUE_CAP, sizeof(zz_task_t));
+    if (!dq->buf) {
+        free(dq);
+        __atomic_sub_fetch(&zz_topup_count, 1, __ATOMIC_ACQ_REL);
+        return;
+    }
+    pthread_t thread;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 1024 * 1024);
+    if (pthread_create(&thread, &attr, zz_worker_loop, dq) == 0) {
+        pthread_detach(thread);
+    } else {
+        free(dq->buf);
+        free(dq);
+        __atomic_sub_fetch(&zz_topup_count, 1, __ATOMIC_ACQ_REL);
+    }
+    pthread_attr_destroy(&attr);
+}
+
+static void *zz_worker_loop(void *arg) {
+    zz_deque_t *dq = (zz_deque_t *)arg;
+    zz_executor_t *ex = &zz_executor;
+    zz_local_deque = dq;
+    zz_is_worker = 1;
+    zz_steal_seed = (unsigned long long)(uintptr_t)dq ^ 0x9E3779B97F4A7C15ULL;
+    for (;;) {
+        zz_task_t task;
+        // Hot spin while work flows: local pop every iteration; sibling
+        // + injector steals every 16th. A full steal round hammers shared
+        // atomics (and the injector mutex); doing it per PAUSE starves
+        // the very threads whose progress we are waiting for. Bounded
+        // (~4096 iterations) then park — no CPU burn at rest.
+        int found = 0;
+        for (int spin = 0; spin < 4096; spin++) {
+            if (zz_deque_pop(dq, &task)) {
+                found = 1;
+                break;
+            }
+            // Full steal round (incl. injector mutex) every 16th
+            // iteration; sibling-only steals between. A full round per
+            // PAUSE hammers shared atomics and starves the very threads
+            // whose progress we are waiting for.
+            int got = ((spin & 15) == 0) ? zz_steal_round(&task)
+                                         : zz_steal_siblings(&task);
+            if (got) {
+                found = 1;
+                break;
+            }
+#if defined(__x86_64__) || defined(__i386__)
+            __asm__ volatile("pause");
+#elif defined(__aarch64__)
+            __asm__ volatile("yield");
+#else
+            sched_yield();
+#endif
+        }
+        if (found) {
+            zz_run_task(task);
+            continue;
+        }
+        // Cold: announce sleep, re-verify, then sleep on the condvar.
+        // Lock ordering: the re-verify below NEVER takes `inj_lock`
+        // (sibling steals are pure CAS; the injector is read directly
+        // under the held lock). The old code called the full steal round
+        // while holding `inj_lock` — self-deadlock on first idle.
+        pthread_mutex_lock(&ex->inj_lock);
+        __atomic_add_fetch(&ex->sleepers, 1, __ATOMIC_ACQ_REL);
+        for (;;) {
+            if (zz_deque_pop(dq, &task) || zz_steal_siblings(&task)) {
+                break;
+            }
+            if (ex->inj_len > 0) {
+                task = ex->inj_buf[ex->inj_head];
+                ex->inj_head = (ex->inj_head + 1) % ex->inj_cap;
+                ex->inj_len--;
+                break;
+            }
+            // Announce-then-verify: a push landing between the last steal
+            // and this park signals the condvar (sleepers > 0), so no
+            // wakeup is lost by construction.
+            pthread_cond_wait(&ex->inj_cond, &ex->inj_lock);
+        }
+        pthread_mutex_unlock(&ex->inj_lock);
+        __atomic_sub_fetch(&ex->sleepers, 1, __ATOMIC_ACQ_REL);
+        zz_run_task(task);
+    }
     return NULL;
+}
+
+static void zz_executor_init(void);
+static int get_cpu_count(void);
+
+static void zz_executor_init(void) {
+    zz_executor_t *ex = &zz_executor;
+#ifdef ZZ_OS_WINDOWS
+    size_t n = 4;
+#else
+    int cpus = get_cpu_count();
+    size_t n = cpus > 0 ? (size_t)cpus : 4;
+#endif
+    if (n < 2) n = 2;
+    ex->nworkers = n;
+    ex->deques = (zz_deque_t *)calloc(n, sizeof(zz_deque_t));
+    if (!ex->deques) {
+        fprintf(stderr, "zz: out of memory (executor)\n");
+        exit(1);
+    }
+    for (size_t i = 0; i < n; i++) {
+        ex->deques[i].buf =
+            (zz_task_t *)calloc(ZZ_DEQUE_CAP, sizeof(zz_task_t));
+        if (!ex->deques[i].buf) {
+            fprintf(stderr, "zz: out of memory (executor)\n");
+            exit(1);
+        }
+    }
+    pthread_mutex_init(&ex->inj_lock, NULL);
+    pthread_cond_init(&ex->inj_cond, NULL);
+    ex->inj_buf = NULL;
+    ex->inj_len = 0;
+    ex->inj_cap = 0;
+    ex->inj_head = 0;
+    __atomic_store_n(&ex->sleepers, 0, __ATOMIC_RELAXED);
+    // Top-up cap: 4x founding workers, clamped to [32, 256].
+    __atomic_store_n(&zz_topup_count, 0, __ATOMIC_RELAXED);
+    size_t cap = n * 4;
+    if (cap < 32) cap = 32;
+    if (cap > 256) cap = 256;
+    __atomic_store_n(&zz_topup_cap, cap, __ATOMIC_RELAXED);
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 1024 * 1024);
+    for (size_t i = 0; i < n; i++) {
+        pthread_t thread;
+        if (pthread_create(&thread, &attr, zz_worker_loop,
+                           &ex->deques[i]) != 0) {
+            fprintf(stderr, "zz: out of memory (executor thread)\n");
+            exit(1);
+        }
+        pthread_detach(thread);
+    }
+    pthread_attr_destroy(&attr);
 }
 
 zz_value zz_spawn(zz_value fn, int *err) {
     // Closures lower to ZZ_NATIVE (zz_closure_make); ZZ_FUNC is the
     // legacy named-fn box. Accept both.
     if (fn.tag != ZZ_FUNC && fn.tag != ZZ_NATIVE) { *err = 1; return zz_unit(); }
+    // M:N executor (Phase B2): enqueue instead of creating a pthread.
+    // Lazily initialized once; workers are detached and live for the
+    // process (same lifetime discipline as the old detached threads).
+    pthread_once(&zz_executor_once, zz_executor_init);
     // Create task join handle.
     zz_task_join *join = (zz_task_join *)malloc(sizeof(zz_task_join));
     if (!join) {
@@ -734,31 +1329,10 @@ zz_value zz_spawn(zz_value fn, int *err) {
     join->result = zz_unit();
     join->completed = 0;
     join->consumed = 0;
-    // Create spawn context passed to trampoline.
-    zz_spawn_ctx *ctx = (zz_spawn_ctx *)malloc(sizeof(zz_spawn_ctx));
-    if (!ctx) {
-        fprintf(stderr, "zz: out of memory (spawn context)\n");
-        exit(1);
-    }
-    ctx->fn = zz_value_dup(fn);  // Independent copy for the thread.
-    ctx->join = join;
-    // Small stacks: ZZ values live on the heap and closure calls use
-    // shallow C frames, so 1MB is ample — and it makes 10k+ parallel
-    // tasks feasible (8MB default stacks need 400GB virtual for 50k
-    // tasks). Very deep C recursion inside tasks is the known tradeoff.
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 1024 * 1024);
-    int spawn_rc = pthread_create(&join->thread, &attr, zz_spawn_trampoline, ctx);
-    pthread_attr_destroy(&attr);
-    if (spawn_rc != 0) {
-        free(ctx);
-        free(join);
-        *err = 1;
-        return zz_unit();
-    }
-    // Detach: thread frees its own resources.
-    pthread_detach(join->thread);
+    zz_task_t task;
+    task.fn = zz_value_dup(fn);  // Independent copy for the worker.
+    task.join = join;
+    zz_enqueue_task(task);
     zz_value v;
     v.tag = ZZ_TASK_JOIN;
     v.task = join;
@@ -769,6 +1343,12 @@ zz_value zz_task_join_recv(zz_value join_val, int *err) {
     if (join_val.tag != ZZ_TASK_JOIN) { *err = 1; return zz_unit(); }
     zz_task_join *join = join_val.task;
     pthread_mutex_lock(&join->lock);
+    // Same top-up discipline as channel recv: only when genuinely about
+    // to park (!completed), at most once; the parked-worker gate + hard
+    // cap inside zz_executor_top_up bound the total.
+    if (!join->completed && zz_is_worker) {
+        zz_executor_top_up();
+    }
     while (!join->completed) {
         pthread_cond_wait(&join->cond, &join->lock);
     }

@@ -206,18 +206,51 @@ struct zz_func {
     size_t env_len;
 };
 
-// ---- thread-safe channels (pthread-based) ------------------------------
-// Thread-safe channel for inter-thread communication. The queue is a
-// circular ring buffer: send appends at `tail`, recv pops from `head`
-// — both O(1), no memmove on the hot path.
+// ---- thread-safe channels (lock-free fast path + spillover) ----------
+// Two tiers, one FIFO (mirrors the VM's `ChanState`): a Vyukov bounded
+// MPMC ring serves all traffic while it fits — pure `__atomic`
+// operations, zero locks, zero futex syscalls — and bursts past ring
+// capacity spill to the mutex queue below (channels stay unbounded).
+// Receivers drain the spill first whenever non-empty, preserving order.
+// Sends notify the condvar only when sleepers exist (counted with an
+// atomic), so waiter-free traffic pays no futex wake at all.
+#define ZZ_RING_CAP 1024
+#define ZZ_RING_MASK (ZZ_RING_CAP - 1)
+
+// One ring slot: sequence number + payload, padded to a full cache line
+// so adjacent slots never share a line between producer and consumer
+// cores. This padding (not the algorithm) is what kills cache-line
+// bouncing on the fast path.
+typedef struct {
+    size_t seq; // __atomic access only (see zz_ring_* below)
+    zz_value value; // valid only under the sequence protocol
+    char _pad[64 - sizeof(size_t) - sizeof(zz_value)];
+} zz_ring_cell;
+_Static_assert(sizeof(zz_ring_cell) == 64, "zz_ring_cell must fill a cache line");
+
 struct zz_chan {
+    // Fast path: Vyukov ring. Head/tail live on separate cache lines —
+    // the producer core writes tail, the consumer core writes head, and
+    // neither line is ever read-for-ownership by the other hot loop.
+    // ALL accesses via `__atomic` builtins (see below), never plain.
+    zz_ring_cell *ring;
+    size_t ring_head __attribute__((aligned(64)));
+    size_t ring_tail __attribute__((aligned(64)));
+    // Slow path: mutex spillover queue + signaling condvar. Unbounded
+    // bursts land here; drained before the ring whenever non-empty.
     pthread_mutex_t lock;
     pthread_cond_t  cond;
-    zz_value       *queue;   // ring buffer of zz_value
-    size_t          len;     // current number of items
-    size_t          cap;     // buffer capacity
-    size_t          head;    // next read position (mod cap)
-    size_t          tail;    // next write position (mod cap)
+    zz_value       *queue;   // spill ring buffer of zz_value
+    size_t          len;     // current spill items
+    size_t          cap;     // spill buffer capacity
+    size_t          head;    // next spill read position (mod cap)
+    size_t          tail;    // next spill write position (mod cap)
+    size_t          sleepers; // __atomic: condvar sleepers in flight
+    // Number of values in the spill queue. Written only while holding
+    // `lock`; read lock-free by fast paths (Release/Acquire). A zero
+    // count means every queued value sits in the ring in FIFO order, so
+    // a lock-free ring pop is exactly ordered — no lock needed.
+    size_t          spill_count; // __atomic
 };
 
 // Task join handle for spawned threads.
