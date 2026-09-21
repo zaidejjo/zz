@@ -17,9 +17,26 @@ use crate::env::Env;
 use crate::lf_chan::LfRing;
 use crate::vm::{Chunk, Op};
 
-/// Cached keep-set for worker env snapshots: `(chain shape, reachable set,
-/// names to clone)`. See `Interp::spawn_keep_cache`.
-pub type SpawnKeepCache = Option<(Vec<(usize, usize)>, HashSet<String>, Vec<String>)>;
+/// Cached keep-set for worker env snapshots: `(parent shape, leaf names,
+/// reachable set, pinned deeper resolutions)`. Keyed on the *parent*
+/// chain — not the leaf — because loop bodies run each iteration in a
+/// fresh leaf scope (new identity every spawn), while the parent chain
+/// is stable. Leaf-bound names are validated by set equality and resolved
+/// live every spawn (the leaf is fresh, so cached holders would be
+/// stale); deeper names resolve once on a miss to pinned holder scopes.
+/// Shape validation (per-scope identity + binding count) guarantees
+/// pinned resolutions still hold — any shadowing define changes the
+/// parent shape or the leaf name set and forces recompute. Values are
+/// always cloned fresh per spawn regardless.
+pub type SpawnKeepCache = Option<(
+    Vec<(usize, usize)>,
+    Vec<String>,
+    HashSet<String>,
+    DeeperResolutions,
+)>;
+
+/// Pinned holder resolutions for deeper (non-leaf) kept bindings.
+pub type DeeperResolutions = Vec<(String, Rc<RefCell<Env>>)>;
 
 /// Cached reachability for one spawn-site chunk: the chunk `Arc` is held
 /// so its address can never be reused while cached (kills the
@@ -347,17 +364,43 @@ pub fn snapshot_env_pruned(
     // every stdlib func aliases its module scope). A fresh memo per entry
     // re-clones the shared graph once per entry (measured 130ms/spawn for
     // 131 entries); sharing makes it linear.
-    // Keep-set cache: the filter decision depends only on the chain shape
-    // (scope identities + binding counts — any new binding changes the
-    // shape) and the reachable set. Loop iterations from one spawn site
-    // hit this and skip the visit walk; values are always cloned fresh.
-    let shape = crate::env::Env::chain_shape(env);
-    let keep: Vec<String> = match keep_cache {
-        // `loads` is a pure function of the spawn-site chunk, so keying on
-        // `(shape, reachable)` covers it: same site + same table membership
-        // ⇒ same loads.
-        Some((s, r, names)) if *s == shape && *r == *reachable => names.clone(),
-        _ => {
+    //
+    // Keep-set cache, keyed on the parent chain (stable across loop
+    // iterations) — NOT the leaf (fresh scope per iteration by
+    // construction). Hits skip the whole-chain visit walk; leaf bindings
+    // resolve live from the current leaf, deeper ones from pinned
+    // holders. `loads` is a pure function of the spawn-site chunk, so the
+    // `reachable` key covers it.
+    let (parent_shape, leaf_names) = {
+        let leaf = env.borrow();
+        match leaf.parent_rc() {
+            Some(parent) => (
+                crate::env::Env::chain_shape_from(&parent),
+                leaf.local_names(),
+            ),
+            None => (Vec::new(), leaf.local_names()),
+        }
+    };
+    enum KeepPlan {
+        Hit {
+            deeper: Vec<(String, Rc<RefCell<Env>>)>,
+        },
+        Miss,
+    }
+    let plan = match keep_cache {
+        Some((ps, ln, r, deeper))
+            if *ps == parent_shape && *ln == leaf_names && *r == *reachable =>
+        {
+            KeepPlan::Hit {
+                deeper: deeper.clone(),
+            }
+        }
+        _ => KeepPlan::Miss,
+    };
+    // Partition on a miss, resolve on a hit — shared tail below.
+    let (deeper, leaf_live): (DeeperResolutions, Vec<String>) = match plan {
+        KeepPlan::Hit { deeper } => (deeper, leaf_names),
+        KeepPlan::Miss => {
             // Two phases: decide keep/drop under the chain borrows
             // (predicate only reads), then clone after all borrows are
             // released. Cloning inside the visit could re-borrow a visited
@@ -382,26 +425,51 @@ pub fn snapshot_env_pruned(
                 }
                 fresh.push(k.clone());
             });
-            *keep_cache = Some((shape, reachable.clone(), fresh.clone()));
-            fresh
+            // Partition: leaf-bound names resolve live every spawn (fresh
+            // leaf — cached holders would be stale); deeper names resolve
+            // once to pinned holders. `visit_flat` dedups leaf-first, so
+            // a name in the leaf set IS the leaf's binding (shadowing a
+            // same-named ancestor, which stays dropped).
+            let leaf_set: std::collections::HashSet<&String> = leaf_names.iter().collect();
+            let mut deeper = Vec::new();
+            let mut leaf_live: Vec<String> = Vec::new();
+            for k in fresh {
+                if leaf_set.contains(&k) {
+                    leaf_live.push(k);
+                } else if let Some(scope) = crate::env::Env::resolve_scope(env, &k) {
+                    deeper.push((k, scope));
+                }
+            }
+            leaf_live.sort();
+            *keep_cache = Some((
+                parent_shape,
+                leaf_live.clone(),
+                reachable.clone(),
+                deeper.clone(),
+            ));
+            (deeper, leaf_live)
         }
     };
-    // Debug aid (ZZ_SPAWN_PROFILE=2, see spawn profiler): kept inventory.
-    if std::env::var("ZZ_SPAWN_PROFILE")
-        .map(|v| v == "2")
-        .unwrap_or(false)
-    {
-        eprintln!("[snap-env] keep {keep:?}");
-    }
     let mut seen: HashMap<usize, Value> = HashMap::new();
-    let mut out = HashMap::with_capacity(keep.len());
-    for k in keep {
+    let mut out = HashMap::with_capacity(deeper.len() + leaf_live.len());
+    // Deeper bindings first, current-leaf bindings second: the leaf
+    // shadows ancestors on ties, matching resolution order (a shadowing
+    // leaf define is always read live — never from a cached scope).
+    for (k, scope) in &deeper {
         // Borrow released before `deep_clone_value` runs: a kept value may
         // capture this very scope, and cloning it re-borrows the chain.
-        // `get` resolves leaf-most — same binding the visit decided on.
-        let v = env.borrow().get(&k);
+        let v = scope.borrow().get_local(k);
         if let Some(v) = v {
-            out.insert(k, deep_clone_value(v, &mut seen));
+            out.insert(k.clone(), deep_clone_value(v, &mut seen));
+        }
+    }
+    // Current-leaf bindings, resolved live every spawn (the leaf is fresh
+    // per loop iteration — cached holders would be stale). Each borrow
+    // ends before `deep_clone_value` runs (statement scope).
+    for k in &leaf_live {
+        let v = env.borrow().get_local(k);
+        if let Some(v) = v {
+            out.insert(k.clone(), deep_clone_value(v, &mut seen));
         }
     }
     out

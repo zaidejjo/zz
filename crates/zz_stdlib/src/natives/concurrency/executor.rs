@@ -32,6 +32,15 @@ use zz_runtime::value::{
 use zz_runtime::vm::Vm;
 use zz_runtime::{Interp, Value};
 
+/// Debug aid flag, cached: `std::env::var` costs a lock + allocation
+/// (~150ns) per call — reading it per spawn/slice/park would tax every
+/// task lifecycle ~0.7µs for a diagnostic that is almost always off.
+/// `OnceLock` reads are a single atomic load after init.
+pub(crate) fn profiling() -> bool {
+    static PROFILING: OnceLock<bool> = OnceLock::new();
+    *PROFILING.get_or_init(|| std::env::var("ZZ_SPAWN_PROFILE").is_ok())
+}
+
 /// One suspended-or-runnable green thread: everything needed to resume it.
 ///
 /// # Thread safety
@@ -400,7 +409,7 @@ impl Executor {
         // (LIFO warmth), else the global injector. Cannot fail: queues
         // are unbounded and live for the process.
         Self::enqueue(id);
-        if std::env::var("ZZ_SPAWN_PROFILE").is_ok() {
+        if profiling() {
             eprintln!("[exec] spawn id={id}");
         }
         id
@@ -447,7 +456,7 @@ impl Executor {
     /// Run one task slice: take it, deliver any pending value, execute to
     /// completion or the next yield, then complete or park it.
     fn run_slice(id: TaskId) {
-        let profile = std::env::var("ZZ_SPAWN_PROFILE").is_ok();
+        let profile = profiling();
         let entry = match Executor::global().registry[Self::shard(id)]
             .lock()
             .unwrap()
@@ -493,7 +502,7 @@ impl Executor {
         });
         match outcome {
             Ok(Ok(Flow::Value(v))) | Ok(Ok(Flow::Return(v))) => {
-                if std::env::var("ZZ_SPAWN_PROFILE").is_ok() {
+                if profiling() {
                     eprintln!("[exec] complete id={id}");
                 }
                 Self::complete(task, Ok(v));
@@ -506,7 +515,7 @@ impl Executor {
                 Err(format!("`continue` outside of a loop at {span:?}")),
             ),
             Ok(Ok(Flow::Yield(reason))) => {
-                if std::env::var("ZZ_SPAWN_PROFILE").is_ok() {
+                if profiling() {
                     eprintln!("[exec] park id={id} reason={reason:?}");
                 }
                 Self::park(task, reason);

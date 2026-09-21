@@ -13,6 +13,7 @@
 pub(crate) mod executor;
 
 use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 use std::sync::{atomic::AtomicUsize, Arc, Condvar, Mutex};
 
 use zz_runtime::{EvalError, Interp, Span, Value};
@@ -275,8 +276,22 @@ pub(crate) fn spawn(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let fv = match args.first() {
-        Some(Value::Func(f)) => (**f).clone(),
+    // Borrow the closure's pieces instead of cloning the whole FuncValue
+    // (Box + params Vec + drops): the args Vec is dropped by the caller
+    // right after we return, so cloning it here is pure waste (~0.3µs).
+    // Only the chunk `Arc` (shared code) and env `Rc` (snapshot source)
+    // escape; the param count is read out.
+    let (chunk, param_count, env) = match args.first() {
+        Some(Value::Func(f)) => (
+            f.chunk.clone().ok_or_else(|| {
+                EvalError::new(
+                    "spawn: closure has no compiled chunk (tree-walker closures cannot be spawned)",
+                    span,
+                )
+            })?,
+            f.params.len(),
+            Rc::clone(&f.env),
+        ),
         Some(other) => {
             return Err(EvalError::new(
                 format!("spawn: expected a closure, found `{other}`"),
@@ -291,17 +306,9 @@ pub(crate) fn spawn(
         }
     };
 
-    let chunk = fv.chunk.ok_or_else(|| {
-        EvalError::new(
-            "spawn: closure has no compiled chunk (tree-walker closures cannot be spawned)",
-            span,
-        )
-    })?;
-    let param_count = fv.params.len();
-
     // Debug aid: ZZ_SPAWN_PROFILE=1 prints per-spawn timing breakdowns.
     // Used by perf investigations (W2); no production code depends on it.
-    let profiling = std::env::var("ZZ_SPAWN_PROFILE").is_ok();
+    let profiling = executor::profiling();
     let t_all = profiling.then(std::time::Instant::now);
     // 1. Snapshot captured env → self-contained flat map.
     // Reachability is computed first (it only needs the table for
@@ -341,7 +348,7 @@ pub(crate) fn spawn(
     let dt_reach = t0.map(|t| t.elapsed());
     let t0 = profiling.then(std::time::Instant::now);
     let snapshot = snapshot_env_pruned(
-        &fv.env,
+        &env,
         &interp.funcs,
         &reachable,
         &loads,
@@ -366,7 +373,8 @@ pub(crate) fn spawn(
     let n_natives = natives.len();
     let dt_natives = t0.map(|t| t.elapsed());
     let t0 = profiling.then(std::time::Instant::now);
-    let structs = interp.structs.clone();
+    // `Arc` clone (atomic inc): the map itself is shared copy-on-write.
+    let structs = Arc::clone(&interp.structs);
     let dt_structs = t0.map(|t| t.elapsed());
     let t0 = profiling.then(std::time::Instant::now);
     // Reachable-only table slice: the worker carries just the functions

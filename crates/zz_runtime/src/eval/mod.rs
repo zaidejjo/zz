@@ -26,7 +26,12 @@ pub struct Interp {
     /// entry map). Late mutation (REPL imports) uses copy-on-write via
     /// [`Arc::make_mut`].
     pub natives: Arc<HashMap<String, NativeEntry>>,
-    pub structs: HashMap<String, Vec<String>>,
+    /// Struct layouts, reference-counted for copy-on-write sharing with
+    /// worker threads (`task.spawn` clones the `Rc`, not the map) and
+    /// server snapshots. Struct definitions are rare after load, so
+    /// writes use `Rc::make_mut` (clones only on actual sharing) while
+    /// every spawn/read pays a single atomic inc — or nothing at all.
+    pub structs: Arc<HashMap<String, Vec<String>>>,
     pub args: Vec<String>,
     pub defer_stacks: Vec<Vec<Value>>,
     /// Mutation counter for [`Interp::funcs`], bumped on every insert.
@@ -73,7 +78,7 @@ impl Interp {
             env: Rc::new(RefCell::new(Env::new())),
             funcs: HashMap::new(),
             natives: Arc::new(HashMap::new()),
-            structs: HashMap::new(),
+            structs: Arc::new(HashMap::new()),
             args: Vec::new(),
             defer_stacks: Vec::new(),
             funcs_version: 0,
@@ -89,7 +94,7 @@ impl Interp {
             env: Rc::new(RefCell::new(Env::new())),
             funcs: HashMap::new(),
             natives: Arc::new(natives),
-            structs: HashMap::new(),
+            structs: Arc::new(HashMap::new()),
             args: Vec::new(),
             defer_stacks: Vec::new(),
             funcs_version: 0,
@@ -108,7 +113,7 @@ impl Interp {
             env: Rc::new(RefCell::new(Env::new())),
             funcs: HashMap::new(),
             natives,
-            structs: HashMap::new(),
+            structs: Arc::new(HashMap::new()),
             args: Vec::new(),
             defer_stacks: Vec::new(),
             funcs_version: 0,

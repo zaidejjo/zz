@@ -586,7 +586,8 @@ impl Vm {
                     self.stack.push(Value::Unit);
                 }
                 Op::RegisterStruct { name, fields } => {
-                    interp.structs.insert(name.clone(), fields.clone());
+                    // Copy-on-write (see tree-walker `Stmt::Struct`).
+                    Arc::make_mut(&mut interp.structs).insert(name.clone(), fields.clone());
                     self.stack.push(Value::Unit);
                 }
                 Op::BinOp(op, span) => {

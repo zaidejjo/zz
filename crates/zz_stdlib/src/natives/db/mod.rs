@@ -1009,6 +1009,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn read_frame(s: &mut std::net::TcpStream) -> Vec<u8> {
@@ -1123,7 +1124,7 @@ mod tests {
     fn mysql_native_query_maps_structs() {
         let (addr, rx) = mock_mysql();
         let mut interp = Interp::new();
-        interp.structs.insert(
+        Arc::make_mut(&mut interp.structs).insert(
             "User".to_string(),
             vec!["id".to_string(), "name".to_string()],
         );

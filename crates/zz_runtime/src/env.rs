@@ -48,6 +48,60 @@ impl Env {
         self.vars.get_mut(name)
     }
 
+    /// Find the leaf-most scope holding `name` (the same binding
+    /// `get` would return). Used by spawn snapshots to resolve each
+    /// kept name directly instead of re-walking the chain per spawn.
+    pub fn resolve_scope(env: &Rc<RefCell<Env>>, name: &str) -> Option<Rc<RefCell<Env>>> {
+        let mut cur: Option<Rc<RefCell<Env>>> = Some(Rc::clone(env));
+        while let Some(rc) = cur {
+            let (hit, parent) = {
+                let borrowed = rc.borrow();
+                (borrowed.vars.contains_key(name), borrowed.parent.clone())
+            };
+            if hit {
+                return Some(rc);
+            }
+            cur = parent;
+        }
+        None
+    }
+
+    /// Direct read from this scope only (no parent walk): for cached
+    /// resolutions, where the holder is already known.
+    pub fn get_local(&self, name: &str) -> Option<Value> {
+        self.vars.get(name).cloned()
+    }
+
+    /// Sorted names bound in this scope only (no parent walk): for
+    /// spawn keep-cache validation of fresh per-iteration leaves.
+    pub fn local_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.vars.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Shape fingerprint of one chain link's ancestors: per-scope
+    /// `(identity, binding count)` from the given scope upward. Same as
+    /// `chain_shape` but starting at an arbitrary link — lets caches key
+    /// on the *parent* chain while the leaf varies per loop iteration.
+    pub fn chain_shape_from(env: &Rc<RefCell<Env>>) -> Vec<(usize, usize)> {
+        let mut shape = Vec::new();
+        let mut cur: Option<Rc<RefCell<Env>>> = Some(Rc::clone(env));
+        while let Some(rc) = cur {
+            let (key, parent, len) = {
+                let borrowed = rc.borrow();
+                (
+                    Rc::as_ptr(&rc) as *const () as usize,
+                    borrowed.parent.clone(),
+                    borrowed.vars.len(),
+                )
+            };
+            shape.push((key, len));
+            cur = parent;
+        }
+        shape
+    }
+
     /// Copy all local bindings from `child` into this scope. Used for
     /// or-pattern matching: alternatives are tried in a throwaway child
     /// scope so failed alternatives leave no bindings behind; on success
@@ -78,10 +132,12 @@ impl Env {
     }
 
     /// Shape fingerprint of the scope chain: per-scope `(identity, binding
+    /// Shape fingerprint of the scope chain: per-scope `(identity, binding
     /// count)` leaf→root. The *set* of visible names can only change when a
     /// binding is added (count changes) or a scope is replaced (identity
-    /// changes), so snapshots can cache name-filter decisions against this
-    /// key while always cloning values fresh.
+    /// changes), so snapshots cache name-filter decisions against this key
+    /// while always cloning values fresh. Costs one walk per spawn on a
+    /// miss; hits (identical chain) skip the visit walk below.
     pub fn chain_shape(env: &Rc<RefCell<Env>>) -> Vec<(usize, usize)> {
         let mut shape = Vec::new();
         let mut cur: Option<Rc<RefCell<Env>>> = Some(Rc::clone(env));
