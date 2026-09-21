@@ -61,8 +61,9 @@ safepoint at its loop top (VM `Op::Safepoint`, AOT `zz_safepoint()`):
 one counter decrement per iteration, clock read once per 1024, voluntary
 yield past a 1ms quantum. Cost ~0.02ns/iter (unmeasurable); header (not
 back-edge) placement so `continue` cannot skip the check. On the VM the
-executor requeues the task; on AOT (pthread-based tasks, no suspendable
-frames) it is a `sched_yield` courtesy so siblings get scheduled.
+executor requeues the task; on AOT the task suspends at the next
+blocking call (see below), so the safepoint is only an OS courtesy
+for sibling threads.
 
 ## Pitfalls
 
@@ -119,6 +120,39 @@ runtime-owned hook slot the stdlib registers inside `stdlib_natives()`),
 and completed VMs recycle through a bounded shell pool with warmed
 stack/frame buffers (a `VmShell` wrapper carries the `Send` claim so the
 general-purpose `Vm` type stays `!Send`).
+
+## AOT suspendable frames (B3)
+
+AOT closures that block in `chan.recv` / `task.join` lower to explicit
+state machines (trampoline + resume labels, RFC option (i)): every local
+lives in a heap cell owned by the task frame, each statement-level
+blocking call suspends back to the executor instead of parking the
+thread, and the sender hands the value directly into the waiter's frame.
+Eligible shapes (straight-line code, loops, ifs, matches over blocking
+calls) transform automatically; anything else — indirect calls, `defer`,
+transactions, exotic assign targets, nested closures — keeps the
+blocking lowering (always correct, parks the thread with top-up cover).
+
+Invariants the bench proved load-bearing:
+
+- The suspend verdict is **thread-local**, never frame-shared: a
+  resuming run legitimately overlaps the suspending run's unwind that it
+  was handed off from, and a shared flag corrupts exactly that window
+  (phantom suspends, duplicate body execution).
+- The resume id is written **under the waiter-queue lock, before the
+  waiter is visible**: otherwise the resuming run dispatches on a stale
+  id and re-executes the body (duplicate sends, off-by-one).
+- Sends serialize check-and-enqueue **under the channel lock** (what Go
+  does): a lock-free pre-check leaves an unordered hole (stale-zero
+  count vs late registration + early publish = orphaned value with a
+  suspended waiter). Receives keep the fully lock-free fast path.
+- Main-thread recvs spin **only while both tiers look empty**: spinning
+  past a stocked spill burns ~10µs per call (measured 170x drain
+  slowdown).
+
+Measured AOT (release, same 4-core box): 100k channel round-trips at
+~5µs/rt (was ~15µs pre-B3), 10k fan-in at ~139k/s, 50k endurance with a
+~4ms join, full bench green at ~27MB peak RSS.
 
 ## Copy-on-write environments
 

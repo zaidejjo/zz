@@ -251,7 +251,79 @@ struct zz_chan {
     // count means every queued value sits in the ring in FIFO order, so
     // a lock-free ring pop is exactly ordered — no lock needed.
     size_t          spill_count; // __atomic
+    // Green waiters (B3): suspended tasks/threads queued for direct
+    // handoff on send (no condvar round-trip for task waiters). Sends
+    // check the atomic count first and divert to the handoff path while
+    // any waiter is queued; receivers register under `lock` after
+    // verifying both tiers empty, so no send can slip between the check
+    // and the park. Served FIFO before the ring.
+    struct zz_green_waiter *gwait_head;
+    struct zz_green_waiter *gwait_tail;
+    struct zz_green_waiter *gwait_pool; // lock-protected node free-list
+    size_t          gwait_pool_n;
+    size_t          green_waiters; // __atomic
+    // Thread-parked (sync-frame) green waiters. Handoff broadcasts the
+    // condvar only when this is non-zero: task waiters requeue without
+    // any futex, so the steady state pays zero wakeups.
+    size_t          gparked; // __atomic
 };
+
+// ---- green tasks: suspendable frames (B3) ------------------------------
+// A suspendable frame carries a task's heap cells (locals that must
+// survive a suspend/resume round-trip), the resume label id, and the
+// handoff value slot. Task frames live on the heap (owned by the task,
+// freed by the trampoline on completion); sync-called green closures
+// (NULL TLS frame) run on stack-backed frames that vanish with the call.
+//
+// Generated state-machine closures access cells through frame slots;
+// the runtime only moves opaque pointers and the handoff value.
+typedef struct {
+    void         **cells;      // heap-cell pointers (frame slots)
+    unsigned char *cell_kind;  // per-slot ZZ_CELL_VALUE/ZZ_CELL_RAW
+    size_t        *cell_size;  // per-slot byte size (RAW cells)
+    size_t         ncells;
+    int            owns_cells; // task frames: heap arrays (free on completion)
+    int            is_task;    // set by the trampoline (suspend returns)
+    int            resume;     // resume label id (0 = fresh entry)
+    zz_value       value;      // handoff slot (sender deposits here)
+    int            has_value;
+} zz_task_frame;
+
+// One suspended waiter: either a task (requeue on handoff — no futex)
+// or a parked thread (condvar signal). Frames are always the handoff
+// target; `fn`/`join` rebuild the task for requeue (core.c-private
+// `zz_task_t` layout stays out of this header).
+typedef struct zz_green_waiter {
+    struct zz_green_waiter *next;
+    zz_value                fn;    // task closure (shallow; freed once at completion)
+    zz_task_join           *join;  // task join handle
+    zz_task_frame          *frame; // handoff target (value lands here)
+    int                     is_task;
+} zz_green_waiter;
+
+void zz_task_frame_init(zz_task_frame *fr);
+zz_task_frame *zz_green_frame(void); // TLS current frame (NULL off-task)
+void zz_green_frame_set(zz_task_frame *fr); // sync-call hygiene endpoint
+zz_task_frame *zz_frame_new(void);   // heap frame from the B4 pool
+void zz_frame_free(zz_task_frame *fr); // release cells; pool/free struct
+void zz_sync_frame_cleanup(zz_task_frame *fr); // `cleanup` attr endpoint
+// Per-thread suspend verdict (B3): set by green entries on every return
+// (1 = this call suspended the task, 0 = value returned). Thread-local
+// so a resuming run can never corrupt the suspending run's unwind that
+// it legitimately overlaps (ownership already transferred at handoff).
+int zz_green_suspended(void);
+
+// Blocking points with green fast paths: hit → value; miss → register
+// the frame as a waiter and either suspend (task frames: return to the
+// trampoline) or park the thread (sync frames). NULL frame degrades to
+// the blocking call (thread parks; always correct).
+//
+// `resume_id` is recorded into the frame under the same lock that queues
+// the waiter — before the waiter becomes visible — so a resuming run can
+// never dispatch on a stale id (the handoff that requeues it is ordered
+// after the write by that lock).
+zz_value zz_chan_recv_green(zz_value chan, zz_task_frame *fr, int resume_id, int *err);
+zz_value zz_task_join_recv_green(zz_value join, zz_task_frame *fr, int resume_id, int *err);
 
 // Task join handle for spawned threads.
 struct zz_task_join {
@@ -261,6 +333,15 @@ struct zz_task_join {
     int             consumed;   // set once `task.try_join` takes the result
     pthread_mutex_t lock;
     pthread_cond_t  cond;
+    // Green waiters (B3): tasks/threads suspended in `task.join` that
+    // must be resumed by direct handoff on completion (no condvar
+    // round-trip for task waiters). Served FIFO before the condvar.
+    struct zz_green_waiter *gwait_head;
+    struct zz_green_waiter *gwait_tail;
+    struct zz_green_waiter *gwait_pool; // lock-protected node free-list
+    size_t          gwait_pool_n;
+    size_t          green_waiters; // __atomic: queued green waiters
+    size_t          gparked; // __atomic: thread-parked green waiters (gate broadcasts)
 };
 
 // ---- arena allocator ---------------------------------------------------
@@ -502,12 +583,29 @@ zz_value zz_closure_make_ex_typed(
     size_t nenv);
 // Extract the generated function pointer from a closure value.
 zz_dispatch_fn zz_closure_target(zz_value v);
+// Suspendable-frame (B3) constructors: like the plain makers, but the
+// rep is flagged green so the trampoline runs it with a task frame and
+// `recv`/`join` inside suspend instead of parking the thread.
+zz_value zz_closure_make_green(zz_dispatch_fn f);
+zz_value zz_closure_make_ex_typed_green(
+    zz_dispatch_fn f,
+    void **cells,
+    const unsigned char *kinds,
+    const size_t *sizes,
+    size_t nenv);
+void zz_closure_set_green(zz_value v);
+int zz_closure_is_green(zz_value v);
 // Extract the captured environment from a closure value (NULL + 0 when none).
 void **zz_closure_env(zz_value v, size_t *nenv);
 // Call a closure value with args. Returns unit when `f` is not a closure
 // (null target) so unresolvable callees keep the old unit behavior
 // instead of crashing.
 zz_value zz_call_closure(zz_value f, zz_value *args, size_t argc);
+// Raw variant: no TLS frame management (the trampoline manages TLS
+// itself around this call).
+zz_value zz_call_closure_raw(zz_value f, zz_value *args, size_t argc);
+// Publish a task result (trampoline completion path).
+void zz_task_join_complete(zz_task_join *join, zz_value result);
 
 zz_value zz_call(zz_value fn, zz_value *args, size_t argc, int *err);
 
