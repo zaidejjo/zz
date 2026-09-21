@@ -300,6 +300,26 @@ impl EnvLink {
         names
     }
 
+    /// Reset for shell-pool reuse: clear bindings (retain table
+    /// capacity), drop the parent link, bump the version (pooled shells
+    /// reuse addresses — the version change defeats any stale shape-key
+    /// match). Only meaningful on owned links; frozen links detach first
+    /// (defense only — pooled shells are always owned by construction).
+    pub fn reset_shell(&mut self) {
+        if self.is_frozen() {
+            *self = self.detached_owned();
+        }
+        match self {
+            EnvLink::Owned(rc) => {
+                let mut borrowed = rc.borrow_mut();
+                borrowed.vars.clear();
+                borrowed.parent = None;
+                borrowed.bump();
+            }
+            EnvLink::Frozen(_) => unreachable!("reset_shell detaches frozen links first"),
+        }
+    }
+
     /// This scope's binding count (for shape keys).
     pub fn len(&self) -> usize {
         match self {

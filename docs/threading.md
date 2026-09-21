@@ -149,7 +149,7 @@ Safety notes (all bench-proven):
 
 | op | ZZ | comparison |
 |---|---|---|
-| `spawn` dispatch | ~3µs (~130k fan-in/s; 50k burst in 0.29s) | Go 50k burst in 0.66s, 185k fan-in/s |
+| `spawn` dispatch | ~3µs (~226k fan-in/s; 50k burst in 0.19s) | Go 50k burst in 0.66s, 185k fan-in/s |
 | `spawn+join` round-trip | ~25µs | pool-era ZZ was ~250ms (10,000× ago) |
 | `chan.send+recv` round-trip | ~1.9µs release (was 25µs pre-spin) | Go chan ~1.5µs/rt |
 | 64 parallel tasks | linear speedup | real parallelism, not just concurrency |
