@@ -358,11 +358,17 @@ zz_value zz_iter_map(zz_value items, zz_value f, int *err) {
     zz_value arr = zz_iter_items(items);
     zz_value out = zz_array_new();
     if (!fn) return out;
+    // Sync-call hygiene (B3): callbacks run outside the trampoline, so a
+    // stale task frame would corrupt the owning task's resume state.
+    // Green closures see NULL and take the stack-frame + thread-park path.
+    zz_task_frame *saved_fr = zz_green_frame();
+    zz_green_frame_set(NULL);
     for (size_t i = 0; i < arr.arr->len; i++) {
         zz_value a1[] = { arr.arr->items[i] };
         zz_value r = fn(a1, 1, env, nenv);
         zz_array_push(out.arr, r);
     }
+    zz_green_frame_set(saved_fr);
     zz_release(&arr);
     return out;
 }
@@ -376,6 +382,9 @@ zz_value zz_iter_filter(zz_value items, zz_value f, int *err) {
     zz_value arr = zz_iter_items(items);
     zz_value out = zz_array_new();
     if (!fn) return out;
+    // Sync-call hygiene (B3): see zz_iter_map.
+    zz_task_frame *saved_fr = zz_green_frame();
+    zz_green_frame_set(NULL);
     for (size_t i = 0; i < arr.arr->len; i++) {
         zz_value a1[] = { arr.arr->items[i] };
         zz_value r = fn(a1, 1, env, nenv);
@@ -383,6 +392,7 @@ zz_value zz_iter_filter(zz_value items, zz_value f, int *err) {
             zz_array_push(out.arr, zz_clone(arr.arr->items[i]));
         }
     }
+    zz_green_frame_set(saved_fr);
     zz_release(&arr);
     return out;
 }

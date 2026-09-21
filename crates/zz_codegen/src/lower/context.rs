@@ -14,9 +14,11 @@ use zz_frontend::ast::Expr;
 use super::mangle;
 
 /// Extract the creation counter from a C identifier for scope tracking.
-/// Plain locals are `vN`; owner-cell derefs are `(*_cellN)`. Anything else
-/// (temps like `__tail1`, global ids) returns `usize::MAX` so `pop_scope`
-/// drops it with the current scope.
+/// Plain locals are `vN`; owner-cell derefs are `(*_cellN)`; green frame
+/// cells are `(*_gcellN)` (same counter discipline — the `_gcellN`
+/// pointers are function-scope, restored from the frame on resume).
+/// Anything else (temps like `__tail1`, global ids) returns `usize::MAX`
+/// so `pop_scope` drops it with the current scope.
 fn cid_counter(cid: &str) -> usize {
     if let Some(rest) = cid.strip_prefix('v') {
         if let Ok(n) = rest.parse::<usize>() {
@@ -24,6 +26,13 @@ fn cid_counter(cid: &str) -> usize {
         }
     }
     if let Some(rest) = cid.strip_prefix("(*_cell") {
+        if let Some(num) = rest.strip_suffix(')') {
+            if let Ok(n) = num.parse::<usize>() {
+                return n;
+            }
+        }
+    }
+    if let Some(rest) = cid.strip_prefix("(*_gcell") {
         if let Some(num) = rest.strip_suffix(')') {
             if let Ok(n) = num.parse::<usize>() {
                 return n;
@@ -354,8 +363,18 @@ pub struct Lowerer {
     /// instead of copy-on-write `zz_vec_push`.
     pub(crate) void_context: std::cell::RefCell<bool>,
     /// Name of the current loop arena, if any. Used to emit arena-aware
-    /// native calls (e.g. str_cast_arena) inside loops.
+    /// native calls (e.g. str_cast_arena) inside loops. Forced to `None`
+    /// inside green closures (stack arenas cannot survive a suspend).
     pub(crate) current_loop_arena: std::cell::RefCell<Option<String>>,
+    /// True for the single outermost `emit_expr` of a statement-level
+    /// value (Decl/Assign RHS, Expr statement). Lets the call lowerer
+    /// recognize a suspendable call in direct yield position for the
+    /// green transform. Consumed (reset) by every `emit_expr` entry, so
+    /// nested calls never observe it.
+    pub(crate) stmt_direct: std::cell::Cell<bool>,
+    /// Active green (suspendable) transform state, if a green closure
+    /// body is being emitted. See `green.rs`.
+    pub(crate) green: std::cell::RefCell<Option<crate::lower::green::GreenCtx>>,
     /// When true, the generated C omits the embedded runtime sources
     /// (`RUNTIME_C`) and only includes headers (`RUNTIME_H`). The C runtime
     /// is linked from a precompiled static library (`libzz_rt.a`) instead.
@@ -383,6 +402,8 @@ impl Lowerer {
             closure_seq: std::cell::Cell::new(0),
             void_context: std::cell::RefCell::new(false),
             current_loop_arena: std::cell::RefCell::new(None),
+            stmt_direct: std::cell::Cell::new(false),
+            green: std::cell::RefCell::new(None),
             precompiled: false,
         }
     }
@@ -441,6 +462,11 @@ impl Lowerer {
     ///
     /// Returns the C arena identifier (without `&`) or None for heap.
     pub(super) fn arena_for(&self, span: zz_frontend::span::Span) -> Option<String> {
+        // Green closures run heap-only: stack arenas cannot survive a
+        // suspend (the C frame returns to the trampoline).
+        if self.green_active() {
+            return None;
+        }
         if self.is_escaping(span) {
             return None;
         }

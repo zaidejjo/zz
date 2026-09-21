@@ -14,6 +14,7 @@ mod context;
 mod expr;
 mod extern_call;
 mod fn_decl;
+mod green;
 mod stmt;
 
 use zz_frontend::ast::{Block, Expr, Stmt};

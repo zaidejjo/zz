@@ -3,10 +3,17 @@
 
 use zz_frontend::ast::{Expr, FmtPart, MatchArm, Param, Pattern};
 
+use super::green::GreenCtx;
 use super::*;
 
 impl Lowerer {
     pub(super) fn emit_expr(&self, e: &Expr, names: &mut NameCtx, out: &mut String) -> String {
+        // Statement-direct flag: true when this expression is the
+        // outermost value of a statement-level position (set by the
+        // statement lowerer). Consumed here so only the direct child
+        // observes it — nested expressions (tuple elements, call
+        // arguments, block contents) always see false.
+        let stmt_direct = self.stmt_direct.replace(false);
         match e {
             Expr::Int { value, .. } => format!("zz_int({value})"),
             Expr::Float { value, .. } => {
@@ -321,7 +328,7 @@ impl Lowerer {
                 args,
                 named,
                 ..
-            } => self.emit_call(callee, args, named, names, out),
+            } => self.emit_call(callee, args, named, names, out, stmt_direct),
             Expr::While {
                 cond, body, span, ..
             } => {
@@ -329,17 +336,20 @@ impl Lowerer {
                 // loop-scoped sub-arena, exactly like `for` loops: the buffer
                 // is reset at the end of every iteration so per-iteration
                 // allocations are reused instead of growing the heap.
-                let loop_arena: Option<String> = if self.escape.loop_spans.contains(span) {
-                    let ac = names.bump_counter();
-                    let name = format!("_loop_arena{ac}");
-                    let alloc_count = count_allocating_exprs(body);
-                    let arena_size = (alloc_count * 128).max(65536);
-                    out.push_str(&format!("    zz_arena {name};\n"));
-                    out.push_str(&format!("    zz_arena_init(&{name}, {arena_size});\n"));
-                    Some(name)
-                } else {
-                    None
-                };
+                // Skipped in green closures (stack arenas cannot survive
+                // a suspend; heap-only there).
+                let loop_arena: Option<String> =
+                    if !self.green_active() && self.escape.loop_spans.contains(span) {
+                        let ac = names.bump_counter();
+                        let name = format!("_loop_arena{ac}");
+                        let alloc_count = count_allocating_exprs(body);
+                        let arena_size = (alloc_count * 128).max(65536);
+                        out.push_str(&format!("    zz_arena {name};\n"));
+                        out.push_str(&format!("    zz_arena_init(&{name}, {arena_size});\n"));
+                        Some(name)
+                    } else {
+                        None
+                    };
                 if let Some(ref name) = loop_arena {
                     self.loop_arenas.borrow_mut().push(name.clone());
                     *self.current_loop_arena.borrow_mut() = Some(name.clone());
@@ -922,8 +932,15 @@ impl Lowerer {
                 self.closure_forward_decls.borrow_mut().push(format!(
                     "static zz_value zz_closure_{cid}(zz_value *args, size_t argc, void **env, size_t nenv);\n"
                 ));
+                // Green closures (B3 suspendable frames): eligible bodies
+                // lower to a state machine and suspend instead of parking.
+                let green = super::green::closure_green_eligible(self, body);
                 if caps.is_empty() {
-                    format!("zz_closure_make(zz_closure_{cid})")
+                    if green {
+                        format!("zz_closure_make_green(zz_closure_{cid})")
+                    } else {
+                        format!("zz_closure_make(zz_closure_{cid})")
+                    }
                 } else {
                     let cap_arr = names.fresh("_cap");
                     let ptrs: Vec<String> = caps.iter().map(|(_, p, _, _)| p.clone()).collect();
@@ -957,8 +974,9 @@ impl Lowerer {
                         sizes.join(", ")
                     ));
                     format!(
-                        "zz_closure_make_ex_typed(zz_closure_{cid}, {cap_arr}, {kind_arr}, {size_arr}, {})",
-                        caps.len()
+                        "zz_closure_make_ex_typed{green}(zz_closure_{cid}, {cap_arr}, {kind_arr}, {size_arr}, {})",
+                        caps.len(),
+                        green = if green { "_green" } else { "" },
                     )
                 }
             }
@@ -979,6 +997,35 @@ impl Lowerer {
         caps: &[(String, String, String, Option<zz_checker::Type>)],
         _outer_names: &mut NameCtx,
         _out: &mut String,
+    ) -> String {
+        // Green transform (B3): suspendable bodies lower every local to a
+        // task-frame cell and split at blocking calls into resume labels.
+        let green = super::green::closure_green_eligible(self, body);
+        if green {
+            self.green.borrow_mut().replace(GreenCtx::new());
+        }
+        // Loop arenas cannot survive a suspend (stack buffers): force heap
+        // allocation throughout green bodies. Save/restore the outer state
+        // (closures may be created inside outer loop bodies).
+        let saved_arena = self.current_loop_arena.borrow().clone();
+        if green {
+            *self.current_loop_arena.borrow_mut() = None;
+        }
+        let mut o = self.emit_closure_inner(params, body, cid, caps, green);
+        if green {
+            self.green_finish(&mut o);
+            *self.current_loop_arena.borrow_mut() = saved_arena;
+        }
+        o
+    }
+
+    fn emit_closure_inner(
+        &self,
+        params: &[Param],
+        body: &Expr,
+        cid: usize,
+        caps: &[(String, String, String, Option<zz_checker::Type>)],
+        green: bool,
     ) -> String {
         let mut names = NameCtx::new();
         self.seed_globals(&mut names);
@@ -1001,11 +1048,68 @@ impl Lowerer {
         if caps.is_empty() {
             o.push_str("    (void)env;\n");
         }
-        o.push_str("    zz_arena _arena;\n");
-        o.push_str("    zz_arena_init(&_arena, 65536);\n");
+        if green {
+            // Suspendable prologue: fetch the task frame (trampoline-set)
+            // or stand up a stack-backed sync frame (sync calls: NULL
+            // TLS). The cleanup attribute frees sync cell contents at
+            // every exit; task frames are freed by the trampoline on
+            // completion and survive suspend-returns. `_gcell` pointers
+            // restore from frame slots (a resume jumps over their
+            // allocation sites), then resume dispatches to the yield
+            // label. Placeholders expand in `green_finish`.
+            o.push_str("    zz_task_frame *zz_fr = zz_green_frame();\n");
+            o.push_str(
+                "    __attribute__((cleanup(zz_sync_frame_cleanup))) zz_task_frame zz_sync_fr;\n",
+            );
+            o.push_str("    void *_sync_cells[/*GREEN_NSLOTS*/];\n");
+            o.push_str("    unsigned char _sync_kind[/*GREEN_NSLOTS*/];\n");
+            o.push_str("    size_t _sync_size[/*GREEN_NSLOTS*/];\n");
+            o.push_str("    zz_task_frame_init(&zz_sync_fr);\n");
+            o.push_str("    if (!zz_fr) {\n");
+            o.push_str("        memset(_sync_cells, 0, sizeof(_sync_cells));\n");
+            o.push_str("        memset(_sync_kind, 0, sizeof(_sync_kind));\n");
+            o.push_str("        memset(_sync_size, 0, sizeof(_sync_size));\n");
+            o.push_str("        zz_sync_fr.cells = _sync_cells;\n");
+            o.push_str("        zz_sync_fr.cell_kind = _sync_kind;\n");
+            o.push_str("        zz_sync_fr.cell_size = _sync_size;\n");
+            o.push_str("        zz_sync_fr.ncells = /*GREEN_NSLOTS*/;\n");
+            o.push_str("        zz_fr = &zz_sync_fr;\n");
+            o.push_str("    }\n");
+            o.push_str("    if (!zz_fr->cells) {\n");
+            o.push_str("        zz_fr->cells = (void**)calloc(/*GREEN_NSLOTS*/, sizeof(void*));\n");
+            o.push_str("        zz_fr->cell_kind = (unsigned char*)calloc(/*GREEN_NSLOTS*/, 1);\n");
+            o.push_str(
+                "        zz_fr->cell_size = (size_t*)calloc(/*GREEN_NSLOTS*/, sizeof(size_t));\n",
+            );
+            o.push_str("        if (!zz_fr->cells || !zz_fr->cell_kind || !zz_fr->cell_size) { fprintf(stderr, \"zz: out of memory (frame cells)\\n\"); exit(1); }\n");
+            o.push_str("        zz_fr->ncells = /*GREEN_NSLOTS*/;\n");
+            o.push_str("        zz_fr->owns_cells = 1;\n");
+            o.push_str("    }\n");
+            o.push_str("/*GREEN_DECLS*/");
+            o.push_str("/*GREEN_RESTORE*/");
+            o.push_str("    if (zz_fr->resume != 0) {\n");
+            o.push_str("        switch (zz_fr->resume) {\n");
+            o.push_str("/*GREEN_DISPATCH*/");
+            o.push_str("        default: break;\n");
+            o.push_str("        }\n");
+            o.push_str("        return zz_unit();\n");
+            o.push_str("    }\n");
+        } else {
+            o.push_str("    zz_arena _arena;\n");
+            o.push_str("    zz_arena_init(&_arena, 65536);\n");
+        }
         o.push_str("    int __defers[32];\n");
         o.push_str("    int __defer_n = 0;\n");
         for (i, p) in params.iter().enumerate() {
+            if green {
+                // Params must survive a suspend: frame cells, assigned
+                // from the re-passed `args[]` on first entry (resume
+                // skips straight to the yield label).
+                let (ptr, deref, n) = self.green_cell(&mut names, "zz_value", true, &mut o);
+                o.push_str(&format!("    {deref} = args[{i}];\n"));
+                names.enter_cell(&p.name.name, &ptr, &deref, "zz_value", n);
+                continue;
+            }
             if names.capture_set.contains(&p.name.name) {
                 // Captured param: heap cell shared with nested closures.
                 let n = names.bump_counter();
@@ -1037,6 +1141,11 @@ impl Lowerer {
                 String::new()
             }
             None => {
+                // A bare body that IS a suspendable call (`|_| recv(c)`)
+                // is a statement-level yield: suspend instead of parking.
+                if green {
+                    self.stmt_direct.set(true);
+                }
                 let v = self.emit_expr(body, &mut names, &mut body_out);
                 o.push_str(&body_out);
                 box_scalar_operand(body, &names, &v)
@@ -1065,7 +1174,11 @@ impl Lowerer {
         } else {
             o.push_str(&format!("    return {val};\n"));
         }
-        o.push_str("    zz_arena_reset_trim(&_arena);\n");
+        // Green closures run heap-only (no function arena to reset); the
+        // frame owns every cell. Blocking closures keep arena discipline.
+        if !green {
+            o.push_str("    zz_arena_reset_trim(&_arena);\n");
+        }
         o.push_str("}\n");
         o
     }
@@ -1171,7 +1284,12 @@ impl Lowerer {
         named: &[(String, Expr)],
         names: &mut NameCtx,
         out: &mut String,
+        stmt_direct: bool,
     ) -> String {
+        // `stmt_direct` arrives from `emit_expr` (single funnel above):
+        // only a suspendable call sitting directly in statement position
+        // qualifies for the green yield sequence; nested calls observed
+        // `false` and keep the blocking path.
         // Resolve callee name — handle method dispatch for Path/Field expressions.
         // Returns (cname, method_receiver) where method_receiver is the owned Expr
         // to insert as the first argument for method calls like `x.push(4)`.
@@ -1870,6 +1988,39 @@ impl Lowerer {
             return match arg_items.len() {
                 1 => {
                     let a = &arg_items[0];
+                    // Green yield (B3): a suspendable call in direct
+                    // statement position inside a green closure suspends
+                    // the task instead of parking the thread. The value
+                    // travels through a frame temp cell so both the fresh
+                    // path (stores the call result) and the resume path
+                    // (loads the handed-off value at the label) converge
+                    // on the same value string for the enclosing
+                    // statement. Non-statement positions keep the
+                    // blocking call (thread parks; always correct).
+                    if stmt_direct
+                        && self.green_active()
+                        && (effective_name == "zz_chan_recv"
+                            || effective_name == "zz_task_join_recv")
+                    {
+                        let green_fn = if effective_name == "zz_chan_recv" {
+                            "zz_chan_recv_green"
+                        } else {
+                            "zz_task_join_recv_green"
+                        };
+                        let tmp = self.green_temp(names, out);
+                        let k = self.green_resume_id();
+                        let yv = names.fresh("_yv");
+                        out.push_str(&format!(
+                            "    {{ int _e = 0; zz_value {yv} = {green_fn}({a}, zz_fr, {k}, &_e);\n"
+                        ));
+                        out.push_str("      if (zz_green_suspended()) { return zz_unit(); }\n");
+                        out.push_str(&format!("      {tmp} = {yv}; goto green_done_{k}; }}\n"));
+                        out.push_str(&format!(
+                            "    green_L_{k}: {tmp} = zz_fr->value; zz_fr->has_value = 0;\n"
+                        ));
+                        out.push_str(&format!("    green_done_{k}: ;\n"));
+                        return tmp;
+                    }
                     format!("zz_call_native1({effective_name}, {a})")
                 }
                 0 => format!("zz_call_native0({effective_name})"),
@@ -2285,8 +2436,16 @@ impl Lowerer {
     ) -> usize {
         match pat {
             Pattern::Binding { name } => {
-                let cid = names.enter(&name.name);
-                out.push_str(&format!("        zz_value {cid} = {scrut};\n"));
+                // Green: arm bindings live in frame cells (a yield in
+                // the arm body resumes past this declaration).
+                if self.green_active() {
+                    let (ptr, deref, n) = self.green_cell(names, "zz_value", true, out);
+                    out.push_str(&format!("        {deref} = {scrut};\n"));
+                    names.enter_cell(&name.name, &ptr, &deref, "zz_value", n);
+                } else {
+                    let cid = names.enter(&name.name);
+                    out.push_str(&format!("        zz_value {cid} = {scrut};\n"));
+                }
                 0
             }
             Pattern::Variant { name, arg, .. } => {
@@ -2305,10 +2464,17 @@ impl Lowerer {
                 };
                 out.push_str(&format!("        if ({scrut}.tag == {tag_check}) {{\n"));
                 let inner_open = if let Some(inner) = arg {
-                    let payload_tmp = names.fresh("_payload");
-                    out.push_str(&format!(
-                        "            zz_value {payload_tmp} = {extractor}({scrut});\n"
-                    ));
+                    let payload_tmp: String = if self.green_active() {
+                        let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                        out.push_str(&format!("            {deref} = {extractor}({scrut});\n"));
+                        deref
+                    } else {
+                        let payload_tmp = names.fresh("_payload");
+                        out.push_str(&format!(
+                            "            zz_value {payload_tmp} = {extractor}({scrut});\n"
+                        ));
+                        payload_tmp
+                    };
                     self.emit_pattern_bind(inner, &payload_tmp, names, out)
                 } else {
                     0
@@ -2328,15 +2494,32 @@ impl Lowerer {
         out: &mut String,
     ) -> String {
         let scrut_val = self.emit_expr(scrutinee, names, out);
-        let scrut_tmp = names.fresh("_match");
+        // Green: scrutinee/result cross arm yields (resume may land
+        // inside an arm); plain path keeps stack temps.
+        let green_match = self.green_active();
+        let scrut_tmp: String = if green_match {
+            let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+            deref
+        } else {
+            let scrut_tmp = names.fresh("_match");
+            out.push_str(&format!("    zz_value {scrut_tmp} = zz_unit();\n"));
+            scrut_tmp
+        };
         let boxed = box_scalar_operand(scrutinee, names, &scrut_val);
-        out.push_str(&format!("    zz_value {scrut_tmp} = {boxed};\n"));
+        out.push_str(&format!("    {scrut_tmp} = {boxed};\n"));
 
         let scrut_type = scalar_operand_type(scrutinee, names);
         let scrut_raw = scalar_operand_c(scrutinee, names).unwrap_or_else(|| scrut_val.clone());
 
-        let result_tmp = names.fresh("_mresult");
-        out.push_str(&format!("    zz_value {result_tmp} = zz_unit();\n"));
+        let result_tmp: String = if green_match {
+            let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+            out.push_str(&format!("    {deref} = zz_unit();\n"));
+            deref
+        } else {
+            let result_tmp = names.fresh("_mresult");
+            out.push_str(&format!("    zz_value {result_tmp} = zz_unit();\n"));
+            result_tmp
+        };
 
         // Desugar or-patterns (`a | b`) into separate arms sharing the
         // same body/guard, expanding nested ors (variant args, tuples).
@@ -2448,10 +2631,17 @@ impl Lowerer {
                     // another variant pattern for nested matching).
                     let mut inner_open = 0;
                     if let Some(arg_pat) = arg {
-                        let payload_tmp = names.fresh("_payload");
-                        out.push_str(&format!(
-                            "        zz_value {payload_tmp} = {extractor}({scrut_tmp});\n"
-                        ));
+                        let payload_tmp: String = if self.green_active() {
+                            let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                            out.push_str(&format!("        {deref} = {extractor}({scrut_tmp});\n"));
+                            deref
+                        } else {
+                            let payload_tmp = names.fresh("_payload");
+                            out.push_str(&format!(
+                                "        zz_value {payload_tmp} = {extractor}({scrut_tmp});\n"
+                            ));
+                            payload_tmp
+                        };
                         inner_open = self.emit_pattern_bind(arg_pat, &payload_tmp, names, out);
                     }
 

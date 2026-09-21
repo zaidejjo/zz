@@ -34,8 +34,16 @@ impl Lowerer {
                 {
                     if self.is_unboxed_struct(struct_name) {
                         let c_type = self.struct_c_type(struct_name);
+                        if self.green_active() {
+                            self.stmt_direct.set(true);
+                        }
                         let val = self.emit_expr(value, names, out);
-                        if names.capture_set.contains(&name.name) {
+                        if self.green_active() {
+                            let captured = names.capture_set.contains(&name.name);
+                            let (ptr, deref, n) = self.green_cell(names, &c_type, captured, out);
+                            out.push_str(&format!("    {deref} = {val};\n"));
+                            names.enter_cell(&name.name, &ptr, &deref, &c_type, n);
+                        } else if names.capture_set.contains(&name.name) {
                             // Captured struct: heap cell holding the unboxed value.
                             let n = names.bump_counter();
                             let ptr = format!("_cell{n}");
@@ -54,6 +62,13 @@ impl Lowerer {
                 // resolves to the PREVIOUS scope entry (if any). This is critical
                 // for redeclarations like `total := total + item` inside loop
                 // bodies: the RHS must reference the old `total`, not the new one.
+                //
+                // In a green closure the RHS may be a statement-level
+                // suspendable call: flag it so the call lowerer suspends
+                // instead of parking.
+                if self.green_active() {
+                    self.stmt_direct.set(true);
+                }
                 let val = self.emit_expr(value, names, out);
 
                 // NOW enter the new scope entry with the correct C type.
@@ -80,7 +95,15 @@ impl Lowerer {
                 // Captured bindings become shared heap cells instead of plain
                 // locals: the stack entry holds the deref expr so every use
                 // site transparently reads/writes the shared cell.
-                if names.capture_set.contains(&name.name) {
+                // Green closures put EVERY binding in a task-frame cell
+                // (locals must survive a suspend): same transparency,
+                // frame-backed lifetime.
+                if self.green_active() {
+                    let captured = names.capture_set.contains(&name.name);
+                    let (ptr, deref, n) = self.green_cell(names, &ctype, captured, out);
+                    out.push_str(&format!("    {deref} = {final_val};\n"));
+                    names.enter_cell(&name.name, &ptr, &deref, &ctype, n);
+                } else if names.capture_set.contains(&name.name) {
                     let n = names.bump_counter();
                     let ptr = format!("_cell{n}");
                     let deref = NameCtx::owner_deref(&ptr);
@@ -194,6 +217,12 @@ impl Lowerer {
                     }
                 }
 
+                // Green closures: a statement-level suspendable RHS
+                // suspends instead of parking (pre-scan rejected exotic
+                // targets, so the assignment after the label is plain).
+                if self.green_active() {
+                    self.stmt_direct.set(true);
+                }
                 let val = self.emit_expr(value, names, out);
                 // If the RHS expression was already lowered to a raw
                 // scalar (int64_t/double/bool), don't try to extract
@@ -398,6 +427,9 @@ impl Lowerer {
                     } else if matches!(e, Expr::Call { .. }) || needs_temp(e) {
                         let tmp = format!("__tail{}", names.counter);
                         names.counter += 1;
+                        if self.green_active() {
+                            self.stmt_direct.set(true);
+                        }
                         let val = self.emit_expr(e, names, out);
                         out.push_str(&format!("    zz_value {tmp} = {val};\n"));
                         names
@@ -433,6 +465,9 @@ impl Lowerer {
                         }
                     }
                     *self.void_context.borrow_mut() = true;
+                    if self.green_active() {
+                        self.stmt_direct.set(true);
+                    }
                     let val = self.emit_expr(e, names, out);
                     *self.void_context.borrow_mut() = false;
                     out.push_str(&format!("    (void)({val});\n"));
@@ -534,19 +569,22 @@ impl Lowerer {
             // allocations get their own arena so the per-iteration reset can
             // reuse the buffer without touching objects an enclosing scope or
             // an outer loop iteration may have placed on the function arena.
-            let loop_arena: Option<String> = if self.escape.loop_spans.contains(&span) {
-                let ac = names.bump_counter();
-                let name = format!("_loop_arena{ac}");
-                // Estimate per-iteration allocation size to pre-size the arena.
-                // Count allocating expressions in the body × 128 bytes each.
-                let alloc_count = count_allocating_exprs(body);
-                let arena_size = (alloc_count * 128).max(65536);
-                out.push_str(&format!("    zz_arena {name};\n"));
-                out.push_str(&format!("    zz_arena_init(&{name}, {arena_size});\n"));
-                Some(name)
-            } else {
-                None
-            };
+            // Skipped in green closures: stack arenas cannot survive a
+            // suspend (heap-only there).
+            let loop_arena: Option<String> =
+                if !self.green_active() && self.escape.loop_spans.contains(&span) {
+                    let ac = names.bump_counter();
+                    let name = format!("_loop_arena{ac}");
+                    // Estimate per-iteration allocation size to pre-size the arena.
+                    // Count allocating expressions in the body × 128 bytes each.
+                    let alloc_count = count_allocating_exprs(body);
+                    let arena_size = (alloc_count * 128).max(65536);
+                    out.push_str(&format!("    zz_arena {name};\n"));
+                    out.push_str(&format!("    zz_arena_init(&{name}, {arena_size});\n"));
+                    Some(name)
+                } else {
+                    None
+                };
             // Check if end is an unboxed scalar variable (for fast path)
             let end_name_opt: Option<String> = match &end_expr {
                 Expr::Ident { name, .. } => Some(name.clone()),
@@ -562,13 +600,24 @@ impl Lowerer {
             let sv = self.emit_expr(&start_expr, names, out);
             let ev = self.emit_expr(&end_expr, names, out);
             let v = &vars[0].name;
-            let cid = names.enter(v);
-            // Update the type in NameCtx to int64_t since the loop variable is unboxed
-            if let Some(vec) = names.stack.get_mut(v) {
-                if let Some((_, existing_ty)) = vec.last_mut() {
-                    *existing_ty = "int64_t".to_string();
+            let green = self.green_active();
+            // Green closures: the loop variable lives in a frame cell
+            // (a resume may land inside the body). Plain path keeps the
+            // unboxed stack local.
+            let cid: String = if green {
+                let (ptr, deref, n) = self.green_cell(names, "int64_t", true, out);
+                names.enter_cell(v, &ptr, &deref, "int64_t", n);
+                deref
+            } else {
+                let cid = names.enter(v);
+                // Update the type in NameCtx to int64_t since the loop variable is unboxed
+                if let Some(vec) = names.stack.get_mut(v) {
+                    if let Some((_, existing_ty)) = vec.last_mut() {
+                        *existing_ty = "int64_t".to_string();
+                    }
                 }
-            }
+                cid
+            };
 
             // Fast path: if end is an unboxed scalar, use unboxed C loop variables
             if end_is_scalar {
@@ -611,9 +660,13 @@ impl Lowerer {
                     format!("({sv}).i")
                 };
 
-                let s = format!(
-                    "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++) {{\n"
-                );
+                let s = if green {
+                    format!("for ({cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++) {{\n")
+                } else {
+                    format!(
+                        "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++) {{\n"
+                    )
+                };
                 out.push_str(&s);
                 // Loop-top safepoint (mirrors the VM's `Op::Safepoint`).
                 out.push_str("    zz_safepoint();\n");
@@ -621,30 +674,53 @@ impl Lowerer {
                 // Slow path: both bounds are general expressions, use boxed loop
                 let sv_boxed = sv;
                 let ev_boxed = auto_box(&ev, if end_is_scalar { Some("int64_t") } else { None });
-                let s = format!(
-                    "{{ zz_value _s = {sv_boxed}; zz_value _e = {ev_boxed};\n    \
+                if green {
+                    // Green: raw driver + per-iteration copy both live in
+                    // frame cells (a resume may land inside the body).
+                    let (_, driver, _) = self.green_cell(names, "int64_t", true, out);
+                    out.push_str(&format!(
+                        "{{ zz_value _s = {sv_boxed}; zz_value _e = {ev_boxed};\n    \
+                         if (_s.tag == ZZ_INT && _e.tag == ZZ_INT) {{\n        \
+                         for ({driver} = _s.i; {driver} < _e.i; {driver}++) {{\n            \
+                         {cid} = {driver};\n            \
+                         zz_safepoint();\n"
+                    ));
+                } else {
+                    let s = format!(
+                        "{{ zz_value _s = {sv_boxed}; zz_value _e = {ev_boxed};\n    \
                      if (_s.tag == ZZ_INT && _e.tag == ZZ_INT) {{\n        \
                      for (int64_t {cid}_i = _s.i; {cid}_i < _e.i; {cid}_i++) {{\n            \
                      int64_t {cid} = {cid}_i;\n            \
                      zz_safepoint();\n"
-                );
-                out.push_str(&s);
+                    );
+                    out.push_str(&s);
+                }
             }
             // Loop body is never a function tail.
             // A captured loop variable gets a per-iteration shared cell so
             // closures created inside the loop each see their own iteration.
             // Body writes go to the cell; the raw loop variable keeps driving
-            // iteration.
+            // iteration. Green closures mirror this with frame cells: the
+            // driver stays put while a fresh per-iteration copy cell shadows
+            // it for the body (spawned closures dup at creation, so later
+            // iterations cannot disturb them — same isolation as below).
             let loop_cell: Option<String> = if names.capture_set.contains(v) {
-                let n = names.bump_counter();
-                let ptr = format!("_cell{n}");
-                let deref = NameCtx::owner_deref(&ptr);
-                out.push_str(&format!(
-                    "    int64_t *{ptr} = (int64_t*)malloc(sizeof(int64_t));\n"
-                ));
-                out.push_str(&format!("    {deref} = {cid};\n"));
-                names.enter_cell(v, &ptr, &deref, "int64_t", n);
-                Some(v.clone())
+                if green {
+                    let (ptr2, deref2, n2) = self.green_cell(names, "int64_t", true, out);
+                    out.push_str(&format!("    {deref2} = {cid};\n"));
+                    names.enter_cell(v, &ptr2, &deref2, "int64_t", n2);
+                    Some(v.clone())
+                } else {
+                    let n = names.bump_counter();
+                    let ptr = format!("_cell{n}");
+                    let deref = NameCtx::owner_deref(&ptr);
+                    out.push_str(&format!(
+                        "    int64_t *{ptr} = (int64_t*)malloc(sizeof(int64_t));\n"
+                    ));
+                    out.push_str(&format!("    {deref} = {cid};\n"));
+                    names.enter_cell(v, &ptr, &deref, "int64_t", n);
+                    Some(v.clone())
+                }
             } else {
                 None
             };
@@ -676,13 +752,27 @@ impl Lowerer {
                 names.leave(&cell_name);
                 names.pop_cell(&cell_name);
             }
+            if green {
+                // Green driver is itself a frame cell: retire its records.
+                names.pop_cell(v);
+            }
             names.leave(v);
         } else {
             // For-in over an array or dict: evaluate the iterable, then
             // dispatch based on the runtime tag.
             let iter_val = self.emit_expr(iter, names, out);
-            let iter_tmp = names.fresh("_iter");
-            out.push_str(&format!("    zz_value {iter_tmp} = {iter_val};\n"));
+            let green_iter = self.green_active();
+            // Green: the iterable temp must survive a suspend (a resume
+            // may land inside the loop).
+            let iter_tmp: String = if green_iter {
+                let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                out.push_str(&format!("    {deref} = {iter_val};\n"));
+                deref
+            } else {
+                let iter_tmp = names.fresh("_iter");
+                out.push_str(&format!("    zz_value {iter_tmp} = {iter_val};\n"));
+                iter_tmp
+            };
 
             if vars.len() == 1 {
                 // for x in <array|dict>: iterate array elements or dict keys.
@@ -690,29 +780,66 @@ impl Lowerer {
                 // `total := total + item`) don't leak past the loop boundary.
                 names.push_scope();
                 let v = &vars[0].name;
-                let cid = names.enter(v);
-                // Update type to zz_value (array elements / dict keys are boxed)
-                if let Some(vec) = names.stack.get_mut(v) {
-                    if let Some((_, existing_ty)) = vec.last_mut() {
-                        *existing_ty = "zz_value".to_string();
+                // Green: per-iteration item is a frame cell (fresh when a
+                // nested closure may capture it — same isolation as the
+                // blocking path's per-iteration cells — else reused).
+                let cid: String = if green_iter {
+                    let captured = names.capture_set.contains(v);
+                    let (ptr, deref, n) = self.green_cell(names, "zz_value", captured, out);
+                    names.enter_cell(v, &ptr, &deref, "zz_value", n);
+                    deref
+                } else {
+                    let cid = names.enter(v);
+                    // Update type to zz_value (array elements / dict keys are boxed)
+                    if let Some(vec) = names.stack.get_mut(v) {
+                        if let Some((_, existing_ty)) = vec.last_mut() {
+                            *existing_ty = "zz_value".to_string();
+                        }
                     }
-                }
-                let idx = names.fresh("_idx");
-                let len = names.fresh("_len");
-                out.push_str(&format!("    int64_t {idx} = 0;\n"));
-                out.push_str(&format!(
-                    "    int64_t {len} = ({iter_tmp}.tag == ZZ_ARRAY) ? (int64_t){iter_tmp}.arr->len\n\
-                     : ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
-                ));
+                    cid
+                };
+                // Green: loop drivers live in frame cells (a resume may
+                // land inside the loop); plain path keeps stack counters.
+                let (idx, len): (String, String) = if green_iter {
+                    let (_, ideref, _) = self.green_cell(names, "int64_t", false, out);
+                    let (_, lderef, _) = self.green_cell(names, "int64_t", false, out);
+                    out.push_str(&format!("    {ideref} = 0;\n"));
+                    out.push_str(&format!(
+                        "    {lderef} = ({iter_tmp}.tag == ZZ_ARRAY) ? (int64_t){iter_tmp}.arr->len\n\
+                         : ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
+                    ));
+                    (ideref, lderef)
+                } else {
+                    let idx = names.fresh("_idx");
+                    let len = names.fresh("_len");
+                    out.push_str(&format!("    int64_t {idx} = 0;\n"));
+                    out.push_str(&format!(
+                        "    int64_t {len} = ({iter_tmp}.tag == ZZ_ARRAY) ? (int64_t){iter_tmp}.arr->len\n\
+                         : ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
+                    ));
+                    (idx, len)
+                };
                 out.push_str(&format!("    for (; {idx} < {len}; {idx}++) {{\n"));
                 out.push_str("    zz_safepoint();\n");
-                out.push_str(&format!(
-                    "        zz_value {cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
-                     ? zz_clone({iter_tmp}.arr->items[{idx}])\n\
-                     : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}};\n"
-                ));
+                // Green: the item is a frame cell (assigned, never
+                // declared); plain path declares the per-iteration local.
+                if green_iter {
+                    out.push_str(&format!(
+                        "        {cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
+                         ? zz_clone({iter_tmp}.arr->items[{idx}])\n\
+                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}};\n"
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "        zz_value {cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
+                         ? zz_clone({iter_tmp}.arr->items[{idx}])\n\
+                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}};\n"
+                    ));
+                }
                 // Captured iteration variable: per-iteration shared cell.
-                if names.capture_set.contains(v) {
+                // Green skips this: the item is already a frame cell
+                // (fresh per iteration when captured).
+                if !green_iter && names.capture_set.contains(v) {
                     let n = names.bump_counter();
                     let ptr = format!("_cell{n}");
                     let deref = NameCtx::owner_deref(&ptr);
@@ -732,46 +859,82 @@ impl Lowerer {
                 names.push_scope();
                 let k_name = &vars[0].name;
                 let v_name = &vars[1].name;
-                let k_cid = names.enter(k_name);
-                let v_cid = names.enter(v_name);
-                if let Some(vec) = names.stack.get_mut(k_name) {
-                    if let Some((_, ty)) = vec.last_mut() {
-                        *ty = "zz_value".to_string();
+                // Green: per-iteration items are frame cells (fresh when
+                // capturable, reused otherwise); drivers likewise.
+                let (k_cid, v_cid): (String, String) = if green_iter {
+                    let k_cap = names.capture_set.contains(k_name);
+                    let (kptr, kderef, kn) = self.green_cell(names, "zz_value", k_cap, out);
+                    names.enter_cell(k_name, &kptr, &kderef, "zz_value", kn);
+                    let v_cap = names.capture_set.contains(v_name);
+                    let (vptr, vderef, vn) = self.green_cell(names, "zz_value", v_cap, out);
+                    names.enter_cell(v_name, &vptr, &vderef, "zz_value", vn);
+                    (kderef, vderef)
+                } else {
+                    let k_cid = names.enter(k_name);
+                    let v_cid = names.enter(v_name);
+                    if let Some(vec) = names.stack.get_mut(k_name) {
+                        if let Some((_, ty)) = vec.last_mut() {
+                            *ty = "zz_value".to_string();
+                        }
                     }
-                }
-                if let Some(vec) = names.stack.get_mut(v_name) {
-                    if let Some((_, ty)) = vec.last_mut() {
-                        *ty = "zz_value".to_string();
+                    if let Some(vec) = names.stack.get_mut(v_name) {
+                        if let Some((_, ty)) = vec.last_mut() {
+                            *ty = "zz_value".to_string();
+                        }
                     }
+                    (k_cid, v_cid)
+                };
+                // Green: drivers are frame cells (a resume may land inside
+                // the loop); plain path keeps stack counters.
+                if green_iter {
+                    let (_, ideref, _) = self.green_cell(names, "int64_t", false, out);
+                    let (_, lderef, _) = self.green_cell(names, "int64_t", false, out);
+                    out.push_str(&format!("    {ideref} = 0;\n"));
+                    out.push_str(&format!(
+                        "    {lderef} = ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
+                    ));
+                    out.push_str(&format!("    for (; {ideref} < {lderef}; {ideref}++) {{\n"));
+                    out.push_str("    zz_safepoint();\n");
+                    out.push_str(&format!(
+                        "        {k_cid} = (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{ideref}].key}}}};\n"
+                    ));
+                    out.push_str(&format!(
+                        "        {v_cid} = zz_clone({iter_tmp}.dict->entries[{ideref}].val);\n"
+                    ));
+                } else {
+                    let idx = names.fresh("_idx");
+                    let len = names.fresh("_len");
+                    out.push_str(&format!("    int64_t {idx} = 0;\n"));
+                    out.push_str(&format!(
+                        "    int64_t {len} = ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
+                    ));
+                    out.push_str(&format!("    for (; {idx} < {len}; {idx}++) {{\n"));
+                    out.push_str("    zz_safepoint();\n");
+                    out.push_str(&format!(
+                        "        zz_value {k_cid} = (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}};\n"
+                    ));
+                    out.push_str(&format!(
+                        "        zz_value {v_cid} = zz_clone({iter_tmp}.dict->entries[{idx}].val);\n"
+                    ));
                 }
-                let idx = names.fresh("_idx");
-                let len = names.fresh("_len");
-                out.push_str(&format!("    int64_t {idx} = 0;\n"));
-                out.push_str(&format!(
-                    "    int64_t {len} = ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
-                ));
-                out.push_str(&format!("    for (; {idx} < {len}; {idx}++) {{\n"));
-                out.push_str("    zz_safepoint();\n");
-                out.push_str(&format!(
-                    "        zz_value {k_cid} = (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}};\n"
-                ));
-                out.push_str(&format!(
-                    "        zz_value {v_cid} = zz_clone({iter_tmp}.dict->entries[{idx}].val);\n"
-                ));
                 // Captured iteration variables: per-iteration shared cells.
-                for (lname, raw) in [
-                    (k_name.as_str(), k_cid.as_str()),
-                    (v_name.as_str(), v_cid.as_str()),
-                ] {
-                    if names.capture_set.contains(lname) {
-                        let n = names.bump_counter();
-                        let ptr = format!("_cell{n}");
-                        let deref = NameCtx::owner_deref(&ptr);
-                        out.push_str(&format!(
-                            "        zz_value *{ptr} = (zz_value*)malloc(sizeof(zz_value));\n"
-                        ));
-                        out.push_str(&format!("        {deref} = {raw};\n"));
-                        names.enter_cell(lname, &ptr, &deref, "zz_value", n);
+                // Green skips this: items are already frame cells (fresh
+                // per iteration when captured).
+                if !green_iter {
+                    for (lname, raw) in [
+                        (k_name.as_str(), k_cid.as_str()),
+                        (v_name.as_str(), v_cid.as_str()),
+                    ] {
+                        if names.capture_set.contains(lname) {
+                            let n = names.bump_counter();
+                            let ptr = format!("_cell{n}");
+                            let deref = NameCtx::owner_deref(&ptr);
+                            out.push_str(&format!(
+                                "        zz_value *{ptr} = (zz_value*)malloc(sizeof(zz_value));\n"
+                            ));
+                            out.push_str(&format!("        {deref} = {raw};\n"));
+                            names.enter_cell(lname, &ptr, &deref, "zz_value", n);
+                        }
                     }
                 }
                 for bstmt in &body.stmts {
