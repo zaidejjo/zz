@@ -154,6 +154,47 @@ Measured AOT (release, same 4-core box): 100k channel round-trips at
 ~5µs/rt (was ~15µs pre-B3), 10k fan-in at ~139k/s, 50k endurance with a
 ~4ms join, full bench green at ~27MB peak RSS.
 
+## Direct worker handoff (spawn fast path + inline resume)
+
+Two queue bypasses on top of B3, same box:
+
+- **Synchronous resume on handoff.** A channel send (or join completion)
+  that releases a suspended task waiter runs it *inline on the sender's
+  thread* instead of routing through the executor queue (depth-capped at 8
+  levels, queue fallback past it). In the rendezvous steady state the
+  waiter's reply lands in the ring before the sender even reaches `recv` —
+  zero queue hops, zero thread hops, zero futex park/wake pairs per
+  round-trip. Safe because the trampoline saves/restores TLS around the
+  run, every green entry re-establishes the thread-local verdict, and no
+  locks are held at any inline site.
+- **`task.spawn(closure-literal)` fuse (`zz_spawn_ex`).** The lowerer
+  passes capture arrays straight to spawn, which builds the worker-owned
+  fused rep directly — skipping the intermediate call-site rep (one malloc
+  + a full make/dup layer per spawn).
+- **Allocator discipline (the spawn burst is allocator-bound: glibc malloc
+  costs ~450ns/op under cross-thread free traffic, tcmalloc proved 4x).**
+  Fused single-block closure reps (header + kinds/sizes + inline VALUE
+  cells + 16-aligned inline RAW bytes = 1 malloc, 0 per-cell allocs),
+  inline dup-memo store (8 entries, no bookkeeping malloc), static
+  mutex/cond init on join handles (no libc init calls), and a bounded
+  size-classed block pool recycling spawn-dup reps between spawner and
+  worker threads.
+- **Wake gating.** Unconditional condvar signals on the channel spill path
+  and join completion now fire only with parked waiters (announce-then-
+  verify counters), and injector steals pre-check length lock-free, so idle
+  workers no longer hammer the injector mutex.
+
+Measured: channel round-trip 4.9µs → **~0.3µs** (16x, TSan-clean),
+10k fan-in ~110k/s → **~550k/s steady** (double-burst probe), join chains
+and nested/rich-capture spawns verified under ASan/TSan.
+
+Two correctness fixes fell out of the new shapes: a resumed run that
+returns without another blocking call kept the stale suspend verdict and
+the trampoline dropped its completion (join-chain hang) — the verdict now
+resets at trampoline entry and at every resume label; and the Chase–Lev
+`bottom` owner writes are atomic stores (they raced atomic thief reads —
+formal UB, TSan-flagged on steal-heavy shapes).
+
 ## Copy-on-write environments
 
 Scope chains are `EnvLink`s: owned (`Rc<RefCell>`, thread-local,

@@ -312,6 +312,11 @@ void zz_sync_frame_cleanup(zz_task_frame *fr); // `cleanup` attr endpoint
 // so a resuming run can never corrupt the suspending run's unwind that
 // it legitimately overlaps (ownership already transferred at handoff).
 int zz_green_suspended(void);
+// Mark the current run live again: emitted at every state-machine resume
+// label. Without this, a run that suspends once and then returns without
+// another blocking call keeps the stale suspend verdict and the
+// trampoline drops its completion (silent hang on `task.join` chains).
+void zz_green_resumed(void);
 
 // Blocking points with green fast paths: hit → value; miss → register
 // the frame as a waiter and either suspend (task frames: return to the
@@ -342,6 +347,11 @@ struct zz_task_join {
     size_t          gwait_pool_n;
     size_t          green_waiters; // __atomic: queued green waiters
     size_t          gparked; // __atomic: thread-parked green waiters (gate broadcasts)
+    // Blocking `task.join` waiters parked on `cond` (announce-then-verify
+    // around the wait, like channel sleepers). Completion signals the
+    // condvar only when this is non-zero, so waiter-free completions —
+    // the fan-in steady state — pay no futex wake at all.
+    size_t          sleepers; // __atomic
 };
 
 // ---- arena allocator ---------------------------------------------------
@@ -614,6 +624,9 @@ zz_value zz_call_native1(zz_value (*f)(zz_value, int *), zz_value a);
 zz_value zz_call_native0(zz_value (*f)(zz_value, int *));
 zz_value zz_call_native2(zz_value (*f)(zz_value, zz_value, int *), zz_value a, zz_value b);
 zz_value zz_call_native3(zz_value (*f)(zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c);
+zz_value zz_call_native_spawn(zz_dispatch_fn fn, void **cells,
+                              const unsigned char *kinds, const size_t *sizes,
+                              size_t nenv, int is_green);
 
 // ---- io / math / time natives ------------------------------------------
 zz_value zz_io_println(zz_value v, int *err);
@@ -702,6 +715,12 @@ zz_value zz_chan_send(zz_value chan, zz_value val, int *err);
 zz_value zz_chan_recv(zz_value chan, int *err);
 zz_value zz_chan_try_recv(zz_value chan, int *err);
 zz_value zz_spawn(zz_value fn, int *err);
+// Spawn fast path for closure literals: builds the worker-owned rep
+// directly from the call-site capture arrays (no intermediate rep).
+// `is_green` marks suspendable bodies; capture arrays are borrowed.
+zz_value zz_spawn_ex(zz_dispatch_fn fn, void **cells,
+                     const unsigned char *kinds, const size_t *sizes,
+                     size_t nenv, int is_green, int *err);
 zz_value zz_task_join_recv(zz_value join, int *err);
 zz_value zz_task_try_join(zz_value join, int *err);
 // Cooperative safepoint for loop tops (emitted by the AOT lowerer for
