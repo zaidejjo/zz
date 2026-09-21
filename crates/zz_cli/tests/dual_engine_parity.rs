@@ -414,6 +414,11 @@ parity_strict!(
     "stdlib",
     "concurrency_capture_test.zz"
 );
+parity_strict!(
+    parity_stdlib_concurrency_recall_test,
+    "stdlib",
+    "concurrency_recall_test.zz"
+);
 parity_known_failure!(
     parity_stdlib_concurrency_panic_test,
     "stdlib",

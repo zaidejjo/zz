@@ -3,22 +3,19 @@ mod tree_walker;
 #[cfg(test)]
 mod tests;
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use zz_frontend::ast::Program;
 use zz_frontend::span::Span;
 
-use crate::env::Env;
 use crate::runtime::Flow;
 use crate::value::{FuncValue, Value};
 
 pub use crate::runtime::{EvalError, NativeEntry, NativeFn, RuntimeState};
 
 pub struct Interp {
-    pub env: Rc<RefCell<Env>>,
+    pub env: crate::env::EnvLink,
     pub funcs: HashMap<String, FuncValue>,
     /// Native registry, reference-counted: registrations happen at load
     /// time, after which the map is effectively frozen and freely shared
@@ -45,12 +42,11 @@ pub struct Interp {
     /// populated on first spawn. Never mutated after insert; workers each
     /// receive a fresh detach-clone, so no state is shared across threads.
     pub spawn_funcs_cache: Option<(u64, HashMap<String, FuncValue>)>,
-    /// Cached keep-set for worker env snapshots (see
-    /// [`SpawnKeepCache`](crate::value::SpawnKeepCache)): the *set* of
-    /// visible names rarely changes between spawns from one site (loop
-    /// iterations reuse the same scopes), while *values* always do — so the
-    /// filter decision is cached but every kept value is cloned fresh per
-    /// spawn.
+    /// Frozen-parent cache for worker env snapshots (see
+    /// [`SpawnKeepCache`](crate::value::SpawnKeepCache)): the parent chain
+    /// rarely changes between spawns from one site, so steady state shares
+    /// the frozen ancestors by pointer while every leaf value is cloned
+    /// fresh per spawn.
     pub spawn_keep_cache: crate::value::SpawnKeepCache,
     /// Reachability cache per spawn-site chunk (see
     /// [`ReachCacheEntry`](crate::value::ReachCacheEntry)): loop spawns
@@ -95,7 +91,7 @@ impl Default for Interp {
 impl Interp {
     pub fn new() -> Self {
         Interp {
-            env: Rc::new(RefCell::new(Env::new())),
+            env: crate::env::EnvLink::new(),
             funcs: HashMap::new(),
             natives: Arc::new(HashMap::new()),
             structs: Arc::new(HashMap::new()),
@@ -111,7 +107,7 @@ impl Interp {
 
     pub fn with_natives(natives: HashMap<String, NativeEntry>) -> Self {
         Interp {
-            env: Rc::new(RefCell::new(Env::new())),
+            env: crate::env::EnvLink::new(),
             funcs: HashMap::new(),
             natives: Arc::new(natives),
             structs: Arc::new(HashMap::new()),
@@ -130,7 +126,7 @@ impl Interp {
     /// only happen at load time (see field docs).
     pub fn with_natives_shared(natives: Arc<HashMap<String, NativeEntry>>) -> Self {
         Interp {
-            env: Rc::new(RefCell::new(Env::new())),
+            env: crate::env::EnvLink::new(),
             funcs: HashMap::new(),
             natives,
             structs: Arc::new(HashMap::new()),

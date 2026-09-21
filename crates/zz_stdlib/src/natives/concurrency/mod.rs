@@ -13,13 +13,12 @@
 pub(crate) mod executor;
 
 use std::collections::{HashMap, VecDeque};
-use std::rc::Rc;
 use std::sync::{atomic::AtomicUsize, Arc, Condvar, Mutex};
 
 use zz_runtime::{EvalError, Interp, Span, Value};
 
 use executor::Executor;
-use zz_runtime::value::snapshot_env_pruned;
+use zz_runtime::value::snapshot_env_cow;
 use zz_runtime::value::{ChanInner, ChanState, TaskJoinState};
 
 /// `chan()` — create a new unbounded channel.
@@ -290,7 +289,7 @@ pub(crate) fn spawn(
                 )
             })?,
             f.params.len(),
-            Rc::clone(&f.env),
+            f.env.clone(),
         ),
         Some(other) => {
             return Err(EvalError::new(
@@ -320,7 +319,7 @@ pub(crate) fn spawn_hook(
     params: &[zz_frontend::ast::Param],
     span: Span,
 ) -> Result<Value, EvalError> {
-    let env = Rc::clone(&interp.env);
+    let env = interp.env.clone();
     spawn_from_parts(interp, Arc::clone(chunk), params.len(), env, span)
 }
 
@@ -331,7 +330,7 @@ fn spawn_from_parts(
     interp: &mut Interp,
     chunk: Arc<zz_runtime::Chunk>,
     param_count: usize,
-    env: Rc<std::cell::RefCell<zz_runtime::Env>>,
+    env: zz_runtime::env::EnvLink,
     _span: Span,
 ) -> Result<Value, EvalError> {
     // Debug aid: ZZ_SPAWN_PROFILE=1 prints per-spawn timing breakdowns.
@@ -375,14 +374,14 @@ fn spawn_from_parts(
     };
     let dt_reach = t0.map(|t| t.elapsed());
     let t0 = profiling.then(std::time::Instant::now);
-    let snapshot = snapshot_env_pruned(
+    let snapshot = snapshot_env_cow(
         &env,
         &interp.funcs,
         &reachable,
         &loads,
         &mut interp.spawn_keep_cache,
     );
-    let n_snapshot = snapshot.len();
+    let n_snapshot = snapshot.leaf.len();
     let dt_env = t0.map(|t| t.elapsed());
     let t0 = profiling.then(std::time::Instant::now);
 
@@ -490,12 +489,13 @@ fn spawn_from_parts(
         vm.push(Value::Unit);
     }
 
-    // Seed env from snapshot.
-    {
-        let mut env = new_interp.env.borrow_mut();
-        for (name, val) in snapshot {
-            env.define(&name, val);
-        }
+    // Seed env from snapshot: fresh owned leaf for the worker, parented
+    // at the shared frozen ancestors (copy-on-write — no per-value
+    // clones above the leaf). Leaf bindings shadow frozen ancestors on
+    // ties, matching resolution order.
+    new_interp.env.set_parent(snapshot.parent);
+    for (name, val) in snapshot.leaf {
+        new_interp.env.define(&name, val);
     }
 
     Executor::spawn_task(vm, new_interp, chunk, Arc::clone(&state));

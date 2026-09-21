@@ -1,11 +1,9 @@
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Pattern, Stmt};
 use zz_frontend::span::Span;
 
-use crate::env::Env;
+use crate::env::{Env, EnvLink};
 use crate::runtime::format::{format_value_with_spec, value_matches_lit};
 use crate::runtime::ops::{
     eval_binary, eval_unary, get_index, object_field, set_index, set_object_field, slice_value,
@@ -21,7 +19,7 @@ impl Interp {
         match stmt {
             Stmt::Decl { name, value, .. } => match self.eval(value)? {
                 Flow::Value(v) => {
-                    self.env.borrow_mut().define(&name.name, v.clone());
+                    self.env.define(&name.name, v.clone());
                     Ok(Flow::Value(v))
                 }
                 Flow::Return(v) => Ok(Flow::Return(v)),
@@ -38,14 +36,12 @@ impl Interp {
                 let fv = FuncValue {
                     params: params.clone(),
                     body: Expr::Block(body.clone()),
-                    env: Rc::clone(&self.env),
+                    env: self.env.clone(),
                     chunk: None,
                 };
                 self.funcs.insert(name.join("."), fv.clone());
                 self.funcs_version = self.funcs_version.wrapping_add(1);
-                self.env
-                    .borrow_mut()
-                    .define(&name.join("."), Value::Func(Box::new(fv)));
+                self.env.define(&name.join("."), Value::Func(Box::new(fv)));
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Return { value, .. } => match value {
@@ -82,14 +78,12 @@ impl Interp {
                         let fv = FuncValue {
                             params: params.clone(),
                             body: Expr::Block(body.clone()),
-                            env: Rc::clone(&self.env),
+                            env: self.env.clone(),
                             chunk: None,
                         };
                         self.funcs.insert(full_name.clone(), fv.clone());
                         self.funcs_version = self.funcs_version.wrapping_add(1);
-                        self.env
-                            .borrow_mut()
-                            .define(&full_name, Value::Func(Box::new(fv)));
+                        self.env.define(&full_name, Value::Func(Box::new(fv)));
                     }
                 }
                 Ok(Flow::Value(Value::Unit))
@@ -102,11 +96,8 @@ impl Interp {
                     Value::Array(items) => {
                         let mut result = Value::Unit;
                         for item in *items {
-                            let scope = Env::with_parent(&self.env);
-                            {
-                                let mut env = scope.borrow_mut();
-                                env.define(&vars[0].name, item);
-                            }
+                            let mut scope = Env::with_parent(&self.env);
+                            scope.define(&vars[0].name, item);
                             let prev = std::mem::replace(&mut self.env, scope);
                             let flow = self.eval_block(body);
                             self.env = prev;
@@ -126,8 +117,8 @@ impl Interp {
                         let mut i = start;
                         if step > 0 {
                             while i < end {
-                                let scope = Env::with_parent(&self.env);
-                                scope.borrow_mut().define(&vars[0].name, Value::Int(i));
+                                let mut scope = Env::with_parent(&self.env);
+                                scope.define(&vars[0].name, Value::Int(i));
                                 let prev = std::mem::replace(&mut self.env, scope);
                                 let flow = self.eval_block(body);
                                 self.env = prev;
@@ -142,8 +133,8 @@ impl Interp {
                             }
                         } else {
                             while i > end {
-                                let scope = Env::with_parent(&self.env);
-                                scope.borrow_mut().define(&vars[0].name, Value::Int(i));
+                                let mut scope = Env::with_parent(&self.env);
+                                scope.define(&vars[0].name, Value::Int(i));
                                 let prev = std::mem::replace(&mut self.env, scope);
                                 let flow = self.eval_block(body);
                                 self.env = prev;
@@ -162,15 +153,12 @@ impl Interp {
                     Value::Dict(pairs) => {
                         let mut result = Value::Unit;
                         for (k, v) in *pairs {
-                            let scope = Env::with_parent(&self.env);
-                            {
-                                let mut env = scope.borrow_mut();
-                                if vars.len() == 2 {
-                                    env.define(&vars[0].name, k);
-                                    env.define(&vars[1].name, v);
-                                } else {
-                                    env.define(&vars[0].name, k);
-                                }
+                            let mut scope = Env::with_parent(&self.env);
+                            if vars.len() == 2 {
+                                scope.define(&vars[0].name, k);
+                                scope.define(&vars[1].name, v);
+                            } else {
+                                scope.define(&vars[0].name, k);
                             }
                             let prev = std::mem::replace(&mut self.env, scope);
                             let flow = self.eval_block(body);
@@ -197,7 +185,7 @@ impl Interp {
                 let closure = FuncValue {
                     params: vec![],
                     body: expr.as_ref().clone(),
-                    env: Rc::clone(&self.env),
+                    env: self.env.clone(),
                     chunk: None,
                 };
                 self.defer_stacks
@@ -208,7 +196,7 @@ impl Interp {
             }
             Stmt::Destructure { pat, value, .. } => {
                 let v = self.eval(value)?.into_value()?;
-                if !self.match_pattern(pat, &v, &self.env) {
+                if !Self::match_pattern(pat, &v, &mut self.env) {
                     return Err(EvalError::new(
                         "destructuring pattern does not match value",
                         pat.span(),
@@ -254,7 +242,7 @@ impl Interp {
                                     arg_vals.push(self.eval(v)?.into_value()?);
                                 }
                                 let result = self.call(f, arg_vals, *pspan)?;
-                                if !self.env.borrow_mut().assign(obj_name, result) {
+                                if !self.env.assign(obj_name, result) {
                                     return Err(EvalError::new(
                                         format!("undefined variable `{obj_name}`"),
                                         *pspan,
@@ -283,7 +271,7 @@ impl Interp {
                                     arg_vals.push(self.eval(v)?.into_value()?);
                                 }
                                 let result = self.call(f, arg_vals, *span)?;
-                                if !self.env.borrow_mut().assign(name, result) {
+                                if !self.env.assign(name, result) {
                                     return Err(EvalError::new(
                                         format!("undefined variable `{name}`"),
                                         *span,
@@ -302,7 +290,7 @@ impl Interp {
                             } = &args[0]
                             {
                                 let result = self.eval(e)?;
-                                if !self.env.borrow_mut().assign(arr_name, result.into_value()?) {
+                                if !self.env.assign(arr_name, result.into_value()?) {
                                     return Err(EvalError::new(
                                         format!("undefined variable `{arr_name}`"),
                                         *span,
@@ -321,7 +309,7 @@ impl Interp {
     fn assign_target(&mut self, target: &Expr, value: Value) -> Result<(), EvalError> {
         match target {
             Expr::Ident { name, span } => {
-                if !self.env.borrow_mut().assign(name, value) {
+                if !self.env.assign(name, value) {
                     return Err(EvalError::new(
                         format!("undefined variable `{name}`"),
                         *span,
@@ -334,7 +322,7 @@ impl Interp {
                 let mut objv = self.eval(obj)?.into_value()?;
                 set_object_field(&mut objv, name, value, *span)?;
                 if let Expr::Ident { name, .. } = &**obj {
-                    self.env.borrow_mut().assign(name, objv);
+                    self.env.assign(name, objv);
                 }
                 Ok(())
             }
@@ -358,14 +346,13 @@ impl Interp {
         span: Span,
     ) -> Result<(), EvalError> {
         let joined = parts.join(".");
-        if self.env.borrow().get(&joined).is_some() {
-            self.env.borrow_mut().assign(&joined, value);
+        if self.env.get(&joined).is_some() {
+            self.env.assign(&joined, value);
             return Ok(());
         }
         let root = &parts[0];
         let mut chain = vec![self
             .env
-            .borrow()
             .get(root)
             .ok_or_else(|| EvalError::new(format!("undefined variable `{joined}`"), span))?];
         for field in &parts[1..parts.len() - 1] {
@@ -378,7 +365,7 @@ impl Interp {
             let child = chain[i].clone();
             set_object_field(&mut chain[i - 1], &parts[i], child, span)?;
         }
-        self.env.borrow_mut().assign(root, chain[0].clone());
+        self.env.assign(root, chain[0].clone());
         Ok(())
     }
 
@@ -388,7 +375,7 @@ impl Interp {
         span: Span,
     ) -> Result<Value, EvalError> {
         let name = parts.join(".");
-        if let Some(v) = self.env.borrow().get(&name) {
+        if let Some(v) = self.env.get(&name) {
             return Ok(v);
         }
         if let Some(fv) = self.funcs.get(&name) {
@@ -400,7 +387,7 @@ impl Interp {
                 arity: entry.arity,
             })));
         }
-        if let Some(mut v) = self.env.borrow().get(&parts[0]) {
+        if let Some(mut v) = self.env.get(&parts[0]) {
             for field in &parts[1..] {
                 v = object_field(&v, field, span)?;
             }
@@ -410,7 +397,7 @@ impl Interp {
     }
 
     fn lookup_callable(&self, name: &str, span: Span) -> Result<Value, EvalError> {
-        if let Some(v) = self.env.borrow().get(name) {
+        if let Some(v) = self.env.get(name) {
             return Ok(v);
         }
         if let Some(fv) = self.funcs.get(name) {
@@ -528,7 +515,7 @@ impl Interp {
     fn write_back(&mut self, target: &Expr, new_value: Value) -> Result<(), EvalError> {
         match target {
             Expr::Ident { name, span } => {
-                if !self.env.borrow_mut().assign(name, new_value) {
+                if !self.env.assign(name, new_value) {
                     return Err(EvalError::new(
                         format!("undefined variable `{name}`"),
                         *span,
@@ -538,12 +525,12 @@ impl Interp {
             }
             Expr::Path { parts, span } => {
                 let joined = parts.join(".");
-                if self.env.borrow().get(&joined).is_some() {
-                    self.env.borrow_mut().assign(&joined, new_value);
+                if self.env.get(&joined).is_some() {
+                    self.env.assign(&joined, new_value);
                     return Ok(());
                 }
                 let root = &parts[0];
-                let mut chain = vec![self.env.borrow().get(root).ok_or_else(|| {
+                let mut chain = vec![self.env.get(root).ok_or_else(|| {
                     EvalError::new(format!("undefined variable `{joined}`"), *span)
                 })?];
                 for field in &parts[1..parts.len() - 1] {
@@ -556,7 +543,7 @@ impl Interp {
                     let child = chain[i].clone();
                     set_object_field(&mut chain[i - 1], &parts[i], child, *span)?;
                 }
-                self.env.borrow_mut().assign(root, chain[0].clone());
+                self.env.assign(root, chain[0].clone());
                 Ok(())
             }
             Expr::Field { obj, name, span } => {
@@ -575,7 +562,7 @@ impl Interp {
             Expr::Str { value, .. } => Ok(Flow::Value(Value::Str(value.clone().into()))),
             Expr::Bool { value, .. } => Ok(Flow::Value(Value::Bool(*value))),
             Expr::Ident { name, span } => {
-                if let Some(v) = self.env.borrow().get(name) {
+                if let Some(v) = self.env.get(name) {
                     return Ok(Flow::Value(v));
                 }
                 if let Some(fv) = self.funcs.get(name) {
@@ -680,7 +667,7 @@ impl Interp {
                 if let Expr::Path { parts, span: pspan } = callee.as_ref() {
                     if parts.len() >= 2 {
                         let joined = parts.join(".");
-                        let is_direct = self.env.borrow().get(&joined).is_some()
+                        let is_direct = self.env.get(&joined).is_some()
                             || self.funcs.contains_key(&joined)
                             || self.natives.contains_key(&joined);
                         if !is_direct && self.resolve_path_value(parts, *pspan).is_err() {
@@ -742,7 +729,7 @@ impl Interp {
                 Ok(Flow::Value(Value::Func(Box::new(FuncValue {
                     params: params.clone(),
                     body: (**body).clone(),
-                    env: Rc::clone(&self.env),
+                    env: self.env.clone(),
                     chunk: None,
                 }))))
             }
@@ -792,8 +779,8 @@ impl Interp {
             } => {
                 let sv = self.eval(scrutinee)?.into_value()?;
                 for arm in arms {
-                    let scope = Env::with_parent(&self.env);
-                    if self.match_pattern(&arm.pat, &sv, &scope) {
+                    let mut scope = Env::with_parent(&self.env);
+                    if Self::match_pattern(&arm.pat, &sv, &mut scope) {
                         let prev = std::mem::replace(&mut self.env, scope);
                         // Check match guard if present
                         if let Some(ref guard) = arm.guard {
@@ -824,8 +811,8 @@ impl Interp {
                 span: _,
             } => {
                 let v = self.eval(value)?.into_value()?;
-                let scope = Env::with_parent(&self.env);
-                if self.match_pattern(pat, &v, &scope) {
+                let mut scope = Env::with_parent(&self.env);
+                if Self::match_pattern(pat, &v, &mut scope) {
                     let prev = std::mem::replace(&mut self.env, scope);
                     let result = self.eval_block(then);
                     self.env = prev;
@@ -890,8 +877,8 @@ impl Interp {
                 match it {
                     Value::Array(items) => {
                         for item in *items {
-                            let scope = Env::with_parent(&self.env);
-                            scope.borrow_mut().define(&var.name, item);
+                            let mut scope = Env::with_parent(&self.env);
+                            scope.define(&var.name, item);
                             let prev = std::mem::replace(&mut self.env, scope);
                             let dominated = if let Some(f) = filter {
                                 let cond = self.eval(f)?.into_value()?;
@@ -911,8 +898,8 @@ impl Interp {
                         let mut i = start;
                         if step > 0 {
                             while i < end {
-                                let scope = Env::with_parent(&self.env);
-                                scope.borrow_mut().define(&var.name, Value::Int(i));
+                                let mut scope = Env::with_parent(&self.env);
+                                scope.define(&var.name, Value::Int(i));
                                 let prev = std::mem::replace(&mut self.env, scope);
                                 let dominated = if let Some(f) = filter {
                                     let cond = self.eval(f)?.into_value()?;
@@ -929,8 +916,8 @@ impl Interp {
                             }
                         } else if step < 0 {
                             while i > end {
-                                let scope = Env::with_parent(&self.env);
-                                scope.borrow_mut().define(&var.name, Value::Int(i));
+                                let mut scope = Env::with_parent(&self.env);
+                                scope.define(&var.name, Value::Int(i));
                                 let prev = std::mem::replace(&mut self.env, scope);
                                 let dominated = if let Some(f) = filter {
                                     let cond = self.eval(f)?.into_value()?;
@@ -1078,16 +1065,11 @@ impl Interp {
         Ok(result)
     }
 
-    pub(crate) fn match_pattern(
-        &self,
-        pat: &Pattern,
-        value: &Value,
-        scope: &Rc<RefCell<Env>>,
-    ) -> bool {
+    pub(crate) fn match_pattern(pat: &Pattern, value: &Value, scope: &mut EnvLink) -> bool {
         match pat {
             Pattern::Wildcard { .. } => true,
             Pattern::Binding { name } => {
-                scope.borrow_mut().define(&name.name, value.clone());
+                scope.define(&name.name, value.clone());
                 true
             }
             Pattern::Literal { value: lit, .. } => value_matches_lit(value, lit),
@@ -1108,7 +1090,7 @@ impl Interp {
                     _ => return false,
                 };
                 match (arg.as_deref(), inner) {
-                    (Some(p), Some(v)) => self.match_pattern(p, v, scope),
+                    (Some(p), Some(v)) => Self::match_pattern(p, v, scope),
                     (None, None) => true,
                     _ => false,
                 }
@@ -1119,7 +1101,7 @@ impl Interp {
                         return false;
                     }
                     for (pat, item) in pats.iter().zip(items.iter()) {
-                        if !self.match_pattern(pat, item, scope) {
+                        if !Self::match_pattern(pat, item, scope) {
                             return false;
                         }
                     }
@@ -1132,9 +1114,9 @@ impl Interp {
                 for p in pats {
                     // Try each alternative in a throwaway child scope so
                     // failed alternatives leave no bindings behind.
-                    let trial = Env::with_parent(scope);
-                    if self.match_pattern(p, value, &trial) {
-                        scope.borrow_mut().absorb_locals(&trial);
+                    let mut trial = Env::with_parent(scope);
+                    if Self::match_pattern(p, value, &mut trial) {
+                        scope.absorb_locals(&trial);
                         return true;
                     }
                 }
@@ -1210,16 +1192,16 @@ impl Interp {
                 span,
             ));
         }
-        let scope = Env::with_parent(&fv.env);
+        let mut scope = Env::with_parent(&fv.env);
         for (p, v) in fv.params.iter().zip(args) {
-            scope.borrow_mut().define(&p.name.name, v);
+            scope.define(&p.name.name, v);
         }
         let prev = std::mem::replace(&mut self.env, scope);
         let result = match &fv.chunk {
             Some(chunk) => {
                 let mut vm = crate::vm::Vm::new();
                 for p in &fv.params {
-                    vm.push(self.env.borrow().get(&p.name.name).unwrap().clone());
+                    vm.push(self.env.get(&p.name.name).unwrap().clone());
                 }
                 vm.run_chunk_with_base(chunk, self, 0)
             }

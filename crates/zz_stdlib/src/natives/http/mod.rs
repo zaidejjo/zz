@@ -9,7 +9,7 @@ use std::time::Instant;
 use crate::natives::{arg, expect_str};
 use zz_runtime::json::{parse_json, to_json_string, JsonValue};
 use zz_runtime::value::{snapshot_env, FuncValue, HttpServer, Response};
-use zz_runtime::{Chunk, Env, EvalError, Expr, Interp, NativeEntry, Param, Span, Value};
+use zz_runtime::{Chunk, Env, EnvLink, EvalError, Expr, Interp, NativeEntry, Param, Span, Value};
 
 // ===========================================================================
 // Helpers
@@ -998,13 +998,11 @@ struct FuncSnapshot {
 impl FuncSnapshot {
     /// Reconstruct a `Value::Func` on the current thread with a fresh env.
     fn reconstruct(&self) -> Value {
-        let env = Rc::new(std::cell::RefCell::new(Env::new()));
-        {
-            let mut e = env.borrow_mut();
-            for (k, v) in &self.env_snapshot {
-                e.define(k, v.clone());
-            }
+        let mut fresh = Env::new();
+        for (k, v) in &self.env_snapshot {
+            fresh.define(k, v.clone());
         }
+        let env = EnvLink::Owned(Rc::new(std::cell::RefCell::new(fresh)));
         Value::Func(Box::new(FuncValue {
             params: self.params.clone(),
             body: self.body.clone(),

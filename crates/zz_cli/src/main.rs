@@ -564,19 +564,19 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
     // The checker gates which names are actually accessible per-module,
     // so injecting all bare forms here is safe.
     for (key, val) in zz_stdlib::stdlib_consts() {
-        interp.env.borrow_mut().define(&key, Value::Float(val));
+        interp.env.define(&key, Value::Float(val));
         if let Some(rest) = key.strip_prefix("std.") {
-            interp.env.borrow_mut().define(rest, Value::Float(val));
+            interp.env.define(rest, Value::Float(val));
         }
         // Bare name: `std.math.PI` → `PI`
         if let Some(bare) = key.rsplit('.').next() {
-            interp.env.borrow_mut().define(bare, Value::Float(val));
+            interp.env.define(bare, Value::Float(val));
         }
     }
     // Also inject any aliased constants from selective imports
     // (e.g. `import std.math(PI as pi)` → inject `pi`).
     for (name, val) in &loaded.consts {
-        interp.env.borrow_mut().define(name, Value::Float(*val));
+        interp.env.define(name, Value::Float(*val));
     }
 
     // Run compiled pure-ZZ stdlib programs. These populate the environment
@@ -597,7 +597,7 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
     // (e.g. `colors.red` → `cl.red`). Natives are already aliased via
     // `loaded.natives`; pure-ZZ funcs live in Env and need the same.
     {
-        let snap = interp.env.borrow().flatten();
+        let snap = interp.env.flatten();
         for (module, ns) in &loaded.stdlib_aliases {
             let src_prefix = module.rsplit('.').next().unwrap_or(module);
             if ns == src_prefix {
@@ -610,7 +610,7 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
                     } else {
                         format!("{ns}{}", &k[src_prefix.len()..])
                     };
-                    interp.env.borrow_mut().define(&alias_key, v.clone());
+                    interp.env.define(&alias_key, v.clone());
                 }
             }
         }

@@ -1148,16 +1148,16 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
     let mut interp = Interp::with_natives(loaded.natives.clone());
 
     for (key, val) in zz_stdlib::stdlib_consts() {
-        interp.env.borrow_mut().define(&key, Value::Float(val));
+        interp.env.define(&key, Value::Float(val));
         if let Some(rest) = key.strip_prefix("std.") {
-            interp.env.borrow_mut().define(rest, Value::Float(val));
+            interp.env.define(rest, Value::Float(val));
         }
         if let Some(bare) = key.rsplit('.').next() {
-            interp.env.borrow_mut().define(bare, Value::Float(val));
+            interp.env.define(bare, Value::Float(val));
         }
     }
     for (name, val) in &loaded.consts {
-        interp.env.borrow_mut().define(name, Value::Float(*val));
+        interp.env.define(name, Value::Float(*val));
     }
 
     for zz_prog in zz_stdlib::zz_stdlib_programs() {
@@ -1171,7 +1171,7 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
     }
 
     {
-        let snap = interp.env.borrow().flatten();
+        let snap = interp.env.flatten();
         for (module, ns) in &loaded.stdlib_aliases {
             let src_prefix = module.rsplit('.').next().unwrap_or(module);
             if ns == src_prefix {
@@ -1184,7 +1184,7 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
                     } else {
                         format!("{ns}{}", &k[src_prefix.len()..])
                     };
-                    interp.env.borrow_mut().define(&alias_key, v.clone());
+                    interp.env.define(&alias_key, v.clone());
                 }
             }
         }
@@ -1202,7 +1202,6 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
     let func_name = test.func_name.join(".");
     let func_val = interp
         .env
-        .borrow()
         .get(&func_name)
         .ok_or_else(|| format!("test function `{func_name}` not found in environment"))?;
 
@@ -1230,7 +1229,6 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
 fn call_named_fn(interp: &mut Interp, name: &str, span: Span) -> Result<(), String> {
     let func_val = interp
         .env
-        .borrow()
         .get(name)
         .ok_or_else(|| format!("`@setup`/`@teardown` function `{name}` not found"))?;
 

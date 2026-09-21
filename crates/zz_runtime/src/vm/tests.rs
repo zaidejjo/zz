@@ -1,4 +1,3 @@
-use std::rc::Rc;
 use std::sync::Arc;
 
 use zz_frontend::ast::{BinOp, Block, Expr, Ident, Param};
@@ -359,7 +358,7 @@ fn vm_method_call_and_cross_module() {
             stmts: Vec::new(),
             span: Span::new(0, 0),
         }),
-        env: Rc::clone(&interp.env),
+        env: interp.env.clone(),
         chunk: Some(Arc::new(chunk)),
     };
     interp.funcs.insert("shapes.dist".into(), fv);
