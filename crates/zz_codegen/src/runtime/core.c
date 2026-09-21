@@ -3115,20 +3115,61 @@ zz_value zz_typeof(zz_value v, int *err) {
     return zz_str_static(name);
 }
 
-// int(v) — cast to int.
+// int(v) — parse to Option[int] (mirrors the VM `conv_int`).
+// INT/FLOAT wrap in `.some`; STR trims ASCII whitespace then requires an
+// optional sign + all-digits (Rust `parse::<i64>` semantics); everything
+// else (BOOL, arrays, NONE, ...) yields `.none`. Strict full-consumption:
+// "12abc"/"3.9"/"" all fail, matching `s.trim().parse::<i64>().ok()`.
 zz_value zz_int_cast(zz_value v, int *err) {
     (void)err;
     switch (v.tag) {
-        case ZZ_INT: return v;
-        case ZZ_FLOAT: return (zz_value){ZZ_INT, {.i = (int64_t)v.f}};
-        case ZZ_BOOL: return (zz_value){ZZ_INT, {.i = v.b ? 1 : 0}};
-        case ZZ_STR: {
-            char *end;
-            int64_t n = strtoll(zz_str_cptr(v.s), &end, 10);
-            if (end == zz_str_cptr(v.s)) return (zz_value){ZZ_INT, {.i = 0}};
-            return (zz_value){ZZ_INT, {.i = n}};
+        case ZZ_INT:
+            return zz_variant_some(v);
+        case ZZ_FLOAT: {
+            double f = v.f;
+            int64_t n;
+            if (f != f) n = 0; // NaN saturates to 0 (Rust `as` semantics)
+            else if (f >= (double)INT64_MAX) n = INT64_MAX;
+            else if (f <= (double)INT64_MIN) n = INT64_MIN;
+            else n = (int64_t)f;
+            return zz_variant_some((zz_value){ZZ_INT, {.i = n}});
         }
-        default: return (zz_value){ZZ_INT, {.i = 0}};
+        case ZZ_STR: {
+            if (!v.s) return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
+            const char *d = zz_str_cptr(v.s);
+            size_t len = v.s->len;
+            size_t start = 0, end = len;
+            while (start < end) {
+                char c = d[start];
+                if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f') start++;
+                else break;
+            }
+            while (end > start) {
+                char c = d[end - 1];
+                if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f') end--;
+                else break;
+            }
+            if (start >= end) return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
+            int neg = 0;
+            size_t pos = start;
+            if (d[pos] == '+' || d[pos] == '-') {
+                neg = (d[pos] == '-');
+                pos++;
+                if (pos >= end) return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
+            }
+            uint64_t limit = neg ? ((uint64_t)INT64_MAX) + 1u : (uint64_t)INT64_MAX;
+            uint64_t acc = 0;
+            for (; pos < end; pos++) {
+                char c = d[pos];
+                if (c < '0' || c > '9') return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
+                unsigned digit = (unsigned)(c - '0');
+                if (acc > (limit - digit) / 10u) return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
+                acc = acc * 10u + digit;
+            }
+            int64_t n = neg ? (acc == limit ? INT64_MIN : -(int64_t)acc) : (int64_t)acc;
+            return zz_variant_some((zz_value){ZZ_INT, {.i = n}});
+        }
+        default: return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
     }
 }
 
