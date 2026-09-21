@@ -13,30 +13,40 @@ use std::sync::{
 use zz_frontend::ast::{Block, Expr, Param};
 use zz_frontend::span::Span;
 
-use crate::env::Env;
+use crate::env::EnvLink;
 use crate::lf_chan::LfRing;
 use crate::vm::{Chunk, Op};
 
-/// Cached keep-set for worker env snapshots: `(parent shape, leaf names,
-/// reachable set, pinned deeper resolutions)`. Keyed on the *parent*
-/// chain — not the leaf — because loop bodies run each iteration in a
-/// fresh leaf scope (new identity every spawn), while the parent chain
-/// is stable. Leaf-bound names are validated by set equality and resolved
-/// live every spawn (the leaf is fresh, so cached holders would be
-/// stale); deeper names resolve once on a miss to pinned holder scopes.
-/// Shape validation (per-scope identity + binding count) guarantees
-/// pinned resolutions still hold — any shadowing define changes the
-/// parent shape or the leaf name set and forces recompute. Values are
-/// always cloned fresh per spawn regardless.
+/// Cached frozen parent per spawner chain: `(parent shape, reachable
+/// set, frozen parent, pinned parent)`. Hits share the frozen ancestors
+/// by pointer; misses freeze once. `loads` is a pure function of the
+/// spawn-site chunk, so the `reachable` key covers it.
+///
+/// The pinned parent link is load-bearing for soundness: shape keys are
+/// allocation addresses, and a freed scope's address can be reused by a
+/// later scope (new call frame of the same function!). The pin keeps the
+/// cached scopes alive, so an address match implies the SAME object —
+/// without it, a stale frozen parent (holding the previous call's
+/// channel!) would be served to the next call and workers would send
+/// into a dead channel while the spawner drains an empty one.
 pub type SpawnKeepCache = Option<(
-    Vec<(usize, usize)>,
-    Vec<String>,
+    Vec<(usize, usize, u64)>,
     HashSet<String>,
-    DeeperResolutions,
+    Option<EnvLink>,
+    Option<EnvLink>,
 )>;
 
-/// Pinned holder resolutions for deeper (non-leaf) kept bindings.
-pub type DeeperResolutions = Vec<(String, Rc<RefCell<Env>>)>;
+/// A worker environment snapshot under copy-on-write: frozen ancestors
+/// shared by pointer plus live leaf bindings. See
+/// [`snapshot_env_cow`] for the exactness argument.
+pub struct CowSnapshot {
+    /// Frozen ancestors (shared — O(1)); `None` when the spawner leaf is
+    /// its own root.
+    pub parent: Option<EnvLink>,
+    /// Current-leaf bindings, deep-cloned (the leaf churns per iteration
+    /// and can never be shared).
+    pub leaf: Vec<(String, Value)>,
+}
 
 /// Cached reachability for one spawn-site chunk: the chunk `Arc` is held
 /// so its address can never be reused while cached (kills the
@@ -303,9 +313,10 @@ pub enum Value {
 }
 
 // SAFETY: `Value` is safe to send across threads when used with
-// deep-cloned snapshots (see `snapshot_env`). The compiler cannot
-// verify this structurally because `FuncValue` contains `Rc<RefCell<Env>>`,
-// but all cross-thread usage operates on self-contained copies.
+// point-in-time snapshots (see `snapshot_env_cow`): frozen scopes are
+// immutable and `Send + Sync` by construction. The compiler cannot verify
+// the owned-scope discipline structurally, but all cross-thread usage
+// operates on frozen-shared or freshly-detached chains.
 unsafe impl Send for Value {}
 unsafe impl Sync for Value {}
 // SAFETY: `FuncValue` is safe to send across threads only when its env
@@ -321,8 +332,8 @@ unsafe impl Send for FuncValue {}
 /// nested closures so they carry their own copy of the captured env (no
 /// dangling `Rc` references to the original scope chain).  This makes the
 /// result safe to move across thread boundaries.
-pub fn snapshot_env(env: &Rc<RefCell<crate::env::Env>>) -> HashMap<String, Value> {
-    let flat = env.borrow().flatten();
+pub fn snapshot_env(env: &EnvLink) -> HashMap<String, Value> {
+    let flat = env.flatten();
     // ONE memo for all entries: captured values routinely share envs (e.g.
     // every stdlib func aliases its module scope). A fresh memo per entry
     // re-clones the shared graph once per entry (measured 130ms/spawn for
@@ -337,142 +348,105 @@ pub fn snapshot_env(env: &Rc<RefCell<crate::env::Env>>) -> HashMap<String, Value
 /// only what the worker chunk may reference.
 ///
 /// `loads` (from [`reachable_refs`]) names every environment resolution
-/// the worker can perform — loads, path heads, and store targets (a store
-/// to a missing name errors, so targets stay). A `Func` entry under a
-/// referenced name is still dropped when it is the same object the table
-/// slice carries (resolution falls through to the table); shadowing
-/// definitions (different captured object) are always kept. This shrinks
-/// the worker env from the whole module namespace (~130 entries, ~13k
-/// deep-clone visits) to the closure's actual references (often ~zero).
-pub fn snapshot_env_pruned(
-    env: &Rc<RefCell<crate::env::Env>>,
+/// Build a worker environment snapshot under copy-on-write.
+///
+/// The worker gets a fresh owned leaf whose parent is the spawner's
+/// frozen ancestors (shared by `Arc`, O(1)) — no per-value deep clones
+/// for anything above the leaf. The current leaf's referenced bindings
+/// are still deep-cloned (the leaf churns per loop iteration and can
+/// never be shared).
+///
+/// # Exactness (why no fallback is needed)
+///
+/// A frozen copy is a point-in-time clone of the ancestors, exactly like
+/// the old deep-clone snapshots — so every behavior matches:
+/// - Later spawner writes can't disturb workers (separate maps), same
+///   as before.
+/// - Later spawns re-validate the parent shape, whose entries carry
+///   mutation versions: any `define`/`assign` anywhere above the leaf
+///   forces a re-freeze. Stale frozen copies are impossible on a hit.
+/// - Unreferenced names stay visible through the frozen chain, but the
+///   worker chunk can only resolve names in its `loads` set (structural
+///   invariant of [`reachable_refs`]) — extra visibility is unobservable.
+///   Store targets are in `loads` too, so a worker store lands on a
+///   detached private copy either way (old: pre-cloned map; new:
+///   clone-on-write), invisible to the spawner in both cases.
+/// - `Func` entries covered by the table slice resolve to the same
+///   object either way (frozen shares it; the table carries it).
+pub fn snapshot_env_cow(
+    env: &EnvLink,
     funcs: &HashMap<String, FuncValue>,
     reachable: &HashSet<String>,
     loads: &HashSet<String>,
     keep_cache: &mut SpawnKeepCache,
-) -> HashMap<String, Value> {
+) -> CowSnapshot {
     // Empty-capture fast path: nothing reachable and nothing loadable
-    // means an empty snapshot — skip the chain-shape walk, the keep-cache
-    // dance, and every allocation. The common case for fire-and-forget
-    // tasks (measured ~2µs of ~5µs snapshot time for zero entries).
-    // Stale `keep_cache` entries are harmless: later non-empty spawns
-    // key on `(shape, reachable)` and recompute on mismatch.
+    // means no parent and no leaf bindings — skip everything.
     if reachable.is_empty() && loads.is_empty() {
-        return HashMap::new();
+        return CowSnapshot {
+            parent: None,
+            leaf: Vec::new(),
+        };
     }
-    // ONE memo for all entries: captured values routinely share envs (e.g.
-    // every stdlib func aliases its module scope). A fresh memo per entry
-    // re-clones the shared graph once per entry (measured 130ms/spawn for
-    // 131 entries); sharing makes it linear.
-    //
-    // Keep-set cache, keyed on the parent chain (stable across loop
-    // iterations) — NOT the leaf (fresh scope per iteration by
-    // construction). Hits skip the whole-chain visit walk; leaf bindings
-    // resolve live from the current leaf, deeper ones from pinned
-    // holders. `loads` is a pure function of the spawn-site chunk, so the
-    // `reachable` key covers it.
-    let (parent_shape, leaf_names) = {
-        let leaf = env.borrow();
-        match leaf.parent_rc() {
-            Some(parent) => (
-                crate::env::Env::chain_shape_from(&parent),
-                leaf.local_names(),
-            ),
-            None => (Vec::new(), leaf.local_names()),
-        }
+    // Validate the parent chain (stable across loop iterations): shape
+    // entries carry mutation versions, so any write above the leaf
+    // forces a re-freeze. Hits share the cached frozen parent by
+    // pointer — the whole snapshot fast path.
+    let parent = env.parent_link();
+    let parent_shape = match &parent {
+        Some(p) => crate::env::Env::chain_shape_from(p),
+        None => Vec::new(),
     };
-    enum KeepPlan {
-        Hit {
-            deeper: Vec<(String, Rc<RefCell<Env>>)>,
-        },
-        Miss,
-    }
-    let plan = match keep_cache {
-        Some((ps, ln, r, deeper))
-            if *ps == parent_shape && *ln == leaf_names && *r == *reachable =>
+    let frozen = match keep_cache {
+        // `pinned` keeps the cached scopes alive, so the address-keyed
+        // shape match implies the SAME scopes (no ABA after free). The
+        // pin must also match the current parent — shape equality alone
+        // can't distinguish a live chain from a same-address reuse.
+        Some((ps, r, frozen, pinned))
+            if *ps == parent_shape
+                && *r == *reachable
+                && match (pinned.as_ref(), parent.as_ref()) {
+                    (Some(a), Some(b)) => EnvLink::ptr_eq(a, b),
+                    (None, None) => true,
+                    _ => false,
+                } =>
         {
-            KeepPlan::Hit {
-                deeper: deeper.clone(),
-            }
+            frozen.clone()
         }
-        _ => KeepPlan::Miss,
-    };
-    // Partition on a miss, resolve on a hit — shared tail below.
-    let (deeper, leaf_live): (DeeperResolutions, Vec<String>) = match plan {
-        KeepPlan::Hit { deeper } => (deeper, leaf_names),
-        KeepPlan::Miss => {
-            // Two phases: decide keep/drop under the chain borrows
-            // (predicate only reads), then clone after all borrows are
-            // released. Cloning inside the visit could re-borrow a visited
-            // scope (a kept value may capture it) and trip the RefCell
-            // dynamic check.
-            let mut fresh: Vec<String> = Vec::new();
-            crate::env::Env::visit_flat(env, |k, v| {
-                // Unreferenced names are never resolved: drop, whatever
-                // they hold. (Calls resolve through `reachable` names, and
-                // every call path is also a load.)
-                if !loads.contains(k.as_str()) {
-                    return;
-                }
-                if let Value::Func(fv) = v {
-                    let covered = reachable.contains(k.as_str())
-                        && funcs
-                            .get(k.as_str())
-                            .is_some_and(|tf| Rc::as_ptr(&tf.env) == Rc::as_ptr(&fv.env));
-                    if covered {
-                        return;
-                    }
-                }
-                fresh.push(k.clone());
-            });
-            // Partition: leaf-bound names resolve live every spawn (fresh
-            // leaf — cached holders would be stale); deeper names resolve
-            // once to pinned holders. `visit_flat` dedups leaf-first, so
-            // a name in the leaf set IS the leaf's binding (shadowing a
-            // same-named ancestor, which stays dropped).
-            let leaf_set: std::collections::HashSet<&String> = leaf_names.iter().collect();
-            let mut deeper = Vec::new();
-            let mut leaf_live: Vec<String> = Vec::new();
-            for k in fresh {
-                if leaf_set.contains(&k) {
-                    leaf_live.push(k);
-                } else if let Some(scope) = crate::env::Env::resolve_scope(env, &k) {
-                    deeper.push((k, scope));
-                }
-            }
-            leaf_live.sort();
-            *keep_cache = Some((
-                parent_shape,
-                leaf_live.clone(),
-                reachable.clone(),
-                deeper.clone(),
-            ));
-            (deeper, leaf_live)
+        _ => {
+            let frozen = parent.as_ref().map(EnvLink::frozen_view);
+            *keep_cache = Some((parent_shape, reachable.clone(), frozen.clone(), parent));
+            frozen
         }
     };
-    let mut seen: HashMap<usize, Value> = HashMap::new();
-    let mut out = HashMap::with_capacity(deeper.len() + leaf_live.len());
-    // Deeper bindings first, current-leaf bindings second: the leaf
-    // shadows ancestors on ties, matching resolution order (a shadowing
-    // leaf define is always read live — never from a cached scope).
-    for (k, scope) in &deeper {
-        // Borrow released before `deep_clone_value` runs: a kept value may
-        // capture this very scope, and cloning it re-borrows the chain.
-        let v = scope.borrow().get_local(k);
-        if let Some(v) = v {
-            out.insert(k.clone(), deep_clone_value(v, &mut seen));
-        }
-    }
     // Current-leaf bindings, resolved live every spawn (the leaf is fresh
-    // per loop iteration — cached holders would be stale). Each borrow
-    // ends before `deep_clone_value` runs (statement scope).
-    for k in &leaf_live {
-        let v = env.borrow().get_local(k);
-        if let Some(v) = v {
-            out.insert(k.clone(), deep_clone_value(v, &mut seen));
+    // per loop iteration — cached holders would be stale). Filtered by
+    // the same rule as before: referenced, and not table-covered `Func`s.
+    // ONE shared memo: leaf values routinely share scopes.
+    let mut seen: HashMap<usize, Value> = HashMap::new();
+    let mut leaf = Vec::new();
+    for name in env.local_names() {
+        if !loads.contains(name.as_str()) {
+            continue;
         }
+        let Some(v) = env.get_local(&name) else {
+            continue;
+        };
+        if let Value::Func(fv) = &v {
+            let covered = reachable.contains(name.as_str())
+                && funcs
+                    .get(name.as_str())
+                    .is_some_and(|tf| EnvLink::ptr_eq(&tf.env, &fv.env));
+            if covered {
+                continue;
+            }
+        }
+        leaf.push((name, deep_clone_value(v, &mut seen)));
     }
-    out
+    CowSnapshot {
+        parent: frozen,
+        leaf,
+    }
 }
 
 /// Snapshot a function table so it is safe to send across thread boundaries.
@@ -492,18 +466,14 @@ pub fn snapshot_funcs(funcs: &HashMap<String, FuncValue>) -> HashMap<String, Fun
     // deep clones still produce independent worker-owned values.
     let mut flats: HashMap<usize, HashMap<String, Value>> = HashMap::new();
     for (name, fv) in funcs {
-        let key = Rc::as_ptr(&fv.env) as *const () as usize;
+        let key = fv.env.id();
         // Borrow dance: compute the flat map only on first sight of an env.
-        let flat = flats
-            .entry(key)
-            .or_insert_with(|| fv.env.borrow().flatten());
-        let new_env = Rc::new(RefCell::new(crate::env::Env::new()));
-        {
-            let mut e = new_env.borrow_mut();
-            for (k, v) in flat {
-                e.define(k, deep_clone_value(v.clone(), &mut seen));
-            }
+        let flat = flats.entry(key).or_insert_with(|| fv.env.flatten());
+        let mut fresh = crate::env::Env::new();
+        for (k, v) in flat {
+            fresh.define(k, deep_clone_value(v.clone(), &mut seen));
         }
+        let new_env = EnvLink::Owned(Rc::new(RefCell::new(fresh)));
         out.insert(
             name.clone(),
             FuncValue {
@@ -532,14 +502,12 @@ pub fn detach_cached_funcs(cached: &HashMap<String, FuncValue>) -> HashMap<Strin
     for (name, fv) in cached {
         // Cached envs are single-scope (built by `snapshot_funcs`), so a
         // plain flatten is a one-layer copy — no chain walk.
-        let flat = fv.env.borrow().flatten();
-        let new_env = Rc::new(RefCell::new(crate::env::Env::new()));
-        {
-            let mut e = new_env.borrow_mut();
-            for (k, v) in flat {
-                e.define(&k, deep_clone_value(v, &mut seen));
-            }
+        let flat = fv.env.flatten();
+        let mut fresh = crate::env::Env::new();
+        for (k, v) in flat {
+            fresh.define(&k, deep_clone_value(v, &mut seen));
         }
+        let new_env = EnvLink::Owned(Rc::new(RefCell::new(fresh)));
         out.insert(
             name.clone(),
             FuncValue {
@@ -709,7 +677,7 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
         Value::Func(fv) => {
             // Use pointer address as the dedup key to prevent infinite recursion
             // on cyclic closure references.
-            let key = Rc::as_ptr(&fv.env) as *const () as usize;
+            let key = fv.env.id();
             if let Some(cloned) = seen.get(&key) {
                 return cloned.clone();
             }
@@ -720,21 +688,19 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
                     stmts: Vec::new(),
                     span: Span::new(0, 0),
                 }),
-                env: Rc::new(RefCell::new(crate::env::Env::new())),
+                env: EnvLink::new(),
                 chunk: fv.chunk.clone(),
             };
             let placeholder_val = Value::Func(Box::new(placeholder));
             seen.insert(key, placeholder_val.clone());
 
             // Flatten the captured env and create a self-contained version.
-            let flat = fv.env.borrow().flatten();
-            let new_env = Rc::new(RefCell::new(crate::env::Env::new()));
-            {
-                let mut e = new_env.borrow_mut();
-                for (name, val) in flat {
-                    e.define(&name, deep_clone_value(val, seen));
-                }
+            let flat = fv.env.flatten();
+            let mut fresh = crate::env::Env::new();
+            for (name, val) in flat {
+                fresh.define(&name, deep_clone_value(val, seen));
             }
+            let new_env = EnvLink::Owned(Rc::new(RefCell::new(fresh)));
             let cloned = Value::Func(Box::new(FuncValue {
                 params: fv.params,
                 body: Expr::Block(Block {
@@ -814,7 +780,7 @@ pub struct NativeFunc {
 pub struct FuncValue {
     pub params: Vec<Param>,
     pub body: Expr,
-    pub env: std::rc::Rc<std::cell::RefCell<Env>>,
+    pub env: EnvLink,
     /// Pre-compiled bytecode body, when the function was defined through the
     /// Phase 6 compiler. `None` for tree-walker-created closures.
     pub chunk: Option<std::sync::Arc<crate::vm::Chunk>>,

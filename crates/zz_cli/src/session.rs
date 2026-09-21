@@ -52,12 +52,12 @@ impl Session {
         // Inject math constants as static float values.
         // Three forms: fully qualified, module namespace, bare name.
         for (key, val) in zz_stdlib::stdlib_consts() {
-            interp.env.borrow_mut().define(&key, Value::Float(val));
+            interp.env.define(&key, Value::Float(val));
             if let Some(rest) = key.strip_prefix("std.") {
-                interp.env.borrow_mut().define(rest, Value::Float(val));
+                interp.env.define(rest, Value::Float(val));
             }
             if let Some(bare) = key.rsplit('.').next() {
-                interp.env.borrow_mut().define(bare, Value::Float(val));
+                interp.env.define(bare, Value::Float(val));
             }
         }
 
@@ -99,7 +99,7 @@ impl Session {
     /// Flatten the runtime environment into (name, value) pairs.
     /// Used by the REPL completer and `:vars` command.
     pub fn env_vars(&self) -> std::collections::HashMap<String, Value> {
-        self.interp.env.borrow().flatten()
+        self.interp.env.flatten()
     }
 
     /// Get the type of a variable by name from the checker seed.
@@ -120,7 +120,7 @@ impl Session {
 
     /// Get the runtime environment reference (for completion queries).
     #[allow(dead_code)]
-    pub fn env(&self) -> &std::rc::Rc<std::cell::RefCell<zz_runtime::Env>> {
+    pub fn env(&self) -> &zz_runtime::EnvLink {
         &self.interp.env
     }
 
@@ -236,7 +236,7 @@ impl Session {
                 // by register_module_namespace; pure-ZZ funcs live in Env.
                 let src_prefix = module.rsplit('.').next().unwrap_or(&module);
                 if ns != src_prefix {
-                    let snap = self.interp.env.borrow().flatten();
+                    let snap = self.interp.env.flatten();
                     let keys: Vec<(String, zz_runtime::Value)> = snap
                         .into_iter()
                         .filter(|(k, _)| {
@@ -249,7 +249,7 @@ impl Session {
                         } else {
                             format!("{ns}{}", &k[src_prefix.len()..])
                         };
-                        self.interp.env.borrow_mut().define(&alias_key, v);
+                        self.interp.env.define(&alias_key, v);
                     }
                 }
             }

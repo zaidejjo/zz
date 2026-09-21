@@ -68,10 +68,16 @@ unsafe impl Send for GreenTask {}
 
 /// Registry slot for a task: the parked task (absent while running) plus a
 /// delivery slot where wakers leave the blocking call's real value.
-/// Shells recycle through per-shard pools (see `RegistryShard`).
+/// Shells recycle through per-shard pools (see `RegistryShard`). One
+/// mutex for both halves: every site touches task and deliver together
+/// (take-take, put-deliver), so a split lock just doubled the atomics.
 struct TaskEntry {
-    task: Mutex<Option<GreenTask>>,
-    deliver: Mutex<Option<Value>>,
+    inner: Mutex<EntryInner>,
+}
+
+struct EntryInner {
+    task: Option<GreenTask>,
+    deliver: Option<Value>,
 }
 
 /// One registry shard: id-keyed entries plus a bounded pool of recycled
@@ -108,7 +114,29 @@ pub(crate) struct Executor {
     /// Round-robin cursor for single-sleeper wakeups (see
     /// `unpark_sleepers`).
     wake_next: AtomicUsize,
+    /// VM shell pool (Phase 6 arena): completed VMs return here with
+    /// warmed stack/frame buffers; spawns check them out instead of
+    /// reallocating every `Vec` per task. One lock per checkout/checkin
+    /// (~25ns) to save ~300ns of reallocation — net win. Bounded; the
+    /// reset shells hold only capacities, no task values.
+    shells: Mutex<Vec<VmShell>>,
 }
+
+/// Max pooled VM shells (each holds warmed Vecs worth KBs — caps retained
+/// memory while covering any realistic completion rate).
+const VM_POOL_CAP: usize = 128;
+
+/// A reset VM shell for the pool. `Vm` is `!Send` (frames hold
+/// `Rc`-shared envs), but a pooled shell is always freshly `reset()` —
+/// no frames, no values, no shared state — and crosses threads by
+/// exclusive ownership exactly once per handoff (pool → spawner → task →
+/// pool). Same discipline as `Send for GreenTask` (see above); the
+/// wrapper keeps the unsafe claim off the general-purpose `Vm` type.
+struct VmShell(Vm);
+
+// SAFETY: see above. A shell in flight holds no task state by
+// construction (`reset()` runs before pooling and before handoff).
+unsafe impl Send for VmShell {}
 
 /// This thread's work-stealing state. `None` off workers (main thread):
 /// enqueues then route to the global injector instead of a local deque.
@@ -159,6 +187,7 @@ impl Executor {
                 parkers: Mutex::new(Vec::new()),
                 sleepers: AtomicUsize::new(0),
                 wake_next: AtomicUsize::new(0),
+                shells: Mutex::new(Vec::new()),
             };
             for (index, worker) in workers.into_iter().enumerate() {
                 std::thread::spawn(move || Self::run_worker(worker, index));
@@ -366,6 +395,31 @@ impl Executor {
         (id as usize) & (REGISTRY_SHARDS - 1)
     }
 
+    /// Check out a VM shell: pooled with warmed buffers when available,
+    /// fresh otherwise. The caller must seat args and run exactly one
+    /// task on it; it returns via `checkin_vm` at completion.
+    pub(crate) fn checkout_vm() -> Vm {
+        Executor::global()
+            .shells
+            .lock()
+            .unwrap()
+            .pop()
+            .map(|shell| shell.0)
+            .unwrap_or_default()
+    }
+
+    /// Return a reset shell to the pool (see `checkout_vm`). Drops the
+    /// shell when the pool is full — bounded memory, no leak.
+    fn checkin_vm(mut vm: Vm) {
+        // Reset drops leftover stack/frame values (the outcome was already
+        // extracted) while retaining buffer capacities for the next task.
+        vm.reset();
+        let mut shells = Executor::global().shells.lock().unwrap();
+        if shells.len() < VM_POOL_CAP {
+            shells.push(VmShell(vm));
+        }
+    }
+
     /// Enqueue a fresh task. Returns its id.
     pub(crate) fn spawn_task(
         vm: Vm,
@@ -381,7 +435,7 @@ impl Executor {
         let mut shard = ex.registry[Self::shard(id)].lock().unwrap();
         let entry = match shard.pool.pop() {
             Some(e) => {
-                *e.task.lock().unwrap() = Some(GreenTask {
+                e.inner.lock().unwrap().task = Some(GreenTask {
                     id,
                     vm,
                     interp,
@@ -392,15 +446,17 @@ impl Executor {
                 e
             }
             None => Arc::new(TaskEntry {
-                task: Mutex::new(Some(GreenTask {
-                    id,
-                    vm,
-                    interp,
-                    chunk,
-                    handle,
-                    started: false,
-                })),
-                deliver: Mutex::new(None),
+                inner: Mutex::new(EntryInner {
+                    task: Some(GreenTask {
+                        id,
+                        vm,
+                        interp,
+                        chunk,
+                        handle,
+                        started: false,
+                    }),
+                    deliver: None,
+                }),
             }),
         };
         shard.map.insert(id, Arc::clone(&entry));
@@ -439,7 +495,7 @@ impl Executor {
         };
         match value {
             Some(v) => {
-                *entry.deliver.lock().unwrap() = Some(v);
+                entry.inner.lock().unwrap().deliver = Some(v);
                 Self::enqueue(wid);
             }
             None => {
@@ -466,7 +522,7 @@ impl Executor {
             Some(e) => Arc::clone(e),
             None => return, // Completed and reaped between enqueue and run.
         };
-        let mut task = match entry.task.lock().unwrap().take() {
+        let mut task = match entry.inner.lock().unwrap().task.take() {
             Some(t) => t,
             None => {
                 // Taken by nobody we know: the task is either running
@@ -479,7 +535,7 @@ impl Executor {
             }
         };
         // Deliver a value left by a waker over the yielded call's dummy.
-        let delivered = entry.deliver.lock().unwrap().take();
+        let delivered = entry.inner.lock().unwrap().deliver.take();
         if profile {
             eprintln!("[exec] run_slice id={id} delivered={}", delivered.is_some());
         }
@@ -556,7 +612,7 @@ impl Executor {
                 // Cooperative quantum expiry: no object involved, no lock
                 // protocol — put back and requeue so siblings run.
                 let id = task.id;
-                *entry.task.lock().unwrap() = Some(task);
+                entry.inner.lock().unwrap().task = Some(task);
                 Self::enqueue(id);
             }
         }
@@ -650,11 +706,11 @@ impl Executor {
                     Self::complete(task, Err("internal error: yield with empty stack".into()));
                     return;
                 }
-                *entry.task.lock().unwrap() = Some(task);
+                entry.inner.lock().unwrap().task = Some(task);
                 Self::enqueue(id);
             }
             None => {
-                *entry.task.lock().unwrap() = Some(task);
+                entry.inner.lock().unwrap().task = Some(task);
             }
         }
     }
@@ -705,11 +761,11 @@ impl Executor {
                     Self::complete(task, Err("internal error: yield with empty stack".into()));
                     return;
                 }
-                *entry.task.lock().unwrap() = Some(task);
+                entry.inner.lock().unwrap().task = Some(task);
                 Self::enqueue(id);
             }
             None => {
-                *entry.task.lock().unwrap() = Some(task);
+                entry.inner.lock().unwrap().task = Some(task);
             }
         }
     }
@@ -724,18 +780,25 @@ impl Executor {
         let ex = Executor::global();
         let handle = task.handle.clone();
         let id = task.id;
-        // Heavy per-task state (VM stacks, interpreter envs) dies here;
-        // only the slim outcome + handle survive for joiners.
-        drop(task.vm);
-        drop(task.interp);
-        drop(task.chunk);
+        // Heavy per-task state (interpreter envs) dies here; only the slim
+        // outcome + handle survive for joiners. The VM shell returns to
+        // the pool with warmed buffers (see `checkout_vm`) instead of
+        // freeing every stack/frame Vec per task.
+        let GreenTask {
+            vm, interp, chunk, ..
+        } = task;
+        drop(interp);
+        drop(chunk);
+        // `checkin_vm` resets (drops leftover stack values) and pools the
+        // shell when there is room.
+        Self::checkin_vm(vm);
         // Reap + recycle: remove the entry, scrub any deliver residue
         // (defense: a stale deliver would corrupt the next occupant's
         // stack via `replace_top`), and pool the shell when there is
         // room. The task slot is already None (taken by the final slice).
         let mut shard = ex.registry[Self::shard(id)].lock().unwrap();
         if let Some(entry) = shard.map.remove(&id) {
-            *entry.deliver.lock().unwrap() = None;
+            entry.inner.lock().unwrap().deliver = None;
             if shard.pool.len() < SHARD_POOL_CAP {
                 shard.pool.push(entry);
             }
@@ -770,7 +833,7 @@ impl Executor {
             })
             .collect();
         for (wentry, wid) in targets {
-            *wentry.deliver.lock().unwrap() = Some(outcome_to_value(outcome.clone()));
+            wentry.inner.lock().unwrap().deliver = Some(outcome_to_value(outcome.clone()));
             // Direct handoff: waiters land on the completing worker's own
             // deque (LIFO) — the thread that made progress very likely
             // runs them next, hot cache, no global-queue hop.

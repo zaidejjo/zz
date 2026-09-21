@@ -13,13 +13,12 @@
 pub(crate) mod executor;
 
 use std::collections::{HashMap, VecDeque};
-use std::rc::Rc;
 use std::sync::{atomic::AtomicUsize, Arc, Condvar, Mutex};
 
 use zz_runtime::{EvalError, Interp, Span, Value};
 
 use executor::Executor;
-use zz_runtime::value::snapshot_env_pruned;
+use zz_runtime::value::snapshot_env_cow;
 use zz_runtime::value::{ChanInner, ChanState, TaskJoinState};
 
 /// `chan()` — create a new unbounded channel.
@@ -290,7 +289,7 @@ pub(crate) fn spawn(
                 )
             })?,
             f.params.len(),
-            Rc::clone(&f.env),
+            f.env.clone(),
         ),
         Some(other) => {
             return Err(EvalError::new(
@@ -306,6 +305,34 @@ pub(crate) fn spawn(
         }
     };
 
+    spawn_from_parts(interp, chunk, param_count, env, span)
+}
+
+/// Fused-spawn entry point for the `SpawnClosure` VM op (see
+/// [`zz_runtime::SpawnHook`]): identical to `spawn` except the chunk,
+/// params, and creation env arrive directly — no `FuncValue` box is ever
+/// built. The creation env is the spawner's current env, exactly what
+/// `MakeClosure` would have captured.
+pub(crate) fn spawn_hook(
+    interp: &mut Interp,
+    chunk: &Arc<zz_runtime::Chunk>,
+    params: &[zz_frontend::ast::Param],
+    span: Span,
+) -> Result<Value, EvalError> {
+    let env = interp.env.clone();
+    spawn_from_parts(interp, Arc::clone(chunk), params.len(), env, span)
+}
+
+/// Task construction shared by the `task.spawn` native and the fused
+/// `SpawnClosure` op: snapshot the captured env, build the worker
+/// interpreter, hand the task to the executor.
+fn spawn_from_parts(
+    interp: &mut Interp,
+    chunk: Arc<zz_runtime::Chunk>,
+    param_count: usize,
+    env: zz_runtime::env::EnvLink,
+    _span: Span,
+) -> Result<Value, EvalError> {
     // Debug aid: ZZ_SPAWN_PROFILE=1 prints per-spawn timing breakdowns.
     // Used by perf investigations (W2); no production code depends on it.
     let profiling = executor::profiling();
@@ -347,14 +374,14 @@ pub(crate) fn spawn(
     };
     let dt_reach = t0.map(|t| t.elapsed());
     let t0 = profiling.then(std::time::Instant::now);
-    let snapshot = snapshot_env_pruned(
+    let snapshot = snapshot_env_cow(
         &env,
         &interp.funcs,
         &reachable,
         &loads,
         &mut interp.spawn_keep_cache,
     );
-    let n_snapshot = snapshot.len();
+    let n_snapshot = snapshot.leaf.len();
     let dt_env = t0.map(|t| t.elapsed());
     let t0 = profiling.then(std::time::Instant::now);
 
@@ -455,18 +482,20 @@ pub(crate) fn spawn(
     // the seated args (running on an empty stack shifts every slot
     // and corrupts locals or panics out of bounds). `spawn` takes
     // no inputs by contract, so Unit is the only sane default;
-    // `|_|` closures ignore it.
-    let mut vm = zz_runtime::vm::Vm::new();
+    // `|_|` closures ignore it. The shell comes from the VM pool
+    // (warmed buffers) when available.
+    let mut vm = Executor::checkout_vm();
     for _ in 0..param_count {
         vm.push(Value::Unit);
     }
 
-    // Seed env from snapshot.
-    {
-        let mut env = new_interp.env.borrow_mut();
-        for (name, val) in snapshot {
-            env.define(&name, val);
-        }
+    // Seed env from snapshot: fresh owned leaf for the worker, parented
+    // at the shared frozen ancestors (copy-on-write — no per-value
+    // clones above the leaf). Leaf bindings shadow frozen ancestors on
+    // ties, matching resolution order.
+    new_interp.env.set_parent(snapshot.parent);
+    for (name, val) in snapshot.leaf {
+        new_interp.env.define(&name, val);
     }
 
     Executor::spawn_task(vm, new_interp, chunk, Arc::clone(&state));

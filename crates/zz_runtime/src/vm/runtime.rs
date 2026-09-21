@@ -1,5 +1,3 @@
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use zz_frontend::ast::{Block, Expr};
@@ -7,7 +5,7 @@ use zz_frontend::span::Span;
 
 use super::chunk::Chunk;
 use super::op::Op;
-use crate::env::Env;
+use crate::env::{Env, EnvLink};
 use crate::eval::{EvalError, Interp};
 use crate::runtime::ops::{
     eval_binary, eval_int_binary, eval_unary, get_index, object_field, set_index, set_object_field,
@@ -30,7 +28,7 @@ struct Frame {
     chunk: Arc<Chunk>,
     ip: usize,
     /// Environment to restore when this frame returns.
-    prev_env: Rc<RefCell<Env>>,
+    prev_env: EnvLink,
     /// Stack index where this frame's evaluation begins.
     stack_base: usize,
     /// Deferred closures accumulated in this frame. Saved/restored across
@@ -50,7 +48,7 @@ struct LoopInfo {
     /// Jump target for `continue` (the loop header).
     header: usize,
     /// Environment at loop start; iteration scopes are children of it.
-    env: Rc<RefCell<Env>>,
+    env: EnvLink,
     /// Frame index that pushed this loop, so `break` inside a function body
     /// cannot capture a caller's loop.
     frame_idx: usize,
@@ -131,6 +129,23 @@ impl Vm {
         }
     }
 
+    /// Reset for shell-pool reuse (Phase 6 arena): clear all execution
+    /// state but RETAIN buffer capacities, so the next task skips every
+    /// `Vec` reallocation. The caller must have already dropped or moved
+    /// out all `Value`s (stack/frames hold task-owned values — clearing
+    /// here drops them; pooling only kicks in after completion, when the
+    /// outcome was already extracted).
+    pub fn reset(&mut self) {
+        self.stack.clear();
+        self.frames.clear();
+        self.loops.clear();
+        self.defer_stack.clear();
+        self.defer_return = None;
+        self.try_convert_depths.clear();
+        self.slice_budget = SAFEPOINT_BUDGET;
+        self.slice_start = None;
+    }
+
     /// Push a value onto the VM stack. Used by `Interp::call_func` to set up
     /// compiled closure parameters before calling `run_chunk_with_base`,
     /// and by `task.spawn` to seat Unit args for worker closures (see
@@ -162,7 +177,7 @@ impl Vm {
         if let Value::Func(fv) = closure {
             if let Some(chunk) = fv.chunk {
                 let stack_base = self.stack.len();
-                let prev_env = std::mem::replace(&mut interp.env, Rc::clone(&fv.env));
+                let prev_env = std::mem::replace(&mut interp.env, fv.env.clone());
                 let saved_defers = std::mem::take(&mut self.defer_stack);
                 self.frames.push(Frame {
                     chunk,
@@ -201,7 +216,7 @@ impl Vm {
         self.frames.push(Frame {
             chunk: Arc::clone(chunk),
             ip: 0,
-            prev_env: Rc::clone(&interp.env),
+            prev_env: interp.env.clone(),
             stack_base,
             defer_stack: Vec::new(),
             func_name: String::new(),
@@ -285,7 +300,7 @@ impl Vm {
                     let idx = sb + *slot as usize;
                     if idx < self.stack.len() {
                         let val = self.stack[idx].clone();
-                        interp.env.borrow_mut().define(name, val);
+                        interp.env.define(name, val);
                     }
                 }
                 let v = if self.stack.len() > sb {
@@ -395,7 +410,6 @@ impl Vm {
                 Op::LoadVar(name, span) => {
                     let v = interp
                         .env
-                        .borrow()
                         .get(name)
                         .or_else(|| {
                             interp
@@ -422,12 +436,12 @@ impl Vm {
                 }
                 Op::DefineVar(name) => {
                     let v = self.stack.pop().unwrap();
-                    interp.env.borrow_mut().define(name, v.clone());
+                    interp.env.define(name, v.clone());
                     self.stack.push(v);
                 }
                 Op::StoreVar(name, span) => {
                     let v = self.stack.pop().unwrap();
-                    if !interp.env.borrow_mut().assign(name, v) {
+                    if !interp.env.assign(name, v) {
                         return Err(self.error(format!("undefined variable `{name}`"), *span));
                     }
                 }
@@ -574,15 +588,12 @@ impl Vm {
                             stmts: Vec::new(),
                             span: Span::new(0, 0),
                         }),
-                        env: Rc::clone(&interp.env),
+                        env: interp.env.clone(),
                         chunk: Some(Arc::clone(fchunk)),
                     };
                     interp.funcs.insert(name.clone(), fv.clone());
                     interp.funcs_version = interp.funcs_version.wrapping_add(1);
-                    interp
-                        .env
-                        .borrow_mut()
-                        .define(name, Value::Func(Box::new(fv)));
+                    interp.env.define(name, Value::Func(Box::new(fv)));
                     self.stack.push(Value::Unit);
                 }
                 Op::RegisterStruct { name, fields } => {
@@ -856,7 +867,7 @@ impl Vm {
                     self.loops.push(LoopInfo {
                         exit: *exit,
                         header: *header,
-                        env: Rc::clone(&interp.env),
+                        env: interp.env.clone(),
                         frame_idx: self.frames.len() - 1,
                         stack_base,
                         slots: total_slots,
@@ -943,14 +954,14 @@ impl Vm {
                         }
                         if *in_env {
                             let li = self.loops.last().unwrap();
-                            let loop_env = Rc::clone(&li.env);
+                            let loop_env = li.env.clone();
                             interp.env = loop_env;
-                            let scope = Env::with_parent(&interp.env);
+                            let mut scope = Env::with_parent(&interp.env);
                             if let Some(ref v2) = push_val2 {
-                                scope.borrow_mut().define(&vars[0], push_val);
-                                scope.borrow_mut().define(&vars[1], v2.clone());
+                                scope.define(&vars[0], push_val);
+                                scope.define(&vars[1], v2.clone());
                             } else {
-                                scope.borrow_mut().define(&vars[0], push_val);
+                                scope.define(&vars[0], push_val);
                             }
                             interp.env = scope;
                         }
@@ -960,7 +971,7 @@ impl Vm {
                     self.loops.push(LoopInfo {
                         exit: *exit,
                         header: *header,
-                        env: Rc::clone(&interp.env),
+                        env: interp.env.clone(),
                         frame_idx: self.frames.len() - 1,
                         stack_base: self.stack.len(),
                         slots: 0,
@@ -997,7 +1008,7 @@ impl Vm {
                         return Err(self.error("`continue` outside of a loop", *span));
                     }
                     self.stack.truncate(li.stack_base + 1 + li.slots);
-                    interp.env = Rc::clone(&li.env);
+                    interp.env = li.env.clone();
                     ip = li.header;
                 }
                 Op::SetLoopResult => {
@@ -1201,10 +1212,25 @@ impl Vm {
                             stmts: Vec::new(),
                             span: Span::new(0, 0),
                         }),
-                        env: Rc::clone(&interp.env),
+                        env: interp.env.clone(),
                         chunk: Some(Arc::clone(chunk)),
                     };
                     self.stack.push(Value::Func(Box::new(fv)));
+                }
+                Op::SpawnClosure {
+                    params,
+                    chunk,
+                    span,
+                } => {
+                    // Fused spawn (see `SpawnHook`): the chunk + params go
+                    // straight to the task constructor — no FuncValue box,
+                    // no args Vec, no native lookup. Creation env is the
+                    // current env, exactly as MakeClosure would capture.
+                    let hook = crate::eval::SPAWN_HOOK.get().copied().ok_or_else(|| {
+                        self.error("`task.spawn` used without stdlib task support", *span)
+                    })?;
+                    let v = hook(interp, chunk, params, *span)?;
+                    self.stack.push(v);
                 }
                 Op::MakeVariant {
                     name,
@@ -1245,14 +1271,14 @@ impl Vm {
                 } => {
                     let sv = self.stack.pop().unwrap();
                     let matched = if *has_env {
-                        let scope = Env::with_parent(&interp.env);
-                        let m = interp.match_pattern(pat, &sv, &scope);
+                        let mut scope = Env::with_parent(&interp.env);
+                        let m = Interp::match_pattern(pat, &sv, &mut scope);
                         if m {
                             interp.env = scope;
                         }
                         m
                     } else {
-                        interp.match_pattern(pat, &sv, &interp.env)
+                        Interp::match_pattern(pat, &sv, &mut interp.env)
                     };
                     if !matched {
                         if *restore {
@@ -1268,11 +1294,7 @@ impl Vm {
                         _ => {
                             if *has_env {
                                 // Exit the scope created by MatchArm
-                                let parent = {
-                                    let env = interp.env.borrow();
-                                    env.parent_rc()
-                                };
-                                if let Some(env_ref) = parent {
+                                if let Some(env_ref) = interp.env.parent_link() {
                                     interp.env = env_ref;
                                 }
                             }
@@ -1286,14 +1308,14 @@ impl Vm {
                 Op::IfLetMatch { pat, els, has_env } => {
                     let v = self.stack.pop().unwrap();
                     let matched = if *has_env {
-                        let scope = Env::with_parent(&interp.env);
-                        let m = interp.match_pattern(pat, &v, &scope);
+                        let mut scope = Env::with_parent(&interp.env);
+                        let m = Interp::match_pattern(pat, &v, &mut scope);
                         if m {
                             interp.env = scope;
                         }
                         m
                     } else {
-                        interp.match_pattern(pat, &v, &interp.env)
+                        Interp::match_pattern(pat, &v, &mut interp.env)
                     };
                     if !matched {
                         self.stack.push(v);
@@ -1451,7 +1473,7 @@ impl Vm {
                     args.reverse();
                     if parts.len() >= 2 {
                         let joined = parts.join(".");
-                        let is_direct = interp.env.borrow().get(&joined).is_some()
+                        let is_direct = interp.env.get(&joined).is_some()
                             || interp.funcs.contains_key(&joined)
                             || interp.natives.contains_key(&joined);
                         if !is_direct && interp.resolve_path_value(parts, pspan).is_err() {
@@ -1617,11 +1639,7 @@ impl Vm {
                     interp.env = scope;
                 }
                 Op::ExitScope => {
-                    let parent = interp
-                        .env
-                        .borrow()
-                        .parent_rc()
-                        .expect("ExitScope at top level");
+                    let parent = interp.env.parent_link().expect("ExitScope at top level");
                     interp.env = parent;
                 }
                 Op::PopN(n) => {
@@ -1680,7 +1698,7 @@ impl Vm {
                 }
                 let stack_base = self.stack.len();
                 self.stack.extend(args);
-                let prev_env = std::mem::replace(&mut interp.env, Rc::clone(&fv.env));
+                let prev_env = std::mem::replace(&mut interp.env, fv.env.clone());
                 let saved_defers = std::mem::take(&mut self.defer_stack);
                 self.frames.push(Frame {
                     chunk: fv.chunk.unwrap(),

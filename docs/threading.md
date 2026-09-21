@@ -112,17 +112,44 @@ share a lock across shards), empty-capture spawns skip snapshotting
 entirely, reachability sets are `Arc`-shared per spawn-site chunk,
 completions with no waiters store by move and skip the condvar notify,
 struct layouts are `Arc` copy-on-write (spawn shares, define clones only
-when shared), and the keep-set cache keys on the *parent* chain (stable
-across loop iterations — fresh per-iteration leaves resolve live).
-(`Rc`-shared structs were tried first and caught by the bench as heap
-corruption — `Rc` refcounts are non-atomic across worker threads. Full
-per-chain epoch validation was also tried and reverted: loop-var
-redefinition churns any epoch, and the machinery cost more than the
-chain walk it replaced.)
+when shared), snapshots are copy-on-write (see below), the
+`task.spawn(closure-literal)` call shape fuses into one `SpawnClosure`
+op (no `FuncValue` box, no args `Vec`, no native dispatch — via a
+runtime-owned hook slot the stdlib registers inside `stdlib_natives()`),
+and completed VMs recycle through a bounded shell pool with warmed
+stack/frame buffers (a `VmShell` wrapper carries the `Send` claim so the
+general-purpose `Vm` type stays `!Send`).
+
+## Copy-on-write environments
+
+Scope chains are `EnvLink`s: owned (`Rc<RefCell>`, thread-local,
+mutable) or frozen (`Arc`-shared immutable maps). Spawning freezes the
+ancestors once and shares them by pointer — O(1), no per-value clones
+above the leaf. Only the churning per-iteration leaf is still
+deep-cloned. Writers detach (clone-on-write): a worker assigning to a
+shared ancestor gets a private copy spliced into its own chain, so the
+spawner and siblings never observe it — exactly the old point-in-time
+snapshot semantics, which is why no fallback path is needed.
+
+Safety notes (all bench-proven):
+- Frozen scopes are statically `Send + Sync` (frozen-only parent
+  links) — the compiler proves cross-thread sharing; values cross under
+  the existing `Send for Value` discipline.
+- The spawner never sees frozen links (only workers do), so spawner
+  writes never detach.
+- The keep-cache pins the parent link: shape keys are allocation
+  addresses, and without the pin a freed frame's reused address would
+  false-hit the cache and serve a stale frozen parent (previous call's
+  channel!) to the next call — a real deadlock we caught and fixed
+  (`concurrency_recall_test.zz` guards it).
+- Earlier attempts and why they died: `Rc`-shared structs raced
+  refcounts (heap corruption → `Arc`); global epoch validation was
+  polluted by worker seeding; per-scope epochs cost more than the walk
+  they replaced.
 
 | op | ZZ | comparison |
 |---|---|---|
-| `spawn` dispatch | ~3µs (~111k fan-in/s; 50k burst in 0.36s) | Go 50k burst in 0.66s, 185k fan-in/s |
+| `spawn` dispatch | ~3µs (~130k fan-in/s; 50k burst in 0.29s) | Go 50k burst in 0.66s, 185k fan-in/s |
 | `spawn+join` round-trip | ~25µs | pool-era ZZ was ~250ms (10,000× ago) |
 | `chan.send+recv` round-trip | ~1.9µs release (was 25µs pre-spin) | Go chan ~1.5µs/rt |
 | 64 parallel tasks | linear speedup | real parallelism, not just concurrency |

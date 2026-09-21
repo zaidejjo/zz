@@ -37,6 +37,10 @@ pub(crate) mod vec_mod;
 
 /// All standard library native functions, keyed by qualified name.
 pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
+    // Register the fused-spawn constructor (see `SpawnHook`): idempotent,
+    // and every interpreter-building path calls this function, so the VM's
+    // `SpawnClosure` op always finds it.
+    let _ = zz_runtime::SPAWN_HOOK.get_or_init(|| concurrency::spawn_hook);
     let mut m = HashMap::new();
 
     // std.io

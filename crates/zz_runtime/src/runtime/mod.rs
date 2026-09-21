@@ -8,13 +8,10 @@
 pub mod format;
 pub mod ops;
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use zz_frontend::span::Span;
 
-use crate::env::Env;
 use crate::value::{FuncValue, Value};
 
 // Re-exports for convenience.
@@ -118,7 +115,7 @@ pub struct NativeEntry {
 /// both the tree-walker and the bytecode VM can operate on the same
 /// underlying state.
 pub struct RuntimeState {
-    pub env: Rc<RefCell<Env>>,
+    pub env: crate::env::EnvLink,
     /// Named functions, kept separate from the environment so recursive
     /// bodies can resolve their own name without circular captured envs.
     pub funcs: HashMap<String, FuncValue>,
@@ -143,7 +140,7 @@ impl Default for RuntimeState {
 impl RuntimeState {
     pub fn new() -> Self {
         RuntimeState {
-            env: Rc::new(RefCell::new(Env::new())),
+            env: crate::env::EnvLink::new(),
             funcs: HashMap::new(),
             natives: HashMap::new(),
             structs: HashMap::new(),
@@ -155,7 +152,7 @@ impl RuntimeState {
     /// Create a runtime state with a native function registry.
     pub fn with_natives(natives: HashMap<String, NativeEntry>) -> Self {
         RuntimeState {
-            env: Rc::new(RefCell::new(Env::new())),
+            env: crate::env::EnvLink::new(),
             funcs: HashMap::new(),
             natives,
             structs: HashMap::new(),

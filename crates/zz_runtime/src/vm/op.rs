@@ -200,6 +200,16 @@ pub enum Op {
         params: Vec<Param>,
         chunk: Arc<Chunk>,
     },
+    /// Fused `task.spawn(closure-literal)`: build the task directly from
+    /// the pre-compiled body chunk, skipping the `FuncValue` box + native
+    /// call dispatch. Behaviorally identical to MakeClosure + task.spawn;
+    /// emitted only for literal closures (variables keep the generic
+    /// path with its arity errors).
+    SpawnClosure {
+        params: Vec<Param>,
+        chunk: Arc<Chunk>,
+        span: Span,
+    },
     /// Pop an optional argument and push an Option/Result variant.
     MakeVariant {
         name: String,

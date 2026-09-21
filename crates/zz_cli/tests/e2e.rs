@@ -253,6 +253,11 @@ e2e_success_test!(
     "stdlib",
     "concurrency_capture_test.zz"
 );
+e2e_success_test!(
+    e2e_stdlib_concurrency_recall_test,
+    "stdlib",
+    "concurrency_recall_test.zz"
+);
 e2e_success_test!(e2e_stdlib_regexp_test, "stdlib", "regexp_test.zz");
 e2e_success_test!(e2e_stdlib_crypto_test, "stdlib", "crypto_test.zz");
 e2e_success_test!(
