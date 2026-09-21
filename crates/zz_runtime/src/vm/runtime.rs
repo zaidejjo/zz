@@ -131,6 +131,23 @@ impl Vm {
         }
     }
 
+    /// Reset for shell-pool reuse (Phase 6 arena): clear all execution
+    /// state but RETAIN buffer capacities, so the next task skips every
+    /// `Vec` reallocation. The caller must have already dropped or moved
+    /// out all `Value`s (stack/frames hold task-owned values — clearing
+    /// here drops them; pooling only kicks in after completion, when the
+    /// outcome was already extracted).
+    pub fn reset(&mut self) {
+        self.stack.clear();
+        self.frames.clear();
+        self.loops.clear();
+        self.defer_stack.clear();
+        self.defer_return = None;
+        self.try_convert_depths.clear();
+        self.slice_budget = SAFEPOINT_BUDGET;
+        self.slice_start = None;
+    }
+
     /// Push a value onto the VM stack. Used by `Interp::call_func` to set up
     /// compiled closure parameters before calling `run_chunk_with_base`,
     /// and by `task.spawn` to seat Unit args for worker closures (see
@@ -1205,6 +1222,21 @@ impl Vm {
                         chunk: Some(Arc::clone(chunk)),
                     };
                     self.stack.push(Value::Func(Box::new(fv)));
+                }
+                Op::SpawnClosure {
+                    params,
+                    chunk,
+                    span,
+                } => {
+                    // Fused spawn (see `SpawnHook`): the chunk + params go
+                    // straight to the task constructor — no FuncValue box,
+                    // no args Vec, no native lookup. Creation env is the
+                    // current env, exactly as MakeClosure would capture.
+                    let hook = crate::eval::SPAWN_HOOK.get().copied().ok_or_else(|| {
+                        self.error("`task.spawn` used without stdlib task support", *span)
+                    })?;
+                    let v = hook(interp, chunk, params, *span)?;
+                    self.stack.push(v);
                 }
                 Op::MakeVariant {
                     name,

@@ -348,6 +348,7 @@ impl Compiler {
             | Op::GetFieldIdx(_, span)
             | Op::SetFieldIdx(_, span) => *span,
             Op::MakeVariant { span, .. } | Op::MatchError(span) => *span,
+            Op::SpawnClosure { span, .. } => *span,
             Op::TryOp(span) | Op::Elvis(span) => *span,
             Op::Call { span, .. }
             | Op::CallPath { span, .. }
@@ -379,6 +380,7 @@ impl Compiler {
             Op::SlotLessIntSlot { .. } | Op::SlotLessIntImm { .. } => 1,
             Op::SlotBinaryInt { .. } | Op::SlotBinaryIntImm { .. } => 0,
             Op::MakeFunc { .. } | Op::RegisterStruct { .. } | Op::MakeClosure { .. } => 1,
+            Op::SpawnClosure { .. } => 1,
             Op::IntAdd(..) | Op::IntSub(..) | Op::IntMul(..) | Op::IntDiv(..) | Op::IntRem(..) => {
                 -1
             }
@@ -1686,6 +1688,23 @@ impl Compiler {
             } => match callee.as_ref() {
                 Expr::Path { parts, span: pspan } => {
                     let func_name = parts.join(".");
+                    // Fused spawn: `task.spawn(|params| body)` with a
+                    // closure literal compiles to a single SpawnClosure
+                    // op — no FuncValue box, no args Vec, no native
+                    // dispatch. Behaviorally identical; anything else
+                    // (variables, extra/named args) keeps the generic
+                    // path with its arity errors.
+                    if func_name == "task.spawn" && named.is_empty() && args.len() == 1 {
+                        if let Expr::Closure { params, body, .. } = &args[0] {
+                            let chunk = self.compile_closure_body(body, params);
+                            self.emit(Op::SpawnClosure {
+                                params: params.clone(),
+                                chunk,
+                                span: *span,
+                            });
+                            return;
+                        }
+                    }
                     // Method form: `mydb.query(sql)` / `mydb.exec(sql)` —
                     // pure ident chains parse as Path; the receiver is a
                     // local, NOT a module namespace. The SQL arg compiles

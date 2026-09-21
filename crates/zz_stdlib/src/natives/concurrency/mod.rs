@@ -306,6 +306,34 @@ pub(crate) fn spawn(
         }
     };
 
+    spawn_from_parts(interp, chunk, param_count, env, span)
+}
+
+/// Fused-spawn entry point for the `SpawnClosure` VM op (see
+/// [`zz_runtime::SpawnHook`]): identical to `spawn` except the chunk,
+/// params, and creation env arrive directly — no `FuncValue` box is ever
+/// built. The creation env is the spawner's current env, exactly what
+/// `MakeClosure` would have captured.
+pub(crate) fn spawn_hook(
+    interp: &mut Interp,
+    chunk: &Arc<zz_runtime::Chunk>,
+    params: &[zz_frontend::ast::Param],
+    span: Span,
+) -> Result<Value, EvalError> {
+    let env = Rc::clone(&interp.env);
+    spawn_from_parts(interp, Arc::clone(chunk), params.len(), env, span)
+}
+
+/// Task construction shared by the `task.spawn` native and the fused
+/// `SpawnClosure` op: snapshot the captured env, build the worker
+/// interpreter, hand the task to the executor.
+fn spawn_from_parts(
+    interp: &mut Interp,
+    chunk: Arc<zz_runtime::Chunk>,
+    param_count: usize,
+    env: Rc<std::cell::RefCell<zz_runtime::Env>>,
+    _span: Span,
+) -> Result<Value, EvalError> {
     // Debug aid: ZZ_SPAWN_PROFILE=1 prints per-spawn timing breakdowns.
     // Used by perf investigations (W2); no production code depends on it.
     let profiling = executor::profiling();
@@ -455,8 +483,9 @@ pub(crate) fn spawn(
     // the seated args (running on an empty stack shifts every slot
     // and corrupts locals or panics out of bounds). `spawn` takes
     // no inputs by contract, so Unit is the only sane default;
-    // `|_|` closures ignore it.
-    let mut vm = zz_runtime::vm::Vm::new();
+    // `|_|` closures ignore it. The shell comes from the VM pool
+    // (warmed buffers) when available.
+    let mut vm = Executor::checkout_vm();
     for _ in 0..param_count {
         vm.push(Value::Unit);
     }

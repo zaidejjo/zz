@@ -112,8 +112,14 @@ share a lock across shards), empty-capture spawns skip snapshotting
 entirely, reachability sets are `Arc`-shared per spawn-site chunk,
 completions with no waiters store by move and skip the condvar notify,
 struct layouts are `Arc` copy-on-write (spawn shares, define clones only
-when shared), and the keep-set cache keys on the *parent* chain (stable
-across loop iterations — fresh per-iteration leaves resolve live).
+when shared), the keep-set cache keys on the *parent* chain (stable
+across loop iterations — fresh per-iteration leaves resolve live), the
+`task.spawn(closure-literal)` call shape fuses into one `SpawnClosure`
+op (no `FuncValue` box, no args `Vec`, no native dispatch — via a
+runtime-owned hook slot the stdlib registers inside `stdlib_natives()`),
+and completed VMs recycle through a bounded shell pool with warmed
+stack/frame buffers (a `VmShell` wrapper carries the `Send` claim so the
+general-purpose `Vm` type stays `!Send`).
 (`Rc`-shared structs were tried first and caught by the bench as heap
 corruption — `Rc` refcounts are non-atomic across worker threads. Full
 per-chain epoch validation was also tried and reverted: loop-var
@@ -122,7 +128,7 @@ chain walk it replaced.)
 
 | op | ZZ | comparison |
 |---|---|---|
-| `spawn` dispatch | ~3µs (~111k fan-in/s; 50k burst in 0.36s) | Go 50k burst in 0.66s, 185k fan-in/s |
+| `spawn` dispatch | ~3µs (~112k fan-in/s; 50k burst in 0.28s) | Go 50k burst in 0.66s, 185k fan-in/s |
 | `spawn+join` round-trip | ~25µs | pool-era ZZ was ~250ms (10,000× ago) |
 | `chan.send+recv` round-trip | ~1.9µs release (was 25µs pre-spin) | Go chan ~1.5µs/rt |
 | 64 parallel tasks | linear speedup | real parallelism, not just concurrency |

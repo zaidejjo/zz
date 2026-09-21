@@ -6,7 +6,7 @@ mod tests;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use zz_frontend::ast::Program;
 use zz_frontend::span::Span;
@@ -65,6 +65,26 @@ pub struct Interp {
     /// (every function has a chunk in the unified pipeline).
     pub task_mode: bool,
 }
+
+/// Fused-spawn constructor (Phase 6): builds a green-thread task directly
+/// from a compiled chunk + params, skipping the intermediate `FuncValue`
+/// box, the call-args `Vec`, and native-dispatch lookup (~0.5µs/spawn).
+/// Implemented by the stdlib (which owns the executor); the runtime only
+/// declares the slot — same split as the yield protocol (`request_yield`
+/// / `take_yield` live in the runtime, both sides use them).
+pub type SpawnHook = fn(
+    interp: &mut Interp,
+    chunk: &Arc<crate::vm::Chunk>,
+    params: &[zz_frontend::ast::Param],
+    span: Span,
+) -> Result<Value, crate::runtime::EvalError>;
+
+/// Global fused-spawn constructor slot (see [`SpawnHook`]). Registered
+/// idempotently as a side effect of `stdlib_natives()` — every
+/// interpreter-building path calls it — so user code never observes
+/// `None`. A hand-built interpreter without stdlib support hits the loud
+/// error in the `SpawnClosure` op instead of misbehaving.
+pub static SPAWN_HOOK: OnceLock<SpawnHook> = OnceLock::new();
 
 impl Default for Interp {
     fn default() -> Self {
