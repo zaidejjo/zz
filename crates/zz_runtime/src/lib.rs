@@ -6,6 +6,7 @@
 pub mod env;
 pub mod eval;
 pub mod json;
+pub mod lf_chan;
 pub mod runtime;
 pub mod value;
 pub mod vm;

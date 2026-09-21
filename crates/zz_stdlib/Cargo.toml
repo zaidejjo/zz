@@ -11,6 +11,7 @@ zz_hir = { path = "../zz_hir" }
 zz_runtime = { path = "../zz_runtime" }
 zz_native_rt = { path = "../zz_native_rt" }
 base64 = "0.22"
+crossbeam-deque = "0.8"
 urlencoding = "2"
 reqwest = { version = "0.12", features = ["blocking"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

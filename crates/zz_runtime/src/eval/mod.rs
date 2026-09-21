@@ -26,7 +26,12 @@ pub struct Interp {
     /// entry map). Late mutation (REPL imports) uses copy-on-write via
     /// [`Arc::make_mut`].
     pub natives: Arc<HashMap<String, NativeEntry>>,
-    pub structs: HashMap<String, Vec<String>>,
+    /// Struct layouts, reference-counted for copy-on-write sharing with
+    /// worker threads (`task.spawn` clones the `Rc`, not the map) and
+    /// server snapshots. Struct definitions are rare after load, so
+    /// writes use `Rc::make_mut` (clones only on actual sharing) while
+    /// every spawn/read pays a single atomic inc — or nothing at all.
+    pub structs: Arc<HashMap<String, Vec<String>>>,
     pub args: Vec<String>,
     pub defer_stacks: Vec<Vec<Value>>,
     /// Mutation counter for [`Interp::funcs`], bumped on every insert.
@@ -47,6 +52,12 @@ pub struct Interp {
     /// filter decision is cached but every kept value is cloned fresh per
     /// spawn.
     pub spawn_keep_cache: crate::value::SpawnKeepCache,
+    /// Reachability cache per spawn-site chunk (see
+    /// [`ReachCacheEntry`](crate::value::ReachCacheEntry)): loop spawns
+    /// reuse one chunk `Arc`, so steady state skips the op walk +
+    /// per-candidate table scan (~1µs/spawn). Cleared on table version
+    /// change or past 64 sites.
+    pub reach_cache: HashMap<usize, crate::value::ReachCacheEntry>,
     /// Green-thread task mode: this interpreter belongs to an executor task.
     /// Blocking natives yield instead of parking, and interpreted
     /// (tree-walker) calls are rejected — interpreter frames live on the
@@ -67,12 +78,13 @@ impl Interp {
             env: Rc::new(RefCell::new(Env::new())),
             funcs: HashMap::new(),
             natives: Arc::new(HashMap::new()),
-            structs: HashMap::new(),
+            structs: Arc::new(HashMap::new()),
             args: Vec::new(),
             defer_stacks: Vec::new(),
             funcs_version: 0,
             spawn_funcs_cache: None,
             spawn_keep_cache: None,
+            reach_cache: HashMap::new(),
             task_mode: false,
         }
     }
@@ -82,12 +94,13 @@ impl Interp {
             env: Rc::new(RefCell::new(Env::new())),
             funcs: HashMap::new(),
             natives: Arc::new(natives),
-            structs: HashMap::new(),
+            structs: Arc::new(HashMap::new()),
             args: Vec::new(),
             defer_stacks: Vec::new(),
             funcs_version: 0,
             spawn_funcs_cache: None,
             spawn_keep_cache: None,
+            reach_cache: HashMap::new(),
             task_mode: false,
         }
     }
@@ -100,12 +113,13 @@ impl Interp {
             env: Rc::new(RefCell::new(Env::new())),
             funcs: HashMap::new(),
             natives,
-            structs: HashMap::new(),
+            structs: Arc::new(HashMap::new()),
             args: Vec::new(),
             defer_stacks: Vec::new(),
             funcs_version: 0,
             spawn_funcs_cache: None,
             spawn_keep_cache: None,
+            reach_cache: HashMap::new(),
             task_mode: false,
         }
     }

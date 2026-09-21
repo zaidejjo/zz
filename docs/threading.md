@@ -3,6 +3,11 @@
 Green threads: `task.spawn` creates a task in ~3µs and the executor
 multiplexes thousands of them onto one OS thread per CPU. Tasks run until
 they complete or block; blocking suspends the task, never the thread.
+Scheduling is work-stealing: each executor thread owns a Chase–Lev deque
+(LIFO local pop), spawns from other threads land in a global injector,
+and idle workers steal from random victims. Wakeups land on the waking
+worker's own deque (direct handoff — the thread that made progress very
+likely resumes the waiter next, hot cache).
 
 ## Model: snapshot isolation
 
@@ -88,11 +93,38 @@ frames) it is a `sched_yield` courtesy so siblings get scheduled.
 
 ## Performance (release `zz`, 4-core Linux/x86_64)
 
+Parking is spin-then-sleep: a worker burns PAUSEs re-checking the
+object for ~3µs before registering as a waiter, so rendezvous arriving
+inside the quantum cost ~100ns with zero futex ops or registry churn.
+Channels add a lock-free MPMC ring fast path (Vyukov, 1024 deep, each
+cell cache-line padded) with mutex spillover past capacity, so
+green-to-green traffic takes zero locks while depth fits. Executor
+threads hot-spin on the ready queue while work flows (adaptive
+miss-streak backoff: consecutive misses halve the budget, a hit
+restores it — calm machines see zero futex sleeps, loaded ones degrade
+to blocking instead of backfiring). Longer quanta backfire (the spinner
+steals the peer's core); the remaining floor is thread-hop + VM
+dispatch (Phase 2 territory: work-stealing).
+
+Spawning is pool-aware: registry entries recycle through per-shard
+pools, the registry itself is 16-way sharded (insert/lookup/remove never
+share a lock across shards), empty-capture spawns skip snapshotting
+entirely, reachability sets are `Arc`-shared per spawn-site chunk,
+completions with no waiters store by move and skip the condvar notify,
+struct layouts are `Arc` copy-on-write (spawn shares, define clones only
+when shared), and the keep-set cache keys on the *parent* chain (stable
+across loop iterations — fresh per-iteration leaves resolve live).
+(`Rc`-shared structs were tried first and caught by the bench as heap
+corruption — `Rc` refcounts are non-atomic across worker threads. Full
+per-chain epoch validation was also tried and reverted: loop-var
+redefinition churns any epoch, and the machinery cost more than the
+chain walk it replaced.)
+
 | op | ZZ | comparison |
 |---|---|---|
-| `spawn` dispatch | ~3µs | Rust `spawn+join` 86µs/op; Go `spawn+join` 723ns/op |
+| `spawn` dispatch | ~3µs (~111k fan-in/s; 50k burst in 0.36s) | Go 50k burst in 0.66s, 185k fan-in/s |
 | `spawn+join` round-trip | ~25µs | pool-era ZZ was ~250ms (10,000× ago) |
-| `chan.send+recv` | ~0.6µs each | Go chan ~0.2µs/op |
+| `chan.send+recv` round-trip | ~1.9µs release (was 25µs pre-spin) | Go chan ~1.5µs/rt |
 | 64 parallel tasks | linear speedup | real parallelism, not just concurrency |
 
 Measure your own hardware with `ZZ_SPAWN_PROFILE=1 zz run prog.zz`

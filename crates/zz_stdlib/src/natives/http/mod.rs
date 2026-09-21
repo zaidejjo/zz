@@ -1063,7 +1063,7 @@ impl ServerSnapshot {
             log_enabled: server.log_enabled,
             static_dir: server.static_dir.clone(),
             natives: interp.natives.clone(),
-            structs: interp.structs.clone(),
+            structs: (*interp.structs).clone(),
         }
     }
 
@@ -1085,7 +1085,7 @@ impl ServerSnapshot {
     /// and cloned structs but an empty environment.
     fn fresh_interp(&self) -> Interp {
         let mut interp = Interp::with_natives_shared(Arc::clone(&self.natives));
-        interp.structs = self.structs.clone();
+        interp.structs = Arc::new(self.structs.clone());
         interp
     }
 }

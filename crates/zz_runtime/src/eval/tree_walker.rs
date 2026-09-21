@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Pattern, Stmt};
 use zz_frontend::span::Span;
@@ -58,7 +59,10 @@ impl Interp {
                 None => Ok(Flow::Return(Value::Unit)),
             },
             Stmt::Struct { name, fields, .. } => {
-                self.structs.insert(
+                // Copy-on-write: `make_mut` clones the map only when
+                // shared (workers/servers hold an `Rc`); the common
+                // unshared case mutates in place.
+                Arc::make_mut(&mut self.structs).insert(
                     name.join("."),
                     fields.iter().map(|(n, _)| n.name.clone()).collect(),
                 );

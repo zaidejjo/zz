@@ -341,9 +341,7 @@ fn vm_method_call_and_cross_module() {
     );
     let parsed = parse("p := shapes.Point{ x: 3, y: 4 }\np.dist()");
     let mut interp = Interp::new();
-    interp
-        .structs
-        .insert("shapes.Point".into(), vec!["x".into(), "y".into()]);
+    Arc::make_mut(&mut interp.structs).insert("shapes.Point".into(), vec!["x".into(), "y".into()]);
     let body = parse("p.x + p.y");
     let mut chunk = Compiler::compile_program(&body.program);
     chunk.params = vec![Param {
