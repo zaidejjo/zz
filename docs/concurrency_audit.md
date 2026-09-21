@@ -9,6 +9,13 @@ ASan/TSan harnesses. **No implementation code was modified in this phase.**
 verified). The battery found **1 Critical deadlock, 2 Major correctness bugs**, plus known
 by-design limits. Details + minimal fix plan below. Approval requested before touching code.
 
+> **Status (post-approval): all three fixes landed on this branch — au1/au8/au12 now pass,
+> full battery + `cargo test --all` green, ASan/TSan silent. A follow-up probe found one
+> more lowerer hole (MAJOR-5, §2) and refined the helping rule (see CRITICAL-1 update).
+> au17 (indirect-verdict probe) was dropped: the shape it needs is exactly MAJOR-5, so no
+> passing test can currently construct it; the help-path save/restore shipped as zero-risk
+> hardening under the same proven invariant.
+
 ## 1. Battery results
 
 | Test | Shape | Release | ASan | TSan | Notes |
@@ -61,6 +68,16 @@ while waiting (helping — bounded: run local tasks until predicate true); (b) m
 deques stealable; (c) route top-up spawns to the injector instead of the private deque.
 (a) is the most robust (also covers founder stranding under cap exhaustion).
 
+> **Landed fix:** (a) — `zz_worker_help_once`: a worker about to park runs one task from
+> its **own deque only** and rechecks its predicate; all stealing stays in the hold-nothing
+> worker loop. Two hard-won refinements from the au4 regression the first revision caused:
+> stealing while nested provably stalls total-order chains (wait-for graph: 17 cycle edges,
+> satisfiable predicates rotting mid-stack while tops wait on the unsatisfiable — per-join
+> broadcasts only revisit tops). Final rule: own-deque-only helping (own-chain nesting is
+> inherently forward: a parent buried under its own child is revisited when the child
+> completes and unwinds into it) + `ZZ_HELP_MAX_DEPTH` 64 backstop. au4 (chain 60) + au8
+> (tree 255) both pass; MPMC/relay/thrash/flood unaffected.
+
 ### MAJOR-1: inline re-suspend clobbers the sender's verdict → completion dropped (au1)
 
 **Trigger:** green task S sends on a channel with a registered task waiter W; W's inline run
@@ -78,6 +95,14 @@ indirect sends (green task → named fn → send).
 **Fix (one spot):** save/restore `zz_suspend_verdict` around `zz_run_task` in
 `zz_handoff_run_inline`. Re-run au1 → expect `verdict_ok`.
 
+> **Landed (+ hardening):** save/restore in `zz_handoff_run_inline` — au1 now `verdict_ok`.
+> Same save/restore added in `zz_worker_help_once`: helping a suspender from inside a
+> named-fn blocking wait is the identical hazard (au9-shape). No dedicated test exists:
+> the only constructible shape needs a green suspender nested in a green waiter, which is
+> exactly MAJOR-5 below — so no passing test can cover it yet. The hardening is zero-risk
+> (blocking callers never consume the verdict; only the trampoline does, after later green
+> entries re-establish whatever the run needs).
+
 ### MAJOR-2: blocking multi-join loses wakeups — `signal` must be `broadcast` (au12)
 
 `zz_task_join_complete` wakes classic sleepers with a single `pthread_cond_signal`, but
@@ -87,6 +112,8 @@ sleeps forever (au12 hangs; ASan proves no corruption involved). Green multi-wai
 fine (all inlined).
 
 **Fix (one line):** `pthread_cond_broadcast` on the join condvar when `sleepers > 0`.
+
+> **Landed:** au12 now `multijoin_ok`, ASan-clean.
 
 ### MAJOR-3 (by design): sends never apply backpressure
 
@@ -137,6 +164,18 @@ guideline and measuring the exact threshold as follow-up.
 divide-first ordering required. Type-system note, not concurrency — recording here since the
 benchmark tripped over it.
 
+### MAJOR-5 (new, lowerer): nested capture through a green cell breaks C codegen
+
+Found by follow-up probing (au18, kept as known-fail guard): a green closure containing a
+nested spawn literal that captures an outer variable fails C compilation (`_gcell1`/`zz_fr`
+undeclared in the child's static scope). The nested closure routes its capture through the
+parent's green frame cell instead of its own env. Discriminant: the identical shape WITHOUT
+the capture builds fine, so the hole is precisely capture-through-greencell (spawn fuse
+innocent — both shapes use it). Loud failure (compile error, never silent), pre-existing B3
+gap, no e2e fixture covers the shape. **Not fixed in this phase (lowerer surgery, out of
+the approved scope) — proposed follow-up.** It also blocks the au17 indirect-verdict probe
+(a green suspender nested in a green waiter), which was dropped for that reason.
+
 ## 3. Verified sound (do not "fix")
 
 - Handoff airtightness: waiter registration vs serve-waiter both under `ch->lock`; no
@@ -163,3 +202,15 @@ benchmark tripped over it.
 
 Steps 1–2 are one-liners; step 3 is the only substantive change. Requesting approval to
 proceed.
+
+## 5. Resolution (all steps landed)
+
+- au1 `verdict_ok`, au12 `multijoin_ok`, au8 `tree_ok` (128), au8b `tree_ok` (16),
+  au4 `chain_ok` (61) — the full battery (au1–au16, au18 known-fail) passes on release.
+- `cargo test --all` exit 0 (44 suites; e2e 141/141, parity 52/52); `cargo fmt --check`
+  clean; `cargo clippy --all-targets` zero warnings.
+- ASan: zero errors on au1/au2/au3/au4/au5/au8/au12/au15 (constant benign leaks only).
+  TSan: silent on au1/au3/au4/au5/au8/au12/au15.
+- `bench/handoff` ZZ-vs-Go holds (box-noisy; relative standing kept).
+- Open follow-ups: MAJOR-5 lowerer fix (+ au17 probe unblocked by it), handle
+  reclamation (MAJOR-4), send backpressure (MAJOR-3), battery wired into CI (step 5).

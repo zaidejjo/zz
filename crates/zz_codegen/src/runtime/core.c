@@ -214,6 +214,11 @@ static __thread int zz_suspend_verdict = 0;
 // thread's C stack. Capped (see ZZ_HANDOFF_MAX_DEPTH) so waiter chains
 // (A→B→C→…) degrade to queueing instead of growing the stack.
 static __thread int zz_handoff_depth = 0;
+// Helping nesting depth (blocking waits that run other tasks instead of
+// parking — audit CRITICAL-1 fix). Capped (see ZZ_HELP_MAX_DEPTH) so
+// pathological blocking-nesting depths degrade to parking instead of
+// growing the C stack without bound.
+static __thread int zz_help_depth = 0;
 
 int zz_green_suspended(void) {
     return zz_suspend_verdict;
@@ -1031,6 +1036,11 @@ static void zz_enqueue_task(zz_task_t task);
 // Run one task to completion-or-suspend (executor trampoline, defined
 // below; forward because the channel handoff path can invoke it inline).
 static void zz_run_task(zz_task_t task);
+// Run one pending task instead of parking in a blocking wait (helping —
+// audit CRITICAL-1 fix; defined after the trampoline). Returns 1 when a
+// task was run (caller rechecks its predicate), 0 when idle or past the
+// nesting cap (caller parks normally).
+static int zz_worker_help_once(void);
 // Run a handed-off task synchronously on the sender's thread when the
 // nesting budget allows (defined after the trampoline). Returns 1 when
 // the task was run inline (caller must NOT enqueue), 0 when the budget
@@ -1289,7 +1299,6 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
 #endif
         }
     }
-    pthread_mutex_lock(&ch->lock);
     // Slow loop: spill first (older than anything that arrived while the
     // ring was full), then the ring. A ring miss with both tiers
     // nominally non-empty is transient (a publisher mid-claim) — loop
@@ -1298,6 +1307,8 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
     // so waiter-free traffic pays no futex wake. Re-checked after every
     // wake (spurious wakeups and racing consumers just loop).
     //
+    // The lock is taken per iteration (not held across the loop): helping
+    // runs tasks that may use this same channel.
     // Top-up discipline: only when genuinely about to park (value
     // confirmed absent above — never on mere slow-path entry), at most
     // once per call, and only when no executor worker is already parked
@@ -1306,6 +1317,7 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
     // per blocking recv — 100k latency round-trips = 100k threads.
     int topped_up = 0;
     for (;;) {
+        pthread_mutex_lock(&ch->lock);
         if (ch->len > 0) {
             // O(1) pop from the spill head — no memmove.
             v = ch->queue[ch->head];
@@ -1323,11 +1335,26 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
             topped_up = 1;
             zz_executor_top_up();
         }
+        // Helping (audit CRITICAL-1): a worker parks only when truly
+        // idle. Otherwise it runs stranded deque/steal work and rechecks
+        // the tiers — the lock is released across the run (the helped
+        // task may itself use this channel) and announce-then-verify
+        // below is unchanged, so no wakeup can be lost: we only sleep
+        // while announced, and any sender in between either enqueued
+        // (seen on recheck) or signaled (sleepers > 0).
+        pthread_mutex_unlock(&ch->lock);
+        if (zz_worker_help_once()) continue;
+        pthread_mutex_lock(&ch->lock);
+        if (ch->len > 0 || zz_ring_len_estimate(ch) > 0) {
+            pthread_mutex_unlock(&ch->lock);
+            continue;
+        }
         __atomic_add_fetch(&ch->sleepers, 1, __ATOMIC_ACQ_REL);
         while (ch->len == 0 && zz_ring_len_estimate(ch) == 0) {
             pthread_cond_wait(&ch->cond, &ch->lock);
         }
         __atomic_sub_fetch(&ch->sleepers, 1, __ATOMIC_ACQ_REL);
+        pthread_mutex_unlock(&ch->lock);
     }
 }
 
@@ -1501,11 +1528,28 @@ zz_value zz_chan_recv_green(zz_value chan, zz_task_frame *fr, int resume_id, int
         zz_suspend_verdict = 1;
         return zz_unit();
     }
-    __atomic_add_fetch(&ch->gparked, 1, __ATOMIC_ACQ_REL);
-    while (!fr->has_value) {
-        pthread_cond_wait(&ch->cond, &ch->lock);
+    // Sync frame: park the thread until a send hands off (value lands in
+    // `fr` under this same lock). Helping applies here too (audit
+    // CRITICAL-1): a worker parked with owned deque work strands it, so
+    // help first and only sleep while announced. A handoff landing
+    // between recheck and announce is still exact — the value sits in
+    // `fr->has_value`, which the wait predicate rechecks under the lock.
+    for (;;) {
+        if (fr->has_value) break;
+        pthread_mutex_unlock(&ch->lock);
+        if (zz_worker_help_once()) {
+            pthread_mutex_lock(&ch->lock);
+            continue;
+        }
+        pthread_mutex_lock(&ch->lock);
+        if (fr->has_value) break;
+        __atomic_add_fetch(&ch->gparked, 1, __ATOMIC_ACQ_REL);
+        while (!fr->has_value) {
+            pthread_cond_wait(&ch->cond, &ch->lock);
+        }
+        __atomic_sub_fetch(&ch->gparked, 1, __ATOMIC_ACQ_REL);
+        break;
     }
-    __atomic_sub_fetch(&ch->gparked, 1, __ATOMIC_ACQ_REL);
     fr->has_value = 0;
     v = fr->value;
     pthread_mutex_unlock(&ch->lock);
@@ -1840,9 +1884,10 @@ static void zz_run_task(zz_task_t task) {
 // - `zz_run_task` saves/restores the TLS frame+task around the run, so a
 //   sender that is itself a running task resumes undisturbed.
 // - Every green entry sets the thread-local suspend verdict before
-//   returning, so the inline run cannot clobber the sender's own verdict:
-//   the sender's next blocking call re-establishes it before anything
-//   reads it (`send` itself never touches the verdict).
+//   returning, and the inline runner saves/restores it, so the inline run
+//   cannot clobber the sender's own verdict: the sender's next blocking
+//   call re-establishes it before anything reads it (`send` itself never
+//   touches the verdict).
 // - No locks are held at any call site (handoff runs after unlock), so no
 //   lock ordering is introduced.
 // - Stack growth is bounded by ZZ_HANDOFF_MAX_DEPTH: each inline level
@@ -1853,8 +1898,61 @@ static void zz_run_task(zz_task_t task) {
 static int zz_handoff_run_inline(zz_task_t task) {
     if (zz_handoff_depth >= ZZ_HANDOFF_MAX_DEPTH) return 0;
     zz_handoff_depth++;
+    // Verdict save/restore (audit MAJOR-1): an inlined waiter that
+    // re-suspends leaves verdict=1 on this thread's TLS. Without restoring,
+    // a green sender that returns without another green entry would look
+    // suspended to the trampoline, which would drop its completion (lost
+    // join result + leaked frame/rep). The sender's own verdict is
+    // meaningless mid-`send` — only the trampoline reads it.
+    int saved_verdict = zz_suspend_verdict;
     zz_run_task(task);
+    zz_suspend_verdict = saved_verdict;
     zz_handoff_depth--;
+    return 1;
+}
+
+// Helping (audit CRITICAL-1 fix): a worker about to park in a blocking
+// wait runs one pending task from its OWN deque instead and reports 1 so
+// the caller rechecks its predicate. Parked owners strand deque work no
+// thief can reach (top-up deques are never stolen from by design);
+// draining it here keeps that work moving while the waiter still polls
+// its own predicate every round. Returns 0 when the deque is empty
+// (caller parks normally) or past the nesting cap (caller parks —
+// graceful degradation for absurd blocking-nesting depths, documented in
+// threading.md).
+//
+// Own-deque ONLY — never steals (audit follow-up): stealing while holding
+// a blocked task buries dependency order under the run. A total-order
+// chain (au4) distributed across nested stacks provably stalls that way:
+// satisfiable predicates rot mid-stack while tops wait on the
+// unsatisfiable, and per-join broadcasts only revisit tops. Own-chain
+// nesting is instead inherently forward (a parent buried under its own
+// child is revisited when the child completes and unwinds into it), and
+// every steal happens from the hold-nothing worker loop, so every parked
+// wait is either a revisited top or unwind-reachable. All stealing stays
+// in `zz_worker_loop`; helping never touches another deque.
+//
+// Runs WITHOUT any channel/join lock (callers unlock first): the helped
+// task may itself wait on the same channel/join, which re-enters helping
+// one level deeper (bounded by ZZ_HELP_MAX_DEPTH).
+#define ZZ_HELP_MAX_DEPTH 64
+
+static int zz_worker_help_once(void) {
+    if (!zz_is_worker || !zz_local_deque) return 0;
+    if (zz_help_depth >= ZZ_HELP_MAX_DEPTH) return 0;
+    // Owner pop only (single owner = this thread; racing thieves use the
+    // top CAS — the standard Chase–Lev pairing, same as the worker loop).
+    zz_task_t task;
+    if (!zz_deque_pop(zz_local_deque, &task)) return 0;
+    // Verdict save/restore (same class as MAJOR-1): the helped task may
+    // suspend (verdict=1), but the waiter runs a *blocking* call that
+    // never reads the verdict — only the trampoline does, after later
+    // green entries re-establish whatever this run needs.
+    int saved_verdict = zz_suspend_verdict;
+    zz_help_depth++;
+    zz_run_task(task);
+    zz_help_depth--;
+    zz_suspend_verdict = saved_verdict;
     return 1;
 }
 
@@ -1905,12 +2003,14 @@ void zz_task_join_complete(zz_task_join *join, zz_value result) {
         w = next;
     }
     // Counted wake: waiter-free completions (the fan-in steady state —
-    // no joiner registered) skip the condvar signal entirely, so each
+    // no joiner registered) skip the broadcast entirely, so each
     // completion pays no futex wake. Airtight by announce-then-verify: a
     // blocking waiter increments `sleepers` before predicating on
-    // `completed` under this same lock.
+    // `completed` under this same lock. Broadcast (not signal): handles
+    // are multi-recv by design, so N parked joiners must ALL wake
+    // (audit MAJOR-2: a single signal stranded every joiner but one).
     if (__atomic_load_n(&join->sleepers, __ATOMIC_ACQUIRE) > 0) {
-        pthread_cond_signal(&join->cond);
+        pthread_cond_broadcast(&join->cond);
     }
     pthread_mutex_unlock(&join->lock);
     for (size_t i = 0; i < ntasks; i++) {
@@ -2265,11 +2365,24 @@ zz_value zz_task_join_recv_green(zz_value join_val, zz_task_frame *fr, int resum
         zz_suspend_verdict = 1;
         return zz_unit();
     }
-    __atomic_add_fetch(&join->gparked, 1, __ATOMIC_ACQ_REL);
-    while (!fr->has_value) {
-        pthread_cond_wait(&join->cond, &join->lock);
+    // Sync frame: same helping discipline as the channel green path —
+    // help first, sleep only while announced on `gparked`.
+    for (;;) {
+        if (fr->has_value) break;
+        pthread_mutex_unlock(&join->lock);
+        if (zz_worker_help_once()) {
+            pthread_mutex_lock(&join->lock);
+            continue;
+        }
+        pthread_mutex_lock(&join->lock);
+        if (fr->has_value) break;
+        __atomic_add_fetch(&join->gparked, 1, __ATOMIC_ACQ_REL);
+        while (!fr->has_value) {
+            pthread_cond_wait(&join->cond, &join->lock);
+        }
+        __atomic_sub_fetch(&join->gparked, 1, __ATOMIC_ACQ_REL);
+        break;
     }
-    __atomic_sub_fetch(&join->gparked, 1, __ATOMIC_ACQ_REL);
     fr->has_value = 0;
     zz_value result = fr->value;
     pthread_mutex_unlock(&join->lock);
@@ -2288,11 +2401,25 @@ zz_value zz_task_join_recv(zz_value join_val, int *err) {
     if (!join->completed && zz_is_worker) {
         zz_executor_top_up();
     }
-    __atomic_add_fetch(&join->sleepers, 1, __ATOMIC_ACQ_REL);
-    while (!join->completed) {
-        pthread_cond_wait(&join->cond, &join->lock);
+    for (;;) {
+        if (join->completed) break;
+        // Helping (audit CRITICAL-1): same discipline as channel recv —
+        // run stranded work instead of parking; the lock is released
+        // across the run. Announce-then-verify below is unchanged.
+        pthread_mutex_unlock(&join->lock);
+        if (zz_worker_help_once()) {
+            pthread_mutex_lock(&join->lock);
+            continue;
+        }
+        pthread_mutex_lock(&join->lock);
+        if (join->completed) break;
+        __atomic_add_fetch(&join->sleepers, 1, __ATOMIC_ACQ_REL);
+        while (!join->completed) {
+            pthread_cond_wait(&join->cond, &join->lock);
+        }
+        __atomic_sub_fetch(&join->sleepers, 1, __ATOMIC_ACQ_REL);
+        break;
     }
-    __atomic_sub_fetch(&join->sleepers, 1, __ATOMIC_ACQ_REL);
     zz_value result = join->result;
     pthread_mutex_unlock(&join->lock);
     // Note: join handle is intentionally not freed here to allow multiple recv.

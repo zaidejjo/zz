@@ -234,3 +234,26 @@ Measure your own hardware with `ZZ_SPAWN_PROFILE=1 zz run prog.zz`
 200-iteration loops, warmed caches, same machine for every column.
 Remaining gap vs Go is scheduler latency (two futex round-trips per
 join), not cloning: snapshots are reachable-only with structural caches.
+
+## By-design runtime limits (audit `docs/concurrency_audit.md`)
+
+- **Sends never apply backpressure.** `chan.send` always succeeds; the
+  spill queue grows without bound. A 50k-message flood costs ~3.5MB, but
+  an unpaced producer OOMs the process (Go would park the sender).
+- **Handles and channels live for the process.** Every spawn leaks its
+  join handle (mutex+cond+result); channels have no teardown. No UAF is
+  possible (nothing is ever freed under a queued waiter), but long-lived
+  services grow steadily — handle reclamation is tracked fast-follow.
+- **Deep call recursion overflows worker stacks.** Workers run on 1MB C
+  stacks; ~100k-deep ZZ recursion segfaults (pre-existing engine limit,
+  unrelated to handoff). Keep task call depth modest.
+- **Blocking-nesting depth is capped.** A worker that blocks while
+  already helping another blocked wait parks past `ZZ_HELP_MAX_DEPTH`
+  (64). Absurd blocking-nesting depths (past 64) can still strand work —
+  recursive shapes should suspend (green) rather than block.
+- **Helping runs own-deque work only.** A thread parked in a blocking
+  wait drains work it stranded itself, never steals: stealing while
+  holding a blocked task provably inverts dependency order on chains
+  (every wait must stay broadcast-revisited or unwind-reachable).
+- **Integer literals are 32-bit.** `10000 * 1000000000` wraps; divide
+  first (`ns_per_task := span / n`, then `1e9 / ns_per_task`).
