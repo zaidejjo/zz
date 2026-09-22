@@ -14,11 +14,14 @@
 //! block          := '{' stmt* '}'
 //! type           := type_base ('|' type_base)*            // union
 //! type_base      := 'int'|'float'|'bool'|'str'|'unit'
+//!                | 'func' '(' type_list ')' '->' type       // function type
 //!                | IDENT ('<' type (',' type)* '>')?
-//!                | '(' type (',' type)* ')'
-//!                | '[' type ']'                           // array
-//!                | '{' type ':' type '}'                  // dict
-//! expr           := pipe
+//!                | '(' type (',' type)* ')'                // tuple or grouped
+//!                | '(' type ')' '->' type                  // function type (shorthand)
+//!                | '[' type ']'                            // array
+//!                | '{' type ':' type '}'                   // dict
+//! expr           := elvis
+//! elvis          := pipe ('??' pipe)*                        // unwrap or fallback
 //! pipe           := range ('|>' range)*                    // pipeline
 //! range          := or ('..' or)?                          // integer range
 //! or             := and ('||' and)*
@@ -27,7 +30,12 @@
 //! relational     := additive (('<'|'>'|'<='|'>=') additive)*
 //! additive       := multiplicative (('+'|'-') multiplicative)*
 //! multiplicative := unary (('*'|'/'|'%') unary)*
-//! unary          := ('-'|'+'|'!') unary | postfix
+//! unary          := 'try' unary | ('-'|'+'|'!') unary | postfix
+//!                // 'try' binds one postfix chain:
+//!                // `try a.b().c()` = try(a.b().c())
+//!                // `try a.b() + c` = try(a.b()) + c
+//!                // `try f()?` = try(try(f())) — postfix `?` binds tighter,
+//!                // so redundant double-unwrap is a *type* error, not special syntax
 //! postfix        := primary (call | '?' | '.' IDENT | '[' expr (':' expr)? ']')*
 //! primary        := literal | IDENT | '(' expr ')' | '[' expr_list ']' | dict_or_block
 //!                | closure | 'if' | 'while' | 'match' | '.' variant
@@ -48,7 +56,7 @@ pub mod expr;
 pub mod recovery;
 pub mod stmt;
 
-use crate::ast::{Program, Stmt};
+use crate::ast::Program;
 use crate::diag::{error_at, RawDiag};
 use crate::lexer::lex;
 use crate::span::Span;

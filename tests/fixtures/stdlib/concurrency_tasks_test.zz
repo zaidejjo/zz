@@ -1,0 +1,20 @@
+// E2E: tasks — 4 threads, distinct results, join fan-in.
+// Deterministic: min/max ordering, no timing dependence.
+import std.task
+
+func work(n: int) -> int { n * 10 + 1 }
+
+func main() {
+    h0 := task.spawn(|_| { work(0) })
+    h1 := task.spawn(|_| { work(1) })
+    h2 := task.spawn(|_| { work(2) })
+    h3 := task.spawn(|_| { work(3) })
+    a: int = task.join(h0)
+    b: int = task.join(h1)
+    c: int = task.join(h2)
+    d: int = task.join(h3)
+    vals := [a, b, c, d]
+    vals.sort()
+    println("{vals[0]},{vals[1]},{vals[2]},{vals[3]}")
+    println("tasks_ok")
+}

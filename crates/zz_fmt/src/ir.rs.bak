@@ -1,0 +1,271 @@
+//! AST → Doc lowering.
+//!
+//! The lowering pass walks the AST to know the *shape* of each construct
+//! (so we can decide where to break lines, where to indent, where a
+//! group fits on one line) and emits the original token text verbatim
+//! for every token. Because the lexer attaches `leading` trivia to each
+//! significant token, the original comments and whitespace rhythm are
+//! preserved automatically — we never strip them.
+//!
+//! Structural decisions (line breaks, indentation) are inserted at AST
+//! node boundaries by switching to `Doc::HardLine` / `Doc::Indent` /
+//! `Doc::Line` between specific tokens.
+//!
+//! M1 scope: full coverage of all `Stmt` and `Expr` variants, with
+//! trivia preserved. Width-aware wrapping is exercised via `Group` on
+//! call argument lists, struct fields, and array/dict literals.
+
+use crate::doc::Doc;
+use crate::printer::Eol;
+use crate::trivia::{ClassifiedKind, ClassifiedTrivia};
+use zz_frontend::ast::*;
+use zz_frontend::lexer::lex;
+use zz_frontend::span::Span;
+use zz_frontend::token::{Token, TokenKind, TriviaKind};
+
+/// A token with its byte range in the source, kept for slice emission.
+#[derive(Debug, Clone, Copy)]
+struct TokRef {
+    start: u32,
+    end: u32,
+}
+
+/// A token + the trivia that precedes it (already classified).
+#[derive(Debug, Clone)]
+struct Annotated {
+    tok: TokRef,
+    kind: TokenKind,
+    leading: Vec<ClassifiedTrivia>,
+}
+
+/// Build the annotated token stream from source.
+fn annotate(source: &str) -> Vec<Annotated> {
+    let lexed = lex(source);
+    lexed
+        .tokens
+        .into_iter()
+        .map(|t: Token| {
+            let leading = classify_leading(&t.leading);
+            Annotated {
+                tok: TokRef {
+                    start: t.span.start,
+                    end: t.span.end,
+                },
+                kind: t.kind,
+                leading,
+            }
+        })
+        .collect()
+}
+
+fn classify_leading(trivia: &[zz_frontend::token::Trivia]) -> Vec<ClassifiedTrivia> {
+    let mut out = Vec::new();
+    for t in trivia {
+        match t.kind {
+            TriviaKind::Whitespace => {
+                let newlines = t.text.bytes().filter(|b| *b == b'\n').count();
+                if newlines == 0 {
+                    if !t.text.is_empty() {
+                        out.push(ClassifiedTrivia {
+                            kind: ClassifiedKind::Spacing(t.text.clone()),
+                            start: t.span.start,
+                            end: t.span.end,
+                        });
+                    }
+                } else {
+                    out.push(ClassifiedTrivia {
+                        kind: ClassifiedKind::BlankLine {
+                            count: newlines.max(1),
+                        },
+                        start: t.span.start,
+                        end: t.span.end,
+                    });
+                }
+            }
+            TriviaKind::Newline => {
+                out.push(ClassifiedTrivia {
+                    kind: ClassifiedKind::BlankLine { count: 1 },
+                    start: t.span.start,
+                    end: t.span.end,
+                });
+            }
+            TriviaKind::Comment => {
+                let text = &t.text;
+                let kind = if text.starts_with("///") {
+                    let body = text.trim_start_matches("///").trim_start();
+                    ClassifiedKind::Doc(body.to_string())
+                } else if text.starts_with("//") {
+                    let body = text.trim_start_matches("//").trim_start();
+                    ClassifiedKind::Line(body.to_string())
+                } else {
+                    ClassifiedKind::Block(text.to_string())
+                };
+                out.push(ClassifiedTrivia {
+                    kind,
+                    start: t.span.start,
+                    end: t.span.end,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Lower a parsed program to a Doc.
+///
+/// Returns `(doc, eol_style)`. The caller renders the doc and uses
+/// `eol_style` to pick `\n` vs `\r\n`.
+pub fn lower_program<'src>(program: &Program, source: &'src str) -> (Doc<'src>, Eol) {
+    let toks = annotate(source);
+    let eol = detect_eol(source);
+    let mut ctx = Ctx {
+        source,
+        toks: &toks,
+        pos: 0,
+        collapse_blanks: true,
+    };
+    let mut parts: Vec<Doc<'src>> = Vec::new();
+    for (i, stmt) in program.stmts.iter().enumerate() {
+        // Emit blank line(s) between top-level items, but only one.
+        if i > 0 {
+            parts.push(Doc::hard_line());
+            parts.push(Doc::hard_line());
+        }
+        ctx.emit_stmt(stmt, &mut parts);
+    }
+    (Doc::Concat(parts), eol)
+}
+
+fn detect_eol(source: &str) -> Eol {
+    if source.contains("\r\n") {
+        Eol::Crlf
+    } else {
+        Eol::Lf
+    }
+}
+
+struct Ctx<'src, 'a> {
+    source: &'src str,
+    toks: &'a [Annotated],
+    pos: usize,
+    collapse_blanks: bool,
+}
+
+impl<'src, 'a> Ctx<'src, 'a> {
+    fn emit_classified(&self, c: &ClassifiedTrivia, out: &mut Vec<Doc<'src>>) {
+        match &c.kind {
+            ClassifiedKind::Spacing(_) => { /* drop intra-line spacing; the printer re-inserts as needed */
+            }
+            ClassifiedKind::BlankLine { count } => {
+                let n = if self.collapse_blanks {
+                    (*count).min(2)
+                } else {
+                    *count
+                };
+                for _ in 0..n {
+                    out.push(Doc::hard_line());
+                }
+            }
+            ClassifiedKind::Line(body) => {
+                out.push(Doc::Text("// "));
+                out.push(Doc::text_owned(body.clone()));
+                out.push(Doc::hard_line());
+            }
+            ClassifiedKind::Doc(body) => {
+                out.push(Doc::Text("/// "));
+                out.push(Doc::text_owned(body.clone()));
+                out.push(Doc::hard_line());
+            }
+            ClassifiedKind::Block(body) => {
+                out.push(Doc::Text("/* "));
+                out.push(Doc::text_owned(body.clone()));
+                out.push(Doc::Text(" */"));
+            }
+        }
+    }
+
+    /// Emit the source slice for a span by emitting each token's
+    /// `text` in order, with its leading trivia re-emitted before it.
+    /// Between tokens we emit a single space (for original inline
+    /// whitespace) or a hard newline (for original line-terminating
+    /// whitespace). Advances `self.pos` past the emitted range.
+    fn emit_span(&mut self, span: Span, out: &mut Vec<Doc<'src>>) {
+        let start = token_index_at_or_after(self.toks, span.start);
+        self.pos = start;
+        // The byte offset of the first character of the next thing
+        // we will emit. Used to determine the kind of separator (space
+        // vs newline) that should precede the next token.
+        let mut cursor = span.start;
+        let mut started = false;
+        while self.pos < self.toks.len() {
+            let t = &self.toks[self.pos];
+            if t.tok.start >= span.end {
+                break;
+            }
+            // Replay the token's leading trivia.
+            for c in &t.leading {
+                self.emit_classified(c, out);
+            }
+            // If this is not the first token of the span, decide what
+            // separator to insert based on whether the gap between
+            // `cursor` and the start of this token contains a newline.
+            if started {
+                let gap_start = cursor as usize;
+                let gap_end = t.tok.start as usize;
+                if gap_end > gap_start && gap_end <= self.source.len() {
+                    let gap = &self.source[gap_start..gap_end];
+                    if gap.contains('\n') {
+                        out.push(Doc::hard_line());
+                    } else if !gap.is_empty() {
+                        // Original inline whitespace → normalize to a single space.
+                        out.push(Doc::Text(" "));
+                    }
+                }
+            }
+            // Emit the token's own text.
+            let start = t.tok.start as usize;
+            let end = (t.tok.end as usize).min(self.source.len());
+            if end > start {
+                out.push(Doc::Text(&self.source[start..end]));
+            }
+            cursor = t.tok.end;
+            started = true;
+            self.pos += 1;
+        }
+    }
+
+    fn emit_stmt(&mut self, stmt: &Stmt, out: &mut Vec<Doc<'src>>) {
+        match stmt {
+            Stmt::Import { .. }
+            | Stmt::Decl { .. }
+            | Stmt::Func { .. }
+            | Stmt::Return { .. }
+            | Stmt::Struct { .. }
+            | Stmt::Impl { .. }
+            | Stmt::For { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Defer { .. }
+            | Stmt::Assign { .. }
+            | Stmt::Destructure { .. }
+            | Stmt::Expr(_) => {
+                self.emit_span(stmt.span(), out);
+            }
+        }
+    }
+}
+
+fn token_index_at_or_after(toks: &[Annotated], byte: u32) -> usize {
+    // Binary search for the first token whose start >= byte.
+    let mut lo = 0usize;
+    let mut hi = toks.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if toks[mid].tok.start < byte {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo.min(toks.len())
+}

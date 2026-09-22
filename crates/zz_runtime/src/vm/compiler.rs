@@ -1,12 +1,21 @@
-use std::rc::Rc;
+use std::collections::HashMap;
+use std::sync::Arc;
 
-use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Param, Program, Stmt};
+use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Param, Pattern, Program, Stmt};
 use zz_frontend::span::Span;
 
 use super::capture::*;
 use super::chunk::Chunk;
 use super::op::Op;
 use crate::value::Value;
+
+/// Extract an integer literal from an expression, if it is one.
+fn int_literal(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Int { value, .. } => Some(*value),
+        _ => None,
+    }
+}
 
 /// A compile-time-resolved local variable.
 struct Local {
@@ -52,8 +61,29 @@ pub struct Compiler {
     /// True for the top-level program chunk (depth-0 declarations are
     /// globals, stored in the environment).
     is_main: bool,
+    /// Top-level names that nested closures/functions reference. These must
+    /// stay in the environment (capture-by-reference); all other top-level
+    /// names are promoted to frame slots.
+    captured_at_top: std::collections::HashSet<String>,
+    /// Slots reserved at the frame base for promoted top-level vars,
+    /// in declaration order.
+    promoted_slots: std::collections::HashMap<String, usize>,
     /// Known function signatures for named-arg reordering.
     func_info: std::collections::HashMap<String, FuncInfo>,
+    /// Resolved type per expression span, shared from the HIR.
+    /// When present, the compiler can make type-driven decisions (e.g.
+    /// integer-specific bytecode, direct field access).
+    types: Option<Arc<HashMap<Span, zz_checker::Type>>>,
+    /// Struct definitions from the HIR, keyed by fully-qualified name.
+    /// Enables type-driven field access indexing and other struct optimizations.
+    structs: Option<HashMap<String, zz_checker::StructSig>>,
+    /// Known native function names, for direct native call dispatch.
+    native_names: Option<Arc<std::collections::HashSet<String>>>,
+    /// True while compiling the SQL argument of `sqlz.query`/`sqlz.exec`
+    /// (`db.*` alias included):
+    /// the Fmt lowers to template + bound params (DbQuery) instead of
+    /// string concatenation.
+    in_db_query: bool,
 }
 
 enum JumpKind {
@@ -89,15 +119,89 @@ impl Compiler {
             stack_height: 0,
             captured: std::collections::HashSet::new(),
             is_main: false,
+            captured_at_top: std::collections::HashSet::new(),
+            promoted_slots: std::collections::HashMap::new(),
             func_info: std::collections::HashMap::new(),
+            types: None,
+            structs: None,
+            native_names: None,
+            in_db_query: false,
         }
     }
 
     /// Compile a whole program. The top level runs in the interpreter's root
     /// scope (no `EnterScope`), matching the tree-walker.
     pub fn compile_program(program: &Program) -> Chunk {
+        Self::compile_program_opt(program, None)
+    }
+
+    /// Like [`compile_program`](Self::compile_program), but the compiler
+    /// knows every registered native name — so statement-level call shapes
+    /// that collide with builtins (`fs.append`, `fs.remove`, …) lower as
+    /// real native calls instead of array-method write-backs.
+    pub fn compile_program_with_natives(
+        program: &Program,
+        native_names: Arc<std::collections::HashSet<String>>,
+    ) -> Chunk {
+        Self::compile_program_opt(program, Some(native_names))
+    }
+
+    fn compile_program_opt(
+        program: &Program,
+        native_names: Option<Arc<std::collections::HashSet<String>>>,
+    ) -> Chunk {
         let mut c = Compiler::new();
         c.is_main = true;
+        c.native_names = native_names;
+        // Collect top-level declared names (post-rewrite, so namespaced).
+        let mut top_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Decl { name, pub_, .. } => {
+                    top_names.insert(name.name.clone());
+                    // pub bindings are exported cross-module via the env and
+                    // must never be promoted to frame-local slots.
+                    if *pub_ {
+                        c.captured_at_top.insert(name.name.clone());
+                    }
+                }
+                Stmt::Func { name, .. } => {
+                    top_names.insert(name.join("."));
+                }
+                _ => {}
+            }
+        }
+        // Pre-scan: names referenced by nested closures/functions must stay
+        // in the environment so closures can capture them by reference.
+        // Everything else declared at top level can be promoted to a direct
+        // frame slot, letting the slot peepholes fire in top-level loops.
+        let mut defined: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut free: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in &program.stmts {
+            super::capture::scan_stmt_captured(stmt, &mut defined, &mut free);
+        }
+        // Only names that are actually declared at top level matter for
+        // promotion; paths like `std.time.now_ms` or `p.x` are not top-level
+        // bindings and must not block promotion. For a path `ns.var.field`,
+        // the captured name is the longest prefix that is a top-level decl
+        // (`ns.var`), not the full path.
+        let mut captured: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for name in &free {
+            if top_names.contains(name) {
+                captured.insert(name.clone());
+            } else {
+                // Try progressively shorter prefixes: `a.b.c` -> `a.b` -> `a`.
+                let parts: Vec<&str> = name.split('.').collect();
+                for end in (1..parts.len()).rev() {
+                    let prefix = parts[..end].join(".");
+                    if top_names.contains(&prefix) {
+                        captured.insert(prefix);
+                        break;
+                    }
+                }
+            }
+        }
+        c.captured_at_top = captured;
         for stmt in &program.stmts {
             if let Stmt::Func { name, params, .. } = stmt {
                 let full = name.join(".");
@@ -111,6 +215,123 @@ impl Compiler {
                 );
             }
         }
+        // Pre-allocate a reserved region at the frame base for every
+        // promotable top-level decl, in declaration order. Statement code
+        // runs above this region, so top-level slot indices are stable and
+        // independent of transient stack activity (short-circuit joins etc).
+        let mut promoted_index = 0usize;
+        let mut promoted_slots: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for stmt in &program.stmts {
+            if let Stmt::Decl { name, .. } = stmt {
+                if !c.captured_at_top.contains(&name.name) {
+                    promoted_slots.insert(name.name.clone(), promoted_index);
+                    promoted_index += 1;
+                }
+            }
+        }
+        for _ in 0..promoted_index {
+            c.emit_const(Value::Unit);
+        }
+        c.promoted_slots = promoted_slots;
+        c.stack_height = promoted_index;
+        for (i, stmt) in program.stmts.iter().enumerate() {
+            let v = c.compile_stmt(stmt);
+            if i < program.stmts.len() - 1 && matches!(v, StmtValue::Discard) {
+                c.emit(Op::Pop);
+            }
+        }
+        if program.stmts.is_empty() {
+            c.emit_const(Value::Unit);
+        }
+        c.chunk
+    }
+
+    /// Compile a whole program with type information from the HIR.
+    ///
+    /// Behaves identically to [`compile_program`] but threads the resolved
+    /// type map and struct definitions from the HIR into the compiler and all
+    /// sub-compilers (functions, closures). The type map enables type-driven
+    /// optimizations in future phases.
+    pub fn compile_program_typed(
+        program: &Program,
+        types: Arc<HashMap<Span, zz_checker::Type>>,
+        structs: HashMap<String, zz_checker::StructSig>,
+        native_names: Arc<std::collections::HashSet<String>>,
+    ) -> Chunk {
+        let mut c = Compiler::new();
+        c.is_main = true;
+        c.types = Some(types);
+        c.structs = Some(structs);
+        c.native_names = Some(native_names);
+        // Collect top-level declared names (post-rewrite, so namespaced).
+        let mut top_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Decl { name, pub_, .. } => {
+                    top_names.insert(name.name.clone());
+                    if *pub_ {
+                        c.captured_at_top.insert(name.name.clone());
+                    }
+                }
+                Stmt::Func { name, .. } => {
+                    top_names.insert(name.join("."));
+                }
+                _ => {}
+            }
+        }
+        // Pre-scan: names referenced by nested closures/functions must stay
+        // in the environment so closures can capture them by reference.
+        let mut defined: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut free: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in &program.stmts {
+            super::capture::scan_stmt_captured(stmt, &mut defined, &mut free);
+        }
+        let mut captured: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for name in &free {
+            if top_names.contains(name) {
+                captured.insert(name.clone());
+            } else {
+                let parts: Vec<&str> = name.split('.').collect();
+                for end in (1..parts.len()).rev() {
+                    let prefix = parts[..end].join(".");
+                    if top_names.contains(&prefix) {
+                        captured.insert(prefix);
+                        break;
+                    }
+                }
+            }
+        }
+        c.captured_at_top = captured;
+        for stmt in &program.stmts {
+            if let Stmt::Func { name, params, .. } = stmt {
+                let full = name.join(".");
+                c.func_info.insert(
+                    full,
+                    FuncInfo {
+                        param_names: params.iter().map(|p| p.name.name.clone()).collect(),
+                        has_default: params.iter().map(|p| p.default.is_some()).collect(),
+                        defaults: params.iter().map(|p| p.default.clone()).collect(),
+                    },
+                );
+            }
+        }
+        let mut promoted_index = 0usize;
+        let mut promoted_slots: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for stmt in &program.stmts {
+            if let Stmt::Decl { name, .. } = stmt {
+                if !c.captured_at_top.contains(&name.name) {
+                    promoted_slots.insert(name.name.clone(), promoted_index);
+                    promoted_index += 1;
+                }
+            }
+        }
+        for _ in 0..promoted_index {
+            c.emit_const(Value::Unit);
+        }
+        c.promoted_slots = promoted_slots;
+        c.stack_height = promoted_index;
         for (i, stmt) in program.stmts.iter().enumerate() {
             let v = c.compile_stmt(stmt);
             if i < program.stmts.len() - 1 && matches!(v, StmtValue::Discard) {
@@ -124,8 +345,42 @@ impl Compiler {
     }
 
     fn emit(&mut self, op: Op) {
+        let span = match &op {
+            Op::Break(span) | Op::Continue(span) => *span,
+            Op::IntAdd(span)
+            | Op::IntSub(span)
+            | Op::IntMul(span)
+            | Op::IntDiv(span)
+            | Op::IntRem(span)
+            | Op::IntNeg(span)
+            | Op::BinOp(_, span)
+            | Op::UnOp(_, span) => *span,
+            Op::LoadVar(_, span) | Op::StoreVar(_, span) => *span,
+            Op::LoadPath(_, span) | Op::StorePath(_, span) => *span,
+            Op::JumpIfFalseBool(_, span) => *span,
+            Op::ForSetup { span, .. } | Op::WhileCond { span, .. } => *span,
+            Op::ArrayPush(span) | Op::IndexOp(span) | Op::StoreIndexOp(span) => *span,
+            Op::SliceOp(span) | Op::MakeRange(span) => *span,
+            Op::MakeStruct { span, .. }
+            | Op::GetField(_, span)
+            | Op::SetField(_, span)
+            | Op::GetFieldIdx(_, span)
+            | Op::SetFieldIdx(_, span) => *span,
+            Op::MakeVariant { span, .. } | Op::MatchError(span) => *span,
+            Op::SpawnClosure { span, .. } => *span,
+            Op::TryOp(span) | Op::Elvis(span) => *span,
+            Op::Call { span, .. }
+            | Op::CallPath { span, .. }
+            | Op::CallMethod { span, .. }
+            | Op::CallNative { span, .. } => *span,
+            Op::FormatValue(span) => *span,
+            Op::DbQuery { span, .. } => *span,
+            _ => Span::default(),
+        };
         let effect = Self::stack_effect(&op);
         self.stack_height = self.stack_height.saturating_add_signed(effect as isize);
+
+        self.chunk.spans.push(span);
         self.chunk.code.push(op);
     }
 
@@ -138,18 +393,31 @@ impl Compiler {
             Op::LoadVar(..) | Op::LoadPath(..) | Op::LoadSlot(_) => 1,
             Op::DefineVar(_) => 0,
             Op::StoreVar(..) | Op::StorePath(..) | Op::StoreSlot(_) => -1,
+            Op::SlotAddInt { .. } => 0,
+            Op::SlotInc { .. } => 0,
+            Op::SlotAddIntImm { .. } => 0,
+            Op::SlotLessIntSlot { .. } | Op::SlotLessIntImm { .. } => 1,
+            Op::SlotBinaryInt { .. } | Op::SlotBinaryIntImm { .. } => 0,
             Op::MakeFunc { .. } | Op::RegisterStruct { .. } | Op::MakeClosure { .. } => 1,
-            Op::BinOp(..) | Op::UnOp(..) => -1,
+            Op::SpawnClosure { .. } => 1,
+            Op::IntAdd(..) | Op::IntSub(..) | Op::IntMul(..) | Op::IntDiv(..) | Op::IntRem(..) => {
+                -1
+            }
+            Op::IntNeg(..) => 0,
+            Op::BinOp(..) => -1,
+            Op::UnOp(..) => 0,
             Op::Jump(_) => 0,
             Op::JumpIfFalse(_) | Op::JumpIfTrue(_) | Op::JumpIfFalseBool(..) => -1,
             Op::Return => -1,
-            Op::ForSetup { .. } => 2,
+            Op::ForSetup { num_vars, .. } => 1 + *num_vars as i64,
             Op::ForNext { .. } => 0,
             Op::WhileSetup { .. } => 0,
             Op::WhileCond { .. } => -1,
-            Op::Break | Op::Continue => 0,
+            Op::Break(_) | Op::Continue(_) => 0,
             Op::SetLoopResult => -1,
+            Op::Safepoint => 0,
             Op::MakeArray(n) => 1 - *n as i64,
+            Op::UnpackTuple(n) => *n as i64 - 1,
             Op::ArrayPush(_) => -1,
             Op::MakeDict(n) => 1 - 2 * *n as i64,
             Op::IndexOp(_) => -1,
@@ -157,8 +425,8 @@ impl Compiler {
             Op::SliceOp(_) => -2,
             Op::MakeRange(_) => -1,
             Op::MakeStruct { field_names, .. } => 1 - field_names.len() as i64,
-            Op::GetField(..) => 0,
-            Op::SetField(..) => -1,
+            Op::GetField(..) | Op::GetFieldIdx(..) => 0,
+            Op::SetField(..) | Op::SetFieldIdx(..) => -1,
             Op::MakeVariant { has_arg, .. } => {
                 if *has_arg {
                     0
@@ -167,15 +435,20 @@ impl Compiler {
                 }
             }
             Op::MatchArm { .. } => -1,
+            Op::MatchGuard { .. } => -1,
             Op::MatchError(_) => 0,
             Op::IfLetMatch { .. } => -1,
             Op::TryOp(_) => 0,
             Op::Elvis(_) => 1,
             Op::ElvisResult => -2,
             Op::Call { argc, .. } | Op::CallMethod { argc, .. } => -(*argc as i64),
+            Op::CallNative { argc, .. } => 1 - (*argc as i64),
             Op::CallPath { argc, .. } => 1 - (*argc as i64),
             Op::Concat(n) => 1 - *n as i64,
             Op::FormatValue(_) => -1,
+            // DbQuery pops nparams bound values + template, pushes
+            // template + params back: net 0 (reordering only).
+            Op::DbQuery { .. } => 0,
             Op::EnterScope | Op::ExitScope => 0,
             Op::PopN(n) => -(*n as i64),
             Op::DeferRecord => -1,
@@ -183,7 +456,12 @@ impl Compiler {
     }
 
     fn declare_local(&mut self, name: &str) -> bool {
-        if self.captured.contains(name) || (self.is_main && self.scope_depth == 0) {
+        // Top-level names referenced by nested closures/functions must stay
+        // in the environment (capture-by-reference). All other names resolve
+        // to frame slots. Top-level (is_main && depth 0) declarations are
+        // handled directly in `compile_stmt` (reserved-slot promotion); this
+        // method handles function-local and nested-scope declarations.
+        if self.captured.contains(name) {
             self.emit(Op::DefineVar(name.to_string()));
             self.locals.push(Local {
                 name: name.to_string(),
@@ -215,8 +493,296 @@ impl Compiler {
         Resolved::Env
     }
 
+    /// Look up the resolved type for an expression by its span.
+    /// Returns `None` when type info is unavailable (no HIR, or expression
+    /// was not resolved by the checker).
+    fn type_of(&self, span: Span) -> Option<&zz_checker::Type> {
+        self.types.as_ref().and_then(|t| t.get(&span))
+    }
+
+    /// Match `x = x + y` / `x = y + x` where `x` and `y` both resolve to
+    /// local slots. Returns `(dst, src)` so the VM can fuse the load/add/
+    /// store into a single in-place `SlotAddInt`.
+    fn try_slot_add(&self, target: &str, value: &Expr) -> Option<(u16, u16)> {
+        let Expr::Binary {
+            op: binop,
+            left,
+            right,
+            ..
+        } = value
+        else {
+            return None;
+        };
+        if *binop != zz_frontend::ast::BinOp::Add {
+            return None;
+        }
+        // Type guard: both operands must be Int.
+        if !matches!(self.type_of(left.span()), Some(zz_checker::Type::Int))
+            || !matches!(self.type_of(right.span()), Some(zz_checker::Type::Int))
+        {
+            return None;
+        }
+        let dst = match self.resolve(target) {
+            Resolved::Slot(slot) => slot as u16,
+            Resolved::Env => return None,
+        };
+        let src = match (left.as_ref(), right.as_ref()) {
+            (Expr::Ident { name: ln, .. }, Expr::Ident { name: rn, .. }) => {
+                // `x = x + y` -> dst + src, or `x = y + x` -> dst + src
+                if ln == target {
+                    match self.resolve(rn) {
+                        Resolved::Slot(slot) => slot as u16,
+                        Resolved::Env => return None,
+                    }
+                } else if rn == target {
+                    match self.resolve(ln) {
+                        Resolved::Slot(slot) => slot as u16,
+                        Resolved::Env => return None,
+                    }
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+        Some((dst, src))
+    }
+
+    /// Extended peephole for `x = x op N` / `x = x op y` on local slots.
+    ///
+    /// Returns the fused opcode to emit, or `None` to fall back to the
+    /// generic compile path.
+    fn try_slot_binop(&self, target: &str, value: &Expr) -> Option<Op> {
+        let Expr::Binary {
+            op: binop,
+            left,
+            right,
+            span,
+            ..
+        } = value
+        else {
+            return None;
+        };
+        // Type guard: the binary expression must produce Int.
+        if !matches!(self.type_of(*span), Some(zz_checker::Type::Int)) {
+            return None;
+        }
+        let dst = match self.resolve(target) {
+            Resolved::Slot(slot) => slot as u16,
+            Resolved::Env => return None,
+        };
+        // `x = x + 1` -> SlotInc
+        if *binop == zz_frontend::ast::BinOp::Add {
+            let is_one = |e: &Expr| matches!(e, Expr::Int { value: 1, .. });
+            let (l, r) = (left.as_ref(), right.as_ref());
+            if (matches!(l, Expr::Ident { name, .. } if name == target) && is_one(r))
+                || (matches!(r, Expr::Ident { name, .. } if name == target) && is_one(l))
+            {
+                return Some(Op::SlotInc { slot: dst });
+            }
+            // `x = x + N` -> SlotAddIntImm
+            let imm = match (l, r) {
+                (Expr::Ident { name, .. }, e) if name == target => int_literal(e),
+                (e, Expr::Ident { name, .. }) if name == target => int_literal(e),
+                _ => None,
+            };
+            if let Some(imm) = imm {
+                return Some(Op::SlotAddIntImm { dst, imm });
+            }
+        }
+        // `x = x + y` -> SlotAddInt (existing)
+        if let Some((d, s)) = self.try_slot_add(target, value) {
+            return Some(Op::SlotAddInt { dst: d, src: s });
+        }
+        // 3-address: `x = y op z` / `x = y op N` / `x = N op y` where the
+        // target is NOT one of the operands. Covers any integer BinOp
+        // (add/sub/mul/div/rem/power/comparisons): earlier rules handled the
+        // in-place `x = x op ...` forms; this is the general form.
+        let (l, r) = (left.as_ref(), right.as_ref());
+        let target_slot = self.resolve_expr_slot(&Expr::Ident {
+            name: target.to_string(),
+            span: Span::default(),
+        });
+        let lhs = self.resolve_expr_slot(l);
+        let rhs = self.resolve_expr_slot(r);
+        let lhs_imm = int_literal(l);
+        let rhs_imm = int_literal(r);
+        // y op z (both slots)
+        if let (Some(d), Some(a), Some(b)) = (target_slot, lhs, rhs) {
+            return Some(Op::SlotBinaryInt {
+                dst: d,
+                lhs: a,
+                rhs: b,
+                op: *binop,
+            });
+        }
+        // y op N
+        if let (Some(d), Some(a), Some(imm)) = (target_slot, lhs, rhs_imm) {
+            if imm != 1 || *binop != zz_frontend::ast::BinOp::Add {
+                return Some(Op::SlotBinaryIntImm {
+                    dst: d,
+                    lhs: a,
+                    imm,
+                    op: *binop,
+                });
+            }
+        }
+        // N op y
+        if let (Some(d), Some(imm), Some(b)) = (target_slot, lhs_imm, rhs) {
+            if imm != 1 || *binop != zz_frontend::ast::BinOp::Add {
+                return Some(Op::SlotBinaryIntImm {
+                    dst: d,
+                    lhs: b,
+                    imm,
+                    op: *binop,
+                });
+            }
+        }
+        None
+    }
+
+    fn resolve_expr_slot(&self, e: &Expr) -> Option<u16> {
+        match e {
+            Expr::Ident { name, .. } => match self.resolve(name) {
+                Resolved::Slot(slot) => Some(slot as u16),
+                Resolved::Env => None,
+            },
+            // Namespaced top-level slot: `ns.var` resolves to a slot when the
+            // full dotted name is a promoted local.
+            Expr::Path { parts, .. } => match self.resolve(&parts.join(".")) {
+                Resolved::Slot(slot) => Some(slot as u16),
+                Resolved::Env => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Path-target variant of [`Compiler::try_slot_binop`] for namespaced
+    /// top-level slots (`ns.sum = ns.sum + i`).
+    fn try_slot_binop_path(&self, target_parts: &[String], value: &Expr) -> Option<Op> {
+        let Expr::Binary {
+            op: binop,
+            left,
+            right,
+            span,
+            ..
+        } = value
+        else {
+            return None;
+        };
+        // Type guard: the binary expression must produce Int.
+        if !matches!(self.type_of(*span), Some(zz_checker::Type::Int)) {
+            return None;
+        }
+        let full = target_parts.join(".");
+        let dst = match self.resolve(&full) {
+            Resolved::Slot(slot) => slot as u16,
+            Resolved::Env => return None,
+        };
+        // `ns.sum = ns.sum + 1` -> SlotInc
+        if *binop == zz_frontend::ast::BinOp::Add {
+            let is_one = |e: &Expr| matches!(e, Expr::Int { value: 1, .. });
+            let (l, r) = (left.as_ref(), right.as_ref());
+            let is_target = |e: &Expr| match e {
+                Expr::Ident { name, .. } => name == &full,
+                Expr::Path { parts, .. } => parts.join(".") == full,
+                _ => false,
+            };
+            if (is_target(l) && is_one(r)) || (is_target(r) && is_one(l)) {
+                return Some(Op::SlotInc { slot: dst });
+            }
+            // `ns.sum = ns.sum + N` -> SlotAddIntImm
+            let imm = match (l, r) {
+                (e, other) if is_target(e) => int_literal(other),
+                (other, e) if is_target(e) => int_literal(other),
+                _ => None,
+            };
+            if let Some(imm) = imm {
+                return Some(Op::SlotAddIntImm { dst, imm });
+            }
+        }
+        // `ns.sum = ns.sum + y` -> SlotAddInt
+        if *binop == zz_frontend::ast::BinOp::Add {
+            let (l, r) = (left.as_ref(), right.as_ref());
+            let is_target = |e: &Expr| match e {
+                Expr::Ident { name, .. } => name == &full,
+                Expr::Path { parts, .. } => parts.join(".") == full,
+                _ => false,
+            };
+            let src = if is_target(l) {
+                self.resolve_expr_slot(r)
+            } else if is_target(r) {
+                self.resolve_expr_slot(l)
+            } else {
+                None
+            };
+            if let Some(src) = src {
+                return Some(Op::SlotAddInt { dst, src });
+            }
+        }
+        None
+    }
+
+    /// Peephole for `while`-style conditions: `a < b` / `a < N` where both
+    /// sides resolve to local slots (or one is an int literal) and the
+    /// expression is typed Int. Also handles `a > b` by swapping operands.
+    fn try_slot_compare(&self, value: &Expr) -> Option<Op> {
+        let Expr::Binary {
+            op: binop,
+            left,
+            right,
+            ..
+        } = value
+        else {
+            return None;
+        };
+        // Type guard: at least the left operand must be typed Int.
+        if !matches!(self.type_of(left.span()), Some(zz_checker::Type::Int)) {
+            return None;
+        }
+        let slot_of = |e: &Expr| match e {
+            Expr::Ident { name, .. } => match self.resolve(name) {
+                Resolved::Slot(slot) => Some(slot as u16),
+                Resolved::Env => None,
+            },
+            Expr::Path { parts, .. } => match self.resolve(&parts.join(".")) {
+                Resolved::Slot(slot) => Some(slot as u16),
+                Resolved::Env => None,
+            },
+            _ => None,
+        };
+        let imm_of = |e: &Expr| int_literal(e);
+        match *binop {
+            BinOp::Lt => {
+                if let (Some(a), Some(b)) = (slot_of(left.as_ref()), slot_of(right.as_ref())) {
+                    Some(Op::SlotLessIntSlot { a, b })
+                } else if let (Some(a), Some(imm)) =
+                    (slot_of(left.as_ref()), imm_of(right.as_ref()))
+                {
+                    Some(Op::SlotLessIntImm { a, imm })
+                } else {
+                    None
+                }
+            }
+            // `a > b` is equivalent to `b < a` — swap operands.
+            BinOp::Gt => {
+                if let (Some(b), Some(a)) = (slot_of(left.as_ref()), slot_of(right.as_ref())) {
+                    Some(Op::SlotLessIntSlot { a, b })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn compile_path_load(&mut self, parts: &[String], span: Span) {
-        if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
+        // A top-level var promoted to a slot is declared under its full
+        // dotted name (`add_to_1M.sum`); resolve the joined name first.
+        let full = parts.join(".");
+        if let Resolved::Slot(slot) = self.resolve(&full) {
+            self.emit(Op::LoadSlot(slot as u16));
+        } else if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
             self.emit(Op::LoadSlot(slot as u16));
             for part in &parts[1..] {
                 self.emit(Op::GetField(part.clone(), span));
@@ -227,6 +793,12 @@ impl Compiler {
     }
 
     fn compile_path_store(&mut self, parts: &[String], span: Span) {
+        let full = parts.join(".");
+        // Top-level slot promoted under the full dotted name -> direct store.
+        if let Resolved::Slot(slot) = self.resolve(&full) {
+            self.emit(Op::StoreSlot(slot as u16));
+            return;
+        }
         if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
             self.emit(Op::LoadSlot(slot as u16));
             for part in &parts[1..parts.len() - 1] {
@@ -265,12 +837,13 @@ impl Compiler {
 
     fn emit_jump(&mut self, kind: JumpKind) -> usize {
         let pos = self.chunk.code.len();
-        let op = match kind {
-            JumpKind::Always => Op::Jump(0),
-            JumpKind::IfFalse => Op::JumpIfFalse(0),
-            JumpKind::IfTrue => Op::JumpIfTrue(0),
-            JumpKind::IfFalseBool(span) => Op::JumpIfFalseBool(0, span),
+        let (op, span) = match kind {
+            JumpKind::Always => (Op::Jump(0), Span::default()),
+            JumpKind::IfFalse => (Op::JumpIfFalse(0), Span::default()),
+            JumpKind::IfTrue => (Op::JumpIfTrue(0), Span::default()),
+            JumpKind::IfFalseBool(span) => (Op::JumpIfFalseBool(0, span), span),
         };
+        self.chunk.spans.push(span);
         self.chunk.code.push(op);
         pos
     }
@@ -283,8 +856,8 @@ impl Compiler {
             Op::JumpIfFalse(_) => Op::JumpIfFalse(target),
             Op::JumpIfTrue(_) => Op::JumpIfTrue(target),
             Op::JumpIfFalseBool(_, span) => Op::JumpIfFalseBool(target, span),
-            Op::ForNext { var, in_env, .. } => Op::ForNext {
-                var,
+            Op::ForNext { vars, in_env, .. } => Op::ForNext {
+                vars,
                 exit: target,
                 in_env,
             },
@@ -293,10 +866,10 @@ impl Compiler {
         };
     }
 
-    fn emit_for_next(&mut self, var: &str, in_env: bool) -> usize {
+    fn emit_for_next(&mut self, vars: Vec<String>, in_env: bool) -> usize {
         let pos = self.chunk.code.len();
         self.emit(Op::ForNext {
-            var: var.to_string(),
+            vars,
             exit: 0,
             in_env,
         });
@@ -318,6 +891,16 @@ impl Compiler {
             Expr::Path { parts, span } => self.compile_path_store(parts, *span),
             Expr::Field { obj, name, span } => {
                 self.compile_expr(obj);
+                // Type-driven fast path for set.
+                if let Some(zz_checker::Type::Struct(struct_name)) = self.type_of(obj.span()) {
+                    if let Some(sig) = self.structs.as_ref().and_then(|s| s.get(struct_name)) {
+                        if let Some(idx) = sig.fields.iter().position(|(n, _)| n == name) {
+                            self.emit(Op::SetFieldIdx(idx as u16, *span));
+                            self.compile_write_back(obj);
+                            return;
+                        }
+                    }
+                }
                 self.emit(Op::SetField(name.clone(), *span));
                 self.compile_write_back(obj);
             }
@@ -325,17 +908,81 @@ impl Compiler {
         }
     }
 
+    /// Compile a destructuring pattern. Expects the value to be on the stack.
+    fn compile_destructure(&mut self, pat: &Pattern) {
+        match pat {
+            Pattern::Wildcard { .. } => {
+                self.emit(Op::Pop);
+            }
+            Pattern::Binding { name } => {
+                if self.declare_local(&name.name) {
+                    // Local already declared, value stays on stack
+                } else {
+                    self.emit(Op::Pop);
+                }
+            }
+            Pattern::Tuple { pats, .. } => {
+                // Value is on stack. We need to unpack it.
+                // Emit UnpackTuple to split into individual elements.
+                self.emit(Op::UnpackTuple(pats.len() as u8));
+                // After UnpackTuple, elements are in reverse order on stack:
+                // [last, ..., second, first] where first is on top.
+                // Declare locals in forward order so first name gets the
+                // slot for the top-of-stack element.
+                for pat in pats {
+                    self.compile_destructure(pat);
+                }
+            }
+            Pattern::Literal { .. } | Pattern::Variant { .. } | Pattern::Or { .. } => {
+                // These are match-only patterns, not valid in destructuring
+                // (or-patterns in destructuring are rejected by the checker).
+                self.emit(Op::Pop);
+            }
+        }
+    }
+
     fn compile_stmt(&mut self, stmt: &Stmt) -> StmtValue {
         match stmt {
             Stmt::Decl { name, value, .. } => {
                 self.compile_expr(value);
-                if self.declare_local(&name.name) {
+                if self.is_main && self.scope_depth == 0 {
+                    // Top-level: value goes into the reserved slot region.
+                    if self.captured_at_top.contains(&name.name) {
+                        self.emit(Op::DefineVar(name.name.clone()));
+                        self.locals.push(Local {
+                            name: name.name.clone(),
+                            slot: 0,
+                            in_env: true,
+                        });
+                        // DefineVar re-pushes the value; discard it.
+                        StmtValue::Discard
+                    } else {
+                        let slot = self.promoted_slots[&name.name];
+                        self.emit(Op::StoreSlot(slot as u16));
+                        // Sync back to env at frame exit so later chunks
+                        // (REPL statements, other modules) can read it.
+                        self.chunk
+                            .toplevel_slots
+                            .push((name.name.clone(), slot as u16));
+                        self.locals.push(Local {
+                            name: name.name.clone(),
+                            slot,
+                            in_env: false,
+                        });
+                        // StoreSlot consumes the value; nothing left on the
+                        // statement stack.
+                        StmtValue::None
+                    }
+                } else if self.declare_local(&name.name) {
                     StmtValue::Keep
                 } else {
                     StmtValue::Discard
                 }
             }
             Stmt::Import { .. } => StmtValue::None,
+            // VM stub: extern C requires --native; calls fail at runtime with
+            // a clear error (see vm/runtime.rs LoadVar/native dispatch).
+            Stmt::ExternBlock { .. } | Stmt::Link { .. } => StmtValue::None,
             Stmt::Func {
                 name, params, body, ..
             } => {
@@ -362,13 +1009,37 @@ impl Compiler {
                 });
                 StmtValue::Discard
             }
+            Stmt::Impl { name, methods, .. } => {
+                let type_name = name.join(".");
+                for method in methods {
+                    if let Stmt::Func {
+                        name: mname,
+                        generics: _,
+                        params,
+                        ret: _,
+                        body,
+                        ..
+                    } = method
+                    {
+                        let full_name = format!("{}.{}", type_name, mname.join("."));
+                        let chunk = self.compile_func_body(body, params);
+                        self.emit(Op::MakeFunc {
+                            name: full_name,
+                            params: params.clone(),
+                            chunk,
+                        });
+                    }
+                }
+                StmtValue::Discard
+            }
             Stmt::For {
-                var,
+                vars,
                 iter,
                 body,
                 span,
             } => {
                 let pre = self.stack_height;
+                let num_vars_u8 = vars.len() as u8;
                 self.emit_const(Value::Unit);
                 self.compile_expr(iter);
                 let setup_pos = self.chunk.code.len();
@@ -376,21 +1047,37 @@ impl Compiler {
                     exit: 0,
                     header: 0,
                     span: *span,
+                    num_vars: num_vars_u8,
                 });
                 let header = self.chunk.code.len();
-                let in_env = self.captured.contains(&var.name);
-                let j = self.emit_for_next(&var.name, in_env);
-                self.locals.push(Local {
-                    name: var.name.clone(),
-                    slot: self.stack_height - 1,
-                    in_env,
-                });
+                // Safepoint at the header (not the back-edge) so `continue`
+                // cannot skip the cooperative yield check.
+                self.emit(Op::Safepoint);
+                // Determine if any var is captured by an inner closure
+                let any_captured = vars.iter().any(|v| self.captured.contains(&v.name));
+                let var_names: Vec<String> = vars.iter().map(|v| v.name.clone()).collect();
+                let j = self.emit_for_next(var_names.clone(), any_captured);
+                // Push locals for each var — last var at highest slot,
+                // first at lowest
+                let num_vars = vars.len();
+                for (i, v) in vars.iter().enumerate().rev() {
+                    let in_env = self.captured.contains(&v.name);
+                    self.locals.push(Local {
+                        name: v.name.clone(),
+                        slot: self.stack_height - num_vars + i,
+                        in_env,
+                    });
+                }
                 let body_needs_env = self.scope_declares_captured(body);
                 if body_needs_env {
                     self.emit(Op::EnterScope);
                 }
                 self.scope_depth += 1;
-                self.compile_block_body(body);
+                if self.compile_block_body(body) {
+                    // Trailing slot declaration (see `compile_block_body`):
+                    // supply the loop-result value `SetLoopResult` pops.
+                    self.emit_const(Value::Unit);
+                }
                 self.scope_depth -= 1;
                 if body_needs_env {
                     self.emit(Op::ExitScope);
@@ -403,17 +1090,21 @@ impl Compiler {
                     exit,
                     header,
                     span: *span,
+                    num_vars: num_vars_u8,
                 };
-                self.locals.pop();
+                // Pop locals
+                for _ in vars {
+                    self.locals.pop();
+                }
                 self.stack_height = pre + 1;
                 StmtValue::Discard
             }
-            Stmt::Break { .. } => {
-                self.emit(Op::Break);
+            Stmt::Break { span } => {
+                self.emit(Op::Break(*span));
                 StmtValue::None
             }
-            Stmt::Continue { .. } => {
-                self.emit(Op::Continue);
+            Stmt::Continue { span } => {
+                self.emit(Op::Continue(*span));
                 StmtValue::None
             }
             Stmt::Defer { expr, .. } => {
@@ -429,17 +1120,40 @@ impl Compiler {
                 self.emit(Op::DeferRecord);
                 StmtValue::None
             }
+            Stmt::Destructure { pat, value, .. } => {
+                self.compile_expr(value);
+                self.compile_destructure(pat);
+                StmtValue::None
+            }
             Stmt::Assign { target, value, .. } => match target {
                 Expr::Ident { name, span } => {
-                    self.compile_expr(value);
-                    match self.resolve(name) {
-                        Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
-                        Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+                    // Fast path: `x = x + y` / `x = x + 1` / `x = x + N` with
+                    // operands resolving to local slots -> single fused op.
+                    if let Some(op) = self.try_slot_binop(name, value) {
+                        self.emit(op);
+                        self.emit_const(Value::Unit);
+                        StmtValue::Discard
+                    } else {
+                        self.compile_expr(value);
+                        match self.resolve(name) {
+                            Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
+                            Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+                        }
+                        self.emit_const(Value::Unit);
+                        StmtValue::Discard
                     }
-                    self.emit_const(Value::Unit);
-                    StmtValue::Discard
                 }
                 Expr::Path { parts, span } => {
+                    let full = parts.join(".");
+                    // Namespaced top-level slot promotion: `ns.sum = ns.sum + i`
+                    // resolves to a direct slot when the full name is a local.
+                    if let Resolved::Slot(_) = self.resolve(&full) {
+                        if let Some(op) = self.try_slot_binop_path(parts, value) {
+                            self.emit(op);
+                            self.emit_const(Value::Unit);
+                            return StmtValue::Discard;
+                        }
+                    }
                     self.compile_expr(value);
                     self.compile_path_store(parts, *span);
                     self.emit_const(Value::Unit);
@@ -457,6 +1171,17 @@ impl Compiler {
                 Expr::Field { obj, name, span } => {
                     self.compile_expr(value);
                     self.compile_expr(obj);
+                    // Type-driven fast path for field assignment.
+                    if let Some(zz_checker::Type::Struct(struct_name)) = self.type_of(obj.span()) {
+                        if let Some(sig) = self.structs.as_ref().and_then(|s| s.get(struct_name)) {
+                            if let Some(idx) = sig.fields.iter().position(|(n, _)| n == name) {
+                                self.emit(Op::SetFieldIdx(idx as u16, *span));
+                                self.compile_write_back(obj);
+                                self.emit_const(Value::Unit);
+                                return StmtValue::Discard;
+                            }
+                        }
+                    }
                     self.emit(Op::SetField(name.clone(), *span));
                     self.compile_write_back(obj);
                     self.emit_const(Value::Unit);
@@ -465,6 +1190,127 @@ impl Compiler {
                 _ => unreachable!("unhandled assignment target"),
             },
             Stmt::Expr(e) => {
+                // Method call write-back: if `obj.method(args)` is called as a
+                // statement, the return value (e.g. the new array from push/pop)
+                // must be written back to `obj` so the mutation is visible.
+                // Only intercept known mutating methods to avoid corrupting
+                // non-mutating calls (e.g. `arr.len()` should not write back).
+                if let Expr::Call {
+                    callee,
+                    args,
+                    named,
+                    ..
+                } = e
+                {
+                    // Known mutating array methods that return the modified array.
+                    const MUTATING_METHODS: &[&str] = &[
+                        "push", "pop", "insert", "remove", "reverse", "sort", "append",
+                    ];
+
+                    // Handle `arr.push(x)` — parsed as Path { parts: ["arr", "push"] }
+                    if let Expr::Path { parts, .. } = callee.as_ref() {
+                        if parts.len() == 2 {
+                            let method_name = &parts[1];
+                            // A dotted stdlib native (`fs.append`,
+                            // `fs.remove`, …) is a real call, not an
+                            // array-method write-back. The typed pipeline
+                            // knows every native name; without it the
+                            // rewrite would emit LoadVar(fs) for a module
+                            // namespace ("undefined variable `fs`").
+                            let dotted = parts.join(".");
+                            let is_native = self
+                                .native_names
+                                .as_ref()
+                                .is_some_and(|n| n.contains(&dotted));
+                            if !is_native && MUTATING_METHODS.contains(&method_name.as_str()) {
+                                let obj_name = &parts[0];
+                                // Compile: LoadVar(obj) + args + CallMethod(method)
+                                match self.resolve(obj_name) {
+                                    Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
+                                    Resolved::Env => {
+                                        self.emit(Op::LoadVar(obj_name.clone(), e.span()))
+                                    }
+                                }
+                                for a in args {
+                                    self.compile_expr(a);
+                                }
+                                for (_, val) in named {
+                                    self.compile_expr(val);
+                                }
+                                self.emit(Op::CallMethod {
+                                    name: method_name.clone(),
+                                    argc: (args.len() + named.len()) as u16,
+                                    span: e.span(),
+                                });
+                                // Write back: StoreVar(obj) pops the result into the variable
+                                match self.resolve(obj_name) {
+                                    Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
+                                    Resolved::Env => {
+                                        self.emit(Op::StoreVar(obj_name.clone(), e.span()))
+                                    }
+                                }
+                                return StmtValue::None;
+                            }
+                        }
+                    }
+                    // Handle `obj.method(x)` — parsed as Field { obj, name }
+                    if let Expr::Field {
+                        obj: field_obj,
+                        name: method_name,
+                        ..
+                    } = callee.as_ref()
+                    {
+                        if MUTATING_METHODS.contains(&method_name.as_str()) {
+                            if let Expr::Ident { name, span } = field_obj.as_ref() {
+                                self.compile_expr(field_obj);
+                                for a in args {
+                                    self.compile_expr(a);
+                                }
+                                for (_, val) in named {
+                                    self.compile_expr(val);
+                                }
+                                self.emit(Op::CallMethod {
+                                    name: method_name.clone(),
+                                    argc: (args.len() + named.len()) as u16,
+                                    span: e.span(),
+                                });
+                                match self.resolve(name) {
+                                    Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
+                                    Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+                                }
+                                return StmtValue::None;
+                            }
+                        }
+                    }
+                }
+                // Built-in `append(arr, val)` write-back: same as method call.
+                // append returns the mutated array; store it back to arr.
+                if let Expr::Call {
+                    callee,
+                    args,
+                    named,
+                    ..
+                } = e
+                {
+                    if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                        if fname == "append" && args.len() == 2 && named.is_empty() {
+                            if let Expr::Ident {
+                                name: arr_name,
+                                span,
+                            } = &args[0]
+                            {
+                                self.compile_expr(e);
+                                match self.resolve(arr_name) {
+                                    Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
+                                    Resolved::Env => {
+                                        self.emit(Op::StoreVar(arr_name.clone(), *span))
+                                    }
+                                }
+                                return StmtValue::None;
+                            }
+                        }
+                    }
+                }
                 self.compile_expr(e);
                 StmtValue::Discard
             }
@@ -484,7 +1330,13 @@ impl Compiler {
         }
     }
 
-    fn compile_block_body(&mut self, block: &Block) {
+    /// Compile a block body, cleaning up its locals. Returns `true` when the
+    /// body's final statement left slot storage that `PopN` consumed: loop
+    /// callers (`for`/`while`, which pop one more value via `SetLoopResult`
+    /// for the loop result) must then emit a `Unit` to stay balanced.
+    /// Other callers (plain blocks, function bodies) ignore the return and
+    /// keep existing behavior.
+    fn compile_block_body(&mut self, block: &Block) -> bool {
         let scope_base = self.locals.len();
         let mut last = StmtValue::None;
         for (i, stmt) in block.stmts.iter().enumerate() {
@@ -503,11 +1355,22 @@ impl Compiler {
         if n > 0 {
             self.emit(Op::PopN(n as u16));
         }
+        // A trailing slot declaration's value doubles as its slot storage:
+        // `PopN` just consumed it, so a loop result pop would eat into the
+        // loop frame (the `ForNext on non-iterable` misalignment). An
+        // env-captured (`in_env`) trailing declaration instead leaves its
+        // `DefineVar` value behind, which already serves as the result.
+        let need_result_unit = matches!(last, StmtValue::Keep)
+            && self.locals[scope_base..].last().is_some_and(|l| !l.in_env);
         self.locals.truncate(scope_base);
+        need_result_unit
     }
 
-    fn compile_func_body(&mut self, block: &Block, params: &[Param]) -> Rc<Chunk> {
+    fn compile_func_body(&mut self, block: &Block, params: &[Param]) -> Arc<Chunk> {
         let mut sub = Compiler::new();
+        sub.types = self.types.clone();
+        sub.structs = self.structs.clone();
+        sub.native_names = self.native_names.clone();
         sub.chunk.params = params.to_vec();
         sub.captured = scan_block_captured(block, params);
         let needs_env = params.iter().any(|p| sub.captured.contains(&p.name.name))
@@ -519,6 +1382,10 @@ impl Compiler {
             if sub.captured.contains(&p.name.name) {
                 sub.emit(Op::LoadSlot(i as u16));
                 sub.emit(Op::DefineVar(p.name.name.clone()));
+                // DefineVar re-pushes the value; discard the leftover or
+                // every later slot in this frame shifts by one per
+                // captured param (spooky `h` reads `n`-class bugs).
+                sub.emit(Op::Pop);
                 sub.locals.push(Local {
                     name: p.name.name.clone(),
                     slot: i,
@@ -537,7 +1404,7 @@ impl Compiler {
         if needs_env {
             sub.emit(Op::ExitScope);
         }
-        Rc::new(sub.chunk)
+        Arc::new(sub.chunk)
     }
 
     fn compile_reordered_args(&mut self, func_name: &str, args: &[Expr], named: &[(String, Expr)]) {
@@ -579,8 +1446,149 @@ impl Compiler {
         }
     }
 
-    fn compile_closure_body(&mut self, body: &Expr, params: &[Param]) -> Rc<Chunk> {
+    /// Count `{expr}` params in an SQL Fmt arg (0 for plain strings).
+    fn fmt_param_count(arg: &Expr) -> usize {
+        match arg {
+            Expr::Fmt { parts, .. } => parts
+                .iter()
+                .filter(|p| matches!(p, FmtPart::Expr(_, _)))
+                .count(),
+            Expr::Paren { expr, .. } => Self::fmt_param_count(expr),
+            _ => 0,
+        }
+    }
+
+    /// Total native argc for a `sqlz.query`/`sqlz.exec` call site
+    /// (`db.*` alias included):
+    /// receiver + template + bound params (+1 struct marker for query
+    /// when the checker resolved an `[Struct]` element type).
+    fn db_call_argc(&self, args: &[Expr], span: Span) -> usize {
+        let nparams = args.first().map(Self::fmt_param_count).unwrap_or(0);
+        // Path-form call site: `args` holds ONLY user args ([sql]);
+        // receiver already emitted separately. CallMethod pops `argc`
+        // args then pops recv, so argc = template + params (+ marker).
+        let base = 1 + nparams;
+        if self.db_query_struct(span).is_some() {
+            base + 1
+        } else {
+            base
+        }
+    }
+
+    /// Resolve the `[Struct]` element type for a `sqlz.query` call site
+    /// (`db.*` alias included)
+    /// from the checker's span map (the call's own span carries the
+    /// unified return type, which includes the `let x: [User]` annotation).
+    fn db_query_struct(&self, span: Span) -> Option<String> {
+        let ty = self.type_of(span)?;
+        match ty {
+            zz_checker::Type::Array(inner) => match inner.as_ref() {
+                zz_checker::Type::Struct(name) => Some(name.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Compile `mydb.query(sql)` / `mydb.exec(sql)` args into
+    /// `[recv, template, p1..pn, marker?]`:
+    /// - receiver as normal,
+    /// - SQL Fmt in DbQuery mode (template with `?N` + bound values),
+    ///   plain Str as a zero-param template,
+    /// - trailing `__struct:Name` marker for query when the return
+    ///   element type is a known struct (drives row-to-struct mapping).
+    ///
+    /// NOTE: at this Path-form call site, `args` holds ONLY the user
+    /// args (`[sql]`); the receiver (`parts[0]`) was already emitted as
+    /// LoadSlot/LoadVar above. So the SQL is `args[0]`, not `args[1]`.
+    fn compile_db_args(&mut self, args: &[Expr], span: Span) {
+        if let Some(sql) = args.first() {
+            let prev = std::mem::replace(&mut self.in_db_query, true);
+            self.compile_expr(sql);
+            self.in_db_query = prev;
+        }
+        if let Some(name) = self.db_query_struct(span) {
+            self.emit_const(Value::Str(format!("__struct:{name}").into()));
+        }
+    }
+
+    /// Total native argc for a module-namespace call
+    /// (`pg.query(db, sql)`, `sqlz.query(db, sql)`, ...): the handle is a
+    /// normal arg, so argc = db + template + bound params (+1 struct
+    /// marker for query when the checker resolved `[Struct]`, + named).
+    fn module_db_call_argc(&self, args: &[Expr], named: &[(String, Expr)], span: Span) -> usize {
+        let nparams = args.get(1).map(Self::fmt_param_count).unwrap_or(0);
+        let base = 2 + nparams + args.len().saturating_sub(2) + named.len();
+        if self.db_query_struct(span).is_some() {
+            base + 1
+        } else {
+            base
+        }
+    }
+
+    /// Compile `pg.query(db, sql)` / `sqlz.exec(db, sql)` args into
+    /// `[db, template, p1..pn, marker?]` for `CallNative`:
+    /// - args[0] (the handle) as normal,
+    /// - args[1] (the SQL) in DbQuery mode,
+    /// - trailing `__struct:Name` marker for query when typed.
+    fn compile_module_db_args(&mut self, args: &[Expr], named: &[(String, Expr)], span: Span) {
+        if let Some(db) = args.first() {
+            self.compile_expr(db);
+        }
+        if let Some(sql) = args.get(1) {
+            let prev = std::mem::replace(&mut self.in_db_query, true);
+            self.compile_expr(sql);
+            self.in_db_query = prev;
+        }
+        for extra in args.iter().skip(2) {
+            self.compile_expr(extra);
+        }
+        for (_, val) in named {
+            self.compile_expr(val);
+        }
+        // Only `query` carries a struct marker (`exec` returns int).
+        if self.db_query_struct(span).is_some() {
+            self.emit_const(Value::Str(
+                format!("__struct:{}", self.db_query_struct(span).unwrap()).into(),
+            ));
+        }
+    }
+
+    /// True when a Path-form call `recv.method` targets a db handle:
+    /// either the module-qualified `sqlz.query`/`std.sqlz.query` (or the
+    /// `db.*`/`std.db.*` alias, receiver is the module namespace) or a
+    /// method on a local whose checker type is `Db`. Falls back to
+    /// name-only match when type info is absent (untyped
+    /// `compile_program` path, e.g. tests/REPL snippets).
+    fn is_db_path(&self, parts: &[String]) -> bool {
+        if parts.len() != 2 {
+            return false;
+        }
+        if !matches!(parts[1].as_str(), "query" | "exec" | "close" | "open") {
+            return false;
+        }
+        if parts[0] == "sqlz" || parts[0] == "db" || parts[0] == "std" {
+            return true;
+        }
+        // Type-driven: receiver local resolved to Db by the checker.
+        // The span map keys full call spans, not ident spans, so consult
+        // the struct/type tables indirectly: check `types` for any entry
+        // — when typed info exists we trust method-name + Db namespace
+        // registration instead (checker already gated the call).
+        if self.types.is_some() {
+            return true;
+        }
+        // Untyped path: accept query/exec/close on any receiver; the
+        // runtime `lookup_method` will resolve `sqlz.*` (or the `db.*`
+        // alias) or error clearly.
+        true
+    }
+
+    fn compile_closure_body(&mut self, body: &Expr, params: &[Param]) -> Arc<Chunk> {
         let mut sub = Compiler::new();
+        sub.types = self.types.clone();
+        sub.structs = self.structs.clone();
+        sub.native_names = self.native_names.clone();
         sub.chunk.params = params.to_vec();
         sub.captured = scan_closure_captured(body, params);
         let needs_env = params.iter().any(|p| sub.captured.contains(&p.name.name));
@@ -591,6 +1599,9 @@ impl Compiler {
             if sub.captured.contains(&p.name.name) {
                 sub.emit(Op::LoadSlot(i as u16));
                 sub.emit(Op::DefineVar(p.name.name.clone()));
+                // DefineVar re-pushes the value; discard (see
+                // `compile_func_body` — same one-slot-per-capture shift).
+                sub.emit(Op::Pop);
                 sub.locals.push(Local {
                     name: p.name.name.clone(),
                     slot: i,
@@ -609,15 +1620,21 @@ impl Compiler {
         if needs_env {
             sub.emit(Op::ExitScope);
         }
-        Rc::new(sub.chunk)
+        Arc::new(sub.chunk)
     }
 
     fn compile_expr(&mut self, expr: &Expr) {
         match expr {
             Expr::Int { value, .. } => self.emit_const(Value::Int(*value)),
             Expr::Float { value, .. } => self.emit_const(Value::Float(*value)),
-            Expr::Str { value, .. } => self.emit_const(Value::Str(value.clone())),
+            Expr::Str { value, .. } => self.emit_const(Value::Str(value.clone().into())),
             Expr::Bool { value, .. } => self.emit_const(Value::Bool(*value)),
+            Expr::Break { span } => {
+                self.emit(Op::Break(*span));
+            }
+            Expr::Continue { span } => {
+                self.emit(Op::Continue(*span));
+            }
             Expr::Ident { name, span } => match self.resolve(name) {
                 Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
                 Resolved::Env => self.emit(Op::LoadVar(name.clone(), *span)),
@@ -626,7 +1643,14 @@ impl Compiler {
             Expr::Paren { expr, .. } => self.compile_expr(expr),
             Expr::Unary { op, expr, span } => {
                 self.compile_expr(expr);
-                self.emit(Op::UnOp(*op, *span));
+                // Type-driven fast path: int negation.
+                if matches!(op, zz_frontend::ast::UnOp::Neg)
+                    && matches!(self.type_of(expr.span()), Some(zz_checker::Type::Int))
+                {
+                    self.emit(Op::IntNeg(*span));
+                } else {
+                    self.emit(Op::UnOp(*op, *span));
+                }
             }
             Expr::Binary {
                 op,
@@ -661,9 +1685,29 @@ impl Compiler {
                     self.emit(Op::ElvisResult);
                 }
                 _ => {
-                    self.compile_expr(left);
-                    self.compile_expr(right);
-                    self.emit(Op::BinOp(*op, *span));
+                    // Type-driven fast path: if both operands are Int,
+                    // emit unboxed integer ops that skip generic dispatch.
+                    if matches!(self.type_of(left.span()), Some(zz_checker::Type::Int))
+                        && matches!(self.type_of(right.span()), Some(zz_checker::Type::Int))
+                    {
+                        self.compile_expr(left);
+                        self.compile_expr(right);
+                        match op {
+                            BinOp::Add => self.emit(Op::IntAdd(*span)),
+                            BinOp::Sub => self.emit(Op::IntSub(*span)),
+                            BinOp::Mul => self.emit(Op::IntMul(*span)),
+                            BinOp::Div => self.emit(Op::IntDiv(*span)),
+                            BinOp::Rem => self.emit(Op::IntRem(*span)),
+                            _ => {
+                                // Comparisons, Pow, etc. fall through to generic.
+                                self.emit(Op::BinOp(*op, *span));
+                            }
+                        }
+                    } else {
+                        self.compile_expr(left);
+                        self.compile_expr(right);
+                        self.emit(Op::BinOp(*op, *span));
+                    }
                 }
             },
             Expr::Call {
@@ -674,15 +1718,77 @@ impl Compiler {
             } => match callee.as_ref() {
                 Expr::Path { parts, span: pspan } => {
                     let func_name = parts.join(".");
+                    // Fused spawn: `task.spawn(|params| body)` with a
+                    // closure literal compiles to a single SpawnClosure
+                    // op — no FuncValue box, no args Vec, no native
+                    // dispatch. Behaviorally identical; anything else
+                    // (variables, extra/named args) keeps the generic
+                    // path with its arity errors.
+                    if func_name == "task.spawn" && named.is_empty() && args.len() == 1 {
+                        if let Expr::Closure { params, body, .. } = &args[0] {
+                            let chunk = self.compile_closure_body(body, params);
+                            self.emit(Op::SpawnClosure {
+                                params: params.clone(),
+                                chunk,
+                                span: *span,
+                            });
+                            return;
+                        }
+                    }
+                    // Method form: `mydb.query(sql)` / `mydb.exec(sql)` —
+                    // pure ident chains parse as Path; the receiver is a
+                    // local, NOT a module namespace. The SQL arg compiles
+                    // in DbQuery mode (template + bound params).
+                    //
+                    // A leading component that resolves to a slot/env LOCAL
+                    // is a receiver; a module namespace (`sqlz`, `db`,
+                    // `pg`, `postgres`, `my`, `mysql`, `std`) takes the
+                    // free-function branch below (`is_module_db_call`).
+                    let leading_is_module_ns =
+                        matches!(
+                            parts[0].as_str(),
+                            "sqlz" | "db" | "pg" | "postgres" | "my" | "mysql" | "std"
+                        ) && matches!(self.resolve(&parts[0]), Resolved::Env);
+                    let is_db_call = parts.len() == 2
+                        && matches!(parts[1].as_str(), "query" | "exec")
+                        && !leading_is_module_ns
+                        && self.is_db_path(parts);
+                    // Free-function form with explicit receiver:
+                    // `pg.query(db, sql)`, `my.exec(db, sql)`,
+                    // `sqlz.query(db, sql)`,
+                    // `std.sqlz.postgres.exec(db, sql)`, ... The db handle
+                    // is args[0], the SQL (args[1]) compiles in DbQuery
+                    // mode exactly like the method form.
+                    let db_module_prefix = if parts.len() >= 2 {
+                        parts[..parts.len() - 1].join(".")
+                    } else {
+                        String::new()
+                    };
+                    let is_module_db_call = matches!(
+                        parts.last().map(String::as_str),
+                        Some("query") | Some("exec")
+                    ) && matches!(
+                        db_module_prefix.as_str(),
+                        "sqlz"
+                            | "std.sqlz"
+                            | "db"
+                            | "std.db"
+                            | "pg"
+                            | "postgres"
+                            | "std.sqlz.postgres"
+                            | "my"
+                            | "mysql"
+                            | "std.sqlz.mysql"
+                    ) && leading_is_module_ns
+                        && args.len() + named.len() >= 2;
                     let is_input = parts.len() == 1
                         && parts[0] == "input"
-                        && args.is_empty()
+                        && args.len() <= 1
                         && named.is_empty();
                     let is_range = parts.len() == 1
                         && parts[0] == "range"
                         && args.len() + named.len() < 3
                         && named.is_empty();
-
                     let has_named_or_defaults = !named.is_empty()
                         || self
                             .func_info
@@ -701,10 +1807,54 @@ impl Compiler {
                         args.len() + named.len()
                     };
 
-                    if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
+                    // A namespaced top-level closure promoted to a slot
+                    // (`ns.foo(...)` where `ns.foo` resolves directly) is a
+                    // plain function call, not a method call or env lookup.
+                    if let Resolved::Slot(slot) = self.resolve(&parts.join(".")) {
+                        self.emit(Op::LoadSlot(slot as u16));
+                        if is_range {
+                            if args.len() == 1 {
+                                self.emit_const(Value::Int(0));
+                                self.compile_expr(&args[0]);
+                                self.emit_const(Value::Int(1));
+                            } else if args.len() == 2 {
+                                self.compile_expr(&args[0]);
+                                self.compile_expr(&args[1]);
+                                self.emit_const(Value::Int(1));
+                            } else {
+                                for a in args {
+                                    self.compile_expr(a);
+                                }
+                            }
+                        } else if has_named_or_defaults {
+                            self.compile_reordered_args(&func_name, args, named);
+                        } else {
+                            for a in args {
+                                self.compile_expr(a);
+                            }
+                        }
+                        if is_input && args.is_empty() {
+                            self.emit_const(Value::Str(String::new().into()));
+                        }
+                        self.emit(Op::Call {
+                            argc: argc as u16,
+                            span: *span,
+                        });
+                    } else if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
                         self.emit(Op::LoadSlot(slot as u16));
                         for part in &parts[1..parts.len() - 1] {
                             self.emit(Op::GetField(part.clone(), *pspan));
+                        }
+                        if is_db_call {
+                            self.compile_db_args(args, *span);
+                            self.emit(Op::CallMethod {
+                                name: parts.last().unwrap().clone(),
+                                argc: self.db_call_argc(args, *span) as u16,
+                                span: *span,
+                            });
+                            // Skip the trailing generic CallMethod below —
+                            // the db call is fully emitted.
+                            return;
                         }
                         if is_range {
                             if args.len() == 1 {
@@ -728,7 +1878,7 @@ impl Compiler {
                             }
                         }
                         if is_input {
-                            self.emit_const(Value::Str(String::new()));
+                            self.emit_const(Value::Str(String::new().into()));
                         }
                         self.emit(Op::CallMethod {
                             name: parts.last().unwrap().clone(),
@@ -736,7 +1886,51 @@ impl Compiler {
                             span: *span,
                         });
                     } else {
-                        if is_range {
+                        // Env-path receiver (e.g. top-level `mydb` lives in
+                        // env, not a slot). Method-form db calls need
+                        // DbQuery treatment here too — same as the slot
+                        // path above. The if/else chain below handles
+                        // emission; guard each generic branch so db args
+                        // are compiled exactly once.
+                        if is_db_call {
+                            match self.resolve(&parts[0]) {
+                                Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
+                                Resolved::Env => self.emit(Op::LoadVar(parts[0].clone(), *pspan)),
+                            }
+                            for part in &parts[1..parts.len() - 1] {
+                                self.emit(Op::GetField(part.clone(), *pspan));
+                            }
+                            self.compile_db_args(args, *span);
+                            self.emit(Op::CallMethod {
+                                name: parts.last().unwrap().clone(),
+                                argc: self.db_call_argc(args, *span) as u16,
+                                span: *span,
+                            });
+                        } else if is_module_db_call {
+                            // Free-function form with explicit receiver
+                            // (`pg.query(db, sql)`): handle is a normal
+                            // arg, SQL splits to template + bound params.
+                            self.compile_module_db_args(args, named, *span);
+                            let argc = self.module_db_call_argc(args, named, *span);
+                            if self
+                                .native_names
+                                .as_ref()
+                                .is_some_and(|n| n.contains(&func_name))
+                            {
+                                self.emit(Op::CallNative {
+                                    name: func_name.clone(),
+                                    argc: argc as u16,
+                                    span: *span,
+                                });
+                            } else {
+                                self.emit(Op::CallPath {
+                                    parts: parts.clone(),
+                                    argc: argc as u16,
+                                    span: *span,
+                                    pspan: *pspan,
+                                });
+                            }
+                        } else if is_range {
                             if args.len() == 1 {
                                 self.emit_const(Value::Int(0));
                                 self.compile_expr(&args[0]);
@@ -752,23 +1946,75 @@ impl Compiler {
                             }
                         } else if has_named_or_defaults {
                             self.compile_reordered_args(&func_name, args, named);
-                        } else {
+                        } else if !is_db_call && !is_module_db_call {
+                            // (db calls already emitted above with CallMethod
+                            // or CallNative; compiling args again would
+                            // duplicate them.)
                             for a in args {
                                 self.compile_expr(a);
                             }
                         }
                         if is_input {
-                            self.emit_const(Value::Str(String::new()));
+                            self.emit_const(Value::Str(String::new().into()));
                         }
-                        self.emit(Op::CallPath {
-                            parts: parts.clone(),
-                            argc: argc as u16,
-                            span: *span,
-                            pspan: *pspan,
-                        });
+                        // (db calls already emitted above — skip so we don't
+                        // emit a second call op.)
+                        if is_db_call || is_module_db_call {
+                            // Already emitted. Do nothing.
+                        } else if !is_range
+                            && !has_named_or_defaults
+                            && self
+                                .native_names
+                                .as_ref()
+                                .is_some_and(|n| n.contains(&func_name))
+                        {
+                            self.emit(Op::CallNative {
+                                name: func_name,
+                                argc: argc as u16,
+                                span: *span,
+                            });
+                        } else {
+                            self.emit(Op::CallPath {
+                                parts: parts.clone(),
+                                argc: argc as u16,
+                                span: *span,
+                                pspan: *pspan,
+                            });
+                        }
                     }
                 }
                 Expr::Field { obj, name, span: _ } => {
+                    // sqlz method form: `mydb.query(sql)` where mydb is a local
+                    // (Field, not Path). Same DbQuery treatment as Path form.
+                    let is_db_method = matches!(name.as_str(), "query" | "exec");
+                    if is_db_method {
+                        self.compile_expr(obj);
+                        let prev = std::mem::replace(&mut self.in_db_query, true);
+                        for a in args {
+                            self.compile_expr(a);
+                        }
+                        self.in_db_query = prev;
+                        for (_, val) in named {
+                            self.compile_expr(val);
+                        }
+                        // argc: template + params (+ struct marker).
+                        // CallMethod pops `argc` args then pops recv, so
+                        // recv is NOT counted here.
+                        let nparams = args.first().map(Self::fmt_param_count).unwrap_or(0);
+                        let mut argc = 1 + nparams + named.len();
+                        if name == "query" && self.db_query_struct(*span).is_some() {
+                            self.emit_const(Value::Str(
+                                format!("__struct:{}", self.db_query_struct(*span).unwrap()).into(),
+                            ));
+                            argc += 1;
+                        }
+                        self.emit(Op::CallMethod {
+                            name: name.clone(),
+                            argc: argc as u16,
+                            span: *span,
+                        });
+                        return;
+                    }
                     self.compile_expr(obj);
                     for a in args {
                         self.compile_expr(a);
@@ -838,7 +2084,7 @@ impl Compiler {
                         }
                     }
                     if is_input {
-                        self.emit_const(Value::Str(String::new()));
+                        self.emit_const(Value::Str(String::new().into()));
                     }
                     self.emit(Op::Call {
                         argc: argc as u16,
@@ -867,16 +2113,45 @@ impl Compiler {
             }
             Expr::Block(b) => self.compile_block(b),
             Expr::Fmt { parts, .. } => {
+                // sqlz context: when this Fmt is the SQL arg of
+                // `sqlz.query`/`sqlz.exec` (+ `db.*` alias), emit DbQuery
+                // so the template and
+                // bound values stay separate (prepared-statement binding,
+                // never string concatenation). Otherwise normal Concat.
+                if self.in_db_query {
+                    let mut nparams = 0u16;
+                    let mut template = String::new();
+                    let mut param_exprs: Vec<&Expr> = Vec::new();
+                    for part in parts {
+                        match part {
+                            FmtPart::Text(t) => template.push_str(t),
+                            FmtPart::Expr(e, _) => {
+                                nparams += 1;
+                                template.push_str(&format!("?{nparams}"));
+                                param_exprs.push(e);
+                            }
+                        }
+                    }
+                    self.emit_const(Value::Str(template.into()));
+                    for e in param_exprs {
+                        self.compile_expr(e);
+                    }
+                    self.emit(Op::DbQuery {
+                        nparams,
+                        span: expr.span(),
+                    });
+                    return;
+                }
                 let mut n = 0u16;
                 for part in parts {
                     match part {
                         FmtPart::Text(t) => {
-                            self.emit_const(Value::Str(t.clone()));
+                            self.emit_const(Value::Str(t.clone().into()));
                             n += 1;
                         }
                         FmtPart::Expr(e, Some(spec)) => {
                             self.compile_expr(e);
-                            self.emit_const(Value::Str(spec.clone()));
+                            self.emit_const(Value::Str(spec.clone().into()));
                             self.emit(Op::FormatValue(e.span()));
                             n += 1;
                         }
@@ -894,14 +2169,27 @@ impl Compiler {
                 self.emit(Op::WhileSetup { exit: 0, header: 0 });
                 self.emit_const(Value::Unit);
                 let header = self.chunk.code.len();
-                self.compile_expr(cond);
+                // Safepoint at the header (not the back-edge) so `continue`
+                // cannot skip the cooperative yield check.
+                self.emit(Op::Safepoint);
+                // Fast path: `a < b` / `a < N` on local slots -> single
+                // fused comparison op instead of LoadSlot/LoadSlot/BinOp.
+                if let Some(op) = self.try_slot_compare(cond) {
+                    self.emit(op);
+                } else {
+                    self.compile_expr(cond);
+                }
                 let j = self.emit_while_cond(*span);
                 let body_needs_env = self.scope_declares_captured(body);
                 if body_needs_env {
                     self.emit(Op::EnterScope);
                 }
                 self.scope_depth += 1;
-                self.compile_block_body(body);
+                if self.compile_block_body(body) {
+                    // Trailing slot declaration (see `compile_block_body`):
+                    // supply the loop-result value `SetLoopResult` pops.
+                    self.emit_const(Value::Unit);
+                }
                 self.scope_depth -= 1;
                 if body_needs_env {
                     self.emit(Op::ExitScope);
@@ -918,6 +2206,12 @@ impl Compiler {
                     self.compile_expr(e);
                 }
                 self.emit(Op::MakeArray(elems.len() as u16));
+            }
+            Expr::Tuple { items, .. } => {
+                for e in items {
+                    self.compile_expr(e);
+                }
+                self.emit(Op::MakeArray(items.len() as u16));
             }
             Expr::ListComp {
                 body,
@@ -936,10 +2230,11 @@ impl Compiler {
                     exit: 0,
                     header: 0,
                     span: *span,
+                    num_vars: 1,
                 });
                 let header = self.chunk.code.len();
                 let in_env = self.captured.contains(&var.name);
-                let j = self.emit_for_next(&var.name, in_env);
+                let j = self.emit_for_next(vec![var.name.clone()], in_env);
                 self.locals.push(Local {
                     name: var.name.clone(),
                     slot: self.stack_height - 1,
@@ -966,6 +2261,7 @@ impl Compiler {
                     exit,
                     header,
                     span: *span,
+                    num_vars: 1,
                 };
                 self.locals.pop();
                 self.stack_height = result_slot + 1;
@@ -979,6 +2275,16 @@ impl Compiler {
             }
             Expr::Field { obj, name, span } => {
                 self.compile_expr(obj);
+                // Type-driven fast path: if the receiver is a known struct
+                // type, resolve the field index at compile time for O(1) access.
+                if let Some(zz_checker::Type::Struct(struct_name)) = self.type_of(obj.span()) {
+                    if let Some(sig) = self.structs.as_ref().and_then(|s| s.get(struct_name)) {
+                        if let Some(idx) = sig.fields.iter().position(|(n, _)| n == name) {
+                            self.emit(Op::GetFieldIdx(idx as u16, *span));
+                            return;
+                        }
+                    }
+                }
                 self.emit(Op::GetField(name.clone(), *span));
             }
             Expr::Range { start, end, span } => {
@@ -1030,41 +2336,126 @@ impl Compiler {
                 arms,
                 span,
             } => {
-                self.compile_expr(scrutinee);
-                let mut arm_positions = Vec::with_capacity(arms.len());
-                let mut body_jumps = Vec::with_capacity(arms.len());
-                for arm in arms {
-                    let pos = self.chunk.code.len();
-                    let has_env = pattern_binds(&arm.pat);
-                    self.emit(Op::MatchArm {
-                        pat: arm.pat.clone(),
-                        next: 0,
-                        has_env,
-                    });
-                    self.compile_expr(&arm.body);
-                    if has_env {
-                        self.emit(Op::ExitScope);
+                // Save scrutinee in a slot. When arms have guards, each
+                // arm reloads from the slot (no push-back on miss). Without
+                // guards, the original single-copy approach works.
+                let has_guards = arms.iter().any(|a| a.guard.is_some());
+                if has_guards {
+                    self.compile_expr(scrutinee);
+                    // Store scrutinee in a temporary variable, then pop
+                    // the stack copy (only env copy remains for reload).
+                    let tmp_name = format!("__match_scrutinee_{}", self.chunk.code.len());
+                    self.emit(Op::DefineVar(tmp_name.clone()));
+                    self.emit(Op::Pop);
+                    let mut arm_positions = Vec::with_capacity(arms.len());
+                    let mut body_jumps = Vec::with_capacity(arms.len());
+                    let mut guard_positions: Vec<usize> = Vec::new();
+                    for arm in arms {
+                        let has_env = pattern_binds(&arm.pat);
+                        self.emit(Op::LoadVar(tmp_name.clone(), *span));
+                        let pos = self.chunk.code.len();
+                        self.emit(Op::MatchArm {
+                            pat: arm.pat.clone(),
+                            next: 0,
+                            has_env,
+                            restore: false,
+                        });
+                        // Compile guard if present
+                        if let Some(guard) = &arm.guard {
+                            guard_positions.push(pos);
+                            self.compile_expr(guard);
+                            let guard_pos = self.chunk.code.len();
+                            self.emit(Op::MatchGuard {
+                                next: 0,
+                                has_env: pattern_binds(&arm.pat),
+                            });
+                            guard_positions.push(guard_pos);
+                        }
+                        self.compile_expr(&arm.body);
+                        if has_env {
+                            self.emit(Op::ExitScope);
+                        }
+                        let j = self.emit_jump(JumpKind::Always);
+                        arm_positions.push(pos);
+                        body_jumps.push(j);
                     }
-                    let j = self.emit_jump(JumpKind::Always);
-                    arm_positions.push(pos);
-                    body_jumps.push(j);
-                }
-                let error_pos = self.chunk.code.len();
-                self.emit(Op::MatchError(*span));
-                for (i, pos) in arm_positions.iter().enumerate() {
-                    let next = if i + 1 < arms.len() {
-                        arm_positions[i + 1]
-                    } else {
-                        error_pos
-                    };
-                    self.chunk.code[*pos] = Op::MatchArm {
-                        pat: arms[i].pat.clone(),
-                        next,
-                        has_env: pattern_binds(&arms[i].pat),
-                    };
-                }
-                for j in body_jumps {
-                    self.patch_jump(j);
+                    let error_pos = self.chunk.code.len();
+                    self.emit(Op::MatchError(*span));
+                    // Patch arm jumps
+                    for (i, pos) in arm_positions.iter().enumerate() {
+                        let next = if i + 1 < arms.len() {
+                            arm_positions[i + 1]
+                        } else {
+                            error_pos
+                        };
+                        self.chunk.code[*pos] = Op::MatchArm {
+                            pat: arms[i].pat.clone(),
+                            next,
+                            has_env: pattern_binds(&arms[i].pat),
+                            restore: false,
+                        };
+                    }
+                    // Patch guard jumps — jump to the LoadVar before the next
+                    // arm's MatchArm (arm_positions[i+1] - 1).
+                    let mut gi = 0;
+                    for (i, arm) in arms.iter().enumerate() {
+                        if arm.guard.is_some() {
+                            let guard_jmp_pos = guard_positions[gi + 1];
+                            let next = if i + 1 < arms.len() {
+                                arm_positions[i + 1] - 1 // LoadVar before MatchArm
+                            } else {
+                                error_pos
+                            };
+                            self.chunk.code[guard_jmp_pos] = Op::MatchGuard {
+                                next,
+                                has_env: pattern_binds(&arms[i].pat),
+                            };
+                            gi += 2;
+                        }
+                    }
+                    for j in body_jumps {
+                        self.patch_jump(j);
+                    }
+                } else {
+                    // No guards: original single-copy approach
+                    self.compile_expr(scrutinee);
+                    let mut arm_positions = Vec::with_capacity(arms.len());
+                    let mut body_jumps = Vec::with_capacity(arms.len());
+                    for arm in arms {
+                        let pos = self.chunk.code.len();
+                        let has_env = pattern_binds(&arm.pat);
+                        self.emit(Op::MatchArm {
+                            pat: arm.pat.clone(),
+                            next: 0,
+                            has_env,
+                            restore: true,
+                        });
+                        self.compile_expr(&arm.body);
+                        if has_env {
+                            self.emit(Op::ExitScope);
+                        }
+                        let j = self.emit_jump(JumpKind::Always);
+                        arm_positions.push(pos);
+                        body_jumps.push(j);
+                    }
+                    let error_pos = self.chunk.code.len();
+                    self.emit(Op::MatchError(*span));
+                    for (i, pos) in arm_positions.iter().enumerate() {
+                        let next = if i + 1 < arms.len() {
+                            arm_positions[i + 1]
+                        } else {
+                            error_pos
+                        };
+                        self.chunk.code[*pos] = Op::MatchArm {
+                            pat: arms[i].pat.clone(),
+                            next,
+                            has_env: pattern_binds(&arms[i].pat),
+                            restore: true,
+                        };
+                    }
+                    for j in body_jumps {
+                        self.patch_jump(j);
+                    }
                 }
             }
             Expr::IfLet {

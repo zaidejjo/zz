@@ -1,0 +1,17 @@
+// E2E: selective/module import aliases resolve identically in VM and AOT.
+// Bare (`sin`), aliased (`rts`), module-aliased (`f.exists`), and wildcard
+// (`length`) calls must all lower to their canonical natives.
+import std.math(sin)
+import std.fs(read_to_string as rts)
+import std.fs as f
+import std.str(length)
+
+func main() {
+    println(sin(0.0))
+    f.write("/tmp/zz_import_alias.txt", "alias-data")
+    println(rts("/tmp/zz_import_alias.txt"))
+    println(f.exists("/tmp/zz_import_alias.txt"))
+    println(length("hello"))
+    f.remove_file("/tmp/zz_import_alias.txt")
+    println("import_alias_ok")
+}

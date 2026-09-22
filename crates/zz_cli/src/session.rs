@@ -9,11 +9,13 @@
 
 use std::collections::HashMap;
 
-use zz_checker::{check_program, FuncSig, StructSig, Type};
+use zz_checker::{check_program_with_consts, FuncSig, StructSig, Type};
 use zz_frontend::diag::{error_at, render_to_string, Files, RawDiag};
 use zz_frontend::parse;
 use zz_runtime::{EvalError, Interp, Value};
-use zz_stdlib::{register_module_namespace, stdlib_funcs, stdlib_natives, STDLIB_MODULES};
+use zz_stdlib::{
+    register_module_namespace, stdlib_funcs, stdlib_natives, zz_stdlib_programs, STDLIB_MODULES,
+};
 
 /// Result of evaluating one source snippet.
 pub struct EvalOutput {
@@ -27,6 +29,9 @@ pub struct Session {
     pub interp: Interp,
     /// Types of top-level bindings from previous snippets (checker seed).
     bindings: HashMap<String, Type>,
+    /// Declaration spans of top-level `const` bindings from previous
+    /// snippets (checker seed) — keeps immutable names immutable in the REPL.
+    consts: HashMap<String, zz_frontend::span::Span>,
     /// Signatures of functions from previous snippets (checker seed).
     funcs: HashMap<String, FuncSig>,
     /// Struct definitions from previous snippets (checker seed).
@@ -42,10 +47,42 @@ impl Session {
         let name = name.into();
         let mut files = Files::new();
         let file_id = files.add(name.clone(), String::new());
+        let mut interp = Interp::with_natives(stdlib_natives());
+
+        // Inject math constants as static float values.
+        // Three forms: fully qualified, module namespace, bare name.
+        for (key, val) in zz_stdlib::stdlib_consts() {
+            interp.env.define(&key, Value::Float(val));
+            if let Some(rest) = key.strip_prefix("std.") {
+                interp.env.define(rest, Value::Float(val));
+            }
+            if let Some(bare) = key.rsplit('.').next() {
+                interp.env.define(bare, Value::Float(val));
+            }
+        }
+
+        // Run compiled pure-ZZ stdlib programs (vec.map, math.sum, etc.).
+        // These populate the environment with functions written in ZZ that
+        // extend the native stdlib. Must happen before user code.
+        let mut funcs = stdlib_funcs();
+        for zz_prog in zz_stdlib_programs() {
+            // Seed the type checker with pure-ZZ function signatures so that
+            // calls like `vec.map(...)` type-check in user snippets.
+            funcs.extend(zz_prog.funcs.clone());
+            if let Err(e) = interp.run_typed(
+                &zz_prog.program,
+                std::sync::Arc::new(zz_prog.types.clone()),
+                zz_prog.structs.clone(),
+            ) {
+                panic!("zz: pure-ZZ stdlib error: {e:?}");
+            }
+        }
+
         Session {
-            interp: Interp::with_natives(stdlib_natives()),
+            interp,
             bindings: HashMap::new(),
-            funcs: stdlib_funcs(),
+            consts: HashMap::new(),
+            funcs,
             structs: HashMap::new(),
             files,
             file_id,
@@ -57,6 +94,40 @@ impl Session {
     /// Whether the most recent `eval` produced errors.
     pub fn last_eval_had_errors(&self) -> bool {
         self.last_had_errors
+    }
+
+    /// Flatten the runtime environment into (name, value) pairs.
+    /// Used by the REPL completer and `:vars` command.
+    pub fn env_vars(&self) -> std::collections::HashMap<String, Value> {
+        self.interp.env.flatten()
+    }
+
+    /// Get the type of a variable by name from the checker seed.
+    pub fn var_type(&self, name: &str) -> Option<&Type> {
+        self.bindings.get(name)
+    }
+
+    /// Get all function signatures (stdlib + user-defined).
+    pub fn funcs(&self) -> &std::collections::HashMap<String, FuncSig> {
+        &self.funcs
+    }
+
+    /// Get all struct definitions.
+    #[allow(dead_code)]
+    pub fn structs(&self) -> &std::collections::HashMap<String, StructSig> {
+        &self.structs
+    }
+
+    /// Get the runtime environment reference (for completion queries).
+    #[allow(dead_code)]
+    pub fn env(&self) -> &zz_runtime::EnvLink {
+        &self.interp.env
+    }
+
+    /// Get native function names (for stdlib completion).
+    #[allow(dead_code)]
+    pub fn native_names(&self) -> Vec<String> {
+        self.interp.natives.keys().cloned().collect()
     }
 
     /// Evaluate source: parse, type-check, then run. The environment is only
@@ -74,11 +145,38 @@ impl Session {
             };
         }
 
+        // Expand explicit decorators before checking/running so the REPL
+        // sees the same lowered `__inner` + wrapper functions as `zz run`.
+        let (expanded_program, decorator_errors) =
+            zz_frontend::decorators::expand_program(&parsed.program);
+        if !decorator_errors.is_empty() {
+            self.last_had_errors = true;
+            return EvalOutput {
+                output: String::new(),
+                errors: Some(render_to_string(
+                    &self.files,
+                    self.file_id,
+                    &decorator_errors,
+                )),
+            };
+        }
+        let parsed = zz_frontend::Parsed {
+            program: expanded_program,
+            errors: Vec::new(),
+        };
+
         // Process imports: register `std.*` modules under their namespace
         // (or alias) in both the checker seed and the interpreter. Relative
         // imports need a file context and are rejected in the REPL.
         for stmt in &parsed.program.stmts {
-            if let zz_frontend::ast::Stmt::Import { path, alias, span } = stmt {
+            if let zz_frontend::ast::Stmt::Import {
+                path,
+                alias,
+                items: _,
+                span,
+                pub_: _,
+            } = stmt
+            {
                 if path.first().map(String::as_str) != Some("std") {
                     self.last_had_errors = true;
                     return EvalOutput {
@@ -93,7 +191,11 @@ impl Session {
                         )),
                     };
                 }
-                let Some(module) = path.get(1) else { continue };
+                if path.len() < 2 {
+                    continue;
+                }
+                // Dotted module key (`std.sqlz.postgres` -> "sqlz.postgres").
+                let module = path[1..].join(".");
                 if !STDLIB_MODULES.contains(&module.as_str()) {
                     self.last_had_errors = true;
                     return EvalOutput {
@@ -108,12 +210,16 @@ impl Session {
                         )),
                     };
                 }
-                let ns = alias.clone().unwrap_or_else(|| module.clone());
+                // Default namespace is the last component:
+                // `import std.sqlz.postgres` -> `postgres.*`.
+                let ns = alias
+                    .clone()
+                    .unwrap_or_else(|| path.last().cloned().unwrap_or_else(|| module.clone()));
                 if let Err(msg) = register_module_namespace(
-                    module,
+                    &module,
                     &ns,
                     &mut self.funcs,
-                    &mut self.interp.natives,
+                    std::sync::Arc::make_mut(&mut self.interp.natives),
                 ) {
                     self.last_had_errors = true;
                     return EvalOutput {
@@ -125,14 +231,36 @@ impl Session {
                         )),
                     };
                 }
+                // Mirror pure-ZZ Env bindings under the alias (e.g. `colors.red`
+                // → `cl.red` for `import std.colors as cl`). Natives are handled
+                // by register_module_namespace; pure-ZZ funcs live in Env.
+                let src_prefix = module.rsplit('.').next().unwrap_or(&module);
+                if ns != src_prefix {
+                    let snap = self.interp.env.flatten();
+                    let keys: Vec<(String, zz_runtime::Value)> = snap
+                        .into_iter()
+                        .filter(|(k, _)| {
+                            k == src_prefix || k.starts_with(&format!("{src_prefix}."))
+                        })
+                        .collect();
+                    for (k, v) in keys {
+                        let alias_key = if k == src_prefix {
+                            ns.clone()
+                        } else {
+                            format!("{ns}{}", &k[src_prefix.len()..])
+                        };
+                        self.interp.env.define(&alias_key, v);
+                    }
+                }
             }
         }
 
-        let checked = check_program(
+        let checked = check_program_with_consts(
             &parsed.program,
             self.bindings.clone(),
             self.funcs.clone(),
             self.structs.clone(),
+            self.consts.clone(),
         );
         let has_errors = checked
             .errors
@@ -151,6 +279,16 @@ impl Session {
                 self.last_had_errors = false;
                 // Seed the checker with this snippet's new top-level types.
                 self.bindings.extend(checked.bindings);
+                // Const spans from this snippet won't be valid in the next
+                // REPL snippet, so replace them with an out-of-bounds sentinel.
+                // The renderer treats u32::MAX spans as cross-snippet references
+                // and emits them as notes instead of source labels.
+                self.consts.extend(
+                    checked
+                        .const_bindings
+                        .into_keys()
+                        .map(|k| (k, zz_frontend::span::Span::new(u32::MAX, u32::MAX))),
+                );
                 self.funcs.extend(checked.funcs);
                 self.structs.extend(checked.structs);
                 EvalOutput {
@@ -184,7 +322,18 @@ fn display_value(v: &Value) -> String {
 }
 
 fn eval_error_to_diag(e: &EvalError) -> Vec<RawDiag> {
-    vec![error_at(e.message.clone(), e.span)]
+    let mut diag = error_at(e.message.clone(), e.span);
+    for (name, _span) in &e.backtrace {
+        if name.is_empty() {
+            diag = diag.with_note("  at <top-level>");
+        } else {
+            diag = diag.with_note(format!("  at {name}"));
+        }
+    }
+    for note in &e.notes {
+        diag = diag.with_note(note.clone());
+    }
+    vec![diag]
 }
 
 #[cfg(test)]
@@ -295,7 +444,7 @@ mod tests {
     #[test]
     fn import_accepted() {
         let mut s = Session::new("<test>");
-        let out = s.eval("import std.io\n1 + 1");
+        let out = s.eval("import std.str\n1 + 1");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "2");
     }
@@ -319,7 +468,7 @@ mod tests {
     #[test]
     fn stdlib_print_any_value() {
         let mut s = Session::new("<test>");
-        let out = s.eval("import std.io\nio.println(42)");
+        let out = s.eval("println(42)");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "");
     }
@@ -337,7 +486,7 @@ mod tests {
     #[test]
     fn stdlib_unknown_func_errors() {
         let mut s = Session::new("<test>");
-        let out = s.eval("import std.io\nio.nope(1)");
+        let out = s.eval("import std.str\nstr.nope(1)");
         assert!(out.errors.is_some(), "expected error");
     }
 
@@ -416,17 +565,18 @@ mod tests {
     #[test]
     fn json_parse_and_get() {
         let mut s = Session::new("<test>");
-        let out =
-            s.eval("import std.json\nj := json.parse(\"{\\\"a\\\": [1, 2]}\")\njson.get(j, \"a\")");
+        let out = s.eval(
+            "import std.json\nj := json.parse(\"{\\\"a\\\": [1, 2]}\") ?? json.null()\njson.get(j, \"a\")",
+        );
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
-        assert_eq!(out.output, "[1,2]");
+        assert_eq!(out.output, ".ok([1,2])");
     }
 
     #[test]
     fn json_as_int() {
         let mut s = Session::new("<test>");
         let out = s.eval(
-            "import std.json\nj := json.parse(\"{\\\"n\\\": 42}\")\njson.as_int(json.get(j, \"n\"))",
+            "import std.json\nj := json.parse(\"{\\\"n\\\": 42}\") ?? json.null()\njson.as_int(json.get(j, \"n\") ?? json.null())",
         );
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "42");
@@ -437,7 +587,7 @@ mod tests {
         let mut s = Session::new("<test>");
         let out = s.eval("import std.json\njson.stringify([1, 2, 3])");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
-        assert_eq!(out.output, "[1,2,3]");
+        assert_eq!(out.output, ".ok([1,2,3])");
     }
 
     #[test]
@@ -445,13 +595,13 @@ mod tests {
         let mut s = Session::new("<test>");
         let out = s.eval("import std.json\njson.stringify({\"name\": \"zaid\"})");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
-        assert_eq!(out.output, r#"{"name":"zaid"}"#);
+        assert_eq!(out.output, r#".ok({"name":"zaid"})"#);
     }
 
     #[test]
     fn json_wrong_access_errors() {
         let mut s = Session::new("<test>");
-        let out = s.eval("import std.json\nj := json.parse(\"[1, 2]\")\njson.as_int(j)");
+        let out = s.eval("import std.json\nj := json.parse(\"[1, 2]\").unwrap()\njson.as_int(j)");
         assert!(out.errors.is_some(), "expected error");
     }
 
@@ -461,7 +611,7 @@ mod tests {
     fn http_get_route() {
         let mut s = Session::new("<test>");
         let out = s.eval(
-            "import std.http\ns := http.server()\ns2 := http.get(s, \"/hi\", |path: str| \"hello\")\nhttp.handle(s2, \"GET\", \"/hi\", \"\")",
+            "import std.http\ns := http.server()\ns2 := http.route_get(s, \"/hi\", |req| \"hello\")\nhttp.handle(s2, \"GET\", \"/hi\", \"\") ?? \"error\"",
         );
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "hello");
@@ -471,7 +621,7 @@ mod tests {
     fn http_post_body_passthrough() {
         let mut s = Session::new("<test>");
         let out = s.eval(
-            "import std.http\ns := http.server()\ns2 := http.post(s, \"/echo\", |body: str| body)\nhttp.handle(s2, \"POST\", \"/echo\", \"ping\")",
+            "import std.http\ns := http.server()\ns2 := http.route_post(s, \"/echo\", |req| req.body)\nhttp.handle(s2, \"POST\", \"/echo\", \"ping\") ?? \"error\"",
         );
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "ping");
@@ -482,7 +632,13 @@ mod tests {
         let mut s = Session::new("<test>");
         let out =
             s.eval("import std.http\ns := http.server()\nhttp.handle(s, \"GET\", \"/nope\", \"\")");
-        assert!(out.errors.is_some(), "expected error");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        // Result::Err — the output renders as .err(...)
+        assert!(
+            out.output.starts_with(".err("),
+            "expected .err(...), got: {}",
+            out.output
+        );
     }
 
     // --- structs -----------------------------------------------------------
@@ -661,5 +817,47 @@ mod tests {
         let out = s.eval("import std.math\nmath.abs(-7)");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "7");
+    }
+
+    // --- Phase 3: pure-ZZ stdlib tests ------------------------------------
+
+    #[test]
+    fn pure_zz_math_sum_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.math\nmath.sum([1, 2, 3, 4])");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "10");
+    }
+
+    #[test]
+    fn pure_zz_math_product_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.math\nmath.product([2, 3, 4])");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "24");
+    }
+
+    #[test]
+    fn pure_zz_math_count_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.math\nmath.count([1, 2, 3, 2, 2], 2)");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "3");
+    }
+
+    #[test]
+    fn pure_zz_str_repeat_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.str\nstr.repeat(\"ab\", 3)");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "ababab");
+    }
+
+    #[test]
+    fn pure_zz_str_count_in_session() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("import std.str\nstr.count(\"aabaa\", \"aa\")");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        assert_eq!(out.output, "2");
     }
 }

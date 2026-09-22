@@ -7,6 +7,9 @@ pub mod checker;
 pub mod type_;
 pub mod unify;
 
-pub use checker::{check_program, CheckResult, FuncSig, StructSig};
+pub use checker::{
+    check_program, check_program_typed, check_program_with_consts, CheckResult, ConvertImpl,
+    FuncSig, StructSig,
+};
 pub use type_::Type;
 pub use unify::{Unifier, UnifyError};

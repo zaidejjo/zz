@@ -1,0 +1,10 @@
+// Helper module for selective import tests.
+pub func double(x: int) -> int {
+    x * 2
+}
+
+pub func triple(x: int) -> int {
+    x * 3
+}
+
+pub PI := 314

@@ -1,0 +1,11 @@
+// E2E: selective import from stdlib — no module prefix needed.
+import std.math(PI, sqrt, abs)
+
+pi_val := PI
+sq := sqrt(9.0)
+ab := abs(-42)
+
+println(pi_val)
+println(sq)
+println(ab)
+println("selective_import_ok")

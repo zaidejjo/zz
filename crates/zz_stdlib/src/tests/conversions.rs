@@ -3,16 +3,22 @@ use zz_runtime::Value;
 
 #[test]
 fn conv_str() {
-    assert_eq!(run("str(42)").unwrap(), Value::Str("42".to_string()));
-    assert_eq!(run("str(3.5)").unwrap(), Value::Str("3.5".to_string()));
-    assert_eq!(run("str(true)").unwrap(), Value::Str("true".to_string()));
+    assert_eq!(run("str(42)").unwrap(), Value::Str("42".to_string().into()));
+    assert_eq!(
+        run("str(3.5)").unwrap(),
+        Value::Str("3.5".to_string().into())
+    );
+    assert_eq!(
+        run("str(true)").unwrap(),
+        Value::Str("true".to_string().into())
+    );
     assert_eq!(
         run("str([1, 2])").unwrap(),
-        Value::Str("[1, 2]".to_string())
+        Value::Str("[1, 2]".to_string().into())
     );
     assert_eq!(
         run("str({\"a\": 1})").unwrap(),
-        Value::Str("{a: 1}".to_string())
+        Value::Str("{a: 1}".to_string().into())
     );
 }
 
@@ -40,17 +46,12 @@ fn conv_int() {
 
 #[test]
 fn conv_float() {
-    assert_eq!(
-        run("float(\"2.5\")").unwrap(),
-        Value::Option(Some(Box::new(Value::Float(2.5))))
-    );
-    assert_eq!(run("float(\"x\")").unwrap(), Value::Option(None));
-    assert_eq!(
-        run("float(3)").unwrap(),
-        Value::Option(Some(Box::new(Value::Float(3.0))))
-    );
-    assert_eq!(
-        run("float(1.5)").unwrap(),
-        Value::Option(Some(Box::new(Value::Float(1.5))))
-    );
+    assert_eq!(run("float(\"2.5\")").unwrap(), Value::Float(2.5));
+    // Invalid parse returns NaN (not Option::None).
+    match run("float(\"x\")").unwrap() {
+        Value::Float(f) => assert!(f.is_nan()),
+        other => panic!("expected float NaN, got {:?}", other),
+    }
+    assert_eq!(run("float(3)").unwrap(), Value::Float(3.0));
+    assert_eq!(run("float(1.5)").unwrap(), Value::Float(1.5));
 }

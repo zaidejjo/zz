@@ -1,0 +1,7 @@
+// Match guards
+x := 10
+match x {
+    n if n > 5 => println("big")
+    n if n < 5 => println("small")
+    _ => println("other")
+}

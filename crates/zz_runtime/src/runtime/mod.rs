@@ -8,13 +8,10 @@
 pub mod format;
 pub mod ops;
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use zz_frontend::span::Span;
 
-use crate::env::Env;
 use crate::value::{FuncValue, Value};
 
 // Re-exports for convenience.
@@ -25,6 +22,10 @@ pub use crate::value::{FuncValue as FuncValueReexport, Value as ValueReexport};
 pub struct EvalError {
     pub message: String,
     pub span: Span,
+    /// Call stack at the time of the error: (function_name, call_site_span).
+    pub backtrace: Vec<(String, Span)>,
+    /// Extra `= ...` note lines rendered under the error (e.g. hints).
+    pub notes: Vec<String>,
 }
 
 impl EvalError {
@@ -32,19 +33,50 @@ impl EvalError {
         EvalError {
             message: message.into(),
             span,
+            backtrace: Vec::new(),
+            notes: Vec::new(),
         }
+    }
+
+    /// Loud internal error for a green-thread `Yield` that reached code
+    /// which cannot suspend (interpreter frames live on the Rust call
+    /// stack). Blocking natives park the thread instead whenever such
+    /// frames are above them, so this is always a bug.
+    pub fn yield_escape() -> Self {
+        EvalError::new(
+            "internal error: green-thread yield across interpreter frames",
+            Span::new(0, 0),
+        )
+    }
+
+    pub fn with_backtrace(mut self, bt: Vec<(String, Span)>) -> Self {
+        self.backtrace = bt;
+        self
+    }
+
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.notes.push(note.into());
+        self
+    }
+
+    pub fn with_notes(mut self, notes: Vec<String>) -> Self {
+        self.notes.extend(notes);
+        self
     }
 }
 
 /// Result of evaluating an expression or statement. `Return` unwinds the
 /// call stack until the enclosing function call catches it; `Break` and
-/// `Continue` unwind to the enclosing loop.
+/// `Continue` unwind to the enclosing loop. `Yield` suspends a green-thread
+/// task at a blocking call (`chan.recv`/`task.join` on an unready object);
+/// only the executor produces or consumes it.
 #[derive(Debug)]
-pub(crate) enum Flow {
+pub enum Flow {
     Value(Value),
     Return(Value),
-    Break,
-    Continue,
+    Break(Span),
+    Continue(Span),
+    Yield(crate::value::YieldReason),
 }
 
 impl Flow {
@@ -55,9 +87,10 @@ impl Flow {
                 "`return` outside of a function",
                 Span::new(0, 0),
             )),
-            Flow::Break => Err(EvalError::new("`break` outside of a loop", Span::new(0, 0))),
-            Flow::Continue => Err(EvalError::new(
-                "`continue` outside of a loop",
+            Flow::Break(span) => Err(EvalError::new("`break` outside of a loop", span)),
+            Flow::Continue(span) => Err(EvalError::new("`continue` outside of a loop", span)),
+            Flow::Yield(_) => Err(EvalError::new(
+                "internal error: green-thread yield escaped its executor",
                 Span::new(0, 0),
             )),
         }
@@ -65,10 +98,11 @@ impl Flow {
 }
 
 /// A native function implementation. Receives the interpreter (so natives
-/// can call back into ZZ, e.g. HTTP route handlers) and the argument vector
-/// (a `Vec`, not a slice, because `std.vec.push` must grow it).
+/// can call back into ZZ, e.g. HTTP route handlers), the argument vector
+/// (a `Vec`, not a slice, because `std.vec.push` must grow it), and the
+/// call-site span for accurate error reporting.
 #[allow(clippy::ptr_arg)]
-pub type NativeFn = fn(&mut crate::eval::Interp, &mut Vec<Value>) -> Result<Value, EvalError>;
+pub type NativeFn = fn(&mut crate::eval::Interp, &mut Vec<Value>, Span) -> Result<Value, EvalError>;
 
 /// A registered native function: its arity and Rust implementation.
 #[derive(Debug, Clone, Copy)]
@@ -81,7 +115,7 @@ pub struct NativeEntry {
 /// both the tree-walker and the bytecode VM can operate on the same
 /// underlying state.
 pub struct RuntimeState {
-    pub env: Rc<RefCell<Env>>,
+    pub env: crate::env::EnvLink,
     /// Named functions, kept separate from the environment so recursive
     /// bodies can resolve their own name without circular captured envs.
     pub funcs: HashMap<String, FuncValue>,
@@ -106,7 +140,7 @@ impl Default for RuntimeState {
 impl RuntimeState {
     pub fn new() -> Self {
         RuntimeState {
-            env: Rc::new(RefCell::new(Env::new())),
+            env: crate::env::EnvLink::new(),
             funcs: HashMap::new(),
             natives: HashMap::new(),
             structs: HashMap::new(),
@@ -118,7 +152,7 @@ impl RuntimeState {
     /// Create a runtime state with a native function registry.
     pub fn with_natives(natives: HashMap<String, NativeEntry>) -> Self {
         RuntimeState {
-            env: Rc::new(RefCell::new(Env::new())),
+            env: crate::env::EnvLink::new(),
             funcs: HashMap::new(),
             natives,
             structs: HashMap::new(),

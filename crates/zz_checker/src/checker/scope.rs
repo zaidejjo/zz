@@ -3,7 +3,7 @@
 use crate::checker::Checker;
 use crate::type_::Type;
 use zz_frontend::diag::{error_at, warning_at, FixIt};
-use zz_frontend::levenshtein::suggest_all;
+use zz_frontend::levenshtein::{suggest_all, suggest_dotted};
 use zz_frontend::span::Span;
 
 impl Checker {
@@ -12,6 +12,7 @@ impl Checker {
     pub(crate) fn push_scope(&mut self) {
         self.env.push(std::collections::HashMap::new());
         self.defined_names.push(std::collections::HashMap::new());
+        self.const_env.push(std::collections::HashMap::new());
     }
 
     /// Strip the module prefix from a name for display.
@@ -28,7 +29,10 @@ impl Checker {
         if let Some(defined) = self.defined_names.pop() {
             for (name, span) in &defined {
                 let display = Self::display_name(name);
-                if !self.used_names.contains(name) && !display.starts_with('_') {
+                if !self.used_names.contains(name)
+                    && !self.pub_names.contains(name)
+                    && !display.starts_with('_')
+                {
                     let fixit_name = format!("_{display}");
                     self.errors.push(
                         warning_at(
@@ -48,6 +52,7 @@ impl Checker {
             }
         }
         self.env.pop();
+        self.const_env.pop();
     }
 
     pub(crate) fn define(&mut self, name: &str, ty: Type) {
@@ -62,6 +67,39 @@ impl Checker {
         }
     }
 
+    /// Define a variable, recording its immutability when `is_const`.
+    pub(crate) fn define_var_at(&mut self, name: &str, ty: Type, span: Span, is_const: bool) {
+        if is_const {
+            self.define_const_at(name, ty, span);
+        } else {
+            self.define_at(name, ty, span);
+        }
+    }
+
+    /// Define an immutable (`const`) variable, remembering its declaration
+    /// span so reassignment errors can point back at it.
+    pub(crate) fn define_const_at(&mut self, name: &str, ty: Type, span: Span) {
+        self.define_at(name, ty, span);
+        if let Some(scope) = self.const_env.last_mut() {
+            scope.insert(name.to_string(), span);
+        }
+    }
+
+    /// If `name` resolves to a `const` binding, return its declaration span.
+    /// Shadowing-aware: only the scope that actually binds the name is
+    /// consulted, so an inner mutable shadow of an outer const is mutable.
+    pub(crate) fn lookup_const_span(&mut self, name: &str) -> Option<Span> {
+        for (i, scope) in self.env.iter().enumerate().rev() {
+            if scope.contains_key(name) {
+                if let Some(s) = self.const_env[i].get(name) {
+                    return Some(*s);
+                }
+                return None;
+            }
+        }
+        None
+    }
+
     /// Emit unused-variable warnings for the global scope (scope index 0).
     /// The global scope is never popped, so `pop_scope`'s check does not
     /// fire for top-level definitions. Also emits unused-import warnings.
@@ -73,7 +111,10 @@ impl Checker {
                 defined.iter().map(|(k, &v)| (k.clone(), v)).collect();
             for (name, span) in &entries {
                 let display = Self::display_name(name);
-                if !self.used_names.contains(name) && !display.starts_with('_') {
+                if !self.used_names.contains(name)
+                    && !self.pub_names.contains(name)
+                    && !display.starts_with('_')
+                {
                     let fixit_name = format!("_{display}");
                     self.errors.push(
                         warning_at(
@@ -172,9 +213,8 @@ impl Checker {
                 // stdlib pattern, suggest adding the import.
                 if let Some((module, _func)) = name.split_once('.') {
                     let std_module = match module {
-                        "io" | "str" | "vec" | "json" | "http" | "fs" | "env" | "math" | "time" => {
-                            Some(module)
-                        }
+                        "io" | "str" | "vec" | "json" | "http" | "fs" | "env" | "math" | "time"
+                        | "sqlz" | "db" => Some(module),
                         _ => None,
                     };
                     if let Some(mod_name) = std_module {
@@ -239,7 +279,30 @@ impl Checker {
             for key in self.structs.keys() {
                 candidates.push(key);
             }
+            // A lone namespace head (`env` in `env.tmp_dir(...)`) is a
+            // receiver probe, not a missing value: stay silent here and
+            // let the caller's joined-name check report (with its typo
+            // hint). Bare `env` as a value still errors via `lookup`.
+            if parts.len() == 1 {
+                let prefix = format!("{}.", parts[0]);
+                if candidates.iter().any(|c| c.starts_with(&prefix)) {
+                    return Type::Error;
+                }
+            }
             let mut diag = error_at(format!("undefined variable `{joined}`"), span);
+            // Dotted paths (`env.tmp_dir`) match segment-wise first:
+            // whole-string Levenshtein drowns a 1-char tail typo in the
+            // shared prefix. Falls back to root-name suggestions.
+            if parts.len() >= 2 {
+                if let Some(dotted) = suggest_dotted(&joined, &candidates) {
+                    diag = diag.with_note(format!("did you mean `{dotted}`?"));
+                    diag =
+                        diag.with_fixit(FixIt::safe(span, dotted.to_string(), "replace variable"));
+                    self.errors.push(diag);
+                    self.had_undefined_var = true;
+                    return Type::Error;
+                }
+            }
             let all = suggest_all(&parts[0], &candidates);
             if let Some((suggestion, _)) = all.first() {
                 diag = diag.with_note(format!("did you mean `{suggestion}`?"));
@@ -259,37 +322,49 @@ impl Checker {
         let mut ty = root;
         for field in &parts[1..] {
             match self.unifier.resolve(&ty) {
-                Type::Struct(name) => match self.structs.get(&name) {
+                Type::Struct(name) => match self.structs.get(&name).cloned() {
                     Some(sig) => match sig.fields.iter().find(|(n, _)| n == field) {
                         Some((_, ft)) => ty = ft.clone(),
-                        None => {
-                            // Suggest closest field name.
-                            let field_names: Vec<&str> =
-                                sig.fields.iter().map(|(n, _)| n.as_str()).collect();
-                            let mut diag =
-                                error_at(format!("struct `{name}` has no field `{field}`"), span);
-                            let all = suggest_all(field, &field_names);
-                            if let Some((suggestion, _)) = all.first() {
-                                diag =
-                                    diag.with_note(format!("did you mean field `{suggestion}`?"));
-                                let field_span = Span::new(span.end - field.len() as u32, span.end);
-                                let fixit = if all.len() == 1 {
-                                    FixIt::safe(field_span, suggestion.to_string(), "replace field")
-                                } else {
-                                    let alts: Vec<String> =
-                                        all.iter().map(|(s, _)| s.to_string()).collect();
-                                    FixIt::ambiguous(
-                                        field_span,
-                                        suggestion.to_string(),
-                                        "replace field",
-                                        alts,
-                                    )
-                                };
-                                diag = diag.with_fixit(fixit);
+                        None => match self.resolve_struct_field(&name, field) {
+                            // Promoted through an embedded struct.
+                            Some(ft) => ty = ft,
+                            None => {
+                                // Suggest closest field name (including promoted fields).
+                                let visible = self.all_visible_fields(&name);
+                                let field_names: Vec<&str> =
+                                    visible.iter().map(|n| n.as_str()).collect();
+                                let mut diag = error_at(
+                                    format!("struct `{name}` has no field `{field}`"),
+                                    span,
+                                );
+                                let all = suggest_all(field, &field_names);
+                                if let Some((suggestion, _)) = all.first() {
+                                    diag = diag
+                                        .with_note(format!("did you mean field `{suggestion}`?"));
+                                    let field_span =
+                                        Span::new(span.end - field.len() as u32, span.end);
+                                    let fixit = if all.len() == 1 {
+                                        FixIt::safe(
+                                            field_span,
+                                            suggestion.to_string(),
+                                            "replace field",
+                                        )
+                                    } else {
+                                        let alts: Vec<String> =
+                                            all.iter().map(|(s, _)| s.to_string()).collect();
+                                        FixIt::ambiguous(
+                                            field_span,
+                                            suggestion.to_string(),
+                                            "replace field",
+                                            alts,
+                                        )
+                                    };
+                                    diag = diag.with_fixit(fixit);
+                                }
+                                self.errors.push(diag);
+                                return Type::Error;
                             }
-                            self.errors.push(diag);
-                            return Type::Error;
-                        }
+                        },
                     },
                     None => {
                         self.errors
@@ -297,6 +372,18 @@ impl Checker {
                         return Type::Error;
                     }
                 },
+                Type::Dict(k, v) => {
+                    // Dict field access: req.body returns the value type
+                    if let Err(e) = self.unifier.unify(&Type::Str, &k) {
+                        self.report_mismatch(e, span);
+                    }
+                    ty = *v;
+                }
+                Type::Var(_) => {
+                    // Inference variable — not yet resolved (e.g. untyped closure param).
+                    // Return a fresh var; unification will catch real mismatches later.
+                    ty = self.unifier.fresh_var();
+                }
                 other => {
                     self.errors.push(error_at(
                         format!("cannot access field `{field}` on a value of type `{other}`"),

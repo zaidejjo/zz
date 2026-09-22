@@ -1,0 +1,24 @@
+// AU18 KNOWN-FAIL (audit MAJOR-5): green closure containing a nested
+// spawn literal that captures an outer variable. Currently rejected at
+// C-compile time (`_gcell1`/`zz_fr` undeclared in the child's scope):
+// the nested closure routes its capture through the parent's green frame
+// cell instead of its own env. The same shape WITHOUT the capture builds
+// fine, isolating the hole to capture-through-greencell. Kept as a
+// regression guard for the lowerer fix.
+import std.task
+import std.chan
+
+func main() {
+    c := std.chan()
+    h := task.spawn(|_| {
+        g := task.spawn(|_| {
+            v := 0
+            v = std.chan.recv(c)
+            v
+        })
+        w := 0
+        w = std.chan.recv(c)
+        w
+    })
+    println("built_ok")
+}

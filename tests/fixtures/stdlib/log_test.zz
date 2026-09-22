@@ -1,0 +1,67 @@
+// E2E: std.log — levels, filtering, file sink, JSON format, spans
+import std.log
+import std.fs
+import std.str
+import std.time
+
+// NOTE: needles live in bindings — string literals inside `{...}`
+// interpolation do not support escapes. Logs go to stderr (and the file
+// sink); stdout carries only println checks + the final marker.
+
+// ── levels ──
+bogus := "bogus"
+println("level0: {log.get_level()}")
+log.set_level("debug")
+println("level1: {log.get_level()}")
+println("level_bad: {log.set_level(bogus)}")
+println("level2: {log.get_level()}")
+
+// ── text mode to file, with filtering ──
+logpath := "/tmp/zz_log_test.txt"
+needle_info := "hello-text"
+needle_warn := "warn-text"
+needle_sup := "suppressed-info"
+needle_err := "shown-error"
+log.set_format("text")
+log.to_file(logpath)
+log.info(needle_info)
+log.warn(needle_warn)
+log.set_level("error")
+log.info(needle_sup)
+log.error(needle_err)
+log.set_level("debug")
+log.to_stderr()
+
+empty := ""
+body := fs.read_to_string(logpath) ?? empty
+println("has_info: {str.contains(body, needle_info)}")
+println("has_warn: {str.contains(body, needle_warn)}")
+if str.contains(body, needle_sup) {
+    println("suppressed_bad")
+} else {
+    println("suppressed_ok")
+}
+println("has_error: {str.contains(body, needle_err)}")
+
+// ── JSON mode to file ──
+jsonpath := "/tmp/zz_log_json_test.txt"
+lvl := "{\"level\":\"info\","
+jmsg := "\"msg\":\"hello-json\""
+jhello := "hello-json"
+log.set_format("json")
+log.to_file(jsonpath)
+log.info(jhello)
+log.to_stderr()
+log.set_format("text")
+jbody := fs.read_to_string(jsonpath) ?? empty
+println("json_level: {str.contains(jbody, lvl)}")
+println("json_msg: {str.contains(jbody, jmsg)}")
+
+// ── spans measure elapsed microseconds ──
+sp := log.span_begin("work")
+time.sleep_micros(20000)
+us := sp.end()
+println("span_us: {us >= 20000}")
+println("span_sane: {us < 20000000000}")
+
+println("log_ok")

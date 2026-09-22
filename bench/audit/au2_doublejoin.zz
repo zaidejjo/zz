@@ -1,0 +1,11 @@
+// AU2 double-join aliasing: same handle joined twice, array result.
+// If join results alias without retain, scope-end releases double-free.
+import std.task
+
+func main() {
+    h := task.spawn(|_| { [1, 2, 3] })
+    a: [int] = task.join(h)
+    b: [int] = task.join(h)
+    println("m={a[1]} n={b[0]}")
+    println("doublejoin_ok")
+}

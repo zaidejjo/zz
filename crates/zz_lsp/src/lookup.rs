@@ -88,6 +88,24 @@ fn collect_stmt_defs(stmt: &Stmt, source: &str, defs: &mut HashMap<u32, Definiti
                 );
             }
         }
+        Stmt::Impl { name, methods, .. } => {
+            let type_name = name.join(".");
+            for method in methods {
+                if let Stmt::Func { name: mname, .. } = method {
+                    let full_name = format!("{}.{}", type_name, mname.join("."));
+                    if let Some(s) = find_name_in_source(source, &full_name) {
+                        defs.insert(
+                            s.start,
+                            Definition {
+                                name: full_name,
+                                span: s,
+                                kind: DefKind::Func,
+                            },
+                        );
+                    }
+                }
+            }
+        }
         Stmt::Decl { name, value, .. } => {
             defs.insert(
                 name.span.start,
@@ -100,16 +118,18 @@ fn collect_stmt_defs(stmt: &Stmt, source: &str, defs: &mut HashMap<u32, Definiti
             collect_expr_defs(value, source, defs);
         }
         Stmt::For {
-            var, iter, body, ..
+            vars, iter, body, ..
         } => {
-            defs.insert(
-                var.span.start,
-                Definition {
-                    name: var.name.clone(),
-                    span: var.span,
-                    kind: DefKind::Var,
-                },
-            );
+            for v in vars {
+                defs.insert(
+                    v.span.start,
+                    Definition {
+                        name: v.name.clone(),
+                        span: v.span,
+                        kind: DefKind::Var,
+                    },
+                );
+            }
             collect_expr_defs(iter, source, defs);
             collect_block_defs(body, source, defs);
         }
@@ -140,6 +160,20 @@ fn collect_stmt_defs(stmt: &Stmt, source: &str, defs: &mut HashMap<u32, Definiti
         }
         Stmt::Expr(e) => collect_expr_defs(e, source, defs),
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::ExternBlock { items, .. } => {
+            for item in items {
+                defs.insert(
+                    item.name.span.start,
+                    Definition {
+                        name: item.name.name.clone(),
+                        span: item.name.span,
+                        kind: DefKind::Func,
+                    },
+                );
+            }
+        }
+        Stmt::Link { .. } => {}
+        Stmt::Destructure { value, .. } => collect_expr_defs(value, source, defs),
     }
 }
 
@@ -226,6 +260,11 @@ fn collect_pattern_defs(pat: &Pattern, defs: &mut HashMap<u32, Definition>) {
         Pattern::Variant {
             arg: Some(inner), ..
         } => collect_pattern_defs(inner, defs),
+        Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
+            for p in pats {
+                collect_pattern_defs(p, defs);
+            }
+        }
         _ => {}
     }
 }
@@ -301,9 +340,11 @@ fn walk_stmt<'a>(stmt: &'a Stmt, source: &str, offset: u32, result: &mut NodeAtO
             walk_block(body, source, offset, result);
         }
         Stmt::For {
-            var, iter, body, ..
+            vars, iter, body, ..
         } => {
-            check_ident(var, offset, result);
+            for v in vars {
+                check_ident(v, offset, result);
+            }
             walk_expr(iter, source, offset, result);
             walk_block(body, source, offset, result);
         }
@@ -328,6 +369,28 @@ fn walk_stmt<'a>(stmt: &'a Stmt, source: &str, offset: u32, result: &mut NodeAtO
         Stmt::Defer { expr, .. } => walk_expr(expr, source, offset, result),
         Stmt::Import { .. } => {}
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::ExternBlock { items, .. } => {
+            for item in items {
+                check_ident(&item.name, offset, result);
+            }
+        }
+        Stmt::Link { .. } => {}
+        Stmt::Destructure { pat, value, .. } => {
+            walk_pattern(pat, source, offset, result);
+            walk_expr(value, source, offset, result);
+        }
+        Stmt::Impl { name, methods, .. } => {
+            let joined = name.join(".");
+            if let Some(name_span) = find_name_in_source(source, &joined) {
+                if offset >= name_span.start && offset < name_span.end {
+                    result.name = Some(joined);
+                    result.name_span = Some(name_span);
+                }
+            }
+            for method in methods {
+                walk_stmt(method, source, offset, result);
+            }
+        }
         Stmt::Expr(e) => walk_expr(e, source, offset, result),
     }
 }
@@ -335,6 +398,25 @@ fn walk_stmt<'a>(stmt: &'a Stmt, source: &str, offset: u32, result: &mut NodeAtO
 fn walk_block<'a>(block: &'a Block, source: &str, offset: u32, result: &mut NodeAtOffset<'a>) {
     for stmt in &block.stmts {
         walk_stmt(stmt, source, offset, result);
+    }
+}
+
+fn walk_pattern<'a>(pat: &'a Pattern, _source: &str, offset: u32, result: &mut NodeAtOffset<'a>) {
+    let span = pat.span();
+    if offset < span.start || offset >= span.end {
+        return;
+    }
+    match pat {
+        Pattern::Binding { name } => {
+            result.name = Some(name.name.clone());
+            result.name_span = Some(name.span);
+        }
+        Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
+            for p in pats {
+                walk_pattern(p, _source, offset, result);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -471,7 +553,7 @@ fn check_ident(ident: &Ident, offset: u32, result: &mut NodeAtOffset<'_>) {
     }
 }
 
-/// For a dotted path like `std.io.println`, if the cursor is on `println`
+/// For a dotted path like `std.str.length`, if the cursor is on `length`
 /// (the last part), return `"println"`. Otherwise return the matched part.
 fn pick_path_part(parts: &[String], span: Span, offset: u32) -> String {
     if parts.len() == 1 {
@@ -757,15 +839,17 @@ fn collect_name_refs_in_stmt(stmt: &Stmt, name: &str, refs: &mut Vec<Reference>)
             collect_name_refs_in_expr(value, name, refs);
         }
         Stmt::For {
-            var, iter, body, ..
+            vars, iter, body, ..
         } => {
-            if var.name == name {
-                let already = refs.iter().any(|r| r.span == var.span);
-                if !already {
-                    refs.push(Reference {
-                        span: var.span,
-                        is_definition: false,
-                    });
+            for v in vars {
+                if v.name == name {
+                    let already = refs.iter().any(|r| r.span == v.span);
+                    if !already {
+                        refs.push(Reference {
+                            span: v.span,
+                            is_definition: false,
+                        });
+                    }
                 }
             }
             collect_name_refs_in_expr(iter, name, refs);
@@ -781,8 +865,18 @@ fn collect_name_refs_in_stmt(stmt: &Stmt, name: &str, refs: &mut Vec<Reference>)
             collect_name_refs_in_expr(value, name, refs);
         }
         Stmt::Defer { expr, .. } => collect_name_refs_in_expr(expr, name, refs),
+        Stmt::Destructure { value, .. } => collect_name_refs_in_expr(value, name, refs),
+        Stmt::Impl { methods, .. } => {
+            for method in methods {
+                collect_name_refs_in_stmt(method, name, refs);
+            }
+        }
         Stmt::Expr(e) => collect_name_refs_in_expr(e, name, refs),
-        Stmt::Import { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Import { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::ExternBlock { .. }
+        | Stmt::Link { .. } => {}
     }
 }
 
@@ -996,13 +1090,15 @@ fn collect_hl_stmt(stmt: &Stmt, name: &str, source: &str, out: &mut Vec<Highligh
             collect_hl_expr(value, name, out);
         }
         Stmt::For {
-            var, iter, body, ..
+            vars, iter, body, ..
         } => {
-            if var.name == name {
-                out.push(Highlight {
-                    span: var.span,
-                    kind: HighlightKind::Write,
-                });
+            for v in vars {
+                if v.name == name {
+                    out.push(Highlight {
+                        span: v.span,
+                        kind: HighlightKind::Write,
+                    });
+                }
             }
             collect_hl_expr(iter, name, out);
             collect_hl_block(body, name, source, out);
@@ -1017,8 +1113,18 @@ fn collect_hl_stmt(stmt: &Stmt, name: &str, source: &str, out: &mut Vec<Highligh
             collect_hl_expr(value, name, out);
         }
         Stmt::Defer { expr, .. } => collect_hl_expr(expr, name, out),
+        Stmt::Destructure { value, .. } => collect_hl_expr(value, name, out),
+        Stmt::Impl { methods, .. } => {
+            for method in methods {
+                collect_hl_stmt(method, name, source, out);
+            }
+        }
         Stmt::Expr(e) => collect_hl_expr(e, name, out),
-        Stmt::Import { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Import { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::ExternBlock { .. }
+        | Stmt::Link { .. } => {}
     }
 }
 
@@ -1242,7 +1348,7 @@ mod tests {
 
     #[test]
     fn find_node_at_path() {
-        let source = "import std.io\nstd.io.println(\"hi\")\n";
+        let source = "import std.str\nstr.length(\"hi\")\n";
         let parsed = parse(source);
         // Offset 20 should be somewhere in the import or the call.
         let node = find_node_at(&parsed.program, source, 20);

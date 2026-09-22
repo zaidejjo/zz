@@ -1,0 +1,28 @@
+// E2E: first-class `bytes` — contiguous buffers from `fs.read_bytes` /
+// `fs.read_chunk_bytes` with O(1) index / len / slice / iteration.
+// Same output on VM and AOT.
+import std.fs
+
+func main() {
+    match fs.read_bytes("tests/fixtures/stdlib/data/sample.tar") {
+        .ok(b) => {
+            println(typeof(b))
+            println(len(b))
+            println(b.len())
+            println(b[0])
+            println(b[-1])
+            println(b[0:5])
+            s := b[0:5]
+            println(len(s))
+            println(s[0])
+            println(len(s[1:4]))
+            total := 0
+            for x in b[0:5] {
+                total = total + x
+            }
+            println(total)
+            println("bytes_ok")
+        }
+        .err(e) => println("read_err: {e}")
+    }
+}

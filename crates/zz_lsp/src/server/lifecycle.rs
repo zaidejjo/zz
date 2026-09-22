@@ -58,8 +58,8 @@ pub(crate) async fn handle_initialize(
             }),
             document_formatting_provider: Some(OneOf::Left(true)),
             folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
-            semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
-                SemanticTokensOptions {
+            semantic_tokens_provider: Some(
+                SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
                     legend: SemanticTokensLegend {
                         token_types: crate::semantic_tokens::token_type_legend(),
                         token_modifiers: vec![],
@@ -67,8 +67,8 @@ pub(crate) async fn handle_initialize(
                     range: Some(true),
                     full: Some(SemanticTokensFullOptions::Bool(true)),
                     ..Default::default()
-                },
-            )),
+                }),
+            ),
             ..Default::default()
         },
         server_info: Some(ServerInfo {
@@ -97,6 +97,9 @@ pub(crate) async fn handle_did_change_workspace_folders(
     backend.state.scan_workspace_async();
     backend
         .client
-        .log_message(MessageType::INFO, "workspace folders changed, rescan complete")
+        .log_message(
+            MessageType::INFO,
+            "workspace folders changed, rescan complete",
+        )
         .await;
 }

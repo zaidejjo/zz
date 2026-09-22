@@ -40,7 +40,7 @@ pub fn levenshtein(a: &str, b: &str) -> u32 {
     let shorter_len = alen.min(blen);
     let threshold = max_distance_by_len(shorter_len);
     if len_diff > threshold {
-        return len_diff as u32;
+        return len_diff;
     }
 
     // Single-row DP.
@@ -146,9 +146,85 @@ pub fn suggest_all<'a>(name: &str, candidates: &[&'a str]) -> Vec<(&'a str, u32)
         .collect()
 }
 
+/// Suggest a correction for a dotted path (`env.tmp_dir` → `env.temp_dir`).
+///
+/// Plain Levenshtein over the whole string misses these: the shared
+/// `env.` prefix plus a 1-char tail typo already exceeds the threshold.
+/// Instead, match segment-wise — a candidate qualifies when its head
+/// segments equal the name's (or are themselves within threshold) and its
+/// final segment is within threshold of the name's final segment.
+/// Returns the full corrected path.
+pub fn suggest_dotted<'a>(name: &str, candidates: &[&'a str]) -> Option<&'a str> {
+    let mut name_segs: Vec<&str> = name.split('.').collect();
+    if name_segs.len() < 2 {
+        return None;
+    }
+    let name_tail = name_segs.pop().unwrap();
+    let mut best: Option<(&'a str, u32)> = None;
+    for &cand in candidates {
+        if cand == name {
+            continue;
+        }
+        let mut cand_segs: Vec<&str> = cand.split('.').collect();
+        if cand_segs.len() != name_segs.len() + 1 {
+            continue;
+        }
+        let cand_tail = cand_segs.pop().unwrap();
+        // Heads must match closely (exact, or a small typo like `evn`).
+        let mut head_dist = 0u32;
+        let mut heads_ok = true;
+        for (a, b) in name_segs.iter().zip(cand_segs.iter()) {
+            if a != b {
+                let d = levenshtein(a, b);
+                if d > max_distance(a) {
+                    heads_ok = false;
+                    break;
+                }
+                head_dist += d;
+            }
+        }
+        if !heads_ok {
+            continue;
+        }
+        let tail_dist = levenshtein(name_tail, cand_tail);
+        if tail_dist > max_distance(name_tail) || (head_dist == 0 && tail_dist == 0) {
+            continue;
+        }
+        let total = head_dist + tail_dist;
+        if best.map(|(_, d)| total < d).unwrap_or(true) {
+            best = Some((cand, total));
+        }
+    }
+    best.map(|(cand, _)| cand)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dotted_tail_typo() {
+        let cands = vec![
+            "std.env.temp_dir",
+            "env.temp_dir",
+            "std.env.cwd",
+            "temp_dir",
+        ];
+        assert_eq!(suggest_dotted("env.tmp_dir", &cands), Some("env.temp_dir"));
+        assert_eq!(
+            suggest_dotted("std.env.tmp_dir", &cands),
+            Some("std.env.temp_dir")
+        );
+    }
+
+    #[test]
+    fn dotted_rejects_wrong_head_and_far_tails() {
+        let cands = vec!["std.env.temp_dir", "env.temp_dir"];
+        assert_eq!(suggest_dotted("fs.tmp_dir", &cands), None);
+        assert_eq!(suggest_dotted("env.zzzzzz", &cands), None);
+        assert_eq!(suggest_dotted("tmp_dir", &cands), None);
+        assert_eq!(suggest_dotted("env.temp_dir", &cands), None);
+    }
 
     #[test]
     fn identical_strings_zero() {

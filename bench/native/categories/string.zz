@@ -1,0 +1,10 @@
+
+// Strings: 20k concat
+
+func main() {
+    s := ""
+    for i in 0..20000 {
+        s = s + "a"
+    }
+    println(len(s))
+}

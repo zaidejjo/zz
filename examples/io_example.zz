@@ -1,0 +1,22 @@
+// examples/io_example.zz — builtin print/println demonstrations
+
+// ── print (no newline) ──
+print("Hello ")
+print("World")
+println("")
+
+// ── println ──
+println("println builtin")
+
+// ── string interpolation ──
+name := "ZZ"
+version := 42
+println("Language: {name}, version: {version}")
+
+// ── print any value ──
+println(42)
+println(3.14)
+println(true)
+println([1, 2, 3])
+
+println("io_example_done")

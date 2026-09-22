@@ -50,10 +50,20 @@ pub enum TokenKind {
     Break,
     Continue,
     Defer,
+    Pub,
+    Impl,
+    Const,
+    Extern,
+    Mut,
     // Literals
     Int,
     Float,
     Str,
+    /// Interpolation segment inside a format string (`"hello {name}"`).
+    /// Emitted by the lexer for text segments that are part of an
+    /// interpolated string. The parser uses this to unambiguously
+    /// distinguish interpolation from a string followed by a block.
+    StrFmt,
     Ident,
     // Operators
     Plus,
@@ -89,6 +99,7 @@ pub enum TokenKind {
     RBrace,
     LBracket,
     RBracket,
+    At,
     // Statement terminator: `;` or a newline at bracket depth 0
     StmtEnd,
     Eof,
@@ -113,9 +124,15 @@ impl TokenKind {
             TokenKind::Break => "`break`",
             TokenKind::Continue => "`continue`",
             TokenKind::Defer => "`defer`",
+            TokenKind::Pub => "`pub`",
+            TokenKind::Impl => "`impl`",
+            TokenKind::Const => "`const`",
+            TokenKind::Extern => "`extern`",
+            TokenKind::Mut => "`mut`",
             TokenKind::Int => "integer literal",
             TokenKind::Float => "float literal",
             TokenKind::Str => "string literal",
+            TokenKind::StrFmt => "interpolated string segment",
             TokenKind::Ident => "identifier",
             TokenKind::Plus => "`+`",
             TokenKind::Minus => "`-`",
@@ -149,6 +166,7 @@ impl TokenKind {
             TokenKind::RBrace => "`}`",
             TokenKind::LBracket => "`[`",
             TokenKind::RBracket => "`]`",
+            TokenKind::At => "`@`",
             TokenKind::StmtEnd => "end of statement",
             TokenKind::Eof => "end of input",
         }

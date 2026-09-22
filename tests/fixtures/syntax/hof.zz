@@ -1,0 +1,30 @@
+// E2E: Higher-order functions — map, filter, enumerate, zip, range
+// Note: custom closures tested separately via eval
+
+nums := [1, 2, 3, 4, 5]
+
+// map
+doubled := map(nums, |x: int| x * 2)
+println(doubled)
+
+// filter
+evens := filter(nums, |x: int| x % 2 == 0)
+println(evens)
+
+// enumerate
+indexed := enumerate(nums)
+println(indexed)
+
+// zip
+paired := zip(["a", "b", "c"], [1, 2, 3])
+println(paired)
+
+// range
+r := range(0, 5)
+println(len(r))
+
+// chaining
+result := nums |> map(|x: int| x * 3) |> filter(|x: int| x > 4)
+println(result)
+
+println("hof_ok")

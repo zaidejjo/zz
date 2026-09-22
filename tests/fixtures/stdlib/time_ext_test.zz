@@ -1,0 +1,38 @@
+// E2E: std.time extension — ns/us clocks, monotonic, micro sleeps, durations
+import std.time
+
+// NOTE: top-level bindings only (VM scope limitation, see regexp notes).
+
+// ── system clocks advance and agree ──
+a := time.now_nanos()
+b := time.now_nanos()
+println("nanos_order: {b >= a}")
+m1 := time.monotonic_nanos()
+m2 := time.monotonic_nanos()
+println("mono_order: {m2 >= m1}")
+n := time.now_nanos()
+u := time.now_micros()
+d := n / 1000 - u
+println("agree_hi: {d < 1000000}")
+println("agree_lo: {d > -1000000}")
+
+// ── duration conversions (integer microseconds) ──
+dd := time.micros(20000)
+println("d_us: {time.to_micros(dd) == 20000}")
+println("d_ms: {time.to_millis(dd) == 20}")
+println("d_ns: {time.to_nanos(dd) == 20000000}")
+println("d_s: {time.to_secs(time.secs(2)) == 2}")
+println("d_from_ms: {time.to_micros(time.millis(1500)) == 1500000}")
+
+// ── measured sleep: 20ms via monotonic clock, tolerance-banded ──
+t0 := time.monotonic_nanos()
+time.sleep(dd)
+dt := time.monotonic_nanos() - t0
+println("slept: {dt >= 20000000}")
+println("sane: {dt < 20000000000}")
+
+// ── zero sleep is a no-op ──
+time.sleep_micros(0)
+println("zero_ok")
+
+println("time_ok")

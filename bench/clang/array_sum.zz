@@ -1,0 +1,11 @@
+// bench: array growth + indexed access. sum 1..2000 = 2001000.
+a := []
+for i in range(2000) {
+    a.append(i + 1)
+}
+s := 0
+for i in range(a.len()) {
+    s = s + a[i]
+}
+println(s)
+println(a.len())

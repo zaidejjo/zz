@@ -87,6 +87,32 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
                 },
             })
         }
+        Stmt::Impl {
+            name,
+            methods,
+            span,
+            ..
+        } => {
+            let full_name = format!("{} impl", name.join("."));
+            let children: Vec<DocumentSymbol> = methods
+                .iter()
+                .filter_map(|m| stmt_to_document_symbol(m, source))
+                .collect();
+            Some(DocumentSymbol {
+                name: full_name,
+                detail: None,
+                kind: SymbolKind::INTERFACE,
+                tags: None,
+                deprecated: None,
+                range: span_to_range(source, *span),
+                selection_range: struct_name_range(name, source),
+                children: if children.is_empty() {
+                    None
+                } else {
+                    Some(children)
+                },
+            })
+        }
         Stmt::Decl {
             name, value, span, ..
         } => {
@@ -106,7 +132,9 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
                 children: None,
             })
         }
-        Stmt::Import { path, alias, span } => {
+        Stmt::Import {
+            path, alias, span, ..
+        } => {
             let display = match alias {
                 Some(a) => format!("{} as {}", path.join("."), a),
                 None => path.join("."),
@@ -123,7 +151,7 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
             })
         }
         Stmt::For {
-            var,
+            vars,
             iter,
             body,
             span,
@@ -133,14 +161,20 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
                 p.print_expr(iter)
             };
             let children = block_children(body, source);
+            let var_name = if vars.len() == 1 {
+                vars[0].name.clone()
+            } else {
+                let names: Vec<&str> = vars.iter().map(|v| v.name.as_str()).collect();
+                names.join(", ")
+            };
             Some(DocumentSymbol {
-                name: var.name.clone(),
+                name: var_name,
                 detail: Some(format!("in {iter_detail}")),
                 kind: SymbolKind::VARIABLE,
                 tags: None,
                 deprecated: None,
                 range: span_to_range(source, *span),
-                selection_range: span_to_range(source, var.span),
+                selection_range: span_to_range(source, vars[0].span),
                 children: if children.is_empty() {
                     None
                 } else {
@@ -153,6 +187,9 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
             None
         }
         Stmt::Assign { .. } => None,
+        Stmt::Destructure { .. } => None,
+        Stmt::ExternBlock { .. } => None,
+        Stmt::Link { .. } => None,
         Stmt::Expr(_) => None,
     }
 }
@@ -203,6 +240,15 @@ fn fmt_ty(ty: &zz_frontend::ast::Ty) -> String {
         TyKind::Bool => "bool".into(),
         TyKind::Str => "str".into(),
         TyKind::Unit => "unit".into(),
+        TyKind::Void => "void".into(),
+        TyKind::Ptr { mutable, inner } => {
+            let base = fmt_ty(inner);
+            if *mutable {
+                format!("*mut {base}")
+            } else {
+                format!("*const {base}")
+            }
+        }
         TyKind::Named(name, args) => {
             if args.is_empty() {
                 name.clone()
@@ -325,6 +371,20 @@ fn collect_workspace_symbols(
                     container_name: None,
                 });
             }
+            Stmt::Impl { name, span, .. } => {
+                let full_name = format!("{} impl", name.join("."));
+                out.push(SymbolInformation {
+                    name: full_name,
+                    kind: SymbolKind::INTERFACE,
+                    tags: None,
+                    deprecated: None,
+                    location: tower_lsp::lsp_types::Location {
+                        uri: uri.clone(),
+                        range: span_to_range(source, *span),
+                    },
+                    container_name: None,
+                });
+            }
             Stmt::Decl { name, span, .. } => {
                 out.push(SymbolInformation {
                     name: name.name.clone(),
@@ -338,7 +398,9 @@ fn collect_workspace_symbols(
                     container_name: None,
                 });
             }
-            Stmt::Import { path, alias, span } => {
+            Stmt::Import {
+                path, alias, span, ..
+            } => {
                 let display = match alias {
                     Some(a) => format!("{} as {}", path.join("."), a),
                     None => path.join("."),
