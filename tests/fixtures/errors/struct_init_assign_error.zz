@@ -2,5 +2,5 @@
 struct User { name: str, age: int }
 func main() {
     u := User{name = "Alice", age = 30}
-    std.io.println(u.name)
+    println(u.name)
 }

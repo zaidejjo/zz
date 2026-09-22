@@ -500,11 +500,10 @@ fn ty_to_ctype(ty: &zz_hir::Type) -> String {
 /// Map a zz native qualified name to its C runtime implementation name.
 fn native_impl(name: &str) -> Option<&'static str> {
     match name {
-        // Bare builtins (no namespace) registered by stdlib at top level.
-        "println" | "io.println" | "std.io.println" => Some("zz_io_println"),
-        "print" | "io.print" | "std.io.print" => Some("zz_io_print"),
-        "printz" | "io.printz" | "std.io.printz" => Some("zz_io_print"),
-        "input" | "io.read_line" | "std.io.read_line" | "main_io.input" => Some("zz_io_input"),
+        // Builtin console I/O (no import, no `std.io` module).
+        "println" => Some("zz_io_println"),
+        "print" => Some("zz_io_print"),
+        "input" => Some("zz_io_input"),
         "len" => Some("zz_len"),
         "map" | "vec.map" | "std.vec.map" => Some("zz_iter_map"),
         "filter" | "vec.filter" | "std.vec.filter" => Some("zz_iter_filter"),

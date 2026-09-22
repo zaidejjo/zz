@@ -207,7 +207,7 @@ impl Manifest {
                 "import std.http\n\nfunc main() {\n    s := http.server()\n    s2 := http.route_get(s, \"/\", |req| \"Hello, ZZ!\")\n    http.listen(s2, 8080) ?? println(\"failed to start server\")\n}\n"
             }
             _ => {
-                "import std.io\n\nfunc main() {\n    io.println(\"Hello, ZZ!\")\n}\n"
+                "import std.http\n\nfunc main() {\n    println(\"Hello, ZZ!\")\n}\n"
             }
         };
         std::fs::write(project_dir.join("src/main.zz"), main_content)

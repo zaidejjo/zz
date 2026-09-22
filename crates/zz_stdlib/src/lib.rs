@@ -5,7 +5,7 @@
 //! - [`stdlib_natives`]: Rust implementations consumed by the interpreter.
 //!
 //! Modules:
-//! - `std.io`   — `printz`, `println`, `read_line`
+//! - console I/O is builtin — `print`, `println`, `input` (no import, no `std.io`)
 //! - `std.str`  — `length`, `split`, `contains`
 //! - `std.vec`  — `push`, `pop`, `len`
 //! - `std.json` — `parse`, `stringify`, `get`, `as_str`, `as_int`, `as_float`, `as_bool`
@@ -45,7 +45,6 @@ pub fn stdlib_consts() -> std::collections::HashMap<String, f64> {
 /// `sqlz.mysql` the nested MySQL wire-protocol submodule
 /// (dotted keys; see the loader's multi-component handling).
 pub const STDLIB_MODULES: &[&str] = &[
-    "io",
     "str",
     "vec",
     "json",
@@ -86,8 +85,8 @@ pub fn canonical_module(module: &str) -> &str {
 /// Register a `std.*` module under a namespace name by copying its entries
 /// from the `std.<module>.*` keys to `<ns>.*` keys in both registries.
 ///
-/// Used by the loader and the REPL session so that `import std.io` makes
-/// `io.println` (and friends) available. Returns an error message if the
+/// Used by the loader and the REPL session so that `import std.str` makes
+/// `str.length` (and friends) available. Returns an error message if the
 /// module is unknown.
 /// Build a non-generic zero-arg FuncSig (for constants).
 fn const_sig(ret: zz_checker::Type) -> zz_checker::FuncSig {

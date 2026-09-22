@@ -344,7 +344,7 @@ sum := 0
 for i in 0..1000 {
     sum = sum + i
 }
-io.println(sum)
+println(sum)
 "#;
     let (_, native_stdout) = native_run(src);
     assert_eq!(native_stdout, "499500\n", "native output mismatch");
@@ -354,10 +354,10 @@ io.println(sum)
 #[test]
 fn native_arithmetic_matches_vm() {
     let src = r#"
-io.println(1 + 2 * 3)
-io.println((10 - 3) * 2)
-io.println((2 ** 10))
-io.println(-5 + 5)
+println(1 + 2 * 3)
+println((10 - 3) * 2)
+println((2 ** 10))
+println(-5 + 5)
 "#;
     let (_, out) = native_run(src);
     assert_eq!(out, "7\n14\n1024\n0\n");
@@ -366,8 +366,8 @@ io.println(-5 + 5)
 #[test]
 fn native_float_matches_vm() {
     let src = r#"
-io.println(3.5 + 1.5)
-io.println(10.0 / 4)
+println(3.5 + 1.5)
+println(10.0 / 4)
 "#;
     let (_, out) = native_run(src);
     assert_eq!(out, "5.0\n2.5\n");
@@ -398,10 +398,10 @@ func pick(a: int, b: int, cond: bool) -> int {
     }
     x
 }
-io.println(fit(640, 480, 320, 240))
-io.println(fit(640, 480, 200, 200))
-io.println(pick(10, 20, true))
-io.println(pick(10, 20, false))
+println(fit(640, 480, 320, 240))
+println(fit(640, 480, 200, 200))
+println(pick(10, 20, true))
+println(pick(10, 20, false))
 "#;
     let (_, out) = native_run(src);
     assert_eq!(out, "0.5\n0.3125\n20\n10\n");
@@ -410,7 +410,7 @@ io.println(pick(10, 20, false))
 #[test]
 fn native_string_concat_matches_vm() {
     let src = r#"
-io.println("hello" + " " + "world")
+println("hello" + " " + "world")
 "#;
     let (_, out) = native_run(src);
     assert_eq!(out, "hello world\n");
@@ -421,9 +421,9 @@ fn native_if_else_matches_vm() {
     let src = r#"
 x := 10
 if x > 5 {
-    io.println("big")
+    println("big")
 } else {
-    io.println("small")
+    println("small")
 }
 "#;
     let (_, out) = native_run(src);
@@ -439,8 +439,8 @@ func add(a: int, b: int) -> int {
 func double(x: int) -> int {
     x * 2
 }
-io.println(add(2, 3))
-io.println(double(add(1, 4)))
+println(add(2, 3))
+println(double(add(1, 4)))
 "#;
     let (_, out) = native_run(src);
     assert_eq!(out, "5\n10\n");
@@ -452,7 +452,7 @@ fn native_recursion_matches_vm() {
 func fib(n: int) -> int {
     if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
 }
-io.println(fib(10))
+println(fib(10))
 "#;
     let (_, out) = native_run(src);
     assert_eq!(out, "55\n");
@@ -461,7 +461,7 @@ io.println(fib(10))
 #[test]
 fn native_sqrt_math_pow() {
     let src = r#"
-io.println(2 ** 5)
+println(2 ** 5)
 "#;
     let (_, out) = native_run(src);
     assert_eq!(out, "32\n");
@@ -474,7 +474,7 @@ fn native_dce_prunes_unused_http() {
     // doesn't implement http.
     let src = r#"
 import std.http
-io.println("only io")
+println("only io")
 "#;
     // NOTE: stdlib_funcs seeds http.*; DCE prunes them; native_run builds.
     let (_, out) = native_run(src);
@@ -486,7 +486,7 @@ fn native_main_auto_called() {
     // func main is auto-invoked.
     let src = r#"
 func main() {
-    io.println("from main")
+    println("from main")
 }
 "#;
     let (_, out) = native_run(src);
@@ -495,7 +495,7 @@ func main() {
 
 #[test]
 fn generated_source_contains_expected_sections() {
-    let src = "io.println(42)\n";
+    let src = "println(42)\n";
     let (pruned, reach) = build_reachable(src);
     let lowerer = crate::Lowerer::new(
         reach.funcs.clone(),
@@ -525,7 +525,7 @@ fn native_used_function_kept_unused_pruned() {
     let src = r#"
 func used(x: int) -> int { x + 1 }
 func unused(x: int) -> int { x * 10 }
-io.println(used(1))
+println(used(1))
 "#;
     let (pruned, reach) = build_reachable(src);
     assert!(reach.funcs.contains("used"));
@@ -549,7 +549,7 @@ fn native_input_reads_line_and_flushes_prompt() {
     let src = r#"
 func main() {
     name := input("prompt: ")
-    io.println("got " + name)
+    println("got " + name)
 }
 "#;
     let (pruned, reach) = build_reachable(src);
@@ -622,10 +622,10 @@ fn native_struct_init_and_fields() {
     let src = r#"
 struct Point { x: int, y: int }
 p := Point{ x: 10, y: 20 }
-io.println(p.x)
-io.println(p.y)
+println(p.x)
+println(p.y)
 p.x = 99
-io.println(p.x)
+println(p.x)
 "#;
     let (_, out) = native_run(src);
     assert_eq!(out, "10\n20\n99\n");
@@ -659,9 +659,9 @@ func late() {
     a = 100
     r1 + add_a(5)
 }
-io.println(make_counter())
-io.println(nested())
-io.println(late())
+println(make_counter())
+println(nested())
+println(late())
 "#;
     let (_, out) = native_run(src);
     assert_eq!(out, "8\n112\n120\n");
@@ -675,10 +675,10 @@ fn native_method_form_hof() {
 func main() {
     xs := [1, 2, 3]
     ys := xs.map(|x| x + 1)
-    io.println(ys[0] + ys[1] + ys[2])
+    println(ys[0] + ys[1] + ys[2])
     zs := xs.filter(|x| x > 1)
-    io.println(zs[0] + zs[1])
-    io.println(len(xs.enumerate()))
+    println(zs[0] + zs[1])
+    println(len(xs.enumerate()))
 }
 "#;
     let (_, out) = native_run(src);
@@ -694,7 +694,7 @@ struct Point { x: int, y: int }
 func main() {
     p := Point { x: 3, y: 4 }
     f := |s| p.x * s + p.y
-    io.println(f(10))
+    println(f(10))
 }
 "#;
     let (_, out) = native_run(src);
@@ -708,38 +708,38 @@ fn native_json_extended_matches_vm() {
     // pretty, merge, deep_get, array_push).
     let src = r#"
 j := json.parse("{\"name\": \"test\", \"count\": 42, \"tags\": [\"a\", \"b\"], \"nested\": {\"x\": 1}}") ?? json.null()
-io.println(json.type(j))
+println(json.type(j))
 arr := json.get(j, "tags") ?? json.null()
-io.println(json.type(arr))
+println(json.type(arr))
 num := json.get(j, "count") ?? json.null()
-io.println(json.type(num))
-io.println(json.len(j))
-io.println(json.len(arr))
+println(json.type(num))
+println(json.len(j))
+println(json.len(arr))
 k := json.keys(j)
-io.println(len(k))
-io.println(json.has(j, "name"))
-io.println(json.has(j, "missing"))
+println(len(k))
+println(json.has(j, "name"))
+println(json.has(j, "missing"))
 pretty_out := json.pretty(j)
-io.println(str.contains(pretty_out, "\n"))
+println(str.contains(pretty_out, "\n"))
 a := json.parse("{\"x\": 1, \"y\": 2}") ?? json.null()
 b := json.parse("{\"y\": 99, \"z\": 3}") ?? json.null()
 merged := json.merge(a, b)
 merged_y := json.get(merged, "y") ?? json.null()
-io.println(json.as_int(merged_y))
-io.println(json.has(merged, "z"))
+println(json.as_int(merged_y))
+println(json.has(merged, "z"))
 deep := json.deep_get(j, "nested.x")
 match deep {
-    .ok(v) => io.println(json.as_int(v))
-    .err(msg) => io.println("deep_get error: {msg}")
+    .ok(v) => println(json.as_int(v))
+    .err(msg) => println("deep_get error: {msg}")
 }
 miss := json.deep_get(j, "missing.path")
 match miss {
-    .ok(_) => io.println("deep miss: should not happen")
-    .err(_) => io.println("deep miss: correctly returned error")
+    .ok(_) => println("deep miss: should not happen")
+    .err(_) => println("deep miss: correctly returned error")
 }
 original_arr := json.parse("[1, 2, 3]") ?? json.null()
 pushed := json.array_push(original_arr, 4)
-io.println(json.len(pushed))
+println(json.len(pushed))
 "#;
     let (_, out) = native_run(src);
     assert_eq!(
@@ -754,11 +754,11 @@ fn native_struct_nested() {
 struct Point { x: int, y: int }
 struct Rect { origin: Point, w: int, h: int }
 r := Rect{ origin: Point{ x: 1, y: 2 }, w: 10, h: 20 }
-io.println(r.origin.x)
-io.println(r.origin.y)
-io.println(r.w)
+println(r.origin.x)
+println(r.origin.y)
+println(r.w)
 r.origin.x = 42
-io.println(r.origin.x)
+println(r.origin.x)
 "#;
     let (_, out) = native_run(src);
     assert_eq!(out, "1\n2\n10\n42\n");
@@ -879,7 +879,7 @@ fn escape_analysis_local_array_non_escaping() {
     let src = r#"
 func main() {
     arr := [1, 2, 3]
-    io.println(len(arr))
+    println(len(arr))
 }
 "#;
     let (pruned, reach) = build_reachable(src);
@@ -912,7 +912,7 @@ func compute(n: int) {
     for i in 0..n {
         result = result + i
     }
-    io.println(result)
+    println(result)
 }
 func main() {
     compute(100)
@@ -944,7 +944,7 @@ func main() {
     x := 42
     y := 3.14
     z := true
-    io.println(x)
+    println(x)
 }
 "#;
     let (_, out) = native_run(src);
@@ -961,7 +961,7 @@ func main() {
     for i in 0..5 {
         s = s + "x"
     }
-    io.println(s)
+    println(s)
 }
 "#;
     let (_, out) = native_run(src);
@@ -973,7 +973,7 @@ fn generated_c_contains_arena_in_all_functions() {
     let src = r#"
 func helper(x: int) -> int { x + 1 }
 func main() {
-    io.println(helper(41))
+    println(helper(41))
 }
 "#;
     let (pruned, reach) = build_reachable(src);

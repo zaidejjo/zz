@@ -1187,7 +1187,7 @@ mod tests {
 
     #[test]
     fn check_ok_on_valid_file() {
-        let path = write_temp("x := 1 + 2\nimport std.io\nio.println(x)\n");
+        let path = write_temp("x := 1 + 2\nprintln(x)\n");
         let result = check_or_fix_path(
             &Some(path.to_string_lossy().to_string()),
             false,

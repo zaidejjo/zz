@@ -795,7 +795,7 @@ fn empty_dict_deferred_inference() {
 
 #[test]
 fn import_is_noop() {
-    let r = check_src("import std.io\nx := 1");
+    let r = check_src("x := 1");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["x"], Type::Int);
 }

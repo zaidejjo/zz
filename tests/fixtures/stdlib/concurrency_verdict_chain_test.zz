@@ -3,7 +3,6 @@
 // T3 waits on chA then blocks on chB; T2's trailing send hands off to T3.
 // T2's own completion must still arrive. Deterministic: sleeps order the
 // registration before the send; the poll only observes.
-import std.io
 import std.task
 import std.chan
 import std.time
@@ -34,6 +33,6 @@ func main() {
             break
         }
     }
-    io.println("h2_done:{done}")
-    io.println("verdict_chain_ok")
+    println("h2_done:{done}")
+    println("verdict_chain_ok")
 }

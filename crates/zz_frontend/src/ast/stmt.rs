@@ -120,8 +120,8 @@ pub enum Stmt {
         pub_: bool,
         is_const: bool,
     },
-    /// `import std.io` — a dotted path of identifiers, optionally aliased
-    /// (`import std.io as console`), with optional selective items
+    /// `import std.str` — a dotted path of identifiers, optionally aliased
+    /// (`import std.str as s`), with optional selective items
     /// (`import std.math(PI, sin)`).
     Import {
         path: Vec<String>,

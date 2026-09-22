@@ -487,10 +487,9 @@ mod tests {
 
     #[test]
     fn prelude_empty_without_ffi_natives() {
-        let natives: HashSet<String> =
-            ["std.io.println".to_string(), "std.time.now_ms".to_string()]
-                .into_iter()
-                .collect();
+        let natives: HashSet<String> = ["println".to_string(), "std.time.now_ms".to_string()]
+            .into_iter()
+            .collect();
         assert!(!needs_native_rt(&natives));
         assert_eq!(ffi_prelude(&natives), "");
         // Unknown future names without a registry entry stay embedded-only.

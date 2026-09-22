@@ -1,5 +1,4 @@
 // E2E: MPMC — 4 senders x 200 msgs into one channel, main drains 800.
-import std.io
 import std.task
 import std.chan
 
@@ -18,6 +17,6 @@ func main() {
         v = std.chan.recv(c)
         total = total + v
     }
-    io.println("total:{total}")
-    io.println("mpmc_ok")
+    println("total:{total}")
+    println("mpmc_ok")
 }

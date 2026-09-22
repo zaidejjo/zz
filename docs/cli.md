@@ -230,7 +230,7 @@ The CLI resolves imports relative to the source file's directory:
 
 ```
 project/
-├── main.zz          // import std.io
+├── main.zz          // println("hi")
 ├── utils/
 │   ├── mod.zz       // import std.math
 │   └── helper.zz    // import .utils as util

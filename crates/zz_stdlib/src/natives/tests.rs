@@ -115,9 +115,9 @@ fn wrong_type_errors() {
 
 #[test]
 fn read_line_from_dev_null_is_empty() {
-    // In the test harness stdin is /dev/null, so read_line yields "".
+    // In the test harness stdin is /dev/null, so input yields "".
     assert_eq!(
-        call("std.io.read_line", vec![]).unwrap(),
+        call("input", vec![]).unwrap(),
         Value::Str(String::new().into())
     );
 }

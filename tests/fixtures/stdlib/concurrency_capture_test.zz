@@ -3,7 +3,6 @@
 // shifting every later slot by one per captured param (`h` read `n`);
 // and AOT `zz_value_dup` misread unboxed int cells as `zz_value*`
 // (spawn segfault). Deterministic: exact sums, no timing dependence.
-import std.io
 import std.task
 import std.chan
 
@@ -37,7 +36,7 @@ func fan(n: int) -> int {
 }
 
 func main() {
-    io.println("{work(100)}")
-    io.println("{fan(10)}")
-    io.println("capture_ok")
+    println("{work(100)}")
+    println("{fan(10)}")
+    println("capture_ok")
 }

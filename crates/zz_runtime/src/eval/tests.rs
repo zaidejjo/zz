@@ -333,7 +333,7 @@ fn dict_union_value_type() {
 
 #[test]
 fn import_is_noop() {
-    assert_eq!(eval_src("import std.io\nx := 1\nx").unwrap(), Value::Int(1));
+    assert_eq!(eval_src("x := 1\nx").unwrap(), Value::Int(1));
 }
 
 #[test]

@@ -863,9 +863,9 @@ mod tests {
 
     #[test]
     fn format_import() {
-        let src = "import std.io as console";
+        let src = "import std.str as s";
         let out = fmt(src);
-        assert!(out.contains("import std.io as console"));
+        assert!(out.contains("import std.str as s"));
     }
 
     #[test]

@@ -985,23 +985,9 @@ impl Lowerer {
     }
 
     /// True for the display builtins that render values as strings:
-    /// `println` / `print` / `printz` (plus `io.` / `std.io.` spellings)
-    /// and the `str()` cast.
+    /// `println` / `print` and the `str()` cast.
     pub(super) fn is_display_builtin(cname: &str) -> bool {
-        matches!(
-            cname,
-            "println"
-                | "print"
-                | "printz"
-                | "str"
-                | "io.println"
-                | "io.print"
-                | "io.printz"
-                | "std.io.println"
-                | "std.io.print"
-                | "std.io.printz"
-                | "std.str"
-        )
+        matches!(cname, "println" | "print" | "str" | "std.str")
     }
 
     /// Render an unboxed-struct lvalue chain: `parts[0]` is a local whose C

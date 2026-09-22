@@ -1,11 +1,6 @@
-// E2E: std.io — console I/O
-import std.io
-
+// E2E: builtin console I/O — print/println/input, no import required
 // println
 println("hello")
-
-// io.println
-io.println("io_hello")
 
 // print (no newline) + println
 print("partial")

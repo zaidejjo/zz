@@ -6,5 +6,5 @@ struct PrivatePoint {x: int, y: int}
 
 func main() {
     p := PublicPoint{x: 1, y: 2}
-    std.io.println(p.x + p.y)
+    println(p.x + p.y)
 }

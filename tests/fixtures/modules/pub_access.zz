@@ -15,5 +15,5 @@ struct Box {val: int}
 
 func main() {
     p := Point{x: 1, y: 2}
-    std.io.println(PI + add(p.x, p.y))
+    println(PI + add(p.x, p.y))
 }

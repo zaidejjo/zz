@@ -525,7 +525,6 @@ match x {
 ### Import Statement
 
 ```zz
-import std.io
 import std.math
 import std.str
 ```

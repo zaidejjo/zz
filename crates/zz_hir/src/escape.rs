@@ -578,12 +578,12 @@ mod tests {
             "parse errors: {:?}",
             parsed.errors
         );
-        // Seed a minimal stdlib for io.println only.
+        // Seed a minimal stdlib for println only.
         let mut funcs = HashMap::new();
         let unit = Type::Unit;
         let t_any = Type::Named("T".to_string());
         funcs.insert(
-            "io.println".into(),
+            "println".into(),
             crate::FuncSig {
                 is_extern: false,
                 extern_c_symbol: None,

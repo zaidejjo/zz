@@ -7,5 +7,5 @@ pub func double(x: int) -> int {
 func main() {
     PI := 99
     val := double(PI)
-    std.io.println(val)
+    println(val)
 }

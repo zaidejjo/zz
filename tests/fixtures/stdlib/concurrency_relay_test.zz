@@ -1,6 +1,5 @@
 // E2E: relay cascade — 10 tasks chained by channels, each hop +1.
 // Exercises handoff chaining past any inline nesting budget.
-import std.io
 import std.task
 import std.chan
 
@@ -20,6 +19,6 @@ func main() {
     std.chan.send(first, 0)
     last := 0
     last = std.chan.recv(cur)
-    io.println("relay:{last}")
-    io.println("relay_ok")
+    println("relay:{last}")
+    println("relay_ok")
 }

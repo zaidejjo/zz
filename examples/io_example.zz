@@ -1,23 +1,22 @@
-// examples/io_example.zz — std.io demonstrations
-import std.io
+// examples/io_example.zz — builtin print/println demonstrations
 
-// ── printz (no newline) ──
-io.printz("Hello ")
-io.printz("World")
+// ── print (no newline) ──
+print("Hello ")
+print("World")
 println("")
 
 // ── println ──
-io.println("println with std.io prefix")
+println("println builtin")
 
 // ── string interpolation ──
 name := "ZZ"
 version := 42
-io.println("Language: {name}, version: {version}")
+println("Language: {name}, version: {version}")
 
 // ── print any value ──
-io.println(42)
-io.println(3.14)
-io.println(true)
-io.println([1, 2, 3])
+println(42)
+println(3.14)
+println(true)
+println([1, 2, 3])
 
 println("io_example_done")

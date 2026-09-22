@@ -2060,9 +2060,7 @@ impl Lowerer {
                 _ => "zz_array_new()".to_string(),
             };
         }
-        // A native may be bound under `std.io.println` (stdlib_funcs) while
-        // the source calls `io.println` (namespace-registered). Match either.
-        // Also recognize namespace-qualified names from method dispatch
+        // Recognize namespace-qualified names from method dispatch
         // (e.g. `vec.map`) that have a C runtime impl even though
         // `reachable_natives` only tracks the bare name (`map`).
         let std_name = format!("std.{cname_for_native}");

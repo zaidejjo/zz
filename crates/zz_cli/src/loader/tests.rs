@@ -243,7 +243,10 @@ fn full_program_runs_with_imports() {
     use zz_runtime::{Interp, Value};
 
     let dir = temp_project(&[
-        ("main.zz", "import std.io\nimport std.str\nimport math.utils\nn := utils.double(6)\nstr.length(\"abc\")"),
+        (
+            "main.zz",
+            "import std.str\nimport math.utils\nn := utils.double(6)\nstr.length(\"abc\")",
+        ),
         ("math/utils.zz", "pub func double(n: int) -> int { n * 2 }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -261,14 +264,14 @@ fn full_program_runs_with_imports() {
 
 #[test]
 fn stdlib_import_needs_no_file() {
-    let dir = temp_project(&[("main.zz", "import std.io\nimport std.str\n1")]);
+    let dir = temp_project(&[("main.zz", "import std.str\n1")]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
     assert_eq!(result.programs.len(), 1);
-    assert!(result.funcs.contains_key("std.io.println"));
+    assert!(result.funcs.contains_key("std.str.length"));
     // Namespaced copies are registered too.
-    assert!(result.funcs.contains_key("io.println"));
-    assert!(result.natives.contains_key("io.println"));
+    assert!(result.funcs.contains_key("str.length"));
+    assert!(result.natives.contains_key("str.length"));
 }
 
 #[test]
@@ -417,7 +420,7 @@ fn shadowing_imported_pub_var() {
     let dir = temp_project(&[
         (
             "main.zz",
-            "import config\nconfig_val := config.val\nx := { val := 99\nval }\nstd.io.println(x)\nconfig_val",
+            "import config\nconfig_val := config.val\nx := { val := 99\nval }\nprintln(x)\nconfig_val",
         ),
         (
             "config.zz",
@@ -609,7 +612,7 @@ fn pub_item_unused_no_warning() {
     // pub items must NOT generate unused-variable warnings.
     let dir = temp_project(&[(
         "main.zz",
-        "pub x := 42\npub func f() -> int { 1 }\npub struct S { v: int }\nfunc main() { std.io.println(1) }",
+        "pub x := 42\npub func f() -> int { 1 }\npub struct S { v: int }\nfunc main() { println(1) }",
     )]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     // No errors, and specifically no "unused variable" warnings for x, f, S.
@@ -628,7 +631,7 @@ fn pub_item_unused_no_warning() {
 #[test]
 fn private_item_unused_does_warn() {
     // Private items that are unused DO generate warnings.
-    let dir = temp_project(&[("main.zz", "secret := 42\nfunc main() { std.io.println(1) }")]);
+    let dir = temp_project(&[("main.zz", "secret := 42\nfunc main() { println(1) }")]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     let has_unused = result.errors.iter().any(|e| {
         e.diags
@@ -1043,7 +1046,7 @@ fn func_call_before_for_loop_no_corruption() {
 
     let dir = temp_project(&[(
         "main.zz",
-        "func id(x: int) -> int { x }\nx := id(42)\nfor i in 0..3 { std.io.println(i) }\nx",
+        "func id(x: int) -> int { x }\nx := id(42)\nfor i in 0..3 { println(i) }\nx",
     )]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -1064,7 +1067,7 @@ fn struct_method_then_recursion_in_for_loop() {
 
     let dir = temp_project(&[(
         "main.zz",
-        "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\nfunc fib(n: int) -> int { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\np := Point { x: 3, y: 4 }\nd := dist(p)\nfor i in 0..5 { std.io.println(fib(i)) }\nd",
+        "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\nfunc fib(n: int) -> int { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\np := Point { x: 3, y: 4 }\nd := dist(p)\nfor i in 0..5 { println(fib(i)) }\nd",
     )]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);

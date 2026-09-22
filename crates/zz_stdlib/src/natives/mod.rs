@@ -43,35 +43,12 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
     let _ = zz_runtime::SPAWN_HOOK.get_or_init(|| concurrency::spawn_hook);
     let mut m = HashMap::new();
 
-    // std.io
-    m.insert(
-        "std.io.printz".into(),
-        NativeEntry {
-            arity: 1,
-            f: io::printz,
-        },
-    );
-    m.insert(
-        "std.io.println".into(),
-        NativeEntry {
-            arity: 1,
-            f: io::println,
-        },
-    );
-    m.insert(
-        "std.io.read_line".into(),
-        NativeEntry {
-            arity: 0,
-            f: io::read_line,
-        },
-    );
-
-    // Top-level builtins — available without import.
+    // Builtin console I/O — no import required, no `std.io` module.
     m.insert(
         "print".into(),
         NativeEntry {
             arity: 1,
-            f: io::printz,
+            f: io::print,
         },
     );
     m.insert(

@@ -234,7 +234,7 @@ fn parses_string_and_bool() {
 
 #[test]
 fn parses_dotted_path() {
-    let prog = zz_frontend::parse("r := std.io.println(1)\n");
+    let prog = zz_frontend::parse("r := std.str.length(\"hi\")\n");
     assert!(prog.errors.is_empty(), "errors: {:?}", prog.errors);
     match &prog.program.stmts[0] {
         zz_frontend::ast::Stmt::Decl {
@@ -242,7 +242,7 @@ fn parses_dotted_path() {
             ..
         } => match callee.as_ref() {
             E::Path { parts, .. } => {
-                assert_eq!(parts, &["std", "io", "println"]);
+                assert_eq!(parts, &["std", "str", "length"]);
             }
             other => panic!("expected Path callee, got {other:?}"),
         },

@@ -1,6 +1,5 @@
 // E2E: tasks — 4 threads, distinct results, join fan-in.
 // Deterministic: min/max ordering, no timing dependence.
-import std.io
 import std.task
 
 func work(n: int) -> int { n * 10 + 1 }
@@ -16,6 +15,6 @@ func main() {
     d: int = task.join(h3)
     vals := [a, b, c, d]
     vals.sort()
-    io.println("{vals[0]},{vals[1]},{vals[2]},{vals[3]}")
-    io.println("tasks_ok")
+    println("{vals[0]},{vals[1]},{vals[2]},{vals[3]}")
+    println("tasks_ok")
 }

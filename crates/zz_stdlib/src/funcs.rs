@@ -53,26 +53,13 @@ fn sig_tu(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
 }
 
 /// All standard library function signatures, keyed by qualified name
-/// (e.g. `std.io.println`).
+/// (e.g. `std.str.length`). Console I/O lives here as bare builtins
+/// (`print`, `println`, `input`) — there is no `std.io` module.
 pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     let mut m = HashMap::new();
 
-    // std.io — print functions accept any value (displayed).
+    // Builtin console I/O — no import required.
     let t = Type::Named("T".to_string());
-    m.insert(
-        "std.io.printz".into(),
-        sig_t(vec![("v", t.clone())], Type::Unit),
-    );
-    m.insert(
-        "std.io.println".into(),
-        sig_t(vec![("v", t.clone())], Type::Unit),
-    );
-    m.insert(
-        "std.io.read_line".into(),
-        sig_t(vec![("prompt", Type::Str)], Type::Str),
-    );
-
-    // Top-level builtins — available without import.
     m.insert("print".into(), sig_t(vec![("v", t.clone())], Type::Unit));
     m.insert("println".into(), sig_t(vec![("v", t.clone())], Type::Unit));
     m.insert(
@@ -2713,7 +2700,9 @@ mod tests {
     #[test]
     fn has_all_modules() {
         let funcs = stdlib_funcs();
-        assert!(funcs.contains_key("std.io.println"));
+        assert!(funcs.contains_key("println"));
+        assert!(funcs.contains_key("print"));
+        assert!(funcs.contains_key("input"));
         assert!(funcs.contains_key("std.str.length"));
         assert!(funcs.contains_key("std.vec.push"));
         assert!(funcs.contains_key("std.json.parse"));
@@ -2813,7 +2802,7 @@ mod tests {
         assert!(funcs.contains_key("colors.red"));
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
-        assert_eq!(funcs.len(), 537);
+        assert_eq!(funcs.len(), 534);
     }
 
     #[test]

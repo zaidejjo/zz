@@ -1,5 +1,4 @@
 // E2E: variable loop bound — `0..n` trips exactly n times.
-import std.io
 import std.task
 import std.chan
 
@@ -19,6 +18,6 @@ func main() {
         std.chan.send(c, 1)
     }
     r: int = task.join(h)
-    io.println("vartrip:{r}")
-    io.println("vartrip_ok")
+    println("vartrip:{r}")
+    println("vartrip_ok")
 }

@@ -1,7 +1,6 @@
 // E2E: task.try_join — non-blocking poll: `.none` while running,
 // `.some` once done (repeatable, non-destructive), then `join` takes.
 // Deterministic: bounded spin-poll (no sleeps, no timing dependence).
-import std.io
 import std.task
 
 func main() {
@@ -17,7 +16,7 @@ func main() {
         }
     }
     r: int = task.join(h)
-    io.println("hits:{hits}")
-    io.println("r:{r}")
-    io.println("tryjoin_ok")
+    println("hits:{hits}")
+    println("r:{r}")
+    println("tryjoin_ok")
 }

@@ -553,7 +553,7 @@ fn check_ident(ident: &Ident, offset: u32, result: &mut NodeAtOffset<'_>) {
     }
 }
 
-/// For a dotted path like `std.io.println`, if the cursor is on `println`
+/// For a dotted path like `std.str.length`, if the cursor is on `length`
 /// (the last part), return `"println"`. Otherwise return the matched part.
 fn pick_path_part(parts: &[String], span: Span, offset: u32) -> String {
     if parts.len() == 1 {
@@ -1348,7 +1348,7 @@ mod tests {
 
     #[test]
     fn find_node_at_path() {
-        let source = "import std.io\nstd.io.println(\"hi\")\n";
+        let source = "import std.str\nstr.length(\"hi\")\n";
         let parsed = parse(source);
         // Offset 20 should be somewhere in the import or the call.
         let node = find_node_at(&parsed.program, source, 20);

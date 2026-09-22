@@ -3,7 +3,7 @@ use std::io::Write;
 use crate::natives::expect_str;
 use zz_runtime::{EvalError, Interp, Span, Value};
 
-pub(crate) fn printz(
+pub(crate) fn print(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     span: Span,
@@ -11,7 +11,7 @@ pub(crate) fn printz(
     let v = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for std.io.printz", span))?;
+        .ok_or_else(|| EvalError::new("missing argument for print", span))?;
     print!("{v}");
     Ok(Value::Unit)
 }
@@ -24,7 +24,7 @@ pub(crate) fn println(
     let v = args
         .first()
         .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for std.io.println", span))?;
+        .ok_or_else(|| EvalError::new("missing argument for println", span))?;
     println!("{v}");
     Ok(Value::Unit)
 }

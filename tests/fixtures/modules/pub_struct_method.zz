@@ -7,5 +7,5 @@ pub func dist(p: Point) -> int {
 
 func main() {
     p := Point{x: 3, y: 4}
-    std.io.println(dist(p))
+    println(dist(p))
 }

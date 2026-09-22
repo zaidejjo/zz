@@ -103,10 +103,10 @@ fn parses_union_type() {
 
 #[test]
 fn parses_import() {
-    let p = parse_ok("import std.io");
+    let p = parse_ok("import std.str");
     match &p.stmts[0] {
         zz_frontend::ast::Stmt::Import { path, .. } => {
-            assert_eq!(path, &vec!["std".to_string(), "io".to_string()])
+            assert_eq!(path, &vec!["std".to_string(), "str".to_string()])
         }
         other => panic!("unexpected: {other:?}"),
     }

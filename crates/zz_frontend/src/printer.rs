@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn round_trip_import_alias() {
-        round_trips("import std.io as console\nconsole.println(1)");
+        round_trips("import std.str as s\ns.length(\"hi\")");
     }
 
     #[test]
@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn round_trip_for_loop() {
-        round_trips("for i in 0..10 { io.println(i) }");
+        round_trips("for i in 0..10 { println(i) }");
         round_trips("for x in xs { total = total + x }");
         round_trips("for i in 0..10 { if i == 3 { break } }");
         round_trips("for i in 0..10 { if i == 3 { continue } }");
@@ -258,6 +258,6 @@ mod tests {
 
     #[test]
     fn round_trip_import() {
-        round_trips("import std.io\n");
+        round_trips("import std.str\n");
     }
 }

@@ -2,7 +2,6 @@
 // Guards worker helping (private-deque drain) without dependency
 // inversion: every parked wait stays broadcast-revisited or
 // unwind-reachable. Fresh cell per link via `prev`.
-import std.io
 import std.task
 
 func inc(prev) {
@@ -19,6 +18,6 @@ func main() {
         })
     }
     r: int = task.join(h)
-    io.println("chain:{r}")
-    io.println("join_chain_ok")
+    println("chain:{r}")
+    println("join_chain_ok")
 }

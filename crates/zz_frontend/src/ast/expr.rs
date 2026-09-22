@@ -86,7 +86,7 @@ pub enum Expr {
         name: String,
         span: Span,
     },
-    /// Dotted path: `std.io.println`. Resolved as a single qualified name.
+    /// Dotted path: `std.str.length`. Resolved as a single qualified name.
     Path {
         parts: Vec<String>,
         span: Span,

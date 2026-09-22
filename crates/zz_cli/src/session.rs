@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn import_accepted() {
         let mut s = Session::new("<test>");
-        let out = s.eval("import std.io\n1 + 1");
+        let out = s.eval("import std.str\n1 + 1");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "2");
     }
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn stdlib_print_any_value() {
         let mut s = Session::new("<test>");
-        let out = s.eval("import std.io\nio.println(42)");
+        let out = s.eval("println(42)");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "");
     }
@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn stdlib_unknown_func_errors() {
         let mut s = Session::new("<test>");
-        let out = s.eval("import std.io\nio.nope(1)");
+        let out = s.eval("import std.str\nstr.nope(1)");
         assert!(out.errors.is_some(), "expected error");
     }
 

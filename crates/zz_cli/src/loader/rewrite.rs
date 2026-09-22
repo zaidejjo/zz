@@ -6,7 +6,7 @@ pub(crate) struct Rewriter<'a> {
     pub(crate) ns: &'a str,
     pub(crate) top: &'a HashSet<String>,
     /// Imported namespace heads (`ops` from `import ops`, `io` from
-    /// `import std.io`, explicit aliases). Calls through them
+    /// `import std.str`, explicit aliases). Calls through them
     /// (`ops.resize(...)`) already resolve and must not be rewritten.
     pub(crate) imports: HashSet<String>,
     /// Stack of shadowing scopes; each holds names declared so far.

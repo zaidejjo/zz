@@ -8,5 +8,5 @@ pub struct Vec2 {x: int, y: int}
 
 func main() {
     // Use nothing — pub items must NOT warn about being unused.
-    std.io.println("no warnings expected")
+    println("no warnings expected")
 }

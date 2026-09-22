@@ -10,7 +10,7 @@ Available without imports:
 |----------|-----------|-------------|
 | `print` | `print(v: T) -> unit` | Print value without newline |
 | `println` | `println(v: T) -> unit` | Print value with newline |
-| `input` | `input() -> str` | Read line from stdin |
+| `input` | `input(prompt: str) -> str` | Read line from stdin (optional prompt) |
 | `typeof` | `typeof(v: T) -> str` | Runtime type name |
 | `str` | `str(v: T) -> str` | Convert to string |
 | `int` | `int(v: T)` | Parse/convert to int (`.none` on failure) |
@@ -26,7 +26,6 @@ Available without imports:
 
 | Module | Purpose |
 |--------|---------|
-| `std.io` | Console I/O |
 | `std.str` | String manipulation |
 | `std.vec` | Array operations |
 | `std.json` | JSON parsing/serialization |
@@ -38,24 +37,13 @@ Available without imports:
 
 ---
 
-## `std.io` -- Console I/O
+## Console I/O (built-ins, no import)
 
 ```zz
-import std.io
-```
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `io.printz` | `io.printz(v: T) -> unit` | Print without newline |
-| `io.println` | `io.println(v: T) -> unit` | Print with newline |
-| `io.read_line` | `io.read_line() -> str` | Read line from stdin |
-
-```zz
-import std.io
-
-io.printz("Enter name: ")
-name := io.read_line()
-io.println("Hello, {name}")
+println("hello")
+print("Enter name: ")
+name := input("Enter name: ")
+println("Hello, {name}")
 ```
 
 ---

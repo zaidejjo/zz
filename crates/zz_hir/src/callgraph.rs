@@ -134,7 +134,7 @@ pub struct ReachableSet {
     pub funcs: HashSet<String>,
     /// Reachable struct names.
     pub structs: HashSet<String>,
-    /// Reachable stdlib native names (`stdio.io.println`-style qualified).
+    /// Reachable stdlib native names (`std.str.length`-style qualified).
     pub natives: HashSet<String>,
 }
 

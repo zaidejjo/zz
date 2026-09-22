@@ -35,14 +35,13 @@ fn write_fixture(dir: &Path, name: &str, src: &str) -> PathBuf {
 }
 
 const HELLO: &str = r#"
-import std.io
 func main() {
-    io.println("nativetest")
+    println("nativetest")
     s := 0
     for i in 0..1000 {
         s = s + i
     }
-    io.println(s)
+    println(s)
 }
 "#;
 

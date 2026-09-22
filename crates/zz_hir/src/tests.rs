@@ -8,15 +8,15 @@ use crate::callgraph::{build_callgraph, dce, reachable};
 use crate::walk::walk_exprs;
 use crate::{build_source, is_dynamic, is_int};
 
-/// Seed a small stdlib surface for call-graph tests: io + http + str + vec
+/// Seed a small stdlib surface for call-graph tests: print + http + str + vec
 /// natives so method dispatch and module pruning are observable.
 fn seed_stdlib() -> HashMap<String, FuncSig> {
     let mut f = HashMap::new();
     let unit = Type::Unit;
     let t_any = Type::Named("T".to_string());
-    // io
+    // print
     f.insert(
-        "io.println".into(),
+        "println".into(),
         FuncSig {
             is_extern: false,
             extern_c_symbol: None,
@@ -28,7 +28,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         },
     );
     f.insert(
-        "io.print".into(),
+        "print".into(),
         FuncSig {
             is_extern: false,
             extern_c_symbol: None,
@@ -276,9 +276,9 @@ fn build_with_stdlib(src: &str) -> crate::TypedResult {
 
 #[test]
 fn reachable_mark_io_only_when_http_imported_but_unused() {
-    // The test in the plan: `import std.http` but only use `io.println`.
-    // Reachability must include io.println and strip http.get/http.server.
-    let src = "import std.http\nfunc main() {\n    io.println(\"hi\")\n}\n";
+    // The test in the plan: `import std.http` but only use `println`.
+    // Reachability must include println and strip http.get/http.server.
+    let src = "import std.http\nfunc main() {\n    println(\"hi\")\n}\n";
     let res = build_with_stdlib(src);
     assert!(
         !has_errors(&res.diagnostics),
@@ -289,25 +289,21 @@ fn reachable_mark_io_only_when_http_imported_but_unused() {
     let reach = reachable(tp, "main");
 
     // FIXME: the import registers `http` namespace only if reachable funcs
-    // use it; since io.println is a direct call, http.* must be pruned.
+    // use it; since println is a direct call, http.* must be pruned.
     let mut saw_io = false;
     let mut saw_http = false;
     for f in &reach.funcs {
-        if f == "io.println" {
+        if f == "println" {
             saw_io = true;
         }
         if f.starts_with("http.") {
             saw_http = true;
         }
     }
-    assert!(
-        saw_io,
-        "io.println should be reachable, got {:?}",
-        reach.funcs
-    );
+    assert!(saw_io, "println should be reachable, got {:?}", reach.funcs);
     assert!(!saw_http, "http.* should be pruned, got {:?}", reach.funcs);
     // natives = reachable but not program-defined.
-    assert!(reach.natives.contains("io.println"));
+    assert!(reach.natives.contains("println"));
     assert!(!reach.natives.iter().any(|n| n.starts_with("http.")));
 }
 
@@ -317,7 +313,7 @@ fn method_dispatch_traces_str_and_vec() {
 func main() {
     s := "  hi  "
     n := s.len()
-    io.println(n)
+    println(n)
 }
 "#;
     let res = build_with_stdlib(src);
@@ -340,7 +336,7 @@ struct Used { x: int }
 struct Unused { y: int }
 func main() {
     p := Used{ x: 1 }
-    io.println(p.x)
+    println(p.x)
 }
 "#;
     let res = build_with_stdlib(src);
@@ -363,7 +359,7 @@ fn unused_function_pruned_unused_kept() {
 func used(x: int) -> int { x * 2 }
 func unused(x: int) -> int { x * 3 }
 func main() {
-    io.println(used(21))
+    println(used(21))
 }
 "#;
     let res = build_with_stdlib(src);
@@ -386,7 +382,7 @@ func factorial(n: int) -> int {
     if n <= 1 { 1 } else { n * factorial(n - 1) }
 }
 func main() {
-    io.println(factorial(5))
+    println(factorial(5))
 }
 "#;
     let res = build_with_stdlib(src);
@@ -405,7 +401,7 @@ fn function_used_as_value_kept() {
 func helper(x: int) -> int { x + 1 }
 func main() {
     g := helper
-    io.println(g(1))
+    println(g(1))
 }
 "#;
     let res = build_with_stdlib(src);
@@ -421,7 +417,7 @@ func main() {
 
 #[test]
 fn callgraph_has_edges_from_top() {
-    let src = "io.println(1)\n";
+    let src = "println(1)\n";
     let res = build_with_stdlib(src);
     let tp = &res.program;
     let cg = build_callgraph(tp);
@@ -429,7 +425,7 @@ fn callgraph_has_edges_from_top() {
     assert!(top_edges.is_some(), "top-level statements must have edges");
     let edges = top_edges.unwrap();
     assert!(
-        edges.contains(&"io.println".to_string()),
-        "expected io.println edge, got {edges:?}"
+        edges.contains(&"println".to_string()),
+        "expected println edge, got {edges:?}"
     );
 }

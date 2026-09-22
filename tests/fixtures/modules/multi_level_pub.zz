@@ -1,6 +1,5 @@
 // Test: pub re-export chain pattern.
 // Full multi-file test is in loader/tests.rs (pub_reexport_chain).
-import std.io as io
 
 pub base := 100
 pub func scale(x: int) -> int {
@@ -8,5 +7,5 @@ pub func scale(x: int) -> int {
 }
 
 func main() {
-    io.println(scale(5))
+    println(scale(5))
 }

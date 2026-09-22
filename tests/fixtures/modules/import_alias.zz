@@ -1,9 +1,10 @@
 // Test: import ... as aliasing works correctly
-import std.io as console
+import std.str as console
 import math.utils as m
 
 func main() {
-    console.println("Hello from alias")
+    println("Hello from alias")
     n := m.double(21)
-    console.println(n)
+    println(n)
+    println(console.length("abc"))
 }
