@@ -78,58 +78,20 @@ impl<'a> FmtCtx<'a> {
                 params,
                 ret,
                 body,
-                pub_,
-                decorators,
                 ..
             } => {
-                for dec in decorators {
-                    self.write_indent();
-                    self.write_str("@");
-                    self.write_str(&dec.path.join("."));
-                    if !dec.args.is_empty() || !dec.named.is_empty() {
-                        self.write_str("(");
-                        for (i, arg) in dec.args.iter().enumerate() {
-                            if i > 0 {
-                                self.write_str(", ");
-                            }
-                            self.fmt_expr(arg, source);
-                        }
-                        for (i, (aname, arg)) in dec.named.iter().enumerate() {
-                            if i > 0 || !dec.args.is_empty() {
-                                self.write_str(", ");
-                            }
-                            self.write_str(aname);
-                            self.write_str(": ");
-                            self.fmt_expr(arg, source);
-                        }
-                        self.write_str(")");
-                    }
-                    self.write_line();
-                }
                 self.write_indent();
-                if *pub_ {
-                    self.write_str("pub ");
-                }
                 self.write_str("func ");
                 self.write_str(&name.join("."));
                 if !generics.is_empty() {
-                    self.write_str("<");
+                    self.write_str("[");
                     for (i, g) in generics.iter().enumerate() {
                         if i > 0 {
                             self.write_str(", ");
                         }
-                        self.write_str(&g.name.name);
-                        if !g.bounds.is_empty() {
-                            self.write_str(": ");
-                            for (j, b) in g.bounds.iter().enumerate() {
-                                if j > 0 {
-                                    self.write_str(" + ");
-                                }
-                                self.write_str(b.name());
-                            }
-                        }
+                        self.write_str(&g.name);
                     }
-                    self.write_str(">");
+                    self.write_str("]");
                 }
                 self.write_str("(");
                 self.fmt_params(params, source);
@@ -141,13 +103,8 @@ impl<'a> FmtCtx<'a> {
                 self.write_str(" ");
                 self.fmt_block(body, source);
             }
-            Stmt::Struct {
-                name, fields, pub_, ..
-            } => {
+            Stmt::Struct { name, fields, .. } => {
                 self.write_indent();
-                if *pub_ {
-                    self.write_str("pub ");
-                }
                 self.write_str("struct ");
                 self.write_str(&name.join("."));
                 self.write_str(" {");
@@ -157,18 +114,9 @@ impl<'a> FmtCtx<'a> {
                     self.write_line();
                     for (fname, fty) in fields {
                         self.write_indent();
-                        // Embedded (anonymous) fields print in short form:
-                        // `Base,` instead of `Base: Base,`.
-                        let embedded = matches!(&fty.kind, TyKind::Named(full, args)
-                            if args.is_empty()
-                                && full.rsplit('.').next().unwrap_or(full) == fname.name);
-                        if embedded {
-                            self.write_str(&fname.name);
-                        } else {
-                            self.write_str(&fname.name);
-                            self.write_str(": ");
-                            self.fmt_ty(fty, source);
-                        }
+                        self.write_str(&fname.name);
+                        self.write_str(": ");
+                        self.fmt_ty(fty, source);
                         self.write_str(",");
                         self.write_line();
                     }
@@ -177,28 +125,13 @@ impl<'a> FmtCtx<'a> {
                 }
             }
             Stmt::Decl {
-                ty,
-                name,
-                value,
-                pub_,
-                is_const,
-                ..
+                ty, name, value, ..
             } => {
                 self.write_indent();
-                if *pub_ {
-                    self.write_str("pub ");
-                }
-                if *is_const {
-                    self.write_str("const ");
-                }
                 if let Some(ty) = ty {
                     self.write_str(&name.name);
                     self.write_str(": ");
                     self.fmt_ty(ty, source);
-                    self.write_str(" = ");
-                } else if *is_const {
-                    // `const x = expr` uses `=` even without a type annotation.
-                    self.write_str(&name.name);
                     self.write_str(" = ");
                 } else {
                     self.write_str(&name.name);
@@ -206,43 +139,13 @@ impl<'a> FmtCtx<'a> {
                 }
                 self.fmt_expr(value, source);
             }
-            Stmt::Import {
-                path,
-                alias,
-                items,
-                pub_,
-                ..
-            } => {
+            Stmt::Import { path, alias, .. } => {
                 self.write_indent();
-                if *pub_ {
-                    self.write_str("pub ");
-                }
                 self.write_str("import ");
                 self.write_str(&path.join("."));
                 if let Some(a) = alias {
                     self.write_str(" as ");
                     self.write_str(a);
-                }
-                if !items.is_empty() {
-                    self.write_str("(");
-                    for (i, item) in items.iter().enumerate() {
-                        if i > 0 {
-                            self.write_str(", ");
-                        }
-                        match item {
-                            crate::ast::stmt::ImportItem::Wildcard { .. } => {
-                                self.write_str("*");
-                            }
-                            crate::ast::stmt::ImportItem::Named { name, alias, .. } => {
-                                self.write_str(name);
-                                if let Some(a) = alias {
-                                    self.write_str(" as ");
-                                    self.write_str(a);
-                                }
-                            }
-                        }
-                    }
-                    self.write_str(")");
                 }
             }
             Stmt::Return { value, .. } => {
@@ -254,16 +157,11 @@ impl<'a> FmtCtx<'a> {
                 }
             }
             Stmt::For {
-                vars, iter, body, ..
+                var, iter, body, ..
             } => {
                 self.write_indent();
                 self.write_str("for ");
-                for (i, v) in vars.iter().enumerate() {
-                    if i > 0 {
-                        self.write_str(", ");
-                    }
-                    self.write_str(&v.name);
-                }
+                self.write_str(&var.name);
                 self.write_str(" in ");
                 self.fmt_expr(iter, source);
                 self.write_str(" ");
@@ -288,84 +186,9 @@ impl<'a> FmtCtx<'a> {
                 self.write_str(" = ");
                 self.fmt_expr(value, source);
             }
-            Stmt::Destructure { pat, value, .. } => {
-                self.write_indent();
-                self.fmt_pattern(pat, source);
-                self.write_str(" := ");
-                self.fmt_expr(value, source);
-            }
-            Stmt::Impl {
-                name,
-                methods,
-                pub_,
-                ..
-            } => {
-                self.write_indent();
-                if *pub_ {
-                    self.write_str("pub ");
-                }
-                self.write_str("impl ");
-                self.write_str(&name.join("."));
-                self.write_str(" {");
-                if methods.is_empty() {
-                    self.write_str("}");
-                } else {
-                    self.write_line();
-                    self.indent += 1;
-                    for (i, m) in methods.iter().enumerate() {
-                        if i > 0 {
-                            self.write_line();
-                        }
-                        self.fmt_stmt(m, source);
-                    }
-                    self.indent -= 1;
-                    self.write_line();
-                    self.write_indent();
-                    self.write_str("}");
-                }
-            }
             Stmt::Expr(e) => {
                 self.write_indent();
                 self.fmt_expr(e, source);
-            }
-            Stmt::ExternBlock { abi, items, .. } => {
-                self.write_indent();
-                self.write_str("extern \"");
-                self.write_str(abi);
-                self.write_str("\" {");
-                if items.is_empty() {
-                    self.write_str("}");
-                } else {
-                    self.write_line();
-                    self.indent += 1;
-                    for item in items {
-                        self.write_indent();
-                        self.write_str("func ");
-                        self.write_str(&item.name.name);
-                        self.write_str("(");
-                        self.fmt_params(&item.params, source);
-                        self.write_str(")");
-                        if let Some(ret) = &item.ret {
-                            self.write_str(" -> ");
-                            self.fmt_ty(ret, source);
-                        }
-                        if let Some(sym) = &item.c_symbol {
-                            self.write_str(" = \"");
-                            self.write_str(sym);
-                            self.write_str("\"");
-                        }
-                        self.write_line();
-                    }
-                    self.indent -= 1;
-                    self.write_indent();
-                    self.write_str("}");
-                }
-            }
-            Stmt::Link { lib, .. } => {
-                self.write_indent();
-                self.write_str("@link(\"");
-                self.write_str(lib);
-                self.write_str("\")");
             }
         }
     }
@@ -410,13 +233,8 @@ impl<'a> FmtCtx<'a> {
             TyKind::Bool => self.write_str("bool"),
             TyKind::Str => self.write_str("str"),
             TyKind::Unit => self.write_str("()"),
-            TyKind::Void => self.write_str("void"),
-            TyKind::Ptr { mutable, inner } => {
-                self.write_str(if *mutable { "*mut " } else { "*const " });
-                self.fmt_ty(inner, _source);
-            }
             TyKind::Named(name, generics) => {
-                self.write_str(name);
+                self.write_str(&name);
                 if !generics.is_empty() {
                     self.write_str("[");
                     for (i, g) in generics.iter().enumerate() {
@@ -459,7 +277,7 @@ impl<'a> FmtCtx<'a> {
                 self.write_str(")");
             }
             TyKind::Func(params, ret) => {
-                self.write_str("func(");
+                self.write_str("\\(");
                 for (i, p) in params.iter().enumerate() {
                     if i > 0 {
                         self.write_str(", ");
@@ -621,17 +439,9 @@ impl<'a> FmtCtx<'a> {
                 self.write_str("..");
                 self.fmt_expr(end, source);
             }
-            Expr::Try { expr, span } => {
-                let is_prefix = source
-                    .get(span.start as usize..)
-                    .is_some_and(|s| s.starts_with("try ") || s.starts_with("try("));
-                if is_prefix {
-                    self.write_str("try ");
-                    self.fmt_expr(expr, source);
-                } else {
-                    self.fmt_expr(expr, source);
-                    self.write_str("?");
-                }
+            Expr::Try { expr, .. } => {
+                self.fmt_expr(expr, source);
+                self.write_str("?");
             }
             Expr::Fmt { parts, .. } => {
                 self.write_str("\"");
@@ -659,14 +469,8 @@ impl<'a> FmtCtx<'a> {
                     if i > 0 {
                         self.write_str(", ");
                     }
-                    // Embedded shorthand: `Base{...}` instead of
-                    // `Base: Base{...}`.
-                    let shorthand = matches!(fval, Expr::StructInit { name: inner, .. }
-                        if inner.rsplit('.').next().unwrap_or(inner.as_str()) == fname.as_str());
-                    if !shorthand {
-                        self.write_str(fname);
-                        self.write_str(": ");
-                    }
+                    self.write_str(fname);
+                    self.write_str(": ");
                     self.fmt_expr(fval, source);
                 }
                 self.write_str(" }");
@@ -690,20 +494,10 @@ impl<'a> FmtCtx<'a> {
                 }
                 self.write_str("]");
             }
-            Expr::Closure {
-                params,
-                ret_ty,
-                body,
-                ..
-            } => {
+            Expr::Closure { params, body, .. } => {
                 self.write_str("|");
                 self.fmt_params(params, source);
-                self.write_str("|");
-                if let Some(rt) = ret_ty {
-                    self.write_str(" -> ");
-                    self.fmt_ty(rt, source);
-                }
-                self.write_str(" ");
+                self.write_str("| ");
                 self.fmt_expr(body, source);
             }
             Expr::Variant { name, arg, .. } => {
@@ -715,8 +509,6 @@ impl<'a> FmtCtx<'a> {
                     self.write_str(")");
                 }
             }
-            Expr::Break { .. } => self.write_str("break"),
-            Expr::Continue { .. } => self.write_str("continue"),
             Expr::IfLet {
                 pat,
                 value,
@@ -734,16 +526,6 @@ impl<'a> FmtCtx<'a> {
                     self.write_str(" else ");
                     self.fmt_expr(e, source);
                 }
-            }
-            Expr::Tuple { items, .. } => {
-                self.write_str("(");
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        self.write_str(", ");
-                    }
-                    self.fmt_expr(item, source);
-                }
-                self.write_str(")");
             }
         }
     }
@@ -772,24 +554,6 @@ impl<'a> FmtCtx<'a> {
                     self.write_str("(");
                     self.fmt_pattern(a, source);
                     self.write_str(")");
-                }
-            }
-            Pattern::Tuple { pats, .. } => {
-                self.write_str("(");
-                for (i, p) in pats.iter().enumerate() {
-                    if i > 0 {
-                        self.write_str(", ");
-                    }
-                    self.fmt_pattern(p, source);
-                }
-                self.write_str(")");
-            }
-            Pattern::Or { pats, .. } => {
-                for (i, p) in pats.iter().enumerate() {
-                    if i > 0 {
-                        self.write_str(" | ");
-                    }
-                    self.fmt_pattern(p, source);
                 }
             }
         }
@@ -863,9 +627,9 @@ mod tests {
 
     #[test]
     fn format_import() {
-        let src = "import std.str as s";
+        let src = "import std.io as console";
         let out = fmt(src);
-        assert!(out.contains("import std.str as s"));
+        assert!(out.contains("import std.io as console"));
     }
 
     #[test]

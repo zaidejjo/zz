@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use zz_frontend::ast::{BinOp, Param, Pattern, UnOp};
 use zz_frontend::span::Span;
@@ -34,44 +34,6 @@ pub enum Op {
     LoadSlot(u16),
     /// Pop a value and write it to a compile-time-resolved local slot.
     StoreSlot(u16),
-    /// In-place integer add: `slot[dst] = Int(slot[dst] + slot[src])`.
-    ///
-    /// Fused fast path for `x = x + y` inside hot loops: no stack traffic,
-    /// no generic `BinOp` dispatch. Falls back to the generic path when
-    /// either slot does not hold an `Int`.
-    SlotAddInt { dst: u16, src: u16 },
-    /// In-place integer increment: `slot[slot] = Int(slot[slot] + 1)`.
-    ///
-    /// Fused fast path for `x = x + 1` / `x += 1` inside hot loops.
-    SlotInc { slot: u16 },
-    /// In-place integer add of an immediate: `slot[dst] = Int(slot[dst] + imm)`.
-    ///
-    /// Fused fast path for `x = x + N` with a literal `N`.
-    SlotAddIntImm { dst: u16, imm: i64 },
-    /// Compare two slots as integers, push `Bool(a < b)`.
-    SlotLessIntSlot { a: u16, b: u16 },
-    /// Compare a slot against an immediate integer, push `Bool(a < imm)`.
-    SlotLessIntImm { a: u16, imm: i64 },
-    /// 3-address integer binary op: `slot[dst] = Int(slot[lhs] op slot[rhs])`.
-    ///
-    /// Fused fast path for `x = y op z` where all three resolve to local
-    /// slots: no stack traffic for the operands, no generic `BinOp`
-    /// dispatch. Fallback to `eval_binary` when either operand is not an
-    /// `Int`.
-    SlotBinaryInt {
-        dst: u16,
-        lhs: u16,
-        rhs: u16,
-        op: zz_frontend::ast::BinOp,
-    },
-    /// 3-address integer binary op with an immediate RHS:
-    /// `slot[dst] = Int(slot[lhs] op imm)`.
-    SlotBinaryIntImm {
-        dst: u16,
-        lhs: u16,
-        imm: i64,
-        op: zz_frontend::ast::BinOp,
-    },
 
     // ---- functions & structs ----
     /// Create a named function value from a pre-compiled body chunk, register
@@ -79,26 +41,12 @@ pub enum Op {
     MakeFunc {
         name: String,
         params: Vec<Param>,
-        chunk: Arc<Chunk>,
+        chunk: Rc<Chunk>,
     },
     /// Register a struct definition (name -> ordered field names).
     RegisterStruct { name: String, fields: Vec<String> },
 
-    // ---- typed arithmetic (unboxed, int-only) ----
-    /// Pop two ints, push `a + b` (wrapping in release, checked in debug).
-    IntAdd(Span),
-    /// Pop two ints, push `a - b`.
-    IntSub(Span),
-    /// Pop two ints, push `a * b`.
-    IntMul(Span),
-    /// Pop two ints, push `a / b` (error on zero).
-    IntDiv(Span),
-    /// Pop two ints, push `a % b` (error on zero).
-    IntRem(Span),
-    /// Pop one int, push `-a`.
-    IntNeg(Span),
-
-    // ---- generic arithmetic (fallback) ----
+    // ---- arithmetic ----
     /// Pop `b`, pop `a`, push `a op b` (int/float/str semantics).
     BinOp(BinOp, Span),
     /// Pop `v`, push `op v`.
@@ -123,14 +71,12 @@ pub enum Op {
         exit: usize,
         header: usize,
         span: Span,
-        num_vars: u8,
     },
     /// Advance a `for` loop: pop the index, push `index + 1` and the current
-    /// item(s) (bound to `var` in a fresh iteration scope when `in_env`, or
-    /// left on the stack as a local slot(s)), or exit when the iterable is
-    /// exhausted.
+    /// item (bound to `var` in a fresh iteration scope when `in_env`, or left
+    /// on the stack as a local slot), or exit when the iterable is exhausted.
     ForNext {
-        vars: Vec<String>,
+        var: String,
         exit: usize,
         in_env: bool,
     },
@@ -141,24 +87,15 @@ pub enum Op {
     /// falsy.
     WhileCond { exit: usize, span: Span },
     /// Exit the innermost loop (restores the loop's environment).
-    Break(Span),
+    Break,
     /// Jump to the innermost loop's header (restores the loop's environment).
-    Continue(Span),
+    Continue,
     /// Pop a value and store it as the innermost loop's result.
     SetLoopResult,
-    /// Cooperative safepoint at a loop header (emitted by the compiler for
-    /// every `for`/`while`). Stack-neutral: decrements the VM's slice
-    /// budget, and once per budget worth of iterations checks the timeslice
-    /// clock — yielding to the executor when the task overruns its quantum
-    /// so CPU-bound loops cannot starve sibling tasks. Header (not
-    /// back-edge) placement so `continue` cannot skip the check.
-    Safepoint,
 
     // ---- collections ----
     /// Pop `n` values and push an array.
     MakeArray(u16),
-    /// Pop a tuple/array and push its elements on the stack.
-    UnpackTuple(u8),
     /// Pop a value and an array; push the array with the value appended.
     ArrayPush(Span),
     /// Pop `2n` values (key, value pairs) and push a dict.
@@ -184,31 +121,16 @@ pub enum Op {
     },
     /// Pop an object, push `object.field`.
     GetField(String, Span),
-    /// Pop an object, push `object.fields[idx]` (O(1) for known struct types).
-    GetFieldIdx(u16, Span),
     /// Pop a value and an object; write `object.field = value`; push the
     /// mutated object back (for write-back).
     SetField(String, Span),
-    /// Pop a value and an object; write `object.fields[idx] = value`; push
-    /// the mutated object back (O(1) for known struct types).
-    SetFieldIdx(u16, Span),
 
     // ---- closures & variants ----
     /// Create a closure value from a pre-compiled body chunk, capturing the
     /// current environment.
     MakeClosure {
         params: Vec<Param>,
-        chunk: Arc<Chunk>,
-    },
-    /// Fused `task.spawn(closure-literal)`: build the task directly from
-    /// the pre-compiled body chunk, skipping the `FuncValue` box + native
-    /// call dispatch. Behaviorally identical to MakeClosure + task.spawn;
-    /// emitted only for literal closures (variables keep the generic
-    /// path with its arity errors).
-    SpawnClosure {
-        params: Vec<Param>,
-        chunk: Arc<Chunk>,
-        span: Span,
+        chunk: Rc<Chunk>,
     },
     /// Pop an optional argument and push an Option/Result variant.
     MakeVariant {
@@ -220,18 +142,13 @@ pub enum Op {
     // ---- pattern matching ----
     /// Pop the scrutinee; try `pat` in a fresh scope (when `has_env`, i.e.
     /// the pattern binds names). On a match, run the body in that scope;
-    /// otherwise jump to `next` (the following arm or the non-exhaustive
-    /// error). When `restore` is true, push the scrutinee back before
-    /// jumping (used when the compiler reloads the scrutinee from a slot).
+    /// otherwise push the scrutinee back and jump to `next` (the following
+    /// arm or the non-exhaustive error).
     MatchArm {
         pat: Pattern,
         next: usize,
         has_env: bool,
-        restore: bool,
     },
-    /// Pop a bool guard value; if false, jump to `next` (next arm).
-    /// When `has_env` is true, also exit the scope created by MatchArm.
-    MatchGuard { next: usize, has_env: bool },
     /// Error: no match arm matched.
     MatchError(Span),
     /// Pop the value; try `pat` in a fresh scope (when `has_env`). On a
@@ -270,24 +187,11 @@ pub enum Op {
     /// Pops `argc` args, then the receiver.
     CallMethod { name: String, argc: u16, span: Span },
 
-    /// Direct native function call: resolves the function by name in the
-    /// native registry and calls it directly, bypassing env/func/method
-    /// resolution. Pops `argc` args, pushes result.
-    CallNative { name: String, argc: u16, span: Span },
-
     // ---- fmt ----
     /// Pop `n` values, concatenate their Display forms, push the string.
     Concat(u16),
     /// Pop a format spec string, pop a value, push the formatted string.
     FormatValue(Span),
-    /// sqlz prepared-query split: pop `n` bound values, pop the Fmt
-    /// template parts count `m`... (compiled inline — see DbQuery).
-    /// Pops `nparams` bound values + `nparts` template parts, pushes the
-    /// SQL template string (with `{expr}` segments replaced by `?N`
-    /// placeholders), then re-pushes each bound value in order. The
-    /// following `CallNative(db.query/db.exec)` consumes
-    /// `[template, p1, ...]` and binds via prepared statements.
-    DbQuery { nparams: u16, span: Span },
 
     // ---- scopes ----
     /// Enter a new child scope (only emitted when the scope declares

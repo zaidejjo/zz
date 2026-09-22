@@ -5,8 +5,6 @@ pub(crate) fn pattern_binds(pat: &Pattern) -> bool {
     match pat {
         Pattern::Binding { .. } => true,
         Pattern::Variant { arg: Some(p), .. } => pattern_binds(p),
-        Pattern::Tuple { pats, .. } => pats.iter().any(pattern_binds),
-        Pattern::Or { pats, .. } => pats.iter().any(pattern_binds),
         _ => false,
     }
 }
@@ -136,11 +134,6 @@ pub(crate) fn scan_expr_captured(
                 scan_expr_captured(e, defined, free);
             }
         }
-        Expr::Tuple { items, .. } => {
-            for e in items {
-                scan_expr_captured(e, defined, free);
-            }
-        }
         Expr::ListComp {
             body,
             var,
@@ -191,24 +184,7 @@ pub(crate) fn scan_expr_captured(
         | Expr::Float { .. }
         | Expr::Str { .. }
         | Expr::Bool { .. }
-        | Expr::Break { .. }
-        | Expr::Continue { .. } => {}
-        // A dotted path may reference a namespaced top-level binding
-        // (`ns.var`), a struct field access (`p.x`), or a nested module
-        // path.  The *root* variable (`parts[0]`) is what must be
-        // captured from the enclosing scope; the full joined name is
-        // kept as a fallback for namespaced top-level bindings stored as
-        // single slots.
-        Expr::Path { parts, .. } => {
-            let root = parts[0].clone();
-            if !defined.contains(&root) {
-                free.insert(root);
-            }
-            let full = parts.join(".");
-            if full != parts[0] && !defined.contains(&full) {
-                free.insert(full);
-            }
-        }
+        | Expr::Path { .. } => {}
     }
 }
 
@@ -223,7 +199,6 @@ pub(crate) fn scan_stmt_captured(
             defined.insert(name.name.clone());
         }
         Stmt::Import { .. } => {}
-        Stmt::ExternBlock { .. } | Stmt::Link { .. } => {}
         Stmt::Func {
             name, params, body, ..
         } => {
@@ -240,19 +215,12 @@ pub(crate) fn scan_stmt_captured(
             }
         }
         Stmt::Struct { .. } => {}
-        Stmt::Impl { methods, .. } => {
-            for method in methods {
-                scan_stmt_captured(method, defined, free);
-            }
-        }
         Stmt::For {
-            vars, iter, body, ..
+            var, iter, body, ..
         } => {
             scan_expr_captured(iter, defined, free);
             let mut inner = defined.clone();
-            for v in vars {
-                inner.insert(v.name.clone());
-            }
+            inner.insert(var.name.clone());
             for stmt in &body.stmts {
                 scan_stmt_captured(stmt, &mut inner, free);
             }
@@ -264,10 +232,6 @@ pub(crate) fn scan_stmt_captured(
         Stmt::Assign { target, value, .. } => {
             scan_expr_captured(value, defined, free);
             scan_expr_captured(target, defined, free);
-        }
-        Stmt::Destructure { pat, value, .. } => {
-            scan_expr_captured(value, defined, free);
-            collect_pattern_bindings(pat, defined);
         }
         Stmt::Expr(e) => scan_expr_captured(e, defined, free),
     }
@@ -283,16 +247,6 @@ pub(crate) fn collect_pattern_bindings(
             defined.insert(name.name.clone());
         }
         Pattern::Variant { arg: Some(p), .. } => collect_pattern_bindings(p, defined),
-        Pattern::Tuple { pats, .. } => {
-            for p in pats {
-                collect_pattern_bindings(p, defined);
-            }
-        }
-        Pattern::Or { pats, .. } => {
-            for p in pats {
-                collect_pattern_bindings(p, defined);
-            }
-        }
         _ => {}
     }
 }

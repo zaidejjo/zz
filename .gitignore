@@ -2,30 +2,3 @@
 **/*.rs.bk
 /examples
 /plans
-bench/add_to_1M
-bench/native/bench_fib
-bench/native/bench_loop
-bench/native/bench_str
-bench/native/_go/main
-target/
-
-# native build artifacts
-bench/add_to_1M
-bench/native/bench_fib
-bench/native/bench_loop
-bench/native/bench_str
-bench/native/_go/main
-bench/native/.bin
-bench/native/categories/*
-!bench/native/categories/*.zz
-benchmarks/arena_bench
-
-# performance_check build artifacts
-bench/performance_check/.bin
-bench/performance_check/.log
-bench/performance_check/rust/target
-bench/performance_check/go/bench_go
-**/.zzbin/
-bench/performance_check/results.json
-bench/performance_check/RESULTS.md
-**/bin/

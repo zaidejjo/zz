@@ -1,7 +1,0 @@
-// `try` inside a closure without an explicit return type is a compile error.
-func fetch() -> Result<int, str> {
-    .ok(1)
-}
-
-f := |x| try fetch()
-println(f(0))

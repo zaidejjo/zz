@@ -12,8 +12,13 @@ pub(crate) async fn handle_formatting(
         Some(doc) => doc.clone(),
         None => return Ok(None),
     };
+    let program = match &doc.program {
+        Some(p) => p,
+        None => return Ok(None),
+    };
 
-    let edit = crate::formatting::format_as_edit(&doc.source);
+    let config = crate::formatting::FormatConfig::default();
+    let edit = crate::formatting::format_as_edit(program, &doc.source, &config);
     Ok(edit.map(|e| vec![e]))
 }
 

@@ -1,6 +1,6 @@
 mod code_action;
-mod display;
 mod document_sync;
+mod display;
 mod intellisense;
 mod lifecycle;
 mod navigation;
@@ -158,7 +158,10 @@ impl LanguageServer for Backend {
         intellisense::handle_signature_help(self, params).await
     }
 
-    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
         display::handle_formatting(self, params).await
     }
 
@@ -173,7 +176,10 @@ impl LanguageServer for Backend {
         display::handle_semantic_tokens_full(self, params).await
     }
 
-    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+    ) -> Result<Option<Vec<FoldingRange>>> {
         display::handle_folding_range(self, params).await
     }
 

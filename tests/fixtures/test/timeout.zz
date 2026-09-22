@@ -1,8 +1,0 @@
-// E2E: @test(timeout) enforces wall-clock limit
-
-@test(timeout = 2000)
-func test_fast_enough() {
-    assert(true)
-}
-
-println("test_framework_ok")

@@ -1,9 +1,9 @@
 //! Type declaration parsing.
 
 use crate::ast::{Ty, TyKind};
-use crate::diag::error_at;
+use crate::diag::{error_at, RawDiag};
 use crate::span::Span;
-use crate::token::TokenKind;
+use crate::token::{Token, TokenKind};
 
 use super::Parser;
 
@@ -32,61 +32,7 @@ impl Parser {
 
     pub(crate) fn parse_type_base(&mut self) -> Ty {
         let tok = self.peek().clone();
-        // `*const T` / `*mut T` / `*T` — raw C pointer. Bare `*T` means `*const T`.
-        if tok.kind == TokenKind::Star {
-            self.advance();
-            let mutable = if self.at(TokenKind::Const) {
-                self.advance();
-                false
-            } else if self.at(TokenKind::Mut) {
-                self.advance();
-                true
-            } else {
-                false
-            };
-            let inner = self.parse_type_base();
-            let span = tok.span.join(inner.span);
-            return Ty {
-                kind: TyKind::Ptr {
-                    mutable,
-                    inner: Box::new(inner),
-                },
-                span,
-            };
-        }
         match tok.kind {
-            // func(int) -> int  — function type keyword
-            TokenKind::Func => {
-                self.advance();
-                if !self.eat(TokenKind::LParen) {
-                    self.error_here("expected `(` after `func` in function type");
-                } else {
-                    self.push_delim(TokenKind::LParen, self.previous().span);
-                }
-                let params = if self.at(TokenKind::RParen) {
-                    Vec::new()
-                } else {
-                    let mut ts = vec![self.parse_type()];
-                    while self.eat(TokenKind::Comma) {
-                        ts.push(self.parse_type());
-                    }
-                    ts
-                };
-                if !self.eat(TokenKind::RParen) {
-                    self.error_here("expected `)` to close function type parameters");
-                } else {
-                    self.pop_delim(TokenKind::RParen, self.previous().span);
-                }
-                if !self.eat(TokenKind::Arrow) {
-                    self.error_here("expected `->` in function type");
-                }
-                let ret = self.parse_type();
-                let span = tok.span.join(ret.span);
-                Ty {
-                    kind: TyKind::Func(params, Box::new(ret)),
-                    span,
-                }
-            }
             TokenKind::Ident => {
                 self.advance();
                 // Consume dotted type names: `shapes.Point`, `a.b.c`, etc.
@@ -158,15 +104,6 @@ impl Parser {
                             ));
                         }
                         TyKind::Unit
-                    }
-                    "void" => {
-                        if !args.is_empty() {
-                            self.errors.push(error_at(
-                                "type `void` does not take type arguments",
-                                tok.span,
-                            ));
-                        }
-                        TyKind::Void
                     }
                     "Option" => match args.len() {
                         1 => TyKind::Option(Box::new(args.into_iter().next().unwrap())),
@@ -260,58 +197,26 @@ impl Parser {
                             break;
                         }
                     }
-                    // Save position before consuming `)` to detect `(A, B) -> Ret`.
-                    let save_pos = self.pos;
-                    if self.eat_close(TokenKind::RParen) {
-                        if self.eat(TokenKind::Arrow) {
-                            let ret = self.parse_type();
-                            let span = tok.span.join(ret.span);
-                            Ty {
-                                kind: TyKind::Func(ts, Box::new(ret)),
-                                span,
-                            }
-                        } else {
-                            // Not a function type — restore and re-consume `)`.
-                            self.pos = save_pos;
-                            self.eat_close(TokenKind::RParen);
-                            Ty {
-                                kind: TyKind::Tuple(ts),
-                                span: tok.span.join(self.previous().span),
-                            }
-                        }
+                    let end = if self.eat_close(TokenKind::RParen) {
+                        self.previous().span
                     } else {
                         self.error_here("expected `)` to close tuple type");
-                        Ty {
-                            kind: TyKind::Tuple(ts),
-                            span: tok.span.join(first_span),
-                        }
+                        first_span
+                    };
+                    Ty {
+                        kind: TyKind::Tuple(ts),
+                        span: tok.span.join(end),
                     }
                 } else {
-                    // Save position before consuming `)` to detect `(A) -> Ret`.
-                    let save_pos = self.pos;
-                    if self.eat_close(TokenKind::RParen) {
-                        if self.eat(TokenKind::Arrow) {
-                            let ret = self.parse_type();
-                            let span = tok.span.join(ret.span);
-                            Ty {
-                                kind: TyKind::Func(vec![first], Box::new(ret)),
-                                span,
-                            }
-                        } else {
-                            // Not a function type — restore and re-consume `)`.
-                            self.pos = save_pos;
-                            self.eat_close(TokenKind::RParen);
-                            Ty {
-                                kind: first.kind,
-                                span: tok.span.join(self.previous().span),
-                            }
-                        }
+                    let end = if self.eat_close(TokenKind::RParen) {
+                        self.previous().span
                     } else {
                         self.error_here("expected `)` to close type");
-                        Ty {
-                            kind: first.kind,
-                            span: tok.span.join(first_span),
-                        }
+                        first_span
+                    };
+                    Ty {
+                        kind: first.kind,
+                        span: tok.span.join(end),
                     }
                 }
             }
@@ -323,57 +228,6 @@ impl Parser {
                 }
             }
         }
-    }
-
-    /// True when the upcoming tokens start an embedded (anonymous) struct
-    /// field: a dotted type name (with optional `<...>` generic args)
-    /// followed by `,`, `}`, or a statement end — and NOT by `:` (which
-    /// marks a named `field: Type` field). The terminator requirement keeps
-    /// the old error for a missing colon (`age int` still reports
-    /// "expected `:` after field name" instead of misreading `age` as an
-    /// embedded type).
-    pub(crate) fn is_embedded_field_start(&self) -> bool {
-        // Must start with an identifier.
-        if self.peek_kind_at(0) != TokenKind::Ident {
-            return false;
-        }
-        let mut i = 1;
-        // Skip `. Ident` segments.
-        while self.peek_kind_at(i) == TokenKind::Dot && self.peek_kind_at(i + 1) == TokenKind::Ident
-        {
-            i += 2;
-        }
-        // Skip a single `<...>` generic argument list, if present.
-        if self.peek_kind_at(i) == TokenKind::Lt {
-            let mut depth = 0usize;
-            loop {
-                match self.peek_kind_at(i) {
-                    TokenKind::Eof => return false,
-                    TokenKind::Lt => {
-                        depth += 1;
-                        i += 1;
-                    }
-                    TokenKind::Gt => {
-                        depth -= 1;
-                        i += 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    _ => {
-                        i += 1;
-                    }
-                }
-                // Bound the scan so a missing `>` cannot hang the parser.
-                if i > 64 {
-                    return false;
-                }
-            }
-        }
-        matches!(
-            self.peek_kind_at(i),
-            TokenKind::Comma | TokenKind::RBrace | TokenKind::StmtEnd | TokenKind::Eof
-        )
     }
 
     /// Parse a dotted identifier: `a`, `a.b`, `a.b.c`, ...

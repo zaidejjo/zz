@@ -1,21 +1,25 @@
 use crate::natives::expect_str;
-use zz_runtime::{EvalError, Interp, Span, Value};
+use zz_runtime::{EvalError, Interp, Value};
 
 pub(crate) fn option_unwrap(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
 ) -> Result<Value, EvalError> {
-    let opt = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for option.unwrap", span))?;
+    let opt = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for option.unwrap",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
     match opt {
         Value::Option(Some(v)) => Ok(*v),
-        Value::Option(None) => Err(EvalError::new("called unwrap on .none", span)),
+        Value::Option(None) => Err(EvalError::new(
+            "called unwrap on .none",
+            zz_runtime::Span::new(0, 0),
+        )),
         other => Err(EvalError::new(
             format!("option.unwrap: expected an option, found `{other}`"),
-            span,
+            zz_runtime::Span::new(0, 0),
         )),
     }
 }
@@ -23,22 +27,25 @@ pub(crate) fn option_unwrap(
 pub(crate) fn option_unwrap_or(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
 ) -> Result<Value, EvalError> {
-    let opt = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for option.unwrap_or", span))?;
-    let default = args
-        .get(1)
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing `default` argument for option.unwrap_or", span))?;
+    let opt = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for option.unwrap_or",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
+    let default = args.get(1).cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing `default` argument for option.unwrap_or",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
     match opt {
         Value::Option(Some(v)) => Ok(*v),
         Value::Option(None) => Ok(default),
         other => Err(EvalError::new(
             format!("option.unwrap_or: expected an option, found `{other}`"),
-            span,
+            zz_runtime::Span::new(0, 0),
         )),
     }
 }
@@ -46,19 +53,23 @@ pub(crate) fn option_unwrap_or(
 pub(crate) fn option_expect(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
 ) -> Result<Value, EvalError> {
-    let opt = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for option.expect", span))?;
+    let opt = args.first().cloned().ok_or_else(|| {
+        EvalError::new(
+            "missing argument for option.expect",
+            zz_runtime::Span::new(0, 0),
+        )
+    })?;
     let msg = expect_str(args, 1, "option.expect")?;
     match opt {
         Value::Option(Some(v)) => Ok(*v),
-        Value::Option(None) => Err(EvalError::new(format!("option.expect: {msg}"), span)),
+        Value::Option(None) => Err(EvalError::new(
+            format!("option.expect: {msg}"),
+            zz_runtime::Span::new(0, 0),
+        )),
         other => Err(EvalError::new(
             format!("option.expect: expected an option, found `{other}`"),
-            span,
+            zz_runtime::Span::new(0, 0),
         )),
     }
 }

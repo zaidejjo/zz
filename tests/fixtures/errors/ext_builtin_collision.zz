@@ -1,6 +1,0 @@
-// Extension colliding with a builtin method is a compile error (builtin wins).
-impl str {
-    func length(self) -> int {
-        0
-    }
-}

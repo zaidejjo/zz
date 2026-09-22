@@ -39,14 +39,14 @@ fn collect_stmt_hints(
             collect_block_hints(body, source, cr, out);
         }
         Stmt::For {
-            vars, iter, body, ..
+            var, iter, body, ..
         } => {
             // Hint the iterator element type if no type annotation.
             if cr.is_some() {
                 // We could resolve the iter type from CheckResult, but
                 // the parser already requires type annotations on `for` vars in ZZ.
                 // Still, emit a hint for the iteration.
-                let _ = (vars, iter);
+                let _ = (var, iter);
             }
             collect_block_hints(body, source, cr, out);
         }

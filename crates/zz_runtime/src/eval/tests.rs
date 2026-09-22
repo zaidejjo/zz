@@ -1,6 +1,6 @@
 use super::Interp;
 use crate::runtime::{EvalError, NativeEntry};
-use crate::value::{ObjectValue, Value};
+use crate::value::Value;
 use std::collections::HashMap;
 use zz_frontend::parse;
 use zz_frontend::span::Span;
@@ -26,21 +26,24 @@ fn arithmetic_and_precedence() {
 }
 
 #[test]
-fn binding_evaluates_to_value() {
-    assert_eq!(eval_src("x := 1 + 2").unwrap(), Value::Int(3));
+fn let_binding_evaluates_to_value() {
+    assert_eq!(eval_src("let x = 1 + 2").unwrap(), Value::Int(3));
 }
 
 #[test]
-fn references_previous_bindings() {
+fn let_references_previous_bindings() {
     assert_eq!(
-        eval_src("a := 10\nb := 20\nc := a + b\nc").unwrap(),
+        eval_src("let a = 10\nlet b = 20\nlet c = a + b\nc").unwrap(),
         Value::Int(30)
     );
 }
 
 #[test]
 fn shadowing() {
-    assert_eq!(eval_src("x := 1\nx := x + 1\nx").unwrap(), Value::Int(2));
+    assert_eq!(
+        eval_src("let x = 1\nlet x = x + 1\nx").unwrap(),
+        Value::Int(2)
+    );
 }
 
 #[test]
@@ -73,10 +76,7 @@ fn empty_program_is_unit() {
 
 #[test]
 fn strings_and_concat() {
-    assert_eq!(
-        eval_src("\"a\" + \"b\"").unwrap(),
-        Value::Str("ab".to_string().into())
-    );
+    assert_eq!(eval_src("\"a\" + \"b\"").unwrap(), Value::Str("ab".into()));
 }
 
 #[test]
@@ -86,48 +86,6 @@ fn comparisons_and_logic() {
     assert_eq!(eval_src("true && false").unwrap(), Value::Bool(false));
     assert_eq!(eval_src("true || false").unwrap(), Value::Bool(true));
     assert_eq!(eval_src("!true").unwrap(), Value::Bool(false));
-}
-
-#[test]
-fn bool_and_generic_equality() {
-    // Regression: `single == false` (Bool == Bool) used to fail with
-    // "arithmetic on non-numeric value".
-    assert_eq!(eval_src("true == true").unwrap(), Value::Bool(true));
-    assert_eq!(eval_src("true == false").unwrap(), Value::Bool(false));
-    assert_eq!(eval_src("false == false").unwrap(), Value::Bool(true));
-    assert_eq!(eval_src("true != false").unwrap(), Value::Bool(true));
-    assert_eq!(eval_src("false != false").unwrap(), Value::Bool(false));
-    assert_eq!(
-        eval_src("single := true\nsingle == false").unwrap(),
-        Value::Bool(false)
-    );
-    assert_eq!(
-        eval_src("single := true\nsingle != false").unwrap(),
-        Value::Bool(true)
-    );
-    // Same-type numerics and strings still work.
-    assert_eq!(eval_src("1.5 == 1.5").unwrap(), Value::Bool(true));
-    assert_eq!(eval_src("\"a\" == \"a\"").unwrap(), Value::Bool(true));
-    assert_eq!(eval_src("\"a\" != \"b\"").unwrap(), Value::Bool(true));
-    // Mixed int/float compares as floats.
-    assert_eq!(eval_src("1 == 1.0").unwrap(), Value::Bool(true));
-    assert_eq!(eval_src("1 != 1.5").unwrap(), Value::Bool(true));
-    assert_eq!(eval_src("1 < 1.5").unwrap(), Value::Bool(true));
-    // Mismatched types compare as unequal, not an arithmetic error.
-    assert_eq!(eval_src("1 == \"1\"").unwrap(), Value::Bool(false));
-    assert_eq!(eval_src("1 != \"1\"").unwrap(), Value::Bool(true));
-    assert_eq!(eval_src("true == 1").unwrap(), Value::Bool(false));
-    assert_eq!(eval_src("true != 1").unwrap(), Value::Bool(true));
-    // Compound values use deep equality.
-    assert_eq!(eval_src("[1, 2] == [1, 2]").unwrap(), Value::Bool(true));
-    assert_eq!(eval_src("[1, 2] != [1, 3]").unwrap(), Value::Bool(true));
-    // Ordering on bools reports the operator, not generic arithmetic.
-    let err = eval_src("true < false").unwrap_err();
-    assert!(
-        err.message.contains("operator `<` is not supported"),
-        "unexpected message: {}",
-        err.message
-    );
 }
 
 #[test]
@@ -142,7 +100,7 @@ fn if_expression() {
 #[test]
 fn closure_and_call() {
     assert_eq!(
-        eval_src("f := |x: int| x + 1\nf(5)").unwrap(),
+        eval_src("let f = |x: int| x + 1\nf(5)").unwrap(),
         Value::Int(6)
     );
 }
@@ -150,7 +108,7 @@ fn closure_and_call() {
 #[test]
 fn closure_captures_env() {
     assert_eq!(
-        eval_src("a := 10\nf := |x: int| x + a\nf(5)").unwrap(),
+        eval_src("let a = 10\nlet f = |x: int| x + a\nf(5)").unwrap(),
         Value::Int(15)
     );
 }
@@ -175,11 +133,11 @@ fn return_unwinds() {
 #[test]
 fn match_option() {
     assert_eq!(
-        eval_src("v := .some(1)\nmatch v { .some(n) => n, .none => 0 }").unwrap(),
+        eval_src("let v = .some(1)\nmatch v { .some(n) => n, .none => 0 }").unwrap(),
         Value::Int(1)
     );
     assert_eq!(
-        eval_src("v := .none\nmatch v { .some(n) => n, .none => 0 }").unwrap(),
+        eval_src("let v = .none\nmatch v { .some(n) => n, .none => 0 }").unwrap(),
         Value::Int(0)
     );
 }
@@ -187,57 +145,23 @@ fn match_option() {
 #[test]
 fn match_result() {
     assert_eq!(
-        eval_src("v := .ok(1)\nmatch v { .ok(n) => n, .err(_) => 0 }").unwrap(),
+        eval_src("let v = .ok(1)\nmatch v { .ok(n) => n, .err(_) => 0 }").unwrap(),
         Value::Int(1)
     );
     assert_eq!(
-        eval_src("v := .err(\"x\")\nmatch v { .ok(n) => n, .err(_) => 0 }").unwrap(),
+        eval_src("let v = .err(\"x\")\nmatch v { .ok(n) => n, .err(_) => 0 }").unwrap(),
         Value::Int(0)
-    );
-}
-
-#[test]
-fn match_or_pattern() {
-    assert_eq!(
-        eval_src("match 2 { 1 | 2 => 10, _ => 0 }").unwrap(),
-        Value::Int(10)
-    );
-    assert_eq!(
-        eval_src("match 3 { 1 | 2 => 10, _ => 0 }").unwrap(),
-        Value::Int(0)
-    );
-    assert_eq!(
-        eval_src(
-            "v := .some(\"yes\")\nmatch v { .some(\"done\" | \"yes\" | \"true\") => 1, .some(_) => 0, .none => 0 }"
-        )
-        .unwrap(),
-        Value::Int(1)
-    );
-    assert_eq!(
-        eval_src(
-            "v := .some(\"no\")\nmatch v { .some(\"done\" | \"yes\" | \"true\") => 1, .some(_) => 0, .none => 0 }"
-        )
-        .unwrap(),
-        Value::Int(0)
-    );
-}
-
-#[test]
-fn match_break_arm_body() {
-    assert_eq!(
-        eval_src("i := 0\nwhile true { i = i + 1\nmatch i { 3 => break, _ => 0 } }\ni").unwrap(),
-        Value::Int(3)
     );
 }
 
 #[test]
 fn if_let() {
     assert_eq!(
-        eval_src("v := .some(3)\nif let .some(n) = v { n } else { 0 }").unwrap(),
+        eval_src("let v = .some(3)\nif let .some(n) = v { n } else { 0 }").unwrap(),
         Value::Int(3)
     );
     assert_eq!(
-        eval_src("v := .none\nif let .some(n) = v { n } else { 0 }").unwrap(),
+        eval_src("let v = .none\nif let .some(n) = v { n } else { 0 }").unwrap(),
         Value::Int(0)
     );
 }
@@ -245,7 +169,7 @@ fn if_let() {
 #[test]
 fn try_unwraps_option() {
     assert_eq!(
-        eval_src("func f() -> Option<int> { x := .some(1)?; .some(x) }\nf()").unwrap(),
+        eval_src("func f() -> Option<int> { let x = .some(1)?; .some(x) }\nf()").unwrap(),
         Value::Option(Some(Box::new(Value::Int(1))))
     );
 }
@@ -262,7 +186,7 @@ fn try_propagates_none() {
 fn try_propagates_err() {
     assert_eq!(
         eval_src("func f() -> Result<int, str> { x := .err(\"boom\")?; .ok(x) }\nf()").unwrap(),
-        Value::Result(Box::new(Err(Value::Str("boom".to_string().into()))))
+        Value::Result(Err(Box::new(Value::Str("boom".into()))))
     );
 }
 
@@ -270,7 +194,7 @@ fn try_propagates_err() {
 fn variant_constructors() {
     assert_eq!(
         eval_src(".ok(1)").unwrap(),
-        Value::Result(Box::new(Ok(Value::Int(1))))
+        Value::Result(Ok(Box::new(Value::Int(1))))
     );
     assert_eq!(eval_src(".none").unwrap(), Value::Option(None));
 }
@@ -279,19 +203,15 @@ fn variant_constructors() {
 fn array_literal() {
     assert_eq!(
         eval_src("scores := [10, 20, 30]\nscores").unwrap(),
-        Value::Array(Box::new(vec![
-            Value::Int(10),
-            Value::Int(20),
-            Value::Int(30)
-        ]))
+        Value::Array(vec![Value::Int(10), Value::Int(20), Value::Int(30)])
     );
 }
 
 #[test]
 fn array_explicit_decl() {
     assert_eq!(
-        eval_src("scores: [int] = [1, 2]\nscores").unwrap(),
-        Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)]))
+        eval_src("[int] scores = [1, 2]\nscores").unwrap(),
+        Value::Array(vec![Value::Int(1), Value::Int(2)])
     );
 }
 
@@ -299,51 +219,38 @@ fn array_explicit_decl() {
 fn dict_literal() {
     assert_eq!(
         eval_src("ages := {\"Zaid\": 20}\nages").unwrap(),
-        Value::Dict(Box::new(vec![(
-            Value::Str("Zaid".to_string().into()),
-            Value::Int(20)
-        )]))
+        Value::Dict(vec![(Value::Str("Zaid".into()), Value::Int(20))])
     );
 }
 
 #[test]
 fn dict_explicit_decl() {
     assert_eq!(
-        eval_src("ages: {str: int} = {\"a\": 1}\nages").unwrap(),
-        Value::Dict(Box::new(vec![(
-            Value::Str("a".to_string().into()),
-            Value::Int(1)
-        )]))
+        eval_src("{str: int} ages = {\"a\": 1}\nages").unwrap(),
+        Value::Dict(vec![(Value::Str("a".into()), Value::Int(1))])
     );
 }
 
 #[test]
 fn dict_union_value_type() {
     assert_eq!(
-        eval_src("user: {str: str | int} = {\"name\": \"Zaid\", \"age\": 20}\nuser").unwrap(),
-        Value::Dict(Box::new(vec![
-            (
-                Value::Str("name".to_string().into()),
-                Value::Str("Zaid".to_string().into())
-            ),
-            (Value::Str("age".to_string().into()), Value::Int(20)),
-        ]))
+        eval_src("{str: str | int} user = {\"name\": \"Zaid\", \"age\": 20}\nuser").unwrap(),
+        Value::Dict(vec![
+            (Value::Str("name".into()), Value::Str("Zaid".into())),
+            (Value::Str("age".into()), Value::Int(20)),
+        ])
     );
 }
 
 #[test]
 fn import_is_noop() {
-    assert_eq!(eval_src("x := 1\nx").unwrap(), Value::Int(1));
+    assert_eq!(eval_src("import std.io\nx := 1\nx").unwrap(), Value::Int(1));
 }
 
 #[test]
 fn native_function_dispatches() {
     #[allow(clippy::ptr_arg)]
-    fn double(
-        _interp: &mut Interp,
-        args: &mut Vec<Value>,
-        _span: Span,
-    ) -> Result<Value, EvalError> {
+    fn double(_interp: &mut Interp, args: &mut Vec<Value>) -> Result<Value, EvalError> {
         let n = match args.first() {
             Some(Value::Int(n)) => *n,
             _ => return Err(EvalError::new("expected int", Span::new(0, 0))),
@@ -367,7 +274,7 @@ fn native_function_dispatches() {
 
 #[test]
 fn native_wrong_arity_errors() {
-    fn noop(_interp: &mut Interp, _: &mut Vec<Value>, _span: Span) -> Result<Value, EvalError> {
+    fn noop(_interp: &mut Interp, _: &mut Vec<Value>) -> Result<Value, EvalError> {
         Ok(Value::Unit)
     }
     let mut natives = HashMap::new();
@@ -418,10 +325,10 @@ fn struct_field_mutation_visible_in_object() {
         eval_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.x = 10\np").unwrap();
     assert_eq!(
         v,
-        Value::Object(Box::new(ObjectValue {
+        Value::Object {
             name: "Point".into(),
             fields: vec![("x".into(), Value::Int(10)), ("y".into(), Value::Int(2)),],
-        }))
+        }
     );
 }
 
@@ -618,7 +525,7 @@ fn dict_missing_key_errors() {
 #[test]
 fn str_index() {
     let v = eval_src("\"hello\"[1]").unwrap();
-    assert_eq!(v, Value::Str("e".to_string().into()));
+    assert_eq!(v, Value::Str("e".to_string()));
 }
 
 #[test]
@@ -634,51 +541,41 @@ fn index_non_indexable_errors() {
 #[test]
 fn array_slice() {
     let v = eval_src("scores := [10, 20, 30, 40]\nscores[1:3]").unwrap();
-    assert_eq!(
-        v,
-        Value::Array(Box::new(vec![Value::Int(20), Value::Int(30)]))
-    );
+    assert_eq!(v, Value::Array(vec![Value::Int(20), Value::Int(30)]));
 }
 
 #[test]
 fn slice_open_bounds() {
     assert_eq!(
         eval_src("scores := [10, 20, 30]\nscores[:2]").unwrap(),
-        Value::Array(Box::new(vec![Value::Int(10), Value::Int(20)]))
+        Value::Array(vec![Value::Int(10), Value::Int(20)])
     );
     assert_eq!(
         eval_src("scores := [10, 20, 30]\nscores[1:]").unwrap(),
-        Value::Array(Box::new(vec![Value::Int(20), Value::Int(30)]))
+        Value::Array(vec![Value::Int(20), Value::Int(30)])
     );
     assert_eq!(
         eval_src("scores := [10, 20, 30]\nscores[:]").unwrap(),
-        Value::Array(Box::new(vec![
-            Value::Int(10),
-            Value::Int(20),
-            Value::Int(30)
-        ]))
+        Value::Array(vec![Value::Int(10), Value::Int(20), Value::Int(30)])
     );
 }
 
 #[test]
 fn slice_negative_bounds() {
     let v = eval_src("\"hello\"[-2:]").unwrap();
-    assert_eq!(v, Value::Str("lo".to_string().into()));
+    assert_eq!(v, Value::Str("lo".to_string()));
 }
 
 #[test]
 fn slice_clamps_bounds() {
     let v = eval_src("scores := [10, 20, 30]\nscores[1:99]").unwrap();
-    assert_eq!(
-        v,
-        Value::Array(Box::new(vec![Value::Int(20), Value::Int(30)]))
-    );
+    assert_eq!(v, Value::Array(vec![Value::Int(20), Value::Int(30)]));
 }
 
 #[test]
 fn str_slice() {
     let v = eval_src("\"hello\"[1:3]").unwrap();
-    assert_eq!(v, Value::Str("el".to_string().into()));
+    assert_eq!(v, Value::Str("el".to_string()));
 }
 
 #[test]
