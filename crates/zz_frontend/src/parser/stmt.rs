@@ -402,6 +402,39 @@ impl Parser {
             if self.at(TokenKind::RBrace) {
                 break;
             }
+            // Embedded (anonymous) field: a bare type name with no `:`,
+            // e.g. `Base,` in `struct User { Base, age: int }`. The field
+            // name defaults to the type's last segment (`pkg.Base` → `Base`).
+            if self.at(TokenKind::Ident) && self.is_embedded_field_start() {
+                let fty = self.parse_type_base();
+                match &fty.kind {
+                    crate::ast::TyKind::Named(full, _) => {
+                        let base = full.rsplit('.').next().unwrap_or(full).to_string();
+                        let fname = crate::ast::Ident {
+                            name: base,
+                            span: fty.span,
+                        };
+                        fields.push((fname, fty));
+                    }
+                    _ => {
+                        self.errors.push(error_at(
+                            "embedded struct field must be a struct type",
+                            fty.span,
+                        ));
+                    }
+                }
+                if self.eat(TokenKind::Comma) {
+                    continue;
+                }
+                self.skip_stmt_ends();
+                if !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                    self.error_here("expected `,` or `}` after field");
+                }
+                if self.pos == start_pos {
+                    self.advance();
+                }
+                continue;
+            }
             let fname = self
                 .expect_ident()
                 .unwrap_or_else(|| dummy_ident(self.peek().span));

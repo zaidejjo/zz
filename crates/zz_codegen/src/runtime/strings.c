@@ -337,7 +337,16 @@ static void zz_print_double(FILE *out, double x) {
     fputs(buf, out);
 }
 
+// Maximum nesting for printed values. Values are finite trees, so this is
+// only a safety bound against reference cycles built through mutation.
+#define ZZ_PRINT_MAX_DEPTH 32
+static void zz_print_value_depth(FILE *out, const zz_value *v, int depth);
+
 void zz_print_value(FILE *out, const zz_value *v) {
+    zz_print_value_depth(out, v, 0);
+}
+
+static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
     switch (v->tag) {
     case ZZ_UNIT:
         break;
@@ -367,7 +376,7 @@ void zz_print_value(FILE *out, const zz_value *v) {
         if (v->arr) {
             for (size_t i = 0; i < v->arr->len; i++) {
                 if (i > 0) fputs(", ", out);
-                zz_print_value(out, &v->arr->items[i]);
+                zz_print_value_depth(out, &v->arr->items[i], depth + 1);
             }
         }
         fputs("]", out);
@@ -380,14 +389,14 @@ void zz_print_value(FILE *out, const zz_value *v) {
                 fwrite(zz_str_ptr(v->dict->entries[i].key), 1,
                        v->dict->entries[i].key->len, out);
                 fputs(": ", out);
-                zz_print_value(out, &v->dict->entries[i].val);
+                zz_print_value_depth(out, &v->dict->entries[i].val, depth + 1);
             }
         }
         fputs("}", out);
         break;
     case ZZ_OPTION_SOME:
         fputs(".some(", out);
-        if (v->payload) zz_print_value(out, v->payload);
+        if (v->payload) zz_print_value_depth(out, v->payload, depth + 1);
         fputs(")", out);
         break;
     case ZZ_OPTION_NONE:
@@ -395,12 +404,12 @@ void zz_print_value(FILE *out, const zz_value *v) {
         break;
     case ZZ_RESULT_OK:
         fputs(".ok(", out);
-        if (v->payload) zz_print_value(out, v->payload);
+        if (v->payload) zz_print_value_depth(out, v->payload, depth + 1);
         fputs(")", out);
         break;
     case ZZ_RESULT_ERR:
         fputs(".err(", out);
-        if (v->payload) zz_print_value(out, v->payload);
+        if (v->payload) zz_print_value_depth(out, v->payload, depth + 1);
         fputs(")", out);
         break;
     case ZZ_RANGE:
@@ -422,12 +431,36 @@ void zz_print_value(FILE *out, const zz_value *v) {
             if ((*arr).tag == ZZ_ARRAY) {
                 for (size_t i = 0; i < (*arr).arr->len; i++) {
                     if (i > 0) fputs(", ", out);
-                    zz_print_value(out, &(*arr).arr->items[i]);
+                    zz_print_value_depth(out, &(*arr).arr->items[i], depth + 1);
                 }
             }
         }
         fputs(")", out);
         break;
+    case ZZ_OBJECT: {
+        // Boxed struct: `Type{field: value, ...}`, matching the VM's
+        // Display. Embedded fields recurse through the same printer.
+        if (!v->obj || depth >= ZZ_PRINT_MAX_DEPTH) {
+            fputs("...", out);
+            break;
+        }
+        const zz_object *o = v->obj;
+        fputs(o->type_name ? o->type_name : "<struct>", out);
+        fputc('{', out);
+        for (size_t i = 0; i < o->len; i++) {
+            if (i > 0) fputs(", ", out);
+            const zz_value *fname = &o->fields[i * 2];
+            if (fname->tag == ZZ_STR && fname->s) {
+                fwrite(zz_str_ptr(fname->s), 1, fname->s->len, out);
+            } else {
+                fputs("?", out);
+            }
+            fputs(": ", out);
+            zz_print_value_depth(out, &o->fields[i * 2 + 1], depth + 1);
+        }
+        fputc('}', out);
+        break;
+    }
     case ZZ_TCP_STREAM:
         fputs("<tcp stream>", out);
         break;
@@ -506,7 +539,13 @@ static void zz_append_double(strbuf *sb, double x) {
     sb_append_str(sb, buf);
 }
 
+static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth);
+
 static void zz_value_to_strbuf(strbuf *sb, const zz_value *v) {
+    zz_value_to_strbuf_depth(sb, v, 0);
+}
+
+static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth) {
     char buf[128];
     switch (v->tag) {
     case ZZ_UNIT:
@@ -540,7 +579,7 @@ static void zz_value_to_strbuf(strbuf *sb, const zz_value *v) {
         if (v->arr) {
             for (size_t i = 0; i < v->arr->len; i++) {
                 if (i > 0) sb_append_str(sb, ", ");
-                zz_value_to_strbuf(sb, &v->arr->items[i]);
+                zz_value_to_strbuf_depth(sb, &v->arr->items[i], depth + 1);
             }
         }
         sb_append_c(sb, ']');
@@ -553,14 +592,14 @@ static void zz_value_to_strbuf(strbuf *sb, const zz_value *v) {
                 sb_append(sb, zz_str_ptr(v->dict->entries[i].key),
                           v->dict->entries[i].key->len);
                 sb_append_str(sb, ": ");
-                zz_value_to_strbuf(sb, &v->dict->entries[i].val);
+                zz_value_to_strbuf_depth(sb, &v->dict->entries[i].val, depth + 1);
             }
         }
         sb_append_c(sb, '}');
         break;
     case ZZ_OPTION_SOME:
         sb_append_str(sb, ".some(");
-        if (v->payload) zz_value_to_strbuf(sb, v->payload);
+        if (v->payload) zz_value_to_strbuf_depth(sb, v->payload, depth + 1);
         sb_append_c(sb, ')');
         break;
     case ZZ_OPTION_NONE:
@@ -568,12 +607,12 @@ static void zz_value_to_strbuf(strbuf *sb, const zz_value *v) {
         break;
     case ZZ_RESULT_OK:
         sb_append_str(sb, ".ok(");
-        if (v->payload) zz_value_to_strbuf(sb, v->payload);
+        if (v->payload) zz_value_to_strbuf_depth(sb, v->payload, depth + 1);
         sb_append_c(sb, ')');
         break;
     case ZZ_RESULT_ERR:
         sb_append_str(sb, ".err(");
-        if (v->payload) zz_value_to_strbuf(sb, v->payload);
+        if (v->payload) zz_value_to_strbuf_depth(sb, v->payload, depth + 1);
         sb_append_c(sb, ')');
         break;
     case ZZ_RANGE:
@@ -596,12 +635,36 @@ static void zz_value_to_strbuf(strbuf *sb, const zz_value *v) {
             if ((*arr).tag == ZZ_ARRAY) {
                 for (size_t i = 0; i < (*arr).arr->len; i++) {
                     if (i > 0) sb_append_str(sb, ", ");
-                    zz_value_to_strbuf(sb, &(*arr).arr->items[i]);
+                    zz_value_to_strbuf_depth(sb, &(*arr).arr->items[i], depth + 1);
                 }
             }
         }
         sb_append_str(sb, ")");
         break;
+    case ZZ_OBJECT: {
+        // Boxed struct: `Type{field: value, ...}`, matching the VM's
+        // Display. Embedded fields recurse through the same printer.
+        if (!v->obj || depth >= ZZ_PRINT_MAX_DEPTH) {
+            sb_append_str(sb, "...");
+            break;
+        }
+        const zz_object *o = v->obj;
+        sb_append_str(sb, o->type_name ? o->type_name : "<struct>");
+        sb_append_c(sb, '{');
+        for (size_t i = 0; i < o->len; i++) {
+            if (i > 0) sb_append_str(sb, ", ");
+            const zz_value *fname = &o->fields[i * 2];
+            if (fname->tag == ZZ_STR && fname->s) {
+                sb_append(sb, zz_str_ptr(fname->s), fname->s->len);
+            } else {
+                sb_append_c(sb, '?');
+            }
+            sb_append_str(sb, ": ");
+            zz_value_to_strbuf_depth(sb, &o->fields[i * 2 + 1], depth + 1);
+        }
+        sb_append_c(sb, '}');
+        break;
+    }
     case ZZ_TCP_STREAM:
         sb_append_str(sb, "<tcp stream>");
         break;

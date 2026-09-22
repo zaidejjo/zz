@@ -502,9 +502,17 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     if i > 0 {
                         self.text(", ");
                     }
-                    self.text(n.name.clone());
-                    self.text(": ");
-                    self.emit_ty(t);
+                    // Embedded (anonymous) fields print in short form.
+                    let embedded = matches!(&t.kind, TyKind::Named(full, args)
+                        if args.is_empty()
+                            && full.rsplit('.').next().unwrap_or(full) == n.name);
+                    if embedded {
+                        self.text(n.name.clone());
+                    } else {
+                        self.text(n.name.clone());
+                        self.text(": ");
+                        self.emit_ty(t);
+                    }
                 }
                 self.text("}");
             }
@@ -1167,8 +1175,15 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     if i > 0 {
                         self.text(", ");
                     }
-                    self.text(n);
-                    self.text(": ");
+                    // Embedded shorthand: `Base{...}` instead of
+                    // `Base: Base{...}` when the value constructs the
+                    // embedded type itself.
+                    let shorthand = matches!(v, Expr::StructInit { name: inner, .. }
+                        if inner.rsplit('.').next().unwrap_or(inner.as_str()) == n.as_str());
+                    if !shorthand {
+                        self.text(n);
+                        self.text(": ");
+                    }
                     self.emit_expr(v);
                 }
                 self.text("}");

@@ -182,6 +182,7 @@ e2e_success_test!(e2e_syntax_main_result, "syntax", "main_result.zz");
 
 // Type fixtures
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
+e2e_success_test!(e2e_types_struct_embedding, "types", "struct_embedding.zz");
 e2e_success_test!(e2e_types_generics, "types", "generics.zz");
 e2e_success_test!(e2e_types_generic_bounds, "types", "generic_bounds.zz");
 e2e_success_test!(e2e_types_variants, "types", "variants.zz");

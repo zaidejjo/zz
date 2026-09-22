@@ -40,6 +40,17 @@ impl Lowerer {
                         }
                         FmtPart::Expr(inner, spec) => {
                             let v = self.emit_expr(inner, names, out);
+                            // Unboxed structs render through their generated
+                            // `debug_string` (a raw C struct is not a
+                            // `zz_value`). Format specs on structs keep the
+                            // old path.
+                            if spec.is_none() {
+                                if let Some(sname) = self.unboxed_struct_of_expr(inner, names) {
+                                    let s = self.stringify_struct_value(&sname, v, names, out);
+                                    acc = format!("zz_binop_cat_str({acc}, {s})");
+                                    continue;
+                                }
+                            }
                             let boxed_v = box_scalar_operand(inner, names, &v);
                             // If format spec is present, use zz_to_str_fmt
                             if let Some(ref s) = spec {
@@ -81,17 +92,35 @@ impl Lowerer {
                                 // so the result is always a `zz_value`.
                                 // The `auto_box` idempotency guard prevents
                                 // double-boxing when callers also call auto_box.
-                                let field_c_type = self
-                                    .field_type_from_struct(base_type, field_name)
-                                    .unwrap_or("zz_value");
-                                let raw = format!("({base_name}).{field_name}");
-                                match field_c_type {
-                                    "int64_t" => return format!("zz_int({raw})"),
-                                    "double" => return format!("zz_float({raw})"),
-                                    "bool" => return format!("zz_bool({raw})"),
-                                    // Non-scalar field (boxed): clone.
-                                    _ => return format!("zz_clone({raw})"),
+                                if let Some(field_c_type) =
+                                    self.field_type_from_struct(base_type, field_name)
+                                {
+                                    let raw = format!("({base_name}).{field_name}");
+                                    match field_c_type {
+                                        "int64_t" => return format!("zz_int({raw})"),
+                                        "double" => return format!("zz_float({raw})"),
+                                        "bool" => return format!("zz_bool({raw})"),
+                                        // Non-scalar field (boxed): clone.
+                                        _ => return format!("zz_clone({raw})"),
+                                    }
                                 }
+                                // Promoted field through an embedded struct
+                                // (`u.id` → `(u).Base.id`).
+                                if let Some(root) = self.unmangled_struct_name(base_type) {
+                                    if let Some((chain, leaf)) =
+                                        self.resolve_access_chain(&root, &parts[1..])
+                                    {
+                                        let mut raw = format!("({base_name})");
+                                        for p in &chain {
+                                            raw = format!("({raw}).{p}");
+                                        }
+                                        return auto_box(&raw, Some(leaf.as_str()));
+                                    }
+                                }
+                                // Unknown field on a struct: fall through to
+                                // the generic lookup below (the checker
+                                // rejects unknown fields, so this is
+                                // unreachable for valid programs).
                             } else if base_type == "zz_value" {
                                 // Boxed object field access: u.name where u is a boxed struct
                                 // Use runtime function to get the field value.
@@ -107,17 +136,46 @@ impl Lowerer {
                 // Handle nested struct field access (e.g., r.origin.x = parts[0..2] + parts[2])
                 if parts.len() >= 3 {
                     // Try to find the base variable
-                    if let Some(base_name) = names.lookup(&parts[0]) {
-                        if let Some(base_type) = names.lookup_type(&parts[0]) {
+                    if let Some(base_name) = names.lookup(&parts[0]).map(str::to_string) {
+                        if let Some(base_type) = names.lookup_type(&parts[0]).map(str::to_string) {
+                            if self.is_struct_type_str(&base_type) {
+                                // General promotion-aware resolution first:
+                                // covers direct chains of any depth plus
+                                // embedded hops (e.g. `o.Mid.Inner.x`).
+                                if let Some(root) = self.unmangled_struct_name(&base_type) {
+                                    if let Some((chain, leaf)) =
+                                        self.resolve_access_chain(&root, &parts[1..])
+                                    {
+                                        let mut praw = format!("({base_name})");
+                                        for p in &chain {
+                                            praw = format!("({praw}).{p}");
+                                        }
+                                        return auto_box(&praw, Some(leaf.as_str()));
+                                    }
+                                }
+                            } else if base_type == "zz_value" {
+                                // Boxed base (boxed struct or dict): chain
+                                // runtime field reads. Each level resolves
+                                // embedded fields recursively in C, so both
+                                // `u.Base.name` and promoted chains work.
+                                let mut acc =
+                                    format!("zz_object_get_field(&{base_name}, \"{}\")", parts[1]);
+                                for part in &parts[2..] {
+                                    let tmp = names.fresh("_field_obj");
+                                    out.push_str(&format!("    zz_value {tmp} = {acc};\n"));
+                                    acc = format!("zz_object_get_field(&{tmp}, \"{part}\")");
+                                }
+                                return acc;
+                            }
                             // For now, only handle 2-level deep fields
-                            if parts.len() == 3 && self.is_struct_type_str(base_type) {
+                            if parts.len() == 3 && self.is_struct_type_str(&base_type) {
                                 let field1 = &parts[1];
                                 let field2 = &parts[2];
                                 let raw = format!("(({base_name}).{field1}).{field2}");
                                 // Walk the chain: base → field1 (struct) → field2 (scalar/struct)
                                 // to derive the final field's C type for auto-boxing.
                                 let field2_ctype =
-                                    self.field_type_from_struct(base_type, field1).and_then(
+                                    self.field_type_from_struct(&base_type, field1).and_then(
                                         |f1_type| self.field_type_from_struct(f1_type, field2),
                                     );
                                 return auto_box(&raw, field2_ctype);
@@ -476,74 +534,7 @@ impl Lowerer {
                 format!("zz_call_native3(zz_slice_value, {o}, {s}, {e})")
             }
             Expr::StructInit { name, fields, .. } => {
-                // Check if this struct is unboxed
-                if self.is_unboxed_struct(name) {
-                    let c_type = self.struct_c_type(name);
-                    let mut field_inits = Vec::new();
-                    for (field_name, field_expr) in fields {
-                        let field_val = self.emit_expr(field_expr, names, out);
-                        // Check if the field type is scalar
-                        if let Some(sig) = self.tp.structs.get(name) {
-                            if let Some((_, field_type)) =
-                                sig.fields.iter().find(|(n, _)| n == field_name)
-                            {
-                                let final_val = match field_type {
-                                    zz_checker::Type::Int => format!("({field_val}).i"),
-                                    zz_checker::Type::Float => format!("({field_val}).f"),
-                                    zz_checker::Type::Bool => format!("({field_val}).b"),
-                                    _ => field_val,
-                                };
-                                field_inits.push(format!(".{field_name} = {final_val}"));
-                            } else {
-                                field_inits.push(format!(".{field_name} = {field_val}"));
-                            }
-                        } else {
-                            field_inits.push(format!(".{field_name} = {field_val}"));
-                        }
-                    }
-                    format!("({c_type}){{ {}}}", field_inits.join(", "))
-                } else {
-                    // Boxed struct: use zz_object_new + zz_object_set_field
-                    let sig = match self.tp.structs.get(name) {
-                        Some(s) => s,
-                        None => return "zz_unit()".to_string(),
-                    };
-                    let n = sig.fields.len();
-                    let obj_tmp = names.fresh("__obj");
-                    // Build field_names array: interned strings for each field name
-                    let names_arr_tmp = names.fresh("__field_names");
-                    out.push_str(&format!("    zz_value {names_arr_tmp}[{n}];\n"));
-                    for (i, (fname, _)) in sig.fields.iter().enumerate() {
-                        out.push_str(&format!(
-                            "    {names_arr_tmp}[{i}] = zz_str_static(\"{fname}\");\n",
-                        ));
-                    }
-                    // Create the object
-                    out.push_str(&format!(
-                        "    zz_value {obj_tmp} = zz_object_new(\"{name}\", {names_arr_tmp}, {n});\n",
-                    ));
-                    // Set each field from the StructInit's fields list
-                    for (fname, fexpr) in fields {
-                        let fval = self.emit_expr(fexpr, names, out);
-                        // Box the field value if it's a scalar type
-                        let boxed_fval = if let Some((_, field_type)) =
-                            sig.fields.iter().find(|(n, _)| n == fname)
-                        {
-                            match field_type {
-                                zz_checker::Type::Int => format!("zz_int({fval})"),
-                                zz_checker::Type::Float => format!("zz_float({fval})"),
-                                zz_checker::Type::Bool => format!("zz_bool({fval})"),
-                                _ => fval,
-                            }
-                        } else {
-                            fval
-                        };
-                        out.push_str(&format!(
-                            "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed_fval});\n",
-                        ));
-                    }
-                    obj_tmp
-                }
+                self.emit_struct_init(name, fields, names, out)
             }
             Expr::Field { obj, name, .. } => {
                 // Determine if the object is boxed (zz_value) or unboxed (C struct).
@@ -565,7 +556,6 @@ impl Lowerer {
                 if is_unboxed {
                     // Unboxed struct: direct C field access, then auto-box
                     // scalar fields so the result is always a zz_value.
-                    let raw = format!("({obj_val}).{name}");
                     // Derive the field C type from the parent object's struct type.
                     let field_ctype = self.tp.types.get(&obj.span()).and_then(|ot| {
                         if let zz_checker::Type::Struct(sname) = ot {
@@ -574,9 +564,36 @@ impl Lowerer {
                                     return Some(self.type_to_c(ft));
                                 }
                             }
+                            // Promoted field through an embedded struct.
+                            if let Some((chain, _)) =
+                                self.resolve_access_chain(sname, std::slice::from_ref(name))
+                            {
+                                if let Some(leaf) = self.promoted_leaf_ctype(sname, &chain) {
+                                    return Some(leaf);
+                                }
+                            }
                         }
                         None
                     });
+                    // The raw access must follow the embedded chain when the
+                    // field is promoted (`m().id` → `(tmp).Base.id`).
+                    let raw = self
+                        .tp
+                        .types
+                        .get(&obj.span())
+                        .and_then(|ot| match ot {
+                            zz_checker::Type::Struct(sname) => self
+                                .resolve_access_chain(sname, std::slice::from_ref(name))
+                                .map(|(chain, _)| {
+                                    let mut acc = format!("({obj_val})");
+                                    for p in &chain {
+                                        acc = format!("({acc}).{p}");
+                                    }
+                                    acc
+                                }),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| format!("({obj_val}).{name}"));
                     auto_box(&raw, field_ctype.as_deref())
                 } else {
                     // Boxed object: use runtime function.
@@ -739,6 +756,17 @@ impl Lowerer {
                         }
                         zz_frontend::ast::FmtPart::Expr(expr, spec) => {
                             let val = self.emit_expr(expr, names, out);
+                            // Unboxed structs render through their generated
+                            // `debug_string`. (`zz_to_str` needs a `zz_value`.)
+                            let val = if spec.is_none() {
+                                if let Some(sname) = self.unboxed_struct_of_expr(expr, names) {
+                                    self.stringify_struct_value(&sname, val, names, out)
+                                } else {
+                                    val
+                                }
+                            } else {
+                                val
+                            };
                             if let Some(ref s) = spec {
                                 let spec_str =
                                     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
@@ -1337,37 +1365,37 @@ impl Lowerer {
                     // methods are stored as `Type.method` using the
                     // un-mangled struct name like `mod.Rectangle`). This
                     // handles `rect.area()` regardless of whether `rect`
-                    // is bare or module-prefixed.
-                    let struct_dispatch: Option<(String, Expr)> =
-                        if let Some(recv_type) = names.lookup_type(obj_name) {
-                            self.struct_name_from_c_type(recv_type)
-                                .and_then(|mangled_name| {
-                                    // Find the un-mangled struct name (the
-                                    // key in `tp.structs`) whose mangled C
-                                    // form matches `mangled_name`.
-                                    self.tp
-                                        .structs
-                                        .keys()
-                                        .find(|k| mangle(k) == *mangled_name)
-                                        .cloned()
-                                })
-                                .and_then(|unmangled| {
-                                    let impl_name = format!("{unmangled}.{method}");
-                                    if self.reachable_funcs.contains(&impl_name) {
-                                        Some((
-                                            impl_name,
-                                            Expr::Ident {
-                                                name: obj_name.clone(),
-                                                span: first_ident_span,
-                                            },
-                                        ))
+                    // is bare or module-prefixed. Boxed structs (C type
+                    // `zz_value`, e.g. containing strings) resolve through
+                    // the checker's type map instead; embedded promotion
+                    // (`u.area()` → `Base.area`) applies to both shapes.
+                    let struct_dispatch: Option<(String, Expr)> = self
+                        .dispatch_struct_name(
+                            names,
+                            names.lookup_type(obj_name),
+                            obj_name,
+                            first_ident_span,
+                        )
+                        .and_then(|unmangled| {
+                            self.struct_method_target(&unmangled, method).map(
+                                |(impl_name, path)| {
+                                    let recv = if path.is_empty() {
+                                        Expr::Ident {
+                                            name: obj_name.clone(),
+                                            span: first_ident_span,
+                                        }
                                     } else {
-                                        None
-                                    }
-                                })
-                        } else {
-                            None
-                        };
+                                        let mut parts = vec![obj_name.clone()];
+                                        parts.extend(path);
+                                        Expr::Path {
+                                            parts,
+                                            span: first_ident_span,
+                                        }
+                                    };
+                                    (impl_name, recv)
+                                },
+                            )
+                        });
                     if let Some((c, r)) = struct_dispatch {
                         (c, Some(r))
                     } else {
@@ -1530,7 +1558,15 @@ impl Lowerer {
                 // Look up receiver type and dispatch.
                 if let Some(zzty) = self.tp.types.get(&obj.span()) {
                     match zzty {
-                        zz_checker::Type::Struct(sname) => (format!("{sname}.{method}"), None),
+                        zz_checker::Type::Struct(sname) => {
+                            // Keep the direct-form convention (no receiver);
+                            // promotion included for embedded methods.
+                            if let Some((target, _)) = self.struct_method_target(sname, method) {
+                                (target, None)
+                            } else {
+                                (format!("{sname}.{method}"), None)
+                            }
+                        }
                         // Canonical `sqlz.*`; `db.*` alias resolves to the
                         // same runtime fn via native_impl.
                         zz_checker::Type::Db => (format!("sqlz.{method}"), Some(*obj.clone())),
@@ -1797,6 +1833,17 @@ impl Lowerer {
                 .lookup_type(name)
                 .map(|t| t.starts_with("zz_struct_"))
                 .unwrap_or(false),
+            // Promoted receiver (`u.Base` for `u.area()`): a path whose
+            // leaf resolves to an unboxed struct type.
+            Some(Expr::Path { parts, .. }) if parts.len() >= 2 => names
+                .lookup_type(&parts[0])
+                .and_then(|bt| {
+                    self.unmangled_struct_name(bt).and_then(|root| {
+                        self.resolve_access_chain(&root, &parts[1..])
+                            .map(|(_, leaf)| leaf.starts_with("zz_struct_"))
+                    })
+                })
+                .unwrap_or(false),
             _ => false,
         };
         if let Some(ref recv) = method_receiver {
@@ -1836,6 +1883,15 @@ impl Lowerer {
         *self.void_context.borrow_mut() = false;
         for a in &ordered_args {
             let emitted = self.emit_expr(a, names, out);
+            // Display builtins (`println`, `print`, `str`, ...) render
+            // unboxed structs through their generated `debug_string`
+            // function (a raw C struct is not a `zz_value`).
+            if Self::is_display_builtin(&cname) {
+                if let Some(sname) = self.unboxed_struct_of_expr(a, names) {
+                    arg_items.push(self.stringify_struct_value(&sname, emitted, names, out));
+                    continue;
+                }
+            }
             // Auto-box if this argument is a scalar variable or struct field
             let boxed = if let Expr::Ident { name, .. } = a {
                 let name_str = name.clone();
@@ -2121,6 +2177,19 @@ impl Lowerer {
                         } else {
                             self.emit_expr(method_receiver, names, out)
                         }
+                    } else if let Expr::Path { parts, .. } = method_receiver {
+                        // Promoted struct receiver (`u.Base`): emit the raw
+                        // lvalue chain so `&(...)` takes the embedded
+                        // object's address. Boxed receivers are not lvalues,
+                        // so materialize them into a temp instead.
+                        if let Some(lval) = self.emit_struct_lvalue(parts, names) {
+                            lval
+                        } else {
+                            let rv = self.emit_expr(method_receiver, names, out);
+                            let tmp = names.fresh("_recv");
+                            out.push_str(&format!("    zz_value {tmp} = {rv};\n"));
+                            tmp
+                        }
                     } else {
                         self.emit_expr(method_receiver, names, out)
                     };
@@ -2202,6 +2271,323 @@ impl Lowerer {
         "zz_unit()".to_string()
     }
 
+    /// Lower a struct literal, distributing flattened (promoted) fields
+    /// into embedded sub-objects (`User{id: 1, age: 2}` fills `Base.id`).
+    /// Literals without flattened fields keep the historical emission
+    /// exactly (evaluation order included).
+    pub(super) fn emit_struct_init(
+        &self,
+        sname: &str,
+        fields: &[(String, Expr)],
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        let all_direct = self.tp.structs.get(sname).is_some_and(|sig| {
+            fields
+                .iter()
+                .all(|(fname, _)| sig.fields.iter().any(|(n, _)| n == fname))
+        });
+        if all_direct {
+            return self.emit_struct_init_direct(sname, fields, names, out);
+        }
+        let entries: Vec<(Vec<String>, &Expr)> = fields
+            .iter()
+            .map(|(fname, fexpr)| (self.literal_field_path(sname, fname), fexpr))
+            .collect();
+        self.emit_struct_lit(sname, &entries, names, out, false)
+    }
+
+    /// Historical struct-literal emission for literals whose fields are all
+    /// direct (no flattening): unboxed C literals or boxed runtime objects.
+    fn emit_struct_init_direct(
+        &self,
+        name: &str,
+        fields: &[(String, Expr)],
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        // Check if this struct is unboxed
+        if self.is_unboxed_struct(name) {
+            let c_type = self.struct_c_type(name);
+            let mut field_inits = Vec::new();
+            for (field_name, field_expr) in fields {
+                let field_val = self.emit_expr(field_expr, names, out);
+                // Check if the field type is scalar
+                if let Some(sig) = self.tp.structs.get(name) {
+                    if let Some((_, field_type)) = sig.fields.iter().find(|(n, _)| n == field_name)
+                    {
+                        let final_val = match field_type {
+                            zz_checker::Type::Int => format!("({field_val}).i"),
+                            zz_checker::Type::Float => format!("({field_val}).f"),
+                            zz_checker::Type::Bool => format!("({field_val}).b"),
+                            _ => field_val,
+                        };
+                        field_inits.push(format!(".{field_name} = {final_val}"));
+                    } else {
+                        field_inits.push(format!(".{field_name} = {field_val}"));
+                    }
+                } else {
+                    field_inits.push(format!(".{field_name} = {field_val}"));
+                }
+            }
+            format!("({c_type}){{ {}}}", field_inits.join(", "))
+        } else {
+            // Boxed struct: use zz_object_new + zz_object_set_field
+            let sig = match self.tp.structs.get(name) {
+                Some(s) => s,
+                None => return "zz_unit()".to_string(),
+            };
+            let n = sig.fields.len();
+            let obj_tmp = names.fresh("__obj");
+            // Build field_names array: interned strings for each field name
+            let names_arr_tmp = names.fresh("__field_names");
+            out.push_str(&format!("    zz_value {names_arr_tmp}[{n}];\n"));
+            for (i, (fname, _)) in sig.fields.iter().enumerate() {
+                out.push_str(&format!(
+                    "    {names_arr_tmp}[{i}] = zz_str_static(\"{fname}\");\n",
+                ));
+            }
+            // Create the object
+            out.push_str(&format!(
+                "    zz_value {obj_tmp} = zz_object_new(\"{name}\", {names_arr_tmp}, {n});\n",
+            ));
+            // Set each field from the StructInit's fields list
+            for (fname, fexpr) in fields {
+                // An unboxed struct value stored in a boxed parent must be
+                // boxed into a runtime object first (a raw C struct is not
+                // a `zz_value`).
+                let for_boxing = sig
+                    .fields
+                    .iter()
+                    .find(|(n, _)| n == fname)
+                    .and_then(|(_, ft)| match ft {
+                        zz_checker::Type::Struct(inner) if self.is_unboxed_struct(inner) => {
+                            Some(inner.clone())
+                        }
+                        _ => None,
+                    });
+                if let Some(inner) = for_boxing {
+                    let child = self.emit_boxed_value(&inner, fexpr, names, out);
+                    out.push_str(&format!(
+                        "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {child});\n",
+                    ));
+                    continue;
+                }
+                let fval = self.emit_expr(fexpr, names, out);
+                // Box the field value if it's a scalar type
+                let boxed_fval =
+                    if let Some((_, field_type)) = sig.fields.iter().find(|(n, _)| n == fname) {
+                        Self::box_struct_field_value(fval, field_type)
+                    } else {
+                        fval
+                    };
+                out.push_str(&format!(
+                    "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed_fval});\n",
+                ));
+            }
+            obj_tmp
+        }
+    }
+
+    /// Box an unboxed-struct-typed value into a runtime `ZZ_OBJECT` so it
+    /// can be stored inside a boxed parent (e.g. an embedded all-scalar
+    /// struct inside a struct holding strings). Literals lower
+    /// field-by-field; any other expression is read member-wise through
+    /// synthesized field accesses.
+    fn emit_boxed_value(
+        &self,
+        sname: &str,
+        value: &Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        if let Expr::StructInit { fields, .. } = value {
+            let entries: Vec<(Vec<String>, &Expr)> = fields
+                .iter()
+                .map(|(fname, fexpr)| (self.literal_field_path(sname, fname), fexpr))
+                .collect();
+            return self.emit_struct_lit(sname, &entries, names, out, true);
+        }
+        let sig_fields: Vec<(String, zz_checker::Type)> = self
+            .tp
+            .structs
+            .get(sname)
+            .map(|s| s.fields.clone())
+            .unwrap_or_default();
+        let n = sig_fields.len();
+        let obj_tmp = names.fresh("__obj");
+        let names_arr_tmp = names.fresh("__field_names");
+        out.push_str(&format!("    zz_value {names_arr_tmp}[{n}];\n"));
+        for (i, (fname, _)) in sig_fields.iter().enumerate() {
+            out.push_str(&format!(
+                "    {names_arr_tmp}[{i}] = zz_str_static(\"{fname}\");\n",
+            ));
+        }
+        out.push_str(&format!(
+            "    zz_value {obj_tmp} = zz_object_new(\"{sname}\", {names_arr_tmp}, {n});\n",
+        ));
+        for (fname, fty) in &sig_fields {
+            let access = Expr::Field {
+                obj: Box::new(value.clone()),
+                name: fname.clone(),
+                span: value.span(),
+            };
+            if let zz_checker::Type::Struct(inner) = fty {
+                if self.is_unboxed_struct(inner) {
+                    let child = self.emit_boxed_value(inner, &access, names, out);
+                    out.push_str(&format!(
+                        "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {child});\n",
+                    ));
+                    continue;
+                }
+            }
+            let fval = self.emit_expr(&access, names, out);
+            let boxed = Self::box_struct_field_value(fval, fty);
+            out.push_str(&format!(
+                "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed});\n",
+            ));
+        }
+        obj_tmp
+    }
+
+    /// Recursive struct-literal emission over concrete paths. `entries` maps
+    /// a concrete path (`[Base, id]`) to its value expression. Only used
+    /// for literals with flattened fields; the checker guarantees every
+    /// entry resolves and every required leaf is covered.
+    fn emit_struct_lit(
+        &self,
+        sname: &str,
+        entries: &[(Vec<String>, &Expr)],
+        names: &mut NameCtx,
+        out: &mut String,
+        force_boxed: bool,
+    ) -> String {
+        let sig_fields: Vec<(String, zz_checker::Type)> = self
+            .tp
+            .structs
+            .get(sname)
+            .map(|s| s.fields.clone())
+            .unwrap_or_default();
+        if sig_fields.is_empty() {
+            return "zz_unit()".to_string();
+        }
+        // `force_boxed` renders an unboxed struct as a runtime object so it
+        // can be stored inside a boxed parent (see `emit_boxed_value`).
+        if self.is_unboxed_struct(sname) && !force_boxed {
+            let c_type = self.struct_c_type(sname);
+            let mut field_inits = Vec::new();
+            for (fname, fty) in &sig_fields {
+                if let Some((_, fexpr)) =
+                    entries.iter().find(|(p, _)| p.len() == 1 && &p[0] == fname)
+                {
+                    let field_val = self.emit_expr(fexpr, names, out);
+                    let final_val = match fty {
+                        zz_checker::Type::Int => format!("({field_val}).i"),
+                        zz_checker::Type::Float => format!("({field_val}).f"),
+                        zz_checker::Type::Bool => format!("({field_val}).b"),
+                        _ => field_val,
+                    };
+                    field_inits.push(format!(".{fname} = {final_val}"));
+                } else if let zz_checker::Type::Struct(inner) = fty {
+                    let child: Vec<(Vec<String>, &Expr)> = entries
+                        .iter()
+                        .filter(|(p, _)| p.len() > 1 && &p[0] == fname)
+                        .map(|(p, e)| (p[1..].to_vec(), *e))
+                        .collect();
+                    if !child.is_empty() {
+                        let child_val = self.emit_struct_lit(inner, &child, names, out, false);
+                        field_inits.push(format!(".{fname} = {child_val}"));
+                    }
+                    // Otherwise missing (rejected by the checker) — C
+                    // designated initializers zero-fill the rest.
+                }
+            }
+            format!("({c_type}){{ {}}}", field_inits.join(", "))
+        } else {
+            // Boxed struct: nested objects are built into temps, then set.
+            let n = sig_fields.len();
+            let obj_tmp = names.fresh("__obj");
+            let names_arr_tmp = names.fresh("__field_names");
+            out.push_str(&format!("    zz_value {names_arr_tmp}[{n}];\n"));
+            for (i, (fname, _)) in sig_fields.iter().enumerate() {
+                out.push_str(&format!(
+                    "    {names_arr_tmp}[{i}] = zz_str_static(\"{fname}\");\n",
+                ));
+            }
+            out.push_str(&format!(
+                "    zz_value {obj_tmp} = zz_object_new(\"{sname}\", {names_arr_tmp}, {n});\n",
+            ));
+            for (fname, fty) in &sig_fields {
+                if let Some((_, fexpr)) =
+                    entries.iter().find(|(p, _)| p.len() == 1 && &p[0] == fname)
+                {
+                    // An unboxed struct value stored in a boxed parent must
+                    // be boxed into a runtime object first.
+                    if let zz_checker::Type::Struct(inner) = fty {
+                        if self.is_unboxed_struct(inner) {
+                            let child = self.emit_boxed_value(inner, fexpr, names, out);
+                            out.push_str(&format!(
+                                "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {child});\n",
+                            ));
+                            continue;
+                        }
+                    }
+                    let fval = self.emit_expr(fexpr, names, out);
+                    let boxed_fval = Self::box_struct_field_value(fval, fty);
+                    out.push_str(&format!(
+                        "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed_fval});\n",
+                    ));
+                } else if let zz_checker::Type::Struct(inner) = fty {
+                    let child: Vec<(Vec<String>, &Expr)> = entries
+                        .iter()
+                        .filter(|(p, _)| p.len() > 1 && &p[0] == fname)
+                        .map(|(p, e)| (p[1..].to_vec(), *e))
+                        .collect();
+                    if !child.is_empty() {
+                        let child_val = self.emit_struct_lit(inner, &child, names, out, true);
+                        out.push_str(&format!(
+                            "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {child_val});\n",
+                        ));
+                    }
+                }
+            }
+            obj_tmp
+        }
+    }
+
+    /// Box a struct field value for `zz_object_set_field` given the field's
+    /// C type: scalars need `zz_int/float/bool(...)` unless the emitted
+    /// value is already boxed.
+    pub(super) fn box_struct_field_ctype(fval: String, ctype: &str) -> String {
+        if !matches!(ctype, "int64_t" | "double" | "bool") {
+            return fval;
+        }
+        let already_boxed = fval.starts_with("zz_int(")
+            || fval.starts_with("zz_float(")
+            || fval.starts_with("zz_bool(");
+        if already_boxed {
+            return fval;
+        }
+        match ctype {
+            "int64_t" => format!("zz_int({fval})"),
+            "double" => format!("zz_float({fval})"),
+            _ => format!("zz_bool({fval})"),
+        }
+    }
+
+    /// Box a struct field value for `zz_object_set_field`: scalar-typed
+    /// fields need `zz_int/float/bool(...)` unless the emitted value is
+    /// already boxed (int/float/bool literals and field reads emit
+    /// `zz_value`s directly — wrapping them again breaks C compilation).
+    fn box_struct_field_value(fval: String, fty: &zz_checker::Type) -> String {
+        match fty {
+            zz_checker::Type::Int => Self::box_struct_field_ctype(fval, "int64_t"),
+            zz_checker::Type::Float => Self::box_struct_field_ctype(fval, "double"),
+            zz_checker::Type::Bool => Self::box_struct_field_ctype(fval, "bool"),
+            _ => fval,
+        }
+    }
+
     /// Resolve a multi-segment `Path` callee into a method-dispatch pair
     /// `(impl_method_full_name, receiver_expr)`. Returns `None` when the
     /// path is not a recognized struct-method call (e.g. it's a static
@@ -2250,13 +2636,34 @@ impl Lowerer {
                 continue;
             };
             let recv_type = names.lookup_type(&matched_key)?;
-            let struct_name = self.struct_name_from_c_type(recv_type)?;
-            let impl_name = format!("{struct_name}.{method}");
-            if self.reachable_funcs.contains(&impl_name) {
+            let unmangled = self
+                .struct_name_from_c_type(recv_type)
+                .and_then(|mangled| {
+                    self.tp
+                        .structs
+                        .keys()
+                        .find(|k| mangle(k) == *mangled)
+                        .cloned()
+                })
+                .or_else(|| {
+                    // Boxed receiver: resolve through the checker type.
+                    let span = zz_frontend::span::Span::new(0, 0);
+                    self.checker_struct_of(names, &matched_tail, Some(span))
+                })?;
+            if let Some((impl_name, path)) = self.struct_method_target(&unmangled, &method) {
                 let span = zz_frontend::span::Span::new(0, 0);
-                let recv_expr = Expr::Ident {
-                    name: matched_tail,
-                    span,
+                let recv_expr = if path.is_empty() {
+                    Expr::Ident {
+                        name: matched_tail,
+                        span,
+                    }
+                } else {
+                    let mut rparts = vec![matched_tail];
+                    rparts.extend(path);
+                    Expr::Path {
+                        parts: rparts,
+                        span,
+                    }
                 };
                 return Some((impl_name, recv_expr));
             }

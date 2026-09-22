@@ -285,6 +285,11 @@ impl Lowerer {
         // Generate struct typedefs preamble
         let struct_preamble = self.lower_structs_preamble();
 
+        // Auto-generated struct debug_string functions (VM-identical
+        // display for println/f-strings/str()). Empty when the program
+        // defines no unboxed structs.
+        let struct_debug_fns = self.lower_struct_debug_fns();
+
         // Forward declarations: every reachable user-defined function (incl.
         // `impl` methods) is `static` in the emitted C, so the order of
         // definitions in `funcs` decides which callers see which callees.
@@ -362,10 +367,11 @@ impl Lowerer {
             crate::RUNTIME_C
         };
         let source = format!(
-            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n// ---- module globals ----\n{globals_decl}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset_trim(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
+            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals ----\n{globals_decl}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset_trim(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
             runtime_h = crate::RUNTIME_H,
             runtime_c = runtime_c,
             struct_preamble = struct_preamble,
+            struct_debug_fns = struct_debug_fns,
             globals_decl = globals_decl,
             funcs = funcs,
             closure_defs = self.closure_defs.borrow().join("\n"),

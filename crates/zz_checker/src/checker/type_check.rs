@@ -418,43 +418,49 @@ impl Checker {
                 let ot = self.check_expr(obj);
                 let ot = self.unifier.resolve(&ot);
                 match ot {
-                    Type::Struct(sname) => match self.structs.get(&sname) {
+                    Type::Struct(sname) => match self.structs.get(&sname).cloned() {
                         Some(sig) => match sig.fields.iter().find(|(n, _)| n == name) {
                             Some((_, ft)) => ft.clone(),
-                            None => {
-                                let field_names: Vec<&str> =
-                                    sig.fields.iter().map(|(n, _)| n.as_str()).collect();
-                                let mut diag = error_at(
-                                    format!("struct `{sname}` has no field `{name}`"),
-                                    *span,
-                                );
-                                let all = suggest_all(name, &field_names);
-                                if let Some((suggestion, _)) = all.first() {
-                                    diag = diag
-                                        .with_note(format!("did you mean field `{suggestion}`?"));
-                                    let field_span =
-                                        Span::new(span.end - name.len() as u32, span.end);
-                                    let alts: Vec<String> =
-                                        all.iter().map(|(s, _)| s.to_string()).collect();
-                                    let fixit = if all.len() == 1 {
-                                        FixIt::safe(
-                                            field_span,
-                                            suggestion.to_string(),
-                                            "replace field",
-                                        )
-                                    } else {
-                                        FixIt::ambiguous(
-                                            field_span,
-                                            suggestion.to_string(),
-                                            "replace field",
-                                            alts,
-                                        )
-                                    };
-                                    diag = diag.with_fixit(fixit);
+                            None => match self.resolve_struct_field(&sname, name) {
+                                // Promoted through an embedded struct.
+                                Some(ft) => ft,
+                                None => {
+                                    let visible = self.all_visible_fields(&sname);
+                                    let field_names: Vec<&str> =
+                                        visible.iter().map(|n| n.as_str()).collect();
+                                    let mut diag = error_at(
+                                        format!("struct `{sname}` has no field `{name}`"),
+                                        *span,
+                                    );
+                                    let all = suggest_all(name, &field_names);
+                                    if let Some((suggestion, _)) = all.first() {
+                                        diag = diag.with_note(format!(
+                                            "did you mean field `{suggestion}`?"
+                                        ));
+                                        let field_span =
+                                            Span::new(span.end - name.len() as u32, span.end);
+                                        let alts: Vec<String> =
+                                            all.iter().map(|(s, _)| s.to_string()).collect();
+                                        let fixit = if all.len() == 1 {
+                                            FixIt::safe(
+                                                field_span,
+                                                suggestion.to_string(),
+                                                "replace field",
+                                            )
+                                        } else {
+                                            FixIt::ambiguous(
+                                                field_span,
+                                                suggestion.to_string(),
+                                                "replace field",
+                                                alts,
+                                            )
+                                        };
+                                        diag = diag.with_fixit(fixit);
+                                    }
+                                    self.errors.push(diag);
+                                    Type::Unit
                                 }
-                                self.errors.push(diag);
-                                Type::Unit
-                            }
+                            },
                         },
                         None => {
                             self.errors
@@ -558,43 +564,49 @@ impl Checker {
                 let ot = self.check_expr(obj);
                 let ot = self.unifier.resolve(&ot);
                 match ot {
-                    Type::Struct(sname) => match self.structs.get(&sname) {
+                    Type::Struct(sname) => match self.structs.get(&sname).cloned() {
                         Some(sig) => match sig.fields.iter().find(|(n, _)| n == name) {
                             Some((_, ft)) => ft.clone(),
-                            None => {
-                                let field_names: Vec<&str> =
-                                    sig.fields.iter().map(|(n, _)| n.as_str()).collect();
-                                let mut diag = error_at(
-                                    format!("struct `{sname}` has no field `{name}`"),
-                                    *span,
-                                );
-                                let all = suggest_all(name, &field_names);
-                                if let Some((suggestion, _)) = all.first() {
-                                    diag = diag
-                                        .with_note(format!("did you mean field `{suggestion}`?"));
-                                    let field_span =
-                                        Span::new(span.end - name.len() as u32, span.end);
-                                    let alts: Vec<String> =
-                                        all.iter().map(|(s, _)| s.to_string()).collect();
-                                    let fixit = if all.len() == 1 {
-                                        FixIt::safe(
-                                            field_span,
-                                            suggestion.to_string(),
-                                            "replace field",
-                                        )
-                                    } else {
-                                        FixIt::ambiguous(
-                                            field_span,
-                                            suggestion.to_string(),
-                                            "replace field",
-                                            alts,
-                                        )
-                                    };
-                                    diag = diag.with_fixit(fixit);
+                            None => match self.resolve_struct_field(&sname, name) {
+                                // Promoted through an embedded struct.
+                                Some(ft) => ft,
+                                None => {
+                                    let visible = self.all_visible_fields(&sname);
+                                    let field_names: Vec<&str> =
+                                        visible.iter().map(|n| n.as_str()).collect();
+                                    let mut diag = error_at(
+                                        format!("struct `{sname}` has no field `{name}`"),
+                                        *span,
+                                    );
+                                    let all = suggest_all(name, &field_names);
+                                    if let Some((suggestion, _)) = all.first() {
+                                        diag = diag.with_note(format!(
+                                            "did you mean field `{suggestion}`?"
+                                        ));
+                                        let field_span =
+                                            Span::new(span.end - name.len() as u32, span.end);
+                                        let alts: Vec<String> =
+                                            all.iter().map(|(s, _)| s.to_string()).collect();
+                                        let fixit = if all.len() == 1 {
+                                            FixIt::safe(
+                                                field_span,
+                                                suggestion.to_string(),
+                                                "replace field",
+                                            )
+                                        } else {
+                                            FixIt::ambiguous(
+                                                field_span,
+                                                suggestion.to_string(),
+                                                "replace field",
+                                                alts,
+                                            )
+                                        };
+                                        diag = diag.with_fixit(fixit);
+                                    }
+                                    self.errors.push(diag);
+                                    Type::Unit
                                 }
-                                self.errors.push(diag);
-                                Type::Unit
-                            }
+                            },
                         },
                         None => {
                             self.errors
@@ -672,27 +684,67 @@ impl Checker {
                         .push(error_at(format!("unknown struct `{name}`"), *span));
                     return Type::Unit;
                 };
+                // Each given field maps to a concrete path: direct fields to
+                // `[name]`, promoted (flattened) fields to their embedded
+                // prefix + `[name]` (e.g. `id` in `User{id: 1, ...}` maps to
+                // `[Base, id]`).
+                let mut given_paths: Vec<Vec<String>> = Vec::new();
                 for (fname, fval) in fields {
-                    let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == fname) else {
+                    if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == fname) {
+                        let vt = self.check_expr(fval);
+                        if let Err(e) = self.unifier.unify(&vt, ft) {
+                            self.report_mismatch(e, fval.span());
+                        }
+                        given_paths.push(vec![fname.clone()]);
+                    } else if let Some((prefix, pft)) = self.resolve_struct_field_path(name, fname)
+                    {
+                        if prefix.is_empty() {
+                            // Unreachable: direct fields are handled above.
+                            continue;
+                        }
+                        let vt = self.check_expr(fval);
+                        if let Err(e) = self.unifier.unify(&vt, &pft) {
+                            self.report_mismatch(e, fval.span());
+                        }
+                        let mut full = prefix;
+                        full.push(fname.clone());
+                        given_paths.push(full);
+                    } else {
                         self.errors.push(error_at(
                             format!("struct `{name}` has no field `{fname}`"),
                             fval.span(),
                         ));
-                        continue;
-                    };
-                    let vt = self.check_expr(fval);
-                    if let Err(e) = self.unifier.unify(&vt, ft) {
-                        self.report_mismatch(e, fval.span());
                     }
                 }
-                // Verify all required fields are provided.
-                for (required_name, _) in &sig.fields {
-                    if !fields.iter().any(|(n, _)| n == required_name) {
-                        self.errors.push(error_at(
-                            format!("missing field `{required_name}` in struct literal `{name}`"),
-                            *span,
-                        ));
+                // An explicit embedded value and flattened leaves inside the
+                // same subtree are ambiguous: reject rather than guess.
+                for (i, a) in given_paths.iter().enumerate() {
+                    for b in given_paths.iter().skip(i + 1) {
+                        let conflict = (a.len() < b.len() && b.starts_with(a))
+                            || (b.len() < a.len() && a.starts_with(b));
+                        if conflict {
+                            let (outer, inner) = if a.len() < b.len() { (a, b) } else { (b, a) };
+                            self.errors.push(error_at(
+                                format!(
+                                    "field `{}` conflicts with embedded value `{}` in struct literal `{name}` (provide one or the other)",
+                                    inner.last().unwrap_or(&String::new()),
+                                    outer.last().unwrap_or(&String::new()),
+                                ),
+                                *span,
+                            ));
+                        }
                     }
+                }
+                // Verify all required fields are provided (flattened leaves
+                // count toward their embedded subtree).
+                if let Some(leaf) = self.first_uncovered_leaf(name, &[], &given_paths, 0) {
+                    self.errors.push(error_at(
+                        format!(
+                            "missing field `{}` in struct literal `{name}`",
+                            leaf.join("."),
+                        ),
+                        *span,
+                    ));
                 }
                 Type::Struct(name.clone())
             }
@@ -1293,6 +1345,19 @@ impl Checker {
                         _ => {}
                     }
                 }
+                // Embedded promotion: `u.area()` dispatches to `Base.area`
+                // when `User` embeds `Base`. The runtime passes the embedded
+                // value as the receiver, so the outer type is not unified
+                // against the method's receiver below.
+                let mut promoted_recv: Option<Type> = None;
+                if sig.is_none() {
+                    if let Type::Struct(sname) = self.unifier.resolve(&recv_t) {
+                        if let Some((defining, psig)) = self.find_struct_method(&sname, &method) {
+                            promoted_recv = Some(Type::Struct(defining));
+                            sig = Some(psig);
+                        }
+                    }
+                }
                 if let Some(sig) = sig {
                     let (ps, ret, subs) = self.instantiate(&sig);
                     if ps.is_empty() {
@@ -1302,7 +1367,11 @@ impl Checker {
                         ));
                         return Type::Unit;
                     }
-                    if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
+                    if let Some(promoted) = promoted_recv {
+                        if let Err(e) = self.unifier.unify(&promoted, &ps[0]) {
+                            self.report_mismatch(e, span);
+                        }
+                    } else if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
                         self.report_mismatch(e, span);
                     }
                     self.check_args_against(
@@ -1586,6 +1655,16 @@ impl Checker {
                         _ => {}
                     }
                 }
+                // Embedded promotion (see the `Field`-callee branch above).
+                let mut promoted_recv: Option<Type> = None;
+                if sig.is_none() {
+                    if let Type::Struct(sname) = self.unifier.resolve(&recv_t) {
+                        if let Some((defining, psig)) = self.find_struct_method(&sname, method) {
+                            promoted_recv = Some(Type::Struct(defining));
+                            sig = Some(psig);
+                        }
+                    }
+                }
                 if let Some(sig) = sig {
                     // sqlz method form: `db.exec(sql)`, `db.query(sql)`,
                     // `db.transaction(fn(tx) { ... })` — receiver is
@@ -1661,7 +1740,11 @@ impl Checker {
                         ));
                         return Type::Unit;
                     }
-                    if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
+                    if let Some(promoted) = promoted_recv {
+                        if let Err(e) = self.unifier.unify(&promoted, &ps[0]) {
+                            self.report_mismatch(e, *pspan);
+                        }
+                    } else if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
                         self.report_mismatch(e, *pspan);
                     }
                     self.check_args_against(

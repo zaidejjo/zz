@@ -404,6 +404,31 @@ r.p.x = 9
 println(r.p.x)  // 9
 ```
 
+### Struct Embedding (Anonymous Fields)
+
+A struct can embed another struct by naming the type without a field name.
+The embedded struct's fields and methods are promoted: they resolve on the
+outer struct as if declared there (transitively; direct members win).
+
+```zz
+struct Base { id: int, name: str }
+struct User { Base, age: int }   // embeds Base
+
+impl Base {
+    func area(self) -> int { self.id * 2 }
+}
+
+zaid := User{ id: 1, name: "Zaid Ajo", age: 19 }  // flat init nests into Base
+println(zaid.id)      // 1 — promoted, same as zaid.Base.id
+println(zaid.area())  // 2 — promoted method, receiver is the embedded Base
+zaid.id = 99          // writes through to zaid.Base.id
+```
+
+Explicit (`User{ Base: Base{ id: 1, name: "Z" }, age: 19 }`) and shorthand
+(`User{ Base{ id: 1, name: "Z" }, age: 19 }`) inits mean the same thing.
+Mixing an explicit embedded value with flattened leaves of the same subtree
+is rejected as ambiguous.
+
 ### Method Call Syntax
 
 Method calls desugar to function calls with the receiver as the first argument:

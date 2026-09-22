@@ -318,6 +318,35 @@ impl Lowerer {
                                             ));
                                             return;
                                         }
+                                        // Promoted assignment through an
+                                        // embedded struct: `u.id = 1` writes
+                                        // `(u).Base.id`.
+                                        if let Some(root) = self.unmangled_struct_name(base_type) {
+                                            if let Some((chain, leaf)) =
+                                                self.resolve_access_chain(&root, &parts[1..])
+                                            {
+                                                let final_val = match leaf.as_str() {
+                                                    "int64_t" if !value_is_scalar => {
+                                                        format!("({val}).i")
+                                                    }
+                                                    "double" if !value_is_scalar => {
+                                                        format!("({val}).f")
+                                                    }
+                                                    "bool" if !value_is_scalar => {
+                                                        format!("({val}).b")
+                                                    }
+                                                    _ => val,
+                                                };
+                                                let mut lhs = format!("({base_cid})");
+                                                for p in &chain {
+                                                    lhs = format!("({lhs}).{p}");
+                                                }
+                                                out.push_str(&format!(
+                                                    "    {lhs} = {final_val};\n"
+                                                ));
+                                                return;
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -327,6 +356,35 @@ impl Lowerer {
                             if let Some(base_cid) = names.lookup(&parts[0]) {
                                 if let Some(base_type) = names.lookup_type(&parts[0]) {
                                     if self.is_struct_type_str(base_type) {
+                                        // General promotion-aware resolution
+                                        // first (covers direct chains and
+                                        // embedded hops of any depth).
+                                        if let Some(root) = self.unmangled_struct_name(base_type) {
+                                            if let Some((chain, leaf)) =
+                                                self.resolve_access_chain(&root, &parts[1..])
+                                            {
+                                                let final_val = match leaf.as_str() {
+                                                    "int64_t" if !value_is_scalar => {
+                                                        format!("({val}).i")
+                                                    }
+                                                    "double" if !value_is_scalar => {
+                                                        format!("({val}).f")
+                                                    }
+                                                    "bool" if !value_is_scalar => {
+                                                        format!("({val}).b")
+                                                    }
+                                                    _ => val,
+                                                };
+                                                let mut lhs = format!("({base_cid})");
+                                                for p in &chain {
+                                                    lhs = format!("({lhs}).{p}");
+                                                }
+                                                out.push_str(&format!(
+                                                    "    {lhs} = {final_val};\n"
+                                                ));
+                                                return;
+                                            }
+                                        }
                                         if let Some(field1_type) =
                                             self.field_type_from_struct(base_type, &parts[1])
                                         {
@@ -352,6 +410,102 @@ impl Lowerer {
                                                 ));
                                                 return;
                                             }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Deep chains (`a.b.c.d = v`): promotion-aware
+                        // resolution for unboxed structs.
+                        if parts.len() > 3 {
+                            if let Some(base_cid) = names.lookup(&parts[0]) {
+                                if let Some(base_type) = names.lookup_type(&parts[0]) {
+                                    if self.is_struct_type_str(base_type) {
+                                        if let Some(root) = self.unmangled_struct_name(base_type) {
+                                            if let Some((chain, leaf)) =
+                                                self.resolve_access_chain(&root, &parts[1..])
+                                            {
+                                                let final_val = match leaf.as_str() {
+                                                    "int64_t" if !value_is_scalar => {
+                                                        format!("({val}).i")
+                                                    }
+                                                    "double" if !value_is_scalar => {
+                                                        format!("({val}).f")
+                                                    }
+                                                    "bool" if !value_is_scalar => {
+                                                        format!("({val}).b")
+                                                    }
+                                                    _ => val,
+                                                };
+                                                let mut lhs = format!("({base_cid})");
+                                                for p in &chain {
+                                                    lhs = format!("({lhs}).{p}");
+                                                }
+                                                out.push_str(&format!(
+                                                    "    {lhs} = {final_val};\n"
+                                                ));
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Boxed struct field assignment, direct or promoted
+                        // (`u.id = 1`): lowers to runtime
+                        // `zz_object_set_field`, which promotes through
+                        // embedded structs in C. Only fires for checker-known
+                        // structs so dict/dot targets keep their old path.
+                        if parts.len() >= 2 {
+                            if let Some(base_cid) = names.lookup(&parts[0]).map(str::to_string) {
+                                if let Some(zz_checker::Type::Struct(sname)) =
+                                    names.checker_types.get(&parts[0]).cloned()
+                                {
+                                    if self.type_to_c(&zz_checker::Type::Struct(sname.clone()))
+                                        == "zz_value"
+                                    {
+                                        if let Some((chain, leaf)) =
+                                            self.resolve_access_chain(&sname, &parts[1..])
+                                        {
+                                            let boxed = Self::box_struct_field_ctype(val, &leaf);
+                                            if chain.len() == 1 {
+                                                out.push_str(&format!(
+                                                    "    zz_object_set_field(&{base_cid}, \"{}\", {boxed});\n",
+                                                    chain[0]
+                                                ));
+                                            } else {
+                                                // Walk down with temps, set
+                                                // the leaf, write back up
+                                                // (value semantics, like
+                                                // the VM's assign_path).
+                                                let mut tmps = vec![base_cid];
+                                                for f in &chain[..chain.len() - 1] {
+                                                    let tmp = names.fresh("_sobj");
+                                                    let parent = tmps.last().cloned().unwrap();
+                                                    out.push_str(&format!(
+                                                        "    zz_value {tmp} = zz_object_get_field(&{parent}, \"{f}\");\n"
+                                                    ));
+                                                    tmps.push(tmp);
+                                                }
+                                                let leaf_parent = tmps.last().cloned().unwrap();
+                                                out.push_str(&format!(
+                                                    "    zz_object_set_field(&{leaf_parent}, \"{}\", {boxed});\n",
+                                                    chain.last().unwrap()
+                                                ));
+                                                for (i, f) in chain[..chain.len() - 1]
+                                                    .iter()
+                                                    .enumerate()
+                                                    .rev()
+                                                {
+                                                    out.push_str(&format!(
+                                                        "    zz_object_set_field(&{}, \"{f}\", zz_clone({}));\n",
+                                                        tmps[i], tmps[i + 1]
+                                                    ));
+                                                }
+                                            }
+                                            return;
                                         }
                                     }
                                 }

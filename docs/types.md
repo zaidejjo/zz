@@ -168,6 +168,16 @@ p.y    // int
 p.z    // ERROR: Point has no field `z`
 ```
 
+### Embedded Fields
+
+`struct User { Base, age: int }` embeds `Base`. Field and method lookup
+promote transitively (`u.id` → `u.Base.id`); direct members shadow promoted
+ones. Literals accept flattened leaves (`User{ id: 1, name: "Z", age: 19 }`),
+explicit values (`User{ Base: Base{...}, age: 19 }`), or the shorthand
+(`User{ Base{...}, age: 19 }`). Printing a struct — `println(u)`, f-strings,
+`str(u)` — renders `Type{field: value, ...}` identically on the VM and AOT
+backends.
+
 ### Field Mutation
 
 Fields are mutable if the struct variable is mutable:

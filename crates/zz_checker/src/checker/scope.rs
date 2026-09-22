@@ -299,37 +299,49 @@ impl Checker {
         let mut ty = root;
         for field in &parts[1..] {
             match self.unifier.resolve(&ty) {
-                Type::Struct(name) => match self.structs.get(&name) {
+                Type::Struct(name) => match self.structs.get(&name).cloned() {
                     Some(sig) => match sig.fields.iter().find(|(n, _)| n == field) {
                         Some((_, ft)) => ty = ft.clone(),
-                        None => {
-                            // Suggest closest field name.
-                            let field_names: Vec<&str> =
-                                sig.fields.iter().map(|(n, _)| n.as_str()).collect();
-                            let mut diag =
-                                error_at(format!("struct `{name}` has no field `{field}`"), span);
-                            let all = suggest_all(field, &field_names);
-                            if let Some((suggestion, _)) = all.first() {
-                                diag =
-                                    diag.with_note(format!("did you mean field `{suggestion}`?"));
-                                let field_span = Span::new(span.end - field.len() as u32, span.end);
-                                let fixit = if all.len() == 1 {
-                                    FixIt::safe(field_span, suggestion.to_string(), "replace field")
-                                } else {
-                                    let alts: Vec<String> =
-                                        all.iter().map(|(s, _)| s.to_string()).collect();
-                                    FixIt::ambiguous(
-                                        field_span,
-                                        suggestion.to_string(),
-                                        "replace field",
-                                        alts,
-                                    )
-                                };
-                                diag = diag.with_fixit(fixit);
+                        None => match self.resolve_struct_field(&name, field) {
+                            // Promoted through an embedded struct.
+                            Some(ft) => ty = ft,
+                            None => {
+                                // Suggest closest field name (including promoted fields).
+                                let visible = self.all_visible_fields(&name);
+                                let field_names: Vec<&str> =
+                                    visible.iter().map(|n| n.as_str()).collect();
+                                let mut diag = error_at(
+                                    format!("struct `{name}` has no field `{field}`"),
+                                    span,
+                                );
+                                let all = suggest_all(field, &field_names);
+                                if let Some((suggestion, _)) = all.first() {
+                                    diag = diag
+                                        .with_note(format!("did you mean field `{suggestion}`?"));
+                                    let field_span =
+                                        Span::new(span.end - field.len() as u32, span.end);
+                                    let fixit = if all.len() == 1 {
+                                        FixIt::safe(
+                                            field_span,
+                                            suggestion.to_string(),
+                                            "replace field",
+                                        )
+                                    } else {
+                                        let alts: Vec<String> =
+                                            all.iter().map(|(s, _)| s.to_string()).collect();
+                                        FixIt::ambiguous(
+                                            field_span,
+                                            suggestion.to_string(),
+                                            "replace field",
+                                            alts,
+                                        )
+                                    };
+                                    diag = diag.with_fixit(fixit);
+                                }
+                                self.errors.push(diag);
+                                return Type::Error;
                             }
-                            self.errors.push(diag);
-                            return Type::Error;
-                        }
+                        },
                     },
                     None => {
                         self.errors

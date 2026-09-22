@@ -157,9 +157,18 @@ impl<'a> FmtCtx<'a> {
                     self.write_line();
                     for (fname, fty) in fields {
                         self.write_indent();
-                        self.write_str(&fname.name);
-                        self.write_str(": ");
-                        self.fmt_ty(fty, source);
+                        // Embedded (anonymous) fields print in short form:
+                        // `Base,` instead of `Base: Base,`.
+                        let embedded = matches!(&fty.kind, TyKind::Named(full, args)
+                            if args.is_empty()
+                                && full.rsplit('.').next().unwrap_or(full) == fname.name);
+                        if embedded {
+                            self.write_str(&fname.name);
+                        } else {
+                            self.write_str(&fname.name);
+                            self.write_str(": ");
+                            self.fmt_ty(fty, source);
+                        }
                         self.write_str(",");
                         self.write_line();
                     }
@@ -650,8 +659,14 @@ impl<'a> FmtCtx<'a> {
                     if i > 0 {
                         self.write_str(", ");
                     }
-                    self.write_str(fname);
-                    self.write_str(": ");
+                    // Embedded shorthand: `Base{...}` instead of
+                    // `Base: Base{...}`.
+                    let shorthand = matches!(fval, Expr::StructInit { name: inner, .. }
+                        if inner.rsplit('.').next().unwrap_or(inner.as_str()) == fname.as_str());
+                    if !shorthand {
+                        self.write_str(fname);
+                        self.write_str(": ");
+                    }
                     self.fmt_expr(fval, source);
                 }
                 self.write_str(" }");

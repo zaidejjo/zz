@@ -7,25 +7,138 @@
 use zz_frontend::ast::{BinOp, UnOp};
 use zz_frontend::span::Span;
 
+use std::collections::HashMap;
+
 use super::EvalError;
-use crate::value::Value;
+use crate::value::{ObjectValue, Value};
 
 // ---------------------------------------------------------------------------
 // Object / field helpers
 // ---------------------------------------------------------------------------
 
-/// Read a field from a struct instance.
+/// True when a struct slot holds an embedded (anonymous) field value: an
+/// object whose type's last segment equals the field name
+/// (`User.Base: Base{...}`). Mirrors the checker's `is_embedded_field`,
+/// but value-based so both interpreter engines share it without layouts.
+#[inline]
+pub(crate) fn is_embedded_value(fname: &str, value: &Value) -> bool {
+    match value {
+        Value::Object(o) => o.name.rsplit('.').next().unwrap_or(&o.name) == fname,
+        _ => false,
+    }
+}
+
+/// Resolve the layout name of an embedded field: the field name itself
+/// (`Base`) or the single namespaced struct whose last segment matches
+/// (`mod.Base`). Sorted-first for determinism when several match.
+pub(crate) fn embedded_layout_name(
+    layouts: &HashMap<String, Vec<String>>,
+    fname: &str,
+) -> Option<String> {
+    if layouts.contains_key(fname) {
+        return Some(fname.to_string());
+    }
+    let suffix = format!(".{fname}");
+    let mut hits: Vec<&String> = layouts.keys().filter(|k| k.ends_with(&suffix)).collect();
+    hits.sort();
+    hits.into_iter().next().cloned()
+}
+
+/// Build a struct value from already-evaluated literal fields, distributing
+/// flattened (promoted) fields into embedded sub-objects: `User{id: 1, age:
+/// 2}` fills `Base.id` from the leftover `id`. `given` holds the literal's
+/// `(name, value)` pairs; `registered` is the struct's own field layout.
+/// Used by the bytecode VM's `MakeStruct`.
+pub(crate) fn build_struct_literal(
+    layouts: &HashMap<String, Vec<String>>,
+    sname: &str,
+    registered: &[String],
+    given: &[(String, Value)],
+    span: Span,
+    depth: usize,
+) -> Result<ObjectValue, EvalError> {
+    if depth > MAX_EMBED_DEPTH {
+        return Err(EvalError::new(
+            format!("struct `{sname}` is embedded too deeply (possible cycle)"),
+            span,
+        ));
+    }
+    // Leftovers: given fields that are not direct fields of this struct —
+    // candidates for embedded sub-objects.
+    let leftovers: Vec<(String, Value)> = given
+        .iter()
+        .filter(|(n, _)| !registered.contains(n))
+        .cloned()
+        .collect();
+    let mut out = Vec::with_capacity(registered.len());
+    for fname in registered {
+        if let Some((_, v)) = given.iter().find(|(n, _)| n == fname) {
+            out.push((fname.clone(), v.clone()));
+        } else if let Some(inner_name) = embedded_layout_name(layouts, fname) {
+            let Some(inner_layout) = layouts.get(&inner_name).cloned() else {
+                return Err(EvalError::new(
+                    format!("unknown struct `{inner_name}`"),
+                    span,
+                ));
+            };
+            let inner = build_struct_literal(
+                layouts,
+                &inner_name,
+                &inner_layout,
+                &leftovers,
+                span,
+                depth + 1,
+            )?;
+            out.push((fname.clone(), Value::Object(Box::new(inner))));
+        } else {
+            return Err(EvalError::new(
+                format!("missing field `{fname}` in struct literal"),
+                span,
+            ));
+        }
+    }
+    Ok(ObjectValue {
+        name: sname.to_string(),
+        fields: out,
+    })
+}
+
+/// Maximum promotion depth when searching embedded structs. Struct values
+/// are finite trees, so this is only a safety bound.
+const MAX_EMBED_DEPTH: usize = 32;
+
+/// Read a field from a struct instance, promoting through embedded
+/// (anonymous) fields transitively: `u.id` finds `u.Base.id`.
 #[inline(always)]
 pub(crate) fn object_field(obj: &Value, name: &str, span: Span) -> Result<Value, EvalError> {
+    object_field_depth(obj, name, span, 0)
+}
+
+fn object_field_depth(
+    obj: &Value,
+    name: &str,
+    span: Span,
+    depth: usize,
+) -> Result<Value, EvalError> {
     match obj {
-        Value::Object(o) => o
-            .fields
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| v.clone())
-            .ok_or_else(|| {
-                EvalError::new(format!("struct `{}` has no field `{name}`", o.name), span)
-            }),
+        Value::Object(o) => {
+            if let Some((_, v)) = o.fields.iter().find(|(n, _)| n == name) {
+                return Ok(v.clone());
+            }
+            if depth < MAX_EMBED_DEPTH {
+                for (fname, v) in &o.fields {
+                    if is_embedded_value(fname, v) {
+                        if let Ok(promoted) = object_field_depth(v, name, span, depth + 1) {
+                            return Ok(promoted);
+                        }
+                    }
+                }
+            }
+            Err(EvalError::new(
+                format!("struct `{}` has no field `{name}`", o.name),
+                span,
+            ))
+        }
         Value::Dict(entries) => entries
             .iter()
             .find(|(k, _)| matches!(k, Value::Str(s) if s.as_str() == name))
@@ -38,18 +151,44 @@ pub(crate) fn object_field(obj: &Value, name: &str, span: Span) -> Result<Value,
     }
 }
 
-/// Write a field into a struct instance (in place).
+/// Write a field into a struct instance (in place), promoting through
+/// embedded fields: `u.id = 1` writes `u.Base.id`.
 pub(crate) fn set_object_field(
     obj: &mut Value,
     name: &str,
     value: Value,
     span: Span,
 ) -> Result<(), EvalError> {
+    set_object_field_depth(obj, name, value, span, 0)
+}
+
+fn set_object_field_depth(
+    obj: &mut Value,
+    name: &str,
+    value: Value,
+    span: Span,
+    depth: usize,
+) -> Result<(), EvalError> {
     match obj {
         Value::Object(o) => {
             if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n == name) {
                 *slot = value;
                 Ok(())
+            } else if depth < MAX_EMBED_DEPTH {
+                // `o.name` is needed for the error below; copy it out so
+                // the embedded recursion can mutably borrow the fields.
+                let type_name = o.name.clone();
+                for (fname, v) in o.fields.iter_mut() {
+                    if is_embedded_value(fname, v)
+                        && set_object_field_depth(v, name, value.clone(), span, depth + 1).is_ok()
+                    {
+                        return Ok(());
+                    }
+                }
+                Err(EvalError::new(
+                    format!("struct `{type_name}` has no field `{name}`"),
+                    span,
+                ))
             } else {
                 Err(EvalError::new(
                     format!("struct `{}` has no field `{name}`", o.name),
