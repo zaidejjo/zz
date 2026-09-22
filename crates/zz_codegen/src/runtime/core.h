@@ -769,6 +769,7 @@ zz_value zz_env_home_dir(zz_value unused, int *err);
 zz_value zz_env_temp_dir(zz_value unused, int *err);
 zz_value zz_env_user(zz_value unused, int *err);
 zz_value zz_env_os(zz_value unused, int *err);
+zz_value zz_env_arch(zz_value unused, int *err);
 
 // ---- fs natives ---------------------------------------------------------
 // Comprehensive non-blocking filesystem (see core.c): every fallible op

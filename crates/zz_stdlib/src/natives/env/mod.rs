@@ -231,6 +231,16 @@ pub(crate) fn env_os(
     Ok(Value::Str(zz_native_rt::sys::os().to_string().into()))
 }
 
+/// `env.arch() -> str`: `"x86_64"`, `"aarch64"`, … (compile-time
+/// constant, identical in both engines).
+pub(crate) fn env_arch(
+    _interp: &mut Interp,
+    _args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    Ok(Value::Str(zz_native_rt::sys::arch().to_string().into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

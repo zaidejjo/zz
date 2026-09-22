@@ -3,11 +3,14 @@ use std::io::Write;
 use crate::natives::expect_str;
 use zz_runtime::{EvalError, Interp, Span, Value};
 
-/// Unwrap consecutive `Result::Ok` layers for stdout presentation.
+/// Unwrap consecutive `Result::Ok` / `Option::Some` layers for stdout
+/// presentation.
 ///
-/// `println(.ok(v))` prints `v` directly instead of `.ok(v)`, so standard
-/// execution output stays clean. Interpolation (`"{v}"`), `str(v)`, and
-/// `Debug` keep the full `.ok(...)` representation.
+/// `println(.ok(v))` prints `v` directly instead of `.ok(v)`, and
+/// `println(.some(v))` prints `v` instead of `.some(v)`, so standard
+/// execution output stays clean. A bare `.none` prints `none`.
+/// Interpolation (`"{v}"`), `str(v)`, and `Debug` keep the full
+/// `.ok(...)` / `.some(...)` representation.
 fn for_stdout(mut v: Value, span: Span) -> Result<Value, EvalError> {
     loop {
         match v {
@@ -15,6 +18,21 @@ fn for_stdout(mut v: Value, span: Span) -> Result<Value, EvalError> {
                 Ok(inner) => v = inner,
                 Err(e) => return Err(err_to_throw(&e.to_string(), span)),
             },
+            Value::Option(Some(inner)) => v = *inner,
+            Value::Option(None) => return Ok(Value::Str("none".to_string().into())),
+            Value::Native(nf) => {
+                let mut e = EvalError::new(
+                    format!(
+                        "cannot print function `{}`: call it with arguments",
+                        nf.name
+                    ),
+                    span,
+                );
+                e.notes.push(
+                    "hint: a bare function name is the function itself, not its result".to_string(),
+                );
+                return Err(e);
+            }
             other => return Ok(other),
         }
     }

@@ -577,12 +577,44 @@ static void zz_throw_printed_err(const zz_value *payload);
 
 zz_value zz_io_println(zz_value v, int *err) {
     (void)err;
-    // Unwrap consecutive `Result::Ok` layers for stdout presentation
-    // (mirrors the VM's `for_stdout`): `println(.ok(x))` prints `x`.
-    // A printed `.err` throws a readable, hinted diagnostic on stderr
-    // instead of a raw `.err(...)` line.
-    while (v.tag == ZZ_RESULT_OK && v.payload) {
-        v = *v.payload;
+    // Unwrap consecutive `Result::Ok` / `Option::Some` layers for stdout
+    // presentation (mirrors the VM's `for_stdout`): `println(.ok(x))`
+    // prints `x`, `println(.some(x))` prints `x`, bare `.none` prints
+    // `none`. A printed `.err` throws a readable, hinted diagnostic on
+    // stderr instead of a raw `.err(...)` line. A bare function value is
+    // always a missing `()` — abort with a hint instead of rendering
+    // `<func>` / `<value>`.
+    for (;;) {
+        if (v.tag == ZZ_RESULT_OK && v.payload) {
+            v = *v.payload;
+        } else if (v.tag == ZZ_OPTION_SOME && v.payload) {
+            v = *v.payload;
+        } else {
+            break;
+        }
+    }
+    if (v.tag == ZZ_OPTION_NONE) {
+        fputs("none\n", stdout);
+        fflush(stdout);
+        return zz_unit();
+    }
+    if (v.tag == ZZ_NATIVE || v.tag == ZZ_FUNC) {
+        int tty;
+#ifdef ZZ_OS_WINDOWS
+        tty = _isatty(_fileno(stderr));
+#else
+        tty = isatty(fileno(stderr));
+#endif
+        if (tty) {
+            fprintf(stderr, "\033[1;31merror\033[0m: cannot print a function value: call it with arguments\n");
+            fprintf(stderr, "    \033[1;36m=\033[0m \033[36mhint: a bare function name is the function itself, not its result\033[0m\n");
+        } else {
+            fprintf(stderr, "error: cannot print a function value: call it with arguments\n");
+            fprintf(stderr, "    = hint: a bare function name is the function itself, not its result\n");
+        }
+        fprintf(stderr, "zz: program failed\n");
+        fflush(stderr);
+        exit(1);
     }
     if (v.tag == ZZ_RESULT_ERR && v.payload) {
         zz_throw_printed_err(v.payload);
@@ -597,8 +629,37 @@ zz_value zz_io_println(zz_value v, int *err) {
 
 zz_value zz_io_print(zz_value v, int *err) {
     (void)err;
-    while (v.tag == ZZ_RESULT_OK && v.payload) {
-        v = *v.payload;
+    for (;;) {
+        if (v.tag == ZZ_RESULT_OK && v.payload) {
+            v = *v.payload;
+        } else if (v.tag == ZZ_OPTION_SOME && v.payload) {
+            v = *v.payload;
+        } else {
+            break;
+        }
+    }
+    if (v.tag == ZZ_OPTION_NONE) {
+        fputs("none", stdout);
+        fflush(stdout);
+        return zz_unit();
+    }
+    if (v.tag == ZZ_NATIVE || v.tag == ZZ_FUNC) {
+        int tty;
+#ifdef ZZ_OS_WINDOWS
+        tty = _isatty(_fileno(stderr));
+#else
+        tty = isatty(fileno(stderr));
+#endif
+        if (tty) {
+            fprintf(stderr, "\033[1;31merror\033[0m: cannot print a function value: call it with arguments\n");
+            fprintf(stderr, "    \033[1;36m=\033[0m \033[36mhint: a bare function name is the function itself, not its result\033[0m\n");
+        } else {
+            fprintf(stderr, "error: cannot print a function value: call it with arguments\n");
+            fprintf(stderr, "    = hint: a bare function name is the function itself, not its result\n");
+        }
+        fprintf(stderr, "zz: program failed\n");
+        fflush(stderr);
+        exit(1);
     }
     if (v.tag == ZZ_RESULT_ERR && v.payload) {
         zz_throw_printed_err(v.payload);
@@ -4512,6 +4573,20 @@ zz_value zz_env_os(zz_value unused, int *err) {
     return zz_str_static("macos");
 #elif defined(__linux__)
     return zz_str_static("linux");
+#else
+    return zz_str_static("unknown");
+#endif
+}
+
+// env.arch() → str (target CPU, matching `sys.arch()` values).
+zz_value zz_env_arch(zz_value unused, int *err) {
+    (void)unused; (void)err;
+#if defined(__x86_64__) || defined(_M_X64)
+    return zz_str_static("x86_64");
+#elif defined(__i386__) || defined(_M_IX86)
+    return zz_str_static("x86");
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return zz_str_static("aarch64");
 #else
     return zz_str_static("unknown");
 #endif

@@ -46,6 +46,13 @@ name := input("Enter name: ")
 println("Hello, {name}")
 ```
 
+`print`/`println` unwrap one layer for clean output: `.ok(v)` prints `v`,
+`.some(v)` prints `v`, bare `.none` prints `none`. Printing a bare
+`.err` aborts with a readable hinted error (handle it with `match`
+instead), and printing a bare function value is a compile error
+(`cannot print function 'env.os': did you mean 'env.os()'?`).
+Interpolation (`"{v}"`) and `str(v)` keep the full wrappers.
+
 ---
 
 ## `std.str` -- String Operations

@@ -39,6 +39,7 @@ func main() {
     }
     // OS identity + directories (projections only).
     println(env.os())
+    println(env.arch())
     println(len(env.temp_dir()) > 0)
     match env.cwd() {
         .ok(c) => println(len(c) > 0)

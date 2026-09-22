@@ -1,7 +1,8 @@
-// E2E: Result stdout presentation — `println(.ok(v))` prints `v`
-// directly (no `.ok(...)` wrapper) in both engines. A bare printed
-// `.err` throws a readable, hinted error instead (see below), so error
-// cases stay in `match` arms here.
+// E2E: Result/Option stdout presentation — `println(.ok(v))` prints `v`
+// and `println(.some(v))` prints `v` directly (no wrappers) in both
+// engines. Bare `.none` prints `none`. A bare printed `.err` throws a
+// readable, hinted error instead (see below), so error cases stay in
+// `match` arms here.
 import std.fs
 
 func main() {
@@ -10,6 +11,10 @@ func main() {
     println(fs.read_to_string("/tmp/zz_result_print.txt"))
     print(fs.read_to_string("/tmp/zz_result_print.txt"))
     println("")
+    // Bare Some unwraps; bare None prints `none`.
+    println(.some("unwrapped"))
+    println(.some(42))
+    println(.none)
     // Errors are handled explicitly and stay catchable.
     match fs.read_to_string("/tmp/zz_result_print_missing.txt") {
         .ok(c) => println("unexpected: {c}")

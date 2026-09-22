@@ -1532,6 +1532,7 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         ("std.env.temp_dir", 0, env::env_temp_dir),
         ("std.env.user", 0, env::env_user),
         ("std.env.os", 0, env::env_os),
+        ("std.env.arch", 0, env::env_arch),
     ] {
         m.insert(name.into(), NativeEntry { arity, f: func });
     }

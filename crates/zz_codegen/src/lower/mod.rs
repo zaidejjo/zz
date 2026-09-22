@@ -621,6 +621,7 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "env.temp_dir" | "std.env.temp_dir" => Some("zz_env_temp_dir"),
         "env.user" | "std.env.user" => Some("zz_env_user"),
         "env.os" | "std.env.os" => Some("zz_env_os"),
+        "env.arch" | "std.env.arch" => Some("zz_env_arch"),
         "env.args" | "std.env.args" | "envmod.args" | "std.envmod.args" => Some("zz_env_args"),
         // dict
         "dict.len" => Some("zz_dict_len_val"),

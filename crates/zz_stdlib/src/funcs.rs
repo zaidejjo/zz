@@ -2160,6 +2160,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert("std.env.temp_dir".into(), sig(vec![], Type::Str));
     m.insert("std.env.user".into(), sig(vec![], opt_str()));
     m.insert("std.env.os".into(), sig(vec![], Type::Str));
+    m.insert("std.env.arch".into(), sig(vec![], Type::Str));
 
     // Built-in: `typeof(v)` — accepts any value, returns its type name.
     let t = Type::Named("T".to_string());
@@ -3073,7 +3074,7 @@ mod tests {
         assert!(funcs.contains_key("colors.red"));
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
-        assert_eq!(funcs.len(), 598);
+        assert_eq!(funcs.len(), 599);
     }
 
     #[test]

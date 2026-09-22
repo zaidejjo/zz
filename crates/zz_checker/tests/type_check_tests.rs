@@ -1213,6 +1213,97 @@ fn typo_suggestion_struct_field() {
     );
 }
 
+fn print_test_funcs() -> HashMap<String, FuncSig> {
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "println".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: Vec::new(),
+            params: vec![("v".to_string(), Type::Str)],
+            has_default: vec![false],
+            ret: Type::Unit,
+        },
+    );
+    funcs.insert(
+        "env.os".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: Vec::new(),
+            params: vec![],
+            has_default: vec![],
+            ret: Type::Str,
+        },
+    );
+    funcs.insert(
+        "env.temp_dir".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: Vec::new(),
+            params: vec![],
+            has_default: vec![],
+            ret: Type::Str,
+        },
+    );
+    funcs
+}
+
+#[test]
+fn print_bare_function_is_call_hint() {
+    let parsed = zz_frontend::parse("println(env.os)");
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let r = check_program(
+        &parsed.program,
+        HashMap::new(),
+        print_test_funcs(),
+        HashMap::new(),
+    );
+    let msgs: Vec<_> = r.errors.iter().map(|e| e.message.as_str()).collect();
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("cannot print function `env.os`")),
+        "expected call hint, got: {msgs:?}"
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains("env.os()`")),
+        "expected () hint, got: {notes:?}"
+    );
+}
+
+#[test]
+fn typo_suggestion_dotted_path() {
+    let parsed = zz_frontend::parse("println(env.tmp_dir())");
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let r = check_program(
+        &parsed.program,
+        HashMap::new(),
+        print_test_funcs(),
+        HashMap::new(),
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("did you mean `env.temp_dir`")),
+        "expected dotted suggestion, got: {notes:?}"
+    );
+}
+
 #[test]
 fn unclosed_paren_in_parser() {
     let parsed = zz_frontend::parse("func add(a: int, b: int) -> int {\n    a +\n");

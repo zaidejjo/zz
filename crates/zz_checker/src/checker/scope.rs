@@ -3,7 +3,7 @@
 use crate::checker::Checker;
 use crate::type_::Type;
 use zz_frontend::diag::{error_at, warning_at, FixIt};
-use zz_frontend::levenshtein::suggest_all;
+use zz_frontend::levenshtein::{suggest_all, suggest_dotted};
 use zz_frontend::span::Span;
 
 impl Checker {
@@ -279,7 +279,30 @@ impl Checker {
             for key in self.structs.keys() {
                 candidates.push(key);
             }
+            // A lone namespace head (`env` in `env.tmp_dir(...)`) is a
+            // receiver probe, not a missing value: stay silent here and
+            // let the caller's joined-name check report (with its typo
+            // hint). Bare `env` as a value still errors via `lookup`.
+            if parts.len() == 1 {
+                let prefix = format!("{}.", parts[0]);
+                if candidates.iter().any(|c| c.starts_with(&prefix)) {
+                    return Type::Error;
+                }
+            }
             let mut diag = error_at(format!("undefined variable `{joined}`"), span);
+            // Dotted paths (`env.tmp_dir`) match segment-wise first:
+            // whole-string Levenshtein drowns a 1-char tail typo in the
+            // shared prefix. Falls back to root-name suggestions.
+            if parts.len() >= 2 {
+                if let Some(dotted) = suggest_dotted(&joined, &candidates) {
+                    diag = diag.with_note(format!("did you mean `{dotted}`?"));
+                    diag =
+                        diag.with_fixit(FixIt::safe(span, dotted.to_string(), "replace variable"));
+                    self.errors.push(diag);
+                    self.had_undefined_var = true;
+                    return Type::Error;
+                }
+            }
             let all = suggest_all(&parts[0], &candidates);
             if let Some((suggestion, _)) = all.first() {
                 diag = diag.with_note(format!("did you mean `{suggestion}`?"));
