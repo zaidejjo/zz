@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use zz_frontend::ast::Expr;
+use zz_frontend::ast::{Expr, ImportItem, Stmt};
 
 use super::mangle;
 
@@ -379,6 +379,16 @@ pub struct Lowerer {
     /// (`RUNTIME_C`) and only includes headers (`RUNTIME_H`). The C runtime
     /// is linked from a precompiled static library (`libzz_rt.a`) instead.
     pub(crate) precompiled: bool,
+    /// Selective-import aliases: bare name → canonical dotted native
+    /// (`rts` → `std.fs.read_to_string` from
+    /// `import std.fs(read_to_string as rts)`; `sin` → `std.math.sin`
+    /// from `import std.math(sin)`; whole-module wildcard members too).
+    /// Built from the program's `import` statements so bare and aliased
+    /// calls lower to the same runtime function as the VM resolves.
+    pub(crate) import_fn_aliases: std::collections::HashMap<String, String>,
+    /// Module head aliases: `f` → `std.fs` from `import std.fs as f`, so
+    /// `f.read_to_string(...)` lowers canonically.
+    pub(crate) import_ns_aliases: std::collections::HashMap<String, String>,
 }
 
 impl Lowerer {
@@ -389,12 +399,15 @@ impl Lowerer {
         tp: zz_hir::TypedProgram,
     ) -> Self {
         let escape = zz_hir::escape_analyze(&tp);
+        let (import_fn_aliases, import_ns_aliases) = Self::collect_import_aliases(&tp);
         Lowerer {
             reachable_funcs,
             reachable_natives,
             entry_main,
             tp,
             escape,
+            import_fn_aliases,
+            import_ns_aliases,
             loop_arenas: std::cell::RefCell::new(Vec::new()),
             defer_slots: std::cell::RefCell::new(Vec::new()),
             closure_defs: std::cell::RefCell::new(Vec::new()),
@@ -413,6 +426,56 @@ impl Lowerer {
     /// runtime is linked from a precompiled `libzz_rt.a` instead.
     pub fn set_precompiled(&mut self, v: bool) {
         self.precompiled = v;
+    }
+
+    /// Build the selective/module import alias maps from the program's
+    /// `import` statements (kept through DCE for exactly this purpose).
+    ///
+    /// - `import std.fs(read_to_string as rts)` → `rts` ⇒
+    ///   `std.fs.read_to_string`
+    /// - `import std.math(sin)` → `sin` ⇒ `std.math.sin`
+    /// - `import std.math(*)` → every direct `std.math.*` member ⇒ itself
+    /// - `import std.fs as f` → head `f` ⇒ `std.fs`
+    ///
+    /// First registration wins (mirrors the loader, where an earlier
+    /// import shadows a later one for the same bare name).
+    fn collect_import_aliases(
+        tp: &zz_hir::TypedProgram,
+    ) -> (HashMap<String, String>, HashMap<String, String>) {
+        let mut fns: HashMap<String, String> = HashMap::new();
+        let mut nss: HashMap<String, String> = HashMap::new();
+        for stmt in tp.stmts() {
+            let Stmt::Import {
+                path, alias, items, ..
+            } = stmt
+            else {
+                continue;
+            };
+            let head = path.join(".");
+            if let Some(a) = alias {
+                nss.entry(a.clone()).or_insert_with(|| head.clone());
+            }
+            for item in items {
+                match item {
+                    ImportItem::Wildcard { .. } => {
+                        let prefix = format!("{head}.");
+                        for k in zz_stdlib::stdlib_funcs().keys() {
+                            if let Some(rest) = k.strip_prefix(&prefix) {
+                                if !rest.contains('.') {
+                                    fns.entry(rest.to_string()).or_insert_with(|| k.clone());
+                                }
+                            }
+                        }
+                    }
+                    ImportItem::Named { name, alias, .. } => {
+                        let target = alias.as_ref().unwrap_or(name);
+                        fns.entry(target.clone())
+                            .or_insert_with(|| format!("{head}.{name}"));
+                    }
+                }
+            }
+        }
+        (fns, nss)
     }
 
     /// Check if an expression span is classified as non-escaping (arena-safe).

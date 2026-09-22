@@ -229,6 +229,13 @@ fn assert_parity_strict(
 // Macros
 // ---------------------------------------------------------------------------
 
+/// True when `ZZ_PARITY_VM_ONLY=1`: skip the `--native` leg (slow C
+/// compile+link per fixture) and assert the VM leg only. For fast
+/// iteration (`scripts/test-fast.sh`); CI always runs both legs.
+fn vm_only() -> bool {
+    std::env::var("ZZ_PARITY_VM_ONLY").is_ok()
+}
+
 /// Generate a strict error-parity test (both engines must error).
 macro_rules! parity_strict_error {
     ($name:ident, $file:expr) => {
@@ -239,6 +246,15 @@ macro_rules! parity_strict_error {
             assert!(path.exists(), "fixture not found: {}", path.display());
 
             let vm = run_zz_vm(&path);
+            if vm_only() {
+                assert_ne!(
+                    vm.0,
+                    0,
+                    "[{}]: VM should fail but exited 0.",
+                    path.display()
+                );
+                return;
+            }
             let native = run_zz_native(&path);
             assert_parity_strict(&path, vm, native, true);
         }
@@ -260,6 +276,17 @@ macro_rules! parity_strict {
             }
 
             let vm = run_zz_vm(&path);
+            if vm_only() {
+                assert_eq!(
+                    vm.0,
+                    0,
+                    "[{}]: VM should exit 0 but got {}.\nvm stderr: {}",
+                    path.display(),
+                    vm.0,
+                    vm.2
+                );
+                return;
+            }
             let native = run_zz_native(&path);
             assert_parity_strict(&path, vm, native, false);
         }
@@ -282,8 +309,6 @@ macro_rules! parity_known_failure {
                 .expect("parity_known_failure called for non-known-failure fixture");
 
             let vm = run_zz_vm(&path);
-            let native = run_zz_native(&path);
-
             // VM must succeed.
             assert_eq!(
                 vm.0, 0,
@@ -291,6 +316,13 @@ macro_rules! parity_known_failure {
                 path.display(),
                 vm.2
             );
+
+            if vm_only() {
+                // Known bugs live on the native leg, which is skipped.
+                eprintln!("SKIP KNOWN BUG [{}]: {bug} (VM leg ok)", path.display());
+                return;
+            }
+            let native = run_zz_native(&path);
 
             // Check if native failed/differed as expected.
             let native_broken = native.0 != 0 || strip_numeric_lines(&vm.1) != strip_numeric_lines(&native.1);
@@ -486,6 +518,7 @@ parity_strict!(
     "fs_comprehensive.zz"
 );
 parity_strict!(parity_stdlib_result_print, "stdlib", "result_print.zz");
+parity_strict!(parity_stdlib_import_alias, "stdlib", "import_alias.zz");
 parity_strict!(parity_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
 
 // --- Error fixture: both engines must error on missing struct field ---

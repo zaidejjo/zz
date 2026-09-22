@@ -1349,7 +1349,20 @@ impl Lowerer {
         // Returns (cname, method_receiver) where method_receiver is the owned Expr
         // to insert as the first argument for method calls like `x.push(4)`.
         let (cname, method_receiver): (String, Option<Expr>) = match callee {
-            Expr::Ident { name, .. } => (name.clone(), None),
+            Expr::Ident { name, .. } => {
+                // Selective-import aliases (`rts` from
+                // `import std.fs(read_to_string as rts)`) resolve to their
+                // canonical native — but never shadow a real local binding.
+                let resolved = if names.lookup(name).is_none() {
+                    self.import_fn_aliases
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| name.clone())
+                } else {
+                    name.clone()
+                };
+                (resolved, None)
+            }
             Expr::Path { parts, span, .. } if parts.len() == 2 => {
                 let obj_name = &parts[0];
                 let method = &parts[1];
@@ -1535,8 +1548,14 @@ impl Lowerer {
                         }
                     }
                 } else {
-                    // obj_name is NOT a local — it's a namespace like `vec`, `io`.
-                    (parts.join("."), None)
+                    // obj_name is NOT a local — it's a namespace like `vec`, `io`,
+                    // or a module head alias (`f` from `import std.fs as f`).
+                    let head = self
+                        .import_ns_aliases
+                        .get(obj_name)
+                        .cloned()
+                        .unwrap_or_else(|| obj_name.clone());
+                    (format!("{head}.{method}"), None)
                 }
             }
             Expr::Path { parts, .. } => {
@@ -1553,7 +1572,13 @@ impl Lowerer {
                     {
                         (recv_cname, Some(recv_expr))
                     } else {
-                        (parts.join("."), None)
+                        // Module head aliases (`pg` from
+                        // `import std.sqlz.postgres as pg`) rewrite the head.
+                        let mut fixed = parts.clone();
+                        if let Some(head) = self.import_ns_aliases.get(&parts[0]) {
+                            fixed[0] = head.clone();
+                        }
+                        (fixed.join("."), None)
                     }
                 } else {
                     (parts.join("."), None)

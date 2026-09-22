@@ -850,18 +850,22 @@ impl Loader {
                         span,
                         ..
                     } if !items.is_empty() => {
-                        // Stdlib selective imports: bare names are already in
+                        // Selective imports: bare names are already in
                         // self.funcs / self.natives by the register_* helpers.
-                        // The runtime resolves them as natives. Don't emit
-                        // any import statement — it would trigger a false
-                        // "unused import" warning since the namespace is
-                        // never used in qualified form.
+                        // The runtime resolves them as natives. For local
+                        // files, emit synthetic Decls (below); for stdlib,
+                        // KEEP the import statement (with items) so the AOT
+                        // backend can resolve bare/aliased names to their
+                        // canonical natives. It emits no code and the
+                        // checker already tracks selective names, so no
+                        // false "unused import" warning follows.
                         let is_stdlib = imp_path.first().map(String::as_str) == Some("std");
 
                         if is_stdlib {
-                            // Stdlib: skip entirely. Bare names are in seed.
+                            // Stdlib: keep as-is for alias resolution.
                             // Constants are injected into the runtime env via
                             // LoadResult.consts (including aliased names).
+                            new_stmts.push(stmt);
                         } else {
                             // Local file: keep the import (items cleared) for
                             // namespace tracking, then emit synthetic Decls.

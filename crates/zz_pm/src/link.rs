@@ -324,6 +324,11 @@ mod tests {
     use crate::manifest::{DepSpec, Manifest};
     use std::fs;
 
+    /// Serializes tests that mutate the process-wide `ZZ_HOME` env var.
+    /// Without this, parallel test threads overwrite each other's `ZZ_HOME`
+    /// mid-test (flaky `re_link_skips_unchanged_symlinks` failures).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn tmp() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -385,6 +390,7 @@ mod tests {
 
     #[test]
     fn link_project_creates_symlinks() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let d = tmp();
         // Set ZZ_HOME so CAS paths point to our temp dir
         std::env::set_var("ZZ_HOME", &d);
@@ -418,6 +424,7 @@ mod tests {
 
     #[test]
     fn re_link_skips_unchanged_symlinks() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let d = tmp();
         // Set ZZ_HOME so CAS paths point to our temp dir
         std::env::set_var("ZZ_HOME", &d);
