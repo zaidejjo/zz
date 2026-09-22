@@ -822,6 +822,43 @@ fn arm_start(tok: &str) -> bool {
         || tok.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
 
+/// Canonicalize embedded-struct shorthand: `Base: Base` (explicit) and
+/// `Base` (shorthand) parse to the same AST — in struct definitions and in
+/// struct literals (`Base: Base{...}` vs `Base{...}`) — while the emitter
+/// always prints the shorthand. Collapse `Ident : Ident` (same ident twice)
+/// when followed by `{`, `,`, or `}`. Applied to both sides, so it can only
+/// equate spellings the parser already treats as identical.
+fn normalize_struct_shorthand(seq: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(seq.len());
+    let mut i = 0;
+    while i < seq.len() {
+        if i + 2 < seq.len()
+            && seq[i + 1] == ":"
+            && seq[i + 2] == seq[i]
+            && is_ident(&seq[i])
+            && seq
+                .get(i + 3)
+                .is_some_and(|t| t == "{" || t == "," || t == "}")
+        {
+            out.push(seq[i].clone());
+            i += 3;
+            continue;
+        }
+        out.push(seq[i].clone());
+        i += 1;
+    }
+    out
+}
+
+/// True when `tok` looks like a plain identifier (not an operator, brace,
+/// keyword-ish punctuation, or string literal wrapper).
+fn is_ident(tok: &str) -> bool {
+    !tok.is_empty()
+        && tok.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && !tok.starts_with('"')
+        && !tok.bytes().next().is_some_and(|b| b.is_ascii_digit())
+}
+
 /// Split a normalized token sequence into (sorted import statements, rest).
 /// The formatter hoists `import` statements to the top of the file, so
 /// verification compares imports as an order-insensitive set while keeping
@@ -948,11 +985,12 @@ pub fn verify(
     //    `=` are treated as equivalent so `@test(should_panic = true)` and
     //    `@test(should_panic: true)` verify as identical — see
     //    `parse_call_args` alias for test decorators.
-    let orig_tokens = normalize_func_types(&normalize_trailing_commas(&normalize_named_arg_sep(
-        &significant_token_sequence(original_src),
-    )));
-    let new_tokens = normalize_func_types(&normalize_trailing_commas(&normalize_named_arg_sep(
-        &significant_token_sequence(formatted_src),
+    let orig_tokens =
+        normalize_func_types(&normalize_struct_shorthand(&normalize_trailing_commas(
+            &normalize_named_arg_sep(&significant_token_sequence(original_src)),
+        )));
+    let new_tokens = normalize_func_types(&normalize_struct_shorthand(&normalize_trailing_commas(
+        &normalize_named_arg_sep(&significant_token_sequence(formatted_src)),
     )));
     let (orig_imports, orig_rest) = split_imports(&orig_tokens);
     let (new_imports, new_rest) = split_imports(&new_tokens);

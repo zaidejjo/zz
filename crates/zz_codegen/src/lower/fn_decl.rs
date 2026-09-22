@@ -65,6 +65,9 @@ impl Lowerer {
                 .get(i)
                 .cloned()
                 .unwrap_or(zz_checker::Type::Unit);
+            // Track checker types for method dispatch on params (e.g.
+            // boxed-struct receivers inside function bodies).
+            names.checker_types.insert(p.name.name.clone(), pt.clone());
             // The first param of an impl method is the struct receiver
             // (passed as `*self`); the remaining params live in `args`.
             if is_impl_method && i == 0 {
@@ -208,6 +211,87 @@ impl Lowerer {
         }
 
         preamble
+    }
+
+    /// Generate auto `debug_string` functions for every reachable struct:
+    /// `zz_struct_debug_<mangled>(const zz_struct_<mangled> *self)` renders
+    /// the VM-identical `Type{field: value, ...}` form (embedded fields
+    /// recurse into their own debug function; boxed members go through the
+    /// runtime string cast, which formats boxed structs the same way).
+    /// Only unboxed structs need generated functions — boxed structs are
+    /// formatted generically by the C runtime from their field table.
+    /// Unused functions carry `__attribute__((unused))` so structs that are
+    /// never printed do not warn.
+    pub(super) fn lower_struct_debug_fns(&self) -> String {
+        let mut names: Vec<String> = self
+            .tp
+            .structs
+            .keys()
+            .filter(|n| self.is_unboxed_struct(n))
+            .cloned()
+            .collect();
+        names.sort();
+        let mut out = String::new();
+        if names.is_empty() {
+            return out;
+        }
+        out.push_str("// ---- struct debug_string functions (VM-identical display) ----\n");
+        for name in &names {
+            let Some(sig) = self.tp.structs.get(name) else {
+                continue;
+            };
+            let c_type = format!("zz_struct_{}", mangle(name));
+            out.push_str(&format!(
+                "__attribute__((unused)) static zz_value zz_struct_debug_{m}(const {c_type} *self) {{\n",
+                m = mangle(name),
+            ));
+            out.push_str("    int _e = 0;\n");
+            out.push_str(&format!(
+                "    zz_value _r = zz_str_static(\"{name}{{\");\n",
+                name = Self::c_escape_debug(name),
+            ));
+            for (i, (fname, fty)) in sig.fields.iter().enumerate() {
+                if i > 0 {
+                    out.push_str("    _r = zz_binop_cat(_r, zz_str_static(\", \"));\n");
+                }
+                out.push_str(&format!(
+                    "    _r = zz_binop_cat(_r, zz_str_static(\"{fname}: \"));\n",
+                    fname = Self::c_escape_debug(fname),
+                ));
+                let val_str = match fty {
+                    zz_checker::Type::Int => format!("zz_str_cast(zz_int(self->{fname}), &_e)"),
+                    zz_checker::Type::Float => {
+                        format!("zz_str_cast(zz_float(self->{fname}), &_e)")
+                    }
+                    zz_checker::Type::Bool => {
+                        format!("zz_str_cast(zz_bool(self->{fname}), &_e)")
+                    }
+                    zz_checker::Type::Struct(inner) if self.is_unboxed_struct(inner) => {
+                        format!("zz_struct_debug_{m}(&self->{fname})", m = mangle(inner),)
+                    }
+                    // Boxed members (strings, boxed structs, arrays, ...):
+                    // the runtime string cast formats them VM-identically.
+                    _ => format!("zz_str_cast(self->{fname}, &_e)"),
+                };
+                out.push_str(&format!("    _r = zz_binop_cat(_r, {val_str});\n"));
+            }
+            out.push_str("    _r = zz_binop_cat(_r, zz_str_static(\"}\"));\n");
+            out.push_str("    return _r;\n}\n\n");
+        }
+        out
+    }
+
+    /// Escape a struct/field name for embedding in a C string literal.
+    fn c_escape_debug(s: &str) -> String {
+        let mut o = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '"' => o.push_str("\\\""),
+                '\\' => o.push_str("\\\\"),
+                c => o.push(c),
+            }
+        }
+        o
     }
 
     /// Find a function's parameter definitions in the AST by name.

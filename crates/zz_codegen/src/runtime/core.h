@@ -434,6 +434,14 @@ void zz_release_variant(zz_value *v);
 void zz_release_object(zz_value *v);
 void zz_str_header_free(zz_str *s);
 
+// Retain one reference on a boxed struct object (mirrors the release in
+// `zz_release_object`: clones share ownership, so every clone must bump).
+static inline void zz_retain_object(zz_object *o) {
+    if (o) {
+        __atomic_add_fetch(&o->refs, 1, __ATOMIC_RELAXED);
+    }
+}
+
 static inline void zz_retain(zz_value *v) {
     switch (v->tag) {
     case ZZ_STR:
@@ -449,6 +457,9 @@ static inline void zz_retain(zz_value *v) {
         break;
     case ZZ_FUNC:
         zz_retain_func(v->fn);
+        break;
+    case ZZ_OBJECT:
+        zz_retain_object(v->obj);
         break;
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
@@ -511,6 +522,7 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
     *dst = src;
     // Retain the new value for refcounted types.
     if (src.tag == ZZ_ARRAY || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
+        src.tag == ZZ_OBJECT ||
         src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
         src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON) {
         zz_retain(dst);
@@ -534,6 +546,12 @@ static inline zz_value zz_clone(zz_value v) {
         break;
     case ZZ_FUNC:
         zz_retain_func(v.fn);
+        break;
+    case ZZ_OBJECT:
+        // Boxed structs share ownership on clone (see `zz_retain_object`);
+        // without this bump, overwriting a field frees the object while
+        // other owners still reference it.
+        zz_retain_object(v.obj);
         break;
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:

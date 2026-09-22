@@ -587,7 +587,8 @@ impl Parser {
                 // because `if x == y{ ... }` would be misparsed as struct init.
                 if self.at(TokenKind::LBrace)
                     && self.peek_kind_at(1) == TokenKind::Ident
-                    && self.peek_kind_at(2) == TokenKind::Colon
+                    && (self.peek_kind_at(2) == TokenKind::Colon
+                        || self.peek_kind_at(2) == TokenKind::LBrace)
                 {
                     return self.parse_struct_init(parts, tok.span.join(end));
                 }
@@ -709,6 +710,24 @@ impl Parser {
             let fname = self
                 .expect_ident()
                 .unwrap_or_else(|| dummy_ident(self.peek().span));
+            // Embedded shorthand: `User{Base{id: 1}, age: 30}` means
+            // `User{Base: Base{id: 1}, age: 30}` — a bare `Ident{...}`
+            // with no `:` supplies the embedded field's value directly.
+            if self.at(TokenKind::LBrace) {
+                let value = self.parse_struct_init(vec![fname.name.clone()], fname.span);
+                fields.push((fname.name, value));
+                if self.eat(TokenKind::Comma) {
+                    continue;
+                }
+                self.skip_stmt_ends();
+                if !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                    self.error_here("expected `,` or `}` after field");
+                }
+                if self.pos == start_pos {
+                    self.advance();
+                }
+                continue;
+            }
             if !self.eat(TokenKind::Colon) {
                 if self.at(TokenKind::Assign) {
                     self.error_here(

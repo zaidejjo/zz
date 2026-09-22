@@ -510,8 +510,23 @@ zz_value zz_object_new(const char *type_name, zz_value *field_names, size_t n) {
     return (zz_value){ZZ_OBJECT, {.obj = obj}};
 }
 
-void zz_object_set_field(zz_value *obj, const char *name, zz_value val) {
-    if (obj->tag != ZZ_OBJECT || !obj->obj) return;
+// Maximum promotion depth when searching embedded structs. Struct values
+// are finite trees, so this is only a safety bound.
+#define ZZ_EMBED_MAX_DEPTH 32
+
+// True when a struct slot holds an embedded (anonymous) field value: an
+// object whose type's last segment equals the field name
+// (`User.Base: Base{...}`). Mirrors the checker's rule.
+static int zz_embedded_match(const char *fname, const zz_value *slot) {
+    if (!fname || !slot || slot->tag != ZZ_OBJECT || !slot->obj || !slot->obj->type_name)
+        return 0;
+    const char *base = strrchr(slot->obj->type_name, '.');
+    base = base ? base + 1 : slot->obj->type_name;
+    return strcmp(base, fname) == 0;
+}
+
+static int zz_object_set_depth(zz_value *obj, const char *name, zz_value val, int depth) {
+    if (obj->tag != ZZ_OBJECT || !obj->obj) return 0;
     zz_object *o = obj->obj;
     for (size_t i = 0; i < o->len; i++) {
         zz_value *fname = &o->fields[i * 2];
@@ -519,9 +534,49 @@ void zz_object_set_field(zz_value *obj, const char *name, zz_value val) {
             zz_value *slot = &o->fields[i * 2 + 1];
             zz_release(slot);
             *slot = zz_clone(val);
-            return;
+            return 1;
         }
     }
+    // Embedded promotion: `u.id = 1` writes `u.Base.id` transitively.
+    if (depth < ZZ_EMBED_MAX_DEPTH) {
+        for (size_t i = 0; i < o->len; i++) {
+            zz_value *fname = &o->fields[i * 2];
+            if (fname->tag == ZZ_STR
+                && zz_embedded_match(zz_str_cptr(fname->s), &o->fields[i * 2 + 1])) {
+                if (zz_object_set_depth(&o->fields[i * 2 + 1], name, val, depth + 1))
+                    return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+void zz_object_set_field(zz_value *obj, const char *name, zz_value val) {
+    (void)zz_object_set_depth(obj, name, val, 0);
+}
+
+static int zz_object_get_depth(const zz_value *obj, const char *name, int depth, zz_value *out) {
+    if (!obj || obj->tag != ZZ_OBJECT || !obj->obj) return 0;
+    const zz_object *o = obj->obj;
+    for (size_t i = 0; i < o->len; i++) {
+        const zz_value *fname = &o->fields[i * 2];
+        if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
+            *out = zz_clone(o->fields[i * 2 + 1]);
+            return 1;
+        }
+    }
+    // Embedded promotion: `u.id` reads `u.Base.id` transitively.
+    if (depth < ZZ_EMBED_MAX_DEPTH) {
+        for (size_t i = 0; i < o->len; i++) {
+            const zz_value *fname = &o->fields[i * 2];
+            if (fname->tag == ZZ_STR
+                && zz_embedded_match(zz_str_cptr(fname->s), &o->fields[i * 2 + 1])) {
+                if (zz_object_get_depth(&o->fields[i * 2 + 1], name, depth + 1, out))
+                    return 1;
+            }
+        }
+    }
+    return 0;
 }
 
 zz_value zz_object_get_field(zz_value *obj, const char *name) {
@@ -529,13 +584,9 @@ zz_value zz_object_get_field(zz_value *obj, const char *name) {
     // Struct field access — works on both ZZ_OBJECT (boxed structs) and
     // ZZ_DICT (e.g. rows returned by the AOT C FFI for db.query).
     if (obj->tag == ZZ_OBJECT && obj->obj) {
-        zz_object *o = obj->obj;
-        for (size_t i = 0; i < o->len; i++) {
-            zz_value *fname = &o->fields[i * 2];
-            if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
-                return zz_clone(o->fields[i * 2 + 1]);
-            }
-        }
+        zz_value out;
+        if (zz_object_get_depth(obj, name, 0, &out))
+            return out;
         return zz_unit();
     }
     if (obj->tag == ZZ_DICT && obj->dict) {

@@ -256,6 +256,135 @@ fn struct_unknown_field_errors() {
 }
 
 #[test]
+fn struct_embedding_promotes_field() {
+    let r = check_src(
+        "struct Base { id: int }\nstruct User { Base, age: int }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nz := u.id",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn struct_embedding_explicit_form_matches_shorthand() {
+    // `Base: Base` is the explicit spelling of the embedded field `Base`.
+    let r = check_src(
+        "struct Base { id: int }\nstruct User { Base: Base, age: int }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nz := u.id",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn struct_embedding_shorthand_init() {
+    let r = check_src(
+        "struct Base { id: int }\nstruct User { Base, age: int }\nu := User{ Base{ id: 1 }, age: 2 }\nz := u.id",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn struct_embedding_transitive_field() {
+    let r = check_src(
+        "struct Base { id: int }\nstruct Mid { Base, tag: int }\nstruct Outer { Mid, top: int }\no := Outer{ Mid: Mid{ Base: Base{ id: 1 }, tag: 2 }, top: 3 }\nz := o.id",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn struct_embedding_direct_field_shadows_promoted() {
+    let r = check_src(
+        "struct Base { id: int }\nstruct User { Base, id: int }\nu := User{ Base: Base{ id: 1 }, id: 2 }\nz := u.id",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn struct_embedding_promoted_method_call() {
+    let r = check_src(
+        "struct Base { id: int }\nimpl Base { func get(self) -> int { self.id } }\nstruct User { Base, age: int }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nz := u.get()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn struct_embedding_direct_method_shadows_promoted() {
+    let r = check_src(
+        "struct Base { id: int }\nimpl Base { func who(self) -> str { \"base\" } }\nstruct User { Base, age: int }\nimpl User { func who(self) -> str { \"user\" } }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nz := u.who()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Str);
+}
+
+#[test]
+fn struct_embedding_unknown_field_still_errors() {
+    errors_contain(
+        "struct Base { id: int }\nstruct User { Base, age: int }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nu.nope",
+        "has no field `nope`",
+    );
+}
+
+#[test]
+fn struct_embedding_promoted_mutation() {
+    let r = check_src(
+        "struct Base { id: int }\nstruct User { Base, age: int }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nu.id = 9",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn struct_embedding_suggests_promoted_field() {
+    // Typo of a promoted field suggests the promoted name.
+    let r = check_src(
+        "struct Base { id: int }\nstruct User { Base, age: int }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nu.ix",
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains("did you mean field `id`")),
+        "expected promoted-field suggestion, got notes: {notes:?}, errors: {:?}",
+        r.errors,
+    );
+}
+
+#[test]
+fn struct_embedding_flat_init() {
+    // Flattened init: promoted fields nest into the embedded struct.
+    let r = check_src(
+        "struct Base { id: int, name: str }\nstruct User { Base, age: int }\nu := User{ id: 1, name: \"Zaid\", age: 19 }",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["u"], Type::Struct("User".into()));
+}
+
+#[test]
+fn struct_embedding_flat_init_type_mismatch_errors() {
+    errors_contain(
+        "struct Base { id: int }\nstruct User { Base, age: int }\nu := User{ id: \"x\", age: 2 }",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn struct_embedding_flat_init_missing_leaf_errors() {
+    errors_contain(
+        "struct Base { id: int, name: str }\nstruct User { Base, age: int }\nu := User{ id: 1, age: 2 }",
+        "missing field `Base.name` in struct literal `User`",
+    );
+}
+
+#[test]
+fn struct_embedding_init_conflict_errors() {
+    // Explicit embedded value + flattened leaves of the same subtree.
+    errors_contain(
+        "struct Base { id: int }\nstruct User { Base, age: int }\nu := User{ Base: Base{ id: 1 }, id: 2, age: 3 }",
+        "conflicts with embedded value `Base`",
+    );
+}
+
+#[test]
 fn struct_unknown_field_in_init_errors() {
     errors_contain(
         "struct Point { x: int, y: int }\np := Point{ x: 1, z: 2 }",

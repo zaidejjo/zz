@@ -325,6 +325,57 @@ impl Parser {
         }
     }
 
+    /// True when the upcoming tokens start an embedded (anonymous) struct
+    /// field: a dotted type name (with optional `<...>` generic args)
+    /// followed by `,`, `}`, or a statement end — and NOT by `:` (which
+    /// marks a named `field: Type` field). The terminator requirement keeps
+    /// the old error for a missing colon (`age int` still reports
+    /// "expected `:` after field name" instead of misreading `age` as an
+    /// embedded type).
+    pub(crate) fn is_embedded_field_start(&self) -> bool {
+        // Must start with an identifier.
+        if self.peek_kind_at(0) != TokenKind::Ident {
+            return false;
+        }
+        let mut i = 1;
+        // Skip `. Ident` segments.
+        while self.peek_kind_at(i) == TokenKind::Dot && self.peek_kind_at(i + 1) == TokenKind::Ident
+        {
+            i += 2;
+        }
+        // Skip a single `<...>` generic argument list, if present.
+        if self.peek_kind_at(i) == TokenKind::Lt {
+            let mut depth = 0usize;
+            loop {
+                match self.peek_kind_at(i) {
+                    TokenKind::Eof => return false,
+                    TokenKind::Lt => {
+                        depth += 1;
+                        i += 1;
+                    }
+                    TokenKind::Gt => {
+                        depth -= 1;
+                        i += 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+                // Bound the scan so a missing `>` cannot hang the parser.
+                if i > 64 {
+                    return false;
+                }
+            }
+        }
+        matches!(
+            self.peek_kind_at(i),
+            TokenKind::Comma | TokenKind::RBrace | TokenKind::StmtEnd | TokenKind::Eof
+        )
+    }
+
     /// Parse a dotted identifier: `a`, `a.b`, `a.b.c`, ...
     /// Returns `Vec<String>` of parts.
     pub(crate) fn parse_dotted_ident(&mut self) -> Vec<String> {

@@ -16,6 +16,40 @@ fn parses_struct() {
 }
 
 #[test]
+fn parses_struct_with_embedded_field() {
+    let p = parse_ok("struct User { Base, age: int }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Struct { name, fields, .. } => {
+            assert_eq!(name, &vec!["User".to_string()]);
+            assert_eq!(fields.len(), 2);
+            // Embedded field defaults its name to the type name.
+            assert_eq!(fields[0].0.name, "Base");
+            assert!(matches!(fields[0].1.kind, TyKind::Named(ref n, _) if n == "Base"));
+            assert_eq!(fields[1].0.name, "age");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_struct_init_shorthand_for_embedded() {
+    // `User{Base{id: 1}, age: 2}` == `User{Base: Base{id: 1}, age: 2}`.
+    let p = parse_ok("u := User{ Base{id: 1}, age: 2 }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { value, .. } => match value {
+            E::StructInit { name, fields, .. } => {
+                assert_eq!(name, "User");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "Base");
+                assert!(matches!(fields[0].1, E::StructInit { .. }));
+            }
+            other => panic!("unexpected value: {other:?}"),
+        },
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
 fn parses_for() {
     let p = parse_ok("for x in xs { y := 1 }");
     match &p.stmts[0] {

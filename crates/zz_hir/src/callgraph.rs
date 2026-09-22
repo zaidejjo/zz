@@ -42,6 +42,10 @@ fn resolve_methods(tp: &TypedProgram, recv: &Expr, method: &str) -> Vec<String> 
             let fq = format!("{s}.{method}");
             if tp.funcs.contains_key(&fq) {
                 vec![fq]
+            } else if let Some(promoted) = find_promoted_method(tp, s, method) {
+                // Embedded promotion: `u.area()` on `User` (embedding
+                // `Base`) dispatches to `Base.area`.
+                vec![promoted]
             } else {
                 vec![method.to_string()]
             }
@@ -62,6 +66,36 @@ fn resolve_methods(tp: &TypedProgram, recv: &Expr, method: &str) -> Vec<String> 
     }
 }
 
+/// True when a struct field is an embedded (anonymous) field: its type is
+/// a struct whose last name segment equals the field name. Mirrors the
+/// checker's rule (see `zz_checker::checker::structs`).
+fn is_embedded_field(fname: &str, fty: &Type) -> bool {
+    matches!(fty, Type::Struct(s) if s.rsplit('.').next().unwrap_or(s) == fname)
+}
+
+/// Search structs embedded in `root` (transitively, breadth-first) for a
+/// definition of `{inner}.{method}`. Returns the defining method name.
+fn find_promoted_method(tp: &TypedProgram, root: &str, method: &str) -> Option<String> {
+    let mut visited = vec![root.to_string()];
+    let mut queue = vec![root.to_string()];
+    while let Some(cur) = queue.first().cloned() {
+        queue.remove(0);
+        let sig = tp.structs.get(&cur)?;
+        for (fname, fty) in &sig.fields {
+            if let Type::Struct(inner) = fty {
+                if is_embedded_field(fname, fty) && !visited.contains(inner) {
+                    let fq = format!("{inner}.{method}");
+                    if tp.funcs.contains_key(&fq) {
+                        return Some(fq);
+                    }
+                    visited.push(inner.clone());
+                    queue.push(inner.clone());
+                }
+            }
+        }
+    }
+    None
+}
 /// The call graph: edges from each defined function (or [`TOP`]) to every
 /// resolved callee name, plus struct instantiations and function-as-value
 /// uses (escaping closures).

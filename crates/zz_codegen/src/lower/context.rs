@@ -713,6 +713,315 @@ impl Lowerer {
         }
     }
 
+    /// True when a struct field is an embedded (anonymous) field: its type
+    /// is a struct whose last name segment equals the field name
+    /// (`User.Base: Base`). Mirrors the checker's rule.
+    pub(super) fn is_embedded_sig_field(fname: &str, fty: &zz_checker::Type) -> bool {
+        matches!(fty, zz_checker::Type::Struct(s) if s.rsplit('.').next().unwrap_or(s) == fname)
+    }
+
+    /// Resolve an un-mangled struct name from a C type string
+    /// (`zz_struct_mod__Rect` → `mod.Rect`), or `None` for non-structs.
+    pub(super) fn unmangled_struct_name(&self, base_c_type: &str) -> Option<String> {
+        let mangled_suffix = self.struct_name_from_c_type(base_c_type)?;
+        self.tp
+            .structs
+            .keys()
+            .find(|k| mangle(k) == *mangled_suffix)
+            .cloned()
+    }
+
+    /// Breadth-first path of embedded field names from struct `root` to
+    /// `field` (empty vec = direct field). `None` when the field is not
+    /// visible on the struct at all.
+    pub(super) fn embedded_field_path(&self, root: &str, field: &str) -> Option<Vec<String>> {
+        let mut visited = vec![root.to_string()];
+        let mut queue: Vec<(String, Vec<String>)> = vec![(root.to_string(), Vec::new())];
+        while let Some((cur, path)) = queue.first().cloned() {
+            queue.remove(0);
+            let sig = self.tp.structs.get(&cur)?;
+            if sig.fields.iter().any(|(n, _)| n == field) {
+                return Some(path);
+            }
+            for (fname, fty) in &sig.fields {
+                if let zz_checker::Type::Struct(inner) = fty {
+                    if Self::is_embedded_sig_field(fname, fty) && !visited.contains(inner) {
+                        visited.push(inner.clone());
+                        let mut next = path.clone();
+                        next.push(fname.clone());
+                        queue.push((inner.clone(), next));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find a method promoted from an embedded struct: returns the defining
+    /// struct's un-mangled name plus the embedded path to reach it. Direct
+    /// methods are NOT matched here (callers check those first).
+    pub(super) fn promoted_method_target(
+        &self,
+        root: &str,
+        method: &str,
+    ) -> Option<(String, Vec<String>)> {
+        let mut visited = vec![root.to_string()];
+        let mut queue: Vec<(String, Vec<String>)> = vec![(root.to_string(), Vec::new())];
+        while let Some((cur, path)) = queue.first().cloned() {
+            queue.remove(0);
+            let sig = self.tp.structs.get(&cur)?;
+            for (fname, fty) in &sig.fields {
+                if let zz_checker::Type::Struct(inner) = fty {
+                    if Self::is_embedded_sig_field(fname, fty) && !visited.contains(inner) {
+                        if self.reachable_funcs.contains(&format!("{inner}.{method}")) {
+                            let mut found = path.clone();
+                            found.push(fname.clone());
+                            return Some((inner.clone(), found));
+                        }
+                        visited.push(inner.clone());
+                        let mut next = path.clone();
+                        next.push(fname.clone());
+                        queue.push((inner.clone(), next));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// C type of the leaf field reached by walking `path` (embedded field
+    /// names + final field) from the struct named `root`. Used to box
+    /// promoted field reads in generated C.
+    pub(super) fn promoted_leaf_ctype(&self, root: &str, path: &[String]) -> Option<String> {
+        let mut cur = root.to_string();
+        for (i, part) in path.iter().enumerate() {
+            let sig = self.tp.structs.get(&cur)?;
+            let (_, fty) = sig.fields.iter().find(|(n, _)| n == part)?;
+            if i + 1 == path.len() {
+                return Some(self.type_to_c(fty));
+            }
+            if let zz_checker::Type::Struct(inner) = fty {
+                cur = inner.clone();
+            } else {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Concrete path of a literal field: direct fields map to `[name]`,
+    /// promoted (flattened) fields to their embedded prefix + `[name]`
+    /// (`id` in `User{id: 1, ...}` → `[Base, id]`). Falls back to `[name]`
+    /// for unknown fields (rejected by the checker; codegen never sees
+    /// them in valid programs).
+    pub(super) fn literal_field_path(&self, sname: &str, fname: &str) -> Vec<String> {
+        if let Some(sig) = self.tp.structs.get(sname) {
+            if sig.fields.iter().any(|(n, _)| n == fname) {
+                return vec![fname.to_string()];
+            }
+        }
+        if let Some(mut prefix) = self.embedded_field_path(sname, fname) {
+            if !prefix.is_empty() {
+                prefix.push(fname.to_string());
+                return prefix;
+            }
+        }
+        vec![fname.to_string()]
+    }
+    /// the struct named `root`, expanding promoted (embedded) segments.
+    /// Returns the full concrete chain (embedded hops included) plus the
+    /// leaf C type for boxing.
+    pub(super) fn resolve_access_chain(
+        &self,
+        root: &str,
+        fields: &[String],
+    ) -> Option<(Vec<String>, String)> {
+        let mut cur = root.to_string();
+        let mut full: Vec<String> = Vec::new();
+        for (fi, f) in fields.iter().enumerate() {
+            let last = fi + 1 == fields.len();
+            let sig = self.tp.structs.get(&cur)?;
+            if sig.fields.iter().any(|(n, _)| n == f) {
+                full.push(f.clone());
+                if !last {
+                    match sig.fields.iter().find(|(n, _)| n == f).map(|(_, t)| t) {
+                        Some(zz_checker::Type::Struct(inner)) => cur = inner.clone(),
+                        _ => return None,
+                    }
+                }
+            } else {
+                let path = self.embedded_field_path(&cur, f)?;
+                if path.is_empty() {
+                    return None;
+                }
+                for p in &path {
+                    let s = self.tp.structs.get(&cur)?;
+                    let (_, t) = s.fields.iter().find(|(n, _)| n == p)?;
+                    full.push(p.clone());
+                    match t {
+                        zz_checker::Type::Struct(inner) => cur = inner.clone(),
+                        _ => return None,
+                    }
+                }
+                full.push(f.clone());
+                if !last {
+                    let s = self.tp.structs.get(&cur)?;
+                    let (_, t) = s.fields.iter().find(|(n, _)| n == f)?;
+                    match t {
+                        zz_checker::Type::Struct(inner) => cur = inner.clone(),
+                        _ => return None,
+                    }
+                }
+            }
+        }
+        let leaf = self.promoted_leaf_ctype(root, &full)?;
+        Some((full, leaf))
+    }
+
+    /// Checker struct type (un-mangled name) of a local variable, for
+    /// method dispatch on boxed structs (whose C type is uniformly
+    /// `zz_value`, so the C type alone cannot identify them). Checks the
+    /// tracker's checker-type map, then the type checker's span map.
+    pub(super) fn checker_struct_of(
+        &self,
+        names: &NameCtx,
+        obj_name: &str,
+        obj_span: Option<zz_frontend::span::Span>,
+    ) -> Option<String> {
+        if let Some(zz_checker::Type::Struct(s)) = names.checker_types.get(obj_name) {
+            return Some(s.clone());
+        }
+        if let Some(span) = obj_span {
+            if let Some(zz_checker::Type::Struct(s)) = self.tp.types.get(&span) {
+                return Some(s.clone());
+            }
+        }
+        None
+    }
+
+    /// Un-mangled struct name for method dispatch on a local: unboxed
+    /// structs resolve through the C type (`zz_struct_X`), boxed structs
+    /// (uniformly `zz_value`) through the checker's type map. `None` when
+    /// the local is not a struct.
+    pub(super) fn dispatch_struct_name(
+        &self,
+        names: &NameCtx,
+        recv_ctype: Option<&str>,
+        obj_name: &str,
+        obj_span: zz_frontend::span::Span,
+    ) -> Option<String> {
+        if let Some(recv_type) = recv_ctype {
+            if let Some(mangled_name) = self.struct_name_from_c_type(recv_type) {
+                // Find the un-mangled struct name (the key in `tp.structs`)
+                // whose mangled C form matches `mangled_name`.
+                if let Some(found) = self
+                    .tp
+                    .structs
+                    .keys()
+                    .find(|k| mangle(k) == *mangled_name)
+                    .cloned()
+                {
+                    return Some(found);
+                }
+            }
+        }
+        self.checker_struct_of(names, obj_name, Some(obj_span))
+    }
+
+    /// Resolve `<Struct>.<method>` for dispatch: direct hit, else promoted
+    /// from an embedded struct. Returns the impl name plus the embedded
+    /// path after the receiver (empty = direct method on the struct).
+    pub(super) fn struct_method_target(
+        &self,
+        unmangled: &str,
+        method: &str,
+    ) -> Option<(String, Vec<String>)> {
+        let direct = format!("{unmangled}.{method}");
+        if self.reachable_funcs.contains(&direct) {
+            return Some((direct, Vec::new()));
+        }
+        if let Some((defining, path)) = self.promoted_method_target(unmangled, method) {
+            let impl_name = format!("{defining}.{method}");
+            if self.reachable_funcs.contains(&impl_name) {
+                return Some((impl_name, path));
+            }
+        }
+        None
+    }
+
+    /// Un-mangled name of the unboxed struct an expression evaluates to,
+    /// for display dispatch (`println`, f-strings, `str()`). Only
+    /// Ident/Path/Field shapes lower unboxed structs to raw C values;
+    /// everything else is already a `zz_value` (boxed structs flow through
+    /// the C runtime, which formats them identically).
+    pub(super) fn unboxed_struct_of_expr(&self, e: &Expr, names: &NameCtx) -> Option<String> {
+        match e {
+            Expr::Ident { name, .. } => names
+                .lookup_type(name)
+                .and_then(|ct| self.unmangled_struct_name(ct)),
+            Expr::Path { .. } | Expr::Field { .. } => match self.tp.types.get(&e.span()) {
+                Some(zz_checker::Type::Struct(s)) if self.is_unboxed_struct(s) => Some(s.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Render an unboxed-struct-typed raw C value as a `zz_value` string via
+    /// its generated `debug_string` function. The value is hoisted into a
+    /// temp (prints are cold; copies keep lvalue analysis out of the
+    /// picture).
+    pub(super) fn stringify_struct_value(
+        &self,
+        sname: &str,
+        raw: String,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        let ctype = format!("zz_struct_{}", mangle(sname));
+        let tmp = names.fresh("_dbg");
+        out.push_str(&format!("    {ctype} {tmp} = {raw};\n"));
+        format!("zz_struct_debug_{m}(&{tmp})", m = mangle(sname))
+    }
+
+    /// True for the display builtins that render values as strings:
+    /// `println` / `print` / `printz` (plus `io.` / `std.io.` spellings)
+    /// and the `str()` cast.
+    pub(super) fn is_display_builtin(cname: &str) -> bool {
+        matches!(
+            cname,
+            "println"
+                | "print"
+                | "printz"
+                | "str"
+                | "io.println"
+                | "io.print"
+                | "io.printz"
+                | "std.io.println"
+                | "std.io.print"
+                | "std.io.printz"
+                | "std.str"
+        )
+    }
+
+    /// Render an unboxed-struct lvalue chain: `parts[0]` is a local whose C
+    /// type is a struct, the rest are direct field names. Returns e.g.
+    /// `((zaid).Base).id` — suitable for `&(...)` receiver passing.
+    pub(super) fn emit_struct_lvalue(&self, parts: &[String], names: &NameCtx) -> Option<String> {
+        if parts.is_empty() {
+            return None;
+        }
+        let base = names.lookup(&parts[0])?;
+        if !self.is_struct_type_str(names.lookup_type(&parts[0])?) {
+            return None;
+        }
+        let mut acc = format!("({base})");
+        for p in &parts[1..] {
+            acc = format!("({acc}).{p}");
+        }
+        Some(acc)
+    }
+
     /// Auto-box a nested struct field value (e.g., r.origin.x).
     pub(super) fn auto_box_nested_field(
         &self,

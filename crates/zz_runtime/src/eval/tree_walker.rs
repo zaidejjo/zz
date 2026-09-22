@@ -6,7 +6,8 @@ use zz_frontend::span::Span;
 use crate::env::{Env, EnvLink};
 use crate::runtime::format::{format_value_with_spec, value_matches_lit};
 use crate::runtime::ops::{
-    eval_binary, eval_unary, get_index, object_field, set_index, set_object_field, slice_value,
+    eval_binary, eval_unary, get_index, is_embedded_value, object_field, set_index,
+    set_object_field, slice_value,
 };
 use crate::runtime::{EvalError, Flow};
 use crate::value::NativeFunc;
@@ -369,6 +370,56 @@ impl Interp {
         Ok(())
     }
 
+    /// Build a struct value from a literal, distributing flattened
+    /// (promoted) fields into embedded sub-objects: `User{id: 1, age: 2}`
+    /// fills `Base.id` from the leftover `id`. Mirrors the checker's
+    /// flat-literal coverage rule; the type checker rejects ambiguous or
+    /// incomplete literals before runtime sees them.
+    pub(crate) fn build_struct_value(
+        &mut self,
+        sname: &str,
+        given: &[(String, Expr)],
+        span: Span,
+        depth: usize,
+    ) -> Result<ObjectValue, EvalError> {
+        if depth > 32 {
+            return Err(EvalError::new(
+                format!("struct `{sname}` is embedded too deeply (possible cycle)"),
+                span,
+            ));
+        }
+        let Some(layout) = self.structs.get(sname).cloned() else {
+            return Err(EvalError::new(format!("unknown struct `{sname}`"), span));
+        };
+        // Leftovers: given fields that are not direct fields of this
+        // struct — candidates for embedded sub-objects.
+        let leftovers: Vec<(String, Expr)> = given
+            .iter()
+            .filter(|(n, _)| !layout.contains(n))
+            .cloned()
+            .collect();
+        let mut out = Vec::with_capacity(layout.len());
+        for fname in &layout {
+            if let Some((_, expr)) = given.iter().find(|(n, _)| n == fname) {
+                out.push((fname.clone(), self.eval(expr)?.into_value()?));
+            } else if let Some(inner_name) =
+                crate::runtime::ops::embedded_layout_name(&self.structs, fname)
+            {
+                let inner = self.build_struct_value(&inner_name, &leftovers, span, depth + 1)?;
+                out.push((fname.clone(), Value::Object(Box::new(inner))));
+            } else {
+                return Err(EvalError::new(
+                    format!("missing field `{fname}` in struct literal"),
+                    span,
+                ));
+            }
+        }
+        Ok(ObjectValue {
+            name: sname.to_string(),
+            fields: out,
+        })
+    }
+
     pub(crate) fn resolve_path_value(
         &self,
         parts: &[String],
@@ -418,31 +469,52 @@ impl Interp {
         method: &str,
         span: Span,
     ) -> Result<Value, EvalError> {
+        self.lookup_method_recv(recv, method, span).map(|(f, _)| f)
+    }
+
+    /// Like [`Interp::lookup_method`], but also returns the effective
+    /// receiver: for methods promoted from an embedded struct, the embedded
+    /// value itself (so `Base.area` receives a `Base`, not the outer `User`).
+    pub(crate) fn lookup_method_recv(
+        &self,
+        recv: &Value,
+        method: &str,
+        span: Span,
+    ) -> Result<(Value, Value), EvalError> {
         if let Ok(f) = self.lookup_callable(method, span) {
-            return Ok(f);
+            return Ok((f, recv.clone()));
         }
         if let Some(ns) = recv.method_namespace() {
             if let Ok(f) = self.lookup_callable(&format!("{ns}.{method}"), span) {
-                return Ok(f);
+                return Ok((f, recv.clone()));
             }
             // `db.*` is a zero-overhead alias for canonical `sqlz.*`:
             // fall back so handles work regardless of which module was
             // imported.
             if ns == "sqlz" {
                 if let Ok(f) = self.lookup_callable(&format!("db.{method}"), span) {
-                    return Ok(f);
+                    return Ok((f, recv.clone()));
                 }
             }
         }
         if let Value::Object(o) = recv {
             // Try TypeName.method (impl block methods)
             if let Ok(f) = self.lookup_callable(&format!("{}.{}", o.name, method), span) {
-                return Ok(f);
+                return Ok((f, recv.clone()));
             }
             // Try namespace.method (cross-module)
             if let Some((ns, _)) = o.name.rsplit_once('.') {
                 if let Ok(f) = self.lookup_callable(&format!("{ns}.{method}"), span) {
-                    return Ok(f);
+                    return Ok((f, recv.clone()));
+                }
+            }
+            // Embedded promotion: search embedded values transitively for
+            // the method. The embedded value becomes the receiver.
+            for (fname, child) in &o.fields {
+                if is_embedded_value(fname, child) {
+                    if let Ok((f, r)) = self.lookup_method_recv(child, method, span) {
+                        return Ok((f, r));
+                    }
                 }
             }
         }
@@ -674,7 +746,7 @@ impl Interp {
                             let method = parts.last().unwrap();
                             let recv =
                                 self.resolve_path_value(&parts[..parts.len() - 1], *pspan)?;
-                            let f = self.lookup_method(&recv, method, *pspan)?;
+                            let (f, recv) = self.lookup_method_recv(&recv, method, *pspan)?;
                             let mut arg_vals = vec![recv];
                             for a in args {
                                 arg_vals.push(self.eval(a)?.into_value()?);
@@ -690,7 +762,7 @@ impl Interp {
                 } = callee.as_ref()
                 {
                     let recv = self.eval(obj)?.into_value()?;
-                    let f = self.lookup_method(&recv, name, *fspan)?;
+                    let (f, recv) = self.lookup_method_recv(&recv, name, *fspan)?;
                     let mut arg_vals = vec![recv];
                     for a in args {
                         arg_vals.push(self.eval(a)?.into_value()?);
@@ -991,24 +1063,8 @@ impl Interp {
                 }
             }
             Expr::StructInit { name, fields, span } => {
-                let Some(field_names) = self.structs.get(name).cloned() else {
-                    return Err(EvalError::new(format!("unknown struct `{name}`"), *span));
-                };
-                let mut out = Vec::with_capacity(field_names.len());
-                for fname in &field_names {
-                    let Some(fexpr) = fields.iter().find(|(n, _)| n == fname) else {
-                        return Err(EvalError::new(
-                            format!("missing field `{fname}` in struct literal"),
-                            *span,
-                        ));
-                    };
-                    let v = self.eval(&fexpr.1)?.into_value()?;
-                    out.push((fname.clone(), v));
-                }
-                Ok(Flow::Value(Value::Object(Box::new(ObjectValue {
-                    name: name.clone(),
-                    fields: out,
-                }))))
+                let obj = self.build_struct_value(name, fields, *span, 0)?;
+                Ok(Flow::Value(Value::Object(Box::new(obj))))
             }
             Expr::Index { obj, index, span } => {
                 let ov = self.eval(obj)?.into_value()?;

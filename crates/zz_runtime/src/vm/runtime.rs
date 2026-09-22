@@ -12,7 +12,7 @@ use crate::runtime::ops::{
     slice_value,
 };
 use crate::runtime::Flow;
-use crate::value::{FuncValue, NativeFunc, ObjectValue, RangeValue, Value};
+use crate::value::{FuncValue, NativeFunc, RangeValue, Value};
 
 /// Safepoint budget: iterations between timeslice clock reads. One counter
 /// decrement + branch per iteration; the clock (`Instant::now`, ~20ns) runs
@@ -1163,20 +1163,19 @@ impl Vm {
                         vals.push(self.stack.pop().unwrap());
                     }
                     vals.reverse();
-                    let mut out = Vec::with_capacity(registered.len());
-                    for fname in &registered {
-                        let Some(idx) = field_names.iter().position(|n| n == fname) else {
-                            return Err(self.error(
-                                format!("missing field `{fname}` in struct literal"),
-                                *span,
-                            ));
-                        };
-                        out.push((fname.clone(), vals[idx].clone()));
-                    }
-                    self.stack.push(Value::Object(Box::new(ObjectValue {
-                        name: name.clone(),
-                        fields: out,
-                    })));
+                    let given: Vec<(String, Value)> =
+                        field_names.iter().cloned().zip(vals).collect();
+                    // Flattened (promoted) fields are distributed into
+                    // embedded sub-objects inside `build_struct_literal`.
+                    let obj = crate::runtime::ops::build_struct_literal(
+                        &interp.structs,
+                        name,
+                        &registered,
+                        &given,
+                        *span,
+                        0,
+                    )?;
+                    self.stack.push(Value::Object(Box::new(obj)));
                 }
                 Op::GetField(name, span) => {
                     let ov = self.stack.pop().unwrap();
@@ -1553,7 +1552,7 @@ impl Vm {
                                     }
                                 }
                             }
-                            let f = interp.lookup_method(&recv, method, pspan)?;
+                            let (f, recv) = interp.lookup_method_recv(&recv, method, pspan)?;
                             let mut arg_vals = vec![recv];
                             arg_vals.extend(args);
                             self.frames.last_mut().unwrap().ip = ip;
@@ -1612,7 +1611,7 @@ impl Vm {
                     match object_field(&recv, name, span) {
                         Ok(f) => self.call_value(f, args, span, interp)?,
                         Err(_) => {
-                            let f = interp.lookup_method(&recv, name, span)?;
+                            let (f, recv) = interp.lookup_method_recv(&recv, name, span)?;
                             let mut arg_vals = vec![recv];
                             arg_vals.extend(args);
                             self.call_value(f, arg_vals, span, interp)?;
