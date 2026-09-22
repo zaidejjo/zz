@@ -1,0 +1,2 @@
+// E2E: Runtime error — division by zero
+x := 1 / 0

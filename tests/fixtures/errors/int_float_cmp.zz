@@ -1,0 +1,6 @@
+// E2E: Int/float mixed comparisons must be type errors.
+x := 1
+y := 1.0
+if x == y {
+    println("should not compile")
+}

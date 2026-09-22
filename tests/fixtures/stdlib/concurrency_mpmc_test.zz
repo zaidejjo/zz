@@ -1,0 +1,22 @@
+// E2E: MPMC — 4 senders x 200 msgs into one channel, main drains 800.
+import std.task
+import std.chan
+
+func main() {
+    c := std.chan()
+    for s in 0..4 {
+        task.spawn(|_| {
+            for k in 0..200 {
+                std.chan.send(c, 1)
+            }
+        })
+    }
+    total := 0
+    for i in 0..800 {
+        v := 0
+        v = std.chan.recv(c)
+        total = total + v
+    }
+    println("total:{total}")
+    println("mpmc_ok")
+}

@@ -1,0 +1,15 @@
+// E2E: std.time — time operations
+import std.time
+
+// now_ms returns an int
+t := time.now_ms()
+println(typeof(t))
+println(t > 0)
+
+// sleep_ms doesn't crash
+time.sleep_ms(10)
+
+t2 := time.now_ms()
+println(t2 >= t)
+
+println("time_ok")

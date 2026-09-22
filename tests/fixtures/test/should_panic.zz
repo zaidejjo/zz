@@ -1,0 +1,20 @@
+// E2E: should_panic catches expected failures
+
+func risky(n: int) -> int {
+    if n < 0 {
+        fail("negative not allowed")
+    }
+    n
+}
+
+@test(should_panic = true)
+func test_negative_panics() {
+    risky(-1)
+}
+
+@test
+func test_positive_works() {
+    assert_eq(risky(5), 5)
+}
+
+println("test_framework_ok")

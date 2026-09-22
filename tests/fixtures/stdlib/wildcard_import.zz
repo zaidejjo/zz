@@ -1,0 +1,11 @@
+// E2E: wildcard import from stdlib — all symbols available without prefix.
+import std.math(*)
+
+pi_val := PI
+ab := abs(-5)
+sq := sqrt(4.0)
+
+println(pi_val)
+println(ab)
+println(sq)
+println("wildcard_import_ok")

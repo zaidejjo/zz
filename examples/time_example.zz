@@ -1,0 +1,33 @@
+// examples/time_example.zz — std.time demonstrations
+import std.time
+
+// ── Current timestamp ──
+t1 := time.now_ms()
+println("1. now_ms type: {typeof(t1)}")
+println("2. now_ms > 0:  {t1 > 0}")
+println("3. timestamp:   {t1}")
+
+// ── Sleep ──
+time.sleep_ms(50)
+
+t2 := time.now_ms()
+println("4. after sleep: {t2}")
+println("5. t2 >= t1:    {t2 >= t1}")
+
+// ── Measure elapsed (no for/range, just arithmetic) ──
+start_time := time.now_ms()
+result_sum := 0
+i_val := 0
+while i_val < 1000000 {
+    result_sum = result_sum + i_val
+    i_val = i_val + 1
+}
+end_time := time.now_ms()
+elapsed := end_time - start_time
+println("6. loop elapsed: {elapsed}ms")
+
+// ── Zero sleep doesn't crash ──
+time.sleep_ms(0)
+println("7. zero sleep: OK")
+
+println("time_example_done")

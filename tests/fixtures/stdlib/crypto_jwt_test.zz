@@ -1,0 +1,71 @@
+// E2E: std.crypto asymmetric + JWT — ed25519, RSA, HS256, EdDSA
+import std.crypto
+
+// NOTE: top-level bindings only (VM scope limitation); `.expect` with a
+// plain-string message for Result extraction (`.unwrap` has no AOT impl).
+msg := "hello zz"
+wrong := "tampered"
+junk := "not-a-key"
+secret := "topsecret"
+payload := "{\"sub\": \"123\", \"name\": \"Ada\"}"
+past := "{\"sub\": \"1\", \"exp\": 1}"
+far := "{\"sub\": \"1\", \"exp\": 2000000000}"
+
+// ── Ed25519 ──
+edkeys := crypto.ed25519_keypair()
+edsk := edkeys[0]
+edpk := edkeys[1]
+edsig := crypto.ed25519_sign(edsk, msg).expect("ed sign")
+println("ed_ok: {crypto.ed25519_verify(edpk, msg, edsig)}")
+println("ed_tamper: {crypto.ed25519_verify(edpk, wrong, edsig)}")
+println("ed_junkkey: {crypto.ed25519_verify(junk, msg, edsig)}")
+println("ed_len: {edsig.length() == 128}")
+
+// ── RSA-2048 ──
+rsakeys := crypto.rsa_keypair().expect("rsa keygen")
+rsask := rsakeys[0]
+rsapk := rsakeys[1]
+rsasig := crypto.rsa_sign(rsask, msg).expect("rsa sign")
+println("rsa_ok: {crypto.rsa_verify(rsapk, msg, rsasig)}")
+println("rsa_tamper: {crypto.rsa_verify(rsapk, wrong, rsasig)}")
+println("rsa_junkkey: {crypto.rsa_verify(junk, msg, rsasig)}")
+
+// ── JWT HS256 roundtrip ──
+tok := crypto.jwt_encode(payload, secret)
+match crypto.jwt_decode(tok, secret) {
+    .ok(p) => println("jwt_ok: {p == payload}"),
+    .err(_) => println("jwt_bad"),
+}
+match crypto.jwt_decode(tok, wrong) {
+    .ok(_) => println("jwt_secret_bad"),
+    .err(_) => println("jwt_secret_ok"),
+}
+match crypto.jwt_decode(tok + "x", secret) {
+    .ok(_) => println("jwt_tamper_bad"),
+    .err(_) => println("jwt_tamper_ok"),
+}
+match crypto.jwt_decode("a.b", secret) {
+    .ok(_) => println("jwt_shape_bad"),
+    .err(_) => println("jwt_shape_ok"),
+}
+
+// ── JWT expiry ──
+pasttok := crypto.jwt_encode(past, secret)
+match crypto.jwt_decode(pasttok, secret) {
+    .ok(_) => println("exp_bad"),
+    .err(_) => println("exp_ok"),
+}
+fartok := crypto.jwt_encode(far, secret)
+match crypto.jwt_decode(fartok, secret) {
+    .ok(p) => println("future_ok: {p == far}"),
+    .err(_) => println("future_bad"),
+}
+
+// ── JWT EdDSA roundtrip ──
+edtok := crypto.jwt_encode_ed(payload, edsk).expect("ed jwt")
+match crypto.jwt_decode_ed(edtok, edpk) {
+    .ok(p) => println("eddsa_ok: {p == payload}"),
+    .err(_) => println("eddsa_bad"),
+}
+
+println("crypto_jwt_ok")

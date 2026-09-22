@@ -1,0 +1,47 @@
+// examples/vec_example.zz — std.vec demonstrations
+import std.vec
+
+// ── push ──
+nums := [1, 2, 3]
+nums.push(4)
+println("1. after push: {nums}")
+
+// ── pop ──
+last := nums.pop()
+println("2. popped: {last}")
+println("3. after pop: {nums}")
+
+// ── len ──
+println("4. len: {vec.len(nums)}")
+
+// ── contains ──
+println("5. contains 2: {vec.contains(nums, 2)}")
+println("6. contains 9: {vec.contains(nums, 9)}")
+
+// ── sort ──
+unsorted := [3, 1, 4, 1, 5, 9, 2, 6]
+unsorted.sort()
+println("7. sorted: {unsorted}")
+
+// ── reverse ──
+unsorted.reverse()
+println("8. reversed: {unsorted}")
+
+// ── join ──
+words := ["hello", "world"]
+joined := vec.join(words, " ")
+println("9. joined: {joined}")
+
+// ── insert / remove ──
+items := ["a", "b", "c"]
+items.insert(1, "x")
+println("10. after insert: {items}")
+items.remove(1)
+println("11. after remove: {items}")
+
+// ── append ──
+list := [1, 2]
+list.append(3)
+println("12. after append: {list}")
+
+println("vec_example_done")

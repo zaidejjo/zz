@@ -6,6 +6,7 @@
 //! round-trip, statement-level error recovery) is the permanent foundation.
 
 pub mod ast;
+pub mod decorators;
 pub mod diag;
 pub mod fmt;
 pub mod levenshtein;
@@ -13,10 +14,12 @@ pub mod lexer;
 pub mod parser;
 pub mod printer;
 pub mod span;
+pub mod test_attr;
 pub mod tests;
 pub mod token;
 
-pub use ast::{BinOp, Expr, Ident, Program, Stmt, UnOp};
+pub use ast::{BinOp, Decorator, Expr, Ident, ImportItem, Program, Stmt, UnOp};
+pub use decorators::expand_program;
 pub use diag::{Diag, Files};
 pub use fmt::{format_program, is_formatted, FormatConfig};
 pub use lexer::lex;

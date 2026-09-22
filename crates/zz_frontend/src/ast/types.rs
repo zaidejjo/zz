@@ -16,6 +16,13 @@ pub enum TyKind {
     Bool,
     Str,
     Unit,
+    /// `void` — C void, distinct from `()` unit. Only valid in extern signatures.
+    Void,
+    /// `*const T` / `*mut T` — raw C pointer. `mutable=false` is `*const`.
+    Ptr {
+        mutable: bool,
+        inner: Box<Ty>,
+    },
     Tuple(Vec<Ty>),
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),

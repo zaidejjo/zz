@@ -1,0 +1,14 @@
+// E2E: task stress — 50 spawn+join iterations, all correct.
+// Deterministic: accumulator checked at the end.
+import std.task
+
+func main() {
+    acc := 0
+    for i in 0..50 {
+        h := task.spawn(|_| { 1 })
+        r: int = task.join(h)
+        acc = acc + r + i * 0
+    }
+    println("acc:{acc}")
+    println("stress_ok")
+}

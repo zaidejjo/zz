@@ -54,7 +54,7 @@ pub(crate) fn value_matches_lit(value: &Value, lit: &Lit) -> bool {
     match (value, lit) {
         (Value::Int(a), Lit::Int(b)) => a == b,
         (Value::Float(a), Lit::Float(b)) => a == b,
-        (Value::Str(a), Lit::Str(b)) => a == b,
+        (Value::Str(a), Lit::Str(b)) => &**a == b,
         (Value::Bool(a), Lit::Bool(b)) => a == b,
         _ => false,
     }

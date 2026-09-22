@@ -1,0 +1,16 @@
+// E2E: @test(retry) attribute is accepted without errors
+// Retry is tested by verifying the framework doesn't crash when retry is set.
+
+@test(retry = 2)
+func test_with_retry() {
+    // This test passes on first attempt, retry is unused but should not cause errors.
+    assert(true)
+}
+
+@test(retry = 1)
+func test_retry_one() {
+    // retry=1 means one retry on failure.
+    assert(true)
+}
+
+println("test_framework_ok")

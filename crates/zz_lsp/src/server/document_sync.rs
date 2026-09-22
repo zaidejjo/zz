@@ -49,10 +49,7 @@ pub(crate) async fn handle_did_save(backend: &Backend, params: DidSaveTextDocume
 }
 
 pub(crate) async fn handle_did_close(backend: &Backend, params: DidCloseTextDocumentParams) {
-    if let Some(defs) = backend
-        .state
-        .remove_document(&params.text_document.uri)
-    {
+    if let Some(defs) = backend.state.remove_document(&params.text_document.uri) {
         backend.state.prune_defs(&defs);
     }
     backend

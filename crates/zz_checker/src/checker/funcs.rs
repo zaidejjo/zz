@@ -2,7 +2,7 @@
 
 use crate::checker::Checker;
 use crate::type_::Type;
-use zz_frontend::ast::Stmt;
+use zz_frontend::ast::{Block, Expr, Stmt};
 
 impl Checker {
     pub(crate) fn collect_func(&mut self, stmt: &Stmt) {
@@ -16,7 +16,11 @@ impl Checker {
             } => (name, generics, params, ret),
             _ => unreachable!(),
         };
-        let gen_names: Vec<String> = generics.iter().map(|g| g.name.clone()).collect();
+        let gen_names: Vec<String> = generics.iter().map(|g| g.name.name.clone()).collect();
+        let gen_bounds: Vec<(String, Vec<zz_frontend::ast::TraitBound>)> = generics
+            .iter()
+            .map(|g| (g.name.name.clone(), g.bounds.clone()))
+            .collect();
         let sig_params: Vec<(String, Type)> = params
             .iter()
             .map(|p| {
@@ -37,11 +41,113 @@ impl Checker {
             full_name,
             crate::checker::FuncSig {
                 generics: gen_names,
+                bounds: gen_bounds,
                 params: sig_params,
                 has_default,
                 ret: sig_ret,
+                is_extern: false,
+                extern_c_symbol: None,
             },
         );
+    }
+
+    /// Register one `extern "C"` signature. No body is checked; parameter and
+    /// return types must be C-compatible (int/float/bool/pointer/void/unit).
+    pub(crate) fn collect_extern(
+        &mut self,
+        name: &zz_frontend::ast::Ident,
+        params: &[zz_frontend::ast::Param],
+        ret: &Option<zz_frontend::ast::Ty>,
+        c_symbol: Option<String>,
+    ) {
+        let mut sig_params = Vec::with_capacity(params.len());
+        for p in params {
+            let ty = match &p.ty {
+                Some(t) => {
+                    let ct = self.ast_to_type(t, &[]);
+                    if !Self::is_c_abi_type(&ct) {
+                        self.errors.push(zz_frontend::diag::error_at(
+                            format!(
+                                "extern function `{}`: parameter `{}` has non-C type `{}` (allowed: int, float, bool, str, *const T, *mut T, void, ())",
+                                name.name, p.name.name, ct
+                            ),
+                            p.span,
+                        ));
+                    }
+                    ct
+                }
+                None => {
+                    self.errors.push(zz_frontend::diag::error_at(
+                        format!(
+                            "extern function `{}`: parameter `{}` needs an explicit C type",
+                            name.name, p.name.name
+                        ),
+                        p.span,
+                    ));
+                    Type::Error
+                }
+            };
+            sig_params.push((p.name.name.clone(), ty));
+        }
+        let sig_ret = match ret {
+            Some(t) => {
+                let ct = self.ast_to_type(t, &[]);
+                if matches!(ct, Type::Str) {
+                    self.errors.push(zz_frontend::diag::error_at(
+                        format!(
+                            "plugin extern function `{}` returns str, which is not yet supported — return an int status code and use a getter pattern instead",
+                            name.name
+                        ),
+                        t.span,
+                    ));
+                } else if !Self::is_c_abi_type(&ct) {
+                    self.errors.push(zz_frontend::diag::error_at(
+                        format!(
+                            "extern function `{}` has non-C return type `{}` (allowed: int, float, bool, str, *const T, *mut T, void, ())",
+                            name.name, ct
+                        ),
+                        t.span,
+                    ));
+                }
+                ct
+            }
+            None => Type::Unit,
+        };
+        let full_name = name.name.clone();
+        if self.funcs.contains_key(&full_name) {
+            self.errors.push(zz_frontend::diag::error_at(
+                format!("duplicate definition of function `{full_name}`"),
+                name.span,
+            ));
+        }
+        self.funcs.insert(
+            full_name,
+            crate::checker::FuncSig {
+                generics: Vec::new(),
+                bounds: Vec::new(),
+                params: sig_params,
+                has_default: vec![false; params.len()],
+                ret: sig_ret,
+                is_extern: true,
+                extern_c_symbol: c_symbol,
+            },
+        );
+    }
+
+    fn is_c_abi_type(ty: &Type) -> bool {
+        match ty {
+            Type::Int | Type::Float | Type::Bool | Type::Unit | Type::Void | Type::Error => true,
+            Type::Str => true,
+            Type::Ptr { inner, .. } => Self::is_c_abi_scalar(inner),
+            _ => false,
+        }
+    }
+
+    fn is_c_abi_scalar(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Int | Type::Float | Type::Bool | Type::Unit | Type::Void
+        )
     }
 
     pub(crate) fn check_func_body(&mut self, stmt: &Stmt, sig: &crate::checker::FuncSig) {
@@ -55,13 +161,53 @@ impl Checker {
         }
         let prev_ret = self.current_ret.replace(sig.ret.clone());
         let prev_gen = std::mem::replace(&mut self.current_generics, sig.generics.clone());
+        let prev_bounds = std::mem::replace(
+            &mut self.current_bounds,
+            sig.bounds.iter().cloned().collect(),
+        );
         let body_t = self.check_block(body);
         self.current_ret = prev_ret;
         self.current_generics = prev_gen;
+        self.current_bounds = prev_bounds;
         self.pop_scope();
         let _ = name;
-        if let Err(e) = self.unifier.unify(&body_t, &sig.ret) {
-            self.report_mismatch(e, body.span);
+        // If the body contains any `return` statement, the body's "natural"
+        // type (Unit for loops, etc.) doesn't reflect the actual return path.
+        // The `return` statements are already validated against current_ret,
+        // so we only check the body type when there are no early returns.
+        if !Self::block_has_return(body) {
+            if let Err(e) = self.unifier.unify(&body_t, &sig.ret) {
+                self.report_mismatch(e, body.span);
+            }
+        }
+    }
+
+    /// Recursively check whether a block contains a `return` statement.
+    pub(crate) fn block_has_return(block: &Block) -> bool {
+        block.stmts.iter().any(Self::stmt_has_return)
+    }
+
+    fn stmt_has_return(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Return { .. } => true,
+            Stmt::For { body, .. } => Self::block_has_return(body),
+            Stmt::Expr(Expr::While { body, .. }) => Self::block_has_return(body),
+            Stmt::Expr(Expr::If { then, els, .. }) => {
+                Self::block_has_return(then)
+                    || els.as_ref().is_some_and(|e| Self::expr_has_return(e))
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_has_return(expr: &Expr) -> bool {
+        match expr {
+            Expr::Block(b) => Self::block_has_return(b),
+            Expr::If { then, els, .. } => {
+                Self::block_has_return(then)
+                    || els.as_ref().is_some_and(|e| Self::expr_has_return(e))
+            }
+            _ => false,
         }
     }
 }

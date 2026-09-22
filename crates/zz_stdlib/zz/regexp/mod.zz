@@ -1,0 +1,28 @@
+// Pure-ZZ regexp helpers — compiled once, shared by the VM and AOT.
+// Module: std.regexp
+//
+// Functions that need the compiled-pattern pool (compile, is_match, find,
+// replace_all, captures) stay as native Rust in src/natives/regexp/mod.rs
+// (VM) and zz_native_rt/src/regexp.rs (AOT FFI). Everything below is pure
+// composition over those primitives.
+//
+// Usage:
+//   if let .ok(re) = Regexp.new("[a-z]+") {
+//       re.is_match("hello")
+//   }
+//   regexp.is_email("user@example.com")
+
+struct Regexp {}
+
+impl Regexp {
+    func new(pat: str) {
+        regexp.compile(pat)
+    }
+}
+
+func regexp.is_email(s: str) -> bool {
+    match regexp.compile("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$") {
+        .ok(re) => re.is_match(s),
+        .err(_) => false,
+    }
+}

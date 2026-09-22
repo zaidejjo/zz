@@ -1,0 +1,13 @@
+// E2E: @test(ignore) is skipped, not run
+
+@test
+func test_runs() {
+    assert(true)
+}
+
+@test(ignore = true, reason = "WIP")
+func test_skipped() {
+    fail("should not run")
+}
+
+println("test_framework_ok")

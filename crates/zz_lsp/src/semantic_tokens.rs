@@ -131,7 +131,7 @@ fn collect_stmt_tokens(stmt: &Stmt, source: &str, out: &mut Vec<RawToken>) {
             push_name_tokens(name, TokenType::Function, source, out);
             // Generics.
             for g in generics {
-                push_ident_token(&g.name, g.span, TokenType::Type, source, out);
+                push_ident_token(&g.name.name, g.span, TokenType::Type, source, out);
             }
             // Parameters.
             for param in params {
@@ -161,6 +161,13 @@ fn collect_stmt_tokens(stmt: &Stmt, source: &str, out: &mut Vec<RawToken>) {
                 collect_type_tokens(fty, source, out);
             }
         }
+        Stmt::Impl { name, methods, .. } => {
+            push_keyword_token(stmt.span(), "impl", source, out);
+            push_name_tokens(name, TokenType::Struct, source, out);
+            for method in methods {
+                collect_stmt_tokens(method, source, out);
+            }
+        }
         Stmt::Decl {
             ty, name, value, ..
         } => {
@@ -181,10 +188,16 @@ fn collect_stmt_tokens(stmt: &Stmt, source: &str, out: &mut Vec<RawToken>) {
             }
         }
         Stmt::For {
-            var, iter, body, ..
+            vars, iter, body, ..
         } => {
             push_keyword_token(stmt.span(), "for", source, out);
-            push_ident_token(&var.name, var.span, TokenType::Variable, source, out);
+            for (i, v) in vars.iter().enumerate() {
+                if i > 0 {
+                    // push comma token
+                    push_keyword_token(stmt.span(), ",", source, out);
+                }
+                push_ident_token(&v.name, v.span, TokenType::Variable, source, out);
+            }
             push_keyword_token_stmt(stmt.span(), "in", source, out);
             collect_expr_tokens(iter, source, out);
             collect_block_tokens(body, source, out);
@@ -199,6 +212,44 @@ fn collect_stmt_tokens(stmt: &Stmt, source: &str, out: &mut Vec<RawToken>) {
             collect_expr_tokens(target, source, out);
             collect_expr_tokens(value, source, out);
         }
+        Stmt::Destructure { value, .. } => collect_expr_tokens(value, source, out),
+        Stmt::ExternBlock { items, .. } => {
+            for item in items {
+                // "func" keyword
+                push_keyword_token(item.span, "func", source, out);
+                // function name
+                push_ident_token(
+                    &item.name.name,
+                    item.name.span,
+                    TokenType::Function,
+                    source,
+                    out,
+                );
+                // parameters
+                for (i, param) in item.params.iter().enumerate() {
+                    if i > 0 {
+                        // skip comma
+                    }
+                    push_ident_token(
+                        &param.name.name,
+                        param.name.span,
+                        TokenType::Parameter,
+                        source,
+                        out,
+                    );
+                    if let Some(ty) = &param.ty {
+                        collect_type_tokens(ty, source, out);
+                    }
+                }
+                // return type
+                if let Some(ret) = &item.ret {
+                    // skip arrow
+                    collect_type_tokens(ret, source, out);
+                }
+                // skip semicolon
+            }
+        }
+        Stmt::Link { .. } => {}
         Stmt::Expr(e) => collect_expr_tokens(e, source, out),
     }
 }
@@ -375,6 +426,17 @@ fn collect_expr_tokens(expr: &Expr, source: &str, out: &mut Vec<RawToken>) {
             }
         }
         Expr::Paren { expr, .. } => collect_expr_tokens(expr, source, out),
+        Expr::Tuple { items, .. } => {
+            for e in items {
+                collect_expr_tokens(e, source, out);
+            }
+        }
+        Expr::Break { span } => {
+            push_token("break", *span, TokenType::Keyword, source, out);
+        }
+        Expr::Continue { span } => {
+            push_token("continue", *span, TokenType::Keyword, source, out);
+        }
     }
 }
 
@@ -425,6 +487,12 @@ fn collect_pattern_tokens(pat: &zz_frontend::ast::Pattern, source: &str, out: &m
             collect_pattern_tokens(a, source, out);
         }
         zz_frontend::ast::Pattern::Variant { .. } => {}
+        zz_frontend::ast::Pattern::Tuple { pats, .. }
+        | zz_frontend::ast::Pattern::Or { pats, .. } => {
+            for p in pats {
+                collect_pattern_tokens(p, source, out);
+            }
+        }
         _ => {}
     }
 }

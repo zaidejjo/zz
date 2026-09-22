@@ -1,0 +1,17 @@
+// AU11 deep nesting: 3-level closure literals, direct calls.
+import std.task
+
+func main() {
+    f := |a: int| -> int {
+        g := |b: int| -> int {
+            h := |c: int| -> int { a + b + c }
+            h(3)
+        }
+        g(2)
+    }
+    r := f(1)
+    println("nest={r}")
+    if r == 6 {
+        println("nest_ok")
+    }
+}

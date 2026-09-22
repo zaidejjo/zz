@@ -1,0 +1,6 @@
+// bench: tight integer loop. sum 0..199999 = 19999900000.
+s := 0
+for i in range(200000) {
+    s = s + i
+}
+println(s)

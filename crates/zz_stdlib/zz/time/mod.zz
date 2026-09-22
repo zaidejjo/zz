@@ -1,0 +1,45 @@
+// Pure-ZZ time helpers — durations as integer microseconds.
+// Module: std.time
+//
+// The clocks themselves (now_nanos, now_micros, monotonic_nanos,
+// sleep_micros) stay as native Rust in src/natives/time/mod.rs (VM) and
+// zz_native_rt/src/time_ext.rs (AOT FFI). Everything below is pure
+// composition over those primitives.
+//
+// Durations are plain `int` microseconds (struct methods do not lower
+// in AOT yet), converted with the `time.to_*` family:
+//
+//   d := time.millis(1500)
+//   time.to_secs(d)
+//   time.sleep(d)
+func time.micros(us: int) -> int {
+    us
+}
+
+func time.millis(ms: int) -> int {
+    ms * 1000
+}
+
+func time.secs(s: int) -> int {
+    s * 1000000
+}
+
+func time.to_micros(d: int) -> int {
+    d
+}
+
+func time.to_millis(d: int) -> int {
+    d / 1000
+}
+
+func time.to_secs(d: int) -> int {
+    d / 1000000
+}
+
+func time.to_nanos(d: int) -> int {
+    d * 1000
+}
+
+func time.sleep(d: int) {
+    time.sleep_micros(d)
+}

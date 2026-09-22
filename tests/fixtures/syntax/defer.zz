@@ -1,0 +1,24 @@
+// E2E: Defer statement
+func with_defer() {
+    println("start")
+    defer println("deferred")
+    println("end")
+}
+
+with_defer()
+
+// defer in nested call
+func nested_defer() {
+    println("outer")
+    defer println("outer_deferred")
+    inner()
+}
+
+func inner() {
+    println("inner")
+    defer println("inner_deferred")
+}
+
+nested_defer()
+
+println("defer_ok")

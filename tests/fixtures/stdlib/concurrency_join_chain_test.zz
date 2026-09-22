@@ -1,0 +1,23 @@
+// E2E: join chain — 20 nested spawn+join links complete in order.
+// Guards worker helping (private-deque drain) without dependency
+// inversion: every parked wait stays broadcast-revisited or
+// unwind-reachable. Fresh cell per link via `prev`.
+import std.task
+
+func inc(prev) {
+    v: int = task.join(prev)
+    v + 1
+}
+
+func main() {
+    h := task.spawn(|_| { 1 })
+    for i in 0..20 {
+        prev := h
+        h = task.spawn(|_| {
+            inc(prev)
+        })
+    }
+    r: int = task.join(h)
+    println("chain:{r}")
+    println("join_chain_ok")
+}

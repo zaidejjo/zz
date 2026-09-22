@@ -1,0 +1,23 @@
+// AU4 join chain: 60 nested spawn+join links (fresh cell per link via prev).
+// Exercises sequential inline completions + top-up discipline.
+import std.task
+
+func inc(prev) {
+    v: int = task.join(prev)
+    v + 1
+}
+
+func main() {
+    h := task.spawn(|_| { 1 })
+    for i in 0..60 {
+        prev := h
+        h = task.spawn(|_| {
+            inc(prev)
+        })
+    }
+    r: int = task.join(h)
+    println("chain={r}")
+    if r == 61 {
+        println("chain_ok")
+    }
+}

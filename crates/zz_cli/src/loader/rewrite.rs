@@ -5,6 +5,10 @@ use zz_frontend::ast::{Block, Expr, FmtPart, Pattern, Stmt, Ty, TyKind};
 pub(crate) struct Rewriter<'a> {
     pub(crate) ns: &'a str,
     pub(crate) top: &'a HashSet<String>,
+    /// Imported namespace heads (`ops` from `import ops`, `io` from
+    /// `import std.str`, explicit aliases). Calls through them
+    /// (`ops.resize(...)`) already resolve and must not be rewritten.
+    pub(crate) imports: HashSet<String>,
     /// Stack of shadowing scopes; each holds names declared so far.
     pub(crate) scopes: Vec<HashSet<String>>,
 }
@@ -14,6 +18,7 @@ impl<'a> Rewriter<'a> {
         Rewriter {
             ns,
             top,
+            imports: HashSet::new(),
             scopes: vec![HashSet::new()],
         }
     }
@@ -33,6 +38,19 @@ impl<'a> Rewriter<'a> {
     pub(crate) fn declare(&mut self, name: &str) {
         if let Some(s) = self.scopes.last_mut() {
             s.insert(name.to_string());
+        }
+    }
+
+    fn declare_pattern(pat: &Pattern, declare: &mut impl FnMut(&str)) {
+        match pat {
+            Pattern::Binding { name } => declare(&name.name),
+            Pattern::Variant { arg: Some(a), .. } => Self::declare_pattern(a, declare),
+            Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
+                for p in pats {
+                    Self::declare_pattern(p, declare);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -59,8 +77,12 @@ impl<'a> Rewriter<'a> {
                 ..
             } => {
                 let is_top = self.top.contains(&name.join("."));
-                if is_top && name[0] != self.ns {
-                    // Only prefix if first component doesn't already match namespace.
+                // Prefix unless already a qualified `ns.*` path. A bare
+                // name equal to the namespace itself (e.g. `func main`
+                // in `main.zz`) must still become `main.main`, which the
+                // auto-call lookup expects.
+                let already_qualified = name.len() > 1 && name[0] == self.ns;
+                if is_top && !already_qualified {
                     name[0] = format!("{}.{}", self.ns, name[0]);
                 }
                 self.push_scope();
@@ -69,7 +91,7 @@ impl<'a> Rewriter<'a> {
                     self.declare(&name.join("."));
                 }
                 for g in generics {
-                    self.declare(&g.name);
+                    self.declare(&g.name.name);
                 }
                 for p in params {
                     self.declare(&p.name.name);
@@ -89,19 +111,31 @@ impl<'a> Rewriter<'a> {
                 }
             }
             Stmt::Struct { name, fields, .. } => {
-                if self.top.contains(&name.join(".")) && name[0] != self.ns {
+                let already_qualified = name.len() > 1 && name[0] == self.ns;
+                if self.top.contains(&name.join(".")) && !already_qualified {
                     name[0] = format!("{}.{}", self.ns, name[0]);
                 }
                 for (_, fty) in fields {
                     self.rewrite_ty(fty);
                 }
             }
+            Stmt::Impl { name, methods, .. } => {
+                let already_qualified = name.len() > 1 && name[0] == self.ns;
+                if self.top.contains(&name.join(".")) && !already_qualified {
+                    name[0] = format!("{}.{}", self.ns, name[0]);
+                }
+                for method in methods {
+                    self.rewrite_stmt(method);
+                }
+            }
             Stmt::For {
-                var, iter, body, ..
+                vars, iter, body, ..
             } => {
                 self.rewrite_expr(iter);
                 self.push_scope();
-                self.declare(&var.name);
+                for v in vars {
+                    self.declare(&v.name);
+                }
                 self.rewrite_block(body);
                 self.pop_scope();
             }
@@ -113,8 +147,26 @@ impl<'a> Rewriter<'a> {
                 self.rewrite_expr(target);
                 self.rewrite_expr(value);
             }
+            Stmt::Destructure { value, .. } => {
+                self.rewrite_expr(value);
+            }
             Stmt::Expr(e) => self.rewrite_expr(e),
             Stmt::Import { .. } => {}
+            // Extern signatures and link directives are global: no namespacing.
+            // Extern param/return types still need struct namespacing.
+            Stmt::ExternBlock { items, .. } => {
+                for item in items {
+                    for p in &mut item.params {
+                        if let Some(t) = &mut p.ty {
+                            self.rewrite_ty(t);
+                        }
+                    }
+                    if let Some(t) = &mut item.ret {
+                        self.rewrite_ty(t);
+                    }
+                }
+            }
+            Stmt::Link { .. } => {}
         }
     }
 
@@ -189,9 +241,16 @@ impl<'a> Rewriter<'a> {
             Expr::Call { callee, args, .. } => {
                 // Method call: `p.dist()` — the method name is the last path
                 // component; qualify it like a bare function reference so the
-                // checker/runtime can resolve `ns.dist`.
+                // checker/runtime can resolve `ns.dist`. Only when the head
+                // is neither a local value (true method call: `b.resize()`)
+                // nor an imported namespace (`ops.resize(...)`) — qualifying
+                // either corrupts the path whenever the caller's module
+                // happens to define its own same-named function.
                 if let Expr::Path { parts, .. } = callee.as_mut() {
-                    if parts.len() >= 2 {
+                    if parts.len() >= 2
+                        && !self.is_shadowed(&parts[0])
+                        && !self.imports.contains(&parts[0])
+                    {
                         if let Some(last) = parts.last_mut() {
                             if self.top.contains(last) && !self.is_shadowed(last) {
                                 *last = format!("{}.{}", self.ns, last);
@@ -234,9 +293,7 @@ impl<'a> Rewriter<'a> {
                 self.rewrite_expr(scrutinee);
                 for arm in arms {
                     self.push_scope();
-                    if let Pattern::Binding { name } = &arm.pat {
-                        self.declare(&name.name);
-                    }
+                    Self::declare_pattern(&arm.pat, &mut |n| self.declare(n));
                     self.rewrite_expr(&mut arm.body);
                     self.pop_scope();
                 }
@@ -250,9 +307,7 @@ impl<'a> Rewriter<'a> {
             } => {
                 self.rewrite_expr(value);
                 self.push_scope();
-                if let Pattern::Binding { name } = pat {
-                    self.declare(&name.name);
-                }
+                Self::declare_pattern(pat, &mut |n| self.declare(n));
                 self.rewrite_block(then);
                 if let Some(e) = els {
                     self.rewrite_expr(e);
@@ -268,6 +323,11 @@ impl<'a> Rewriter<'a> {
             }
             Expr::Array { elems, .. } => {
                 for e in elems {
+                    self.rewrite_expr(e);
+                }
+            }
+            Expr::Tuple { items, .. } => {
+                for e in items {
                     self.rewrite_expr(e);
                 }
             }
@@ -342,7 +402,12 @@ impl<'a> Rewriter<'a> {
                     }
                 }
             }
-            Expr::Int { .. } | Expr::Float { .. } | Expr::Str { .. } | Expr::Bool { .. } => {}
+            Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::Str { .. }
+            | Expr::Bool { .. }
+            | Expr::Break { .. }
+            | Expr::Continue { .. } => {}
         }
     }
 }

@@ -11,7 +11,7 @@ fn default_param_uses_default() {
             greet("Alice")
         "#)
         .unwrap(),
-        Value::Str("Hello, Alice!".to_string())
+        Value::Str("Hello, Alice!".to_string().into())
     );
 }
 
@@ -25,7 +25,7 @@ fn default_param_override() {
             greet("Bob", "Hi")
         "#)
         .unwrap(),
-        Value::Str("Hi, Bob!".to_string())
+        Value::Str("Hi, Bob!".to_string().into())
     );
 }
 
@@ -39,7 +39,7 @@ fn multiple_defaults_partial_override() {
             connect("db.local", port: 5432)
         "#)
         .unwrap(),
-        Value::Str("db.local:5432 t=30".to_string())
+        Value::Str("db.local:5432 t=30".to_string().into())
     );
 }
 

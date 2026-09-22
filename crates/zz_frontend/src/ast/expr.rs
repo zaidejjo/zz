@@ -1,6 +1,6 @@
 //! Expression AST nodes.
 
-use crate::ast::types::{Ty, TyKind};
+use crate::ast::types::Ty;
 use crate::span::Span;
 
 /// One piece of an interpolated string.
@@ -16,6 +16,7 @@ pub enum FmtPart {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
     pub pat: Pattern,
+    pub guard: Option<Expr>,
     pub body: Expr,
     pub span: Span,
 }
@@ -35,6 +36,14 @@ pub enum Pattern {
     Variant {
         name: String,
         arg: Option<Box<Pattern>>,
+        span: Span,
+    },
+    Tuple {
+        pats: Vec<Pattern>,
+        span: Span,
+    },
+    Or {
+        pats: Vec<Pattern>,
         span: Span,
     },
 }
@@ -77,7 +86,7 @@ pub enum Expr {
         name: String,
         span: Span,
     },
-    /// Dotted path: `std.io.println`. Resolved as a single qualified name.
+    /// Dotted path: `std.str.length`. Resolved as a single qualified name.
     Path {
         parts: Vec<String>,
         span: Span,
@@ -92,6 +101,11 @@ pub enum Expr {
     /// parens (round-trip fidelity); the checker/interpreter just unwrap it.
     Paren {
         expr: Box<Expr>,
+        span: Span,
+    },
+    /// Tuple literal: `(a, b, c)`.
+    Tuple {
+        items: Vec<Expr>,
         span: Span,
     },
     Unary {
@@ -113,6 +127,7 @@ pub enum Expr {
     },
     Closure {
         params: Vec<Param>,
+        ret_ty: Option<Ty>,
         body: Box<Expr>,
         span: Span,
     },
@@ -139,7 +154,8 @@ pub enum Expr {
         els: Option<Box<Expr>>,
         span: Span,
     },
-    /// Postfix `?`: unwrap Option/Result or propagate.
+    /// `?` postfix or prefix `try <postfix-chain>`: unwrap Option/Result or propagate.
+    /// `try a.b().c()` = whole chain; `try a.b() + c` = only `a.b()`.
     Try {
         expr: Box<Expr>,
         span: Span,
@@ -203,6 +219,15 @@ pub enum Expr {
         filter: Option<Box<Expr>>,
         span: Span,
     },
+    /// `break` used as an expression (e.g. as a match arm body).
+    /// Semantically identical to the `break` statement.
+    Break {
+        span: Span,
+    },
+    /// `continue` used as an expression (e.g. as a match arm body).
+    Continue {
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -233,7 +258,10 @@ impl Expr {
             | Expr::StructInit { span, .. }
             | Expr::Index { span, .. }
             | Expr::Slice { span, .. }
-            | Expr::ListComp { span, .. } => *span,
+            | Expr::ListComp { span, .. }
+            | Expr::Break { span }
+            | Expr::Continue { span }
+            | Expr::Tuple { span, .. } => *span,
             Expr::Block(b) => b.span,
         }
     }
@@ -246,6 +274,8 @@ impl Pattern {
             Pattern::Binding { name } => name.span,
             Pattern::Literal { span, .. } => *span,
             Pattern::Variant { span, .. } => *span,
+            Pattern::Tuple { span, .. } => *span,
+            Pattern::Or { span, .. } => *span,
         }
     }
 }

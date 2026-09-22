@@ -102,6 +102,114 @@ fn generic_func_monomorphic_fail() {
     );
 }
 
+// --- generic type bounds ------------------------------------------------
+
+#[test]
+fn generic_num_bound_arith_ok() {
+    let r = check_src(
+        "func add<T: Num>(x: T, y: T) -> T { return x + y }\na := add(2.1, 3.0)\nb := add(1, 2)",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Float);
+    assert_eq!(r.bindings["b"], Type::Int);
+}
+
+#[test]
+fn generic_unbound_arith_errors_with_hint() {
+    errors_contain(
+        "func add<T>(x: T, y: T) -> T { return x + y }",
+        "needs a `Num` bound for `+`",
+    );
+}
+
+#[test]
+fn generic_ord_bound_comparison_ok() {
+    let r = check_src(
+        "func min<T: Ord>(a: T, b: T) -> T { if a < b { a } else { b } }\nm := min(3, 7)",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["m"], Type::Int);
+}
+
+#[test]
+fn generic_unbound_comparison_errors_with_hint() {
+    errors_contain(
+        "func min<T>(a: T, b: T) -> T { if a < b { a } else { b } }",
+        "needs a `Ord` bound for `<`",
+    );
+}
+
+#[test]
+fn generic_eq_bound_ok() {
+    let r = check_src("func same<T: Eq>(a: T, b: T) -> bool { return a == b }\ns := same(1, 1)");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["s"], Type::Bool);
+}
+
+#[test]
+fn generic_unbound_eq_errors_with_hint() {
+    errors_contain(
+        "func same<T>(a: T, b: T) -> bool { return a == b }",
+        "needs a `Eq` bound for `==`",
+    );
+}
+
+#[test]
+fn generic_multi_bound_ok() {
+    let r = check_src(
+        "func minmax<T: Num + Ord>(a: T, b: T) -> T { if a < b { a } else { b } }\nm := minmax(1.5, 2.5)",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["m"], Type::Float);
+}
+
+#[test]
+fn generic_call_site_bound_violation() {
+    errors_contain(
+        "func min<T: Ord>(a: T, b: T) -> T { if a < b { a } else { b } }\nmin(true, false)",
+        "does not satisfy bound `Ord`",
+    );
+}
+
+#[test]
+fn generic_mixed_int_float_still_rejects() {
+    errors_contain(
+        "func add<T: Num>(x: T, y: T) -> T { return x + y }\nadd(2.1, 3)",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn generic_distinct_params_reject_arith() {
+    errors_contain(
+        "func add<T: Num, U: Num>(x: T, y: U) -> T { return x + y }",
+        "distinct generic parameters",
+    );
+}
+
+#[test]
+fn generic_unary_neg_needs_num() {
+    errors_contain(
+        "func neg<T>(x: T) -> T { return -x }",
+        "needs a `Num` bound for `-`",
+    );
+}
+
+#[test]
+fn generic_unary_neg_with_num_ok() {
+    let r = check_src("func neg<T: Num>(x: T) -> T { return -x }\nn := neg(5)");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["n"], Type::Int);
+}
+
+#[test]
+fn generic_identity_still_works() {
+    let r = check_src("func id<T>(x: T) -> T { return x }\na := id(1)\nb := id(\"s\")");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Int);
+    assert_eq!(r.bindings["b"], Type::Str);
+}
+
 #[test]
 fn recursion_works() {
     let r = check_src("func fact(n: int) -> int { if n <= 1 { 1 } else { n * fact(n - 1) } }");
@@ -144,6 +252,135 @@ fn struct_unknown_field_errors() {
     errors_contain(
         "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.z",
         "has no field `z`",
+    );
+}
+
+#[test]
+fn struct_embedding_promotes_field() {
+    let r = check_src(
+        "struct Base { id: int }\nstruct User { Base, age: int }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nz := u.id",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn struct_embedding_explicit_form_matches_shorthand() {
+    // `Base: Base` is the explicit spelling of the embedded field `Base`.
+    let r = check_src(
+        "struct Base { id: int }\nstruct User { Base: Base, age: int }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nz := u.id",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn struct_embedding_shorthand_init() {
+    let r = check_src(
+        "struct Base { id: int }\nstruct User { Base, age: int }\nu := User{ Base{ id: 1 }, age: 2 }\nz := u.id",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn struct_embedding_transitive_field() {
+    let r = check_src(
+        "struct Base { id: int }\nstruct Mid { Base, tag: int }\nstruct Outer { Mid, top: int }\no := Outer{ Mid: Mid{ Base: Base{ id: 1 }, tag: 2 }, top: 3 }\nz := o.id",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn struct_embedding_direct_field_shadows_promoted() {
+    let r = check_src(
+        "struct Base { id: int }\nstruct User { Base, id: int }\nu := User{ Base: Base{ id: 1 }, id: 2 }\nz := u.id",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn struct_embedding_promoted_method_call() {
+    let r = check_src(
+        "struct Base { id: int }\nimpl Base { func get(self) -> int { self.id } }\nstruct User { Base, age: int }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nz := u.get()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn struct_embedding_direct_method_shadows_promoted() {
+    let r = check_src(
+        "struct Base { id: int }\nimpl Base { func who(self) -> str { \"base\" } }\nstruct User { Base, age: int }\nimpl User { func who(self) -> str { \"user\" } }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nz := u.who()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Str);
+}
+
+#[test]
+fn struct_embedding_unknown_field_still_errors() {
+    errors_contain(
+        "struct Base { id: int }\nstruct User { Base, age: int }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nu.nope",
+        "has no field `nope`",
+    );
+}
+
+#[test]
+fn struct_embedding_promoted_mutation() {
+    let r = check_src(
+        "struct Base { id: int }\nstruct User { Base, age: int }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nu.id = 9",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn struct_embedding_suggests_promoted_field() {
+    // Typo of a promoted field suggests the promoted name.
+    let r = check_src(
+        "struct Base { id: int }\nstruct User { Base, age: int }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nu.ix",
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains("did you mean field `id`")),
+        "expected promoted-field suggestion, got notes: {notes:?}, errors: {:?}",
+        r.errors,
+    );
+}
+
+#[test]
+fn struct_embedding_flat_init() {
+    // Flattened init: promoted fields nest into the embedded struct.
+    let r = check_src(
+        "struct Base { id: int, name: str }\nstruct User { Base, age: int }\nu := User{ id: 1, name: \"Zaid\", age: 19 }",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["u"], Type::Struct("User".into()));
+}
+
+#[test]
+fn struct_embedding_flat_init_type_mismatch_errors() {
+    errors_contain(
+        "struct Base { id: int }\nstruct User { Base, age: int }\nu := User{ id: \"x\", age: 2 }",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn struct_embedding_flat_init_missing_leaf_errors() {
+    errors_contain(
+        "struct Base { id: int, name: str }\nstruct User { Base, age: int }\nu := User{ id: 1, age: 2 }",
+        "missing field `Base.name` in struct literal `User`",
+    );
+}
+
+#[test]
+fn struct_embedding_init_conflict_errors() {
+    // Explicit embedded value + flattened leaves of the same subtree.
+    errors_contain(
+        "struct Base { id: int }\nstruct User { Base, age: int }\nu := User{ Base: Base{ id: 1 }, id: 2, age: 3 }",
+        "conflicts with embedded value `Base`",
     );
 }
 
@@ -314,6 +551,47 @@ fn match_arm_type_mismatch_errors() {
 }
 
 #[test]
+fn match_or_pattern_literals() {
+    let r = check_src("x := match 2 { 1 | 2 => 10, _ => 0 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Int);
+}
+
+#[test]
+fn match_or_pattern_in_variant_arg() {
+    let r = check_src(
+        "v := .some(\"yes\")\nx := match v { .some(\"done\" | \"yes\" | \"true\") => 1, .some(_) => 0, .none => 0 }",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Int);
+}
+
+#[test]
+fn match_or_pattern_bool_exhaustive() {
+    let r = check_src("b := true\nx := match b { true | false => 1 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn match_or_pattern_binding_mismatch_errors() {
+    errors_contain(
+        "v := .some(1)\nmatch v { .some(x) | .none => x, _ => 0 }",
+        "same names",
+    );
+}
+
+#[test]
+fn match_break_arm_body() {
+    let r = check_src("i := 0\nwhile true { i = i + 1\nmatch i { 3 => break, _ => 0 } }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn match_break_outside_loop_errors() {
+    errors_contain("match 1 { 1 => break, _ => 0 }", "outside of a loop");
+}
+
+#[test]
 fn if_let_binds() {
     let r = check_src("v := .some(5)\nx := if let .some(n) = v { n } else { 0 }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
@@ -351,7 +629,7 @@ fn try_on_plain_int_errors() {
 fn try_error_type_mismatch() {
     errors_contain(
         "func a() -> Result<int, str> { .ok(1) }\nfunc b() -> Result<int, int> { x := a()?; .ok(x) }",
-        "type mismatch",
+        "no conversion path",
     );
 }
 
@@ -456,8 +734,14 @@ fn array_union_member_accepted() {
 }
 
 #[test]
-fn empty_array_ambiguous() {
-    errors_contain("v := []", "cannot infer the type of `v`");
+fn empty_array_deferred_inference() {
+    // Empty array without context: inference is deferred, no error.
+    let r = check_src("v := []");
+    assert!(
+        !has_errors(&r),
+        "empty array should not error (deferred inference): {:?}",
+        r.errors
+    );
 }
 
 #[test]
@@ -499,13 +783,19 @@ fn dict_key_mismatch_errors() {
 }
 
 #[test]
-fn empty_dict_ambiguous() {
-    errors_contain("m := {}", "cannot infer the type of `m`");
+fn empty_dict_deferred_inference() {
+    // Empty dict without context: inference is deferred, no error.
+    let r = check_src("m := {}");
+    assert!(
+        !has_errors(&r),
+        "empty dict should not error (deferred inference): {:?}",
+        r.errors
+    );
 }
 
 #[test]
 fn import_is_noop() {
-    let r = check_src("import std.io\nx := 1");
+    let r = check_src("x := 1");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["x"], Type::Int);
 }
@@ -640,7 +930,10 @@ fn typeof_any_value() {
     funcs.insert(
         "typeof".to_string(),
         FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
             generics: vec!["T".to_string()],
+            bounds: Vec::new(),
             params: vec![("v".to_string(), Type::Named("T".to_string()))],
             has_default: vec![],
             ret: Type::Str,
@@ -666,7 +959,10 @@ fn method_funcs() -> HashMap<String, FuncSig> {
     funcs.insert(
         "dist".to_string(),
         FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
             generics: Vec::new(),
+            bounds: Vec::new(),
             params: vec![
                 ("p".to_string(), Type::Struct("Point".to_string())),
                 ("scale".to_string(), Type::Int),
@@ -735,7 +1031,10 @@ fn method_call_namespaced_by_struct_type() {
     funcs.insert(
         "shapes.dist".to_string(),
         FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
             generics: Vec::new(),
+            bounds: Vec::new(),
             params: vec![("p".to_string(), Type::Struct("shapes.Point".to_string()))],
             has_default: vec![],
             ret: Type::Int,
@@ -765,7 +1064,10 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
     funcs.insert(
         "str".to_string(),
         FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
             generics: vec!["T".to_string()],
+            bounds: Vec::new(),
             params: vec![("v".to_string(), t.clone())],
             has_default: vec![],
             ret: Type::Str,
@@ -774,7 +1076,10 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
     funcs.insert(
         "int".to_string(),
         FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
             generics: vec!["T".to_string()],
+            bounds: Vec::new(),
             params: vec![("v".to_string(), t.clone())],
             has_default: vec![],
             ret: Type::Option(Box::new(Type::Int)),
@@ -783,7 +1088,10 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
     funcs.insert(
         "float".to_string(),
         FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
             generics: vec!["T".to_string()],
+            bounds: Vec::new(),
             params: vec![("v".to_string(), t.clone())],
             has_default: vec![],
             ret: Type::Option(Box::new(Type::Float)),
@@ -854,7 +1162,10 @@ fn typo_suggestion_variable() {
     funcs.insert(
         "println".to_string(),
         FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
             generics: vec![],
+            bounds: Vec::new(),
             params: vec![("msg".to_string(), Type::Str)],
             has_default: vec![false],
             ret: Type::Unit,
@@ -902,6 +1213,97 @@ fn typo_suggestion_struct_field() {
     );
 }
 
+fn print_test_funcs() -> HashMap<String, FuncSig> {
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "println".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: Vec::new(),
+            params: vec![("v".to_string(), Type::Str)],
+            has_default: vec![false],
+            ret: Type::Unit,
+        },
+    );
+    funcs.insert(
+        "env.os".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: Vec::new(),
+            params: vec![],
+            has_default: vec![],
+            ret: Type::Str,
+        },
+    );
+    funcs.insert(
+        "env.temp_dir".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: Vec::new(),
+            params: vec![],
+            has_default: vec![],
+            ret: Type::Str,
+        },
+    );
+    funcs
+}
+
+#[test]
+fn print_bare_function_is_call_hint() {
+    let parsed = zz_frontend::parse("println(env.os)");
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let r = check_program(
+        &parsed.program,
+        HashMap::new(),
+        print_test_funcs(),
+        HashMap::new(),
+    );
+    let msgs: Vec<_> = r.errors.iter().map(|e| e.message.as_str()).collect();
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("cannot print function `env.os`")),
+        "expected call hint, got: {msgs:?}"
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains("env.os()`")),
+        "expected () hint, got: {notes:?}"
+    );
+}
+
+#[test]
+fn typo_suggestion_dotted_path() {
+    let parsed = zz_frontend::parse("println(env.tmp_dir())");
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let r = check_program(
+        &parsed.program,
+        HashMap::new(),
+        print_test_funcs(),
+        HashMap::new(),
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("did you mean `env.temp_dir`")),
+        "expected dotted suggestion, got: {notes:?}"
+    );
+}
+
 #[test]
 fn unclosed_paren_in_parser() {
     let parsed = zz_frontend::parse("func add(a: int, b: int) -> int {\n    a +\n");
@@ -924,9 +1326,336 @@ fn mismatched_delimiter_in_parser() {
 }
 
 #[test]
+fn struct_init_marks_import_used() {
+    // Regression: `ml.Circle{...}` must count as a use of `ml`, so a
+    // namespaced struct init does not trigger a spurious unused-import warning.
+    let r = check_src_with_funcs_and_structs(
+        "import math_lib as ml\nc := ml.Circle{rad: 10}\nc",
+        HashMap::new(),
+        {
+            let mut s = HashMap::new();
+            s.insert(
+                "ml.Circle".to_string(),
+                StructSig {
+                    fields: vec![("rad".to_string(), Type::Int)],
+                },
+            );
+            s
+        },
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        !warns.iter().any(|m| m.contains("unused import")),
+        "unused import should not be warned: {warns:?}"
+    );
+}
+
+#[test]
+fn pub_before_impl_is_parse_error() {
+    // `pub impl` is rejected with a hint to remove `pub` — impl methods are
+    // always public.
+    let parsed = zz_frontend::parse("pub impl Point {\n    func dist(self) -> int { self.x }\n}");
+    let msgs: Vec<String> = parsed
+        .errors
+        .iter()
+        .map(|e| format!("{}\n{}", e.message, e.notes.join("\n")))
+        .collect();
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("cannot use `pub` on `impl`")),
+        "expected `pub` on `impl` error, got: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("remove the `pub` keyword")),
+        "expected hint to remove `pub`, got: {msgs:?}"
+    );
+}
+
+#[test]
+fn pub_func_inside_impl_is_allowed() {
+    // `pub func` inside an `impl` block is the supported way to export a
+    // method cross-module.
+    let parsed = zz_frontend::parse("impl Point {\n    pub func dist(self) -> int { self.x }\n}");
+    assert!(
+        parsed.errors.is_empty(),
+        "expected pub func inside impl to parse, got: {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
+fn impl_method_without_pub_checkable() {
+    // Plain `impl` (no `pub` keyword) with struct methods must type-check.
+    let r = check_src(
+        "struct Point { x: int, y: int }\n\
+         impl Point {\n\
+         \x20   func dist(self) -> int { self.x + self.y }\n\
+         }\n\
+         p := Point{ x: 1, y: 2 }\n\
+         z := p.dist()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn impl_method_export_requires_pub() {
+    // Only `pub` methods are exported to the cross-module seed. Non-pub
+    // methods stay visible within the module but absent from `pub_funcs`.
+    let r = check_src(
+        "struct Point { x: int, y: int }\n\
+         impl Point {\n\
+         \x20   func priv_m(self) -> int { self.x }\n\
+         \x20   pub func pub_m(self) -> int { self.y }\n\
+         }\n\
+         p := Point{ x: 1, y: 2 }\n\
+         a := p.priv_m()\n\
+         b := p.pub_m()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        r.funcs.contains_key("Point.priv_m"),
+        "private method must be registered for in-module calls"
+    );
+    assert!(
+        !r.pub_funcs.contains_key("Point.priv_m"),
+        "private method must not be exported"
+    );
+    assert!(
+        r.pub_funcs.contains_key("Point.pub_m"),
+        "pub method must be exported"
+    );
+}
+
+#[test]
 fn fixit_structure_is_populated() {
     use zz_frontend::diag::FixIt;
     let fixit = FixIt::safe(Span::new(0, 5), "_x", "rename to");
     assert_eq!(fixit.replacement, "_x");
     assert_eq!(fixit.message, "rename to");
+}
+
+// --- const (immutable variables) -------------------------------------------
+
+#[test]
+fn const_decl_type_checks() {
+    let r = check_src("const x = 10");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Int);
+}
+
+#[test]
+fn const_explicit_type_checks() {
+    let r = check_src("const x: float = 1.5");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Float);
+}
+
+#[test]
+fn cannot_reassign_const() {
+    errors_contain(
+        "const x = 10\nx = 20",
+        "cannot assign to immutable variable `x`",
+    );
+}
+
+#[test]
+fn cannot_reassign_const_explicit() {
+    errors_contain(
+        "const x: int = 10\nx = 20",
+        "cannot assign to immutable variable `x`",
+    );
+}
+
+#[test]
+fn const_error_has_hint() {
+    let r = check_src("const x = 10\nx = 20");
+    let diag = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("cannot assign to immutable variable"))
+        .unwrap();
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.contains("remove `const` to make `x` mutable")),
+        "missing hint, got: {:?}",
+        diag.notes,
+    );
+}
+
+#[test]
+fn const_error_has_secondary_label() {
+    let r = check_src("const x = 10\nx = 20");
+    let diag = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("cannot assign to immutable variable"))
+        .unwrap();
+    let sec = diag
+        .secondary
+        .as_ref()
+        .expect("const error must carry a secondary label");
+    assert_eq!(sec.message, "variable defined as immutable here");
+    // The secondary span points at the `x` in `const x = 10` (byte 6).
+    assert_eq!(sec.span.start, 6);
+}
+
+#[test]
+fn can_reassign_mutable() {
+    let r = check_src("x := 10\nx = 20");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn const_in_function_scope() {
+    errors_contain(
+        "func f() -> int { const y = 1\ny = 2\nreturn y }",
+        "cannot assign to immutable variable `y`",
+    );
+}
+
+#[test]
+fn mutable_shadow_of_const_is_reassignable() {
+    // The inner `x := 5` shadows the outer const; reassigning the shadow is
+    // legal even though an outer `x` is immutable.
+    let r = check_src(
+        "const x = 10\n\
+         func f() -> int {\n\
+         \x20   x := 5\n\
+         \x20   x = 6\n\
+         \x20   return x\n\
+         }",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn const_shadowed_by_const_still_immutable() {
+    errors_contain(
+        "const x = 10\n\
+         func f() -> int {\n\
+         \x20   const x = 5\n\
+         \x20   x = 6\n\
+         \x20   return x\n\
+         }",
+        "cannot assign to immutable variable `x`",
+    );
+}
+
+#[test]
+fn const_can_be_read() {
+    let r = check_src("const x = 10\ny := x + 1");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["y"], Type::Int);
+}
+
+#[test]
+fn const_closure_capture() {
+    let r = check_src("const x = 10\nf := | | x\nz := f()");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+fn opaque_test_funcs() -> HashMap<String, FuncSig> {
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "regex.compile".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: Vec::new(),
+            bounds: Vec::new(),
+            params: vec![("pat".to_string(), Type::Str)],
+            has_default: vec![],
+            ret: Type::Opaque("regex".to_string()),
+        },
+    );
+    funcs.insert(
+        "regex.is_match".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: Vec::new(),
+            bounds: Vec::new(),
+            params: vec![
+                ("re".to_string(), Type::Opaque("regex".to_string())),
+                ("s".to_string(), Type::Str),
+            ],
+            has_default: vec![],
+            ret: Type::Bool,
+        },
+    );
+    funcs
+}
+
+#[test]
+fn opaque_handle_method_dispatch() {
+    let r = check_src_with_funcs(
+        "r := regex.compile(\"[a-z]+\")\nok := r.is_match(\"abc\")",
+        opaque_test_funcs(),
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["r"], Type::Opaque("regex".to_string()));
+    assert_eq!(r.bindings["ok"], Type::Bool);
+}
+
+#[test]
+fn opaque_handle_tag_mismatch_errors() {
+    // A `uuid` handle passed where a `regex` handle is expected.
+    let mut funcs = opaque_test_funcs();
+    funcs.insert(
+        "uuid.v4".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: Vec::new(),
+            bounds: Vec::new(),
+            params: vec![],
+            has_default: vec![],
+            ret: Type::Opaque("uuid".to_string()),
+        },
+    );
+    let r = check_src_with_funcs("u := uuid.v4()\nok := regex.is_match(u, \"abc\")", funcs);
+    assert!(has_errors(&r), "expected tag mismatch, got {:?}", r.errors);
+}
+
+#[test]
+fn nested_func_rejected() {
+    // Nested named func declarations should produce a clean error, not a panic.
+    errors_contain(
+        "func outer() {\n  func inner() {  }\n  inner()\n}",
+        "nested function `inner` is not supported",
+    );
+}
+
+#[test]
+fn opaque_handle_types_resolve_in_annotations() {
+    // Regression: opaque handle types (chan, task.join, http.server,
+    // tcp.stream, tcp.listener, http.response) were valid Types but had
+    // no name resolution — `func w(c: chan)` failed with "unknown type".
+    // Same gap class as json/db, fixed alongside.
+    for (ann, want) in [
+        ("chan", Type::Chan),
+        ("task.join", Type::TaskJoin),
+        ("http.server", Type::HttpServer),
+        ("tcp.stream", Type::TcpStream),
+        ("tcp.listener", Type::TcpListener),
+        ("http.response", Type::Response),
+    ] {
+        let src = format!("func w(c: {ann}) {{ }}\n");
+        let r = check_src(&src);
+        assert!(!has_errors(&r), "{ann}: errors: {:?}", r.errors);
+        let sig = r
+            .funcs
+            .get("w")
+            .unwrap_or_else(|| panic!("{ann}: func w missing"));
+        assert_eq!(sig.params.len(), 1, "{ann}: arity");
+        assert_eq!(sig.params[0].1, want, "{ann}: param type");
+    }
 }

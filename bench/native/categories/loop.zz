@@ -1,0 +1,10 @@
+
+// Arithmetic: 10M integer accumulation
+
+func main() {
+    sum := 0
+    for i in 0..10000000 {
+        sum = sum + i
+    }
+    println(sum)
+}

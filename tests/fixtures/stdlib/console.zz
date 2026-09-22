@@ -1,0 +1,14 @@
+// E2E: builtin console I/O — print/println/input, no import required
+// println
+println("hello")
+
+// print (no newline) + println
+print("partial")
+println("_done")
+
+// typeof output
+println(typeof(42))
+println(typeof("str"))
+println(typeof(3.14))
+
+println("io_ok")

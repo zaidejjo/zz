@@ -1,0 +1,12 @@
+// E2E: multiple selective imports from different stdlib modules
+import std.math(PI, sqrt)
+import std.str(length)
+
+pi_val := PI
+sq := sqrt(16.0)
+n := length("hello")
+
+println(pi_val)
+println(sq)
+println(n)
+println("multi_selective_ok")

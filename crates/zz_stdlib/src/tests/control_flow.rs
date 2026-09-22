@@ -5,12 +5,12 @@ use zz_runtime::Value;
 fn list_comp_basic() {
     assert_eq!(
         run("[x * 2 for x in [1, 2, 3, 4]]").unwrap(),
-        Value::Array(vec![
+        Value::Array(Box::new(vec![
             Value::Int(2),
             Value::Int(4),
             Value::Int(6),
             Value::Int(8)
-        ])
+        ]))
     );
 }
 
@@ -18,7 +18,7 @@ fn list_comp_basic() {
 fn list_comp_filter() {
     assert_eq!(
         run("[x for x in [1, 2, 3, 4] if x > 2]").unwrap(),
-        Value::Array(vec![Value::Int(3), Value::Int(4)])
+        Value::Array(Box::new(vec![Value::Int(3), Value::Int(4)]))
     );
 }
 
@@ -26,13 +26,13 @@ fn list_comp_filter() {
 fn list_comp_range() {
     assert_eq!(
         run("[x * x for x in 0..5]").unwrap(),
-        Value::Array(vec![
+        Value::Array(Box::new(vec![
             Value::Int(0),
             Value::Int(1),
             Value::Int(4),
             Value::Int(9),
             Value::Int(16)
-        ])
+        ]))
     );
 }
 
@@ -40,13 +40,13 @@ fn list_comp_range() {
 fn list_comp_range_filter() {
     assert_eq!(
         run("[x * x for x in 0..10 if x % 2 == 0]").unwrap(),
-        Value::Array(vec![
+        Value::Array(Box::new(vec![
             Value::Int(0),
             Value::Int(4),
             Value::Int(16),
             Value::Int(36),
             Value::Int(64)
-        ])
+        ]))
     );
 }
 
@@ -60,7 +60,7 @@ fn list_comp_multiple_sequential() {
     "#;
     assert_eq!(
         run(src).unwrap(),
-        Value::Array(vec![Value::Int(2), Value::Int(4), Value::Int(6)])
+        Value::Array(Box::new(vec![Value::Int(2), Value::Int(4), Value::Int(6)]))
     );
 }
 
@@ -77,6 +77,6 @@ fn list_comp_six_sequential() {
     "#;
     assert_eq!(
         run(src).unwrap(),
-        Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+        Value::Array(Box::new(vec![Value::Int(1), Value::Int(2), Value::Int(3)]))
     );
 }

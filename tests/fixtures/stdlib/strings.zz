@@ -1,0 +1,36 @@
+// E2E: std.str — string operations
+import std.str
+
+// length
+println(str.length("hello"))
+
+// split
+parts := str.split("a,b,c", ",")
+println(parts)
+println(len(parts))
+
+// contains
+println(str.contains("hello world", "world"))
+println(str.contains("hello", "xyz"))
+
+// trim
+println(str.trim("  hi  "))
+
+// case conversion
+println(str.to_upper("hello"))
+println(str.to_lower("HELLO"))
+
+// replace
+println(str.replace("foo bar baz", "bar", "qux"))
+
+// starts_with / ends_with
+println(str.starts_with("hello", "he"))
+println(str.ends_with("hello", "lo"))
+
+// method syntax
+println("hello".length())
+println("hello world".split(" "))
+println("hello".to_upper())
+println("  hi  ".trim())
+
+println("str_ok")

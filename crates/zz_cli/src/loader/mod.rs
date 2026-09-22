@@ -18,12 +18,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use zz_checker::{check_program, FuncSig, StructSig, Type};
-use zz_frontend::ast::{Program, Stmt};
+use zz_frontend::ast::{Expr, ImportItem, Program, Stmt};
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
 use zz_frontend::span::Span;
 use zz_runtime::NativeEntry;
-use zz_stdlib::{register_module_namespace, stdlib_funcs, stdlib_natives, STDLIB_MODULES};
+use zz_stdlib::{
+    register_module_namespace, register_selective_namespace, register_wildcard_namespace,
+    stdlib_funcs, stdlib_natives, STDLIB_MODULES,
+};
 
 mod rewrite;
 
@@ -60,7 +63,13 @@ pub struct LoadResult {
     /// Native implementations (stdlib + namespaced copies), for the
     /// interpreter.
     pub natives: HashMap<String, NativeEntry>,
+    /// Static constant values resolved through selective imports (including
+    /// aliases).  Keys are bare names like `"pi"`, values are the float.
+    pub consts: HashMap<String, f64>,
     pub errors: Vec<LoadError>,
+    /// `import std.X as alias` renames for stdlib modules — needed to mirror
+    /// pure-ZZ Env bindings under the alias (e.g. `colors.red` → `cl.red`).
+    pub stdlib_aliases: Vec<(String, String)>,
 }
 
 struct Loader {
@@ -70,19 +79,54 @@ struct Loader {
     visiting: HashSet<PathBuf>,
     done: HashSet<PathBuf>,
     errors: Vec<LoadError>,
+    /// Cross-module seed: only `pub` items from previously loaded modules.
     funcs: HashMap<String, FuncSig>,
     bindings: HashMap<String, Type>,
     structs: HashMap<String, StructSig>,
+    /// All items (pub + private) for the entry file / runtime.
+    all_funcs: HashMap<String, FuncSig>,
+    all_bindings: HashMap<String, Type>,
+    all_structs: HashMap<String, StructSig>,
     natives: HashMap<String, NativeEntry>,
     /// Namespace → canonical path of the module (or `std:<module>` for the
     /// standard library) that owns it.
     namespaces: HashMap<String, PathBuf>,
     /// Canonical path → namespace it was registered under.
     ns_of: HashMap<PathBuf, String>,
+    /// Canonical path of the entry file (for main() call validation).
+    entry: PathBuf,
+    /// Selective/wildcard imports to process after all modules are loaded.
+    /// Each entry: (importing_file_path, module_path, items, is_stdlib).
+    selective_imports: Vec<(PathBuf, Vec<String>, Vec<ImportItem>, bool)>,
+    /// Bare constant names (including aliases) to inject into the runtime env.
+    /// Populated during selective import processing in finish().
+    selected_consts: HashMap<String, f64>,
+    /// Mirrors LoadResult::stdlib_aliases while loading.
+    stdlib_aliases: Vec<(String, String)>,
 }
 
 /// Load an entry file and all of its imports.
 pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
+    load_program_with_plugins(main_path, &[])
+}
+
+/// Load an entry file and all of its imports, merging additional function
+/// signatures from plugin manifests.
+///
+/// `plugin_funcs` is a slice of `(package_name, FuncSig)` pairs loaded from
+/// `.zzi` plugin manifests. These are merged into the checker's function table
+/// alongside the stdlib, making them available for type-checking and codegen.
+pub fn load_program_with_plugins(
+    main_path: &Path,
+    plugin_funcs: &[(String, FuncSig)],
+) -> Result<LoadResult, String> {
+    let entry = main_path.canonicalize().map_err(|e| {
+        format!(
+            "cannot read entry file `{}`: {e}\n\
+                 hint: check that the file exists and the path is correct",
+            main_path.display()
+        )
+    })?;
     let mut loader = Loader {
         sources: HashMap::new(),
         programs: HashMap::new(),
@@ -93,12 +137,66 @@ pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
         funcs: stdlib_funcs(),
         bindings: HashMap::new(),
         structs: HashMap::new(),
+        all_funcs: HashMap::new(),
+        all_bindings: HashMap::new(),
+        all_structs: HashMap::new(),
         natives: stdlib_natives(),
         namespaces: HashMap::new(),
         ns_of: HashMap::new(),
+        entry,
+        selective_imports: Vec::new(),
+        selected_consts: HashMap::new(),
+        stdlib_aliases: Vec::new(),
     };
+    // Merge plugin manifest function signatures into the checker's function table.
+    for (name, sig) in plugin_funcs {
+        loader.funcs.insert(name.clone(), sig.clone());
+    }
     loader.load_file(main_path, None)?;
     Ok(loader.finish())
+}
+
+/// Walk up from `start` (a file or directory) to the project root —
+/// the nearest ancestor (or self) holding `zz.toml`.
+pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
+    // Canonicalize so relative starts (e.g. `src/main.zz` with cwd at
+    // the project root) walk up through real ancestors.
+    let canonical = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    let mut dir = if canonical.is_file() {
+        canonical.parent()?.to_path_buf()
+    } else {
+        canonical
+    };
+    loop {
+        if dir.join("zz.toml").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// Resolve a plugin dependency's package directory for `import <dep>`.
+/// Returns the package dir only when the dep exists in `zz.lock` and
+/// ships a `plugin.zzi` manifest.
+fn resolve_plugin_pkg(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
+    let manifest = zz_pm::manifest::Manifest::load(&project_root.join("zz.toml")).ok()?;
+    let lock = zz_pm::lock::Lockfile::load(&project_root.join("zz.lock")).ok()?;
+    let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
+    let pkg_dir = if locked.source == "path" {
+        match manifest.dependencies.get(dep_name) {
+            Some(zz_pm::manifest::DepSpec::Path(p)) => project_root.join(&p.path),
+            _ => return None,
+        }
+    } else {
+        zz_pm::paths::cas_entry(&locked.hash)
+    };
+    if pkg_dir.join("plugin.zzi").exists() {
+        Some(pkg_dir)
+    } else {
+        None
+    }
 }
 
 /// The namespace a module is bound to: its alias, or its file stem.
@@ -110,13 +208,44 @@ fn module_ns(alias: Option<&str>, path: &Path) -> String {
     })
 }
 
+/// If `msg` is `prefix``name`` (a backtick-quoted name immediately after a
+/// known prefix), return `name`. Used to lift names out of checker messages
+/// (`undefined variable `b.helper``) for private-item detection.
+fn quoted_name_after<'a>(msg: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = msg.strip_prefix(prefix)?;
+    let rest = rest.strip_prefix('`')?;
+    let end = rest.find('`')?;
+    Some(&rest[..end])
+}
+
+/// From `struct `T` has no field `f``, extract (`T`, `f`).
+fn struct_no_field(msg: &str) -> Option<(&str, &str)> {
+    let rest = msg.strip_prefix("struct `")?;
+    let end = rest.find('`')?;
+    let sname = &rest[..end];
+    let rest = rest[end + 1..].strip_prefix(" has no field ")?;
+    let rest = rest.strip_prefix('`')?;
+    let end = rest.find('`')?;
+    Some((sname, &rest[..end]))
+}
+
+/// Push the standard "it's private — add `pub`" note onto a diagnostic.
+fn push_private_note(d: &mut RawDiag, name: &str, template: &str) {
+    let last = name.rsplit('.').next().unwrap_or(name);
+    d.notes.push(template.replace("{}", last));
+}
+
 impl Loader {
     /// Parse a file and recursively load its imports (DFS post-order, so
     /// dependencies land in `order` before their dependents).
     fn load_file(&mut self, path: &Path, alias: Option<&str>) -> Result<(), String> {
-        let canon = path
-            .canonicalize()
-            .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+        let canon = path.canonicalize().map_err(|e| {
+            format!(
+                "cannot read imported file `{}`: {e}\n\
+                     hint: check that the file exists relative to the importing module",
+                path.display()
+            )
+        })?;
 
         if self.done.contains(&canon) {
             return Ok(());
@@ -136,8 +265,13 @@ impl Loader {
             return Ok(());
         }
 
-        let source = std::fs::read_to_string(&canon)
-            .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+        let source = std::fs::read_to_string(&canon).map_err(|e| {
+            format!(
+                "cannot read imported file `{}`: {e}\n\
+                      hint: check that the file exists and you have permission to read it",
+                path.display()
+            )
+        })?;
         let parsed = parse(&source);
         if !parsed.errors.is_empty() {
             self.errors.push(LoadError {
@@ -148,46 +282,121 @@ impl Loader {
             return Ok(());
         }
 
+        // Expand explicit decorators before import scanning and namespacing
+        // so decorator references are ordinary call expressions when the
+        // namespace rewriter runs.
+        let (expanded_program, decorator_errors) =
+            zz_frontend::decorators::expand_program(&parsed.program);
+        if !decorator_errors.is_empty() {
+            self.errors.push(LoadError {
+                name: path.display().to_string(),
+                source,
+                diags: decorator_errors,
+            });
+            return Ok(());
+        }
+        let parsed = zz_frontend::Parsed {
+            program: expanded_program,
+            errors: Vec::new(),
+        };
+
         self.visiting.insert(canon.clone());
 
-        let imports: Vec<(Vec<String>, Option<String>)> = parsed
+        let imports: Vec<(Vec<String>, Option<String>, Vec<ImportItem>)> = parsed
             .program
             .stmts
             .iter()
             .filter_map(|s| match s {
-                Stmt::Import { path, alias, .. } => Some((path.clone(), alias.clone())),
+                Stmt::Import {
+                    path, alias, items, ..
+                } => Some((path.clone(), alias.clone(), items.clone())),
                 _ => None,
             })
             .collect();
 
-        for (imp, imp_alias) in imports {
+        for (imp, imp_alias, imp_items) in imports {
+            let is_selective = !imp_items.is_empty();
             if imp.first().map(String::as_str) == Some("std") {
-                let Some(module) = imp.get(1) else { continue };
+                // Dotted module key: `std.sqlz` -> "sqlz",
+                // `std.sqlz.postgres` -> "sqlz.postgres".
+                if imp.len() < 2 {
+                    continue;
+                }
+                let module = imp[1..].join(".");
                 if !STDLIB_MODULES.contains(&module.as_str()) {
                     self.errors.push(LoadError {
                         name: path.display().to_string(),
                         source: source.clone(),
                         diags: vec![error_at(
-                            format!("unknown standard library module `std.{module}`"),
+                            format!(
+                                "unknown standard library module `std.{module}`\n\
+                                     hint: available modules are: {}",
+                                STDLIB_MODULES.to_vec().join(", ")
+                            ),
                             Span::new(0, 0),
                         )],
                     });
                     continue;
                 }
-                let ns = imp_alias.unwrap_or_else(|| module.clone());
-                if let Err(msg) =
-                    register_module_namespace(module, &ns, &mut self.funcs, &mut self.natives)
-                {
+                if is_selective {
+                    // Store for processing in finish() when all modules are loaded.
+                    self.selective_imports
+                        .push((canon.clone(), imp.clone(), imp_items, true));
+                } else {
+                    // Full module import: copy all symbols under namespace.
+                    // Default namespace is the last component:
+                    // `import std.sqlz.postgres` -> `postgres.*`.
+                    let ns = imp_alias
+                        .clone()
+                        .unwrap_or_else(|| imp.last().cloned().unwrap_or_else(|| module.clone()));
+                    if let Err(msg) =
+                        register_module_namespace(&module, &ns, &mut self.funcs, &mut self.natives)
+                    {
+                        self.errors.push(LoadError {
+                             name: path.display().to_string(),
+                             source: source.clone(),
+                             diags: vec![error_at(
+                                 format!("{msg}\n\
+                                          hint: this may occur if the stdlib module exports a conflicting name"),
+                                 Span::new(0, 0),
+                             )],
+                         });
+                        continue;
+                    }
+                    self.register_ns(&ns, &PathBuf::from(format!("std:{module}")), path, &source);
+                    self.stdlib_aliases.push((module.clone(), ns.clone()));
+                }
+                continue;
+            }
+            // Plugin dependency import (`import zimg`): the dep ships a
+            // `plugin.zzi` manifest. Merge its signatures under their
+            // declared ZZ names and register the namespace. Unlike std,
+            // no bare aliases are created — two plugins must never
+            // collide on short names.
+            if imp.len() == 1 {
+                if !imp_items.is_empty() {
                     self.errors.push(LoadError {
                         name: path.display().to_string(),
                         source: source.clone(),
-                        diags: vec![error_at(msg, Span::new(0, 0))],
+                        diags: vec![error_at(
+                            format!(
+                                "selective imports from plugin `{}` are not supported\n\
+                                 hint: `import {0}` imports the full module; call `{}.*` qualified",
+                                imp[0], imp[0]
+                            ),
+                            Span::new(0, 0),
+                        )],
                     });
                     continue;
                 }
-                self.register_ns(&ns, &PathBuf::from(format!("std:{module}")), path, &source);
-                continue;
+                if let Some(root) = find_project_root(&canon) {
+                    if let Some(pkg_dir) = resolve_plugin_pkg(&root, &imp[0]) {
+                        self.import_plugin(&imp[0], imp_alias.as_deref(), &pkg_dir, path, &source);
+                        continue;
+                    }
+                }
             }
+            // Local file import.
             let rel = canon
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
@@ -196,18 +405,19 @@ impl Loader {
             if let Ok(rel_canon) = rel.canonicalize() {
                 if self.visiting.contains(&rel_canon) {
                     self.errors.push(LoadError {
-                        name: path.display().to_string(),
-                        source: source.clone(),
-                        diags: vec![error_at(
-                            format!(
-                                "circular import: `{}` imports `{}`, which (transitively) imports `{}`",
-                                path.display(),
-                                rel.display(),
-                                path.display()
-                            ),
-                            Span::new(0, 0),
-                        )],
-                    });
+                         name: path.display().to_string(),
+                         source: source.clone(),
+                         diags: vec![error_at(
+                             format!(
+                                 "circular import: `{}` imports `{}`, which (transitively) imports `{}`\n\
+                                  hint: circular imports are not allowed; consider restructuring your code to break the cycle",
+                                 path.display(),
+                                 rel.display(),
+                                 path.display()
+                             ),
+                             Span::new(0, 0),
+                         )],
+                     });
                     continue;
                 }
                 // A module already loaded under a different namespace cannot
@@ -216,21 +426,28 @@ impl Loader {
                     let want = module_ns(imp_alias.as_deref(), &rel);
                     if existing != &want {
                         self.errors.push(LoadError {
-                            name: path.display().to_string(),
-                            source: source.clone(),
-                            diags: vec![error_at(
-                                format!(
-                                    "`{}` is imported under two namespaces: `{existing}` and `{want}`",
-                                    rel.display()
-                                ),
-                                Span::new(0, 0),
-                            )],
-                        });
+                             name: path.display().to_string(),
+                             source: source.clone(),
+                             diags: vec![error_at(
+                                 format!(
+                                     "`{}` is imported under two namespaces: `{existing}` and `{want}`\n\
+                                      hint: each file can only be imported under one namespace; \
+                                      consider using an alias to avoid the conflict",
+                                     rel.display()
+                                 ),
+                                 Span::new(0, 0),
+                             )],
+                         });
                         continue;
                     }
                 }
             }
             self.load_file(&rel, imp_alias.as_deref())?;
+            if is_selective {
+                // Store for processing in finish() when all modules are loaded.
+                self.selective_imports
+                    .push((canon.clone(), imp.clone(), imp_items, false));
+            }
         }
 
         self.visiting.remove(&canon);
@@ -248,6 +465,67 @@ impl Loader {
         Ok(())
     }
 
+    /// Import a plugin dependency (`import zimg`): merge its manifest
+    /// signatures under their declared ZZ names. With an alias
+    /// (`import zimg as z`), names under the `<dep>.` prefix are also
+    /// copied to `<alias>.`. Bare short names are never created.
+    fn import_plugin(
+        &mut self,
+        dep: &str,
+        alias: Option<&str>,
+        pkg_dir: &Path,
+        importer: &Path,
+        source: &str,
+    ) {
+        let manifest = match zz_plugin::load_manifest(&pkg_dir.join("plugin.zzi")) {
+            Ok(m) => m,
+            Err(e) => {
+                self.errors.push(LoadError {
+                    name: importer.display().to_string(),
+                    source: source.to_string(),
+                    diags: vec![error_at(
+                        format!("cannot load plugin `{dep}` manifest: {e}"),
+                        Span::new(0, 0),
+                    )],
+                });
+                return;
+            }
+        };
+        for (name, sig) in &manifest.funcs {
+            self.funcs.insert(name.clone(), sig.clone());
+        }
+        let ns = alias.unwrap_or(dep);
+        if ns != dep {
+            let prefix = format!("{dep}.");
+            let aliased: Vec<(String, zz_checker::FuncSig)> = manifest
+                .funcs
+                .iter()
+                .filter(|(n, _)| n.starts_with(&prefix))
+                .map(|(n, s)| (format!("{ns}.{}", &n[prefix.len()..]), s.clone()))
+                .collect();
+            for (name, sig) in aliased {
+                self.funcs.insert(name, sig);
+            }
+        }
+        // Ergonomic layer: a `<dep>.zz` entry file in the package root
+        // (or `src/`, the conventional code dir) is loaded as a module
+        // under the import namespace, so `import zimg` also brings in
+        // `zimg.resize(...)` etc. Its relative imports resolve inside
+        // the package. Manifest-only packages skip this and only record
+        // the namespace.
+        let entry = [format!("{dep}.zz"), format!("src/{dep}.zz")]
+            .into_iter()
+            .map(|rel| pkg_dir.join(rel))
+            .find(|p| p.exists());
+        if let Some(entry) = entry {
+            // load_file records its own diagnostics; the entry exists.
+            let _ = self.load_file(&entry, Some(ns));
+        } else {
+            // Namespace bookkeeping (re-import diagnostics stay consistent).
+            self.register_ns(ns, &pkg_dir.join("plugin.zzi"), importer, source);
+        }
+    }
+
     /// Register a namespace → module mapping, detecting collisions. Returns
     /// false (and records an error) when two different modules claim the same
     /// namespace, or one module is claimed by two namespaces.
@@ -259,7 +537,8 @@ impl Loader {
                     source: source.to_string(),
                     diags: vec![error_at(
                         format!(
-                            "module `{}` is imported under two namespaces: `{existing}` and `{ns}`",
+                            "module `{}` is imported under two namespaces: `{existing}` and `{ns}`\n\
+                             hint: this can happen when the same file is imported via different paths",
                             display.display()
                         ),
                         Span::new(0, 0),
@@ -276,7 +555,9 @@ impl Loader {
                     source: source.to_string(),
                     diags: vec![error_at(
                         format!(
-                            "namespace `{ns}` is claimed by both `{}` and `{}`",
+                            "namespace `{ns}` is claimed by both `{}` and `{}`\n\
+                             hint: two different files are trying to use the same namespace; \
+                             consider using an alias for one of the imports",
                             existing.display(),
                             display.display()
                         ),
@@ -292,6 +573,72 @@ impl Loader {
         true
     }
 
+    /// Rewrite a diagnostic that references an item which exists but was not
+    /// exported (it is private to its module) into a targeted error with a
+    /// hint to add `pub`. This is a DX upgrade over the generic
+    /// "undefined variable" / "unknown struct" / "no such field" messages.
+    ///
+    /// Returns the fully-qualified private name when the diagnostic was
+    /// rewritten, so the caller can prune cascading noise for that namespace.
+    fn enrich_private(&self, d: &mut RawDiag) -> Option<String> {
+        let msg = d.message.clone();
+
+        // `undefined variable `ns.item`` — private function/variable/struct.
+        if let Some(name) = quoted_name_after(&msg, "undefined variable ") {
+            if let Some(kind) = self.private_item_kind(name) {
+                d.message = format!("{kind} `{name}` is private");
+                push_private_note(
+                    d,
+                    name,
+                    "add `pub` to `{}` to make it visible outside its module",
+                );
+                return Some(name.to_string());
+            }
+        }
+
+        // `unknown struct `ns.name`` — private struct.
+        if let Some(name) = quoted_name_after(&msg, "unknown struct ") {
+            if let Some(kind) = self.private_item_kind(name) {
+                d.message = format!("{kind} `{name}` is private");
+                push_private_note(
+                    d,
+                    name,
+                    "add `pub` to `{}` to make it visible outside its module",
+                );
+                return Some(name.to_string());
+            }
+        }
+
+        // `struct `T` has no field `f`` where `T.f` is a private method from
+        // an `impl` block.
+        if let Some((sname, field)) = struct_no_field(&msg) {
+            let key = format!("{sname}.{field}");
+            if self.all_funcs.contains_key(&key) && !self.funcs.contains_key(&key) {
+                d.message = format!("method `{field}` on struct `{sname}` is private");
+                d.notes.push(format!(
+                    "add `pub` to `{field}` inside `impl {sname}` to make it callable from other modules"
+                ));
+                return Some(key);
+            }
+        }
+        None
+    }
+
+    /// The item kind if `name` exists in the private universe (all items of
+    /// already-loaded modules) but is missing from the pub export seed.
+    fn private_item_kind(&self, name: &str) -> Option<&'static str> {
+        if self.all_funcs.contains_key(name) && !self.funcs.contains_key(name) {
+            return Some("function");
+        }
+        if self.all_structs.contains_key(name) && !self.structs.contains_key(name) {
+            return Some("struct");
+        }
+        if self.all_bindings.contains_key(name) && !self.bindings.contains_key(name) {
+            return Some("variable");
+        }
+        None
+    }
+
     /// Type-check every module in dependency order, accumulating the checker
     /// seed. Modules with errors do not contribute their definitions.
     fn finish(mut self) -> LoadResult {
@@ -303,7 +650,346 @@ impl Loader {
             let source = self.sources.remove(path).unwrap_or_default();
             files.push((name.clone(), source.clone()));
 
-            let program = self.programs.remove(path).unwrap();
+            // Process selective/wildcard imports for this module before
+            // type-checking, so imported symbols are in the seed.
+            let selective: Vec<_> = self
+                .selective_imports
+                .iter()
+                .filter(|(p, _, _, _)| p == path)
+                .cloned()
+                .collect();
+            for (_, imp_path, items, is_std) in selective {
+                if is_std {
+                    // Stdlib selective import (dotted key for nested
+                    // modules: `std.sqlz.postgres` -> "sqlz.postgres").
+                    if imp_path.len() < 2 {
+                        continue;
+                    }
+                    let module = imp_path[1..].join(".");
+                    let has_wildcard = items
+                        .iter()
+                        .any(|i| matches!(i, ImportItem::Wildcard { .. }));
+                    if has_wildcard {
+                        if let Err(msg) = register_wildcard_namespace(
+                            module.as_str(),
+                            &mut self.funcs,
+                            &mut self.natives,
+                        ) {
+                            self.errors.push(LoadError {
+                                name: name.clone(),
+                                source: source.clone(),
+                                diags: vec![error_at(
+                                    format!("{msg}\n\
+                                             hint: this may occur if the stdlib module exports a conflicting name"),
+                                    Span::new(0, 0),
+                                )],
+                            });
+                        }
+                    } else {
+                        let name_aliases: Vec<(String, Option<String>)> = items
+                            .iter()
+                            .filter_map(|i| match i {
+                                ImportItem::Named { name, alias, .. } => {
+                                    Some((name.clone(), alias.clone()))
+                                }
+                                ImportItem::Wildcard { .. } => None,
+                            })
+                            .collect();
+                        match register_selective_namespace(
+                            module.as_str(),
+                            &name_aliases,
+                            &mut self.funcs,
+                            &mut self.natives,
+                        ) {
+                            Ok(missing) => {
+                                for sym in &missing {
+                                    self.errors.push(LoadError {
+                                        name: name.clone(),
+                                        source: source.clone(),
+                                        diags: vec![error_at(
+                                            format!(
+                                                "symbol `{sym}` not found in `std.{module}`\n\
+                                                 hint: check the module's public exports"
+                                            ),
+                                            Span::new(0, 0),
+                                        )],
+                                    });
+                                }
+                            }
+                            Err(msg) => {
+                                self.errors.push(LoadError {
+                                    name: name.clone(),
+                                    source: source.clone(),
+                                    diags: vec![error_at(
+                                        format!("{msg}\n\
+                                                 hint: this may occur if the stdlib module exports a conflicting name"),
+                                        Span::new(0, 0),
+                                    )],
+                                });
+                            }
+                        }
+                        // Collect constants (including aliases) for runtime injection.
+                        let std_consts = zz_stdlib::stdlib_consts();
+                        for (sym_name, alias) in &name_aliases {
+                            let qualified = format!("std.{module}.{sym_name}");
+                            if let Some(&val) = std_consts.get(&qualified) {
+                                let target = alias.as_ref().unwrap_or(sym_name);
+                                self.selected_consts.insert(target.clone(), val);
+                            }
+                        }
+                    }
+                } else {
+                    // Local file selective import — items are in seed as ns.name.
+                    let ns = imp_path.last().map(String::as_str).unwrap_or("");
+                    let prefix = format!("{ns}.");
+                    for item in &items {
+                        match item {
+                            ImportItem::Named {
+                                name: sym_name,
+                                alias,
+                                ..
+                            } => {
+                                let target = alias.as_ref().unwrap_or(sym_name);
+                                let full = format!("{prefix}{sym_name}");
+                                let mut found = false;
+                                if let Some(sig) = self.funcs.get(&full).cloned() {
+                                    self.funcs.insert(target.clone(), sig.clone());
+                                    self.all_funcs.insert(target.clone(), sig);
+                                    found = true;
+                                }
+                                if let Some(entry) = self.natives.get(&full).cloned() {
+                                    self.natives.insert(target.clone(), entry);
+                                    found = true;
+                                }
+                                if let Some(ty) = self.bindings.get(&full).cloned() {
+                                    self.bindings.insert(target.clone(), ty.clone());
+                                    self.all_bindings.insert(target.clone(), ty);
+                                    found = true;
+                                }
+                                if let Some(sig) = self.structs.get(&full).cloned() {
+                                    self.structs.insert(target.clone(), sig.clone());
+                                    self.all_structs.insert(target.clone(), sig);
+                                    found = true;
+                                }
+                                if !found {
+                                    self.errors.push(LoadError {
+                                        name: name.clone(),
+                                        source: source.clone(),
+                                        diags: vec![error_at(
+                                            format!(
+                                                "symbol `{sym_name}` not found or not public in `{}`\n\
+                                                 hint: ensure the symbol is declared with `pub` in the imported module",
+                                                imp_path.join(".")
+                                            ),
+                                            Span::new(0, 0),
+                                        )],
+                                    });
+                                }
+                            }
+                            ImportItem::Wildcard { .. } => {
+                                // Copy ALL pub items from ns.* → bare names.
+                                let keys: Vec<String> = self
+                                    .funcs
+                                    .keys()
+                                    .filter(|k| k.starts_with(&prefix))
+                                    .cloned()
+                                    .collect();
+                                for key in keys {
+                                    let bare = key[prefix.len()..].to_string();
+                                    if let Some(sig) = self.funcs.get(&key).cloned() {
+                                        self.funcs.insert(bare.clone(), sig.clone());
+                                        self.all_funcs.insert(bare, sig);
+                                    }
+                                    if let Some(entry) = self.natives.get(&key).cloned() {
+                                        self.natives.insert(key[prefix.len()..].to_string(), entry);
+                                    }
+                                }
+                                let bkeys: Vec<String> = self
+                                    .bindings
+                                    .keys()
+                                    .filter(|k| k.starts_with(&prefix))
+                                    .cloned()
+                                    .collect();
+                                for key in bkeys {
+                                    let bare = key[prefix.len()..].to_string();
+                                    if let Some(ty) = self.bindings.get(&key).cloned() {
+                                        self.bindings.insert(bare.clone(), ty.clone());
+                                        self.all_bindings.insert(bare, ty);
+                                    }
+                                }
+                                let skeys: Vec<String> = self
+                                    .structs
+                                    .keys()
+                                    .filter(|k| k.starts_with(&prefix))
+                                    .cloned()
+                                    .collect();
+                                for key in skeys {
+                                    let bare = key[prefix.len()..].to_string();
+                                    if let Some(sig) = self.structs.get(&key).cloned() {
+                                        self.structs.insert(bare.clone(), sig.clone());
+                                        self.all_structs.insert(bare, sig);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Remove processed selective imports for this module.
+            // Replace selective import statements with synthetic Decl
+            // assignments so the runtime (VM) creates the variable bindings.
+            self.selective_imports.retain(|(p, _, _, _)| p != path);
+
+            let mut program = self.programs.remove(path).unwrap();
+            let mut new_stmts = Vec::new();
+            for stmt in program.stmts.drain(..) {
+                match &stmt {
+                    Stmt::Import {
+                        items,
+                        path: imp_path,
+                        span,
+                        ..
+                    } if !items.is_empty() => {
+                        // Selective imports: bare names are already in
+                        // self.funcs / self.natives by the register_* helpers.
+                        // The runtime resolves them as natives. For local
+                        // files, emit synthetic Decls (below); for stdlib,
+                        // KEEP the import statement (with items) so the AOT
+                        // backend can resolve bare/aliased names to their
+                        // canonical natives. It emits no code and the
+                        // checker already tracks selective names, so no
+                        // false "unused import" warning follows.
+                        let is_stdlib = imp_path.first().map(String::as_str) == Some("std");
+
+                        if is_stdlib {
+                            // Stdlib: keep as-is for alias resolution.
+                            // Constants are injected into the runtime env via
+                            // LoadResult.consts (including aliased names).
+                            new_stmts.push(stmt);
+                        } else {
+                            // Local file: keep the import (items cleared) for
+                            // namespace tracking, then emit synthetic Decls.
+                            new_stmts.push(Stmt::Import {
+                                path: imp_path.clone(),
+                                alias: None,
+                                items: Vec::new(),
+                                pub_: false,
+                                span: *span,
+                            });
+                            let ns = imp_path.last().map(String::as_str).unwrap_or("");
+                            let prefix = format!("{ns}.");
+                            for item in items {
+                                match item {
+                                    ImportItem::Named {
+                                        name: sym_name,
+                                        alias,
+                                        span: item_span,
+                                    } => {
+                                        let target = alias.as_ref().unwrap_or(sym_name);
+                                        let parts = vec![ns.to_string(), sym_name.clone()];
+                                        new_stmts.push(Stmt::Decl {
+                                            ty: None,
+                                            name: zz_frontend::ast::Ident {
+                                                name: target.clone(),
+                                                span: *item_span,
+                                            },
+                                            value: Expr::Path {
+                                                parts,
+                                                span: *item_span,
+                                            },
+                                            span: *item_span,
+                                            pub_: false,
+                                            is_const: false,
+                                        });
+                                    }
+                                    ImportItem::Wildcard { span: item_span } => {
+                                        // Wildcard: emit a Decl for every pub
+                                        // symbol in the imported module.
+                                        let mut names: Vec<String> = Vec::new();
+                                        for key in self.funcs.keys() {
+                                            if key.starts_with(&prefix) {
+                                                let bare = &key[prefix.len()..];
+                                                if !bare.is_empty() {
+                                                    names.push(bare.to_string());
+                                                }
+                                            }
+                                        }
+                                        for key in self.bindings.keys() {
+                                            if key.starts_with(&prefix) {
+                                                let bare = &key[prefix.len()..];
+                                                if !bare.is_empty()
+                                                    && !names.contains(&bare.to_string())
+                                                {
+                                                    names.push(bare.to_string());
+                                                }
+                                            }
+                                        }
+                                        for bare in &names {
+                                            new_stmts.push(Stmt::Decl {
+                                                ty: None,
+                                                name: zz_frontend::ast::Ident {
+                                                    name: bare.to_string(),
+                                                    span: *item_span,
+                                                },
+                                                value: Expr::Path {
+                                                    parts: vec![ns.to_string(), bare.to_string()],
+                                                    span: *item_span,
+                                                },
+                                                span: *item_span,
+                                                pub_: false,
+                                                is_const: false,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => new_stmts.push(stmt),
+                }
+            }
+            program.stmts = new_stmts;
+
+            // In the entry file, error if func main() and a top-level main()
+            // call coexist — the auto-call would double-execute main().
+            if *path == self.entry {
+                let mut has_main_func = false;
+                let mut has_main_call = false;
+                for stmt in &program.stmts {
+                    match stmt {
+                        Stmt::Func { name, .. } => {
+                            // After namespace rewriting, name may be
+                            // ["ns.main"] or ["ns", "main"]. Check the
+                            // joined form.
+                            let joined = name.join(".");
+                            if joined.ends_with(".main") || joined == "main" {
+                                has_main_func = true;
+                            }
+                        }
+                        Stmt::Expr(Expr::Call { callee, .. }) => {
+                            if let Expr::Path { parts, .. } = callee.as_ref() {
+                                if parts.last().map(|s| s.as_str()) == Some("main") {
+                                    has_main_call = true;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if has_main_func && has_main_call {
+                    self.errors.push(LoadError {
+                        name: name.clone(),
+                        source: source.clone(),
+                        diags: vec![error_at(
+                            "`main()` is auto-called; remove the explicit `main()` call\n\
+                             hint: ZZ automatically calls main() if it exists; \
+                             having both causes double execution",
+                            Span::new(0, 0),
+                        )],
+                    });
+                }
+            }
+
             let checked = check_program(
                 &program,
                 self.bindings.clone(),
@@ -314,25 +1000,99 @@ impl Loader {
                 .errors
                 .iter()
                 .any(|e| e.severity == zz_frontend::diag::Severity::Error);
+            let mut diags = checked.errors;
             if has_errors {
+                // Upgrade generic "undefined variable / unknown struct / no
+                // field" errors into targeted "this item is private — add
+                // `pub`" diagnostics whenever the reference hits an item that
+                // exists but was not exported.
+                let private_names: Vec<String> = diags
+                    .iter_mut()
+                    .filter_map(|d| self.enrich_private(d))
+                    .collect();
+                // When the root cause is a private item, prune cascading
+                // noise: the `undefined variable `ns`` hop and the
+                // "unused import" warning for the same namespace.
+                if !private_names.is_empty() {
+                    let prefixes: HashSet<String> = private_names
+                        .iter()
+                        .filter_map(|n| n.split('.').next().map(str::to_string))
+                        .collect();
+                    diags.retain(|d| {
+                        !prefixes.iter().any(|ns| {
+                            d.message == format!("undefined variable `{ns}`")
+                                || d.message == format!("unused import `{ns}`")
+                        })
+                    });
+                }
                 self.errors.push(LoadError {
-                    name,
-                    source,
-                    diags: checked.errors,
+                    name: name.clone(),
+                    source: source.clone(),
+                    diags,
                 });
             } else {
                 // Propagate warnings (even if there are no hard errors)
                 // so they can be displayed to the user.
-                if !checked.errors.is_empty() {
+                if !diags.is_empty() {
                     self.errors.push(LoadError {
-                        name,
-                        source,
-                        diags: checked.errors,
+                        name: name.clone(),
+                        source: source.clone(),
+                        diags,
                     });
                 }
-                self.bindings.extend(checked.bindings);
-                self.funcs.extend(checked.funcs);
-                self.structs.extend(checked.structs);
+                // Only propagate pub items to the cross-module seed.
+                self.bindings.extend(checked.pub_bindings.clone());
+                self.funcs.extend(checked.pub_funcs.clone());
+                self.structs.extend(checked.pub_structs.clone());
+                // Track all items for the entry file / runtime.
+                self.all_bindings.extend(checked.bindings);
+                self.all_funcs.extend(checked.funcs);
+                self.all_structs.extend(checked.structs);
+
+                // Handle `pub import` re-exports: for each `pub import ns` in
+                // this module, copy the re-exported namespace's pub functions
+                // and bindings into the current module's namespace in the
+                // cross-module seed.
+                // NOTE: struct re-exports are not yet supported because struct
+                // types are identity-based (Type::Struct("a.X") ≠
+                // Type::Struct("b.X")). Struct re-exports require type aliasing
+                // support (future work).
+                if let Some(module_ns) = self.ns_of.get(path).cloned() {
+                    for stmt in &program.stmts {
+                        if let Stmt::Import {
+                            path: imp_path,
+                            alias,
+                            pub_: true,
+                            ..
+                        } = stmt
+                        {
+                            let reexport_ns = alias
+                                .as_deref()
+                                .or_else(|| imp_path.last().map(|s| s.as_str()))
+                                .unwrap_or("");
+                            // Copy items from seed `reexport_ns.*` to
+                            // `module_ns.reexport_ns.*`
+                            let prefix = format!("{}.", reexport_ns);
+                            let new_prefix = format!("{}.{reexport_ns}.", module_ns);
+                            let seed_b = self.bindings.clone();
+                            for (k, v) in &seed_b {
+                                if k.starts_with(&prefix) {
+                                    let new_key = format!("{}{}", new_prefix, &k[prefix.len()..]);
+                                    self.bindings.insert(new_key.clone(), v.clone());
+                                    self.all_bindings.insert(new_key, v.clone());
+                                }
+                            }
+                            let seed_f = self.funcs.clone();
+                            for (k, v) in &seed_f {
+                                if k.starts_with(&prefix) {
+                                    let new_key = format!("{}{}", new_prefix, &k[prefix.len()..]);
+                                    self.funcs.insert(new_key.clone(), v.clone());
+                                    self.all_funcs.insert(new_key, v.clone());
+                                }
+                            }
+                        }
+                    }
+                }
             }
             programs.push(program);
         }
@@ -340,11 +1100,13 @@ impl Loader {
         LoadResult {
             programs,
             files,
-            funcs: self.funcs,
-            bindings: self.bindings,
-            structs: self.structs,
+            funcs: self.all_funcs,
+            bindings: self.all_bindings,
+            structs: self.all_structs,
             natives: self.natives,
+            consts: self.selected_consts,
             errors: self.errors,
+            stdlib_aliases: self.stdlib_aliases,
         }
     }
 }
@@ -368,6 +1130,17 @@ fn namespace_program(program: &mut Program, ns: &str) {
         }
     }
     let mut rw = rewrite::Rewriter::new(ns, &top);
+    // Imported namespace heads resolve on their own; the Call rewriter
+    // must leave `alias.func(...)` paths untouched.
+    for stmt in &program.stmts {
+        if let Stmt::Import { path, alias, .. } = stmt {
+            if let Some(a) = alias {
+                rw.imports.insert(a.clone());
+            } else if let Some(last) = path.last() {
+                rw.imports.insert(last.clone());
+            }
+        }
+    }
     for stmt in &mut program.stmts {
         rw.rewrite_stmt(stmt);
     }

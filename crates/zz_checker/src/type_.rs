@@ -13,20 +13,47 @@ pub enum Type {
     Bool,
     Str,
     Unit,
+    /// C `void` — only valid in `extern "C"` signatures. Distinct from `unit`.
+    Void,
+    /// Raw C pointer: `*const T` (mutable=false) or `*mut T` (mutable=true).
+    Ptr {
+        mutable: bool,
+        inner: Box<Type>,
+    },
     Tuple(Vec<Type>),
     Option(Box<Type>),
     Result(Box<Type>, Box<Type>),
     Func(Vec<Type>, Box<Type>),
     /// `[T]` — array type.
     Array(Box<Type>),
+    /// Contiguous byte buffer (produced by `fs.read_bytes`,
+    /// `fs.read_chunk_bytes`). Indexes to `int`, slices to `bytes`.
+    Bytes,
     /// `{K: V}` — dictionary type.
     Dict(Box<Type>, Box<Type>),
     /// `A | B` — union type.
     Union(Vec<Type>),
     /// Opaque JSON value (produced by `std.json.parse`).
     Json,
+    /// Opaque SQLite database handle (produced by `std.sqlz.open`;
+    /// `std.db.open` is a zero-overhead alias).
+    Db,
     /// Opaque HTTP server handle (produced by `std.http.server`).
     HttpServer,
+    /// Opaque TCP stream handle (produced by `std.net.tcp_connect`).
+    TcpStream,
+    /// Opaque TCP listener handle (produced by `std.net.tcp_listen`).
+    TcpListener,
+    /// Opaque HTTP response (produced by `std.http.get`, etc.).
+    Response,
+    /// Generic opaque handle into the `zz_native_rt` pool. The tag names the
+    /// owning module (e.g. `"regex"`) and selects the method namespace, so
+    /// `Opaque("regex")` and `Opaque("uuid")` are distinct types.
+    Opaque(String),
+    /// Thread-safe channel (produced by `chan()`).
+    Chan,
+    /// Task join handle (produced by `spawn`).
+    TaskJoin,
     /// A named struct type: `Point` from `struct Point { ... }`.
     Struct(String),
     /// `a..b` — an integer range (used by `for` loops).
@@ -55,6 +82,14 @@ impl fmt::Display for Type {
             Type::Bool => write!(f, "bool"),
             Type::Str => write!(f, "str"),
             Type::Unit => write!(f, "unit"),
+            Type::Void => write!(f, "void"),
+            Type::Ptr { mutable, inner } => {
+                if *mutable {
+                    write!(f, "*mut {inner}")
+                } else {
+                    write!(f, "*const {inner}")
+                }
+            }
             Type::Tuple(ts) => {
                 write!(f, "(")?;
                 for (i, t) in ts.iter().enumerate() {
@@ -78,6 +113,7 @@ impl fmt::Display for Type {
                 write!(f, ") -> {r}")
             }
             Type::Array(t) => write!(f, "[{t}]"),
+            Type::Bytes => write!(f, "bytes"),
             Type::Dict(k, v) => write!(f, "{{{k}: {v}}}"),
             Type::Union(ts) => {
                 for (i, t) in ts.iter().enumerate() {
@@ -89,7 +125,14 @@ impl fmt::Display for Type {
                 Ok(())
             }
             Type::Json => write!(f, "json"),
+            Type::Db => write!(f, "db"),
             Type::HttpServer => write!(f, "http.server"),
+            Type::TcpStream => write!(f, "tcp.stream"),
+            Type::TcpListener => write!(f, "tcp.listener"),
+            Type::Response => write!(f, "http.response"),
+            Type::Opaque(tag) => write!(f, "{tag}"),
+            Type::Chan => write!(f, "chan"),
+            Type::TaskJoin => write!(f, "task.join"),
             Type::Struct(n) => write!(f, "{n}"),
             Type::Range(t) => write!(f, "{t}.."),
             Type::Var(_) => write!(f, "_"),

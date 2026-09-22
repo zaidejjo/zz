@@ -1,0 +1,7 @@
+// E2E-ERROR: sending on a non-channel is a static type error.
+import std.chan
+
+func main() {
+    std.chan.send(1, 2)
+    println("sent")
+}

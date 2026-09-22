@@ -15,11 +15,7 @@ use crate::state::GlobalState;
 /// loop is never blocked. An atomic sequence counter acts as a debounce:
 /// if the sequence changes between spawning and completion, the results
 /// are silently discarded (a newer change is pending).
-pub async fn recheck_and_publish(
-    state: Arc<GlobalState>,
-    client: &Client,
-    uri: Url,
-) {
+pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: Url) {
     let seq = state.bump_sequence();
 
     // Snapshot what we need for the blocking closure.
@@ -103,7 +99,9 @@ pub async fn recheck_and_publish(
 /// Stashes the full `RawDiag` as JSON in `Diagnostic.data` so that
 /// `textDocument/codeAction` can retrieve fixit info without re-checking.
 fn convert_diagnostic(source: &str, raw: &zz_frontend::diag::RawDiag) -> Diagnostic {
-    let span = raw.span.expect("caller must filter None spans before calling");
+    let span = raw
+        .span
+        .expect("caller must filter None spans before calling");
     let range = span_to_range(source, span);
     let severity = severity_to_lsp(raw.severity);
 
@@ -146,6 +144,7 @@ mod tests {
             span: Some(Span::new(0, 5)),
             notes: vec![],
             fixits: vec![],
+            secondary: None,
         };
         let diag = convert_diagnostic("hello", &raw);
         assert_eq!(diag.range.start.line, 0);
@@ -170,6 +169,7 @@ mod tests {
                 safety: FixSafety::Safe,
                 alternatives: vec![],
             }],
+            secondary: None,
         };
         let diag = convert_diagnostic("x := 1", &raw);
         assert_eq!(diag.severity, Some(DiagnosticSeverity::WARNING));
@@ -190,6 +190,7 @@ mod tests {
             span: Some(Span::new(2, 8)),
             notes: vec![],
             fixits: vec![],
+            secondary: None,
         };
         let diag = convert_diagnostic("ab\ncd\ndef", &raw);
         // byte 2 is '\n' on line 0 → Position(0, 2)
@@ -246,6 +247,7 @@ mod tests {
             span: Some(Span::new(0, 3)),
             notes: vec![],
             fixits: vec![],
+            secondary: None,
         };
         let diag = convert_diagnostic("abc", &raw);
         assert_eq!(diag.severity, Some(DiagnosticSeverity::HINT));

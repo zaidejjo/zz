@@ -1,0 +1,58 @@
+// tests/fixtures/stdlib/str_extended_test.zz — extended str E2E test
+import std.str
+
+// ── join ──
+words := ["hello", "world", "zz"]
+joined := str.join(words, " ")
+println("join: {joined}")
+
+csv := str.join(["a", "b", "c"], ",")
+println("csv: {csv}")
+
+single := str.join(["only"], "-")
+println("single: {single}")
+
+empty := str.join([], "+")
+println("empty: {empty}")
+
+// ── trim_start ──
+leading := str.trim_start("  hello  ")
+println("trim_start: '{leading}'")
+
+tabbed := str.trim_start("\t\ttest")
+println("tabbed: '{tabbed}'")
+
+// ── trim_end ──
+trailing := str.trim_end("  hello  ")
+println("trim_end: '{trailing}'")
+
+spaced := str.trim_end("done   ")
+println("spaced: '{spaced}'")
+
+// ── combined trim ──
+both := "  spaces  "
+t := str.trim(both)
+println("trim: '{t}'")
+
+ts := str.trim_start(both)
+println("trim_start: '{ts}'")
+
+te := str.trim_end(both)
+println("trim_end: '{te}'")
+
+// ── existing functions still work ──
+s := "Hello, World!"
+println("contains: {str.contains(s, "World")}")
+println("starts_with: {str.starts_with(s, "Hello")}")
+println("ends_with: {str.ends_with(s, "!")}")
+println("replace: {str.replace(s, "World", "ZZ")}")
+println("to_upper: {str.to_upper(s)}")
+println("to_lower: {str.to_lower(s)}")
+
+parts := str.split("a,b,c", ",")
+split_third := parts[2]
+println("split third: {split_third}")
+
+// str.length works on strings
+println("length of 'hello': {str.length("hello")}")
+println("str_extended_test_ok")
