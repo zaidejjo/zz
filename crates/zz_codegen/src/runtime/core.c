@@ -3705,6 +3705,7 @@ zz_value zz_typeof(zz_value v, int *err) {
         case ZZ_JSON: name = "json"; break;
         case ZZ_TCP_STREAM: name = "tcp.stream"; break;
         case ZZ_TCP_LISTENER: name = "tcp.listener"; break;
+        case ZZ_FILE: name = "file"; break;
         case ZZ_TUPLE: name = "tuple"; break;
         default: name = "unknown"; break;
     }
@@ -4197,76 +4198,753 @@ zz_value zz_env_args(zz_value unused, int *err) {
     return out;
 }
 
-// dict.len(d)
-// fs.read(path)
-zz_value zz_fs_read(zz_value path, int *err) {
-    if (path.tag != ZZ_STR) { *err = 1; return zz_unit(); }
-    FILE *f = fopen(zz_str_cptr(path.s), "rb");
-    if (!f) {
-        // Match the VM: `.err(io error string)`
-        return zz_variant_err(zz_str_static("No such file or directory"));
+// =====================================================================
+//  std.fs — comprehensive non-blocking filesystem
+//
+//  Every fallible op returns `Result<_, str>` with a unified diagnostic
+//  `fs:<op>:<code>: <path>` (never raw `strerror` text), mirroring the VM
+//  (`zz_stdlib/src/natives/fs/mod.rs`) byte-for-byte. `<code>` is one of
+//  `not_found`, `permission_denied`, `already_exists`, `invalid_input`,
+//  `not_empty`, `closed`, or `io_error`.
+//
+//  Non-blocking discipline: each blocking syscall first tops up the
+//  executor when running on a worker thread (`zz_is_worker`), so the
+//  scheduler never stalls waiting for disk. The public API stays
+//  synchronous-looking — `fs.read_to_string(path)` — exactly like the VM.
+// =====================================================================
+#ifndef ZZ_OS_WINDOWS
+#include <dirent.h>
+#endif
+
+// errno → stable code (mirrors the VM's ErrorKind mapping).
+static const char *zz_fs_code(int e) {
+    switch (e) {
+    case ENOENT:
+#ifdef ENODATA
+    case ENODATA:
+#endif
+        return "not_found";
+    case EACCES:
+    case EPERM:
+        return "permission_denied";
+    case EEXIST:
+        return "already_exists";
+    case EINVAL:
+    case EISDIR:
+    case ENOTDIR:
+        return "invalid_input";
+#ifdef ENOTEMPTY
+    case ENOTEMPTY:
+#endif
+        return "not_empty";
+    default:
+        return "io_error";
     }
+}
+
+// `fs:<op>:<code>: <path>` as an `.err(str)`.
+static zz_value zz_fs_err1(const char *op, const char *path, int e) {
+    const char *code = zz_fs_code(e);
+    size_t n = strlen("fs:") + strlen(op) + 1 + strlen(code) + 2 + strlen(path) + 1;
+    char *msg = (char *)malloc(n);
+    if (!msg) return zz_variant_err(zz_str_static("fs:io_error"));
+    snprintf(msg, n, "fs:%s:%s: %s", op, code, path);
+    return zz_variant_err(zz_str_owned(msg));
+}
+
+// `fs:<op>:<code>: <src> -> <dst>` as an `.err(str)`.
+static zz_value zz_fs_err2(const char *op, const char *src, const char *dst, int e) {
+    const char *code = zz_fs_code(e);
+    size_t n = strlen("fs:") + strlen(op) + 1 + strlen(code) + 2
+        + strlen(src) + 4 + strlen(dst) + 1;
+    char *msg = (char *)malloc(n);
+    if (!msg) return zz_variant_err(zz_str_static("fs:io_error"));
+    snprintf(msg, n, "fs:%s:%s: %s -> %s", op, code, src, dst);
+    return zz_variant_err(zz_str_owned(msg));
+}
+
+// Scheduler courtesy: blocking disk I/O must never stall the executor.
+// When this runs on a worker thread, park a replacement first (same
+// discipline as channel/task blocking waits).
+static inline void zz_fs_top_up(void) {
+    if (zz_is_worker) zz_executor_top_up();
+}
+
+static const char *zz_fs_cstr(zz_value v) {
+    if (v.tag != ZZ_STR || !v.s) return NULL;
+    return zz_str_cptr(v.s);
+}
+
+// fs.read_to_string(path) → Result<str>
+zz_value zz_fs_read(zz_value path, int *err) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+    FILE *f = fopen(p, "rb");
+    if (!f) return zz_fs_err1("read", p, errno);
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     if (sz < 0) sz = 0;
-    zz_str *out = str_alloc(sz);
-    size_t n = fread(zz_str_ptr(out), 1, sz, f);
+    zz_str *out = str_alloc((size_t)sz);
+    size_t n = fread(zz_str_ptr(out), 1, (size_t)sz, f);
+    int ferr = ferror(f);
     fclose(f);
+    if (ferr) {
+        zz_value leak = (zz_value){ZZ_STR, {.s = out}};
+        zz_release(&leak);
+        return zz_fs_err1("read", p, EIO);
+    }
     zz_str_ptr(out)[n] = '\0';
     out->len = n;
     return zz_variant_ok((zz_value){ZZ_STR, {.s = out}});
 }
 
-// fs.write(path, data)
+// fs.read_bytes(path) → Result<[int]>
+zz_value zz_fs_read_bytes(zz_value path, int *err) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+    FILE *f = fopen(p, "rb");
+    if (!f) return zz_fs_err1("read_bytes", p, errno);
+    zz_value out = zz_array_new();
+    unsigned char buf[65536];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) {
+        for (size_t i = 0; i < n; i++) {
+            zz_array_push(out.arr, (zz_value){ZZ_INT, {.i = (int64_t)buf[i]}});
+        }
+    }
+    int ferr = ferror(f);
+    fclose(f);
+    if (ferr) return zz_fs_err1("read_bytes", p, EIO);
+    return zz_variant_ok(out);
+}
+
+// fs.write(path, data) → Result<unit>
 zz_value zz_fs_write(zz_value path, zz_value data, int *err) {
-    if (path.tag != ZZ_STR || data.tag != ZZ_STR) { *err = 1; return zz_unit(); }
-    FILE *f = fopen(zz_str_cptr(path.s), "wb");
-    if (!f) {
-        return zz_variant_err(zz_str_static("cannot open file for write"));
-    }
-    size_t w = fwrite(zz_str_cptr(data.s), 1, data.s->len, f);
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    const char *d = zz_fs_cstr(data);
+    if (!p || data.tag != ZZ_STR) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+    FILE *f = fopen(p, "wb");
+    if (!f) return zz_fs_err1("write", p, errno);
+    size_t w = fwrite(d, 1, data.s->len, f);
     int close_ok = (fclose(f) == 0);
-    if (w != data.s->len || !close_ok) {
-        return zz_variant_err(zz_str_static("write failed"));
-    }
+    if (w != data.s->len || !close_ok) return zz_fs_err1("write", p, EIO);
     return zz_variant_ok(zz_unit());
 }
 
-// fs.exists(path)
+// fs.append(path, data) → Result<unit>
+zz_value zz_fs_append(zz_value path, zz_value data, int *err) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    const char *d = zz_fs_cstr(data);
+    if (!p || data.tag != ZZ_STR) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+    FILE *f = fopen(p, "ab");
+    if (!f) return zz_fs_err1("append", p, errno);
+    size_t w = fwrite(d, 1, data.s->len, f);
+    int close_ok = (fclose(f) == 0);
+    if (w != data.s->len || !close_ok) return zz_fs_err1("append", p, EIO);
+    return zz_variant_ok(zz_unit());
+}
+
+// fs.copy(src, dst) → Result<unit>
+zz_value zz_fs_copy(zz_value src, zz_value dst, int *err) {
+    (void)err;
+    const char *s = zz_fs_cstr(src);
+    const char *d = zz_fs_cstr(dst);
+    if (!s || !d) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+    FILE *in = fopen(s, "rb");
+    if (!in) return zz_fs_err2("copy", s, d, errno);
+    FILE *out = fopen(d, "wb");
+    if (!out) {
+        int e = errno;
+        fclose(in);
+        return zz_fs_err2("copy", s, d, e);
+    }
+    char buf[65536];
+    size_t n;
+    int rwerr = 0;
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { rwerr = EIO; break; }
+    }
+    if (!rwerr && ferror(in)) rwerr = EIO;
+    fclose(in);
+    if (fclose(out) != 0 && !rwerr) rwerr = EIO;
+    if (rwerr) return zz_fs_err2("copy", s, d, rwerr);
+    return zz_variant_ok(zz_unit());
+}
+
+// fs.move(src, dst) → Result<unit>
+zz_value zz_fs_move(zz_value src, zz_value dst, int *err) {
+    (void)err;
+    const char *s = zz_fs_cstr(src);
+    const char *d = zz_fs_cstr(dst);
+    if (!s || !d) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+    if (rename(s, d) != 0) return zz_fs_err2("move", s, d, errno);
+    return zz_variant_ok(zz_unit());
+}
+
+// fs.exists(path) → bool (stat-based: true for files AND dirs).
 zz_value zz_fs_exists(zz_value path, int *err) {
     (void)err;
-    if (path.tag != ZZ_STR) return (zz_value){ZZ_BOOL, {.b = false}};
-    FILE *f = fopen(zz_str_cptr(path.s), "rb");
-    if (!f) return (zz_value){ZZ_BOOL, {.b = false}};
-    fclose(f);
-    return (zz_value){ZZ_BOOL, {.b = true}};
+    const char *p = zz_fs_cstr(path);
+    if (!p) return (zz_value){ZZ_BOOL, {.b = false}};
+    struct stat st;
+    return (zz_value){ZZ_BOOL, {.b = stat(p, &st) == 0}};
 }
 
-// fs.remove(path)
+// fs.is_file(path) → bool
+zz_value zz_fs_is_file(zz_value path, int *err) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) return (zz_value){ZZ_BOOL, {.b = false}};
+    struct stat st;
+    if (stat(p, &st) != 0) return (zz_value){ZZ_BOOL, {.b = false}};
+#ifdef ZZ_OS_WINDOWS
+    return (zz_value){ZZ_BOOL, {.b = (st.st_mode & _S_IFMT) == _S_IFREG}};
+#else
+    return (zz_value){ZZ_BOOL, {.b = S_ISREG(st.st_mode)}};
+#endif
+}
+
+// fs.is_dir(path) → bool
+zz_value zz_fs_is_dir(zz_value path, int *err) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) return (zz_value){ZZ_BOOL, {.b = false}};
+    struct stat st;
+    if (stat(p, &st) != 0) return (zz_value){ZZ_BOOL, {.b = false}};
+#ifdef ZZ_OS_WINDOWS
+    return (zz_value){ZZ_BOOL, {.b = (st.st_mode & _S_IFMT) == _S_IFDIR}};
+#else
+    return (zz_value){ZZ_BOOL, {.b = S_ISDIR(st.st_mode)}};
+#endif
+}
+
+// fs.remove(path) → Result<unit>
 zz_value zz_fs_remove(zz_value path, int *err) {
-    if (path.tag != ZZ_STR) { *err = 1; return zz_unit(); }
-    int r = remove(zz_str_cptr(path.s));
-    if (r != 0) {
-        return zz_variant_err(zz_str_static("cannot remove file"));
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+    if (remove(p) != 0) return zz_fs_err1("remove_file", p, errno);
+    return zz_variant_ok(zz_unit());
+}
+
+// fs.mkdir(path) → Result<unit>
+zz_value zz_fs_mkdir(zz_value path, int *err) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+#ifdef ZZ_OS_WINDOWS
+    int r = _mkdir(p);
+#else
+    int r = mkdir(p, 0755);
+#endif
+    if (r != 0) return zz_fs_err1("mkdir", p, errno);
+    return zz_variant_ok(zz_unit());
+}
+
+// fs.mkdir_all(path) → Result<unit> (recursive, EEXIST-tolerant).
+zz_value zz_fs_mkdir_all(zz_value path, int *err) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+    // Walk components, creating each level. Absolute + relative paths.
+    size_t len = strlen(p);
+    char *tmp = (char *)malloc(len + 1);
+    if (!tmp) return zz_fs_err1("mkdir_all", p, ENOMEM);
+    memcpy(tmp, p, len + 1);
+    for (size_t i = 0; i <= len; i++) {
+        if (tmp[i] == '/' || tmp[i] == '\\' || tmp[i] == '\0') {
+            char save = tmp[i];
+            // Skip leading separators and `.` (never mkdir "" or ".").
+            int is_edge = (i == 0);
+            tmp[i] = '\0';
+            if (!is_edge && strlen(tmp) > 0 && strcmp(tmp, ".") != 0) {
+#ifdef ZZ_OS_WINDOWS
+                if (_mkdir(tmp) != 0 && errno != EEXIST) {
+#else
+                if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+#endif
+                    int e = errno;
+                    // A non-directory at this prefix is a hard error even
+                    // when some other errno claims success.
+                    struct stat st;
+                    if (stat(tmp, &st) != 0
+#ifdef ZZ_OS_WINDOWS
+                        || (st.st_mode & _S_IFMT) != _S_IFDIR) {
+#else
+                        || !S_ISDIR(st.st_mode)) {
+#endif
+                        tmp[i] = save;
+                        zz_value r = zz_fs_err1("mkdir_all", p, e);
+                        free(tmp);
+                        return r;
+                    }
+                }
+            }
+            tmp[i] = save;
+        }
+    }
+    free(tmp);
+    return zz_variant_ok(zz_unit());
+}
+
+// Collect sorted entry names (no `.`/`..`). Returns NULL on error with
+// errno preserved; `*n_out` holds the count.
+static char **zz_fs_list_names(const char *p, size_t *n_out) {
+    *n_out = 0;
+#ifdef ZZ_OS_WINDOWS
+    size_t plen = strlen(p);
+    char *pat = (char *)malloc(plen + 3);
+    if (!pat) return NULL;
+    memcpy(pat, p, plen);
+    pat[plen] = '\\';
+    pat[plen + 1] = '*';
+    pat[plen + 2] = '\0';
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pat, &fd);
+    free(pat);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    size_t cap = 16, n = 0;
+    char **names = (char **)malloc(cap * sizeof(char *));
+    if (!names) { FindClose(h); return NULL; }
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        if (n == cap) {
+            cap *= 2;
+            char **nb = (char **)realloc(names, cap * sizeof(char *));
+            if (!nb) break;
+            names = nb;
+        }
+        names[n++] = copy_cstr(fd.cFileName, strlen(fd.cFileName));
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR *d = opendir(p);
+    if (!d) return NULL;
+    size_t cap = 16, n = 0;
+    char **names = (char **)malloc(cap * sizeof(char *));
+    if (!names) { closedir(d); return NULL; }
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        if (n == cap) {
+            cap *= 2;
+            char **nb = (char **)realloc(names, cap * sizeof(char *));
+            if (!nb) break;
+            names = nb;
+        }
+        names[n++] = copy_cstr(e->d_name, strlen(e->d_name));
+    }
+    closedir(d);
+#endif
+    // Insertion sort (directories are small; avoids qsort fn-pointer casts).
+    for (size_t i = 1; i < n; i++) {
+        char *t = names[i];
+        size_t j = i;
+        while (j > 0 && strcmp(names[j - 1], t) > 0) {
+            names[j] = names[j - 1];
+            j--;
+        }
+        names[j] = t;
+    }
+    *n_out = n;
+    return names;
+}
+
+// fs.read_dir(path) → Result<[str]> (sorted basenames).
+zz_value zz_fs_read_dir(zz_value path, int *err) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+    size_t n = 0;
+    char **names = zz_fs_list_names(p, &n);
+    if (!names && errno != 0) {
+        // Distinguish "not a directory" from generic I/O errors while
+        // keeping the unified code shape.
+        struct stat st;
+        if (stat(p, &st) != 0) return zz_fs_err1("read_dir", p, errno);
+#ifdef ZZ_OS_WINDOWS
+        if ((st.st_mode & _S_IFMT) != _S_IFDIR) return zz_fs_err1("read_dir", p, ENOTDIR);
+#else
+        if (!S_ISDIR(st.st_mode)) return zz_fs_err1("read_dir", p, ENOTDIR);
+#endif
+        return zz_fs_err1("read_dir", p, EIO);
+    }
+    zz_value out = zz_array_new();
+    for (size_t i = 0; i < n; i++) {
+        zz_array_push(out.arr, zz_str_new(names[i], strlen(names[i])));
+        free(names[i]);
+    }
+    free(names);
+    return zz_variant_ok(out);
+}
+
+// Legacy alias: fs.readdir → read_dir.
+zz_value zz_fs_readdir(zz_value path, int *err) {
+    return zz_fs_read_dir(path, err);
+}
+
+// Recursive remove helper. Returns 0 or an errno.
+static int zz_fs_rm_recursive(const char *p) {
+#ifdef ZZ_OS_WINDOWS
+    DWORD attrs = GetFileAttributesA(p);
+    if (attrs == INVALID_FILE_ATTRIBUTES) return ENOENT;
+    if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+        return DeleteFileA(p) ? 0 : EACCES;
+    }
+    size_t plen = strlen(p);
+    char *pat = (char *)malloc(plen + 3);
+    if (!pat) return ENOMEM;
+    memcpy(pat, p, plen);
+    pat[plen] = '\\';
+    pat[plen + 1] = '*';
+    pat[plen + 2] = '\0';
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pat, &fd);
+    free(pat);
+    int rc = 0;
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+            size_t cl = strlen(p) + 1 + strlen(fd.cFileName) + 1;
+            char *child = (char *)malloc(cl);
+            if (!child) { rc = ENOMEM; break; }
+            snprintf(child, cl, "%s\\%s", p, fd.cFileName);
+            rc = zz_fs_rm_recursive(child);
+            free(child);
+            if (rc) break;
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    if (!rc && !RemoveDirectoryA(p)) rc = EACCES;
+    return rc;
+#else
+    struct stat st;
+    if (lstat(p, &st) != 0) return errno;
+    if (!S_ISDIR(st.st_mode)) {
+        return unlink(p) == 0 ? 0 : errno;
+    }
+    DIR *d = opendir(p);
+    if (!d) return errno;
+    int rc = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        size_t cl = strlen(p) + 1 + strlen(e->d_name) + 1;
+        char *child = (char *)malloc(cl);
+        if (!child) { rc = ENOMEM; break; }
+        snprintf(child, cl, "%s/%s", p, e->d_name);
+        rc = zz_fs_rm_recursive(child);
+        free(child);
+        if (rc) break;
+    }
+    closedir(d);
+    if (!rc && rmdir(p) != 0) rc = errno;
+    return rc;
+#endif
+}
+
+// fs.remove_dir_all(path) → Result<unit>
+zz_value zz_fs_remove_dir_all(zz_value path, int *err) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+    int rc = zz_fs_rm_recursive(p);
+    if (rc != 0) return zz_fs_err1("remove_dir_all", p, rc);
+    return zz_variant_ok(zz_unit());
+}
+
+// Recursive walk helper: appends full paths (files AND dirs, no root
+// itself) to `out` (a C array with cap tracking).
+static int zz_fs_walk_into(const char *dir, char ***out, size_t *len, size_t *cap) {
+    size_t n = 0;
+    char **names = zz_fs_list_names(dir, &n);
+    if (!names) return errno != 0 ? errno : EIO;
+    int rc = 0;
+    for (size_t i = 0; i < n && !rc; i++) {
+        size_t cl;
+#ifdef ZZ_OS_WINDOWS
+        cl = strlen(dir) + 1 + strlen(names[i]) + 1;
+#else
+        cl = strlen(dir) + 1 + strlen(names[i]) + 1;
+#endif
+        char *child = (char *)malloc(cl);
+        if (!child) { rc = ENOMEM; break; }
+#ifdef ZZ_OS_WINDOWS
+        snprintf(child, cl, "%s\\%s", dir, names[i]);
+#else
+        snprintf(child, cl, "%s/%s", dir, names[i]);
+#endif
+        if (*len == *cap) {
+            size_t nc = (*cap == 0) ? 16 : *cap * 2;
+            char **nb = (char **)realloc(*out, nc * sizeof(char *));
+            if (!nb) { free(child); rc = ENOMEM; break; }
+            *out = nb;
+            *cap = nc;
+        }
+        (*out)[(*len)++] = child;
+        // lstat (never stat): symlinked dirs are recorded but never
+        // descended — matching the VM (`DirEntry::file_type` does not
+        // traverse symlinks) and immune to symlink cycles.
+#ifdef ZZ_OS_WINDOWS
+        struct stat st;
+        int is_dir = stat(child, &st) == 0
+            && (st.st_mode & _S_IFMT) == _S_IFDIR
+            && !(GetFileAttributesA(child) & FILE_ATTRIBUTE_REPARSE_POINT);
+#else
+        struct stat st;
+        int is_dir = lstat(child, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+        if (is_dir) {
+            rc = zz_fs_walk_into(child, out, len, cap);
+        }
+    }
+    for (size_t i = 0; i < n; i++) free(names[i]);
+    free(names);
+    return rc;
+}
+
+// fs.walk_dir(path) → Result<[str]> (sorted full paths, recursive).
+zz_value zz_fs_walk_dir(zz_value path, int *err) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+    struct stat st;
+    if (stat(p, &st) != 0) return zz_fs_err1("walk_dir", p, errno);
+#ifdef ZZ_OS_WINDOWS
+    if ((st.st_mode & _S_IFMT) != _S_IFDIR) return zz_fs_err1("walk_dir", p, ENOTDIR);
+#else
+    if (!S_ISDIR(st.st_mode)) return zz_fs_err1("walk_dir", p, ENOTDIR);
+#endif
+    char **paths = NULL;
+    size_t len = 0, cap = 0;
+    int rc = zz_fs_walk_into(p, &paths, &len, &cap);
+    if (rc != 0) {
+        for (size_t i = 0; i < len; i++) free(paths[i]);
+        free(paths);
+        return zz_fs_err1("walk_dir", p, rc);
+    }
+    // Final global sort so VM and AOT agree byte-for-byte.
+    for (size_t i = 1; i < len; i++) {
+        char *t = paths[i];
+        size_t j = i;
+        while (j > 0 && strcmp(paths[j - 1], t) > 0) {
+            paths[j] = paths[j - 1];
+            j--;
+        }
+        paths[j] = t;
+    }
+    zz_value out = zz_array_new();
+    for (size_t i = 0; i < len; i++) {
+        zz_array_push(out.arr, zz_str_new(paths[i], strlen(paths[i])));
+        free(paths[i]);
+    }
+    free(paths);
+    return zz_variant_ok(out);
+}
+
+// fs.stat(path) → Result<dict<str,str>> with size, modified_ms,
+// created_ms, is_file, is_dir, readonly (all strings — Dict<Str,Str>
+// keeps the checker + codegen uniform across engines).
+zz_value zz_fs_stat(zz_value path, int *err) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) { *err = 1; return zz_unit(); }
+    struct stat st;
+    if (stat(p, &st) != 0) return zz_fs_err1("stat", p, errno);
+    char sizeb[32], modb[32], creb[32];
+    snprintf(sizeb, sizeof sizeb, "%lld", (long long)st.st_size);
+#if defined(ZZ_OS_MACOS)
+    long long modms = (long long)st.st_mtimespec.tv_sec * 1000
+        + st.st_mtimespec.tv_nsec / 1000000;
+#ifdef st_birthtime
+    long long crems = (long long)st.st_birthtimespec.tv_sec * 1000
+        + st.st_birthtimespec.tv_nsec / 1000000;
+#else
+    long long crems = 0;
+#endif
+#elif defined(ZZ_OS_WINDOWS)
+    long long modms = (long long)st.st_mtime * 1000;
+    long long crems = (long long)st.st_ctime * 1000;
+#else
+    long long modms = (long long)st.st_mtim.tv_sec * 1000
+        + st.st_mtim.tv_nsec / 1000000;
+    long long crems = 0;
+#endif
+    snprintf(modb, sizeof modb, "%lld", modms);
+    snprintf(creb, sizeof creb, "%lld", crems);
+#ifdef ZZ_OS_WINDOWS
+    int is_file = (st.st_mode & _S_IFMT) == _S_IFREG;
+    int is_dir = (st.st_mode & _S_IFMT) == _S_IFDIR;
+    int readonly = (st.st_mode & _S_IWRITE) == 0;
+#else
+    int is_file = S_ISREG(st.st_mode);
+    int is_dir = S_ISDIR(st.st_mode);
+    int readonly = (st.st_mode & 0222) == 0;
+#endif
+    zz_value d = zz_dict_new();
+    zz_dict_set(d.dict, zz_str_static("size"), zz_str_new(sizeb, strlen(sizeb)));
+    zz_dict_set(d.dict, zz_str_static("modified_ms"), zz_str_new(modb, strlen(modb)));
+    zz_dict_set(d.dict, zz_str_static("created_ms"), zz_str_new(creb, strlen(creb)));
+    zz_dict_set(d.dict, zz_str_static("is_file"),
+                zz_str_new(is_file ? "true" : "false", is_file ? 4 : 5));
+    zz_dict_set(d.dict, zz_str_static("is_dir"),
+                zz_str_new(is_dir ? "true" : "false", is_dir ? 4 : 5));
+    zz_dict_set(d.dict, zz_str_static("readonly"),
+                zz_str_new(readonly ? "true" : "false", readonly ? 4 : 5));
+    return zz_variant_ok(d);
+}
+
+// ---- streaming handles (ZZ_FILE) ----------------------------------------
+
+struct zz_file {
+    FILE *fp;
+    char *path;   // owned copy for diagnostics
+    int closed;
+};
+
+static struct zz_file *zz_file_alloc(FILE *fp, const char *path) {
+    struct zz_file *f = (struct zz_file *)malloc(sizeof(struct zz_file));
+    if (!f) return NULL;
+    f->fp = fp;
+    f->path = copy_cstr(path, strlen(path));
+    f->closed = 0;
+    return f;
+}
+
+static zz_value zz_file_closed_err(const char *op) {
+    size_t n = strlen("fs:") + strlen(op) + strlen(":closed") + 1;
+    char *msg = (char *)malloc(n);
+    if (!msg) return zz_variant_err(zz_str_static("fs:closed"));
+    snprintf(msg, n, "fs:%s:closed", op);
+    return zz_variant_err(zz_str_owned(msg));
+}
+
+// fs.open(path, mode) → Result<file> where mode ∈ {r, w, a}.
+zz_value zz_fs_open(zz_value path, zz_value mode, int *err) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    const char *m = zz_fs_cstr(mode);
+    if (!p || !m) { *err = 1; return zz_unit(); }
+    const char *fmode = NULL;
+    if (strcmp(m, "r") == 0) fmode = "rb";
+    else if (strcmp(m, "w") == 0) fmode = "wb";
+    else if (strcmp(m, "a") == 0) fmode = "ab";
+    if (!fmode) {
+        size_t n = strlen("fs:open:invalid_input: ") + strlen(p)
+            + strlen(" (mode must be one of r, w, a)") + 1;
+        char *msg = (char *)malloc(n);
+        if (!msg) return zz_variant_err(zz_str_static("fs:open:invalid_input"));
+        snprintf(msg, n, "fs:open:invalid_input: %s (mode must be one of r, w, a)", p);
+        return zz_variant_err(zz_str_owned(msg));
+    }
+    zz_fs_top_up();
+    FILE *fp = fopen(p, fmode);
+    if (!fp) return zz_fs_err1("open", p, errno);
+    struct zz_file *f = zz_file_alloc(fp, p);
+    if (!f) {
+        fclose(fp);
+        return zz_variant_err(zz_str_static("fs:open:io_error"));
+    }
+    return zz_variant_ok((zz_value){ZZ_FILE, {.file = f}});
+}
+
+// file.read_chunk(f, n) → Result<str> ("" at EOF).
+zz_value zz_fs_read_chunk(zz_value f, zz_value n, int *err) {
+    (void)err;
+    if (f.tag != ZZ_FILE || !f.file || f.file->closed || !f.file->fp) {
+        return zz_file_closed_err("read_chunk");
+    }
+    if (n.tag != ZZ_INT || n.i < 0) { *err = 1; return zz_unit(); }
+    size_t want = (size_t)n.i;
+    if (want > 8 * 1024 * 1024) want = 8 * 1024 * 1024;
+    zz_fs_top_up();
+    // Heap temp + copy (disk-bound anyway): keeps error paths leak-free
+    // without reaching into the string allocator's ownership rules.
+    char *tmp = (char *)malloc(want > 0 ? want : 1);
+    if (!tmp) return zz_fs_err1("read_chunk", f.file->path ? f.file->path : "?", ENOMEM);
+    size_t got = want > 0 ? fread(tmp, 1, want, f.file->fp) : 0;
+    if (got == 0 && ferror(f.file->fp)) {
+        free(tmp);
+        return zz_fs_err1("read_chunk", f.file->path ? f.file->path : "?", EIO);
+    }
+    zz_value s = zz_str_new(tmp, got);
+    free(tmp);
+    return zz_variant_ok(s);
+}
+
+// file.write_chunk(f, data) → Result<int> (bytes written).
+zz_value zz_fs_write_chunk(zz_value f, zz_value data, int *err) {
+    (void)err;
+    if (f.tag != ZZ_FILE || !f.file || f.file->closed || !f.file->fp) {
+        return zz_file_closed_err("write_chunk");
+    }
+    if (data.tag != ZZ_STR) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+    size_t w = fwrite(zz_str_cptr(data.s), 1, data.s->len, f.file->fp);
+    if (w != data.s->len) {
+        return zz_fs_err1("write_chunk", f.file->path ? f.file->path : "?", EIO);
+    }
+    return zz_variant_ok((zz_value){ZZ_INT, {.i = (int64_t)w}});
+}
+
+// file.seek(f, pos) → Result<int> (absolute from start).
+zz_value zz_fs_seek(zz_value f, zz_value pos, int *err) {
+    (void)err;
+    if (f.tag != ZZ_FILE || !f.file || f.file->closed || !f.file->fp) {
+        return zz_file_closed_err("seek");
+    }
+    if (pos.tag != ZZ_INT || pos.i < 0) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+    if (fseek(f.file->fp, (long)pos.i, SEEK_SET) != 0) {
+        return zz_fs_err1("seek", f.file->path ? f.file->path : "?", errno);
+    }
+    long at = ftell(f.file->fp);
+    return zz_variant_ok((zz_value){ZZ_INT, {.i = (int64_t)(at < 0 ? 0 : at)}});
+}
+
+// file.flush(f) → Result<unit>
+zz_value zz_fs_flush(zz_value f, int *err) {
+    (void)err;
+    if (f.tag != ZZ_FILE || !f.file || f.file->closed || !f.file->fp) {
+        return zz_file_closed_err("flush");
+    }
+    zz_fs_top_up();
+    if (fflush(f.file->fp) != 0) {
+        return zz_fs_err1("flush", f.file->path ? f.file->path : "?", errno);
     }
     return zz_variant_ok(zz_unit());
 }
 
-// fs.mkdir(path)
-zz_value zz_fs_mkdir(zz_value path, int *err) {
-    if (path.tag != ZZ_STR) { *err = 1; return zz_unit(); }
-    int r = mkdir(zz_str_cptr(path.s), 0755);
-    if (r != 0) { *err = 1; return zz_unit(); }
-    return zz_unit();
-}
-
-// fs.readdir(path) — return array of filenames.
-zz_value zz_fs_readdir(zz_value path, int *err) {
+// file.close(f) → Result<unit> (idempotent).
+zz_value zz_fs_close(zz_value f, int *err) {
     (void)err;
-    if (path.tag != ZZ_STR) return zz_array_new();
-    // Not implemented fully — return empty array.
-    return zz_array_new();
+    if (f.tag != ZZ_FILE || !f.file) return zz_variant_ok(zz_unit());
+    if (!f.file->closed && f.file->fp) {
+        fflush(f.file->fp);
+        fclose(f.file->fp);
+        f.file->fp = NULL;
+    }
+    f.file->closed = 1;
+    free(f.file->path);
+    f.file->path = NULL;
+    return zz_variant_ok(zz_unit());
 }
 
 // encoding.url_encode(s)

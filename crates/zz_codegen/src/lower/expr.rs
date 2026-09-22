@@ -1458,6 +1458,7 @@ impl Lowerer {
                         if found_ns.is_empty() {
                             let namespaces = [
                                 "vec", "str", "dict", "option", "result", "http", "sqlz", "db",
+                                "file",
                             ];
                             for ns in &namespaces {
                                 let candidate = format!("{ns}.{method}");
@@ -1471,37 +1472,44 @@ impl Lowerer {
                             }
                         }
                         if found_ns.is_empty() {
-                            // Also try matching by native_impl — checks if there's
-                            // a C runtime function registered for this method under
-                            // any namespace.
-                            let namespaces = [
-                                "vec", "str", "dict", "option", "result", "http", "sqlz", "db",
-                            ];
-                            for ns in &namespaces {
-                                let candidate = format!("{ns}.{method}");
-                                if native_supported(&candidate) {
-                                    found_ns = ns;
-                                    break;
-                                }
+                            // Reachable-based dynamic scan FIRST (FFI-module
+                            // namespaces like regexp, uuid, file, … plus any
+                            // embedded namespace): any reachable
+                            // `<ns>.<method>` wins, sorted for determinism.
+                            // This must precede the `native_supported`
+                            // fallback below: global support without
+                            // reachability misroutes (e.g. `f.close()` on a
+                            // file handle would pick `sqlz.close`, which is
+                            // always "supported" but not reachable here).
+                            let suffix = format!(".{method}");
+                            let mut cands: Vec<&str> = self
+                                .reachable_natives
+                                .iter()
+                                .filter_map(|n| {
+                                    n.strip_suffix(suffix.as_str())
+                                        .map(|ns| ns.strip_prefix("std.").unwrap_or(ns))
+                                })
+                                .collect();
+                            cands.sort_unstable();
+                            cands.dedup();
+                            if let Some(ns) = cands.into_iter().next() {
+                                found_ns = ns;
                             }
-                            // Dynamic scan for FFI-module namespaces (regexp,
-                            // uuid, …) that are not in the fixed lists above:
-                            // any reachable `<ns>.<method>` wins, sorted for
-                            // determinism.
+                            // Last resort: match by native_impl — checks if
+                            // there's a C runtime function registered for
+                            // this method under any namespace, even when
+                            // reachability missed it.
                             if found_ns.is_empty() {
-                                let suffix = format!(".{method}");
-                                let mut cands: Vec<&str> = self
-                                    .reachable_natives
-                                    .iter()
-                                    .filter_map(|n| {
-                                        n.strip_suffix(suffix.as_str())
-                                            .map(|ns| ns.strip_prefix("std.").unwrap_or(ns))
-                                    })
-                                    .collect();
-                                cands.sort_unstable();
-                                cands.dedup();
-                                if let Some(ns) = cands.into_iter().next() {
-                                    found_ns = ns;
+                                let namespaces = [
+                                    "vec", "str", "dict", "option", "result", "http", "sqlz", "db",
+                                    "file",
+                                ];
+                                for ns in &namespaces {
+                                    let candidate = format!("{ns}.{method}");
+                                    if native_supported(&candidate) {
+                                        found_ns = ns;
+                                        break;
+                                    }
                                 }
                             }
                             if found_ns.is_empty() {

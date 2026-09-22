@@ -467,6 +467,9 @@ static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
     case ZZ_TCP_LISTENER:
         fputs("<tcp listener>", out);
         break;
+    case ZZ_FILE:
+        fputs("<file>", out);
+        break;
     case ZZ_JSON:
         if (v->payload) {
             char *j = json_to_cstr(*v);
@@ -670,6 +673,9 @@ static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth) {
         break;
     case ZZ_TCP_LISTENER:
         sb_append_str(sb, "<tcp listener>");
+        break;
+    case ZZ_FILE:
+        sb_append_str(sb, "<file>");
         break;
     case ZZ_JSON:
         if (v->payload) {

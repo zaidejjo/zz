@@ -231,7 +231,13 @@ impl Interp {
                     if let Expr::Path { parts, span: pspan } = callee.as_ref() {
                         if parts.len() == 2 {
                             let method_name = &parts[1];
-                            if MUTATING_METHODS.contains(&method_name.as_str()) {
+                            // A dotted stdlib native (`fs.append`,
+                            // `fs.remove`, …) is a real call, not an
+                            // array-method write-back on a variable.
+                            let dotted = parts.join(".");
+                            if !self.natives.contains_key(&dotted)
+                                && MUTATING_METHODS.contains(&method_name.as_str())
+                            {
                                 let obj_name = &parts[0];
                                 let recv = self.resolve_path_value(parts, *pspan)?;
                                 let f = self.lookup_method(&recv, method_name, *pspan)?;

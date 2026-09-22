@@ -103,7 +103,10 @@ pub(crate) fn chan_send(
 /// hold the mutex, so no registration slips between the take and the
 /// clear. Called with the value already published (ring or spill), which
 /// is what makes the wakeup sound.
-fn service_chan_waiters(
+///
+/// Shared with the non-blocking `std.fs` bridge: I/O worker threads hand
+/// results back through one-shot channels without an `Interp`.
+pub(crate) fn service_chan_waiters(
     state: &Arc<ChanState>,
     mut guard: std::sync::MutexGuard<'_, ChanInner>,
     _span: Span,

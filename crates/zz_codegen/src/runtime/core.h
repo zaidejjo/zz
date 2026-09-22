@@ -63,6 +63,7 @@ typedef enum {
     ZZ_TCP_LISTENER,
     ZZ_TUPLE,
     ZZ_DB,
+    ZZ_FILE,
 } zz_tag;
 
 typedef struct zz_value zz_value;
@@ -77,6 +78,10 @@ typedef struct zz_object zz_object;
 
 // A TCP stream or listener: the underlying socket fd.
 typedef struct zz_tcp zz_tcp;
+
+// An open streaming file (`std.fs.open`): the stdio handle plus its origin
+// path (owned, for diagnostics) and a closed flag (explicit `close`).
+typedef struct zz_file zz_file;
 
 // Refcounted string with Small String Optimization (SSO).
 //
@@ -136,6 +141,7 @@ struct zz_value {
         zz_object *obj;      // boxed struct instance
         zz_tcp *net;         // TCP stream or listener (ZZ_TCP_STREAM/LISTENER)
         void *db;            // opaque sqlite3* handle (ZZ_DB)
+        zz_file *file;       // open streaming file (ZZ_FILE)
     };
 };
 
@@ -708,12 +714,35 @@ zz_value zz_env_var(zz_value name, int *err);
 zz_value zz_env_args(zz_value unused, int *err);
 
 // ---- fs natives ---------------------------------------------------------
+// Comprehensive non-blocking filesystem (see core.c): every fallible op
+// returns `Result<_, str>` with unified `fs:<op>:<code>: <path>`
+// diagnostics (never raw `strerror` text), so the VM and AOT engines agree
+// byte-for-byte. Blocking syscalls top up the executor when running on a
+// worker thread, so the scheduler never stalls; the public API stays
+// synchronous-looking (`fs.read_to_string(path)`).
 zz_value zz_fs_read(zz_value path, int *err);
+zz_value zz_fs_read_bytes(zz_value path, int *err);
 zz_value zz_fs_write(zz_value path, zz_value data, int *err);
+zz_value zz_fs_append(zz_value path, zz_value data, int *err);
+zz_value zz_fs_copy(zz_value src, zz_value dst, int *err);
+zz_value zz_fs_move(zz_value src, zz_value dst, int *err);
 zz_value zz_fs_exists(zz_value path, int *err);
+zz_value zz_fs_is_file(zz_value path, int *err);
+zz_value zz_fs_is_dir(zz_value path, int *err);
 zz_value zz_fs_remove(zz_value path, int *err);
 zz_value zz_fs_mkdir(zz_value path, int *err);
+zz_value zz_fs_mkdir_all(zz_value path, int *err);
 zz_value zz_fs_readdir(zz_value path, int *err);
+zz_value zz_fs_read_dir(zz_value path, int *err);
+zz_value zz_fs_remove_dir_all(zz_value path, int *err);
+zz_value zz_fs_walk_dir(zz_value path, int *err);
+zz_value zz_fs_stat(zz_value path, int *err);
+zz_value zz_fs_open(zz_value path, zz_value mode, int *err);
+zz_value zz_fs_read_chunk(zz_value f, zz_value n, int *err);
+zz_value zz_fs_write_chunk(zz_value f, zz_value data, int *err);
+zz_value zz_fs_seek(zz_value f, zz_value pos, int *err);
+zz_value zz_fs_flush(zz_value f, int *err);
+zz_value zz_fs_close(zz_value f, int *err);
 
 // ---- encoding natives ---------------------------------------------------
 zz_value zz_encoding_url_encode(zz_value s, int *err);

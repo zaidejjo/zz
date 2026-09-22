@@ -132,8 +132,27 @@ impl Compiler {
     /// Compile a whole program. The top level runs in the interpreter's root
     /// scope (no `EnterScope`), matching the tree-walker.
     pub fn compile_program(program: &Program) -> Chunk {
+        Self::compile_program_opt(program, None)
+    }
+
+    /// Like [`compile_program`](Self::compile_program), but the compiler
+    /// knows every registered native name — so statement-level call shapes
+    /// that collide with builtins (`fs.append`, `fs.remove`, …) lower as
+    /// real native calls instead of array-method write-backs.
+    pub fn compile_program_with_natives(
+        program: &Program,
+        native_names: Arc<std::collections::HashSet<String>>,
+    ) -> Chunk {
+        Self::compile_program_opt(program, Some(native_names))
+    }
+
+    fn compile_program_opt(
+        program: &Program,
+        native_names: Option<Arc<std::collections::HashSet<String>>>,
+    ) -> Chunk {
         let mut c = Compiler::new();
         c.is_main = true;
+        c.native_names = native_names;
         // Collect top-level declared names (post-rewrite, so namespaced).
         let mut top_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for stmt in &program.stmts {
@@ -1192,7 +1211,18 @@ impl Compiler {
                     if let Expr::Path { parts, .. } = callee.as_ref() {
                         if parts.len() == 2 {
                             let method_name = &parts[1];
-                            if MUTATING_METHODS.contains(&method_name.as_str()) {
+                            // A dotted stdlib native (`fs.append`,
+                            // `fs.remove`, …) is a real call, not an
+                            // array-method write-back. The typed pipeline
+                            // knows every native name; without it the
+                            // rewrite would emit LoadVar(fs) for a module
+                            // namespace ("undefined variable `fs`").
+                            let dotted = parts.join(".");
+                            let is_native = self
+                                .native_names
+                                .as_ref()
+                                .is_some_and(|n| n.contains(&dotted));
+                            if !is_native && MUTATING_METHODS.contains(&method_name.as_str()) {
                                 let obj_name = &parts[0];
                                 // Compile: LoadVar(obj) + args + CallMethod(method)
                                 match self.resolve(obj_name) {

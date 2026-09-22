@@ -1,0 +1,183 @@
+// E2E: std.fs comprehensive — non-blocking filesystem across VM + AOT.
+//
+// Covers: write/read_to_string, read_bytes, append, copy, move,
+// remove_file, mkdir/mkdir_all, read_dir, remove_dir_all, walk_dir,
+// exists/is_file/is_dir, stat, streaming File handles (open, read_chunk,
+// write_chunk, seek, flush, close), unified error diagnostics, and FS I/O
+// inside green-thread tasks (yield to the I/O pool, never block the
+// scheduler).
+import std.fs
+import std.task
+
+func main() {
+    base := "/tmp/zz_fs_comprehensive"
+    // Clean slate (missing dir is a tolerated .err).
+    fs.remove_dir_all(base)
+    match fs.mkdir_all("{base}/sub/nested") {
+        .ok(_) => println("mkdir_all_ok")
+        .err(e) => println("mkdir_all_err: {e}")
+    }
+
+    // Basic write + read.
+    match fs.write("{base}/a.txt", "hello") {
+        .ok(_) => println("write_ok")
+        .err(e) => println("write_err: {e}")
+    }
+    match fs.append("{base}/a.txt", " world") {
+        .ok(_) => println("append_ok")
+        .err(e) => println("append_err: {e}")
+    }
+    match fs.read_to_string("{base}/a.txt") {
+        .ok(c) => println("content: {c}")
+        .err(e) => println("read_err: {e}")
+    }
+
+    // Byte-level read.
+    match fs.read_bytes("{base}/a.txt") {
+        .ok(b) => println("bytes_len: {len(b)}")
+        .err(e) => println("bytes_err: {e}")
+    }
+
+    // Copy + move.
+    match fs.copy("{base}/a.txt", "{base}/b.txt") {
+        .ok(_) => println("copy_ok")
+        .err(e) => println("copy_err: {e}")
+    }
+    match fs.move("{base}/b.txt", "{base}/sub/c.txt") {
+        .ok(_) => println("move_ok")
+        .err(e) => println("move_err: {e}")
+    }
+
+    // Predicates.
+    println(fs.exists("{base}/a.txt"))
+    println(fs.exists("{base}/missing.txt"))
+    println(fs.is_file("{base}/a.txt"))
+    println(fs.is_dir("{base}/sub"))
+    println(fs.is_dir("{base}/a.txt"))
+
+    // Directory listing (sorted basenames) + recursive walk.
+    match fs.read_dir("{base}") {
+        .ok(entries) => println("readdir: {entries}")
+        .err(e) => println("readdir_err: {e}")
+    }
+    match fs.write("{base}/sub/nested/deep.txt", "deep") {
+        .ok(_) => println("deep_write_ok")
+        .err(e) => println("deep_write_err: {e}")
+    }
+    match fs.walk_dir("{base}/sub") {
+        .ok(paths) => println("walk_n: {len(paths)}")
+        .err(e) => println("walk_err: {e}")
+    }
+
+    // Metadata (values escaped: timestamps vary per run, so only the
+    // shape + deterministic size are asserted here).
+    match fs.stat("{base}/a.txt") {
+        .ok(st) => println("stat_size: {st["size"]}")
+        .err(e) => println("stat_err: {e}")
+    }
+
+    // Streaming write handle (free-function form `fs.*(f, …)` keeps AOT
+    // dispatch unambiguous — see lower/expr.rs method fallback notes).
+    match File.open("{base}/stream.txt", "w") {
+        .ok(f) => {
+            match fs.write_chunk(f, "chunk1-") {
+                .ok(n) => println("wchunk: {n}")
+                .err(e) => println("wchunk_err: {e}")
+            }
+            match fs.write_chunk(f, "chunk2") {
+                .ok(n) => println("wchunk: {n}")
+                .err(e) => println("wchunk_err: {e}")
+            }
+            match fs.flush(f) {
+                .ok(_) => println("flush_ok")
+                .err(e) => println("flush_err: {e}")
+            }
+            match fs.close(f) {
+                .ok(_) => println("close_ok")
+                .err(e) => println("close_err: {e}")
+            }
+        }
+        .err(e) => println("open_err: {e}")
+    }
+
+    // Streaming read handle with seek.
+    match File.open("{base}/stream.txt", "r") {
+        .ok(f) => {
+            match fs.read_chunk(f, 100) {
+                .ok(c) => println("rchunk: {c}")
+                .err(e) => println("rchunk_err: {e}")
+            }
+            match fs.seek(f, 0) {
+                .ok(p) => println("seek: {p}")
+                .err(e) => println("seek_err: {e}")
+            }
+            match fs.read_chunk(f, 6) {
+                .ok(c) => println("rchunk6: {c}")
+                .err(e) => println("rchunk_err: {e}")
+            }
+            fs.close(f)
+            println("stream_read_ok")
+        }
+        .err(e) => println("open_err: {e}")
+    }
+
+    // Unified error diagnostics (identical in VM and AOT).
+    match fs.read_to_string("{base}/missing.txt") {
+        .ok(_) => println("unexpected_ok")
+        .err(e) => println("notfound: {e}")
+    }
+    match File.open("{base}/missing.txt", "r") {
+        .ok(_) => println("unexpected_open_ok")
+        .err(e) => println("open_missing: {e}")
+    }
+    match fs.remove_file("{base}/missing.txt") {
+        .ok(_) => println("unexpected_remove_ok")
+        .err(e) => println("remove_missing: {e}")
+    }
+    match File.open("{base}/a.txt", "bogus") {
+        .ok(_) => println("unexpected_mode_ok")
+        .err(e) => println("bad_mode: {e}")
+    }
+    match File.open("{base}/closed.txt", "w") {
+        .ok(f) => {
+            fs.close(f)
+            match fs.read_chunk(f, 4) {
+                .ok(_) => println("unexpected_read_ok")
+                .err(e) => println("closed_read: {e}")
+            }
+        }
+        .err(e) => println("closed_open_err: {e}")
+    }
+
+    // Green-thread I/O: FS inside spawned tasks yields to the I/O pool
+    // instead of blocking the scheduler.
+    h1 := task.spawn(|_| {
+        match fs.read_to_string("/tmp/zz_fs_comprehensive/a.txt") {
+            .ok(c) => "t1: {c}"
+            .err(e) => "t1_err: {e}"
+        }
+    })
+    h2 := task.spawn(|_| {
+        match fs.write("/tmp/zz_fs_comprehensive/from_task.txt", "task-write") {
+            .ok(_) => "t2_write_ok"
+            .err(e) => "t2_err: {e}"
+        }
+    })
+    r1: str = task.join(h1)
+    r2: str = task.join(h2)
+    println(r1)
+    println(r2)
+    match fs.read_to_string("{base}/from_task.txt") {
+        .ok(content) => println("verify: {content}")
+        .err(e) => println("verify_err: {e}")
+    }
+
+    // Cleanup.
+    match fs.remove_dir_all("{base}") {
+        .ok(_) => println("cleanup_ok")
+        .err(e) => println("cleanup_err: {e}")
+    }
+    println(fs.exists("{base}"))
+
+    println("fs_comprehensive_ok")
+}

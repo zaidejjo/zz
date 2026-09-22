@@ -480,6 +480,11 @@ parity_strict!(parity_stdlib_json_test, "stdlib", "json_test.zz");
 parity_known_failure!(parity_stdlib_encoding_test, "stdlib", "encoding_test.zz");
 parity_strict!(parity_stdlib_filesystem, "stdlib", "filesystem.zz");
 parity_strict!(parity_stdlib_fs_test, "stdlib", "fs_test.zz");
+parity_strict!(
+    parity_stdlib_fs_comprehensive,
+    "stdlib",
+    "fs_comprehensive.zz"
+);
 parity_strict!(parity_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
 
 // --- Error fixture: both engines must error on missing struct field ---

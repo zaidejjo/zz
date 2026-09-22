@@ -1405,49 +1405,54 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
-    // std.fs
-    m.insert(
-        "std.fs.read_file".into(),
-        NativeEntry {
-            arity: 1,
-            f: fs::fs_read_file,
-        },
-    );
-    m.insert(
-        "std.fs.write_file".into(),
-        NativeEntry {
-            arity: 2,
-            f: fs::fs_write_file,
-        },
-    );
-    m.insert(
-        "std.fs.exists".into(),
-        NativeEntry {
-            arity: 1,
-            f: fs::fs_exists,
-        },
-    );
-    m.insert(
-        "std.fs.read_to_string".into(),
-        NativeEntry {
-            arity: 1,
-            f: fs::fs_read_file,
-        },
-    );
-    m.insert(
-        "std.fs.write".into(),
-        NativeEntry {
-            arity: 2,
-            f: fs::fs_write_file,
-        },
-    );
-    m.insert(
-        "std.fs.remove_file".into(),
-        NativeEntry {
-            arity: 1,
-            f: fs::fs_remove_file,
-        },
-    );
+    // std.fs — comprehensive non-blocking filesystem (see
+    // `natives/fs/mod.rs` for the I/O pool + yield protocol). Legacy
+    // aliases (`read_file`/`write_file`/`read`/`remove`) are kept so
+    // existing fixtures keep working.
+    for (name, arity, func) in [
+        (
+            "std.fs.read_file",
+            1_usize,
+            fs::fs_read_file as zz_runtime::NativeFn,
+        ),
+        ("std.fs.read", 1, fs::fs_read_file),
+        ("std.fs.read_to_string", 1, fs::fs_read_file),
+        ("std.fs.read_bytes", 1, fs::fs_read_bytes),
+        ("std.fs.write_file", 2, fs::fs_write_file),
+        ("std.fs.write", 2, fs::fs_write_file),
+        ("std.fs.append", 2, fs::fs_append),
+        ("std.fs.copy", 2, fs::fs_copy),
+        ("std.fs.move", 2, fs::fs_move),
+        ("std.fs.rename", 2, fs::fs_move),
+        ("std.fs.exists", 1, fs::fs_exists),
+        ("std.fs.is_file", 1, fs::fs_is_file),
+        ("std.fs.is_dir", 1, fs::fs_is_dir),
+        ("std.fs.remove_file", 1, fs::fs_remove_file),
+        ("std.fs.remove", 1, fs::fs_remove_file),
+        ("std.fs.mkdir", 1, fs::fs_mkdir),
+        ("std.fs.mkdir_all", 1, fs::fs_mkdir_all),
+        ("std.fs.read_dir", 1, fs::fs_read_dir),
+        ("std.fs.readdir", 1, fs::fs_read_dir),
+        ("std.fs.remove_dir_all", 1, fs::fs_remove_dir_all),
+        ("std.fs.walk_dir", 1, fs::fs_walk_dir),
+        ("std.fs.stat", 1, fs::fs_stat),
+        ("std.fs.open", 2, fs::fs_open),
+        ("std.fs.read_chunk", 2, fs::file_read_chunk),
+        ("std.fs.write_chunk", 2, fs::file_write_chunk),
+        ("std.fs.seek", 2, fs::file_seek),
+        ("std.fs.flush", 1, fs::file_flush),
+        ("std.fs.close", 1, fs::file_close),
+        // `File.open` constructor namespace (mirrors `Regexp.new`).
+        ("File.open", 2, fs::fs_open),
+        // `file.*` method namespace for open-handle dispatch.
+        ("file.read_chunk", 2, fs::file_read_chunk),
+        ("file.write_chunk", 2, fs::file_write_chunk),
+        ("file.seek", 2, fs::file_seek),
+        ("file.flush", 1, fs::file_flush),
+        ("file.close", 1, fs::file_close),
+    ] {
+        m.insert(name.into(), NativeEntry { arity, f: func });
+    }
 
     // std.env
     m.insert(
