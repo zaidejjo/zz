@@ -1,0 +1,84 @@
+// E2E: std.env — cross-platform environment, directories, OS identity.
+// Same output on VM and AOT (only deterministic projections are printed:
+// booleans, markers, and relative facts — never raw absolute paths or
+// full environment dumps).
+import std.env
+
+func main() {
+    // get/set/remove/unset roundtrip on a unique marker.
+    match env.get("ZZ_E2E_ENV_MARKER") {
+        .some(v) => println("unexpected_pre: {v}")
+        .none => println("get_none_ok")
+    }
+    match env.set("ZZ_E2E_ENV_MARKER", "hi") {
+        .ok(_) => println("set_ok")
+        .err(e) => println("set_err: {e}")
+    }
+    match env.get("ZZ_E2E_ENV_MARKER") {
+        .some(v) => println("get_some: {v}")
+        .none => println("unexpected_none")
+    }
+    // Marker visible through the full map (iteration, sorted by VM).
+    found := false
+    m := env.vars()
+    for k in m {
+        if k == "ZZ_E2E_ENV_MARKER" {
+            found = true
+        }
+    }
+    println(found)
+    env.unset("ZZ_E2E_ENV_MARKER")
+    match env.get("ZZ_E2E_ENV_MARKER") {
+        .some(v) => println("unexpected_post: {v}")
+        .none => println("remove_ok")
+    }
+    // Invalid keys are loud .err, never panics.
+    match env.set("", "x") {
+        .ok(_) => println("unexpected_empty_ok")
+        .err(e) => println("badkey_ok")
+    }
+    // OS identity + directories (projections only).
+    println(env.os())
+    println(len(env.temp_dir()) > 0)
+    match env.cwd() {
+        .ok(c) => println(len(c) > 0)
+        .err(e) => println("cwd_err")
+    }
+    match env.exe_path() {
+        .ok(p) => println(len(p) > 0)
+        .err(e) => println("exe_err")
+    }
+    match env.home_dir() {
+        .some(h) => println(len(h) > 0)
+        .none => println("home_none")
+    }
+    match env.user() {
+        .some(u) => println(len(u) > 0)
+        .none => println("user_none")
+    }
+    // set_cwd roundtrip (restored immediately).
+    match env.cwd() {
+        .ok(before) => {
+            match env.set_cwd(env.temp_dir()) {
+                .ok(_) => {
+                    match env.cwd() {
+                        .ok(after) => println(after == env.temp_dir())
+                        .err(e) => println("cwd2_err")
+                    }
+                    env.set_cwd(before)
+                    match env.cwd() {
+                        .ok(restored) => println(restored == before)
+                        .err(e) => println("cwd3_err")
+                    }
+                }
+                .err(e) => println("set_cwd_err: {e}")
+            }
+            match env.set_cwd("/zz-definitely-missing-dir-xyz") {
+                .ok(_) => println("unexpected_cwd_ok")
+                .err(e) => println("cwd_missing_ok")
+            }
+        }
+        .err(e) => println("cwd_err")
+    }
+    println("env_full_ok")
+}

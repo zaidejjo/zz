@@ -611,6 +611,16 @@ fn native_impl(name: &str) -> Option<&'static str> {
             Some("zz_env_get")
         }
         "env.var" | "std.env.var" | "envmod.var" | "std.envmod.var" => Some("zz_env_var"),
+        "env.set" | "std.env.set" => Some("zz_env_set"),
+        "env.remove" | "std.env.remove" | "env.unset" | "std.env.unset" => Some("zz_env_remove"),
+        "env.vars" | "std.env.vars" => Some("zz_env_vars"),
+        "env.cwd" | "std.env.cwd" => Some("zz_env_cwd"),
+        "env.set_cwd" | "std.env.set_cwd" => Some("zz_env_set_cwd"),
+        "env.exe_path" | "std.env.exe_path" => Some("zz_env_exe_path"),
+        "env.home_dir" | "std.env.home_dir" => Some("zz_env_home_dir"),
+        "env.temp_dir" | "std.env.temp_dir" => Some("zz_env_temp_dir"),
+        "env.user" | "std.env.user" => Some("zz_env_user"),
+        "env.os" | "std.env.os" => Some("zz_env_os"),
         "env.args" | "std.env.args" | "envmod.args" | "std.envmod.args" => Some("zz_env_args"),
         // dict
         "dict.len" => Some("zz_dict_len_val"),

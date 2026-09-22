@@ -345,17 +345,44 @@ import std.env
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `env.get_var` | `env.get_var(name: str)` | Get env var |
+| `env.get` | `env.get(key: str) -> str?` | Value or `.none` |
+| `env.get_var` | `env.get_var(name: str)` | Get env var (legacy alias shape) |
+| `env.var` | `env.var(name: str)` | Value or `.err` |
+| `env.set` | `env.set(key: str, val: str)` | Set (`.err` on bad key) |
+| `env.remove` / `env.unset` | `env.remove(key: str)` | Unset (total no-op) |
+| `env.vars` | `env.vars() -> map[str]str` | All variables, sorted by key |
+| `env.cwd` | `env.cwd()` | Working directory (`.err` on failure) |
+| `env.set_cwd` | `env.set_cwd(path: str)` | Change directory (`.err` on failure) |
+| `env.exe_path` | `env.exe_path()` | Absolute path of this binary |
+| `env.home_dir` | `env.home_dir() -> str?` | `HOME` / `USERPROFILE` |
+| `env.temp_dir` | `env.temp_dir() -> str` | System temp dir (total) |
+| `env.user` | `env.user() -> str?` | `USER`/`LOGNAME` / `USERNAME` |
+| `env.os` | `env.os() -> str` | `"linux"` / `"macos"` / `"windows"` |
 | `env.args` | `env.args() -> [str]` | Script arguments |
 
 ```zz
 import std.env
 
 // Environment variable
-match env.get_var("HOME") {
+match env.get("HOME") {
     .some(home) => println("Home: {home}"),
     .none       => println("HOME not set"),
 }
+
+// Set + remove (process-wide, like POSIX setenv)
+match env.set("APP_MODE", "demo") {
+    .ok(_)  => println("set"),
+    .err(e) => println(e),
+}
+env.remove("APP_MODE")
+
+// Directories + identity
+match env.cwd() {
+    .ok(c)  => println(c),
+    .err(e) => println(e),
+}
+println(env.os())
+println(env.temp_dir())
 
 // Command line args
 for arg in env.args() {

@@ -224,6 +224,7 @@ e2e_success_test!(e2e_stdlib_import_alias, "stdlib", "import_alias.zz");
 e2e_success_test!(e2e_stdlib_fs_path, "stdlib", "fs_path.zz");
 e2e_success_test!(e2e_stdlib_fs_vfs, "stdlib", "fs_vfs.zz");
 e2e_success_test!(e2e_stdlib_bytes, "stdlib", "bytes.zz");
+e2e_success_test!(e2e_stdlib_env_full, "stdlib", "env_full.zz");
 e2e_success_test!(e2e_stdlib_env_test, "stdlib", "env_test.zz");
 e2e_success_test!(e2e_stdlib_time_test, "stdlib", "time_test.zz");
 e2e_success_test!(e2e_stdlib_math_extended, "stdlib", "math_extended_test.zz");
