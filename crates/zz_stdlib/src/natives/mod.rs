@@ -1516,6 +1516,26 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
             f: env::env_args,
         },
     );
+    // std.env — cross-platform environment + OS identity (see
+    // `natives/env/mod.rs`). Short `env.*` spellings resolve through the
+    // module namespace like every other stdlib module.
+    for (name, arity, func) in [
+        ("std.env.get", 1_usize, env::env_get as zz_runtime::NativeFn),
+        ("std.env.set", 2, env::env_set),
+        ("std.env.remove", 1, env::env_remove),
+        ("std.env.unset", 1, env::env_remove),
+        ("std.env.vars", 0, env::env_vars),
+        ("std.env.cwd", 0, env::env_cwd),
+        ("std.env.set_cwd", 1, env::env_set_cwd),
+        ("std.env.exe_path", 0, env::env_exe_path),
+        ("std.env.home_dir", 0, env::env_home_dir),
+        ("std.env.temp_dir", 0, env::env_temp_dir),
+        ("std.env.user", 0, env::env_user),
+        ("std.env.os", 0, env::env_os),
+        ("std.env.arch", 0, env::env_arch),
+    ] {
+        m.insert(name.into(), NativeEntry { arity, f: func });
+    }
 
     // std.math
     m.insert(

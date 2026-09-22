@@ -1536,6 +1536,47 @@ impl Checker {
                 let pnames: Vec<String> = sig.params.iter().map(|(n, _)| n.clone()).collect();
                 self.check_args_against(&pnames, &ps, &sig.has_default, args, named, span);
                 self.validate_bounds(&sig, &subs, span);
+                // A bare function value as a print argument is always a
+                // missing `()` (`println(env.os)` would print the function
+                // itself instead of calling it). Catch it here — with the
+                // name attached — rather than letting each engine render
+                // `<func>` / `<native ...>` / empty output.
+                if name == "print" || name == "println" {
+                    if let Some(first) = args.first() {
+                        // Resolve silently (lookup_opt, never check_expr:
+                        // the argument was already checked above and a
+                        // second pass would duplicate diagnostics).
+                        let (arg_t, fname) = match first {
+                            Expr::Ident { name: n, .. } => (self.lookup_opt(n), Some(n.clone())),
+                            Expr::Path { parts, .. } => {
+                                let joined = parts.join(".");
+                                (self.lookup_opt(&joined), Some(joined))
+                            }
+                            _ => (None, None),
+                        };
+                        let is_func = matches!(
+                            arg_t.as_ref().map(|t| self.unifier.resolve(t)),
+                            Some(Type::Func(_, _))
+                        ) || matches!(fname.as_deref(), Some(n) if self.funcs.contains_key(n));
+                        if is_func {
+                            if let Some(fname) = fname {
+                                let mut diag = error_at(
+                                    format!(
+                                        "cannot print function `{fname}`: call it with arguments"
+                                    ),
+                                    first.span(),
+                                );
+                                diag = diag.with_note(format!("did you mean `{fname}()`?"));
+                                diag = diag.with_fixit(FixIt::safe(
+                                    Span::new(first.span().end, first.span().end),
+                                    "()".to_string(),
+                                    "call function",
+                                ));
+                                self.errors.push(diag);
+                            }
+                        }
+                    }
+                }
                 return ret;
             }
         }

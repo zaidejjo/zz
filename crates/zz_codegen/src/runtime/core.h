@@ -27,6 +27,15 @@
 #include <math.h>
 #include <time.h>
 #include <sys/stat.h>
+// POSIX process environment + directories (`std.env` natives in core.c);
+// Windows uses CRT/Win32 equivalents there.
+#ifndef ZZ_OS_WINDOWS
+#include <unistd.h>
+#include <errno.h>
+#endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 // platform.h is concatenated before this header in AOT builds and defines
 // ZZ_HAS_CURL; default to 1 when this header is used standalone.
 #if !defined(ZZ_HAS_CURL) || ZZ_HAS_CURL
@@ -749,6 +758,18 @@ zz_value zz_bool_cast(zz_value v, int *err);
 zz_value zz_env_get(zz_value name, int *err);
 zz_value zz_env_var(zz_value name, int *err);
 zz_value zz_env_args(zz_value unused, int *err);
+// Cross-platform environment + OS identity (mirrors `natives/env`).
+zz_value zz_env_set(zz_value name, zz_value val, int *err);
+zz_value zz_env_remove(zz_value name, int *err);
+zz_value zz_env_vars(zz_value unused, int *err);
+zz_value zz_env_cwd(zz_value unused, int *err);
+zz_value zz_env_set_cwd(zz_value path, int *err);
+zz_value zz_env_exe_path(zz_value unused, int *err);
+zz_value zz_env_home_dir(zz_value unused, int *err);
+zz_value zz_env_temp_dir(zz_value unused, int *err);
+zz_value zz_env_user(zz_value unused, int *err);
+zz_value zz_env_os(zz_value unused, int *err);
+zz_value zz_env_arch(zz_value unused, int *err);
 
 // ---- fs natives ---------------------------------------------------------
 // Comprehensive non-blocking filesystem (see core.c): every fallible op

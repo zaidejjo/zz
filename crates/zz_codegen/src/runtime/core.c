@@ -577,12 +577,44 @@ static void zz_throw_printed_err(const zz_value *payload);
 
 zz_value zz_io_println(zz_value v, int *err) {
     (void)err;
-    // Unwrap consecutive `Result::Ok` layers for stdout presentation
-    // (mirrors the VM's `for_stdout`): `println(.ok(x))` prints `x`.
-    // A printed `.err` throws a readable, hinted diagnostic on stderr
-    // instead of a raw `.err(...)` line.
-    while (v.tag == ZZ_RESULT_OK && v.payload) {
-        v = *v.payload;
+    // Unwrap consecutive `Result::Ok` / `Option::Some` layers for stdout
+    // presentation (mirrors the VM's `for_stdout`): `println(.ok(x))`
+    // prints `x`, `println(.some(x))` prints `x`, bare `.none` prints
+    // `none`. A printed `.err` throws a readable, hinted diagnostic on
+    // stderr instead of a raw `.err(...)` line. A bare function value is
+    // always a missing `()` — abort with a hint instead of rendering
+    // `<func>` / `<value>`.
+    for (;;) {
+        if (v.tag == ZZ_RESULT_OK && v.payload) {
+            v = *v.payload;
+        } else if (v.tag == ZZ_OPTION_SOME && v.payload) {
+            v = *v.payload;
+        } else {
+            break;
+        }
+    }
+    if (v.tag == ZZ_OPTION_NONE) {
+        fputs("none\n", stdout);
+        fflush(stdout);
+        return zz_unit();
+    }
+    if (v.tag == ZZ_NATIVE || v.tag == ZZ_FUNC) {
+        int tty;
+#ifdef ZZ_OS_WINDOWS
+        tty = _isatty(_fileno(stderr));
+#else
+        tty = isatty(fileno(stderr));
+#endif
+        if (tty) {
+            fprintf(stderr, "\033[1;31merror\033[0m: cannot print a function value: call it with arguments\n");
+            fprintf(stderr, "    \033[1;36m=\033[0m \033[36mhint: a bare function name is the function itself, not its result\033[0m\n");
+        } else {
+            fprintf(stderr, "error: cannot print a function value: call it with arguments\n");
+            fprintf(stderr, "    = hint: a bare function name is the function itself, not its result\n");
+        }
+        fprintf(stderr, "zz: program failed\n");
+        fflush(stderr);
+        exit(1);
     }
     if (v.tag == ZZ_RESULT_ERR && v.payload) {
         zz_throw_printed_err(v.payload);
@@ -597,8 +629,37 @@ zz_value zz_io_println(zz_value v, int *err) {
 
 zz_value zz_io_print(zz_value v, int *err) {
     (void)err;
-    while (v.tag == ZZ_RESULT_OK && v.payload) {
-        v = *v.payload;
+    for (;;) {
+        if (v.tag == ZZ_RESULT_OK && v.payload) {
+            v = *v.payload;
+        } else if (v.tag == ZZ_OPTION_SOME && v.payload) {
+            v = *v.payload;
+        } else {
+            break;
+        }
+    }
+    if (v.tag == ZZ_OPTION_NONE) {
+        fputs("none", stdout);
+        fflush(stdout);
+        return zz_unit();
+    }
+    if (v.tag == ZZ_NATIVE || v.tag == ZZ_FUNC) {
+        int tty;
+#ifdef ZZ_OS_WINDOWS
+        tty = _isatty(_fileno(stderr));
+#else
+        tty = isatty(fileno(stderr));
+#endif
+        if (tty) {
+            fprintf(stderr, "\033[1;31merror\033[0m: cannot print a function value: call it with arguments\n");
+            fprintf(stderr, "    \033[1;36m=\033[0m \033[36mhint: a bare function name is the function itself, not its result\033[0m\n");
+        } else {
+            fprintf(stderr, "error: cannot print a function value: call it with arguments\n");
+            fprintf(stderr, "    = hint: a bare function name is the function itself, not its result\n");
+        }
+        fprintf(stderr, "zz: program failed\n");
+        fflush(stderr);
+        exit(1);
     }
     if (v.tag == ZZ_RESULT_ERR && v.payload) {
         zz_throw_printed_err(v.payload);
@@ -4193,7 +4254,8 @@ zz_value zz_env_get(zz_value name, int *err) {
     if (name.tag != ZZ_STR) return (zz_value){ZZ_OPTION_NONE, {0}};
     const char *val = getenv(zz_str_cptr(name.s));
     if (!val) return (zz_value){ZZ_OPTION_NONE, {0}};
-    return zz_variant_some(zz_str_static(val));
+    // Copy: the process environment may move under set/unset.
+    return zz_variant_some(zz_str_new(val, strlen(val)));
 }
 
 // env.var(name) — returns .ok(val) or .err(msg)
@@ -4228,6 +4290,306 @@ zz_value zz_env_args(zz_value unused, int *err) {
         );
     }
     return out;
+}
+
+// ---- cross-platform environment + OS identity (mirrors natives/env) --------
+//
+// POSIX on Unix-likes (`setenv`/`unsetenv`, `getcwd`/`chdir`,
+// `readlink /proc/self/exe`, `_NSGetExecutablePath` on macOS, `environ`)
+// and CRT/Win32 on Windows (`_putenv`, `GetCurrentDirectoryA`,
+// `SetCurrentDirectoryA`, `GetModuleFileNameA`, `GetTempPathA`,
+// `GetEnvironmentStringsA`). All returned strings are copies owned by
+// the runtime (never aliases into `environ`/CRT buffers).
+
+static int zz_env_key_valid(const char *k) {
+    if (!k || !*k) return 0;
+    for (const char *p = k; *p; p++) {
+        if (*p == '=') return 0;
+    }
+    return 1;
+}
+
+// env.set(key, val) → Result<unit>
+zz_value zz_env_set(zz_value name, zz_value val, int *err) {
+    (void)err;
+    if (name.tag != ZZ_STR || val.tag != ZZ_STR) { *err = 1; return zz_unit(); }
+    const char *k = zz_str_cptr(name.s);
+    const char *v = zz_str_cptr(val.s);
+    if (!zz_env_key_valid(k)) {
+        size_t n = strlen("invalid environment variable name ``") + name.s->len + 1;
+        char *msg = (char *)malloc(n);
+        if (!msg) return zz_variant_err(zz_str_static("env.set: out of memory"));
+        snprintf(msg, n, "invalid environment variable name `%s`", k);
+        return zz_variant_err(zz_str_owned(msg));
+    }
+#ifdef ZZ_OS_WINDOWS
+    size_t n = name.s->len + 1 + val.s->len + 1;
+    char *kv = (char *)malloc(n);
+    if (!kv) return zz_variant_err(zz_str_static("env.set: out of memory"));
+    memcpy(kv, k, name.s->len);
+    kv[name.s->len] = '=';
+    memcpy(kv + name.s->len + 1, v, val.s->len + 1);
+    int rc = _putenv(kv);
+    free(kv);
+    if (rc != 0) return zz_variant_err(zz_str_static("env.set: failed"));
+#else
+    // setenv copies both strings; lengths come from NUL-terminated
+    // getters over length-tagged values — pass explicit slices via a
+    // temporary NUL-terminated copy to honor embedded lengths exactly.
+    char *kc = copy_cstr(k, name.s->len);
+    char *vc = copy_cstr(v, val.s->len);
+    int rc = -1;
+    if (kc && vc) rc = setenv(kc, vc, 1);
+    free(kc);
+    free(vc);
+    if (rc != 0) return zz_variant_err(zz_str_static("env.set: failed"));
+#endif
+    return zz_variant_ok(zz_unit());
+}
+
+// env.remove(key) / env.unset(key) — total, missing keys are no-ops.
+zz_value zz_env_remove(zz_value name, int *err) {
+    (void)err;
+    if (name.tag != ZZ_STR) { *err = 1; return zz_unit(); }
+    const char *k = zz_str_cptr(name.s);
+#ifdef ZZ_OS_WINDOWS
+    size_t n = name.s->len + 2;
+    char *kv = (char *)malloc(n);
+    if (kv) {
+        memcpy(kv, k, name.s->len);
+        kv[name.s->len] = '=';
+        kv[name.s->len + 1] = '\0';
+        _putenv(kv); // `NAME=` deletes the variable; ignore errors
+        free(kv);
+    }
+#else
+    char *kc = copy_cstr(k, name.s->len);
+    if (kc) {
+        unsetenv(kc); // no-op when absent; no failure mode worth surfacing
+        free(kc);
+    }
+#endif
+    return zz_unit();
+}
+
+// env.vars() → Dict<str, str> (sorted by key, like the VM).
+zz_value zz_env_vars(zz_value unused, int *err) {
+    (void)unused; (void)err;
+    zz_value out = zz_dict_new();
+#ifdef ZZ_OS_WINDOWS
+    char *block = GetEnvironmentStringsA();
+    if (block) {
+        for (char *p = block; *p; p += strlen(p) + 1) {
+            // Skip the per-drive hidden entries (`=C:=C:\...`).
+            if (*p == '=') continue;
+            char *eq = strchr(p, '=');
+            if (!eq) continue;
+            zz_value k = zz_str_new(p, (size_t)(eq - p));
+            zz_value v = zz_str_new(eq + 1, strlen(eq + 1));
+            zz_dict_set(out.dict, k, v);
+            // dict_set retains the key but takes ownership of the value.
+            zz_release(&k);
+        }
+        FreeEnvironmentStringsA(block);
+    }
+#else
+    extern char **environ;
+    for (char **e = environ; e && *e; e++) {
+        char *eq = strchr(*e, '=');
+        if (!eq) continue;
+        zz_value k = zz_str_new(*e, (size_t)(eq - *e));
+        zz_value v = zz_str_new(eq + 1, strlen(eq + 1));
+        zz_dict_set(out.dict, k, v);
+        // dict_set retains the key but takes ownership of the value.
+        zz_release(&k);
+    }
+#endif
+    // Insertion order differs by platform (environ order vs block order);
+    // the VM sorts by key, so sort here too for byte-exact parity. Dicts
+    // preserve insertion order — rebuild sorted by MOVING entry structs
+    // (ownership transfers; no refcount traffic, no double frees).
+    size_t n = out.dict ? out.dict->len : 0;
+    if (n > 1) {
+        size_t *idx = (size_t *)malloc(n * sizeof(size_t));
+        if (idx) {
+            for (size_t i = 0; i < n; i++) idx[i] = i;
+            // Insertion sort on key bytes (env blocks are small).
+            for (size_t i = 1; i < n; i++) {
+                size_t j = i;
+                while (j > 0) {
+                    zz_str *a = out.dict->entries[idx[j - 1]].key;
+                    zz_str *b = out.dict->entries[idx[j]].key;
+                    size_t m = a->len < b->len ? a->len : b->len;
+                    int c = memcmp(zz_str_cptr(a), zz_str_cptr(b), m);
+                    if (c == 0) c = (a->len < b->len) ? -1 : (a->len > b->len);
+                    if (c <= 0) break;
+                    size_t t = idx[j - 1];
+                    idx[j - 1] = idx[j];
+                    idx[j] = t;
+                    j--;
+                }
+            }
+            zz_dict_entry *nen =
+                (zz_dict_entry *)malloc(n * sizeof(zz_dict_entry));
+            if (nen) {
+                for (size_t i = 0; i < n; i++) nen[i] = out.dict->entries[idx[i]];
+                free(out.dict->entries);
+                out.dict->entries = nen;
+                out.dict->cap = n;
+            }
+            free(idx);
+        }
+    }
+    return out;
+}
+
+// env.cwd() → Result<str>
+zz_value zz_env_cwd(zz_value unused, int *err) {
+    (void)unused; (void)err;
+#ifdef ZZ_OS_WINDOWS
+    char buf[4096];
+    DWORD n = GetCurrentDirectoryA((DWORD)sizeof buf, buf);
+    if (n == 0 || n >= sizeof buf) {
+        return zz_variant_err(zz_str_static("cannot read working directory"));
+    }
+    return zz_variant_ok(zz_str_new(buf, strlen(buf)));
+#else
+    char *p = getcwd(NULL, 0);
+    if (!p) return zz_variant_err(zz_str_static("cannot read working directory"));
+    zz_value v = zz_variant_ok(zz_str_new(p, strlen(p)));
+    free(p);
+    return v;
+#endif
+}
+
+// env.set_cwd(path) → Result<unit>
+zz_value zz_env_set_cwd(zz_value path, int *err) {
+    (void)err;
+    if (path.tag != ZZ_STR || !path.s) { *err = 1; return zz_unit(); }
+    const char *p = zz_str_cptr(path.s);
+#ifdef ZZ_OS_WINDOWS
+    if (!SetCurrentDirectoryA(p)) {
+        size_t n = strlen("fs:set_cwd:io_error: ") + strlen(p) + 1;
+        char *msg = (char *)malloc(n);
+        if (!msg) return zz_variant_err(zz_str_static("fs:set_cwd:io_error"));
+        snprintf(msg, n, "fs:set_cwd:io_error: %s", p);
+        return zz_variant_err(zz_str_owned(msg));
+    }
+#else
+    if (chdir(p) != 0) {
+        size_t n = strlen("fs:set_cwd:io_error: ") + strlen(p)
+            + 2 + strlen(strerror(errno)) + 1;
+        char *msg = (char *)malloc(n);
+        if (!msg) return zz_variant_err(zz_str_static("fs:set_cwd:io_error"));
+        snprintf(msg, n, "fs:set_cwd:io_error: %s (%s)", p, strerror(errno));
+        return zz_variant_err(zz_str_owned(msg));
+    }
+#endif
+    return zz_variant_ok(zz_unit());
+}
+
+// env.exe_path() → Result<str>
+zz_value zz_env_exe_path(zz_value unused, int *err) {
+    (void)unused; (void)err;
+#ifdef ZZ_OS_WINDOWS
+    char buf[32768];
+    DWORD n = GetModuleFileNameA(NULL, buf, (DWORD)sizeof buf);
+    if (n == 0 || n >= sizeof buf) {
+        return zz_variant_err(zz_str_static("cannot read executable path"));
+    }
+    return zz_variant_ok(zz_str_new(buf, n));
+#elif defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(NULL, &size);
+    char *buf = (char *)malloc(size > 0 ? size : 4096);
+    if (!buf) return zz_variant_err(zz_str_static("cannot read executable path"));
+    if (_NSGetExecutablePath(buf, &size) != 0) {
+        free(buf);
+        return zz_variant_err(zz_str_static("cannot read executable path"));
+    }
+    zz_value v = zz_variant_ok(zz_str_new(buf, strlen(buf)));
+    free(buf);
+    return v;
+#else
+    // Linux (and other /proc hosts): readlink sizes the exact buffer.
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+    if (n < 0) return zz_variant_err(zz_str_static("cannot read executable path"));
+    buf[n] = '\0';
+    return zz_variant_ok(zz_str_new(buf, (size_t)n));
+#endif
+}
+
+// env.home_dir() → Option<str>
+zz_value zz_env_home_dir(zz_value unused, int *err) {
+    (void)unused; (void)err;
+#ifdef ZZ_OS_WINDOWS
+    const char *v = getenv("USERPROFILE");
+#else
+    const char *v = getenv("HOME");
+#endif
+    if (!v || !*v) return (zz_value){ZZ_OPTION_NONE, {0}};
+    return zz_variant_some(zz_str_new(v, strlen(v)));
+}
+
+// env.temp_dir() → str (total: always has a fallback).
+zz_value zz_env_temp_dir(zz_value unused, int *err) {
+    (void)unused; (void)err;
+#ifdef ZZ_OS_WINDOWS
+    char buf[32768];
+    DWORD n = GetTempPathA((DWORD)sizeof buf, buf);
+    if (n == 0 || n >= sizeof buf) return zz_str_static("C:\\Windows\\Temp");
+    // GetTempPathA ends with a backslash; strip it for a stable shape.
+    while (n > 1 && (buf[n - 1] == '\\' || buf[n - 1] == '/')) buf[--n] = '\0';
+    return zz_str_new(buf, n);
+#else
+    const char *v = getenv("TMPDIR");
+    if (v && *v) return zz_str_new(v, strlen(v));
+    return zz_str_static("/tmp");
+#endif
+}
+
+// env.user() → Option<str>
+zz_value zz_env_user(zz_value unused, int *err) {
+    (void)unused; (void)err;
+#ifdef ZZ_OS_WINDOWS
+    const char *v = getenv("USERNAME");
+    if (!v || !*v) return (zz_value){ZZ_OPTION_NONE, {0}};
+    return zz_variant_some(zz_str_new(v, strlen(v)));
+#else
+    const char *v = getenv("USER");
+    if (!v || !*v) v = getenv("LOGNAME");
+    if (!v || !*v) return (zz_value){ZZ_OPTION_NONE, {0}};
+    return zz_variant_some(zz_str_new(v, strlen(v)));
+#endif
+}
+
+// env.os() → str (target platform, matching `sys.os()` values).
+zz_value zz_env_os(zz_value unused, int *err) {
+    (void)unused; (void)err;
+#ifdef ZZ_OS_WINDOWS
+    return zz_str_static("windows");
+#elif defined(__APPLE__)
+    return zz_str_static("macos");
+#elif defined(__linux__)
+    return zz_str_static("linux");
+#else
+    return zz_str_static("unknown");
+#endif
+}
+
+// env.arch() → str (target CPU, matching `sys.arch()` values).
+zz_value zz_env_arch(zz_value unused, int *err) {
+    (void)unused; (void)err;
+#if defined(__x86_64__) || defined(_M_X64)
+    return zz_str_static("x86_64");
+#elif defined(__i386__) || defined(_M_IX86)
+    return zz_str_static("x86");
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return zz_str_static("aarch64");
+#else
+    return zz_str_static("unknown");
+#endif
 }
 
 // Render a printed `.err(payload)` as a readable, hinted diagnostic and

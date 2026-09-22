@@ -2126,6 +2126,41 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.env.args".into(),
         sig(vec![], Type::Array(Box::new(Type::Str))),
     );
+    // std.env — cross-platform environment + OS identity.
+    let opt_str = || Type::Option(Box::new(Type::Str));
+    let res_str = || Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+    let res_unit = || Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
+    m.insert(
+        "std.env.get".into(),
+        sig(vec![("key", Type::Str)], opt_str()),
+    );
+    m.insert(
+        "std.env.set".into(),
+        sig(vec![("key", Type::Str), ("val", Type::Str)], res_unit()),
+    );
+    m.insert(
+        "std.env.remove".into(),
+        sig(vec![("key", Type::Str)], Type::Unit),
+    );
+    m.insert(
+        "std.env.unset".into(),
+        sig(vec![("key", Type::Str)], Type::Unit),
+    );
+    m.insert(
+        "std.env.vars".into(),
+        sig(vec![], Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
+    );
+    m.insert("std.env.cwd".into(), sig(vec![], res_str()));
+    m.insert(
+        "std.env.set_cwd".into(),
+        sig(vec![("path", Type::Str)], res_unit()),
+    );
+    m.insert("std.env.exe_path".into(), sig(vec![], res_str()));
+    m.insert("std.env.home_dir".into(), sig(vec![], opt_str()));
+    m.insert("std.env.temp_dir".into(), sig(vec![], Type::Str));
+    m.insert("std.env.user".into(), sig(vec![], opt_str()));
+    m.insert("std.env.os".into(), sig(vec![], Type::Str));
+    m.insert("std.env.arch".into(), sig(vec![], Type::Str));
 
     // Built-in: `typeof(v)` — accepts any value, returns its type name.
     let t = Type::Named("T".to_string());
@@ -3039,7 +3074,7 @@ mod tests {
         assert!(funcs.contains_key("colors.red"));
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
-        assert_eq!(funcs.len(), 586);
+        assert_eq!(funcs.len(), 599);
     }
 
     #[test]
