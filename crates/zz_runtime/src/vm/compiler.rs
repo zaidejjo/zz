@@ -837,12 +837,20 @@ impl Compiler {
 
     fn emit_jump(&mut self, kind: JumpKind) -> usize {
         let pos = self.chunk.code.len();
-        let (op, span) = match kind {
-            JumpKind::Always => (Op::Jump(0), Span::default()),
-            JumpKind::IfFalse => (Op::JumpIfFalse(0), Span::default()),
-            JumpKind::IfTrue => (Op::JumpIfTrue(0), Span::default()),
-            JumpKind::IfFalseBool(span) => (Op::JumpIfFalseBool(0, span), span),
+        // Conditional jumps pop their condition at runtime, so they carry
+        // a -1 stack effect like every other pop. This MUST be accounted
+        // here: `stack_height` assigns frame slot indices, and an
+        // unaccounted pop shifts every later slot one too high — the
+        // reader then loads a temp (silent corruption) or runs past the
+        // frame top (LoadSlot OOB). `emit()` cannot be reused directly
+        // because the target is patched in later.
+        let (op, span, effect) = match kind {
+            JumpKind::Always => (Op::Jump(0), Span::default(), 0),
+            JumpKind::IfFalse => (Op::JumpIfFalse(0), Span::default(), -1),
+            JumpKind::IfTrue => (Op::JumpIfTrue(0), Span::default(), -1),
+            JumpKind::IfFalseBool(span) => (Op::JumpIfFalseBool(0, span), span, -1),
         };
+        self.stack_height = self.stack_height.saturating_add_signed(effect);
         self.chunk.spans.push(span);
         self.chunk.code.push(op);
         pos

@@ -1,0 +1,96 @@
+// Repro battery: jump-heavy shapes with live array locals.
+func get_pair(ok: bool) -> Result<[int], str> {
+    if ok {
+        .ok([640, 480])
+    } else {
+        .err("nope")
+    }
+}
+
+func dims_of(ok: bool) -> [int] {
+    match get_pair(ok) {
+        .ok(v) => v,
+        .err(e) => {
+            fail("dims {e}")
+            [0, 0]
+        },
+    }
+}
+
+func shape_guard(x: int) -> str {
+    r := dims_of(true)
+    s := dims_of(true)
+    m := match x {
+        v if v > 0 => r[0] + s[0],
+        _ => 0,
+    }
+    println("guard {m} {r[1]} {s[1]}")
+    "guard-ok"
+}
+
+func shape_nested() -> str {
+    r := dims_of(true)
+    m := match get_pair(true) {
+        .ok(p) => match p[0] {
+            640 => r[0],
+            _ => 0,
+        },
+        .err(e) => {
+            fail("nested {e}")
+            0
+        },
+    }
+    println("nested {m} {r[1]}")
+    "nested-ok"
+}
+
+func shape_elvis(ok: bool) -> str {
+    r := dims_of(ok)
+    v := match get_pair(ok) {
+        .ok(p) => p[0],
+        .err(_e) => 0,
+    }
+    w := v + r[0]
+    println("elvis {w} {r[1]}")
+    "elvis-ok"
+}
+
+func shape_ifexpr(x: int) -> str {
+    r := dims_of(true)
+    s := dims_of(true)
+    v := if x > 0 { r[0] } else { s[0] }
+    println("ifexpr {v} {r[1]} {s[1]}")
+    "ifexpr-ok"
+}
+
+func shape_while() -> str {
+    r := dims_of(true)
+    s := dims_of(true)
+    total := 0
+    i := 0
+    while i < 3 {
+        total = total + r[0] + s[0]
+        i = i + 1
+    }
+    println("while {total} {r[1]} {s[1]}")
+    "while-ok"
+}
+
+func shape_orchain(a: bool, b: bool) -> str {
+    r := dims_of(true)
+    s := dims_of(true)
+    ok := a || b
+    assert(ok || r[0] == 640 || s[0] == 640)
+    println("or {r[1]} {s[1]}")
+    "or-ok"
+}
+
+func main() {
+    println(shape_guard(5))
+    println(shape_nested())
+    println(shape_elvis(true))
+    println(shape_ifexpr(1))
+    println(shape_while())
+    println(shape_orchain(true, false))
+    println("repro-ok")
+}
