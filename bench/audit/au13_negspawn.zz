@@ -1,0 +1,7 @@
+// AU13 negative: spawn of a non-closure must be a clean type error.
+import std.task
+
+func main() {
+    h := task.spawn(42)
+    println("spawned")
+}

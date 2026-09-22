@@ -209,10 +209,25 @@ static __thread zz_task_frame *zz_current_frame = NULL;
 static __thread zz_task_t *zz_current_task = NULL;
 // Green suspend verdict for the running thread (see header).
 static __thread int zz_suspend_verdict = 0;
+// Synchronous-handoff nesting depth (direct worker handoff): each inline
+// resume nests `zz_run_task` + closure + channel-op frames on this
+// thread's C stack. Capped (see ZZ_HANDOFF_MAX_DEPTH) so waiter chains
+// (A→B→C→…) degrade to queueing instead of growing the stack.
+static __thread int zz_handoff_depth = 0;
+// Helping nesting depth (blocking waits that run other tasks instead of
+// parking — audit CRITICAL-1 fix). Capped (see ZZ_HELP_MAX_DEPTH) so
+// pathological blocking-nesting depths degrade to parking instead of
+// growing the C stack without bound.
+static __thread int zz_help_depth = 0;
 
 int zz_green_suspended(void) {
     return zz_suspend_verdict;
 }
+
+void zz_green_resumed(void) {
+    zz_suspend_verdict = 0;
+}
+
 typedef struct {
     zz_dispatch_fn fn;
     size_t nenv;
@@ -223,8 +238,61 @@ typedef struct {
     // B3 suspendable frame: the trampoline runs green closures with a
     // task frame so `recv`/`join` suspend instead of parking the thread.
     int is_green;
+    // Fused-block discipline (B4-lite slab): `embedded` reps keep
+    // kinds/sizes inside the same malloc block as the header (never freed
+    // separately); `inline_vals` reps (spawn-dup built, worker-owned) also
+    // store every cell inline — VALUE cells in the values section, RAW
+    // bytes in the raw section — so the whole closure is one malloc/one
+    // free. Adopted reps (call-site transfer) keep heap cells and only
+    // embed the kinds/sizes.
+    int embedded;
+    int inline_vals;
+    // Total heap block bytes (meaningful when embedded): drives the
+    // size-classed block pool below (checkout reuses by class, checkin
+    // returns by this size — no size recomputation on free).
+    size_t block_size;
     void *env[];
 } zz_closure_rep;
+
+// Fused rep block layout: [header][env ptrs][kinds][sizes][inline values]
+// [inline raw bytes]. One malloc per closure instead of 3 + per-cell
+// mallocs — the spawn burst is allocator-bound (glibc malloc ~450ns/op
+// under cross-thread free traffic; tcmalloc proved 4x), so halving
+// allocator traffic is worth more than any queue tuning.
+static size_t zz_rep_block_size(size_t nenv, size_t nval, size_t nraw) {
+    size_t n = sizeof(zz_closure_rep) + nenv * sizeof(void *);
+    n += nenv * sizeof(unsigned char);
+    n = (n + 7) & ~(size_t)7;
+    n += nenv * sizeof(size_t);
+    n = (n + 15) & ~(size_t)15;
+    n += nval * sizeof(zz_value);
+    // Raw slots are 16-aligned (user struct captures may need it; the old
+    // per-cell malloc guaranteed it) — the pre-scan, layout, and fill
+    // below must use this same stride.
+    n = (n + 15) & ~(size_t)15;
+    n += nraw;
+    return n;
+}
+
+// Split a fused block into its sections. Valid only for embedded reps;
+// `nval` is the inline VALUE-cell count the block was sized with (known
+// at build time from the kinds pre-scan).
+static void zz_rep_block_layout(zz_closure_rep *rep, size_t nval,
+                                unsigned char **kinds_out,
+                                size_t **sizes_out, zz_value **vals_out,
+                                char **raw_out) {
+    char *p = (char *)rep + sizeof(zz_closure_rep) + rep->nenv * sizeof(void *);
+    *kinds_out = (unsigned char *)p;
+    p += rep->nenv * sizeof(unsigned char);
+    p = (char *)(((uintptr_t)p + 7) & ~(uintptr_t)7);
+    *sizes_out = (size_t *)p;
+    p += rep->nenv * sizeof(size_t);
+    p = (char *)(((uintptr_t)p + 15) & ~(uintptr_t)15);
+    *vals_out = (zz_value *)p;
+    p += nval * sizeof(zz_value);
+    p = (char *)(((uintptr_t)p + 15) & ~(uintptr_t)15);
+    *raw_out = p;
+}
 
 zz_value zz_closure_make(zz_dispatch_fn f) {
     zz_closure_rep *rep =
@@ -235,6 +303,9 @@ zz_value zz_closure_make(zz_dispatch_fn f) {
     rep->cell_kind = NULL;
     rep->cell_size = NULL;
     rep->is_green = 0;
+    rep->embedded = 0;
+    rep->inline_vals = 0;
+    rep->block_size = 0;
     zz_value v;
     v.tag = ZZ_NATIVE;
     v.payload = (zz_value *)rep;
@@ -252,47 +323,42 @@ zz_value zz_closure_make_ex_typed(
     const size_t *sizes,
     size_t nenv)
 {
-    zz_closure_rep *rep = (zz_closure_rep *)malloc(
-        sizeof(zz_closure_rep) + nenv * sizeof(void *));
+    // Adopted cells (call-site transfer): VALUE cell pointers stay heap
+    // (the caller keeps no reference — generated code never frees _cap
+    // cells), kinds/sizes ride inline. One malloc total.
+    size_t total = zz_rep_block_size(nenv, 0, 0);
+    zz_closure_rep *rep = (zz_closure_rep *)malloc(total);
     if (!rep) return zz_unit();
     rep->fn = f;
     rep->nenv = nenv;
-    rep->cell_kind = NULL;
-    rep->cell_size = NULL;
     rep->is_green = 0;
+    rep->embedded = 1;
+    rep->inline_vals = 0;
+    rep->block_size = total;
     if (nenv) {
-        rep->cell_kind = (unsigned char *)malloc(nenv * sizeof(unsigned char));
-        rep->cell_size = (size_t *)malloc(nenv * sizeof(size_t));
-        if (!rep->cell_kind || !rep->cell_size) {
-            free(rep->cell_kind);
-            free(rep->cell_size);
-            free(rep);
-            return zz_unit();
-        }
+        unsigned char *rk;
+        size_t *rs;
+        zz_value *rv;
+        char *rr;
+        zz_rep_block_layout(rep, 0, &rk, &rs, &rv, &rr);
+        (void)rv;
+        (void)rr;
+        rep->cell_kind = rk;
+        rep->cell_size = rs;
         for (size_t i = 0; i < nenv; i++) {
             rep->cell_kind[i] = kinds ? kinds[i] : ZZ_CELL_VALUE;
             rep->cell_size[i] =
                 sizes ? sizes[i] : sizeof(zz_value);
         }
         for (size_t i = 0; i < nenv; i++) rep->env[i] = cells[i];
+    } else {
+        rep->cell_kind = NULL;
+        rep->cell_size = NULL;
     }
     zz_value v;
     v.tag = ZZ_NATIVE;
     v.payload = (zz_value *)rep;
     return v;
-}
-
-// Cell kind/size of a closure value's i-th env slot (defaults: VALUE,
-// sizeof(zz_value) — covers reps built before typing existed).
-static void zz_closure_cell_info(zz_value v, size_t i,
-                                 unsigned char *kind, size_t *size) {
-    *kind = ZZ_CELL_VALUE;
-    *size = sizeof(zz_value);
-    if (v.tag != ZZ_NATIVE || !v.payload) return;
-    zz_closure_rep *rep = (zz_closure_rep *)(void *)v.payload;
-    if (i >= rep->nenv) return;
-    if (rep->cell_kind) *kind = rep->cell_kind[i];
-    if (rep->cell_size) *size = rep->cell_size[i];
 }
 
 zz_dispatch_fn zz_closure_target(zz_value v) {
@@ -333,6 +399,9 @@ zz_value zz_closure_make_ex_typed_green(
 // rep itself are freed. The old pthread-per-task path leaked all of this
 // per spawn (the whole spawn context went unfreed); the M:N executor
 // frees it here after each run.
+// Pooled inline blocks rejoin the rep-block pool instead of freeing
+// (forward: pool block lives below with the dup path).
+static void zz_rep_block_checkin(void *block, size_t size);
 static void zz_closure_release_rep(zz_value v) {
     if (v.tag != ZZ_NATIVE || !v.payload) return;
     zz_closure_rep *rep = (zz_closure_rep *)(void *)v.payload;
@@ -344,11 +413,22 @@ static void zz_closure_release_rep(zz_value v) {
             zz_value cellval = *(zz_value *)rep->env[i];
             zz_release(&cellval);
         }
-        free(rep->env[i]);
+        // Inline cells (fused spawn-dup reps) die with the block; adopted
+        // heap cells (call-site transfer, legacy reps) are freed here.
+        if (!rep->inline_vals) free(rep->env[i]);
     }
-    free(rep->cell_kind);
-    free(rep->cell_size);
-    free(rep);
+    // Embedded kinds/sizes ride inside the block; legacy reps free them.
+    // Pooled inline blocks (spawn-dup built) rejoin their size class;
+    // everything else frees normally.
+    if (rep->inline_vals && rep->block_size > 0) {
+        zz_rep_block_checkin(rep, rep->block_size);
+    } else {
+        if (!rep->embedded) {
+            free(rep->cell_kind);
+            free(rep->cell_size);
+        }
+        free(rep);
+    }
 }
 
 void **zz_closure_env(zz_value v, size_t *nenv) {
@@ -583,6 +663,7 @@ typedef struct {
     zz_dup_entry *items;
     size_t len;
     size_t cap;
+    int owned; // 1 once `items` is heap (must be freed by the owner)
 } zz_dup_memo;
 
 static int zz_dup_memo_get(zz_dup_memo *m, const void *src, zz_value *out) {
@@ -595,15 +676,193 @@ static int zz_dup_memo_get(zz_dup_memo *m, const void *src, zz_value *out) {
     return 0;
 }
 
+// Small-copy fast path: the first entries ride in a caller-provided inline
+// store (spawn closures typically memoize 1–2 entries), so the common dup
+// pays zero allocator traffic for bookkeeping.
+#define ZZ_DUP_INLINE_CAP 8
+
 static void zz_dup_memo_put(zz_dup_memo *m, const void *src, zz_value dst) {
     if (m->len == m->cap) {
-        size_t nc = m->cap == 0 ? 8 : m->cap * 2;
-        m->items = (zz_dup_entry *)realloc(m->items, nc * sizeof(zz_dup_entry));
+        size_t nc = m->cap * 2;
+        zz_dup_entry *nb =
+            (zz_dup_entry *)malloc(nc * sizeof(zz_dup_entry));
+        if (!nb) return; // memo is best-effort dedup; the copy stays correct
+        for (size_t i = 0; i < m->len; i++) nb[i] = m->items[i];
+        if (m->owned) free(m->items);
+        m->items = nb;
         m->cap = nc;
+        m->owned = 1;
     }
     m->items[m->len].src = src;
     m->items[m->len].dst = dst;
     m->len++;
+}
+
+// ---- closure rep block pool (B4-lite slab) -------------------------------
+// Spawn bursts allocate + free one fused rep block per task across threads
+// (main allocates, worker frees) — exactly the traffic glibc malloc
+// handles worst (~450ns/op with cross-thread frees; tcmalloc proved 4x).
+// This pool caches freed blocks by size class behind tiny critical
+// sections (~10 instructions vs malloc's hundreds), so burst traffic
+// recycles without touching the allocator. Bounded (cap per class),
+// overflow-agnostic (unknown sizes malloc/free normally — always correct).
+#define ZZ_REP_POOL_CLASSES 7
+static const size_t zz_rep_pool_buckets[ZZ_REP_POOL_CLASSES] = {
+    128, 256, 512, 1024, 2048, 4096, 8192
+};
+#define ZZ_REP_POOL_CAP 256 // max cached blocks per class
+
+typedef struct {
+    pthread_mutex_t lock;
+    void *head;   // stack of free blocks (next pointer in first word)
+    size_t count;
+} zz_rep_pool_t;
+
+static zz_rep_pool_t zz_rep_pools[ZZ_REP_POOL_CLASSES];
+static pthread_once_t zz_rep_pool_once = PTHREAD_ONCE_INIT;
+
+static void zz_rep_pool_init(void) {
+    for (int i = 0; i < ZZ_REP_POOL_CLASSES; i++) {
+        pthread_mutex_init(&zz_rep_pools[i].lock, NULL);
+        zz_rep_pools[i].head = NULL;
+        zz_rep_pools[i].count = 0;
+    }
+}
+
+// Smallest class holding `need` bytes, or -1 past the largest bucket.
+static int zz_rep_pool_class(size_t need) {
+    for (int i = 0; i < ZZ_REP_POOL_CLASSES; i++) {
+        if (zz_rep_pool_buckets[i] >= need) return i;
+    }
+    return -1;
+}
+
+// Checkout a block of at least `need` bytes: pooled bucket when one fits
+// (the caller lays out by needed dims — a bigger bucket's prefix is
+// identical), exact malloc on overflow. NULL only when malloc fails.
+static void *zz_rep_block_checkout(size_t need) {
+    pthread_once(&zz_rep_pool_once, zz_rep_pool_init);
+    int c = zz_rep_pool_class(need);
+    if (c < 0) return malloc(need);
+    zz_rep_pool_t *p = &zz_rep_pools[c];
+    pthread_mutex_lock(&p->lock);
+    void *b = p->head;
+    if (b) {
+        p->head = *(void **)b;
+        p->count--;
+    }
+    pthread_mutex_unlock(&p->lock);
+    if (b) return b;
+    return malloc(zz_rep_pool_buckets[c]);
+}
+
+// Return a block of recorded checkout size `size`. Only exact bucket
+// sizes rejoin their class (checkout stores bucket sizes; overflow
+// exact-mallocs and foreign blocks fall through to free). Full pools fall
+// through the same way — always correct, just uncached.
+static void zz_rep_block_checkin(void *block, size_t size) {
+    int c = zz_rep_pool_class(size);
+    if (c < 0 || zz_rep_pool_buckets[c] != size) {
+        free(block);
+        return;
+    }
+    zz_rep_pool_t *p = &zz_rep_pools[c];
+    pthread_mutex_lock(&p->lock);
+    if (p->count < ZZ_REP_POOL_CAP) {
+        *(void **)block = p->head;
+        p->head = block;
+        p->count++;
+        block = NULL;
+    }
+    pthread_mutex_unlock(&p->lock);
+    if (block) free(block);
+}
+
+static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m);
+
+// Build a worker-owned fused closure rep directly from capture cells:
+// one block holds header + env ptrs + kinds + sizes + inline VALUE cells
+// (deep-copied via the memo) + inline RAW bytes (memcpy). Zero per-cell
+// mallocs. Shared by the spawn-dup path and the `zz_spawn_ex` fast path
+// below (which skips the intermediate call-site rep entirely).
+//
+// `kinds`/`sizes` may be NULL (all VALUE, default sizes — the untyped
+// make convention). On OOM returns a null-payload closure (calls on it
+// evaluate to unit); callers must not memoize that as a copy.
+static zz_value zz_closure_dup_build(zz_dispatch_fn fn, void **env,
+                                     const unsigned char *kinds,
+                                     const size_t *sizes, size_t nenv,
+                                     int is_green, zz_dup_memo *m) {
+    size_t nval = 0;
+    size_t nraw = 0;
+    for (size_t i = 0; i < nenv; i++) {
+        unsigned char kind = kinds ? kinds[i] : ZZ_CELL_VALUE;
+        size_t size = sizes ? sizes[i] : sizeof(zz_value);
+        if (kind != ZZ_CELL_RAW) {
+            nval++;
+        } else {
+            nraw = (nraw + 15) & ~(size_t)15;
+            nraw += size;
+        }
+    }
+    zz_closure_rep *nr;
+    size_t block_size;
+    {
+        size_t need = zz_rep_block_size(nenv, nval, nraw);
+        int c = zz_rep_pool_class(need);
+        // Pooled checkout (bucket-sized, recorded for exact checkin) or
+        // exact malloc on overflow. The layout below addresses by needed
+        // dims only, so a roomier bucket's prefix is identical.
+        nr = (zz_closure_rep *)zz_rep_block_checkout(need);
+        block_size = c < 0 ? need : zz_rep_pool_buckets[c];
+    }
+    if (!nr) {
+        // OOM degradation: null-payload closure (calls evaluate to unit,
+        // spawns report via err). Callers never memoize this as a copy.
+        zz_value oom;
+        oom.tag = ZZ_NATIVE;
+        oom.payload = NULL;
+        return oom;
+    }
+    nr->fn = fn;
+    nr->nenv = nenv;
+    nr->is_green = is_green;
+    nr->embedded = 1;
+    nr->inline_vals = 1;
+    nr->block_size = block_size;
+    unsigned char *rk;
+    size_t *rs;
+    zz_value *rv;
+    char *rr;
+    zz_rep_block_layout(nr, nval, &rk, &rs, &rv, &rr);
+    nr->cell_kind = nenv ? rk : NULL;
+    nr->cell_size = nenv ? rs : NULL;
+    size_t vi = 0;
+    for (size_t i = 0; i < nenv; i++) {
+        unsigned char kind = kinds ? kinds[i] : ZZ_CELL_VALUE;
+        size_t size = sizes ? sizes[i] : sizeof(zz_value);
+        rk[i] = kind;
+        rs[i] = size;
+        if (kind == ZZ_CELL_RAW) {
+            // Unboxed cell: bitwise copy into the inline raw section.
+            // (Interior pointers, e.g. refcounted strings inside unboxed
+            // struct cells, are shared — documented limitation; never
+            // misread as zz_value, which segfaulted.)
+            uintptr_t aligned = ((uintptr_t)rr + 15) & ~(uintptr_t)15;
+            char *slot = (char *)aligned;
+            if (env[i] && size) memcpy(slot, env[i], size);
+            nr->env[i] = slot;
+            rr = slot + size;
+        } else {
+            nr->env[i] = &rv[vi++];
+            rv[vi - 1] = env[i] ? zz_value_dup_inner(*(zz_value *)env[i], m)
+                                : zz_unit();
+        }
+    }
+    zz_value out;
+    out.tag = ZZ_NATIVE;
+    out.payload = (zz_value *)nr;
+    return out;
 }
 
 static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
@@ -721,61 +980,24 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         // Memo key: the rep payload (shared closures dedup).
         zz_value hit;
         if (v.payload && zz_dup_memo_get(m, v.payload, &hit)) return hit;
-        void **cells = (void **)malloc(nenv * sizeof(void *));
-        unsigned char *kinds = (unsigned char *)malloc(nenv);
-        size_t *sizes = (size_t *)malloc(nenv * sizeof(size_t));
-        if (!cells || !kinds || !sizes) {
-            free(cells);
-            free(kinds);
-            free(sizes);
-            return v;
+        int is_green = v.tag == ZZ_NATIVE && v.payload
+            && ((zz_closure_rep *)(void *)v.payload)->is_green;
+        // Forward the source rep's own kinds/sizes (NULL when untyped —
+        // the helper applies the same defaults `cell_info` would).
+        const unsigned char *sk = NULL;
+        const size_t *ss = NULL;
+        if (v.tag == ZZ_NATIVE && v.payload) {
+            zz_closure_rep *sr = (zz_closure_rep *)(void *)v.payload;
+            sk = sr->cell_kind;
+            ss = sr->cell_size;
         }
-        for (size_t i = 0; i < nenv; i++) {
-            unsigned char kind;
-            size_t size;
-            zz_closure_cell_info(v, i, &kind, &size);
-            kinds[i] = kind;
-            sizes[i] = size;
-            if (kind == ZZ_CELL_RAW) {
-                // Unboxed cell: bitwise copy into a fresh cell. (Interior
-                // pointers, e.g. refcounted strings inside unboxed struct
-                // cells, are shared — documented limitation; never
-                // misread as zz_value, which segfaulted.)
-                void *cell = malloc(size ? size : 1);
-                if (!cell) {
-                    for (size_t j = 0; j < i; j++) free(cells[j]);
-                    free(cells);
-                    free(kinds);
-                    free(sizes);
-                    return v;
-                }
-                memcpy(cell, env[i], size);
-                cells[i] = cell;
-            } else {
-                zz_value *cell = (zz_value *)malloc(sizeof(zz_value));
-                if (!cell) {
-                    for (size_t j = 0; j < i; j++) free(cells[j]);
-                    free(cells);
-                    free(kinds);
-                    free(sizes);
-                    return v;
-                }
-                *cell = zz_value_dup_inner(*(zz_value *)env[i], m);
-                cells[i] = cell;
-            }
+        zz_value out = zz_closure_dup_build(fn, env, sk, ss, nenv,
+                                            is_green, m);
+        // `zz_closure_dup_build` degrades to the shared source on OOM;
+        // only memoize real copies (the source never aliases a copy).
+        if (out.payload != v.payload) {
+            if (v.payload) zz_dup_memo_put(m, v.payload, out);
         }
-        zz_value out =
-            zz_closure_make_ex_typed(fn, cells, kinds, sizes, nenv);
-        // Spawn snapshot isolation dups the closure rep: carry the green
-        // flag so duplicated tasks keep suspending instead of parking.
-        if (v.tag == ZZ_NATIVE && v.payload
-            && ((zz_closure_rep *)(void *)v.payload)->is_green) {
-            zz_closure_set_green(out);
-        }
-        free(cells);
-        free(kinds);
-        free(sizes);
-        if (v.payload) zz_dup_memo_put(m, v.payload, out);
         return out;
     }
     default:
@@ -787,9 +1009,10 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
 
 // Deep-copy a value for transfer across a thread boundary. See above.
 zz_value zz_value_dup(zz_value v) {
-    zz_dup_memo m = {0};
+    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP];
+    zz_dup_memo m = {inline_store, 0, ZZ_DUP_INLINE_CAP, 0};
     zz_value out = zz_value_dup_inner(v, &m);
-    free(m.items);
+    if (m.owned) free(m.items);
     return out;
 }
 // =====================================================================
@@ -810,6 +1033,19 @@ typedef struct zz_task_st {
     zz_task_frame *frame;
 } zz_task_t;
 static void zz_enqueue_task(zz_task_t task);
+// Run one task to completion-or-suspend (executor trampoline, defined
+// below; forward because the channel handoff path can invoke it inline).
+static void zz_run_task(zz_task_t task);
+// Run one pending task instead of parking in a blocking wait (helping —
+// audit CRITICAL-1 fix; defined after the trampoline). Returns 1 when a
+// task was run (caller rechecks its predicate), 0 when idle or past the
+// nesting cap (caller parks normally).
+static int zz_worker_help_once(void);
+// Run a handed-off task synchronously on the sender's thread when the
+// nesting budget allows (defined after the trampoline). Returns 1 when
+// the task was run inline (caller must NOT enqueue), 0 when the budget
+// is exhausted (caller falls back to queueing).
+static int zz_handoff_run_inline(zz_task_t task);
 // Green handoff helper (defined in the B3 block below, used by send).
 static int zz_chan_handoff_locked(
     zz_chan *ch, zz_value v, zz_task_t *task_out, int *is_task_out);
@@ -962,7 +1198,14 @@ zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
             int gparked =
                 __atomic_load_n(&ch->gparked, __ATOMIC_ACQUIRE) > 0;
             pthread_mutex_unlock(&ch->lock);
-            if (wis_task) zz_enqueue_task(wt);
+            // Direct worker handoff: run a suspended task waiter
+            // synchronously on this thread instead of routing it through
+            // the executor queue. In the rendezvous steady state (ping-pong)
+            // the waiter runs NOW — its reply lands in the ring before this
+            // sender even reaches `recv` — so the round trip pays zero
+            // queue hops, zero thread hops, and zero futex park/wake pairs.
+            // Falls back to queueing past the nesting budget.
+            if (wis_task && !zz_handoff_run_inline(wt)) zz_enqueue_task(wt);
             if (gparked) {
                 pthread_mutex_lock(&ch->lock);
                 pthread_cond_broadcast(&ch->cond);
@@ -1006,7 +1249,15 @@ zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
     ch->tail = (ch->tail + 1) % ch->cap;
     ch->len++;
     __atomic_add_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
-    pthread_cond_signal(&ch->cond);
+    // Counted wake: the spill path serves no green waiters (handoff runs
+    // first under the same lock), so with no classic sleepers parked the
+    // signal is a pure futex waste. Gated like the ring path — the
+    // announce-then-verify discipline on both counters keeps it airtight
+    // (a sleeper registering after this read sees the published value and
+    // never parks; one registered before is seen and woken).
+    int wspill = __atomic_load_n(&ch->sleepers, __ATOMIC_ACQUIRE) > 0
+        || __atomic_load_n(&ch->gparked, __ATOMIC_ACQUIRE) > 0;
+    if (wspill) pthread_cond_signal(&ch->cond);
     pthread_mutex_unlock(&ch->lock);
     *err = 0;
     return zz_unit();
@@ -1018,9 +1269,12 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
     zz_chan *ch = chan.chan;
     // Fast path: lock-free ring pop, zero locks. Valid only while the
     // spill is empty — spilled values are older than anything that
-    // arrived while the ring was full.
+    // arrived while the ring was full. Also gated on zero queued green
+    // waiters (same discipline as the green fast path): a registered
+    // waiter must observe every value.
     zz_value v;
-    if (__atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0
+    if (__atomic_load_n(&ch->green_waiters, __ATOMIC_ACQUIRE) == 0
+        && __atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0
         && zz_ring_try_dequeue(ch, &v)) {
         return v;
     }
@@ -1030,9 +1284,14 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
     // the spill is non-empty the value waits under the mutex — spinning
     // would burn ~10µs before taking the lock (measured 170x slowdown
     // draining a stocked buffer). Bounded (~1024) so a genuinely empty
-    // channel still parks promptly.
+    // channel still parks promptly. Breaks immediately when a green
+    // waiter registers (its takes must observe every value — see the
+    // fast-path gate above).
     if (__atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0) {
         for (int spin = 0; spin < 1024; spin++) {
+            if (__atomic_load_n(&ch->green_waiters, __ATOMIC_ACQUIRE) != 0) {
+                break;
+            }
             if (__atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) != 0) {
                 break;
             }
@@ -1048,7 +1307,6 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
 #endif
         }
     }
-    pthread_mutex_lock(&ch->lock);
     // Slow loop: spill first (older than anything that arrived while the
     // ring was full), then the ring. A ring miss with both tiers
     // nominally non-empty is transient (a publisher mid-claim) — loop
@@ -1057,6 +1315,8 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
     // so waiter-free traffic pays no futex wake. Re-checked after every
     // wake (spurious wakeups and racing consumers just loop).
     //
+    // The lock is taken per iteration (not held across the loop): helping
+    // runs tasks that may use this same channel.
     // Top-up discipline: only when genuinely about to park (value
     // confirmed absent above — never on mere slow-path entry), at most
     // once per call, and only when no executor worker is already parked
@@ -1065,6 +1325,7 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
     // per blocking recv — 100k latency round-trips = 100k threads.
     int topped_up = 0;
     for (;;) {
+        pthread_mutex_lock(&ch->lock);
         if (ch->len > 0) {
             // O(1) pop from the spill head — no memmove.
             v = ch->queue[ch->head];
@@ -1082,11 +1343,26 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
             topped_up = 1;
             zz_executor_top_up();
         }
+        // Helping (audit CRITICAL-1): a worker parks only when truly
+        // idle. Otherwise it runs stranded deque/steal work and rechecks
+        // the tiers — the lock is released across the run (the helped
+        // task may itself use this channel) and announce-then-verify
+        // below is unchanged, so no wakeup can be lost: we only sleep
+        // while announced, and any sender in between either enqueued
+        // (seen on recheck) or signaled (sleepers > 0).
+        pthread_mutex_unlock(&ch->lock);
+        if (zz_worker_help_once()) continue;
+        pthread_mutex_lock(&ch->lock);
+        if (ch->len > 0 || zz_ring_len_estimate(ch) > 0) {
+            pthread_mutex_unlock(&ch->lock);
+            continue;
+        }
         __atomic_add_fetch(&ch->sleepers, 1, __ATOMIC_ACQ_REL);
         while (ch->len == 0 && zz_ring_len_estimate(ch) == 0) {
             pthread_cond_wait(&ch->cond, &ch->lock);
         }
         __atomic_sub_fetch(&ch->sleepers, 1, __ATOMIC_ACQ_REL);
+        pthread_mutex_unlock(&ch->lock);
     }
 }
 
@@ -1095,8 +1371,11 @@ zz_value zz_chan_try_recv(zz_value chan, int *err) {
     zz_chan *ch = chan.chan;
     zz_value v;
     // Fast path: zero spill count means every queued value sits in the
-    // ring in FIFO order — a lock-free pop is exactly ordered.
-    if (__atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0
+    // ring in FIFO order — a lock-free pop is exactly ordered. Gated on
+    // zero green waiters like the other fast paths (a registered waiter
+    // must observe every value).
+    if (__atomic_load_n(&ch->green_waiters, __ATOMIC_ACQUIRE) == 0
+        && __atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0
         && zz_ring_try_dequeue(ch, &v)) {
         *err = 0;
         return zz_variant_some(v);
@@ -1168,6 +1447,37 @@ static void zz_gwait_recycle(zz_chan *ch, zz_green_waiter *w) {
     }
 }
 
+// Remove a just-registered waiter that was never exposed to any sender:
+// the caller holds `ch->lock` continuously since registration, so the
+// node is still queued and no handoff could have touched it. Matched by
+// frame (the caller only kept `fr`). Used by the register-then-recheck
+// path when a value turns up in the tiers after all (no suspend after
+// all — frame state untouched).
+static void zz_gwait_unregister_tail(zz_chan *ch, zz_task_frame *fr) {
+    // Find our node by frame identity (defensive walk: the tail invariant
+    // above should always hold, but position is never trusted).
+    zz_green_waiter *prev = NULL;
+    zz_green_waiter *w = ch->gwait_head;
+    while (w && w->frame != fr) {
+        prev = w;
+        w = w->next;
+    }
+    if (!w) {
+        // Not queued (should be impossible — see above). Bail without
+        // touching counts: the waiter still owns the frame's future.
+        return;
+    }
+    if (prev) {
+        prev->next = w->next;
+        if (ch->gwait_tail == w) ch->gwait_tail = prev;
+    } else {
+        ch->gwait_head = w->next;
+        if (ch->gwait_tail == w) ch->gwait_tail = NULL;
+    }
+    __atomic_sub_fetch(&ch->green_waiters, 1, __ATOMIC_RELEASE);
+    zz_gwait_recycle(ch, w);
+}
+
 // Pop the oldest waiter and deposit an owned value into its frame.
 // Caller holds `ch->lock`. Returns 1 when a waiter was served (node
 // recycled, count decremented); 0 when the queue is empty. Waking (task
@@ -1228,8 +1538,14 @@ zz_value zz_chan_recv_green(zz_value chan, zz_task_frame *fr, int resume_id, int
     if (chan.tag != ZZ_CHAN) { *err = 1; return zz_unit(); }
     zz_chan *ch = chan.chan;
     zz_value v;
-    // Fast path first (same exactness rule as the blocking call).
-    if (__atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0
+    // Fast path first (same exactness rule as the blocking call). Gated
+    // on zero queued green waiters: a registered waiter must observe every
+    // value, so lock-free takes stop while one exists — otherwise a racing
+    // take can strand values behind a waiter at sender exhaustion (lost
+    // wakeup — a waiter suspended with values sitting in the ring that no
+    // future send will ever hand off).
+    if (__atomic_load_n(&ch->green_waiters, __ATOMIC_ACQUIRE) == 0
+        && __atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0
         && zz_ring_try_dequeue(ch, &v)) {
         *err = 0;
         zz_suspend_verdict = 0;
@@ -1253,18 +1569,81 @@ zz_value zz_chan_recv_green(zz_value chan, zz_task_frame *fr, int resume_id, int
         return v;
     }
     // Miss: suspend (task) or park (sync) until a send hands off.
+    // Register-then-recheck under this same lock: a lock-free racing
+    // consumer may have beaten our ring CAS above while values remained,
+    // so re-examine both tiers AFTER registering. Either we take a value
+    // (unregister, no suspend) or both tiers are truly empty — and any
+    // LATER send then sees our waiter under this same lock and hands off.
+    // This closes the lost-wakeup hole where a waiter slept behind values
+    // stranded in the ring at sender exhaustion.
     fr->resume = resume_id;
     if (zz_chan_wait_register(ch, fr)) {
+        if (ch->len > 0) {
+            v = ch->queue[ch->head];
+            ch->head = (ch->head + 1) % ch->cap;
+            ch->len--;
+            __atomic_sub_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
+            zz_gwait_unregister_tail(ch, fr);
+            pthread_mutex_unlock(&ch->lock);
+            *err = 0;
+            zz_suspend_verdict = 0;
+            return v;
+        }
+        if (zz_ring_try_dequeue(ch, &v)) {
+            zz_gwait_unregister_tail(ch, fr);
+            pthread_mutex_unlock(&ch->lock);
+            *err = 0;
+            zz_suspend_verdict = 0;
+            return v;
+        }
         pthread_mutex_unlock(&ch->lock);
         *err = 0;
         zz_suspend_verdict = 1;
         return zz_unit();
     }
-    __atomic_add_fetch(&ch->gparked, 1, __ATOMIC_ACQ_REL);
-    while (!fr->has_value) {
-        pthread_cond_wait(&ch->cond, &ch->lock);
+    // Sync frame: park the thread until a send hands off (value lands in
+    // `fr` under this same lock). Same register-then-recheck discipline as
+    // the task branch above: re-examine both tiers now that our own
+    // registration gates every lock-free taker, so the park below can only
+    // begin with both tiers truly empty. Helping applies after that (audit
+    // CRITICAL-1): a worker parked with owned deque work strands it, so
+    // help first and only sleep while announced. A handoff landing
+    // between recheck and announce is still exact — the value sits in
+    // `fr->has_value`, which the wait predicate rechecks under the lock.
+    if (ch->len > 0) {
+        v = ch->queue[ch->head];
+        ch->head = (ch->head + 1) % ch->cap;
+        ch->len--;
+        __atomic_sub_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
+        zz_gwait_unregister_tail(ch, fr);
+        pthread_mutex_unlock(&ch->lock);
+        *err = 0;
+        zz_suspend_verdict = 0;
+        return v;
     }
-    __atomic_sub_fetch(&ch->gparked, 1, __ATOMIC_ACQ_REL);
+    if (zz_ring_try_dequeue(ch, &v)) {
+        zz_gwait_unregister_tail(ch, fr);
+        pthread_mutex_unlock(&ch->lock);
+        *err = 0;
+        zz_suspend_verdict = 0;
+        return v;
+    }
+    for (;;) {
+        if (fr->has_value) break;
+        pthread_mutex_unlock(&ch->lock);
+        if (zz_worker_help_once()) {
+            pthread_mutex_lock(&ch->lock);
+            continue;
+        }
+        pthread_mutex_lock(&ch->lock);
+        if (fr->has_value) break;
+        __atomic_add_fetch(&ch->gparked, 1, __ATOMIC_ACQ_REL);
+        while (!fr->has_value) {
+            pthread_cond_wait(&ch->cond, &ch->lock);
+        }
+        __atomic_sub_fetch(&ch->gparked, 1, __ATOMIC_ACQ_REL);
+        break;
+    }
     fr->has_value = 0;
     v = fr->value;
     pthread_mutex_unlock(&ch->lock);
@@ -1317,7 +1696,7 @@ typedef struct {
     pthread_mutex_t inj_lock;
     pthread_cond_t inj_cond;
     zz_task_t *inj_buf;
-    size_t inj_len;
+    size_t inj_len; // __atomic: stealers pre-check this lock-free (see below)
     size_t inj_cap;
     size_t inj_head;
     size_t sleepers;        // __atomic: parked workers (skip wake if 0)
@@ -1349,16 +1728,22 @@ static void zz_deque_push(zz_deque_t *dq, zz_task_t task) {
 }
 
 // Owner pop: LIFO hot path. Returns 1 with the task, 0 when empty.
+//
+// `bottom` writes are atomic stores (relaxed): thieves read `bottom`
+// atomically, and mixing plain writes with atomic reads is a formal data
+// race (TSan-flagged) even though the protocol's real ordering comes from
+// the fence + top CAS below. Relaxed stores compile to the same single
+// instruction on every target — zero cost, fully defined.
 static int zz_deque_pop(zz_deque_t *dq, zz_task_t *out) {
-    size_t bottom = dq->bottom;
+    size_t bottom = __atomic_load_n(&dq->bottom, __ATOMIC_RELAXED);
     if (bottom == 0) return 0;
     bottom--;
-    dq->bottom = bottom;
+    __atomic_store_n(&dq->bottom, bottom, __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     size_t top = __atomic_load_n(&dq->top, __ATOMIC_RELAXED);
     if (top > bottom) {
         // Empty (a thief took the last one): restore and report empty.
-        dq->bottom = bottom + 1;
+        __atomic_store_n(&dq->bottom, bottom + 1, __ATOMIC_RELAXED);
         return 0;
     }
     *out = dq->buf[bottom & ZZ_DEQUE_MASK];
@@ -1368,7 +1753,7 @@ static int zz_deque_pop(zz_deque_t *dq, zz_task_t *out) {
         if (!__atomic_compare_exchange_n(&dq->top, &expect, top + 1, 0,
                                          __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
             // Lost: a thief won it. Restore and report empty.
-            dq->bottom = bottom + 1;
+            __atomic_store_n(&dq->bottom, bottom + 1, __ATOMIC_RELAXED);
             return 0;
         }
     }
@@ -1397,7 +1782,8 @@ static int zz_deque_steal(zz_deque_t *dq, zz_task_t *out) {
 static void zz_injector_push(zz_task_t task) {
     zz_executor_t *ex = &zz_executor;
     pthread_mutex_lock(&ex->inj_lock);
-    if (ex->inj_len == ex->inj_cap) {
+    size_t ilen = __atomic_load_n(&ex->inj_len, __ATOMIC_RELAXED);
+    if (ilen == ex->inj_cap) {
         size_t new_cap = ex->inj_cap == 0 ? 64 : ex->inj_cap * 2;
         zz_task_t *nb =
             (zz_task_t *)realloc(ex->inj_buf, new_cap * sizeof(zz_task_t));
@@ -1408,23 +1794,23 @@ static void zz_injector_push(zz_task_t task) {
         // Linearize any wrap before growing.
         if (ex->inj_head != 0) {
             zz_task_t *tmp =
-                (zz_task_t *)malloc(ex->inj_len * sizeof(zz_task_t));
+                (zz_task_t *)malloc(ilen * sizeof(zz_task_t));
             if (!tmp) {
                 fprintf(stderr, "zz: out of memory (injector)\n");
                 exit(1);
             }
-            for (size_t i = 0; i < ex->inj_len; i++) {
+            for (size_t i = 0; i < ilen; i++) {
                 tmp[i] = nb[(ex->inj_head + i) % ex->inj_cap];
             }
-            for (size_t i = 0; i < ex->inj_len; i++) nb[i] = tmp[i];
+            for (size_t i = 0; i < ilen; i++) nb[i] = tmp[i];
             free(tmp);
         }
         ex->inj_buf = nb;
         ex->inj_cap = new_cap;
         ex->inj_head = 0;
     }
-    ex->inj_buf[(ex->inj_head + ex->inj_len) % ex->inj_cap] = task;
-    ex->inj_len++;
+    ex->inj_buf[(ex->inj_head + ilen) % ex->inj_cap] = task;
+    __atomic_store_n(&ex->inj_len, ilen + 1, __ATOMIC_RELEASE);
     // Wake one sleeper per push (round-robin thundering is pointless for
     // a single task); skipped when nobody sleeps.
     int wake = __atomic_load_n(&ex->sleepers, __ATOMIC_ACQUIRE) > 0;
@@ -1437,14 +1823,25 @@ static void zz_injector_push(zz_task_t task) {
 }
 
 // Injector pop-from-front for stealers. Returns 1 on success.
+//
+// Lock-free empty pre-check: workers probe the injector on every 16th
+// spin iteration, and a mutex around every probe collapses under a spawn
+// burst (the pusher's lock ping-pongs between 5 cores, inflating each
+// spawn by microseconds). The length is atomic: zero means provably empty
+// (a push publishes the task before bumping the count, so a zero read
+// cannot miss a task), non-zero falls through to the locked pop which
+// re-verifies. A stale-zero read only delays discovery by one spin
+// iteration — progress is never lost.
 static int zz_injector_steal(zz_task_t *out) {
     zz_executor_t *ex = &zz_executor;
+    if (__atomic_load_n(&ex->inj_len, __ATOMIC_ACQUIRE) == 0) return 0;
     int got = 0;
     pthread_mutex_lock(&ex->inj_lock);
-    if (ex->inj_len > 0) {
+    size_t ilen = __atomic_load_n(&ex->inj_len, __ATOMIC_RELAXED);
+    if (ilen > 0) {
         *out = ex->inj_buf[ex->inj_head];
         ex->inj_head = (ex->inj_head + 1) % ex->inj_cap;
-        ex->inj_len--;
+        __atomic_store_n(&ex->inj_len, ilen - 1, __ATOMIC_RELAXED);
         got = 1;
     }
     pthread_mutex_unlock(&ex->inj_lock);
@@ -1544,6 +1941,10 @@ static void zz_run_task(zz_task_t task) {
     if (!task.frame) task.frame = zz_frame_new();
     zz_task_frame *fr = task.frame;
     fr->is_task = 1;
+    // Every run starts live: a recycled worker thread may carry a stale
+    // suspend verdict from an earlier task. Only an actual suspend during
+    // THIS run may set it (green entries do so before returning).
+    zz_suspend_verdict = 0;
     zz_task_frame *saved_fr = zz_current_frame;
     zz_task_t *saved_task = zz_current_task;
     zz_current_frame = fr;
@@ -1567,6 +1968,86 @@ static void zz_run_task(zz_task_t task) {
         zz_release(&task.fn);
     }
     zz_frame_free(task.frame);
+}
+
+// Direct worker handoff: the synchronous-resume half of a channel/join
+// handoff. Bypasses the executor queue (no deque push, no steal, no
+// thread hop) by running the waiter NOW on the sender's thread.
+//
+// Why this is safe:
+// - `zz_run_task` saves/restores the TLS frame+task around the run, so a
+//   sender that is itself a running task resumes undisturbed.
+// - Every green entry sets the thread-local suspend verdict before
+//   returning, and the inline runner saves/restores it, so the inline run
+//   cannot clobber the sender's own verdict: the sender's next blocking
+//   call re-establishes it before anything reads it (`send` itself never
+//   touches the verdict).
+// - No locks are held at any call site (handoff runs after unlock), so no
+//   lock ordering is introduced.
+// - Stack growth is bounded by ZZ_HANDOFF_MAX_DEPTH: each inline level
+//   runs to its next suspend or to completion before returning, and past
+//   the cap the caller queues instead (0 = queue it).
+#define ZZ_HANDOFF_MAX_DEPTH 8
+
+static int zz_handoff_run_inline(zz_task_t task) {
+    if (zz_handoff_depth >= ZZ_HANDOFF_MAX_DEPTH) return 0;
+    zz_handoff_depth++;
+    // Verdict save/restore (audit MAJOR-1): an inlined waiter that
+    // re-suspends leaves verdict=1 on this thread's TLS. Without restoring,
+    // a green sender that returns without another green entry would look
+    // suspended to the trampoline, which would drop its completion (lost
+    // join result + leaked frame/rep). The sender's own verdict is
+    // meaningless mid-`send` — only the trampoline reads it.
+    int saved_verdict = zz_suspend_verdict;
+    zz_run_task(task);
+    zz_suspend_verdict = saved_verdict;
+    zz_handoff_depth--;
+    return 1;
+}
+
+// Helping (audit CRITICAL-1 fix): a worker about to park in a blocking
+// wait runs one pending task from its OWN deque instead and reports 1 so
+// the caller rechecks its predicate. Parked owners strand deque work no
+// thief can reach (top-up deques are never stolen from by design);
+// draining it here keeps that work moving while the waiter still polls
+// its own predicate every round. Returns 0 when the deque is empty
+// (caller parks normally) or past the nesting cap (caller parks —
+// graceful degradation for absurd blocking-nesting depths, documented in
+// threading.md).
+//
+// Own-deque ONLY — never steals (audit follow-up): stealing while holding
+// a blocked task buries dependency order under the run. A total-order
+// chain (au4) distributed across nested stacks provably stalls that way:
+// satisfiable predicates rot mid-stack while tops wait on the
+// unsatisfiable, and per-join broadcasts only revisit tops. Own-chain
+// nesting is instead inherently forward (a parent buried under its own
+// child is revisited when the child completes and unwinds into it), and
+// every steal happens from the hold-nothing worker loop, so every parked
+// wait is either a revisited top or unwind-reachable. All stealing stays
+// in `zz_worker_loop`; helping never touches another deque.
+//
+// Runs WITHOUT any channel/join lock (callers unlock first): the helped
+// task may itself wait on the same channel/join, which re-enters helping
+// one level deeper (bounded by ZZ_HELP_MAX_DEPTH).
+#define ZZ_HELP_MAX_DEPTH 64
+
+static int zz_worker_help_once(void) {
+    if (!zz_is_worker || !zz_local_deque) return 0;
+    if (zz_help_depth >= ZZ_HELP_MAX_DEPTH) return 0;
+    // Owner pop only (single owner = this thread; racing thieves use the
+    // top CAS — the standard Chase–Lev pairing, same as the worker loop).
+    zz_task_t task;
+    if (!zz_deque_pop(zz_local_deque, &task)) return 0;
+    // Verdict save/restore (same class as MAJOR-1): the helped task may
+    // suspend (verdict=1), but the waiter runs a *blocking* call that
+    // never reads the verdict — only the trampoline does, after later
+    // green entries re-establish whatever this run needs.
+    int saved_verdict = zz_suspend_verdict;
+    zz_help_depth++;
+    zz_run_task(task);
+    zz_help_depth--;
+    zz_suspend_verdict = saved_verdict;
+    return 1;
 }
 
 // Publish a task result and serve green join waiters by direct handoff
@@ -1615,9 +2096,22 @@ void zz_task_join_complete(zz_task_join *join, zz_value result) {
         }
         w = next;
     }
-    pthread_cond_signal(&join->cond);
+    // Counted wake: waiter-free completions (the fan-in steady state —
+    // no joiner registered) skip the broadcast entirely, so each
+    // completion pays no futex wake. Airtight by announce-then-verify: a
+    // blocking waiter increments `sleepers` before predicating on
+    // `completed` under this same lock. Broadcast (not signal): handles
+    // are multi-recv by design, so N parked joiners must ALL wake
+    // (audit MAJOR-2: a single signal stranded every joiner but one).
+    if (__atomic_load_n(&join->sleepers, __ATOMIC_ACQUIRE) > 0) {
+        pthread_cond_broadcast(&join->cond);
+    }
     pthread_mutex_unlock(&join->lock);
-    for (size_t i = 0; i < ntasks; i++) zz_enqueue_task(tasks[i]);
+    for (size_t i = 0; i < ntasks; i++) {
+        // Direct handoff applies to join waiters too: a completion that
+        // releases a suspended joiner runs it inline instead of queueing.
+        if (!zz_handoff_run_inline(tasks[i])) zz_enqueue_task(tasks[i]);
+    }
     free(tasks);
     // Thread-parked green waiters (sync frames) sleep on this same
     // condvar with predicate `fr->has_value`: one signal may not reach
@@ -1740,10 +2234,10 @@ static void *zz_worker_loop(void *arg) {
             if (zz_deque_pop(dq, &task) || zz_steal_siblings(&task)) {
                 break;
             }
-            if (ex->inj_len > 0) {
+            if (__atomic_load_n(&ex->inj_len, __ATOMIC_RELAXED) > 0) {
                 task = ex->inj_buf[ex->inj_head];
                 ex->inj_head = (ex->inj_head + 1) % ex->inj_cap;
-                ex->inj_len--;
+                __atomic_sub_fetch(&ex->inj_len, 1, __ATOMIC_RELAXED);
                 break;
             }
             // Announce-then-verify: a push landing between the last steal
@@ -1787,7 +2281,7 @@ static void zz_executor_init(void) {
     pthread_mutex_init(&ex->inj_lock, NULL);
     pthread_cond_init(&ex->inj_cond, NULL);
     ex->inj_buf = NULL;
-    ex->inj_len = 0;
+    __atomic_store_n(&ex->inj_len, 0, __ATOMIC_RELAXED);
     ex->inj_cap = 0;
     ex->inj_head = 0;
     __atomic_store_n(&ex->sleepers, 0, __ATOMIC_RELAXED);
@@ -1826,8 +2320,11 @@ zz_value zz_spawn(zz_value fn, int *err) {
         fprintf(stderr, "zz: out of memory (task join)\n");
         exit(1);
     }
-    pthread_mutex_init(&join->lock, NULL);
-    pthread_cond_init(&join->cond, NULL);
+    // Static initialization (assignment, no init call): handles are never
+    // destroyed (intentionally leaked, like before), so dynamic init buys
+    // nothing — this skips two libc calls per spawn on the hot path.
+    join->lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+    join->cond = (pthread_cond_t)PTHREAD_COND_INITIALIZER;
     join->result = zz_unit();
     join->completed = 0;
     join->consumed = 0;
@@ -1837,10 +2334,70 @@ zz_value zz_spawn(zz_value fn, int *err) {
     join->gwait_pool_n = 0;
     __atomic_store_n(&join->green_waiters, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&join->gparked, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&join->sleepers, 0, __ATOMIC_RELAXED);
     zz_task_t task;
     task.fn = zz_value_dup(fn);  // Independent copy for the worker.
+    if (task.fn.tag == ZZ_NATIVE && !task.fn.payload) {
+        // Dup OOM: null-payload closure. Drop the task (reporting via
+        // err) rather than enqueueing a no-op that still costs a join.
+        *err = 1;
+        return zz_unit();
+    }
     task.join = join;
     task.frame = NULL;  // Lazily allocated by the trampoline (green only).
+    zz_enqueue_task(task);
+    zz_value v;
+    v.tag = ZZ_TASK_JOIN;
+    v.task = join;
+    return v;
+}
+
+// Spawn fast path for `task.spawn(|...| ...)` closure literals: build the
+// worker-owned closure rep directly from the call-site capture arrays and
+// enqueue, skipping the intermediate call-site rep (one malloc plus a full
+// make/dup layer) that `zz_spawn(zz_closure_make_ex_typed(...))` burns.
+// Snapshot isolation is identical (VALUE cells deep-copied, RAW bytes
+// copied); only the redundant middle copy disappears.
+//
+// `is_green` marks suspendable bodies (the lowerer decides eligibility).
+// The capture arrays are borrowed for the call (stack `_cap` arrays) —
+// every byte the worker needs is copied before return.
+zz_value zz_spawn_ex(zz_dispatch_fn fn, void **cells,
+                     const unsigned char *kinds, const size_t *sizes,
+                     size_t nenv, int is_green, int *err) {
+    if (!fn) { *err = 1; return zz_unit(); }
+    pthread_once(&zz_executor_once, zz_executor_init);
+    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP];
+    zz_dup_memo m = {inline_store, 0, ZZ_DUP_INLINE_CAP, 0};
+    zz_value owned =
+        zz_closure_dup_build(fn, cells, kinds, sizes, nenv, is_green, &m);
+    if (m.owned) free(m.items);
+    if (owned.tag != ZZ_NATIVE || !owned.payload) {
+        *err = 1;
+        return zz_unit();
+    }
+    zz_task_join *join = (zz_task_join *)malloc(sizeof(zz_task_join));
+    if (!join) {
+        fprintf(stderr, "zz: out of memory (task join)\n");
+        exit(1);
+    }
+    // Static initialization (see `zz_spawn`): assignment, no libc call.
+    join->lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+    join->cond = (pthread_cond_t)PTHREAD_COND_INITIALIZER;
+    join->result = zz_unit();
+    join->completed = 0;
+    join->consumed = 0;
+    join->gwait_head = NULL;
+    join->gwait_tail = NULL;
+    join->gwait_pool = NULL;
+    join->gwait_pool_n = 0;
+    __atomic_store_n(&join->green_waiters, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&join->gparked, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&join->sleepers, 0, __ATOMIC_RELAXED);
+    zz_task_t task;
+    task.fn = owned;
+    task.join = join;
+    task.frame = NULL;
     zz_enqueue_task(task);
     zz_value v;
     v.tag = ZZ_TASK_JOIN;
@@ -1902,11 +2459,24 @@ zz_value zz_task_join_recv_green(zz_value join_val, zz_task_frame *fr, int resum
         zz_suspend_verdict = 1;
         return zz_unit();
     }
-    __atomic_add_fetch(&join->gparked, 1, __ATOMIC_ACQ_REL);
-    while (!fr->has_value) {
-        pthread_cond_wait(&join->cond, &join->lock);
+    // Sync frame: same helping discipline as the channel green path —
+    // help first, sleep only while announced on `gparked`.
+    for (;;) {
+        if (fr->has_value) break;
+        pthread_mutex_unlock(&join->lock);
+        if (zz_worker_help_once()) {
+            pthread_mutex_lock(&join->lock);
+            continue;
+        }
+        pthread_mutex_lock(&join->lock);
+        if (fr->has_value) break;
+        __atomic_add_fetch(&join->gparked, 1, __ATOMIC_ACQ_REL);
+        while (!fr->has_value) {
+            pthread_cond_wait(&join->cond, &join->lock);
+        }
+        __atomic_sub_fetch(&join->gparked, 1, __ATOMIC_ACQ_REL);
+        break;
     }
-    __atomic_sub_fetch(&join->gparked, 1, __ATOMIC_ACQ_REL);
     fr->has_value = 0;
     zz_value result = fr->value;
     pthread_mutex_unlock(&join->lock);
@@ -1925,8 +2495,24 @@ zz_value zz_task_join_recv(zz_value join_val, int *err) {
     if (!join->completed && zz_is_worker) {
         zz_executor_top_up();
     }
-    while (!join->completed) {
-        pthread_cond_wait(&join->cond, &join->lock);
+    for (;;) {
+        if (join->completed) break;
+        // Helping (audit CRITICAL-1): same discipline as channel recv —
+        // run stranded work instead of parking; the lock is released
+        // across the run. Announce-then-verify below is unchanged.
+        pthread_mutex_unlock(&join->lock);
+        if (zz_worker_help_once()) {
+            pthread_mutex_lock(&join->lock);
+            continue;
+        }
+        pthread_mutex_lock(&join->lock);
+        if (join->completed) break;
+        __atomic_add_fetch(&join->sleepers, 1, __ATOMIC_ACQ_REL);
+        while (!join->completed) {
+            pthread_cond_wait(&join->cond, &join->lock);
+        }
+        __atomic_sub_fetch(&join->sleepers, 1, __ATOMIC_ACQ_REL);
+        break;
     }
     zz_value result = join->result;
     pthread_mutex_unlock(&join->lock);
@@ -3086,6 +3672,16 @@ zz_value zz_call_native3(zz_value (*f)(zz_value, zz_value, zz_value, int *), zz_
     int err = 0;
     zz_value r = f(a, b, c, &err);
     return r;
+}
+// Spawn-closure-literal fuse (`task.spawn(|...| ...)`): the lowerer passes
+// the capture arrays straight through instead of building an intermediate
+// closure value first. Same err discipline as the other shims (ignored:
+// OOM degrades to a unit handle, exactly like a failed `make` would).
+zz_value zz_call_native_spawn(zz_dispatch_fn fn, void **cells,
+                              const unsigned char *kinds, const size_t *sizes,
+                              size_t nenv, int is_green) {
+    int err = 0;
+    return zz_spawn_ex(fn, cells, kinds, sizes, nenv, is_green, &err);
 }
 // typeof(v) — return type name as string.
 zz_value zz_typeof(zz_value v, int *err) {

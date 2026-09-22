@@ -1,0 +1,7 @@
+// E2E-ERROR: spawning a non-closure is a static type error.
+import std.task
+
+func main() {
+    h := task.spawn(42)
+    println("spawned")
+}

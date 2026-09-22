@@ -902,85 +902,112 @@ impl Lowerer {
                 "zz_unit()".to_string()
             }
             Expr::Closure { params, body, .. } => {
-                // Allocate the id up front (not from `closure_defs.len()`):
-                // lowering the body re-enters this arm for nested literals
-                // while no borrow is held, so ids stay unique.
-                let cid = {
-                    let n = self.closure_seq.get();
-                    self.closure_seq.set(n + 1);
-                    n
-                };
-                // Free variables bound outside the closure become shared
-                // heap cells in the environment (match VM by-reference
-                // capture). Names resolving to nothing here (plain function
-                // names, namespaces) are skipped.
-                let param_names: Vec<String> = params.iter().map(|p| p.name.name.clone()).collect();
-                let globals = self.global_name_set();
-                let mut caps: Vec<(String, String, String, Option<zz_checker::Type>)> = Vec::new();
-                for fv in zz_hir::closure_free_vars(&param_names, body, &globals) {
-                    let Some(ptr) = names.cell_ptr(&fv) else {
-                        continue;
-                    };
-                    let ctype = names.lookup_type(&fv).unwrap_or("zz_value").to_string();
-                    let checker = names.checker_types.get(&fv).cloned();
-                    caps.push((fv, ptr, ctype, checker));
-                }
-                let body_c = self.emit_closure(params, body, cid, &caps, names, out);
-                self.closure_defs.borrow_mut().push(body_c);
-                // Emit a forward declaration so the closure is visible to
-                // call sites that appear before the closure definition.
-                self.closure_forward_decls.borrow_mut().push(format!(
-                    "static zz_value zz_closure_{cid}(zz_value *args, size_t argc, void **env, size_t nenv);\n"
-                ));
-                // Green closures (B3 suspendable frames): eligible bodies
-                // lower to a state machine and suspend instead of parking.
-                let green = super::green::closure_green_eligible(self, body);
-                if caps.is_empty() {
+                let (fname, cap_arr, kind_arr, size_arr, n, green) =
+                    self.emit_closure_parts(params, body, names, out);
+                if n == 0 {
                     if green {
-                        format!("zz_closure_make_green(zz_closure_{cid})")
+                        format!("zz_closure_make_green({fname})")
                     } else {
-                        format!("zz_closure_make(zz_closure_{cid})")
+                        format!("zz_closure_make({fname})")
                     }
                 } else {
-                    let cap_arr = names.fresh("_cap");
-                    let ptrs: Vec<String> = caps.iter().map(|(_, p, _, _)| p.clone()).collect();
-                    out.push_str(&format!(
-                        "    void *{cap_arr}[] = {{{}}};\n",
-                        ptrs.join(", ")
-                    ));
-                    // Cell layout for the rep: boxed `zz_value` cells
-                    // deep-copy on spawn; anything else (unboxed int /
-                    // double / bool / struct cells) copies byte-wise.
-                    // `zz_value_dup` reads this — without it every cell
-                    // is misread as `zz_value*` (spawn segfault class).
-                    let kind_arr = names.fresh("_capkind");
-                    let kinds: Vec<String> = caps
-                        .iter()
-                        .map(|(_, _, ctype, _)| {
-                            if ctype == "zz_value" { "0" } else { "1" }.to_string()
-                        })
-                        .collect();
-                    out.push_str(&format!(
-                        "    unsigned char {kind_arr}[] = {{{}}};\n",
-                        kinds.join(", ")
-                    ));
-                    let size_arr = names.fresh("_capsz");
-                    let sizes: Vec<String> = caps
-                        .iter()
-                        .map(|(_, _, ctype, _)| format!("sizeof({ctype})"))
-                        .collect();
-                    out.push_str(&format!(
-                        "    size_t {size_arr}[] = {{{}}};\n",
-                        sizes.join(", ")
-                    ));
                     format!(
-                        "zz_closure_make_ex_typed{green}(zz_closure_{cid}, {cap_arr}, {kind_arr}, {size_arr}, {})",
-                        caps.len(),
+                        "zz_closure_make_ex_typed{green}({fname}, {cap_arr}, {kind_arr}, {size_arr}, {n})",
                         green = if green { "_green" } else { "" },
                     )
                 }
             }
             Expr::Try { expr: inner, span } => self.emit_try(inner, *span, names, out),
+        }
+    }
+
+    /// Lower a closure literal's body definition + capture arrays, returning
+    /// the pieces a construction call needs:
+    /// (fn name, cap array, kind array, size array, ncaps, green).
+    /// Array exprs are `"NULL"` when the closure captures nothing (no arrays
+    /// emitted). Shared by the general `make` path and the `task.spawn`
+    /// fast path (`zz_spawn_ex`, which skips the intermediate rep).
+    pub(super) fn emit_closure_parts(
+        &self,
+        params: &[Param],
+        body: &Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> (String, String, String, String, usize, bool) {
+        // Allocate the id up front (not from `closure_defs.len()`):
+        // lowering the body re-enters closure lowering for nested literals
+        // while no borrow is held, so ids stay unique.
+        let cid = {
+            let n = self.closure_seq.get();
+            self.closure_seq.set(n + 1);
+            n
+        };
+        // Free variables bound outside the closure become shared
+        // heap cells in the environment (match VM by-reference
+        // capture). Names resolving to nothing here (plain function
+        // names, namespaces) are skipped.
+        let param_names: Vec<String> = params.iter().map(|p| p.name.name.clone()).collect();
+        let globals = self.global_name_set();
+        let mut caps: Vec<(String, String, String, Option<zz_checker::Type>)> = Vec::new();
+        for fv in zz_hir::closure_free_vars(&param_names, body, &globals) {
+            let Some(ptr) = names.cell_ptr(&fv) else {
+                continue;
+            };
+            let ctype = names.lookup_type(&fv).unwrap_or("zz_value").to_string();
+            let checker = names.checker_types.get(&fv).cloned();
+            caps.push((fv, ptr, ctype, checker));
+        }
+        let body_c = self.emit_closure(params, body, cid, &caps, names, out);
+        self.closure_defs.borrow_mut().push(body_c);
+        // Emit a forward declaration so the closure is visible to
+        // call sites that appear before the closure definition.
+        self.closure_forward_decls.borrow_mut().push(format!(
+            "static zz_value zz_closure_{cid}(zz_value *args, size_t argc, void **env, size_t nenv);\n"
+        ));
+        // Green closures (B3 suspendable frames): eligible bodies
+        // lower to a state machine and suspend instead of parking.
+        let green = super::green::closure_green_eligible(self, body);
+        let fname = format!("zz_closure_{cid}");
+        if caps.is_empty() {
+            (
+                fname,
+                "NULL".to_string(),
+                "NULL".to_string(),
+                "NULL".to_string(),
+                0,
+                green,
+            )
+        } else {
+            let cap_arr = names.fresh("_cap");
+            let ptrs: Vec<String> = caps.iter().map(|(_, p, _, _)| p.clone()).collect();
+            out.push_str(&format!(
+                "    void *{cap_arr}[] = {{{}}};\n",
+                ptrs.join(", ")
+            ));
+            // Cell layout for the rep: boxed `zz_value` cells
+            // deep-copy on spawn; anything else (unboxed int /
+            // double / bool / struct cells) copies byte-wise.
+            // `zz_value_dup` reads this — without it every cell
+            // is misread as `zz_value*` (spawn segfault class).
+            let kind_arr = names.fresh("_capkind");
+            let kinds: Vec<String> = caps
+                .iter()
+                .map(|(_, _, ctype, _)| if ctype == "zz_value" { "0" } else { "1" }.to_string())
+                .collect();
+            out.push_str(&format!(
+                "    unsigned char {kind_arr}[] = {{{}}};\n",
+                kinds.join(", ")
+            ));
+            let size_arr = names.fresh("_capsz");
+            let sizes: Vec<String> = caps
+                .iter()
+                .map(|(_, _, ctype, _)| format!("sizeof({ctype})"))
+                .collect();
+            out.push_str(&format!(
+                "    size_t {size_arr}[] = {{{}}};\n",
+                sizes.join(", ")
+            ));
+            (fname, cap_arr, kind_arr, size_arr, caps.len(), green)
         }
     }
 
@@ -1732,6 +1759,29 @@ impl Lowerer {
             }
             // Fallback: not a closure argument — let it fall through to zz_unit().
         }
+        // ── task.spawn closure-literal fast path ─────────────────────────
+        // `task.spawn(|...| ...)` builds the worker-owned closure rep
+        // directly from the capture arrays (`zz_spawn_ex`), skipping the
+        // intermediate call-site rep (one malloc + a full make/dup layer
+        // per spawn — the allocator traffic that dominated spawn bursts).
+        // Gated on the real stdlib spawn: receiver-free, arity 1, resolving
+        // to the `zz_spawn` runtime fn. User methods named `spawn`, named
+        // args, and non-literal closures keep the general path (identical
+        // isolation semantics either way).
+        if method_receiver.is_none()
+            && named.is_empty()
+            && args.len() == 1
+            && matches!(native_impl(&cname), Some("zz_spawn"))
+        {
+            if let Some(Expr::Closure { params, body, .. }) = args.last() {
+                let (fname, cap_arr, kind_arr, size_arr, n, green) =
+                    self.emit_closure_parts(params, body, names, out);
+                let g = if green { "1" } else { "0" };
+                return format!(
+                    "zz_call_native_spawn({fname}, {cap_arr}, {kind_arr}, {size_arr}, {n}, {g})"
+                );
+            }
+        }
         // Clone the method receiver up front; we may need it again in the
         // impl-method call-site branch (which needs the original Expr
         // to emit the unboxed-struct address).
@@ -2016,7 +2066,7 @@ impl Lowerer {
                         out.push_str("      if (zz_green_suspended()) { return zz_unit(); }\n");
                         out.push_str(&format!("      {tmp} = {yv}; goto green_done_{k}; }}\n"));
                         out.push_str(&format!(
-                            "    green_L_{k}: {tmp} = zz_fr->value; zz_fr->has_value = 0;\n"
+                            "    green_L_{k}: zz_green_resumed(); {tmp} = zz_fr->value; zz_fr->has_value = 0;\n"
                         ));
                         out.push_str(&format!("    green_done_{k}: ;\n"));
                         return tmp;
@@ -2656,8 +2706,17 @@ impl Lowerer {
                     }
                 }
                 Pattern::Binding { name } => {
-                    let cid = names.enter(&name.name);
-                    out.push_str(&format!("        zz_value {cid} = {scrut_tmp};\n"));
+                    // Green: the binding outlives a suspend in the arm body
+                    // (resume jumps over this declaration) — frame cell,
+                    // mirroring `emit_pattern_bind`.
+                    if self.green_active() {
+                        let (ptr, deref, n) = self.green_cell(names, "zz_value", true, out);
+                        out.push_str(&format!("        {deref} = {scrut_tmp};\n"));
+                        names.enter_cell(&name.name, &ptr, &deref, "zz_value", n);
+                    } else {
+                        let cid = names.enter(&name.name);
+                        out.push_str(&format!("        zz_value {cid} = {scrut_tmp};\n"));
+                    }
 
                     if let Some(guard_expr) = &arm.guard {
                         let guard_c = emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);

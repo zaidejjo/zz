@@ -1,0 +1,30 @@
+// E2E: match-binding across suspend — a guarded binding arm's value
+// must survive a channel wait inside the arm.
+import std.io
+import std.task
+import std.chan
+import std.time
+
+func main() {
+    c1 := std.chan()
+    c2 := std.chan()
+    h := task.spawn(|_| {
+        w := 0
+        w = std.chan.recv(c1)
+        match w {
+            v if v > 0 => {
+                w2 := 0
+                w2 = std.chan.recv(c2)
+                v + w2
+            }
+            _ => 0
+        }
+    })
+    time.sleep_ms(200)
+    std.chan.send(c1, 10)
+    time.sleep_ms(200)
+    std.chan.send(c2, 20)
+    r: int = task.join(h)
+    io.println("matchbind:{r}")
+    io.println("matchbind_ok")
+}

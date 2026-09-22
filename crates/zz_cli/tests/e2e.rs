@@ -258,6 +258,36 @@ e2e_success_test!(
     "stdlib",
     "concurrency_recall_test.zz"
 );
+e2e_success_test!(
+    e2e_stdlib_concurrency_verdict_chain_test,
+    "stdlib",
+    "concurrency_verdict_chain_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_concurrency_join_chain_test,
+    "stdlib",
+    "concurrency_join_chain_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_concurrency_mpmc_test,
+    "stdlib",
+    "concurrency_mpmc_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_concurrency_relay_test,
+    "stdlib",
+    "concurrency_relay_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_concurrency_matchbind_test,
+    "stdlib",
+    "concurrency_matchbind_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_concurrency_vartrip_test,
+    "stdlib",
+    "concurrency_vartrip_test.zz"
+);
 e2e_success_test!(e2e_stdlib_regexp_test, "stdlib", "regexp_test.zz");
 e2e_success_test!(e2e_stdlib_crypto_test, "stdlib", "crypto_test.zz");
 e2e_success_test!(
@@ -343,6 +373,8 @@ e2e_error_test!(e2e_err_ext_orphan_dup, "ext_orphan_dup.zz");
 e2e_error_test!(e2e_err_ext_builtin_collision, "ext_builtin_collision.zz");
 e2e_error_test!(e2e_err_main_result_err, "main_result_err.zz");
 e2e_error_test!(e2e_err_try_double_unwrap, "try_double_unwrap.zz");
+e2e_error_test!(e2e_err_spawn_non_closure, "spawn_non_closure.zz");
+e2e_error_test!(e2e_err_chan_send_non_chan, "chan_send_non_chan.zz");
 
 // ---------------------------------------------------------------------------
 // Eval tests: inline code via `zz eval`
