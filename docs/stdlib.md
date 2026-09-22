@@ -15,7 +15,7 @@ Available without imports:
 | `str` | `str(v: T) -> str` | Convert to string |
 | `int` | `int(v: T)` | Parse/convert to int (`.none` on failure) |
 | `float` | `float(v: T)` | Parse/convert to float (`.none` on failure) |
-| `len` | `len(v: T) -> int` | Length of array, string, dict, or range |
+| `len` | `len(v: T) -> int` | Length of array, bytes, string, dict, or range |
 | `range` | `range(start: int, stop: int, step: int)` | Create integer range |
 | `map` | `map(arr: [T] \| T.., f: func(T) -> U) -> [U]` | Apply function to each element |
 | `filter` | `filter(arr: [T] \| T.., f: func(T) -> bool) -> [T]` | Keep elements where predicate is true |
@@ -227,6 +227,92 @@ import std.fs
 | `fs.read_file` | `fs.read_file(path: str)` | Read file contents |
 | `fs.write_file` | `fs.write_file(path: str, contents: str)` | Write file |
 | `fs.exists` | `fs.exists(path: str) -> bool` | Check existence |
+| `fs.read_bytes` | `fs.read_bytes(path: str)` | Raw bytes as `bytes` (contiguous, ~1x RSS) |
+| `fs.append` / `fs.copy` / `fs.move` / `fs.rename` | `(…)` | Append, copy, move |
+| `fs.is_file` / `fs.is_dir` | `(path) -> bool` | Type predicates |
+| `fs.remove_file` / `fs.remove` | `(path)` | Delete a file |
+| `fs.mkdir` / `fs.mkdir_all` | `(path)` | Create directories |
+| `fs.read_dir` / `fs.readdir` | `(path)` | Child basenames (sorted) |
+| `fs.remove_dir_all` / `fs.walk_dir` | `(path)` | Recursive remove / list |
+| `fs.stat` | `(path)` | Metadata dict |
+| `File.open` / `fs.open` | `(path, mode)` | Streaming handle (`r`/`w`/`a`) |
+| `fs.read_chunk` | `(f, n)` | Text chunk (`""` at EOF; UTF-8) |
+| `fs.read_chunk_bytes` | `(f, n)` | Binary-safe chunk as `bytes` (empty at EOF) |
+| `fs.write_chunk` / `fs.seek` / `fs.flush` / `fs.close` | | Handle ops |
+| `fs.normalize` | `(path) -> str` | Lexical normalize (OS separators, `.`/`..`, roots/UNC) |
+| `fs.join` | `(a, b) -> str` | Join + normalize (`b` wins when absolute) |
+| `fs.basename` / `fs.dirname` | `(path) -> str` | Final segment / directory part |
+| `fs.is_absolute` | `(path) -> bool` | Rooted (`/x`, `C:\x`, `\\unc\…`) |
+| `fs.extension` | `(path) -> str` | Extension without dot |
+| `fs.osfs` / `fs.memfs` / `fs.tarfs` / `fs.embedfs` | | FS providers (see below) |
+| `fs.read_to_string_at` / `fs.read_bytes_at` | `(fsys, path)` | Provider reads |
+| `fs.write_at` / `fs.append_at` | `(fsys, path, data)` | Provider writes (Mem/Os only) |
+| `fs.exists_at` / `fs.is_file_at` / `fs.is_dir_at` | `(fsys, path) -> bool` | Provider predicates |
+| `fs.read_dir_at` / `fs.mkdir_all_at` / `fs.remove_file_at` | | Provider dir ops |
+
+All fallible ops return `Result<_, str>` with unified
+`fs:<op>:<code>: <path>` diagnostics (identical in VM and AOT).
+`read_chunk` is text-oriented (lossy on arbitrary bytes by construction);
+use `read_chunk_bytes` for binary streaming.
+
+### `bytes` — contiguous byte buffers
+
+`fs.read_bytes`, `fs.read_chunk_bytes`, and `fs.read_bytes_at` return
+`bytes`: one contiguous buffer (~1 byte RSS per byte, slices share the
+store with zero copies). Prints like an int array (`[104, 105]`).
+
+```zz
+match fs.read_bytes("data.bin") {
+    .ok(b) => {
+        println(len(b))    // or b.len()
+        println(b[0])      // u8 as int (negatives wrap)
+        println(b[1:4])    // zero-copy slice -> bytes
+        println(typeof(b)) // bytes
+        for x in b {       // iterate ints
+            println(x)
+        }
+    }
+    .err(e) => println(e),
+}
+```
+
+Buffers are immutable (`b[i] = x` is an error) and serialize to JSON as
+int arrays. `==` is deep in the VM; in AOT it matches array behavior.
+
+### FS providers (`fs.FS` handle interface)
+
+System calls accept any provider backing the handle:
+
+```zz
+import std.fs
+
+match fs.memfs() {
+    .ok(m) => {
+        fs.write_at(m, "a/b.txt", "hello")
+        match fs.read_to_string_at(m, "a/b.txt") {
+            .ok(c)  => println(c),   // hello
+            .err(e) => println(e),
+        }
+    }
+    .err(e) => println(e),
+}
+
+// Read-only view over a plain .tar archive (no extraction):
+match fs.tarfs("assets.tar") {
+    .ok(t) => println(fs.exists_at(t, "docs/hi.txt")),
+    .err(e) => println(e),
+}
+```
+
+- `fs.osfs()` — the real OS filesystem.
+- `fs.memfs()` — thread-safe in-memory tree (tests, caches, transient data).
+- `fs.tarfs(path)` — read-only plain-`.tar` view (regular files + dirs;
+  symlinks/devices skipped; writes fail `invalid_input`).
+- `fs.embedfs()` — read-only `--embed` assets (empty unless the CLI was
+  given `--embed <dir>`).
+
+Paths inside a provider live in one `/`-rooted virtual namespace
+(backslash accepted, `.`/`..` resolved, `..` above root clamps).
 
 ```zz
 import std.fs

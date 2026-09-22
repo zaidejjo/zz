@@ -112,6 +112,24 @@ impl Interp {
                         }
                         Ok(Flow::Value(result))
                     }
+                    Value::Bytes(b) => {
+                        let mut result = Value::Unit;
+                        for byte in b.as_slice() {
+                            let mut scope = Env::with_parent(&self.env);
+                            scope.define(&vars[0].name, Value::Int(*byte as i64));
+                            let prev = std::mem::replace(&mut self.env, scope);
+                            let flow = self.eval_block(body);
+                            self.env = prev;
+                            match flow? {
+                                Flow::Value(v) => result = v,
+                                Flow::Return(v) => return Ok(Flow::Return(v)),
+                                Flow::Break(_) => break,
+                                Flow::Continue(_) => {}
+                                Flow::Yield(_) => return Err(EvalError::yield_escape()),
+                            }
+                        }
+                        Ok(Flow::Value(result))
+                    }
                     Value::Range(r) => {
                         let (start, end, step) = (r.start, r.end, r.step);
                         let mut result = Value::Unit;
@@ -231,7 +249,13 @@ impl Interp {
                     if let Expr::Path { parts, span: pspan } = callee.as_ref() {
                         if parts.len() == 2 {
                             let method_name = &parts[1];
-                            if MUTATING_METHODS.contains(&method_name.as_str()) {
+                            // A dotted stdlib native (`fs.append`,
+                            // `fs.remove`, …) is a real call, not an
+                            // array-method write-back on a variable.
+                            let dotted = parts.join(".");
+                            if !self.natives.contains_key(&dotted)
+                                && MUTATING_METHODS.contains(&method_name.as_str())
+                            {
                                 let obj_name = &parts[0];
                                 let recv = self.resolve_path_value(parts, *pspan)?;
                                 let f = self.lookup_method(&recv, method_name, *pspan)?;

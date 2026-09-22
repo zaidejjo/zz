@@ -158,7 +158,16 @@ impl Interp {
 
     /// Compile and execute a raw AST program (no type information).
     pub fn run(&mut self, program: &Program) -> Result<Value, EvalError> {
-        let chunk = Arc::new(crate::vm::Compiler::compile_program(program));
+        // Hand the compiler the registered native names so statement calls
+        // colliding with builtins (`fs.append`, `fs.remove`, …) lower as
+        // real native calls instead of array-method write-backs (the typed
+        // `run_typed` pipeline gets the same via HIR reachability).
+        let native_names: Arc<std::collections::HashSet<String>> =
+            Arc::new(self.natives.keys().cloned().collect());
+        let chunk = Arc::new(crate::vm::Compiler::compile_program_with_natives(
+            program,
+            native_names,
+        ));
         let mut vm = crate::vm::Vm::new();
         match vm.run_chunk(&chunk, self)? {
             Flow::Value(v) => Ok(v),

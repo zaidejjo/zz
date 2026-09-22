@@ -307,6 +307,14 @@ pub(crate) fn value_to_json(v: &Value) -> Result<JsonValue, EvalError> {
             }
             Ok(JsonValue::Arr(items))
         }
+        // Byte buffers serialize as int arrays (same as the old boxed
+        // representation, so existing JSON output is unchanged).
+        Value::Bytes(b) => Ok(JsonValue::Arr(
+            b.as_slice()
+                .iter()
+                .map(|x| JsonValue::Num(*x as f64))
+                .collect(),
+        )),
         Value::Dict(entries) => {
             let mut out = Vec::with_capacity(entries.len());
             for (k, val) in &**entries {

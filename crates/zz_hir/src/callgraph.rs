@@ -27,6 +27,7 @@ fn resolve_methods(tp: &TypedProgram, recv: &Expr, method: &str) -> Vec<String> 
     match tp.type_at(recv.span()) {
         Some(Type::Str) => vec![format!("str.{method}")],
         Some(Type::Array(_)) => vec![format!("vec.{method}")],
+        Some(Type::Bytes) => vec![format!("bytes.{method}")],
         Some(Type::Option(_)) => vec![format!("option.{method}")],
         Some(Type::Result(_, _)) => vec![format!("result.{method}")],
         Some(Type::Response) => vec![format!("http.{method}")],
@@ -550,14 +551,20 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
                     });
                 }
             }
-            Stmt::Import { path, alias, .. } => {
-                // Keep the import only if any reachable func lives under the
+            Stmt::Import {
+                path, alias, items, ..
+            } => {
+                // Keep the import if any reachable func lives under the
                 // imported namespace.
                 let ns = alias
                     .clone()
                     .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
                 let prefix = format!("{ns}.");
-                if reach.funcs.iter().any(|f| f.starts_with(&prefix)) {
+                // Selective/wildcard imports (`import std.fs(read_to_string
+                // as rts)`) are always kept: they carry alias info the AOT
+                // backend needs to resolve bare names to canonical natives.
+                // They emit no code (the lowerer ignores Import statements).
+                if !items.is_empty() || reach.funcs.iter().any(|f| f.starts_with(&prefix)) {
                     stmts.push(stmt.clone());
                 }
             }

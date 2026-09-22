@@ -63,6 +63,9 @@ typedef enum {
     ZZ_TCP_LISTENER,
     ZZ_TUPLE,
     ZZ_DB,
+    ZZ_FILE,
+    ZZ_VFS,
+    ZZ_BYTES,
 } zz_tag;
 
 typedef struct zz_value zz_value;
@@ -77,6 +80,19 @@ typedef struct zz_object zz_object;
 
 // A TCP stream or listener: the underlying socket fd.
 typedef struct zz_tcp zz_tcp;
+
+// An open streaming file (`std.fs.open`): the stdio handle plus its origin
+// path (owned, for diagnostics) and a closed flag (explicit `close`).
+typedef struct zz_file zz_file;
+
+// A virtual filesystem provider (`std.fs.osfs`/`memfs`/`tarfs`/`embedfs`):
+// process-lifetime handle dispatched by `zz_fs_*_at`.
+typedef struct zz_vfs zz_vfs;
+
+// A contiguous byte buffer (`fs.read_bytes`, slices): refcounted shared
+// backing store plus a window, so slices share without copying.
+typedef struct zz_bytes_buf zz_bytes_buf;
+typedef struct zz_bytes zz_bytes;
 
 // Refcounted string with Small String Optimization (SSO).
 //
@@ -136,7 +152,23 @@ struct zz_value {
         zz_object *obj;      // boxed struct instance
         zz_tcp *net;         // TCP stream or listener (ZZ_TCP_STREAM/LISTENER)
         void *db;            // opaque sqlite3* handle (ZZ_DB)
+        zz_file *file;       // open streaming file (ZZ_FILE)
+        zz_vfs *vfs;         // fs provider handle (ZZ_VFS)
+        zz_bytes *bytes;     // byte buffer (ZZ_BYTES)
     };
+};
+
+struct zz_bytes_buf {
+    size_t refs;     // atomic reference count (ARC)
+    size_t len;      // backing store length
+    unsigned char data[]; // flexible array
+};
+
+struct zz_bytes {
+    size_t refs;     // atomic reference count (ARC)
+    zz_bytes_buf *buf; // shared backing store (never NULL)
+    size_t off;      // window start into buf->data
+    size_t len;      // window length
 };
 
 struct zz_array {
@@ -426,6 +458,8 @@ static inline zz_value zz_bool(bool b) {
 // Forward declarations for helpers defined later in the TU.
 void zz_retain_array(zz_array *a);
 void zz_release_array(zz_array *a);
+void zz_retain_bytes(zz_bytes *b);
+void zz_release_bytes(zz_bytes *b);
 void zz_retain_dict(zz_dict *d);
 void zz_release_dict(zz_dict *d);
 void zz_retain_func(zz_func *f);
@@ -451,6 +485,9 @@ static inline void zz_retain(zz_value *v) {
         break;
     case ZZ_ARRAY:
         zz_retain_array(v->arr);
+        break;
+    case ZZ_BYTES:
+        zz_retain_bytes(v->bytes);
         break;
     case ZZ_DICT:
         zz_retain_dict(v->dict);
@@ -491,6 +528,9 @@ static inline void zz_release(zz_value *v) {
     case ZZ_ARRAY:
         zz_release_array(v->arr);
         break;
+    case ZZ_BYTES:
+        zz_release_bytes(v->bytes);
+        break;
     case ZZ_DICT:
         zz_release_dict(v->dict);
         break;
@@ -513,7 +553,7 @@ static inline void zz_release(zz_value *v) {
 
 static inline void zz_assign(zz_value *dst, zz_value src) {
     // Release old value if it's a refcounted type.
-    if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY ||
+    if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY || dst->tag == ZZ_BYTES ||
         dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC || dst->tag == ZZ_OBJECT ||
         dst->tag == ZZ_OPTION_SOME || dst->tag == ZZ_RESULT_OK ||
         dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON) {
@@ -521,7 +561,7 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
     }
     *dst = src;
     // Retain the new value for refcounted types.
-    if (src.tag == ZZ_ARRAY || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
+    if (src.tag == ZZ_ARRAY || src.tag == ZZ_BYTES || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
         src.tag == ZZ_OBJECT ||
         src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
         src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON) {
@@ -540,6 +580,9 @@ static inline zz_value zz_clone(zz_value v) {
         break;
     case ZZ_ARRAY:
         zz_retain_array(v.arr);
+        break;
+    case ZZ_BYTES:
+        zz_retain_bytes(v.bytes);
         break;
     case ZZ_DICT:
         zz_retain_dict(v.dict);
@@ -708,12 +751,62 @@ zz_value zz_env_var(zz_value name, int *err);
 zz_value zz_env_args(zz_value unused, int *err);
 
 // ---- fs natives ---------------------------------------------------------
+// Comprehensive non-blocking filesystem (see core.c): every fallible op
+// returns `Result<_, str>` with unified `fs:<op>:<code>: <path>`
+// diagnostics (never raw `strerror` text), so the VM and AOT engines agree
+// byte-for-byte. Blocking syscalls top up the executor when running on a
+// worker thread, so the scheduler never stalls; the public API stays
+// synchronous-looking (`fs.read_to_string(path)`).
 zz_value zz_fs_read(zz_value path, int *err);
+zz_value zz_fs_read_bytes(zz_value path, int *err);
 zz_value zz_fs_write(zz_value path, zz_value data, int *err);
+zz_value zz_fs_append(zz_value path, zz_value data, int *err);
+zz_value zz_fs_copy(zz_value src, zz_value dst, int *err);
+zz_value zz_fs_move(zz_value src, zz_value dst, int *err);
 zz_value zz_fs_exists(zz_value path, int *err);
+zz_value zz_fs_is_file(zz_value path, int *err);
+zz_value zz_fs_is_dir(zz_value path, int *err);
 zz_value zz_fs_remove(zz_value path, int *err);
 zz_value zz_fs_mkdir(zz_value path, int *err);
+zz_value zz_fs_mkdir_all(zz_value path, int *err);
 zz_value zz_fs_readdir(zz_value path, int *err);
+zz_value zz_fs_read_dir(zz_value path, int *err);
+zz_value zz_fs_remove_dir_all(zz_value path, int *err);
+zz_value zz_fs_walk_dir(zz_value path, int *err);
+zz_value zz_fs_stat(zz_value path, int *err);
+zz_value zz_fs_open(zz_value path, zz_value mode, int *err);
+zz_value zz_fs_read_chunk(zz_value f, zz_value n, int *err);
+zz_value zz_fs_read_chunk_bytes(zz_value f, zz_value n, int *err);
+zz_value zz_fs_write_chunk(zz_value f, zz_value data, int *err);
+zz_value zz_fs_seek(zz_value f, zz_value pos, int *err);
+zz_value zz_fs_flush(zz_value f, int *err);
+zz_value zz_fs_close(zz_value f, int *err);
+// Pure cross-platform path lexing (no I/O; mirrors `natives/fs/path.rs`).
+zz_value zz_fs_normalize(zz_value path, int *err);
+zz_value zz_fs_join(zz_value a, zz_value b, int *err);
+zz_value zz_fs_basename(zz_value path, int *err);
+zz_value zz_fs_dirname(zz_value path, int *err);
+zz_value zz_fs_is_absolute(zz_value path, int *err);
+zz_value zz_fs_extension(zz_value path, int *err);
+
+// ---- virtual filesystem providers (mirrors `natives/fs/vfs.rs`) ------------
+zz_value zz_fs_osfs(zz_value unused, int *err);
+zz_value zz_fs_memfs(zz_value unused, int *err);
+zz_value zz_fs_tarfs(zz_value path, int *err);
+zz_value zz_fs_embedfs(zz_value unused, int *err);
+zz_value zz_fs_read_to_string_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_read_bytes_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_write_at(zz_value fsys, zz_value path, zz_value data, int *err);
+zz_value zz_fs_append_at(zz_value fsys, zz_value path, zz_value data, int *err);
+zz_value zz_fs_exists_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_is_file_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_is_dir_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_read_dir_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_mkdir_all_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_remove_file_at(zz_value fsys, zz_value path, int *err);
+// Link `--embed` assets into the process-wide embed table (called from a
+// static initializer in the generated embed C, or directly in tests).
+void zz_embed_register(const char *name, const unsigned char *data, size_t len);
 
 // ---- encoding natives ---------------------------------------------------
 zz_value zz_encoding_url_encode(zz_value s, int *err);

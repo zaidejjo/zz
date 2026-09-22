@@ -518,6 +518,7 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "str" => Some("zz_str_cast"),
         // vec methods — bare names for method dispatch
         "vec.len" | "std.vec.len" | "vec_len" => Some("zz_vec_len"),
+        "bytes.len" | "std.bytes.len" => Some("zz_len"),
         "vec.append" | "std.vec.append" => Some("zz_vec_append"),
         "vec.push" | "std.vec.push" => Some("zz_vec_push"),
         "vec.pop" | "std.vec.pop" => Some("zz_vec_pop"),
@@ -618,18 +619,60 @@ fn native_impl(name: &str) -> Option<&'static str> {
         // option / result
         "option.expect" | "std.option.expect" => Some("zz_option_expect"),
         "result.expect" | "std.result.expect" => Some("zz_result_expect"),
-        // fs
+        // fs — comprehensive non-blocking filesystem (C runtime in
+        // core.c; unified `fs:<op>:<code>` diagnostics match the VM).
         "fs.read" | "std.fs.read" => Some("zz_fs_read"),
         "fs.read_file" | "std.fs.read_file" => Some("zz_fs_read"),
         "fs.read_to_string" | "std.fs.read_to_string" => Some("zz_fs_read"),
+        "fs.read_bytes" | "std.fs.read_bytes" => Some("zz_fs_read_bytes"),
         "fs.write" | "std.fs.write" => Some("zz_fs_write"),
         "fs.write_file" | "std.fs.write_file" => Some("zz_fs_write"),
+        "fs.append" | "std.fs.append" => Some("zz_fs_append"),
+        "fs.copy" | "std.fs.copy" => Some("zz_fs_copy"),
+        "fs.move" | "std.fs.move" => Some("zz_fs_move"),
+        "fs.rename" | "std.fs.rename" => Some("zz_fs_move"),
         "fs.exists" | "std.fs.exists" => Some("zz_fs_exists"),
+        "fs.is_file" | "std.fs.is_file" => Some("zz_fs_is_file"),
+        "fs.is_dir" | "std.fs.is_dir" => Some("zz_fs_is_dir"),
         "fs.remove" | "std.fs.remove" | "fs.remove_file" | "std.fs.remove_file" => {
             Some("zz_fs_remove")
         }
         "fs.mkdir" | "std.fs.mkdir" => Some("zz_fs_mkdir"),
+        "fs.mkdir_all" | "std.fs.mkdir_all" => Some("zz_fs_mkdir_all"),
         "fs.readdir" | "std.fs.readdir" => Some("zz_fs_readdir"),
+        "fs.read_dir" | "std.fs.read_dir" => Some("zz_fs_read_dir"),
+        "fs.remove_dir_all" | "std.fs.remove_dir_all" => Some("zz_fs_remove_dir_all"),
+        "fs.walk_dir" | "std.fs.walk_dir" => Some("zz_fs_walk_dir"),
+        "fs.stat" | "std.fs.stat" => Some("zz_fs_stat"),
+        "fs.open" | "std.fs.open" | "File.open" => Some("zz_fs_open"),
+        "fs.read_chunk" | "std.fs.read_chunk" | "file.read_chunk" => Some("zz_fs_read_chunk"),
+        "fs.read_chunk_bytes" | "std.fs.read_chunk_bytes" | "file.read_chunk_bytes" => {
+            Some("zz_fs_read_chunk_bytes")
+        }
+        "fs.write_chunk" | "std.fs.write_chunk" | "file.write_chunk" => Some("zz_fs_write_chunk"),
+        "fs.seek" | "std.fs.seek" | "file.seek" => Some("zz_fs_seek"),
+        "fs.flush" | "std.fs.flush" | "file.flush" => Some("zz_fs_flush"),
+        "fs.close" | "std.fs.close" | "file.close" => Some("zz_fs_close"),
+        "fs.normalize" | "std.fs.normalize" => Some("zz_fs_normalize"),
+        "fs.join" | "std.fs.join" => Some("zz_fs_join"),
+        "fs.basename" | "std.fs.basename" => Some("zz_fs_basename"),
+        "fs.dirname" | "std.fs.dirname" => Some("zz_fs_dirname"),
+        "fs.is_absolute" | "std.fs.is_absolute" => Some("zz_fs_is_absolute"),
+        "fs.extension" | "std.fs.extension" => Some("zz_fs_extension"),
+        "fs.osfs" | "std.fs.osfs" => Some("zz_fs_osfs"),
+        "fs.memfs" | "std.fs.memfs" => Some("zz_fs_memfs"),
+        "fs.tarfs" | "std.fs.tarfs" => Some("zz_fs_tarfs"),
+        "fs.embedfs" | "std.fs.embedfs" => Some("zz_fs_embedfs"),
+        "fs.read_to_string_at" | "std.fs.read_to_string_at" => Some("zz_fs_read_to_string_at"),
+        "fs.read_bytes_at" | "std.fs.read_bytes_at" => Some("zz_fs_read_bytes_at"),
+        "fs.write_at" | "std.fs.write_at" => Some("zz_fs_write_at"),
+        "fs.append_at" | "std.fs.append_at" => Some("zz_fs_append_at"),
+        "fs.exists_at" | "std.fs.exists_at" => Some("zz_fs_exists_at"),
+        "fs.is_file_at" | "std.fs.is_file_at" => Some("zz_fs_is_file_at"),
+        "fs.is_dir_at" | "std.fs.is_dir_at" => Some("zz_fs_is_dir_at"),
+        "fs.read_dir_at" | "std.fs.read_dir_at" => Some("zz_fs_read_dir_at"),
+        "fs.mkdir_all_at" | "std.fs.mkdir_all_at" => Some("zz_fs_mkdir_all_at"),
+        "fs.remove_file_at" | "std.fs.remove_file_at" => Some("zz_fs_remove_file_at"),
         // encoding
         "encoding.url_encode" | "std.encoding.url_encode" => Some("zz_encoding_url_encode"),
         "encoding.url_decode" | "std.encoding.url_decode" => Some("zz_encoding_url_decode"),

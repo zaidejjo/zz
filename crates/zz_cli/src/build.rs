@@ -39,6 +39,9 @@ pub enum BuildMode {
 /// Release-build knobs: cross target, provider selection, verbosity.
 #[derive(Debug, Clone, Default)]
 pub struct ReleaseOptions {
+    /// `--embed=<dir>` static asset directory baked into the binary and
+    /// served at runtime through `fs.embedfs()`. `None` = no embedding.
+    pub embed: Option<PathBuf>,
     /// `--target=<triple>` cross triple, or `None` for a native host build.
     pub target: Option<String>,
     /// `--cc=` provider preference (clang vs `zig cc`).
@@ -52,6 +55,76 @@ impl ReleaseOptions {
     pub fn target_opt(&self) -> Option<&str> {
         self.target.as_deref()
     }
+}
+
+/// Walk an `--embed` directory into `(virtual-path, bytes)` pairs.
+/// Virtual paths are slash-separated, relative to the directory root.
+/// Symlinks are not followed; non-regular files are skipped. The total is
+/// capped at 256MB with a loud error (binaries are not archives).
+pub fn collect_embed(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    const MAX_TOTAL: u64 = 256 * 1024 * 1024;
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut total: u64 = 0;
+    let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
+    while let Some(cur) = stack.pop() {
+        let rd = std::fs::read_dir(&cur)
+            .map_err(|e| format!("cannot read --embed dir {}: {e}", cur.display()))?;
+        let mut entries: Vec<PathBuf> = Vec::new();
+        for e in rd {
+            let e = e.map_err(|e| format!("cannot list --embed dir: {e}"))?;
+            entries.push(e.path());
+        }
+        entries.sort();
+        for p in entries {
+            let ft = std::fs::symlink_metadata(&p)
+                .map_err(|e| format!("cannot stat {}: {e}", p.display()))?;
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                stack.push(p);
+            } else if ft.is_file() {
+                let rel = p
+                    .strip_prefix(dir)
+                    .map_err(|e| format!("bad --embed path: {e}"))?;
+                let name = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let bytes =
+                    std::fs::read(&p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
+                total += bytes.len() as u64;
+                if total > MAX_TOTAL {
+                    return Err(format!(
+                        "--embed dir exceeds 256MB ({}); hint: embed a smaller asset tree",
+                        dir.display()
+                    ));
+                }
+                out.push((name, bytes));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+/// Content signature of an `--embed` tree for cache invalidation
+/// (names + sizes + mtimes + a byte hash — asset edits must rebuild).
+pub fn embed_sig(dir: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match collect_embed(dir) {
+        Err(_) => "embed-err".hash(&mut h),
+        Ok(files) => {
+            files.len().hash(&mut h);
+            for (name, bytes) in &files {
+                name.hash(&mut h);
+                bytes.hash(&mut h);
+            }
+        }
+    }
+    format!("{:016x}", h.finish())
 }
 
 /// The cache directory (`~/.zz/cache`).
@@ -599,6 +672,20 @@ pub fn build_release(
     opts.plugin_artifacts = plugin_artifacts;
     opts.plugin_link_args = plugin_link_args;
 
+    // `--embed`: bake the asset tree into the binary (content-hashed into
+    // the cache key below so asset edits rebuild).
+    let embed_slug = match rel.embed.as_deref() {
+        None => String::new(),
+        Some(dir) => {
+            let files = collect_embed(dir)?;
+            opts.embed_assets = files
+                .into_iter()
+                .map(|(name, bytes)| zz_codegen::EmbedAsset { name, bytes })
+                .collect();
+            embed_sig(dir)
+        }
+    };
+
     // Early validation: exact CLI-contract errors for PGO-cross and
     // static-macOS, before any cache or toolchain work.
     if let Err(e) = zz_codegen::validate(&opts, target) {
@@ -631,7 +718,13 @@ pub fn build_release(
     let source = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
     let key = cache_key(path, &source, &opts, target)?;
     let target_slug = target.unwrap_or("host");
-    let cached = dir.join(format!("{key}-{mode:?}-{target_slug}"));
+    // The embed tree is content-fingerprinted separately (compact slug
+    // addition — asset edits must never reuse a non-embed binary).
+    let cached = if embed_slug.is_empty() {
+        dir.join(format!("{key}-{mode:?}-{target_slug}"))
+    } else {
+        dir.join(format!("{key}-{mode:?}-{target_slug}-{embed_slug}"))
+    };
 
     if is_usable_cache_binary(&cached) {
         // Reuse the cached binary.
@@ -707,6 +800,7 @@ fn publish_to_bin(cached: &Path, src: &Path, target: Option<&str>) -> Result<Pat
 /// Build a native binary for `path` in release `mode` with default options.
 /// Convenience wrapper over [`build_release`] (native host, auto provider).
 /// Returns the `bin/` output binary path.
+#[allow(dead_code)]
 pub fn build_native(path: &Path, mode: BuildMode) -> Result<PathBuf, String> {
     build_release(path, mode, &ReleaseOptions::default())
 }

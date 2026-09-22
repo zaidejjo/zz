@@ -241,6 +241,9 @@ void zz_retain_arc(zz_value *v) {
     case ZZ_ARRAY:
         zz_retain_array(v->arr);
         break;
+    case ZZ_BYTES:
+        zz_retain_bytes(v->bytes);
+        break;
     case ZZ_DICT:
         zz_retain_dict(v->dict);
         break;
@@ -275,6 +278,9 @@ void zz_release_arc(zz_value *v) {
     case ZZ_ARRAY:
         zz_release_array(v->arr);
         break;
+    case ZZ_BYTES:
+        zz_release_bytes(v->bytes);
+        break;
     case ZZ_DICT:
         zz_release_dict(v->dict);
         break;
@@ -301,6 +307,9 @@ zz_value zz_clone_arc(zz_value v) {
         break;
     case ZZ_ARRAY:
         zz_retain_array(v.arr);
+        break;
+    case ZZ_BYTES:
+        zz_retain_bytes(v.bytes);
         break;
     case ZZ_DICT:
         zz_retain_dict(v.dict);

@@ -70,6 +70,36 @@ zz_value zz_array_at(zz_value arr, size_t i);
 zz_value zz_array_slice(const zz_array *a, zz_value start, zz_value end, int *err);
 zz_value zz_array_dup(const zz_array *a);
 
+// ---- byte buffers --------------------------------------------------------
+// Contiguous `bytes` (ZZ_BYTES): refcounted shared backing store plus a
+// window, so slices share without copying (mirrors the VM's BytesData).
+zz_value zz_bytes_new(const unsigned char *src, size_t len);
+// Adopt an already-malloc'd buffer of exactly `len` bytes (no copy).
+zz_value zz_bytes_take(unsigned char *data, size_t len);
+// Backing-store constructor + window wrapper (lets file reads land
+// directly in the store: one allocation, zero copies).
+zz_bytes_buf *zz_bytes_buf_new(size_t len);
+zz_value zz_bytes_wrap(zz_bytes_buf *buf, size_t off, size_t len);
+zz_value zz_bytes_slice(const zz_bytes *b, int64_t s, int64_t e);
+static inline zz_value zz_bytes_get(const zz_bytes *b, zz_value idx, int *err) {
+    *err = 0;
+    if (idx.tag != ZZ_INT || !b) {
+        *err = 1;
+        return zz_unit();
+    }
+    int64_t i = idx.i;
+    int64_t n = (int64_t)b->len;
+    if (i < 0)
+        i += n;
+    if (i < 0 || i >= n) {
+        *err = 1;
+        return zz_unit();
+    }
+    return (zz_value){ZZ_INT, {.i = (int64_t)b->buf->data[b->off + (size_t)i]}};
+}
+void zz_retain_bytes(zz_bytes *b);
+void zz_release_bytes(zz_bytes *b);
+
 // Index expression support (lowered from `obj[idx]`). Dispatch on the
 // object tag at runtime: arrays and dicts. Returns unit + *err=1 on unsupported.
 // Inlined for the same reason as zz_array_get above.
@@ -94,6 +124,8 @@ static inline zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
     switch (obj.tag) {
     case ZZ_ARRAY:
         return zz_array_get(obj.arr, idx, err);
+    case ZZ_BYTES:
+        return zz_bytes_get(obj.bytes, idx, err);
     case ZZ_DICT:
         return zz_dict_get(obj.dict, idx, err);
     default:

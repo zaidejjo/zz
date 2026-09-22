@@ -17,7 +17,7 @@ pub(crate) mod crypto;
 pub(crate) mod db;
 pub(crate) mod encoding;
 pub(crate) mod env;
-pub(crate) mod fs;
+pub mod fs;
 pub(crate) mod http;
 pub(crate) mod io;
 pub(crate) mod iterators;
@@ -139,6 +139,21 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
     );
     m.insert(
         "len".into(),
+        NativeEntry {
+            arity: 1,
+            f: iterators::len,
+        },
+    );
+    // bytes.* methods (for method dispatch: `b.len()` on byte buffers).
+    m.insert(
+        "bytes.len".into(),
+        NativeEntry {
+            arity: 1,
+            f: iterators::len,
+        },
+    );
+    m.insert(
+        "std.bytes.len".into(),
         NativeEntry {
             arity: 1,
             f: iterators::len,
@@ -1405,49 +1420,79 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
-    // std.fs
-    m.insert(
-        "std.fs.read_file".into(),
-        NativeEntry {
-            arity: 1,
-            f: fs::fs_read_file,
-        },
-    );
-    m.insert(
-        "std.fs.write_file".into(),
-        NativeEntry {
-            arity: 2,
-            f: fs::fs_write_file,
-        },
-    );
-    m.insert(
-        "std.fs.exists".into(),
-        NativeEntry {
-            arity: 1,
-            f: fs::fs_exists,
-        },
-    );
-    m.insert(
-        "std.fs.read_to_string".into(),
-        NativeEntry {
-            arity: 1,
-            f: fs::fs_read_file,
-        },
-    );
-    m.insert(
-        "std.fs.write".into(),
-        NativeEntry {
-            arity: 2,
-            f: fs::fs_write_file,
-        },
-    );
-    m.insert(
-        "std.fs.remove_file".into(),
-        NativeEntry {
-            arity: 1,
-            f: fs::fs_remove_file,
-        },
-    );
+    // std.fs — comprehensive non-blocking filesystem (see
+    // `natives/fs/mod.rs` for the I/O pool + yield protocol). Legacy
+    // aliases (`read_file`/`write_file`/`read`/`remove`) are kept so
+    // existing fixtures keep working.
+    for (name, arity, func) in [
+        (
+            "std.fs.read_file",
+            1_usize,
+            fs::fs_read_file as zz_runtime::NativeFn,
+        ),
+        ("std.fs.read", 1, fs::fs_read_file),
+        ("std.fs.read_to_string", 1, fs::fs_read_file),
+        ("std.fs.read_bytes", 1, fs::fs_read_bytes),
+        ("std.fs.write_file", 2, fs::fs_write_file),
+        ("std.fs.write", 2, fs::fs_write_file),
+        ("std.fs.append", 2, fs::fs_append),
+        ("std.fs.copy", 2, fs::fs_copy),
+        ("std.fs.move", 2, fs::fs_move),
+        ("std.fs.rename", 2, fs::fs_move),
+        ("std.fs.exists", 1, fs::fs_exists),
+        ("std.fs.is_file", 1, fs::fs_is_file),
+        ("std.fs.is_dir", 1, fs::fs_is_dir),
+        ("std.fs.remove_file", 1, fs::fs_remove_file),
+        ("std.fs.remove", 1, fs::fs_remove_file),
+        ("std.fs.mkdir", 1, fs::fs_mkdir),
+        ("std.fs.mkdir_all", 1, fs::fs_mkdir_all),
+        ("std.fs.read_dir", 1, fs::fs_read_dir),
+        ("std.fs.readdir", 1, fs::fs_read_dir),
+        ("std.fs.remove_dir_all", 1, fs::fs_remove_dir_all),
+        ("std.fs.walk_dir", 1, fs::fs_walk_dir),
+        ("std.fs.stat", 1, fs::fs_stat),
+        ("std.fs.open", 2, fs::fs_open),
+        ("std.fs.read_chunk", 2, fs::file_read_chunk),
+        ("std.fs.read_chunk_bytes", 2, fs::file_read_chunk_bytes),
+        ("std.fs.write_chunk", 2, fs::file_write_chunk),
+        ("std.fs.seek", 2, fs::file_seek),
+        ("std.fs.flush", 1, fs::file_flush),
+        ("std.fs.close", 1, fs::file_close),
+        // Pure cross-platform path lexing (no I/O; see `natives/fs/path.rs`).
+        ("std.fs.normalize", 1, fs::fs_normalize),
+        ("std.fs.join", 2, fs::fs_join),
+        ("std.fs.basename", 1, fs::fs_basename),
+        ("std.fs.dirname", 1, fs::fs_dirname),
+        ("std.fs.is_absolute", 1, fs::fs_is_absolute),
+        ("std.fs.extension", 1, fs::fs_extension),
+        // FS providers (`fs.FS` handle interface: Os / Mem / Tar / Embed)
+        // plus the `*_at` operation family (see `natives/fs/vfs.rs).
+        ("std.fs.osfs", 0, fs::vfs::fs_osfs),
+        ("std.fs.memfs", 0, fs::vfs::fs_memfs),
+        ("std.fs.tarfs", 1, fs::vfs::fs_tarfs),
+        ("std.fs.embedfs", 0, fs::vfs::fs_embedfs),
+        ("std.fs.read_to_string_at", 2, fs::vfs::fs_read_to_string_at),
+        ("std.fs.read_bytes_at", 2, fs::vfs::fs_read_bytes_at),
+        ("std.fs.write_at", 3, fs::vfs::fs_write_at),
+        ("std.fs.append_at", 3, fs::vfs::fs_append_at),
+        ("std.fs.exists_at", 2, fs::vfs::fs_exists_at),
+        ("std.fs.is_file_at", 2, fs::vfs::fs_is_file_at),
+        ("std.fs.is_dir_at", 2, fs::vfs::fs_is_dir_at),
+        ("std.fs.read_dir_at", 2, fs::vfs::fs_read_dir_at),
+        ("std.fs.mkdir_all_at", 2, fs::vfs::fs_mkdir_all_at),
+        ("std.fs.remove_file_at", 2, fs::vfs::fs_remove_file_at),
+        // `File.open` constructor namespace (mirrors `Regexp.new`).
+        ("File.open", 2, fs::fs_open),
+        // `file.*` method namespace for open-handle dispatch.
+        ("file.read_chunk", 2, fs::file_read_chunk),
+        ("file.read_chunk_bytes", 2, fs::file_read_chunk_bytes),
+        ("file.write_chunk", 2, fs::file_write_chunk),
+        ("file.seek", 2, fs::file_seek),
+        ("file.flush", 1, fs::file_flush),
+        ("file.close", 1, fs::file_close),
+    ] {
+        m.insert(name.into(), NativeEntry { arity, f: func });
+    }
 
     // std.env
     m.insert(

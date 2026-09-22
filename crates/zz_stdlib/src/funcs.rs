@@ -756,6 +756,12 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "vec.len".into(),
         sig_t(vec![("v", Type::Array(Box::new(t.clone())))], Type::Int),
     );
+    // bytes.* methods (for method dispatch: `b.len()` on byte buffers).
+    m.insert("bytes.len".into(), sig(vec![("v", Type::Bytes)], Type::Int));
+    m.insert(
+        "std.bytes.len".into(),
+        sig(vec![("v", Type::Bytes)], Type::Int),
+    );
     m.insert(
         "vec.push".into(),
         sig_t(
@@ -1857,46 +1863,252 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
 
-    // std.fs
-    m.insert(
-        "std.fs.read_file".into(),
-        sig(
+    // std.fs — comprehensive non-blocking filesystem. All fallible ops
+    // return `Result<_, str>` with unified `fs:<op>:<code>: <path>`
+    // diagnostics (see `natives/fs/mod.rs`); predicates return `bool`.
+    // Open handles are `Opaque("file")` and dispatch `file.*` methods.
+    let file_t = Type::Opaque("file".to_string());
+    // FS provider handles (`fs.FS` interface: Os / Mem / Tar / Embed).
+    let fs_t = Type::Opaque("zzfs".to_string());
+    let result_unit = || Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
+    let result_str = || Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+    let result_int = || Type::Result(Box::new(Type::Int), Box::new(Type::Str));
+    let result_file = || Type::Result(Box::new(file_t.clone()), Box::new(Type::Str));
+    let result_str_arr = || {
+        Type::Result(
+            Box::new(Type::Array(Box::new(Type::Str))),
+            Box::new(Type::Str),
+        )
+    };
+    let result_bytes = || Type::Result(Box::new(Type::Bytes), Box::new(Type::Str));
+    let result_stat = || {
+        Type::Result(
+            Box::new(Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
+            Box::new(Type::Str),
+        )
+    };
+    for (name, params, ret) in [
+        ("std.fs.read_file", vec![("path", Type::Str)], result_str()),
+        ("std.fs.read", vec![("path", Type::Str)], result_str()),
+        (
+            "std.fs.read_to_string",
             vec![("path", Type::Str)],
-            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+            result_str(),
         ),
-    );
-    m.insert(
-        "std.fs.write_file".into(),
-        sig(
+        (
+            "std.fs.read_bytes",
+            vec![("path", Type::Str)],
+            result_bytes(),
+        ),
+        (
+            "std.fs.write_file",
             vec![("path", Type::Str), ("contents", Type::Str)],
-            Type::Result(Box::new(Type::Unit), Box::new(Type::Str)),
+            result_unit(),
         ),
-    );
-    m.insert(
-        "std.fs.exists".into(),
-        sig(vec![("path", Type::Str)], Type::Bool),
-    );
-    m.insert(
-        "std.fs.read_to_string".into(),
-        sig(
-            vec![("path", Type::Str)],
-            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
-        ),
-    );
-    m.insert(
-        "std.fs.write".into(),
-        sig(
+        (
+            "std.fs.write",
             vec![("path", Type::Str), ("content", Type::Str)],
-            Type::Result(Box::new(Type::Unit), Box::new(Type::Str)),
+            result_unit(),
         ),
-    );
-    m.insert(
-        "std.fs.remove_file".into(),
-        sig(
+        (
+            "std.fs.append",
+            vec![("path", Type::Str), ("content", Type::Str)],
+            result_unit(),
+        ),
+        (
+            "std.fs.copy",
+            vec![("src", Type::Str), ("dst", Type::Str)],
+            result_unit(),
+        ),
+        (
+            "std.fs.move",
+            vec![("src", Type::Str), ("dst", Type::Str)],
+            result_unit(),
+        ),
+        (
+            "std.fs.rename",
+            vec![("src", Type::Str), ("dst", Type::Str)],
+            result_unit(),
+        ),
+        ("std.fs.exists", vec![("path", Type::Str)], Type::Bool),
+        ("std.fs.is_file", vec![("path", Type::Str)], Type::Bool),
+        ("std.fs.is_dir", vec![("path", Type::Str)], Type::Bool),
+        (
+            "std.fs.remove_file",
             vec![("path", Type::Str)],
-            Type::Result(Box::new(Type::Unit), Box::new(Type::Str)),
+            result_unit(),
         ),
-    );
+        ("std.fs.remove", vec![("path", Type::Str)], result_unit()),
+        ("std.fs.mkdir", vec![("path", Type::Str)], result_unit()),
+        ("std.fs.mkdir_all", vec![("path", Type::Str)], result_unit()),
+        (
+            "std.fs.read_dir",
+            vec![("path", Type::Str)],
+            result_str_arr(),
+        ),
+        (
+            "std.fs.readdir",
+            vec![("path", Type::Str)],
+            result_str_arr(),
+        ),
+        (
+            "std.fs.remove_dir_all",
+            vec![("path", Type::Str)],
+            result_unit(),
+        ),
+        (
+            "std.fs.walk_dir",
+            vec![("path", Type::Str)],
+            result_str_arr(),
+        ),
+        ("std.fs.stat", vec![("path", Type::Str)], result_stat()),
+        (
+            "std.fs.open",
+            vec![("path", Type::Str), ("mode", Type::Str)],
+            result_file(),
+        ),
+        (
+            "std.fs.read_chunk",
+            vec![("f", file_t.clone()), ("n", Type::Int)],
+            result_str(),
+        ),
+        (
+            "std.fs.read_chunk_bytes",
+            vec![("f", file_t.clone()), ("n", Type::Int)],
+            result_bytes(),
+        ),
+        (
+            "std.fs.write_chunk",
+            vec![("f", file_t.clone()), ("data", Type::Str)],
+            result_int(),
+        ),
+        (
+            "std.fs.seek",
+            vec![("f", file_t.clone()), ("pos", Type::Int)],
+            result_int(),
+        ),
+        ("std.fs.flush", vec![("f", file_t.clone())], result_unit()),
+        ("std.fs.close", vec![("f", file_t.clone())], result_unit()),
+        // Pure cross-platform path lexing (total, no I/O).
+        ("std.fs.normalize", vec![("path", Type::Str)], Type::Str),
+        (
+            "std.fs.join",
+            vec![("a", Type::Str), ("b", Type::Str)],
+            Type::Str,
+        ),
+        ("std.fs.basename", vec![("path", Type::Str)], Type::Str),
+        ("std.fs.dirname", vec![("path", Type::Str)], Type::Str),
+        ("std.fs.is_absolute", vec![("path", Type::Str)], Type::Bool),
+        ("std.fs.extension", vec![("path", Type::Str)], Type::Str),
+        // FS providers + `*_at` family (see `natives/fs/vfs.rs`).
+        (
+            "std.fs.osfs",
+            vec![],
+            Type::Result(Box::new(fs_t.clone()), Box::new(Type::Str)),
+        ),
+        (
+            "std.fs.memfs",
+            vec![],
+            Type::Result(Box::new(fs_t.clone()), Box::new(Type::Str)),
+        ),
+        (
+            "std.fs.tarfs",
+            vec![("path", Type::Str)],
+            Type::Result(Box::new(fs_t.clone()), Box::new(Type::Str)),
+        ),
+        (
+            "std.fs.embedfs",
+            vec![],
+            Type::Result(Box::new(fs_t.clone()), Box::new(Type::Str)),
+        ),
+        (
+            "std.fs.read_to_string_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            result_str(),
+        ),
+        (
+            "std.fs.read_bytes_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            result_bytes(),
+        ),
+        (
+            "std.fs.write_at",
+            vec![
+                ("fsys", fs_t.clone()),
+                ("path", Type::Str),
+                ("content", Type::Str),
+            ],
+            result_unit(),
+        ),
+        (
+            "std.fs.append_at",
+            vec![
+                ("fsys", fs_t.clone()),
+                ("path", Type::Str),
+                ("content", Type::Str),
+            ],
+            result_unit(),
+        ),
+        (
+            "std.fs.exists_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            Type::Bool,
+        ),
+        (
+            "std.fs.is_file_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            Type::Bool,
+        ),
+        (
+            "std.fs.is_dir_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            Type::Bool,
+        ),
+        (
+            "std.fs.read_dir_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            result_str_arr(),
+        ),
+        (
+            "std.fs.mkdir_all_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            result_unit(),
+        ),
+        (
+            "std.fs.remove_file_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            result_unit(),
+        ),
+        (
+            "File.open",
+            vec![("path", Type::Str), ("mode", Type::Str)],
+            result_file(),
+        ),
+        (
+            "file.read_chunk",
+            vec![("f", file_t.clone()), ("n", Type::Int)],
+            result_str(),
+        ),
+        (
+            "file.read_chunk_bytes",
+            vec![("f", file_t.clone()), ("n", Type::Int)],
+            result_bytes(),
+        ),
+        (
+            "file.write_chunk",
+            vec![("f", file_t.clone()), ("data", Type::Str)],
+            result_int(),
+        ),
+        (
+            "file.seek",
+            vec![("f", file_t.clone()), ("pos", Type::Int)],
+            result_int(),
+        ),
+        ("file.flush", vec![("f", file_t.clone())], result_unit()),
+        ("file.close", vec![("f", file_t.clone())], result_unit()),
+    ] {
+        m.insert(name.into(), sig(params, ret));
+    }
 
     // std.env
     m.insert(
@@ -2720,8 +2932,33 @@ mod tests {
         assert!(funcs.contains_key("std.http.body_json"));
         assert!(funcs.contains_key("std.http.body_form"));
         assert!(funcs.contains_key("std.fs.read_to_string"));
+        assert!(funcs.contains_key("std.fs.read_bytes"));
         assert!(funcs.contains_key("std.fs.write"));
+        assert!(funcs.contains_key("std.fs.append"));
+        assert!(funcs.contains_key("std.fs.copy"));
+        assert!(funcs.contains_key("std.fs.move"));
+        assert!(funcs.contains_key("std.fs.rename"));
+        assert!(funcs.contains_key("std.fs.is_file"));
+        assert!(funcs.contains_key("std.fs.is_dir"));
         assert!(funcs.contains_key("std.fs.remove_file"));
+        assert!(funcs.contains_key("std.fs.mkdir"));
+        assert!(funcs.contains_key("std.fs.mkdir_all"));
+        assert!(funcs.contains_key("std.fs.read_dir"));
+        assert!(funcs.contains_key("std.fs.remove_dir_all"));
+        assert!(funcs.contains_key("std.fs.walk_dir"));
+        assert!(funcs.contains_key("std.fs.stat"));
+        assert!(funcs.contains_key("std.fs.open"));
+        assert!(funcs.contains_key("std.fs.read_chunk"));
+        assert!(funcs.contains_key("std.fs.write_chunk"));
+        assert!(funcs.contains_key("std.fs.seek"));
+        assert!(funcs.contains_key("std.fs.flush"));
+        assert!(funcs.contains_key("std.fs.close"));
+        assert!(funcs.contains_key("File.open"));
+        assert!(funcs.contains_key("file.read_chunk"));
+        assert!(funcs.contains_key("file.write_chunk"));
+        assert!(funcs.contains_key("file.seek"));
+        assert!(funcs.contains_key("file.flush"));
+        assert!(funcs.contains_key("file.close"));
         assert!(funcs.contains_key("std.env.get_var"));
         assert!(funcs.contains_key("std.env.var"));
         assert!(funcs.contains_key("std.env.args"));
@@ -2802,7 +3039,7 @@ mod tests {
         assert!(funcs.contains_key("colors.red"));
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
-        assert_eq!(funcs.len(), 534);
+        assert_eq!(funcs.len(), 586);
     }
 
     #[test]

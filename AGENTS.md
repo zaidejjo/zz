@@ -6,8 +6,14 @@
 # Install the CLI
 cargo install --path crates/zz_cli
 
-# Run all tests (CI equivalent)
+# Run all tests (CI equivalent — slow: native builds + plugin projects)
 cargo test --all
+
+# Fast iteration suite (skips native legs + plugin_e2e, minutes faster)
+./scripts/test-fast.sh
+
+# Parity VM leg only (skips per-fixture `zz run --native` C builds)
+ZZ_PARITY_VM_ONLY=1 cargo test -p zz_cli --test dual_engine_parity
 
 # Run tests for a single crate
 cargo test -p zz_frontend

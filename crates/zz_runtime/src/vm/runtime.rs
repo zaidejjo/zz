@@ -889,6 +889,7 @@ impl Vm {
                     let it = self.stack.pop().unwrap();
                     let (iterable, idx) = match it.clone() {
                         Value::Array(_) => (it, Value::Int(0)),
+                        Value::Bytes(_) => (it, Value::Int(0)),
                         Value::Range(r) => (it, Value::Int(r.start)),
                         Value::Dict(_) => (it, Value::Int(0)),
                         other => {
@@ -950,6 +951,19 @@ impl Vm {
                                     iter_done = false;
                                     next_idx = Value::Int(i + 1);
                                     push_val = arr[i as usize].clone();
+                                }
+                                push_val2 = None;
+                            }
+                            (Value::Bytes(b), Value::Int(i)) => {
+                                let i = *i;
+                                if i >= b.len() as i64 {
+                                    iter_done = true;
+                                    next_idx = Value::Unit;
+                                    push_val = Value::Unit;
+                                } else {
+                                    iter_done = false;
+                                    next_idx = Value::Int(i + 1);
+                                    push_val = Value::Int(b.as_slice()[i as usize] as i64);
                                 }
                                 push_val2 = None;
                             }
@@ -1700,6 +1714,34 @@ impl Vm {
                         args.push(self.stack.pop().unwrap());
                     }
                     args.reverse();
+                    // Arity gate (mirrors `Interp::call`): variadic db
+                    // query/exec (+ aliases) skip it; every other native
+                    // must see exactly its registered arity. Without this
+                    // the direct-dispatch fast path silently accepts
+                    // wrong-arity calls that `CallPath` rejects.
+                    let is_db = matches!(
+                        name.as_str(),
+                        "sqlz.query"
+                            | "std.sqlz.query"
+                            | "sqlz.exec"
+                            | "std.sqlz.exec"
+                            | "db.query"
+                            | "std.db.query"
+                            | "db.exec"
+                            | "std.db.exec"
+                            | "pg.query"
+                            | "pg.exec"
+                            | "postgres.query"
+                            | "postgres.exec"
+                            | "std.sqlz.postgres.query"
+                            | "std.sqlz.postgres.exec"
+                            | "my.query"
+                            | "my.exec"
+                            | "mysql.query"
+                            | "mysql.exec"
+                            | "std.sqlz.mysql.query"
+                            | "std.sqlz.mysql.exec"
+                    );
                     // sqlz.query/sqlz.exec (+ db.* alias) carry a variable
                     // number of bound params; resolve the entry without an
                     // arity gate (Interp::call skips it for sqlz.* too).
@@ -1707,6 +1749,13 @@ impl Vm {
                         interp.natives.get(name).copied().ok_or_else(|| {
                             EvalError::new(format!("unknown native `{name}`"), span)
                         })?;
+                    if !is_db && args.len() != entry.arity {
+                        return_scratch_args(args);
+                        return Err(self.error(
+                            format!("expected {} arguments, found {}", entry.arity, argc),
+                            span,
+                        ));
+                    }
                     self.frames.last_mut().unwrap().ip = ip;
                     let result = (entry.f)(interp, &mut args, span)?;
                     self.stack.push(result);

@@ -184,6 +184,77 @@ zz_value zz_array_dup(const zz_array *a) {
     return out;
 }
 
+// ---- byte buffers ----------------------------------------------------------
+// Contiguous `bytes`: a refcounted backing store (`zz_bytes_buf`) plus a
+// per-value window (`off`/`len`). Slices share the store (O(1), zero-copy);
+// buffers are immutable so sharing is always sound.
+
+zz_bytes_buf *zz_bytes_buf_new(size_t len) {    zz_bytes_buf *buf =
+        (zz_bytes_buf *)malloc(sizeof(zz_bytes_buf) + (len > 0 ? len : 1));
+    if (!buf) return NULL;
+    buf->refs = 1;
+    buf->len = len;
+    return buf;
+}
+
+zz_value zz_bytes_wrap(zz_bytes_buf *buf, size_t off, size_t len) {
+    zz_bytes *b = (zz_bytes *)malloc(sizeof(zz_bytes));
+    if (!b) {
+        if (__atomic_sub_fetch(&buf->refs, 1, __ATOMIC_ACQ_REL) == 0) free(buf);
+        return zz_unit();
+    }
+    b->refs = 1;
+    b->buf = buf;
+    b->off = off;
+    b->len = len;
+    return (zz_value){ZZ_BYTES, {.bytes = b}};
+}
+
+zz_value zz_bytes_new(const unsigned char *src, size_t len) {
+    zz_bytes_buf *buf = zz_bytes_buf_new(len);
+    if (!buf) return zz_unit();
+    if (len && src) memcpy(buf->data, src, len);
+    return zz_bytes_wrap(buf, 0, len);
+}
+
+zz_value zz_bytes_take(unsigned char *data, size_t len) {
+    zz_bytes_buf *buf = zz_bytes_buf_new(len);
+    if (!buf) {
+        free(data);
+        return zz_unit();
+    }
+    if (len && data) memcpy(buf->data, data, len);
+    free(data);
+    return zz_bytes_wrap(buf, 0, len);
+}
+
+zz_value zz_bytes_slice(const zz_bytes *b, int64_t s, int64_t e) {
+    if (!b || !b->buf) return zz_unit();
+    int64_t n = (int64_t)b->len;
+    if (s < 0) s += n;
+    if (e < 0) e += n;
+    if (s < 0) s = 0;
+    if (e > n) e = n;
+    if (s > e) s = e;
+    __atomic_add_fetch(&b->buf->refs, 1, __ATOMIC_RELAXED);
+    return zz_bytes_wrap(b->buf, b->off + (size_t)s, (size_t)(e - s));
+}
+
+void zz_retain_bytes(zz_bytes *b) {
+    if (!b) return;
+    __atomic_add_fetch(&b->refs, 1, __ATOMIC_RELAXED);
+}
+
+void zz_release_bytes(zz_bytes *b) {
+    if (!b) return;
+    if (__atomic_sub_fetch(&b->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+        if (b->buf && __atomic_sub_fetch(&b->buf->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+            free(b->buf);
+        }
+        free(b);
+    }
+}
+
 // ---- dicts ---------------------------------------------------------------
 zz_value zz_dict_new(void) {
     zz_dict *d = (zz_dict *)calloc(1, sizeof(zz_dict));
@@ -273,6 +344,12 @@ zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err) {
             }
             return zz_array_slice(obj.arr, s, e, err);
         }
+    case ZZ_BYTES: {
+        int64_t n = obj.bytes ? (int64_t)obj.bytes->len : 0;
+        int64_t s = start.tag == ZZ_INT ? start.i : 0;
+        int64_t e = end.tag == ZZ_INT ? end.i : n;
+        return zz_bytes_slice(obj.bytes, s, e);
+    }
     case ZZ_STR:
         n = (int64_t)obj.s->len;
         {
@@ -659,11 +736,14 @@ zz_value zz_elvis(zz_value left, zz_value right) {
 //  Missing stdlib natives — bare builtins and module functions
 // =====================================================================
 
-// len(v) — array length, string length, or 0 for other types.
+// len(v) — array length, string length, byte length, or 0 for other types.
 zz_value zz_len(zz_value v, int *err) {
     (void)err;
     if (v.tag == ZZ_ARRAY) {
         return (zz_value){ZZ_INT, {.i = (int64_t)v.arr->len}};
+    }
+    if (v.tag == ZZ_BYTES) {
+        return (zz_value){ZZ_INT, {.i = v.bytes ? (int64_t)v.bytes->len : 0}};
     }
     if (v.tag == ZZ_STR) {
         return (zz_value){ZZ_INT, {.i = (int64_t)v.s->len}};
