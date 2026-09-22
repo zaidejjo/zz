@@ -76,6 +76,10 @@ zz_value zz_array_dup(const zz_array *a);
 zz_value zz_bytes_new(const unsigned char *src, size_t len);
 // Adopt an already-malloc'd buffer of exactly `len` bytes (no copy).
 zz_value zz_bytes_take(unsigned char *data, size_t len);
+// Backing-store constructor + window wrapper (lets file reads land
+// directly in the store: one allocation, zero copies).
+zz_bytes_buf *zz_bytes_buf_new(size_t len);
+zz_value zz_bytes_wrap(zz_bytes_buf *buf, size_t off, size_t len);
 zz_value zz_bytes_slice(const zz_bytes *b, int64_t s, int64_t e);
 static inline zz_value zz_bytes_get(const zz_bytes *b, zz_value idx, int *err) {
     *err = 0;

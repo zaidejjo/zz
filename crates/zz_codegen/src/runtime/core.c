@@ -4449,55 +4449,61 @@ zz_value zz_fs_read_bytes(zz_value path, int *err) {
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     if (sz < 0) sz = 0;
-    unsigned char *buf;
-    size_t n;
     if (sz > 0) {
-        // Regular files: single contiguous read (~1x RSS).
-        buf = (unsigned char *)malloc((size_t)sz);
-        if (!buf) {
+        // Regular files: read straight into the bytes store — one
+        // allocation, zero copies (~1x RSS).
+        zz_bytes_buf *store = zz_bytes_buf_new((size_t)sz);
+        if (!store) {
             fclose(f);
             return zz_fs_err1("read_bytes", p, ENOMEM);
         }
-        n = fread(buf, 1, (size_t)sz, f);
+        size_t n = fread(store->data, 1, (size_t)sz, f);
         int ferr = ferror(f);
         fclose(f);
         if (ferr) {
-            free(buf);
+            if (__atomic_sub_fetch(&store->refs, 1, __ATOMIC_ACQ_REL) == 0) free(store);
             return zz_fs_err1("read_bytes", p, EIO);
         }
+        // Short reads (races/truncation) shrink the window, not the store.
+        return zz_variant_ok(zz_bytes_wrap(store, 0, n));
     } else {
         // Pipes / procfs / sysfs report size 0: grow to EOF (same shape
         // as the old chunked reader, then one shrink).
         size_t cap = 65536;
-        buf = (unsigned char *)malloc(cap);
-        if (!buf) {
+        zz_bytes_buf *store = zz_bytes_buf_new(cap);
+        if (!store) {
             fclose(f);
             return zz_fs_err1("read_bytes", p, ENOMEM);
         }
-        n = 0;
+        size_t n = 0;
         size_t got;
         int ferr = 0;
-        while ((got = fread(buf + n, 1, cap - n, f)) > 0) {
+        while ((got = fread(store->data + n, 1, cap - n, f)) > 0) {
             n += got;
             if (n == cap) {
-                cap *= 2;
-                unsigned char *nb = (unsigned char *)realloc(buf, cap);
-                if (!nb) {
-                    free(buf);
+                size_t ncap = cap * 2;
+                zz_bytes_buf *ns =
+                    (zz_bytes_buf *)realloc(store, sizeof(zz_bytes_buf) + ncap);
+                if (!ns) {
+                    if (__atomic_sub_fetch(&store->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+                        free(store);
+                    }
                     fclose(f);
                     return zz_fs_err1("read_bytes", p, ENOMEM);
                 }
-                buf = nb;
+                store = ns;
+                store->len = ncap;
+                cap = ncap;
             }
         }
         ferr = ferror(f);
         fclose(f);
         if (ferr) {
-            free(buf);
+            if (__atomic_sub_fetch(&store->refs, 1, __ATOMIC_ACQ_REL) == 0) free(store);
             return zz_fs_err1("read_bytes", p, EIO);
         }
+        return zz_variant_ok(zz_bytes_wrap(store, 0, n));
     }
-    return zz_variant_ok(zz_bytes_take(buf, n));
 }
 
 // fs.write(path, data) → Result<unit>

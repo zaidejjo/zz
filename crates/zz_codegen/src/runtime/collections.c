@@ -189,8 +189,7 @@ zz_value zz_array_dup(const zz_array *a) {
 // per-value window (`off`/`len`). Slices share the store (O(1), zero-copy);
 // buffers are immutable so sharing is always sound.
 
-static zz_bytes_buf *zz_bytes_buf_new(size_t len) {
-    zz_bytes_buf *buf =
+zz_bytes_buf *zz_bytes_buf_new(size_t len) {    zz_bytes_buf *buf =
         (zz_bytes_buf *)malloc(sizeof(zz_bytes_buf) + (len > 0 ? len : 1));
     if (!buf) return NULL;
     buf->refs = 1;
@@ -198,7 +197,7 @@ static zz_bytes_buf *zz_bytes_buf_new(size_t len) {
     return buf;
 }
 
-static zz_value zz_bytes_wrap(zz_bytes_buf *buf, size_t off, size_t len) {
+zz_value zz_bytes_wrap(zz_bytes_buf *buf, size_t off, size_t len) {
     zz_bytes *b = (zz_bytes *)malloc(sizeof(zz_bytes));
     if (!b) {
         if (__atomic_sub_fetch(&buf->refs, 1, __ATOMIC_ACQ_REL) == 0) free(buf);
