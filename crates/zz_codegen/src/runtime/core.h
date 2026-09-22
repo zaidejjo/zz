@@ -65,6 +65,7 @@ typedef enum {
     ZZ_DB,
     ZZ_FILE,
     ZZ_VFS,
+    ZZ_BYTES,
 } zz_tag;
 
 typedef struct zz_value zz_value;
@@ -87,6 +88,11 @@ typedef struct zz_file zz_file;
 // A virtual filesystem provider (`std.fs.osfs`/`memfs`/`tarfs`/`embedfs`):
 // process-lifetime handle dispatched by `zz_fs_*_at`.
 typedef struct zz_vfs zz_vfs;
+
+// A contiguous byte buffer (`fs.read_bytes`, slices): refcounted shared
+// backing store plus a window, so slices share without copying.
+typedef struct zz_bytes_buf zz_bytes_buf;
+typedef struct zz_bytes zz_bytes;
 
 // Refcounted string with Small String Optimization (SSO).
 //
@@ -148,7 +154,21 @@ struct zz_value {
         void *db;            // opaque sqlite3* handle (ZZ_DB)
         zz_file *file;       // open streaming file (ZZ_FILE)
         zz_vfs *vfs;         // fs provider handle (ZZ_VFS)
+        zz_bytes *bytes;     // byte buffer (ZZ_BYTES)
     };
+};
+
+struct zz_bytes_buf {
+    size_t refs;     // atomic reference count (ARC)
+    size_t len;      // backing store length
+    unsigned char data[]; // flexible array
+};
+
+struct zz_bytes {
+    size_t refs;     // atomic reference count (ARC)
+    zz_bytes_buf *buf; // shared backing store (never NULL)
+    size_t off;      // window start into buf->data
+    size_t len;      // window length
 };
 
 struct zz_array {
@@ -438,6 +458,8 @@ static inline zz_value zz_bool(bool b) {
 // Forward declarations for helpers defined later in the TU.
 void zz_retain_array(zz_array *a);
 void zz_release_array(zz_array *a);
+void zz_retain_bytes(zz_bytes *b);
+void zz_release_bytes(zz_bytes *b);
 void zz_retain_dict(zz_dict *d);
 void zz_release_dict(zz_dict *d);
 void zz_retain_func(zz_func *f);
@@ -463,6 +485,9 @@ static inline void zz_retain(zz_value *v) {
         break;
     case ZZ_ARRAY:
         zz_retain_array(v->arr);
+        break;
+    case ZZ_BYTES:
+        zz_retain_bytes(v->bytes);
         break;
     case ZZ_DICT:
         zz_retain_dict(v->dict);
@@ -503,6 +528,9 @@ static inline void zz_release(zz_value *v) {
     case ZZ_ARRAY:
         zz_release_array(v->arr);
         break;
+    case ZZ_BYTES:
+        zz_release_bytes(v->bytes);
+        break;
     case ZZ_DICT:
         zz_release_dict(v->dict);
         break;
@@ -525,7 +553,7 @@ static inline void zz_release(zz_value *v) {
 
 static inline void zz_assign(zz_value *dst, zz_value src) {
     // Release old value if it's a refcounted type.
-    if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY ||
+    if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY || dst->tag == ZZ_BYTES ||
         dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC || dst->tag == ZZ_OBJECT ||
         dst->tag == ZZ_OPTION_SOME || dst->tag == ZZ_RESULT_OK ||
         dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON) {
@@ -533,7 +561,7 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
     }
     *dst = src;
     // Retain the new value for refcounted types.
-    if (src.tag == ZZ_ARRAY || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
+    if (src.tag == ZZ_ARRAY || src.tag == ZZ_BYTES || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
         src.tag == ZZ_OBJECT ||
         src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
         src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON) {
@@ -552,6 +580,9 @@ static inline zz_value zz_clone(zz_value v) {
         break;
     case ZZ_ARRAY:
         zz_retain_array(v.arr);
+        break;
+    case ZZ_BYTES:
+        zz_retain_bytes(v.bytes);
         break;
     case ZZ_DICT:
         zz_retain_dict(v.dict);

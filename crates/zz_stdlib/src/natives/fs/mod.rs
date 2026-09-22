@@ -312,9 +312,9 @@ pub(crate) fn fs_read_bytes(
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.read_bytes")?;
     run_fs(interp, span, move || match std::fs::read(&path) {
-        Ok(bytes) => ok_value(Value::Array(Box::new(
-            bytes.into_iter().map(|b| Value::Int(b as i64)).collect(),
-        ))),
+        Ok(bytes) => ok_value(Value::Bytes(Box::new(zz_runtime::BytesData::from_vec(
+            bytes,
+        )))),
         Err(e) => fs_err("read_bytes", &path, &e),
     })
 }
@@ -818,9 +818,7 @@ pub(crate) fn file_read_chunk_bytes(
         match fp.read(&mut buf) {
             Ok(k) => {
                 buf.truncate(k);
-                ok_value(Value::Array(Box::new(
-                    buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
-                )))
+                ok_value(Value::Bytes(Box::new(zz_runtime::BytesData::from_vec(buf))))
             }
             Err(e) => err_str(format!("fs:read_chunk_bytes:{}: {path}", fs_code(&e))),
         }

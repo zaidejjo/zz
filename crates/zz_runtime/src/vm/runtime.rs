@@ -889,6 +889,7 @@ impl Vm {
                     let it = self.stack.pop().unwrap();
                     let (iterable, idx) = match it.clone() {
                         Value::Array(_) => (it, Value::Int(0)),
+                        Value::Bytes(_) => (it, Value::Int(0)),
                         Value::Range(r) => (it, Value::Int(r.start)),
                         Value::Dict(_) => (it, Value::Int(0)),
                         other => {
@@ -950,6 +951,19 @@ impl Vm {
                                     iter_done = false;
                                     next_idx = Value::Int(i + 1);
                                     push_val = arr[i as usize].clone();
+                                }
+                                push_val2 = None;
+                            }
+                            (Value::Bytes(b), Value::Int(i)) => {
+                                let i = *i;
+                                if i >= b.len() as i64 {
+                                    iter_done = true;
+                                    next_idx = Value::Unit;
+                                    push_val = Value::Unit;
+                                } else {
+                                    iter_done = false;
+                                    next_idx = Value::Int(i + 1);
+                                    push_val = Value::Int(b.as_slice()[i as usize] as i64);
                                 }
                                 push_val2 = None;
                             }

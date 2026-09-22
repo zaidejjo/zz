@@ -518,6 +518,7 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "str" => Some("zz_str_cast"),
         // vec methods — bare names for method dispatch
         "vec.len" | "std.vec.len" | "vec_len" => Some("zz_vec_len"),
+        "bytes.len" | "std.bytes.len" => Some("zz_len"),
         "vec.append" | "std.vec.append" => Some("zz_vec_append"),
         "vec.push" | "std.vec.push" => Some("zz_vec_push"),
         "vec.pop" | "std.vec.pop" => Some("zz_vec_pop"),

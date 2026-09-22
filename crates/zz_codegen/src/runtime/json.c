@@ -316,6 +316,21 @@ void json_serialize(SB *sb, zz_value v) {
         sb_str(sb, "]", 1);
         break;
     }
+    case ZZ_BYTES: {
+        // Same as an int array (matches the VM).
+        sb_str(sb, "[", 1);
+        if (v.bytes && v.bytes->buf) {
+            for (size_t i = 0; i < v.bytes->len; i++) {
+                if (i > 0) sb_str(sb, ",", 1);
+                char num[4];
+                snprintf(num, sizeof num, "%u",
+                         v.bytes->buf->data[v.bytes->off + i]);
+                sb_str(sb, num, strlen(num));
+            }
+        }
+        sb_str(sb, "]", 1);
+        break;
+    }
     case ZZ_DICT: {
         sb_str(sb, "{", 1);
         for (size_t i = 0; i < v.dict->len; i++) {

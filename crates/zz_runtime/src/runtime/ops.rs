@@ -221,14 +221,18 @@ pub(crate) fn normalize_index(i: i64, len: usize, span: Span) -> Result<usize, E
     Ok(idx as usize)
 }
 
-/// Read an element: `arr[i]`, `dict[key]`, `str[i]`. Negative indices
-/// count from the end.
+/// Read an element: `arr[i]`, `dict[key]`, `str[i]`, `bytes[i]`.
+/// Negative indices count from the end.
 #[inline(always)]
 pub(crate) fn get_index(obj: &Value, index: &Value, span: Span) -> Result<Value, EvalError> {
     match (obj, index) {
         (Value::Array(items), Value::Int(i)) => {
             let idx = normalize_index(*i, items.len(), span)?;
             Ok(items[idx].clone())
+        }
+        (Value::Bytes(b), Value::Int(i)) => {
+            let idx = normalize_index(*i, b.len(), span)?;
+            Ok(Value::Int(b.as_slice()[idx] as i64))
         }
         (Value::Dict(entries), key) => entries
             .iter()
@@ -303,8 +307,9 @@ fn slice_bounds(start: Option<i64>, end: Option<i64>, len: usize) -> (usize, usi
     }
 }
 
-/// Slice an array or string: `s[1:3]`, `s[:2]`, `s[1:]`, `s[:]`.
-/// Bounds are clamped; negative bounds count from the end.
+/// Slice an array, byte buffer, or string: `s[1:3]`, `s[:2]`, `s[1:]`,
+/// `s[:]`. Bounds are clamped; negative bounds count from the end.
+/// Byte slices share the backing store (O(1), zero-copy).
 pub(crate) fn slice_value(
     obj: &Value,
     start: Option<i64>,
@@ -315,6 +320,10 @@ pub(crate) fn slice_value(
         Value::Array(items) => {
             let (a, b) = slice_bounds(start, end, items.len());
             Ok(Value::Array(Box::new(items[a..b].to_vec())))
+        }
+        Value::Bytes(b) => {
+            let (a, c) = slice_bounds(start, end, b.len());
+            Ok(Value::Bytes(Box::new(b.slice(a, c))))
         }
         Value::Str(s) => {
             let chars: Vec<char> = s.chars().collect();

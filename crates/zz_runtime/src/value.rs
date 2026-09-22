@@ -280,6 +280,11 @@ pub enum Value {
     Func(Box<FuncValue>),
     /// `[v1, v2, ...]`.
     Array(Box<Vec<Value>>),
+    /// Contiguous byte buffer (produced by `fs.read_bytes`,
+    /// `fs.read_chunk_bytes`). Shares its backing store on clone/slice
+    /// (`Arc` + window), so slicing is O(1) and whole-file reads cost
+    /// ~1 byte of RSS per byte of file instead of ~31.
+    Bytes(Box<BytesData>),
     /// `{k1: v1, k2: v2, ...}` — insertion-ordered key/value pairs.
     Dict(Box<Vec<(Value, Value)>>),
     /// A native (Rust-backed) function from the standard library.
@@ -749,6 +754,68 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
 /// A JSON value (see [`crate::json`]).
 pub use crate::json::JsonValue;
 
+/// Contiguous byte buffer with a shared backing store: `data` is
+/// reference-counted, `[start, start+len)` is this value's window.
+/// Clone and slice only bump the `Arc` (no byte copies).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BytesData {
+    data: std::sync::Arc<Vec<u8>>,
+    start: usize,
+    len: usize,
+}
+
+impl BytesData {
+    /// Take ownership of a fresh buffer (whole window).
+    pub fn new(data: Vec<u8>) -> Self {
+        let len = data.len();
+        BytesData {
+            data: std::sync::Arc::new(data),
+            start: 0,
+            len,
+        }
+    }
+
+    /// Borrow a `Vec` without copying (used by fs reads that already own
+    /// the buffer).
+    pub fn from_vec(data: Vec<u8>) -> Self {
+        Self::new(data)
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Visible window as a slice (zero-copy).
+    pub fn as_slice(&self) -> &[u8] {
+        &self.data[self.start..self.start + self.len]
+    }
+
+    /// One byte as `u8`, or `None` out of bounds (no negative wrap here —
+    /// callers normalize first).
+    pub fn get(&self, i: usize) -> Option<u8> {
+        if i < self.len {
+            Some(self.data[self.start + i])
+        } else {
+            None
+        }
+    }
+
+    /// O(1) sub-window sharing the same backing store.
+    pub fn slice(&self, a: usize, b: usize) -> Self {
+        let a = a.min(self.len);
+        let b = b.min(self.len).max(a);
+        BytesData {
+            data: std::sync::Arc::clone(&self.data),
+            start: self.start + a,
+            len: b - a,
+        }
+    }
+}
+
 /// An HTTP server: registered (method, path, handler) routes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HttpServer {
@@ -814,6 +881,7 @@ impl Value {
             Value::Result(_) => "result".to_string(),
             Value::Func(_) => "func".to_string(),
             Value::Array(_) => "array".to_string(),
+            Value::Bytes(_) => "bytes".to_string(),
             Value::Dict(_) => "dict".to_string(),
             Value::Native(_) => "native".to_string(),
             Value::Json(_) => "json".to_string(),
@@ -838,6 +906,7 @@ impl Value {
         match self {
             Value::Str(_) => Some("str"),
             Value::Array(_) => Some("vec"),
+            Value::Bytes(_) => Some("bytes"),
             Value::Option(_) => Some("option"),
             Value::Result(_) => Some("result"),
             Value::Int(_) => Some("int"),
@@ -894,6 +963,18 @@ impl fmt::Display for Value {
                         write!(f, ", ")?;
                     }
                     write!(f, "{v}")?;
+                }
+                write!(f, "]")
+            }
+            // Same shape as an int array (`[104, 105]`) so byte buffers
+            // print exactly like the old boxed representation.
+            Value::Bytes(b) => {
+                write!(f, "[")?;
+                for (i, byte) in b.as_slice().iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{byte}")?;
                 }
                 write!(f, "]")
             }
@@ -959,6 +1040,7 @@ impl PartialEq for Value {
             (Value::Option(a), Value::Option(b)) => a == b,
             (Value::Result(a), Value::Result(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
+            (Value::Bytes(a), Value::Bytes(b)) => a.as_slice() == b.as_slice(),
             (Value::Dict(a), Value::Dict(b)) => a == b,
             (Value::Json(a), Value::Json(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,

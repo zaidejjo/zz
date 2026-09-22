@@ -923,6 +923,12 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         }
         return out;
     }
+    case ZZ_BYTES: {
+        // Buffers are immutable: share the store (retain), never copy.
+        if (!v.bytes) return v;
+        zz_retain_bytes(v.bytes);
+        return v;
+    }
     case ZZ_DICT: {
         if (!v.dict) return v;
         zz_value hit;
@@ -3730,6 +3736,7 @@ zz_value zz_typeof(zz_value v, int *err) {
         case ZZ_TCP_STREAM: name = "tcp.stream"; break;
         case ZZ_TCP_LISTENER: name = "tcp.listener"; break;
         case ZZ_FILE: name = "file"; break;
+        case ZZ_BYTES: name = "bytes"; break;
         case ZZ_VFS: name = "fs"; break;
         case ZZ_TUPLE: name = "tuple"; break;
         default: name = "unknown"; break;
@@ -4430,7 +4437,7 @@ zz_value zz_fs_read(zz_value path, int *err) {
     return zz_variant_ok((zz_value){ZZ_STR, {.s = out}});
 }
 
-// fs.read_bytes(path) → Result<[int]>
+// fs.read_bytes(path) → Result<bytes> (contiguous buffer, ~1x RSS).
 zz_value zz_fs_read_bytes(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
@@ -4438,18 +4445,59 @@ zz_value zz_fs_read_bytes(zz_value path, int *err) {
     zz_fs_top_up();
     FILE *f = fopen(p, "rb");
     if (!f) return zz_fs_err1("read_bytes", p, errno);
-    zz_value out = zz_array_new();
-    unsigned char buf[65536];
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    unsigned char *buf;
     size_t n;
-    while ((n = fread(buf, 1, sizeof buf, f)) > 0) {
-        for (size_t i = 0; i < n; i++) {
-            zz_array_push(out.arr, (zz_value){ZZ_INT, {.i = (int64_t)buf[i]}});
+    if (sz > 0) {
+        // Regular files: single contiguous read (~1x RSS).
+        buf = (unsigned char *)malloc((size_t)sz);
+        if (!buf) {
+            fclose(f);
+            return zz_fs_err1("read_bytes", p, ENOMEM);
+        }
+        n = fread(buf, 1, (size_t)sz, f);
+        int ferr = ferror(f);
+        fclose(f);
+        if (ferr) {
+            free(buf);
+            return zz_fs_err1("read_bytes", p, EIO);
+        }
+    } else {
+        // Pipes / procfs / sysfs report size 0: grow to EOF (same shape
+        // as the old chunked reader, then one shrink).
+        size_t cap = 65536;
+        buf = (unsigned char *)malloc(cap);
+        if (!buf) {
+            fclose(f);
+            return zz_fs_err1("read_bytes", p, ENOMEM);
+        }
+        n = 0;
+        size_t got;
+        int ferr = 0;
+        while ((got = fread(buf + n, 1, cap - n, f)) > 0) {
+            n += got;
+            if (n == cap) {
+                cap *= 2;
+                unsigned char *nb = (unsigned char *)realloc(buf, cap);
+                if (!nb) {
+                    free(buf);
+                    fclose(f);
+                    return zz_fs_err1("read_bytes", p, ENOMEM);
+                }
+                buf = nb;
+            }
+        }
+        ferr = ferror(f);
+        fclose(f);
+        if (ferr) {
+            free(buf);
+            return zz_fs_err1("read_bytes", p, EIO);
         }
     }
-    int ferr = ferror(f);
-    fclose(f);
-    if (ferr) return zz_fs_err1("read_bytes", p, EIO);
-    return zz_variant_ok(out);
+    return zz_variant_ok(zz_bytes_take(buf, n));
 }
 
 // fs.write(path, data) → Result<unit>
@@ -5076,7 +5124,7 @@ zz_value zz_fs_close(zz_value f, int *err) {
     return zz_variant_ok(zz_unit());
 }
 
-// file.read_chunk_bytes(f, n) → Result<[int]> (binary-safe; [] at EOF).
+// file.read_chunk_bytes(f, n) → Result<bytes> (binary-safe; empty at EOF).
 zz_value zz_fs_read_chunk_bytes(zz_value f, zz_value n, int *err) {
     (void)err;
     if (f.tag != ZZ_FILE || !f.file || f.file->closed || !f.file->fp) {
@@ -5093,12 +5141,7 @@ zz_value zz_fs_read_chunk_bytes(zz_value f, zz_value n, int *err) {
         free(tmp);
         return zz_fs_err1("read_chunk_bytes", f.file->path ? f.file->path : "?", EIO);
     }
-    zz_value out = zz_array_new();
-    for (size_t i = 0; i < got; i++) {
-        zz_array_push(out.arr, (zz_value){ZZ_INT, {.i = (int64_t)tmp[i]}});
-    }
-    free(tmp);
-    return zz_variant_ok(out);
+    return zz_variant_ok(zz_bytes_take(tmp, got));
 }
 
 // ---- cross-platform path lexing (mirrors natives/fs/path.rs) ---------------
@@ -5857,11 +5900,7 @@ zz_value zz_fs_read_bytes_at(zz_value fsys, zz_value path, int *err) {
     } else if (e->is_dir) {
         r = zz_vfs_code_err("read_bytes", p, "io_error");
     } else {
-        zz_value out = zz_array_new();
-        for (size_t k = 0; k < e->len; k++) {
-            zz_array_push(out.arr, (zz_value){ZZ_INT, {.i = (int64_t)e->data[k]}});
-        }
-        r = zz_variant_ok(out);
+        r = zz_variant_ok(zz_bytes_new(e->data, e->len));
     }
     free(key);
     return r;

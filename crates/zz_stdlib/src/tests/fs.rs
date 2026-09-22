@@ -84,11 +84,11 @@ fn fs_append_copy_move_dirs_and_stat() {
     let v = run(&format!("import std.fs\nfs.read_bytes(\"{base}/a.txt\")")).unwrap();
     match v {
         Value::Result(r) => match &*r {
-            Ok(Value::Array(items)) => {
-                assert_eq!(items.len(), 6);
-                assert_eq!(items[0], Value::Int(104)); // 'h'
+            Ok(Value::Bytes(b)) => {
+                assert_eq!(b.len(), 6);
+                assert_eq!(b.as_slice()[0], 104); // 'h'
             }
-            other => panic!("expected ok array, got {other:?}"),
+            other => panic!("expected ok bytes, got {other:?}"),
         },
         other => panic!("expected result, got {other:?}"),
     }

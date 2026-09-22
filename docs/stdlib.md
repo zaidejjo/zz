@@ -15,7 +15,7 @@ Available without imports:
 | `str` | `str(v: T) -> str` | Convert to string |
 | `int` | `int(v: T)` | Parse/convert to int (`.none` on failure) |
 | `float` | `float(v: T)` | Parse/convert to float (`.none` on failure) |
-| `len` | `len(v: T) -> int` | Length of array, string, dict, or range |
+| `len` | `len(v: T) -> int` | Length of array, bytes, string, dict, or range |
 | `range` | `range(start: int, stop: int, step: int)` | Create integer range |
 | `map` | `map(arr: [T] \| T.., f: func(T) -> U) -> [U]` | Apply function to each element |
 | `filter` | `filter(arr: [T] \| T.., f: func(T) -> bool) -> [T]` | Keep elements where predicate is true |
@@ -227,7 +227,7 @@ import std.fs
 | `fs.read_file` | `fs.read_file(path: str)` | Read file contents |
 | `fs.write_file` | `fs.write_file(path: str, contents: str)` | Write file |
 | `fs.exists` | `fs.exists(path: str) -> bool` | Check existence |
-| `fs.read_bytes` | `fs.read_bytes(path: str)` | Raw bytes as `[int]` |
+| `fs.read_bytes` | `fs.read_bytes(path: str)` | Raw bytes as `bytes` (contiguous, ~1x RSS) |
 | `fs.append` / `fs.copy` / `fs.move` / `fs.rename` | `(…)` | Append, copy, move |
 | `fs.is_file` / `fs.is_dir` | `(path) -> bool` | Type predicates |
 | `fs.remove_file` / `fs.remove` | `(path)` | Delete a file |
@@ -237,7 +237,7 @@ import std.fs
 | `fs.stat` | `(path)` | Metadata dict |
 | `File.open` / `fs.open` | `(path, mode)` | Streaming handle (`r`/`w`/`a`) |
 | `fs.read_chunk` | `(f, n)` | Text chunk (`""` at EOF; UTF-8) |
-| `fs.read_chunk_bytes` | `(f, n)` | Binary-safe chunk as `[int]` (`[]` at EOF) |
+| `fs.read_chunk_bytes` | `(f, n)` | Binary-safe chunk as `bytes` (empty at EOF) |
 | `fs.write_chunk` / `fs.seek` / `fs.flush` / `fs.close` | | Handle ops |
 | `fs.normalize` | `(path) -> str` | Lexical normalize (OS separators, `.`/`..`, roots/UNC) |
 | `fs.join` | `(a, b) -> str` | Join + normalize (`b` wins when absolute) |
@@ -254,6 +254,30 @@ All fallible ops return `Result<_, str>` with unified
 `fs:<op>:<code>: <path>` diagnostics (identical in VM and AOT).
 `read_chunk` is text-oriented (lossy on arbitrary bytes by construction);
 use `read_chunk_bytes` for binary streaming.
+
+### `bytes` — contiguous byte buffers
+
+`fs.read_bytes`, `fs.read_chunk_bytes`, and `fs.read_bytes_at` return
+`bytes`: one contiguous buffer (~1 byte RSS per byte, slices share the
+store with zero copies). Prints like an int array (`[104, 105]`).
+
+```zz
+match fs.read_bytes("data.bin") {
+    .ok(b) => {
+        println(len(b))    // or b.len()
+        println(b[0])      // u8 as int (negatives wrap)
+        println(b[1:4])    // zero-copy slice -> bytes
+        println(typeof(b)) // bytes
+        for x in b {       // iterate ints
+            println(x)
+        }
+    }
+    .err(e) => println(e),
+}
+```
+
+Buffers are immutable (`b[i] = x` is an error) and serialize to JSON as
+int arrays. `==` is deep in the VM; in AOT it matches array behavior.
 
 ### FS providers (`fs.FS` handle interface)
 

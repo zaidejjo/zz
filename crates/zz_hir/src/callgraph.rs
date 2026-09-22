@@ -27,6 +27,7 @@ fn resolve_methods(tp: &TypedProgram, recv: &Expr, method: &str) -> Vec<String> 
     match tp.type_at(recv.span()) {
         Some(Type::Str) => vec![format!("str.{method}")],
         Some(Type::Array(_)) => vec![format!("vec.{method}")],
+        Some(Type::Bytes) => vec![format!("bytes.{method}")],
         Some(Type::Option(_)) => vec![format!("option.{method}")],
         Some(Type::Result(_, _)) => vec![format!("result.{method}")],
         Some(Type::Response) => vec![format!("http.{method}")],

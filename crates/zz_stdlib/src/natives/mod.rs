@@ -144,6 +144,21 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
             f: iterators::len,
         },
     );
+    // bytes.* methods (for method dispatch: `b.len()` on byte buffers).
+    m.insert(
+        "bytes.len".into(),
+        NativeEntry {
+            arity: 1,
+            f: iterators::len,
+        },
+    );
+    m.insert(
+        "std.bytes.len".into(),
+        NativeEntry {
+            arity: 1,
+            f: iterators::len,
+        },
+    );
     m.insert(
         "map".into(),
         NativeEntry {

@@ -1056,6 +1056,7 @@ impl Lowerer {
                     out.push_str(&format!("    {ideref} = 0;\n"));
                     out.push_str(&format!(
                         "    {lderef} = ({iter_tmp}.tag == ZZ_ARRAY) ? (int64_t){iter_tmp}.arr->len\n\
+                         : ({iter_tmp}.tag == ZZ_BYTES) ? (int64_t)({iter_tmp}.bytes ? {iter_tmp}.bytes->len : 0)\n\
                          : ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
                     ));
                     (ideref, lderef)
@@ -1065,6 +1066,7 @@ impl Lowerer {
                     out.push_str(&format!("    int64_t {idx} = 0;\n"));
                     out.push_str(&format!(
                         "    int64_t {len} = ({iter_tmp}.tag == ZZ_ARRAY) ? (int64_t){iter_tmp}.arr->len\n\
+                         : ({iter_tmp}.tag == ZZ_BYTES) ? (int64_t)({iter_tmp}.bytes ? {iter_tmp}.bytes->len : 0)\n\
                          : ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
                     ));
                     (idx, len)
@@ -1077,13 +1079,17 @@ impl Lowerer {
                     out.push_str(&format!(
                         "        {cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
                          ? zz_clone({iter_tmp}.arr->items[{idx}])\n\
-                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}};\n"
+                         : (({iter_tmp}.tag == ZZ_BYTES)\n\
+                         ? (zz_value){{ZZ_INT, {{.i = (int64_t){iter_tmp}.bytes->buf->data[{iter_tmp}.bytes->off + (size_t){idx}]}}}}\n\
+                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}});\n"
                     ));
                 } else {
                     out.push_str(&format!(
                         "        zz_value {cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
                          ? zz_clone({iter_tmp}.arr->items[{idx}])\n\
-                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}};\n"
+                         : (({iter_tmp}.tag == ZZ_BYTES)\n\
+                         ? (zz_value){{ZZ_INT, {{.i = (int64_t){iter_tmp}.bytes->buf->data[{iter_tmp}.bytes->off + (size_t){idx}]}}}}\n\
+                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}});\n"
                     ));
                 }
                 // Captured iteration variable: per-iteration shared cell.

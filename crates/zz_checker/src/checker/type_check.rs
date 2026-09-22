@@ -239,6 +239,7 @@ impl Checker {
                         // `for x in collection` — single variable
                         let elem = match it {
                             Type::Array(elem) => *elem,
+                            Type::Bytes => Type::Int,
                             Type::Range(elem) => *elem,
                             Type::Dict(_k, _v) => {
                                 // for x in dict → iterates keys
@@ -504,6 +505,11 @@ impl Checker {
                             .push(error_at("cannot assign to an index of a string", *span));
                         Type::Unit
                     }
+                    Type::Bytes => {
+                        self.errors
+                            .push(error_at("cannot assign to an index of bytes", *span));
+                        Type::Unit
+                    }
                     Type::Var(_) => {
                         self.errors.push(error_at(
                             "cannot assign to an index of a value whose type could not be inferred",
@@ -757,6 +763,10 @@ impl Checker {
                         self.ensure_int(it, index.span());
                         *elem
                     }
+                    Type::Bytes => {
+                        self.ensure_int(it, index.span());
+                        Type::Int
+                    }
                     Type::Dict(k, v) => {
                         if let Err(e) = self.unifier.unify(&it, &k) {
                             self.report_mismatch(e, index.span());
@@ -797,6 +807,7 @@ impl Checker {
                 }
                 match ot {
                     Type::Array(elem) => Type::Array(elem),
+                    Type::Bytes => Type::Bytes,
                     Type::Str => Type::Str,
                     Type::Var(_) => {
                         self.errors.push(error_at(
@@ -1297,6 +1308,7 @@ impl Checker {
                     match &self.unifier.resolve(&recv_t) {
                         Type::Str => sig = self.funcs.get(&format!("str.{method}")).cloned(),
                         Type::Array(_) => sig = self.funcs.get(&format!("vec.{method}")).cloned(),
+                        Type::Bytes => sig = self.funcs.get(&format!("bytes.{method}")).cloned(),
                         Type::Option(_) => {
                             sig = self.funcs.get(&format!("option.{method}")).cloned()
                         }

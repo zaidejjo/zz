@@ -756,6 +756,12 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         "vec.len".into(),
         sig_t(vec![("v", Type::Array(Box::new(t.clone())))], Type::Int),
     );
+    // bytes.* methods (for method dispatch: `b.len()` on byte buffers).
+    m.insert("bytes.len".into(), sig(vec![("v", Type::Bytes)], Type::Int));
+    m.insert(
+        "std.bytes.len".into(),
+        sig(vec![("v", Type::Bytes)], Type::Int),
+    );
     m.insert(
         "vec.push".into(),
         sig_t(
@@ -1874,12 +1880,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             Box::new(Type::Str),
         )
     };
-    let result_int_arr = || {
-        Type::Result(
-            Box::new(Type::Array(Box::new(Type::Int))),
-            Box::new(Type::Str),
-        )
-    };
+    let result_bytes = || Type::Result(Box::new(Type::Bytes), Box::new(Type::Str));
     let result_stat = || {
         Type::Result(
             Box::new(Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
@@ -1897,7 +1898,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         (
             "std.fs.read_bytes",
             vec![("path", Type::Str)],
-            result_int_arr(),
+            result_bytes(),
         ),
         (
             "std.fs.write_file",
@@ -1974,7 +1975,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         (
             "std.fs.read_chunk_bytes",
             vec![("f", file_t.clone()), ("n", Type::Int)],
-            result_int_arr(),
+            result_bytes(),
         ),
         (
             "std.fs.write_chunk",
@@ -2028,7 +2029,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         (
             "std.fs.read_bytes_at",
             vec![("fsys", fs_t.clone()), ("path", Type::Str)],
-            result_int_arr(),
+            result_bytes(),
         ),
         (
             "std.fs.write_at",
@@ -2091,7 +2092,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         (
             "file.read_chunk_bytes",
             vec![("f", file_t.clone()), ("n", Type::Int)],
-            result_int_arr(),
+            result_bytes(),
         ),
         (
             "file.write_chunk",
@@ -3038,7 +3039,7 @@ mod tests {
         assert!(funcs.contains_key("colors.red"));
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
-        assert_eq!(funcs.len(), 584);
+        assert_eq!(funcs.len(), 586);
     }
 
     #[test]

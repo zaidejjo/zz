@@ -381,6 +381,18 @@ static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
         }
         fputs("]", out);
         break;
+    case ZZ_BYTES: {
+        // Same `[104, 105]` shape as an int array (matches the VM).
+        fputs("[", out);
+        if (v->bytes && v->bytes->buf) {
+            for (size_t i = 0; i < v->bytes->len; i++) {
+                if (i > 0) fputs(", ", out);
+                fprintf(out, "%u", v->bytes->buf->data[v->bytes->off + i]);
+            }
+        }
+        fputs("]", out);
+        break;
+    }
     case ZZ_DICT:
         fputs("{", out);
         if (v->dict) {
@@ -587,6 +599,20 @@ static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth) {
         }
         sb_append_c(sb, ']');
         break;
+    case ZZ_BYTES: {
+        sb_append_c(sb, '[');
+        if (v->bytes && v->bytes->buf) {
+            for (size_t i = 0; i < v->bytes->len; i++) {
+                if (i > 0) sb_append_str(sb, ", ");
+                char num[4];
+                snprintf(num, sizeof num, "%u",
+                         v->bytes->buf->data[v->bytes->off + i]);
+                sb_append_str(sb, num);
+            }
+        }
+        sb_append_c(sb, ']');
+        break;
+    }
     case ZZ_DICT:
         sb_append_c(sb, '{');
         if (v->dict) {

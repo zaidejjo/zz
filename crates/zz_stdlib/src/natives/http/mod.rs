@@ -35,6 +35,12 @@ fn jsonify_value(v: &Value) -> JsonValue {
         Value::Bool(b) => JsonValue::Bool(*b),
         Value::Unit => JsonValue::Null,
         Value::Array(arr) => JsonValue::Arr(arr.iter().map(jsonify_value).collect()),
+        Value::Bytes(b) => JsonValue::Arr(
+            b.as_slice()
+                .iter()
+                .map(|x| JsonValue::Num(*x as f64))
+                .collect(),
+        ),
         Value::Dict(entries) => {
             let obj: Vec<(String, JsonValue)> = entries
                 .iter()

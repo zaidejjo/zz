@@ -441,16 +441,16 @@ pub(crate) fn fs_read_bytes_at(
         let guard = h.kind.lock().unwrap();
         match &*guard {
             Provider::Os => match std::fs::read(&raw) {
-                Ok(bytes) => ok_value(Value::Array(Box::new(
-                    bytes.into_iter().map(|b| Value::Int(b as i64)).collect(),
-                ))),
+                Ok(bytes) => ok_value(Value::Bytes(Box::new(zz_runtime::BytesData::from_vec(
+                    bytes,
+                )))),
                 Err(e) => super::fs_err("read_bytes", &raw, &e),
             },
             Provider::Mem(_) | Provider::Tar(_) | Provider::Embed(_) => {
                 match guard.tree().and_then(|t| t.get(&key)) {
-                    Some(bytes) => ok_value(Value::Array(Box::new(
-                        bytes.iter().map(|b| Value::Int(*b as i64)).collect(),
-                    ))),
+                    Some(bytes) => ok_value(Value::Bytes(Box::new(zz_runtime::BytesData::new(
+                        bytes.clone(),
+                    )))),
                     None => {
                         let code = if guard.tree().is_some_and(|t| t.is_dir(&key)) {
                             "io_error"
