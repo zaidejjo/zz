@@ -1269,9 +1269,12 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
     zz_chan *ch = chan.chan;
     // Fast path: lock-free ring pop, zero locks. Valid only while the
     // spill is empty — spilled values are older than anything that
-    // arrived while the ring was full.
+    // arrived while the ring was full. Also gated on zero queued green
+    // waiters (same discipline as the green fast path): a registered
+    // waiter must observe every value.
     zz_value v;
-    if (__atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0
+    if (__atomic_load_n(&ch->green_waiters, __ATOMIC_ACQUIRE) == 0
+        && __atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0
         && zz_ring_try_dequeue(ch, &v)) {
         return v;
     }
@@ -1281,9 +1284,14 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
     // the spill is non-empty the value waits under the mutex — spinning
     // would burn ~10µs before taking the lock (measured 170x slowdown
     // draining a stocked buffer). Bounded (~1024) so a genuinely empty
-    // channel still parks promptly.
+    // channel still parks promptly. Breaks immediately when a green
+    // waiter registers (its takes must observe every value — see the
+    // fast-path gate above).
     if (__atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0) {
         for (int spin = 0; spin < 1024; spin++) {
+            if (__atomic_load_n(&ch->green_waiters, __ATOMIC_ACQUIRE) != 0) {
+                break;
+            }
             if (__atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) != 0) {
                 break;
             }
@@ -1363,8 +1371,11 @@ zz_value zz_chan_try_recv(zz_value chan, int *err) {
     zz_chan *ch = chan.chan;
     zz_value v;
     // Fast path: zero spill count means every queued value sits in the
-    // ring in FIFO order — a lock-free pop is exactly ordered.
-    if (__atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0
+    // ring in FIFO order — a lock-free pop is exactly ordered. Gated on
+    // zero green waiters like the other fast paths (a registered waiter
+    // must observe every value).
+    if (__atomic_load_n(&ch->green_waiters, __ATOMIC_ACQUIRE) == 0
+        && __atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0
         && zz_ring_try_dequeue(ch, &v)) {
         *err = 0;
         return zz_variant_some(v);
@@ -1436,6 +1447,37 @@ static void zz_gwait_recycle(zz_chan *ch, zz_green_waiter *w) {
     }
 }
 
+// Remove a just-registered waiter that was never exposed to any sender:
+// the caller holds `ch->lock` continuously since registration, so the
+// node is still queued and no handoff could have touched it. Matched by
+// frame (the caller only kept `fr`). Used by the register-then-recheck
+// path when a value turns up in the tiers after all (no suspend after
+// all — frame state untouched).
+static void zz_gwait_unregister_tail(zz_chan *ch, zz_task_frame *fr) {
+    // Find our node by frame identity (defensive walk: the tail invariant
+    // above should always hold, but position is never trusted).
+    zz_green_waiter *prev = NULL;
+    zz_green_waiter *w = ch->gwait_head;
+    while (w && w->frame != fr) {
+        prev = w;
+        w = w->next;
+    }
+    if (!w) {
+        // Not queued (should be impossible — see above). Bail without
+        // touching counts: the waiter still owns the frame's future.
+        return;
+    }
+    if (prev) {
+        prev->next = w->next;
+        if (ch->gwait_tail == w) ch->gwait_tail = prev;
+    } else {
+        ch->gwait_head = w->next;
+        if (ch->gwait_tail == w) ch->gwait_tail = NULL;
+    }
+    __atomic_sub_fetch(&ch->green_waiters, 1, __ATOMIC_RELEASE);
+    zz_gwait_recycle(ch, w);
+}
+
 // Pop the oldest waiter and deposit an owned value into its frame.
 // Caller holds `ch->lock`. Returns 1 when a waiter was served (node
 // recycled, count decremented); 0 when the queue is empty. Waking (task
@@ -1496,8 +1538,14 @@ zz_value zz_chan_recv_green(zz_value chan, zz_task_frame *fr, int resume_id, int
     if (chan.tag != ZZ_CHAN) { *err = 1; return zz_unit(); }
     zz_chan *ch = chan.chan;
     zz_value v;
-    // Fast path first (same exactness rule as the blocking call).
-    if (__atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0
+    // Fast path first (same exactness rule as the blocking call). Gated
+    // on zero queued green waiters: a registered waiter must observe every
+    // value, so lock-free takes stop while one exists — otherwise a racing
+    // take can strand values behind a waiter at sender exhaustion (lost
+    // wakeup — a waiter suspended with values sitting in the ring that no
+    // future send will ever hand off).
+    if (__atomic_load_n(&ch->green_waiters, __ATOMIC_ACQUIRE) == 0
+        && __atomic_load_n(&ch->spill_count, __ATOMIC_ACQUIRE) == 0
         && zz_ring_try_dequeue(ch, &v)) {
         *err = 0;
         zz_suspend_verdict = 0;
@@ -1521,19 +1569,65 @@ zz_value zz_chan_recv_green(zz_value chan, zz_task_frame *fr, int resume_id, int
         return v;
     }
     // Miss: suspend (task) or park (sync) until a send hands off.
+    // Register-then-recheck under this same lock: a lock-free racing
+    // consumer may have beaten our ring CAS above while values remained,
+    // so re-examine both tiers AFTER registering. Either we take a value
+    // (unregister, no suspend) or both tiers are truly empty — and any
+    // LATER send then sees our waiter under this same lock and hands off.
+    // This closes the lost-wakeup hole where a waiter slept behind values
+    // stranded in the ring at sender exhaustion.
     fr->resume = resume_id;
     if (zz_chan_wait_register(ch, fr)) {
+        if (ch->len > 0) {
+            v = ch->queue[ch->head];
+            ch->head = (ch->head + 1) % ch->cap;
+            ch->len--;
+            __atomic_sub_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
+            zz_gwait_unregister_tail(ch, fr);
+            pthread_mutex_unlock(&ch->lock);
+            *err = 0;
+            zz_suspend_verdict = 0;
+            return v;
+        }
+        if (zz_ring_try_dequeue(ch, &v)) {
+            zz_gwait_unregister_tail(ch, fr);
+            pthread_mutex_unlock(&ch->lock);
+            *err = 0;
+            zz_suspend_verdict = 0;
+            return v;
+        }
         pthread_mutex_unlock(&ch->lock);
         *err = 0;
         zz_suspend_verdict = 1;
         return zz_unit();
     }
     // Sync frame: park the thread until a send hands off (value lands in
-    // `fr` under this same lock). Helping applies here too (audit
+    // `fr` under this same lock). Same register-then-recheck discipline as
+    // the task branch above: re-examine both tiers now that our own
+    // registration gates every lock-free taker, so the park below can only
+    // begin with both tiers truly empty. Helping applies after that (audit
     // CRITICAL-1): a worker parked with owned deque work strands it, so
     // help first and only sleep while announced. A handoff landing
     // between recheck and announce is still exact — the value sits in
     // `fr->has_value`, which the wait predicate rechecks under the lock.
+    if (ch->len > 0) {
+        v = ch->queue[ch->head];
+        ch->head = (ch->head + 1) % ch->cap;
+        ch->len--;
+        __atomic_sub_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
+        zz_gwait_unregister_tail(ch, fr);
+        pthread_mutex_unlock(&ch->lock);
+        *err = 0;
+        zz_suspend_verdict = 0;
+        return v;
+    }
+    if (zz_ring_try_dequeue(ch, &v)) {
+        zz_gwait_unregister_tail(ch, fr);
+        pthread_mutex_unlock(&ch->lock);
+        *err = 0;
+        zz_suspend_verdict = 0;
+        return v;
+    }
     for (;;) {
         if (fr->has_value) break;
         pthread_mutex_unlock(&ch->lock);

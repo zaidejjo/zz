@@ -621,17 +621,38 @@ impl Lowerer {
 
             // Fast path: if end is an unboxed scalar, use unboxed C loop variables
             if end_is_scalar {
-                // Determine the actual unboxed value
-                // If ev is a simple C identifier (like "v0"), it's already unboxed
-                // If ev is a boxing call like "zz_int(...)", extract the inner expression
-                // Otherwise, unbox it with .i
+                // Determine the actual unboxed value.
+                // Scalar-typed ends (plain local, param, or captured raw
+                // cell) are already unboxed — use as-is and NEVER append
+                // `.i`: a raw cell deref like `((*(int64_t*)env[i]))` is an
+                // int, not a struct (appending `.i` breaks C compilation
+                // for loops over captured int bounds, green or plain).
                 let is_simple_ident = |s: &str| -> bool {
                     !s.is_empty()
                         && s.chars().all(|c| c.is_alphanumeric() || c == '_')
                         && !s.starts_with("zz_")
                 };
 
-                let ev_unboxed = if is_simple_ident(&ev) {
+                let end_is_ident_scalar = end_is_scalar;
+                let ev_unboxed = if end_is_ident_scalar {
+                    if (ev.starts_with("zz_int(")
+                        || ev.starts_with("zz_float(")
+                        || ev.starts_with("zz_bool("))
+                        && ev.ends_with(')')
+                    {
+                        // Redundant boxing around a scalar (some passes add
+                        // it): strip to the inner expression. NOTE: prefix
+                        // lengths differ (`zz_float(` is 9 chars), so match
+                        // each prefix explicitly instead of slicing [7..].
+                        ["zz_int(", "zz_float(", "zz_bool("]
+                            .iter()
+                            .find_map(|p| ev.strip_prefix(p).and_then(|s| s.strip_suffix(')')))
+                            .unwrap_or(&ev)
+                            .to_string()
+                    } else {
+                        ev.clone()
+                    }
+                } else if is_simple_ident(&ev) {
                     // ev is a simple identifier (like v0), it's already unboxed
                     ev.clone()
                 } else if ev.starts_with("zz_int(")
@@ -647,8 +668,34 @@ impl Lowerer {
                     format!("({ev}).i")
                 };
 
-                // For start, similar logic
-                let sv_unboxed = if sv.starts_with("zz_int(") {
+                // For start, similar logic: scalar-typed starts are already
+                // unboxed (same raw-deref rule as the end bound above).
+                let start_name_opt: Option<String> = match &start_expr {
+                    Expr::Ident { name, .. } => Some(name.clone()),
+                    Expr::Path { parts, .. } => Some(parts.join(".")),
+                    _ => None,
+                };
+                let start_is_scalar = start_name_opt
+                    .as_ref()
+                    .and_then(|n| names.lookup_type(n))
+                    .map(|t| t == "int64_t" || t == "double" || t == "bool")
+                    .unwrap_or(false);
+                let sv_unboxed = if start_is_scalar {
+                    if (sv.starts_with("zz_int(")
+                        || sv.starts_with("zz_float(")
+                        || sv.starts_with("zz_bool("))
+                        && sv.ends_with(')')
+                    {
+                        // Same prefix-length discipline as the end bound.
+                        ["zz_int(", "zz_float(", "zz_bool("]
+                            .iter()
+                            .find_map(|p| sv.strip_prefix(p).and_then(|s| s.strip_suffix(')')))
+                            .unwrap_or(&sv)
+                            .to_string()
+                    } else {
+                        sv.clone()
+                    }
+                } else if sv.starts_with("zz_int(") {
                     // Literal like zz_int(0) -> extract the literal
                     let inner = &sv[7..sv.len() - 1];
                     inner.to_string()
@@ -661,7 +708,49 @@ impl Lowerer {
                 };
 
                 let s = if green {
-                    format!("for ({cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++) {{\n")
+                    // Resume-safety: the end bound is re-read every
+                    // iteration, including iterations after a resume jumped
+                    // over the bound's evaluation. A non-literal bound
+                    // (variable, temp, call result) would read a dead C
+                    // stack slot — indeterminate trip count (silent hangs /
+                    // early exits under O3). Spill it into a frame cell once
+                    // at loop entry. Only pure literals stay inline (a
+                    // `zz_int(...)` wrapper around a temp is NOT a literal).
+                    let end_ref: String = ["zz_int(", "zz_float(", "zz_bool("]
+                        .iter()
+                        .find_map(|p| {
+                            if ev.starts_with(p) && ev.ends_with(')') {
+                                let inner = &ev[p.len()..ev.len() - 1];
+                                let numeric = !inner.is_empty()
+                                    && inner.chars().all(|c| {
+                                        c.is_ascii_digit()
+                                            || c == '.'
+                                            || c == '-'
+                                            || c == '+'
+                                            || c == 'e'
+                                            || c == 'E'
+                                    });
+                                if numeric || inner == "true" || inner == "false" {
+                                    Some(ev_unboxed.clone())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_else(|| {
+                            let end_ctype: String = end_name_opt
+                                .as_ref()
+                                .and_then(|n| names.lookup_type(n))
+                                .filter(|t| *t == "int64_t" || *t == "double" || *t == "bool")
+                                .unwrap_or("int64_t")
+                                .to_string();
+                            let (_, ederef, _) = self.green_cell(names, &end_ctype, false, out);
+                            out.push_str(&format!("    {ederef} = {ev_unboxed};\n"));
+                            ederef
+                        });
+                    format!("for ({cid} = {sv_unboxed}; {cid} < {end_ref}; {cid}++) {{\n")
                 } else {
                     format!(
                         "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++) {{\n"
@@ -675,13 +764,20 @@ impl Lowerer {
                 let sv_boxed = sv;
                 let ev_boxed = auto_box(&ev, if end_is_scalar { Some("int64_t") } else { None });
                 if green {
-                    // Green: raw driver + per-iteration copy both live in
-                    // frame cells (a resume may land inside the body).
+                    // Green: the end bound is re-read every iteration,
+                    // including iterations after a resume jumped over its
+                    // evaluation — a C-local `_e` would be indeterminate
+                    // (silent hangs / early exits under O3). Spill it into
+                    // a frame cell once at loop entry. `_s` stays a local:
+                    // it is read only at driver init + guard, both of which
+                    // run strictly before any suspend.
                     let (_, driver, _) = self.green_cell(names, "int64_t", true, out);
+                    let (_, ederef, _) = self.green_cell(names, "zz_value", false, out);
                     out.push_str(&format!(
-                        "{{ zz_value _s = {sv_boxed}; zz_value _e = {ev_boxed};\n    \
-                         if (_s.tag == ZZ_INT && _e.tag == ZZ_INT) {{\n        \
-                         for ({driver} = _s.i; {driver} < _e.i; {driver}++) {{\n            \
+                        "{{ zz_value _s = {sv_boxed};\n    \
+                         {ederef} = {ev_boxed};\n    \
+                         if (_s.tag == ZZ_INT && ({ederef}).tag == ZZ_INT) {{\n        \
+                         for ({driver} = _s.i; {driver} < ({ederef}).i; {driver}++) {{\n            \
                          {cid} = {driver};\n            \
                          zz_safepoint();\n"
                     ));

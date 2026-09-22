@@ -2706,8 +2706,17 @@ impl Lowerer {
                     }
                 }
                 Pattern::Binding { name } => {
-                    let cid = names.enter(&name.name);
-                    out.push_str(&format!("        zz_value {cid} = {scrut_tmp};\n"));
+                    // Green: the binding outlives a suspend in the arm body
+                    // (resume jumps over this declaration) — frame cell,
+                    // mirroring `emit_pattern_bind`.
+                    if self.green_active() {
+                        let (ptr, deref, n) = self.green_cell(names, "zz_value", true, out);
+                        out.push_str(&format!("        {deref} = {scrut_tmp};\n"));
+                        names.enter_cell(&name.name, &ptr, &deref, "zz_value", n);
+                    } else {
+                        let cid = names.enter(&name.name);
+                        out.push_str(&format!("        zz_value {cid} = {scrut_tmp};\n"));
+                    }
 
                     if let Some(guard_expr) = &arm.guard {
                         let guard_c = emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);

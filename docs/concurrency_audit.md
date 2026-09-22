@@ -9,9 +9,11 @@ ASan/TSan harnesses. **No implementation code was modified in this phase.**
 verified). The battery found **1 Critical deadlock, 2 Major correctness bugs**, plus known
 by-design limits. Details + minimal fix plan below. Approval requested before touching code.
 
-> **Status (post-approval): all three fixes landed on this branch — au1/au8/au12 now pass,
-> full battery + `cargo test --all` green, ASan/TSan silent. A follow-up probe found one
-> more lowerer hole (MAJOR-5, §2) and refined the helping rule (see CRITICAL-1 update).
+> **Status (post-approval): all three runtime fixes landed on this branch — au1/au8/au12
+> now pass, full battery + `cargo test --all` green, ASan/TSan silent. Follow-up probing
+> found two lowerer holes: MAJOR-6 (resume-skipped C-local initializers — FIXED, au3/au19/
+> au20 guards) and MAJOR-5 (nested capture through greencell — open, au18 known-fail
+> guard). A follow-up probe refined the helping rule further (see CRITICAL-1 update).
 > au17 (indirect-verdict probe) was dropped: the shape it needs is exactly MAJOR-5, so no
 > passing test can currently construct it; the help-path save/restore shipped as zero-risk
 > hardening under the same proven invariant.
@@ -176,6 +178,21 @@ gap, no e2e fixture covers the shape. **Not fixed in this phase (lowerer surgery
 the approved scope) — proposed follow-up.** It also blocks the au17 indirect-verdict probe
 (a green suspender nested in a green waiter), which was dropped for that reason.
 
+### MAJOR-6 (new, lowerer): resume skips C-local initializers — indeterminate loop bounds
+
+Found chasing au3's ~30% O3-only hang (dev clean, ASan clean, TSan silent): green
+range-`for` bounds live in C stack locals (`_s`/`_e`), but a resume `goto`s over their
+declarations into the loop body — the trip count reads indeterminate memory (silent
+over-count hangs / under-count early exits; O0 usually survives on stack-slot reuse,
+which is why only release hung). Same class in match top-level binding arms (plain
+`zz_value v = ...` skipped by resume) and in any non-literal fast-path bound. **Fixed:**
+range end bounds spill to frame cells (literals stay inline; a `zz_int(...)` wrapper
+around a temp is NOT a literal); match top-level bindings use frame cells when green;
+raw-scalar unboxing no longer appends `.i` to int64 cell derefs (that also fixes plain
+`for i in 0..n` over captured ints, green or not — same line, loud C error before).
+Guards: au3 (60/60 release), au20 (variable bound, 15/15), au19 (guarded binding arm).
+The array-iteration path already spilled correctly — range was the miss.
+
 ## 3. Verified sound (do not "fix")
 
 - Handoff airtightness: waiter registration vs serve-waiter both under `ch->lock`; no
@@ -214,3 +231,8 @@ proceed.
 - `bench/handoff` ZZ-vs-Go holds (box-noisy; relative standing kept).
 - Open follow-ups: MAJOR-5 lowerer fix (+ au17 probe unblocked by it), handle
   reclamation (MAJOR-4), send backpressure (MAJOR-3), battery wired into CI (step 5).
+- Step 5 LANDED: `crates/zz_cli/tests/concurrency_audit_regression.rs` (18 AOT tests,
+  hang-safe timeouts, resource bounds, build-failure negatives) + 8 e2e fixtures
+  (6 VM success shapes + 2 static-reject errors). VM multi-join deliberately NOT
+  covered by e2e: the VM consumes join results by design (second join errors), so
+  concurrent multi-join is AOT-only territory (au12).
