@@ -571,8 +571,24 @@ void zz_frame_free(zz_task_frame *fr) {
     }
 }
 
+// Forward: renders a printed `.err` as a readable, hinted diagnostic and
+// aborts. Defined after the socket include block (needs isatty/fileno).
+static void zz_throw_printed_err(const zz_value *payload);
+
 zz_value zz_io_println(zz_value v, int *err) {
     (void)err;
+    // Unwrap consecutive `Result::Ok` layers for stdout presentation
+    // (mirrors the VM's `for_stdout`): `println(.ok(x))` prints `x`.
+    // A printed `.err` throws a readable, hinted diagnostic on stderr
+    // instead of a raw `.err(...)` line.
+    while (v.tag == ZZ_RESULT_OK && v.payload) {
+        v = *v.payload;
+    }
+    if (v.tag == ZZ_RESULT_ERR && v.payload) {
+        zz_throw_printed_err(v.payload);
+        // Unreachable: `zz_throw_printed_err` exits the process.
+        return zz_unit();
+    }
     zz_print_value(stdout, &v);
     fputc('\n', stdout);
     fflush(stdout);
@@ -581,6 +597,13 @@ zz_value zz_io_println(zz_value v, int *err) {
 
 zz_value zz_io_print(zz_value v, int *err) {
     (void)err;
+    while (v.tag == ZZ_RESULT_OK && v.payload) {
+        v = *v.payload;
+    }
+    if (v.tag == ZZ_RESULT_ERR && v.payload) {
+        zz_throw_printed_err(v.payload);
+        return zz_unit();
+    }
     zz_print_value(stdout, &v);
     return zz_unit();
 }
@@ -2587,6 +2610,7 @@ void zz_safepoint(void) {
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <io.h>
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -4198,6 +4222,110 @@ zz_value zz_env_args(zz_value unused, int *err) {
     return out;
 }
 
+// Render a printed `.err(payload)` as a readable, hinted diagnostic and
+// abort (exit 1). Structured `fs:<op>:<code>: <detail>` payloads become
+// `cannot <verb> '<detail>': <reason>` + `hint: ...`; anything else
+// surfaces verbatim with a generic recovery hint. Colors apply when
+// stderr is a terminal, matching the CLI diagnostic renderer.
+// (Defined here — after the socket include block — for isatty/fileno.)
+static void zz_throw_printed_err(const zz_value *payload) {
+    char text[1024];
+    if (payload->tag == ZZ_STR && payload->s) {
+        size_t n = payload->s->len < sizeof(text) - 1 ? payload->s->len : sizeof(text) - 1;
+        memcpy(text, zz_str_cptr(payload->s), n);
+        text[n] = '\0';
+    } else {
+        snprintf(text, sizeof text, "<non-string error>");
+    }
+    // Split `fs:<op>:<code>: <detail>`.
+    const char *verb = NULL;
+    const char *reason = NULL;
+    const char *hint = NULL;
+    char detail[768] = "";
+    if (strncmp(text, "fs:", 3) == 0) {
+        char *op_end = strchr(text + 3, ':');
+        if (op_end) {
+            char *code_end = strchr(op_end + 1, ':');
+            if (code_end) {
+                *op_end = '\0';
+                *code_end = '\0';
+                const char *op = text + 3;
+                const char *code = op_end + 1;
+                snprintf(detail, sizeof detail, "%s", code_end + 1);
+                // Trim one leading space from "<code>: <detail>".
+                if (detail[0] == ' ') memmove(detail, detail + 1, strlen(detail));
+                if (strcmp(op, "read") == 0 || strcmp(op, "read_bytes") == 0) verb = "read";
+                else if (strcmp(op, "write") == 0) verb = "write to";
+                else if (strcmp(op, "append") == 0) verb = "append to";
+                else if (strcmp(op, "copy") == 0) verb = "copy";
+                else if (strcmp(op, "move") == 0 || strcmp(op, "rename") == 0) verb = "move";
+                else if (strcmp(op, "remove") == 0 || strcmp(op, "remove_file") == 0) verb = "remove";
+                else if (strcmp(op, "mkdir") == 0 || strcmp(op, "mkdir_all") == 0) verb = "create directory";
+                else if (strcmp(op, "read_dir") == 0 || strcmp(op, "readdir") == 0) verb = "list directory";
+                else if (strcmp(op, "remove_dir_all") == 0) verb = "remove directory";
+                else if (strcmp(op, "walk_dir") == 0) verb = "walk directory";
+                else if (strcmp(op, "stat") == 0) verb = "stat";
+                else if (strcmp(op, "open") == 0) verb = "open";
+                else if (strcmp(op, "read_chunk") == 0) verb = "read from file";
+                else if (strcmp(op, "write_chunk") == 0) verb = "write to file";
+                else if (strcmp(op, "seek") == 0) verb = "seek in file";
+                else if (strcmp(op, "flush") == 0) verb = "flush file";
+                else if (strcmp(op, "close") == 0) verb = "close file";
+                if (strcmp(code, "not_found") == 0) {
+                    reason = "no such file or directory";
+                    hint = "check that the path is correct — relative paths resolve from the current working directory";
+                } else if (strcmp(code, "permission_denied") == 0) {
+                    reason = "permission denied";
+                    hint = "check read/write permissions for the current user";
+                } else if (strcmp(code, "already_exists") == 0) {
+                    reason = "file already exists";
+                    hint = "remove the existing file first, or pick another path";
+                } else if (strcmp(code, "invalid_input") == 0) {
+                    reason = "invalid argument";
+                    hint = "check the arguments (e.g. File.open mode must be one of r, w, a)";
+                } else if (strcmp(code, "not_empty") == 0) {
+                    reason = "directory is not empty";
+                    hint = "remove the contents first, or use fs.remove_dir_all";
+                } else if (strcmp(code, "closed") == 0) {
+                    reason = "file handle is closed";
+                    hint = "the handle was already closed — open it again with File.open";
+                } else {
+                    reason = "input/output error";
+                    hint = "check disk health and available space";
+                }
+            }
+        }
+    }
+    int tty;
+#ifdef ZZ_OS_WINDOWS
+    tty = _isatty(_fileno(stderr));
+#else
+    tty = isatty(fileno(stderr));
+#endif
+    if (verb && reason) {
+        // Trim leading whitespace from detail (payloads use ": <detail>").
+        const char *d = detail;
+        while (*d == ' ' || *d == '\t') d++;
+        if (tty) {
+            fprintf(stderr, "\033[1;31merror\033[0m: cannot %s '%s': %s\n", verb, d, reason);
+            fprintf(stderr, "    \033[1;36m=\033[0m \033[36mhint: %s\033[0m\n", hint);
+        } else {
+            fprintf(stderr, "error: cannot %s '%s': %s\n", verb, d, reason);
+            fprintf(stderr, "    = hint: %s\n", hint);
+        }
+    } else {
+        if (tty) {
+            fprintf(stderr, "\033[1;31merror\033[0m: error value printed: %s\n", text);
+            fprintf(stderr, "    \033[1;36m=\033[0m \033[36mhint: handle .err explicitly with match to recover instead of aborting\033[0m\n");
+        } else {
+            fprintf(stderr, "error: error value printed: %s\n", text);
+            fprintf(stderr, "    = hint: handle .err explicitly with match to recover instead of aborting\n");
+        }
+    }
+    fprintf(stderr, "zz: program failed\n");
+    fflush(stderr);
+    exit(1);
+}
 // =====================================================================
 //  std.fs — comprehensive non-blocking filesystem
 //

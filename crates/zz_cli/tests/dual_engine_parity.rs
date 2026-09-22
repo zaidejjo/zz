@@ -485,6 +485,7 @@ parity_strict!(
     "stdlib",
     "fs_comprehensive.zz"
 );
+parity_strict!(parity_stdlib_result_print, "stdlib", "result_print.zz");
 parity_strict!(parity_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
 
 // --- Error fixture: both engines must error on missing struct field ---
