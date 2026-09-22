@@ -33,6 +33,9 @@ use zz_runtime::{EvalError, Interp, Span, Value};
 
 use crate::natives::expect_str;
 
+pub(crate) mod path;
+pub mod vfs;
+
 // ── Unified error codes ────────────────────────────────────────────────────
 
 /// Map an I/O error to a stable, platform-independent code.
@@ -767,4 +770,124 @@ pub(crate) fn file_close(
     }
     file_drop(id);
     Ok(ok_unit())
+}
+
+// ── Binary-safe chunked read ───────────────────────────────────────────────
+//
+// `file.read_chunk` returns UTF-8 text (lossy on arbitrary bytes by
+// construction — `String` cannot hold them). `read_chunk_bytes` is the
+// binary twin: raw bytes as `[int]`, mirroring `fs.read_bytes`. Empty
+// array at EOF, same 8MB clamp, same `closed` diagnostics.
+
+pub(crate) fn file_read_chunk_bytes(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let (id, handle) = match expect_file(args, 0, "read_chunk_bytes", "file.read_chunk_bytes")? {
+        Ok(open) => open,
+        Err(closed) => return Ok(closed),
+    };
+    let n: usize = match args.get(1) {
+        Some(Value::Int(n)) if *n >= 0 => (*n as usize).min(8 * 1024 * 1024),
+        Some(other) => {
+            return Err(EvalError::new(
+                format!(
+                    "`file.read_chunk_bytes` expects a non-negative int limit, found `{other}`"
+                ),
+                span,
+            ));
+        }
+        None => {
+            return Err(EvalError::new(
+                "missing argument `n` for `file.read_chunk_bytes`",
+                span,
+            ));
+        }
+    };
+    let path = handle.path.clone();
+    run_fs(interp, span, move || {
+        let Some(f) = file_lookup(id) else {
+            return err_str("fs:read_chunk_bytes:closed".to_string());
+        };
+        let mut guard = f.file.lock().unwrap();
+        let Some(fp) = guard.as_mut() else {
+            return err_str("fs:read_chunk_bytes:closed".to_string());
+        };
+        let mut buf = vec![0u8; n];
+        match fp.read(&mut buf) {
+            Ok(k) => {
+                buf.truncate(k);
+                ok_value(Value::Array(Box::new(
+                    buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
+                )))
+            }
+            Err(e) => err_str(format!("fs:read_chunk_bytes:{}: {path}", fs_code(&e))),
+        }
+    })
+}
+
+// ── Cross-platform path lexing ─────────────────────────────────────────────
+//
+// Pure string operations (no I/O): safe to run inline, never touch the I/O
+// pool. Style resolves dynamically from `sys.os()` (`"windows"` →
+// backslash) so behavior follows the execution host, not the build host.
+
+fn path_style() -> path::Style {
+    path::style_for_os(zz_native_rt::sys::os())
+}
+
+pub(crate) fn fs_normalize(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let p = expect_str(args, 0, "std.fs.normalize")?;
+    Ok(Value::Str(Box::new(path::normalize(&p, path_style()))))
+}
+
+pub(crate) fn fs_join(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let a = expect_str(args, 0, "std.fs.join")?;
+    let b = expect_str(args, 1, "std.fs.join")?;
+    Ok(Value::Str(Box::new(path::join(&a, &b, path_style()))))
+}
+
+pub(crate) fn fs_basename(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let p = expect_str(args, 0, "std.fs.basename")?;
+    Ok(Value::Str(Box::new(path::basename(&p, path_style()))))
+}
+
+pub(crate) fn fs_dirname(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let p = expect_str(args, 0, "std.fs.dirname")?;
+    Ok(Value::Str(Box::new(path::dirname(&p, path_style()))))
+}
+
+pub(crate) fn fs_is_absolute(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let p = expect_str(args, 0, "std.fs.is_absolute")?;
+    Ok(Value::Bool(path::is_absolute(&p, path_style())))
+}
+
+pub(crate) fn fs_extension(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let p = expect_str(args, 0, "std.fs.extension")?;
+    Ok(Value::Str(Box::new(path::extension(&p, path_style()))))
 }

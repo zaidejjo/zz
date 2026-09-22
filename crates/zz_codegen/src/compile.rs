@@ -270,6 +270,13 @@ pub enum PgoMode {
     Use,
 }
 
+/// One embedded asset: virtual path (slash-separated, relative) + bytes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EmbedAsset {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
 /// Build options.
 #[derive(Debug, Clone, Default)]
 pub struct BuildOptions {
@@ -296,6 +303,10 @@ pub struct BuildOptions {
     /// Extra raw linker flags from plugin packages (the `ldflags.txt`
     /// files their build hooks emit, e.g. `-lvips -lgio-2.0 ...`).
     pub plugin_link_args: Vec<String>,
+    /// Static assets baked into the binary (`--embed`): emitted as byte
+    /// tables + a static initializer calling `zz_embed_register`, served
+    /// at runtime through `fs.embedfs()`. Empty = no embedding.
+    pub embed_assets: Vec<EmbedAsset>,
 }
 
 impl BuildOptions {
@@ -312,6 +323,7 @@ impl BuildOptions {
             native_rt: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
+            embed_assets: Vec::new(),
         }
     }
 
@@ -328,6 +340,7 @@ impl BuildOptions {
             native_rt: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
+            embed_assets: Vec::new(),
         }
     }
 
@@ -344,6 +357,7 @@ impl BuildOptions {
             native_rt: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
+            embed_assets: Vec::new(),
         }
     }
 
@@ -360,6 +374,7 @@ impl BuildOptions {
             native_rt: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
+            embed_assets: Vec::new(),
         }
     }
 
@@ -376,6 +391,7 @@ impl BuildOptions {
             native_rt: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
+            embed_assets: Vec::new(),
         }
     }
 }
@@ -408,9 +424,55 @@ impl BuildOptions {
         for a in &self.plugin_link_args {
             a.hash(&mut h);
         }
+        // Hash embedded assets (name + bytes): changed assets must bust
+        // the cache or binaries would serve stale files.
+        for a in &self.embed_assets {
+            a.name.hash(&mut h);
+            a.bytes.hash(&mut h);
+        }
         target.unwrap_or("host").hash(&mut h);
         h.finish()
     }
+}
+
+/// Render embedded assets as C byte tables plus a static initializer that
+/// registers each file with the runtime embed table before `main` runs.
+/// Output is appended to the generated program C (per-binary data — never
+/// part of the precompiled runtime archive).
+pub fn embed_c(assets: &[EmbedAsset]) -> String {
+    if assets.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n// ---- zz --embed assets (generated) ------------------------------------\n",
+    );
+    for (i, a) in assets.iter().enumerate() {
+        out.push_str(&format!("static const unsigned char zz_embed_{i}[] = {{"));
+        for (k, b) in a.bytes.iter().enumerate() {
+            if k % 12 == 0 {
+                out.push('\n');
+            }
+            out.push_str(&format!("{b},"));
+        }
+        out.push_str("\n};\n");
+        // C-escape the virtual path for the string literal.
+        let mut esc = String::with_capacity(a.name.len() + 2);
+        for c in a.name.chars() {
+            match c {
+                '\\' => esc.push_str("\\\\"),
+                '"' => esc.push_str("\\\""),
+                '\n' => esc.push_str("\\n"),
+                c => esc.push(c),
+            }
+        }
+        out.push_str(&format!(
+            "static void zz_embed_init_{i}(void) __attribute__((constructor));\n\
+             static void zz_embed_init_{i}(void) {{\n\
+             \x20   zz_embed_register(\"{esc}\", zz_embed_{i}, sizeof(zz_embed_{i}));\n\
+             }}\n"
+        ));
+    }
+    out
 }
 
 /// The single release flag set (ThinLTO always).
@@ -502,13 +564,20 @@ pub fn build_with(
     let tmpdir = std::env::temp_dir().join(format!("zz-build-{}-{uniq}", std::process::id()));
     std::fs::create_dir_all(&tmpdir)?;
     let src_path = tmpdir.join("prog.c");
-    std::fs::write(&src_path, source)?;
+    // Per-binary `--embed` tables ride along in the program TU (never in
+    // the precompiled archive, which is shared across programs).
+    let full_source = if opts.embed_assets.is_empty() {
+        source.to_string()
+    } else {
+        format!("{source}\n{}", embed_c(&opts.embed_assets))
+    };
+    std::fs::write(&src_path, &full_source)?;
 
     // Debug aid: ZZ_DUMP_C=/some/path.c writes the generated C to that path
     // before compilation. Used by perf investigations; no production code
     // depends on it.
     if let Ok(path) = std::env::var("ZZ_DUMP_C") {
-        let _ = std::fs::write(&path, source);
+        let _ = std::fs::write(&path, &full_source);
     }
 
     let mut cmd = Command::new(&clang.path);
@@ -595,7 +664,14 @@ pub fn emit_c_plus_script(
 ) -> Result<(PathBuf, PathBuf, PathBuf), std::io::Error> {
     std::fs::create_dir_all(dir)?;
     let app_c = dir.join("app.c");
-    std::fs::write(&app_c, source)?;
+    // Manual builds must see the same bytes the real build compiles,
+    // including `--embed` tables.
+    let full_source = if opts.embed_assets.is_empty() {
+        source.to_string()
+    } else {
+        format!("{source}\n{}", embed_c(&opts.embed_assets))
+    };
+    std::fs::write(&app_c, &full_source)?;
 
     let mut flags = clang_flags(opts, target);
     // Scripts always show the portable command: drop build-machine-specific

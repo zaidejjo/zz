@@ -64,6 +64,8 @@ FLAGS:
     --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
     --interactive, -i  with --fix, prompt for ambiguous fixes interactively
     --native           with run, use the native AOT compiler instead of the VM
+    --embed <dir>      with run/build, serve (VM) or bake (native) a static asset
+                       directory, readable at runtime via `fs.embedfs()`
     -p, --release      with build, full optimization (-O3 -flto=thin, dynamic, stripped)
     --static           with build, static self-contained binary (ThinLTO, DCE; rejected on macOS)
     --pgo              with build, profile-guided optimization build (native host only)
@@ -139,11 +141,14 @@ fn main() -> ExitCode {
         }
         Some("run") => {
             let native = rest.iter().any(|a| a == "--native");
-            let args: Vec<String> = rest.iter().filter(|a| *a != "--native").cloned().collect();
+            let embed = parse_flag_value(rest, "--embed").map(std::path::PathBuf::from);
+            // Strip `--embed <dir>` / `--embed=<dir>` (and `--native`) so
+            // neither the loader nor the script sees them as paths/args.
+            let args: Vec<String> = strip_flag_value(rest, "--embed", "--native");
             let script_args = args.get(1..).unwrap_or(&[]).to_vec();
             let file = args.iter().find(|a| !a.starts_with('-'));
             if native {
-                match run_native(file, &script_args) {
+                match run_native(file, &script_args, embed) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
                         eprintln!("zz: {msg}");
@@ -151,7 +156,7 @@ fn main() -> ExitCode {
                     }
                 }
             } else {
-                match run_file(rest.first(), &script_args) {
+                match run_file(file, &script_args, embed) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
                         eprintln!("zz: {msg}");
@@ -474,7 +479,11 @@ fn load_vm_plugins(
     Ok(())
 }
 
-fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String> {
+fn run_file(
+    path: Option<&String>,
+    script_args: &[String],
+    embed: Option<std::path::PathBuf>,
+) -> Result<(), String> {
     let path = path.ok_or_else(|| {
         "missing file argument\n\n\
              usage: zz run <file.zz>\n\
@@ -553,6 +562,16 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
 
     let mut interp = Interp::with_natives(natives);
     interp.args = script_args.to_vec();
+
+    // `--embed <dir>`: serve the asset tree to `fs.embedfs()` for this run.
+    if let Some(dir) = embed.as_deref() {
+        let files = build::collect_embed(dir)?;
+        zz_stdlib::natives::fs::vfs::set_embed(
+            files
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>(),
+        );
+    }
 
     // Inject math constants as static float values in the runtime env.
     // This avoids the zero-arg native function indirection — `PI` resolves
@@ -709,7 +728,11 @@ fn run_file(path: Option<&String>, script_args: &[String]) -> Result<(), String>
 }
 
 /// `zz run --native <file>`: compile to a temp location, execute, cleanup.
-fn run_native(path: Option<&String>, script_args: &[String]) -> Result<(), String> {
+fn run_native(
+    path: Option<&String>,
+    script_args: &[String],
+    embed: Option<std::path::PathBuf>,
+) -> Result<(), String> {
     let path = path.ok_or_else(|| {
         "missing file argument\n\n\
              usage: zz run --native <file.zz>\n\
@@ -718,7 +741,11 @@ fn run_native(path: Option<&String>, script_args: &[String]) -> Result<(), Strin
     })?;
     let p = std::path::Path::new(path);
     // Use release mode for native runs to get -O3 optimization (true native speed).
-    let cached = build::build_native(p, build::BuildMode::Release)?;
+    let rel = build::ReleaseOptions {
+        embed,
+        ..Default::default()
+    };
+    let cached = build::build_release(p, build::BuildMode::Release, &rel)?;
     let code = build::exec_binary(&cached, script_args)?;
     if code != 0 {
         return Err(format!(
@@ -751,8 +778,9 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     let verbose = args.iter().any(|a| a == "--verbose");
     let target = parse_flag_value(args, "--target");
     let cc = parse_flag_value(args, "--cc");
+    let embed = parse_flag_value(args, "--embed").map(std::path::PathBuf::from);
     // Positional path: first non-flag arg, skipping values consumed by
-    // `--target <triple>` / `--cc <name>` (space form).
+    // `--target <triple>` / `--cc <name>` / `--embed <dir>` (space form).
     let mut skip_next = false;
     let path = args
         .iter()
@@ -761,7 +789,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
                 skip_next = false;
                 return false;
             }
-            if a.as_str() == "--target" || a.as_str() == "--cc" {
+            if a.as_str() == "--target" || a.as_str() == "--cc" || a.as_str() == "--embed" {
                 skip_next = true;
                 return false;
             }
@@ -769,7 +797,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         })
         .ok_or_else(|| {
             "missing file argument\n\n\
-             usage: zz build [-p|--release|-O3|--static|--pgo] [--target <triple>] [--cc <clang|zig>] <file.zz>\n\
+             usage: zz build [-p|--release|-O3|--static|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] <file.zz>\n\
              hint: provide the path to a .zz file to build"
                 .to_string()
         })?;
@@ -800,6 +828,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         target,
         provider,
         verbose,
+        embed,
     };
     let dest = build::build_release(p, mode, &rel)?;
     let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
@@ -832,6 +861,32 @@ fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Strip value-flags (`--embed <dir>` / `--embed=<dir>`) plus any bare
+/// flags in `bare` from an arg list (for `run`: the loader and the script
+/// must never see CLI-only flags).
+fn strip_flag_value(args: &[String], flag: &str, bare: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a == flag {
+            skip_next = true;
+            continue;
+        }
+        if a.starts_with(&format!("{flag}=")) {
+            continue;
+        }
+        if a == bare {
+            continue;
+        }
+        out.push(a.clone());
+    }
+    out
 }
 
 /// Top-level entry for `zz fmt`.

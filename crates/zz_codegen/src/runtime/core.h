@@ -64,6 +64,7 @@ typedef enum {
     ZZ_TUPLE,
     ZZ_DB,
     ZZ_FILE,
+    ZZ_VFS,
 } zz_tag;
 
 typedef struct zz_value zz_value;
@@ -82,6 +83,10 @@ typedef struct zz_tcp zz_tcp;
 // An open streaming file (`std.fs.open`): the stdio handle plus its origin
 // path (owned, for diagnostics) and a closed flag (explicit `close`).
 typedef struct zz_file zz_file;
+
+// A virtual filesystem provider (`std.fs.osfs`/`memfs`/`tarfs`/`embedfs`):
+// process-lifetime handle dispatched by `zz_fs_*_at`.
+typedef struct zz_vfs zz_vfs;
 
 // Refcounted string with Small String Optimization (SSO).
 //
@@ -142,6 +147,7 @@ struct zz_value {
         zz_tcp *net;         // TCP stream or listener (ZZ_TCP_STREAM/LISTENER)
         void *db;            // opaque sqlite3* handle (ZZ_DB)
         zz_file *file;       // open streaming file (ZZ_FILE)
+        zz_vfs *vfs;         // fs provider handle (ZZ_VFS)
     };
 };
 
@@ -739,10 +745,37 @@ zz_value zz_fs_walk_dir(zz_value path, int *err);
 zz_value zz_fs_stat(zz_value path, int *err);
 zz_value zz_fs_open(zz_value path, zz_value mode, int *err);
 zz_value zz_fs_read_chunk(zz_value f, zz_value n, int *err);
+zz_value zz_fs_read_chunk_bytes(zz_value f, zz_value n, int *err);
 zz_value zz_fs_write_chunk(zz_value f, zz_value data, int *err);
 zz_value zz_fs_seek(zz_value f, zz_value pos, int *err);
 zz_value zz_fs_flush(zz_value f, int *err);
 zz_value zz_fs_close(zz_value f, int *err);
+// Pure cross-platform path lexing (no I/O; mirrors `natives/fs/path.rs`).
+zz_value zz_fs_normalize(zz_value path, int *err);
+zz_value zz_fs_join(zz_value a, zz_value b, int *err);
+zz_value zz_fs_basename(zz_value path, int *err);
+zz_value zz_fs_dirname(zz_value path, int *err);
+zz_value zz_fs_is_absolute(zz_value path, int *err);
+zz_value zz_fs_extension(zz_value path, int *err);
+
+// ---- virtual filesystem providers (mirrors `natives/fs/vfs.rs`) ------------
+zz_value zz_fs_osfs(zz_value unused, int *err);
+zz_value zz_fs_memfs(zz_value unused, int *err);
+zz_value zz_fs_tarfs(zz_value path, int *err);
+zz_value zz_fs_embedfs(zz_value unused, int *err);
+zz_value zz_fs_read_to_string_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_read_bytes_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_write_at(zz_value fsys, zz_value path, zz_value data, int *err);
+zz_value zz_fs_append_at(zz_value fsys, zz_value path, zz_value data, int *err);
+zz_value zz_fs_exists_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_is_file_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_is_dir_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_read_dir_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_mkdir_all_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_remove_file_at(zz_value fsys, zz_value path, int *err);
+// Link `--embed` assets into the process-wide embed table (called from a
+// static initializer in the generated embed C, or directly in tests).
+void zz_embed_register(const char *name, const unsigned char *data, size_t len);
 
 // ---- encoding natives ---------------------------------------------------
 zz_value zz_encoding_url_encode(zz_value s, int *err);

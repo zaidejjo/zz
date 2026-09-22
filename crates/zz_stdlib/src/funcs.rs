@@ -1862,6 +1862,8 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     // diagnostics (see `natives/fs/mod.rs`); predicates return `bool`.
     // Open handles are `Opaque("file")` and dispatch `file.*` methods.
     let file_t = Type::Opaque("file".to_string());
+    // FS provider handles (`fs.FS` interface: Os / Mem / Tar / Embed).
+    let fs_t = Type::Opaque("zzfs".to_string());
     let result_unit = || Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
     let result_str = || Type::Result(Box::new(Type::Str), Box::new(Type::Str));
     let result_int = || Type::Result(Box::new(Type::Int), Box::new(Type::Str));
@@ -1970,6 +1972,11 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             result_str(),
         ),
         (
+            "std.fs.read_chunk_bytes",
+            vec![("f", file_t.clone()), ("n", Type::Int)],
+            result_int_arr(),
+        ),
+        (
             "std.fs.write_chunk",
             vec![("f", file_t.clone()), ("data", Type::Str)],
             result_int(),
@@ -1981,6 +1988,96 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
         ("std.fs.flush", vec![("f", file_t.clone())], result_unit()),
         ("std.fs.close", vec![("f", file_t.clone())], result_unit()),
+        // Pure cross-platform path lexing (total, no I/O).
+        ("std.fs.normalize", vec![("path", Type::Str)], Type::Str),
+        (
+            "std.fs.join",
+            vec![("a", Type::Str), ("b", Type::Str)],
+            Type::Str,
+        ),
+        ("std.fs.basename", vec![("path", Type::Str)], Type::Str),
+        ("std.fs.dirname", vec![("path", Type::Str)], Type::Str),
+        ("std.fs.is_absolute", vec![("path", Type::Str)], Type::Bool),
+        ("std.fs.extension", vec![("path", Type::Str)], Type::Str),
+        // FS providers + `*_at` family (see `natives/fs/vfs.rs`).
+        (
+            "std.fs.osfs",
+            vec![],
+            Type::Result(Box::new(fs_t.clone()), Box::new(Type::Str)),
+        ),
+        (
+            "std.fs.memfs",
+            vec![],
+            Type::Result(Box::new(fs_t.clone()), Box::new(Type::Str)),
+        ),
+        (
+            "std.fs.tarfs",
+            vec![("path", Type::Str)],
+            Type::Result(Box::new(fs_t.clone()), Box::new(Type::Str)),
+        ),
+        (
+            "std.fs.embedfs",
+            vec![],
+            Type::Result(Box::new(fs_t.clone()), Box::new(Type::Str)),
+        ),
+        (
+            "std.fs.read_to_string_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            result_str(),
+        ),
+        (
+            "std.fs.read_bytes_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            result_int_arr(),
+        ),
+        (
+            "std.fs.write_at",
+            vec![
+                ("fsys", fs_t.clone()),
+                ("path", Type::Str),
+                ("content", Type::Str),
+            ],
+            result_unit(),
+        ),
+        (
+            "std.fs.append_at",
+            vec![
+                ("fsys", fs_t.clone()),
+                ("path", Type::Str),
+                ("content", Type::Str),
+            ],
+            result_unit(),
+        ),
+        (
+            "std.fs.exists_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            Type::Bool,
+        ),
+        (
+            "std.fs.is_file_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            Type::Bool,
+        ),
+        (
+            "std.fs.is_dir_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            Type::Bool,
+        ),
+        (
+            "std.fs.read_dir_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            result_str_arr(),
+        ),
+        (
+            "std.fs.mkdir_all_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            result_unit(),
+        ),
+        (
+            "std.fs.remove_file_at",
+            vec![("fsys", fs_t.clone()), ("path", Type::Str)],
+            result_unit(),
+        ),
         (
             "File.open",
             vec![("path", Type::Str), ("mode", Type::Str)],
@@ -1990,6 +2087,11 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             "file.read_chunk",
             vec![("f", file_t.clone()), ("n", Type::Int)],
             result_str(),
+        ),
+        (
+            "file.read_chunk_bytes",
+            vec![("f", file_t.clone()), ("n", Type::Int)],
+            result_int_arr(),
         ),
         (
             "file.write_chunk",
@@ -2936,7 +3038,7 @@ mod tests {
         assert!(funcs.contains_key("colors.red"));
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
-        assert_eq!(funcs.len(), 562);
+        assert_eq!(funcs.len(), 584);
     }
 
     #[test]

@@ -95,6 +95,24 @@ fn run_zz_test(file: &Path) -> (i32, String, String) {
     (exit_code, stdout, stderr)
 }
 
+/// Run `zz run --embed <dir> <file>` and return (exit_code, stdout, stderr).
+fn run_zz_embed(embed_dir: &Path, file: &Path) -> (i32, String, String) {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("run")
+        .arg("--embed")
+        .arg(embed_dir)
+        .arg(file)
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz run --embed {file:?}`: {e}"));
+
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    (exit_code, stdout, stderr)
+}
+
 // ---------------------------------------------------------------------------
 // Success fixtures: must exit 0
 // ---------------------------------------------------------------------------
@@ -203,6 +221,8 @@ e2e_success_test!(e2e_stdlib_fs_test, "stdlib", "fs_test.zz");
 e2e_success_test!(e2e_stdlib_fs_comprehensive, "stdlib", "fs_comprehensive.zz");
 e2e_success_test!(e2e_stdlib_result_print, "stdlib", "result_print.zz");
 e2e_success_test!(e2e_stdlib_import_alias, "stdlib", "import_alias.zz");
+e2e_success_test!(e2e_stdlib_fs_path, "stdlib", "fs_path.zz");
+e2e_success_test!(e2e_stdlib_fs_vfs, "stdlib", "fs_vfs.zz");
 e2e_success_test!(e2e_stdlib_env_test, "stdlib", "env_test.zz");
 e2e_success_test!(e2e_stdlib_time_test, "stdlib", "time_test.zz");
 e2e_success_test!(e2e_stdlib_math_extended, "stdlib", "math_extended_test.zz");
@@ -383,6 +403,40 @@ e2e_error_test!(e2e_err_chan_send_non_chan, "chan_send_non_chan.zz");
 // ---------------------------------------------------------------------------
 // Eval tests: inline code via `zz eval`
 // ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_embed_vm_serves_assets() {
+    // `fs_embed.zz` is intentionally NOT a plain success fixture (without
+    // `--embed` its reads are correctly not_found); it runs here with an
+    // asset dir, asserting the full EmbedFS surface in the VM.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = root.join("tests/fixtures/stdlib/data/embed_demo");
+    let file = root.join("tests/fixtures/stdlib/fs_embed.zz");
+    let (exit, stdout, stderr) = run_zz_embed(&dir, &file);
+    assert_eq!(exit, 0, "stderr: {stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.iter().any(|l| l.trim() == "index: hello embedded"),
+        "{stdout}"
+    );
+    assert!(
+        lines.iter().any(|l| l.trim() == "css: body{color:red}"),
+        "{stdout}"
+    );
+    assert!(
+        lines.iter().any(|l| l.trim() == "css_dir: [site.css]"),
+        "{stdout}"
+    );
+    assert!(lines.iter().any(|l| l.trim() == "true"), "{stdout}");
+    assert!(lines.iter().any(|l| l.trim() == "false"), "{stdout}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("embed_readonly: fs:write:invalid_input:")),
+        "{stdout}"
+    );
+    assert!(lines.iter().any(|l| l.trim() == "fs_embed_ok"), "{stdout}");
+}
 
 #[test]
 fn e2e_eval_basic_arithmetic() {

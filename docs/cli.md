@@ -81,7 +81,28 @@ zz build --pgo main.zz           # profile-guided, native host only
 zz build --target aarch64-unknown-linux-gnu main.zz   # cross (implies -p)
 zz build -p --cc zig main.zz     # use `zig cc` as the provider
 zz build -p --verbose main.zz    # print the exact clang command line
+zz build --embed ./assets main.zz            # bake static files into the binary
+zz run --embed ./assets main.zz              # serve them in the VM instead
+zz run --native --embed ./assets main.zz     # bake + run natively
 ```
+
+Static assets (`--embed <dir>`) are readable at runtime through
+`fs.embedfs()` (same `*_at` operations as every provider; read-only):
+
+```zz
+import std.fs
+
+match fs.embedfs() {
+    .ok(e) => match fs.read_to_string_at(e, "index.txt") {
+        .ok(c)  => println(c),
+        .err(x) => println(x),
+    },
+    .err(x) => println(x),
+}
+```
+
+Asset edits invalidate the build cache (content-hashed), and `bin/app.c`
+manual builds include the same tables.
 
 All artifacts live in `bin/` next to the source: `bin/app`,
 `bin/app.exe` (Windows), or `bin/app-<triple>[.exe]` for `--target`
