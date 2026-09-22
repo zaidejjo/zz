@@ -193,7 +193,6 @@ mod tests {
             span: Some(Span::new(10, 11)),
             notes: vec![],
             fixits: vec![FixIt::safe(Span::new(10, 11), "_x", "rename to")],
-            secondary: None,
         };
         let diag = make_test_diag(&raw);
         let uri: Url = "file:///test.zz".parse().unwrap();
@@ -219,7 +218,6 @@ mod tests {
                 "replace variable",
                 vec!["println".into(), "println!".into()],
             )],
-            secondary: None,
         };
         let diag = make_test_diag(&raw);
         let uri: Url = "file:///test.zz".parse().unwrap();

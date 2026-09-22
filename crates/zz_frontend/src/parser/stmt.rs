@@ -1,11 +1,9 @@
 //! Statement parsing.
 
-use crate::ast::{
-    Block, Decorator, ExternFunc, Ident, ImportItem, Param, Pattern, Stmt, TraitBound, TypeParam,
-};
-use crate::diag::error_at;
+use crate::ast::{Block, Expr, Ident, Param, Program, Stmt, Ty};
+use crate::diag::{error_at, RawDiag};
 use crate::span::Span;
-use crate::token::TokenKind;
+use crate::token::{Token, TokenKind};
 
 use super::Parser;
 
@@ -42,64 +40,8 @@ impl Parser {
 
     pub(crate) fn parse_stmt(&mut self) -> Stmt {
         match self.peek_kind() {
-            TokenKind::Pub => {
-                let pub_tok = self.advance();
-                // `pub` must be followed by func, struct, import, or a declaration.
-                let stmt = match self.peek_kind() {
-                    TokenKind::Func => self.parse_func(true),
-                    TokenKind::Struct => self.parse_struct(true),
-                    TokenKind::Impl => {
-                        // `pub impl` is not allowed: impl methods are always
-                        // public. Recover by treating the impl as non-pub.
-                        self.error_here(
-                            "cannot use `pub` on `impl`\n\
-                             hint: impl methods are always public, remove the `pub` keyword",
-                        );
-                        self.parse_impl(false)
-                    }
-                    TokenKind::Import => self.parse_import(true),
-                    // `pub const x = expr` / `pub const x: type = expr`
-                    TokenKind::Const => self.parse_const_decl(true),
-                    // `pub x := expr` or `pub x: type = expr`
-                    TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {
-                        self.parse_short_decl(true, false)
-                    }
-                    TokenKind::Ident => {
-                        // Try `pub x: type = expr`
-                        let save_pos = self.pos;
-                        let save_errs = self.errors.len();
-                        if let Some(decl) = self.try_parse_explicit_decl(true, false) {
-                            decl
-                        } else {
-                            self.pos = save_pos;
-                            self.errors.truncate(save_errs);
-                            self.error_here(
-                                "expected `func`, `struct`, `import`, or declaration after `pub`",
-                            );
-                            // Recover by parsing the next statement as if `pub` wasn't there.
-                            self.parse_stmt()
-                        }
-                    }
-                    // `pub @dec func ...` — decorators after `pub`.
-                    TokenKind::At => {
-                        if self.is_link_directive() {
-                            self.error_here("cannot use `pub` on `@link`");
-                            self.parse_link()
-                        } else {
-                            self.parse_decorated_func(true)
-                        }
-                    }
-                    _ => {
-                        self.error_here(
-                            "expected `func`, `struct`, `impl`, `import`, decorator, or declaration after `pub`",
-                        );
-                        self.parse_stmt()
-                    }
-                };
-                pub_started(stmt, pub_tok.span)
-            }
-            TokenKind::Import => self.parse_import(false),
-            TokenKind::Func => self.parse_func(false),
+            TokenKind::Import => self.parse_import(),
+            TokenKind::Func => self.parse_func(),
             TokenKind::Return => {
                 let ret_tok = self.advance();
                 let value = if self.at(TokenKind::StmtEnd)
@@ -117,27 +59,9 @@ impl Parser {
             }
             // `x := expr` — short declaration with inference.
             TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {
-                self.parse_short_decl(false, false)
+                self.parse_short_decl()
             }
-            // `const x = expr` / `const x: type = expr` — immutable binding.
-            TokenKind::Const => self.parse_const_decl(false),
-            // `(a, b) := expr` — tuple destructuring declaration.
-            TokenKind::LParen
-                if self.peek_kind_at(1) == TokenKind::Ident
-                    && self.peek_kind_at(2) == TokenKind::Comma =>
-            {
-                self.parse_destructure_decl(false)
-            }
-            TokenKind::Struct => self.parse_struct(false),
-            TokenKind::Impl => self.parse_impl(false),
-            TokenKind::At => {
-                if self.is_link_directive() {
-                    self.parse_link()
-                } else {
-                    self.parse_decorated_func(false)
-                }
-            }
-            TokenKind::Extern => self.parse_extern_block(),
+            TokenKind::Struct => self.parse_struct(),
             TokenKind::For => self.parse_for(),
             TokenKind::Break => {
                 let tok = self.advance();
@@ -161,7 +85,7 @@ impl Parser {
                 // on failure so ordinary expressions still parse.
                 let save_pos = self.pos;
                 let save_errs = self.errors.len();
-                if let Some(decl) = self.try_parse_explicit_decl(false, false) {
+                if let Some(decl) = self.try_parse_explicit_decl() {
                     return decl;
                 }
                 self.pos = save_pos;
@@ -203,8 +127,6 @@ impl Parser {
                             },
                             value,
                             span,
-                            pub_: false,
-                            is_const: false,
                         };
                     }
                 }
@@ -226,167 +148,7 @@ impl Parser {
         }
     }
 
-    /// True when the upcoming tokens form a `@link` directive rather than a
-    /// function decorator: `@` `link` followed by `(` or a string literal.
-    /// A bare `@link` followed by `func` is a decorator named `link`.
-    pub(crate) fn is_link_directive(&self) -> bool {
-        if self.peek_kind() != TokenKind::At {
-            return false;
-        }
-        let next = self.toks.get(self.pos + 1);
-        let after = self.toks.get(self.pos + 2);
-        matches!((next, after), (Some(n), Some(a)) if n.kind == TokenKind::Ident
-            && n.text == "link"
-            && (a.kind == TokenKind::LParen || a.kind == TokenKind::Str))
-    }
-
-    pub(crate) fn parse_link(&mut self) -> Stmt {
-        let at_tok = self.advance(); // `@`
-        if self.at(TokenKind::Ident) && self.peek().text == "link" {
-            self.advance();
-        } else {
-            self.error_here("expected `link` after `@` (e.g. `@link(\"sqlite3\")`)");
-        }
-        let lib = if self.eat(TokenKind::LParen) {
-            let lib_tok = self.peek().clone();
-            let lib = if self.at(TokenKind::Str) {
-                self.advance().text
-            } else {
-                self.error_here("expected string literal in `@link(\"lib\")`");
-                String::new()
-            };
-            if !self.eat(TokenKind::RParen) {
-                self.error_here("expected `)` to close `@link(...)`");
-            }
-            let _ = lib_tok;
-            lib
-        } else if self.at(TokenKind::Str) {
-            self.advance().text
-        } else {
-            self.error_here("expected `(\"lib\")` after `@link`");
-            String::new()
-        };
-        if lib.is_empty() {
-            self.error_here("`@link` requires a non-empty library name");
-        }
-        let span = at_tok.span.join(self.previous().span);
-        Stmt::Link { lib, span }
-    }
-
-    pub(crate) fn parse_extern_block(&mut self) -> Stmt {
-        let extern_tok = self.advance(); // `extern`
-        let abi_tok = self.peek().clone();
-        let abi = if self.at(TokenKind::Str) {
-            self.advance().text
-        } else {
-            self.error_here("expected ABI string after `extern` (e.g. `extern \"C\"`)");
-            String::new()
-        };
-        if abi != "C" {
-            self.errors.push(error_at(
-                format!("unsupported extern ABI `{abi}` (expected `\"C\"`)"),
-                abi_tok.span,
-            ));
-        }
-        if !self.eat(TokenKind::LBrace) {
-            self.error_here("expected `{` to start extern block");
-            self.skip_to_rbrace();
-        }
-        let mut items = Vec::new();
-        loop {
-            self.skip_stmt_ends();
-            if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
-                break;
-            }
-            if !self.at(TokenKind::Func) {
-                self.error_here("expected `func` signature in extern block");
-                self.skip_to_stmt_end();
-                continue;
-            }
-            let func_tok = self.advance(); // `func`
-            let mut name = self
-                .expect_ident()
-                .unwrap_or_else(|| dummy_ident(self.peek().span));
-            // Dotted ZZ-visible names for namespaced plugins
-            // (`func zimg.resize(...)`).
-            while self.eat(TokenKind::Dot) {
-                let part = self
-                    .expect_ident()
-                    .unwrap_or_else(|| dummy_ident(self.peek().span));
-                name.name.push('.');
-                name.name.push_str(&part.name);
-                name.span = name.span.join(part.span);
-            }
-            if self.at(TokenKind::Lt) {
-                self.error_here("extern functions cannot have generic parameters");
-            }
-            if !self.eat(TokenKind::LParen) {
-                self.error_here("expected `(` after extern function name");
-            } else {
-                self.push_delim(TokenKind::LParen, self.previous().span);
-            }
-            let params = self.parse_param_list();
-            if !self.eat(TokenKind::RParen) {
-                self.error_here("expected `)` after extern parameters");
-            } else {
-                self.pop_delim(TokenKind::RParen, self.previous().span);
-            }
-            let ret = if self.eat(TokenKind::Arrow) {
-                Some(self.parse_type())
-            } else {
-                None
-            };
-            // Optional explicit C symbol override:
-            // `func zimg.resize(...) -> int = "zimg_resize_impl";`
-            // Absent = derive from the ZZ name (`.` → `_`).
-            // Note: `=` lexes as Assign (Eq is `==`).
-            let c_symbol = if self.eat(TokenKind::Assign) {
-                if self.at(TokenKind::Str) {
-                    Some(self.advance().text)
-                } else {
-                    self.error_here("expected string literal for C symbol name");
-                    None
-                }
-            } else {
-                None
-            };
-            // Extern signatures have no body — must end the statement here.
-            let span = func_tok.span.join(
-                ret.as_ref()
-                    .map(|t| t.span)
-                    .unwrap_or_else(|| params.last().map(|p| p.span).unwrap_or(name.span)),
-            );
-            items.push(ExternFunc {
-                name,
-                params,
-                ret,
-                c_symbol,
-                span,
-            });
-            // A trailing `{` means the user wrote a body — reject it.
-            if self.at(TokenKind::LBrace) {
-                self.error_here("extern function signatures must not have a body");
-                // Skip the block to recover.
-                self.advance();
-                self.skip_to_rbrace();
-                self.eat(TokenKind::RBrace);
-            }
-        }
-        let end = if self.eat(TokenKind::RBrace) {
-            self.previous().span
-        } else {
-            self.error_here("expected `}` to close extern block");
-            self.peek().span
-        };
-        let span = extern_tok.span.join(end);
-        Stmt::ExternBlock {
-            abi: if abi.is_empty() { "C".to_string() } else { abi },
-            items,
-            span,
-        }
-    }
-
-    pub(crate) fn parse_struct(&mut self, pub_: bool) -> Stmt {
+    pub(crate) fn parse_struct(&mut self) -> Stmt {
         let struct_tok = self.advance();
         let name = self.parse_dotted_ident();
         if !self.eat(TokenKind::LBrace) {
@@ -401,39 +163,6 @@ impl Parser {
             self.skip_stmt_ends();
             if self.at(TokenKind::RBrace) {
                 break;
-            }
-            // Embedded (anonymous) field: a bare type name with no `:`,
-            // e.g. `Base,` in `struct User { Base, age: int }`. The field
-            // name defaults to the type's last segment (`pkg.Base` → `Base`).
-            if self.at(TokenKind::Ident) && self.is_embedded_field_start() {
-                let fty = self.parse_type_base();
-                match &fty.kind {
-                    crate::ast::TyKind::Named(full, _) => {
-                        let base = full.rsplit('.').next().unwrap_or(full).to_string();
-                        let fname = crate::ast::Ident {
-                            name: base,
-                            span: fty.span,
-                        };
-                        fields.push((fname, fty));
-                    }
-                    _ => {
-                        self.errors.push(error_at(
-                            "embedded struct field must be a struct type",
-                            fty.span,
-                        ));
-                    }
-                }
-                if self.eat(TokenKind::Comma) {
-                    continue;
-                }
-                self.skip_stmt_ends();
-                if !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-                    self.error_here("expected `,` or `}` after field");
-                }
-                if self.pos == start_pos {
-                    self.advance();
-                }
-                continue;
             }
             let fname = self
                 .expect_ident()
@@ -463,86 +192,14 @@ impl Parser {
             self.peek().span
         };
         let span = struct_tok.span.join(end);
-        Stmt::Struct {
-            name,
-            fields,
-            span,
-            pub_,
-        }
-    }
-
-    pub(crate) fn parse_impl(&mut self, pub_: bool) -> Stmt {
-        let impl_tok = self.advance();
-        let name = self.parse_dotted_ident();
-        if !self.eat(TokenKind::LBrace) {
-            self.error_here("expected `{` to start impl body");
-            self.skip_to_rbrace();
-        }
-        let mut methods = Vec::new();
-        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-            self.skip_stmt_ends();
-            if self.at(TokenKind::RBrace) {
-                break;
-            }
-            match self.peek_kind() {
-                TokenKind::Func => {
-                    methods.push(self.parse_func(false));
-                }
-                TokenKind::Pub => {
-                    let _pub_tok = self.advance();
-                    if self.peek_kind() == TokenKind::Func {
-                        methods.push(self.parse_func(true));
-                    } else if self.peek_kind() == TokenKind::At && !self.is_link_directive() {
-                        methods.push(self.parse_decorated_func(true));
-                    } else {
-                        self.error_here("expected `func` after `pub` in impl block");
-                    }
-                }
-                TokenKind::At => {
-                    if self.is_link_directive() {
-                        self.error_here("`@link` is not allowed inside `impl` blocks");
-                        self.parse_link();
-                    } else {
-                        methods.push(self.parse_decorated_func(false));
-                    }
-                }
-                _ => {
-                    self.error_here("expected `func` in impl block");
-                    // Skip to next statement or end of block
-                    if self.pos < self.toks.len() {
-                        self.advance();
-                    }
-                }
-            }
-        }
-        let end = if self.eat(TokenKind::RBrace) {
-            self.previous().span
-        } else {
-            self.error_here("expected `}` to close impl body");
-            self.peek().span
-        };
-        let span = impl_tok.span.join(end);
-        Stmt::Impl {
-            name,
-            methods,
-            span,
-            pub_,
-        }
+        Stmt::Struct { name, fields, span }
     }
 
     pub(crate) fn parse_for(&mut self) -> Stmt {
         let for_tok = self.advance();
-        let first = self
+        let var = self
             .expect_ident()
             .unwrap_or_else(|| dummy_ident(for_tok.span));
-        let mut vars = vec![first];
-        // for k, v in dict
-        while self.eat(TokenKind::Comma) {
-            let v = self
-                .expect_ident()
-                .unwrap_or_else(|| dummy_ident(for_tok.span));
-            vars.push(v);
-        }
         if !self.eat(TokenKind::In) {
             self.error_here("expected `in` after loop variable");
         }
@@ -550,14 +207,14 @@ impl Parser {
         let body = self.parse_block();
         let span = for_tok.span.join(body.span);
         Stmt::For {
-            vars,
+            var,
             iter: Box::new(iter),
             body,
             span,
         }
     }
 
-    pub(crate) fn parse_import(&mut self, pub_: bool) -> Stmt {
+    pub(crate) fn parse_import(&mut self) -> Stmt {
         let import_tok = self.advance();
         let mut path = Vec::new();
         if let Some(id) = self.expect_ident() {
@@ -573,45 +230,11 @@ impl Parser {
         } else {
             None
         };
-        // Parse optional selective import list: `import module(A, B, *)`
-        let items = if self.eat(TokenKind::LParen) {
-            let mut items = Vec::new();
-            while self.peek_kind() != TokenKind::RParen {
-                if self.peek_kind() == TokenKind::Star {
-                    let tok = self.advance();
-                    items.push(ImportItem::Wildcard { span: tok.span });
-                } else if let Some(id) = self.expect_ident() {
-                    let item_alias = if self.eat(TokenKind::As) {
-                        self.expect_ident().map(|id| id.name)
-                    } else {
-                        None
-                    };
-                    items.push(ImportItem::Named {
-                        name: id.name,
-                        alias: item_alias,
-                        span: id.span,
-                    });
-                }
-                if !self.eat(TokenKind::Comma) {
-                    break;
-                }
-            }
-            self.eat(TokenKind::RParen);
-            items
-        } else {
-            Vec::new()
-        };
         let span = import_tok.span.join(self.previous().span);
-        Stmt::Import {
-            path,
-            alias,
-            items,
-            span,
-            pub_,
-        }
+        Stmt::Import { path, alias, span }
     }
 
-    pub(crate) fn parse_short_decl(&mut self, pub_: bool, is_const: bool) -> Stmt {
+    pub(crate) fn parse_short_decl(&mut self) -> Stmt {
         let name = self.advance(); // identifier
         self.advance(); // `:=`
         let value = self.parse_expr();
@@ -624,78 +247,12 @@ impl Parser {
             },
             value,
             span,
-            pub_,
-            is_const,
-        }
-    }
-
-    /// Parse `const x = expr` or `const x: Type = expr` — an immutable
-    /// binding. Unlike plain declarations, `const` uses `=` for both the
-    /// inferred and the annotated form.
-    pub(crate) fn parse_const_decl(&mut self, pub_: bool) -> Stmt {
-        let const_tok = self.advance(); // `const`
-        let name = self.advance(); // identifier
-        let ty = if self.eat(TokenKind::Colon) {
-            Some(self.parse_type())
-        } else {
-            None
-        };
-        if !self.eat(TokenKind::Assign) {
-            self.error_here("expected `=` after const declaration");
-        }
-        let value = self.parse_expr();
-        let span = const_tok.span.join(value.span());
-        Stmt::Decl {
-            ty,
-            name: Ident {
-                name: name.text,
-                span: name.span,
-            },
-            value,
-            span,
-            pub_,
-            is_const: true,
-        }
-    }
-
-    /// Parse `(a, b) := expr` — tuple destructuring declaration.
-    pub(crate) fn parse_destructure_decl(&mut self, _pub_: bool) -> Stmt {
-        let lparen = self.advance(); // `(`
-        let mut pats = Vec::new();
-        // Parse first pattern
-        pats.push(self.parse_pattern());
-        // Parse remaining patterns
-        while self.eat(TokenKind::Comma) {
-            if self.at(TokenKind::RParen) {
-                break;
-            }
-            pats.push(self.parse_pattern());
-        }
-        let rparen = if self.eat(TokenKind::RParen) {
-            self.previous().span
-        } else {
-            self.error_here("expected `)` to close destructuring pattern");
-            self.peek().span
-        };
-        // Parse `:=`
-        if !self.eat(TokenKind::ColonEq) {
-            self.error_here("expected `:=` after destructuring pattern");
-        }
-        let value = self.parse_expr();
-        let span = lparen.span.join(value.span());
-        Stmt::Destructure {
-            pat: Pattern::Tuple {
-                pats,
-                span: lparen.span.join(rparen),
-            },
-            value,
-            span,
         }
     }
 
     /// Parse `IDENT: TYPE = expr`; returns `None` (with position restored by
     /// the caller) when the statement is not an explicit declaration.
-    pub(crate) fn try_parse_explicit_decl(&mut self, pub_: bool, is_const: bool) -> Option<Stmt> {
+    pub(crate) fn try_parse_explicit_decl(&mut self) -> Option<Stmt> {
         // Must start with an identifier.
         if !self.at(TokenKind::Ident) {
             return None;
@@ -721,45 +278,18 @@ impl Parser {
             },
             value,
             span,
-            pub_,
-            is_const,
         })
     }
 
-    pub(crate) fn parse_func(&mut self, pub_: bool) -> Stmt {
+    pub(crate) fn parse_func(&mut self) -> Stmt {
         let func_tok = self.advance();
         let name = self.parse_dotted_ident();
         let generics = if self.eat(TokenKind::Lt) {
             let mut gs = Vec::new();
             loop {
-                let name = self
-                    .expect_ident()
-                    .unwrap_or_else(|| dummy_ident(self.peek().span));
-                let start = name.span;
-                let mut bounds = Vec::new();
-                if self.eat(TokenKind::Colon) {
-                    loop {
-                        if let Some(id) = self.expect_ident() {
-                            match id.name.as_str() {
-                                "Num" => bounds.push(TraitBound::Num),
-                                "Ord" => bounds.push(TraitBound::Ord),
-                                "Eq" => bounds.push(TraitBound::Eq),
-                                "Display" => bounds.push(TraitBound::Display),
-                                other => self.errors.push(error_at(
-                                    format!("unknown trait bound `{other}` (expected `Num`, `Ord`, `Eq`, or `Display`)"),
-                                    id.span,
-                                )),
-                            }
-                        }
-                        if self.eat(TokenKind::Plus) {
-                            continue;
-                        }
-                        break;
-                    }
+                if let Some(id) = self.expect_ident() {
+                    gs.push(id);
                 }
-                let end = self.previous().span;
-                let span = start.join(end);
-                gs.push(TypeParam { name, bounds, span });
                 if self.eat(TokenKind::Comma) {
                     continue;
                 }
@@ -797,96 +327,7 @@ impl Parser {
             ret,
             body,
             span,
-            pub_,
-            decorators: Vec::new(),
         }
-    }
-
-    /// Parse `@name` / `@name(args)` decorators followed by `func`.
-    ///
-    /// Grammar: (`@` dotted_ident (`(` call_args `)`)? StmtEnd*)+ (`pub`)? `func`.
-    /// `@link(...)` is NOT a decorator — it is handled before calling here.
-    pub(crate) fn parse_decorated_func(&mut self, pub_: bool) -> Stmt {
-        let mut decorators = self.parse_decorator_list();
-        self.skip_stmt_ends();
-        // `pub` may appear after the decorators: `@dec pub func f()`.
-        let is_pub = if self.at(TokenKind::Pub) {
-            self.advance();
-            true
-        } else {
-            pub_
-        };
-        if self.peek_kind() != TokenKind::Func {
-            self.error_here("expected `func` after decorator (e.g. `@dec func foo() { ... }`)");
-            // Recover with an empty function so later passes terminate.
-            let span = decorators
-                .first()
-                .map(|d: &Decorator| d.span)
-                .unwrap_or_else(|| self.peek().span);
-            return Stmt::Func {
-                name: vec![String::new()],
-                generics: Vec::new(),
-                params: Vec::new(),
-                ret: None,
-                body: Block {
-                    stmts: Vec::new(),
-                    span,
-                },
-                span,
-                pub_: is_pub,
-                decorators: Vec::new(),
-            };
-        }
-        let mut stmt = self.parse_func(is_pub);
-        if let Stmt::Func {
-            decorators: ref mut slot,
-            span: ref mut func_span,
-            ..
-        } = stmt
-        {
-            if !decorators.is_empty() {
-                let first = decorators.first().unwrap().span;
-                func_span.start = func_span.start.min(first.start);
-            }
-            *slot = std::mem::take(&mut decorators);
-        }
-        stmt
-    }
-
-    /// Parse one or more `@path` / `@path(args)` lines. The caller must have
-    /// excluded `@link(...)`. Each decorator must start at `At`; blank lines
-    /// (StmtEnd) between decorators are skipped.
-    fn parse_decorator_list(&mut self) -> Vec<Decorator> {
-        let mut out = Vec::new();
-        while self.at(TokenKind::At) {
-            let at_tok = self.advance();
-            // `parse_dotted_ident` emits its own diagnostic on failure.
-            let path = self.parse_dotted_ident();
-            let (args, named, end) = if self.eat(TokenKind::LParen) {
-                let (args, named) = self.parse_call_args();
-                let end = if self.eat_close(TokenKind::RParen) {
-                    self.previous().span
-                } else {
-                    self.error_here("expected `)` to close decorator arguments");
-                    self.peek().span
-                };
-                (args, named, end)
-            } else {
-                (Vec::new(), Vec::new(), self.previous().span)
-            };
-            out.push(Decorator {
-                path,
-                args,
-                named,
-                span: at_tok.span.join(end),
-            });
-            self.skip_stmt_ends();
-            // A second `@` continues the list; anything else ends it.
-            if !self.at(TokenKind::At) {
-                break;
-            }
-        }
-        out
     }
 
     pub(crate) fn parse_param_list(&mut self) -> Vec<Param> {
@@ -956,103 +397,5 @@ fn dummy_ident(span: Span) -> Ident {
     Ident {
         name: String::new(),
         span,
-    }
-}
-
-/// Extend a statement's span to include the leading `pub` keyword so the
-/// `pub_` flag and the span always agree (the formatter relies on it when
-/// re-emitting `pub`).
-fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
-    let span = |s: &mut Span| {
-        if s.start > pub_span.start {
-            s.start = pub_span.start;
-        }
-    };
-    match stmt {
-        Stmt::Decl {
-            ty,
-            name,
-            value,
-            span: mut sp,
-            pub_,
-            is_const,
-        } => {
-            span(&mut sp);
-            Stmt::Decl {
-                ty,
-                name,
-                value,
-                span: sp,
-                pub_,
-                is_const,
-            }
-        }
-        Stmt::Import {
-            path,
-            alias,
-            items,
-            span: mut sp,
-            pub_,
-        } => {
-            span(&mut sp);
-            Stmt::Import {
-                path,
-                alias,
-                items,
-                span: sp,
-                pub_,
-            }
-        }
-        Stmt::Func {
-            name,
-            generics,
-            params,
-            ret,
-            body,
-            span: mut sp,
-            pub_,
-            decorators,
-        } => {
-            span(&mut sp);
-            Stmt::Func {
-                name,
-                generics,
-                params,
-                ret,
-                body,
-                span: sp,
-                pub_,
-                decorators,
-            }
-        }
-        Stmt::Struct {
-            name,
-            fields,
-            span: mut sp,
-            pub_,
-        } => {
-            span(&mut sp);
-            Stmt::Struct {
-                name,
-                fields,
-                span: sp,
-                pub_,
-            }
-        }
-        Stmt::Impl {
-            name,
-            methods,
-            span: mut sp,
-            pub_,
-        } => {
-            span(&mut sp);
-            Stmt::Impl {
-                name,
-                methods,
-                span: sp,
-                pub_,
-            }
-        }
-        other => other,
     }
 }

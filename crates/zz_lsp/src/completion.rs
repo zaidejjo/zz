@@ -21,7 +21,7 @@ const KEYWORDS: &[&str] = &[
 // ── Stdlib module names ──────────────────────────────────────────────────
 
 const STDLIB_MODULES: &[&str] = &[
-    "io", "str", "vec", "json", "http", "fs", "env", "math", "time", "sqlz", "db",
+    "io", "str", "vec", "json", "http", "fs", "env", "math", "time",
 ];
 
 // ── Public API ───────────────────────────────────────────────────────────
@@ -164,53 +164,8 @@ fn dot_access_completions(
 
     // 1. Try struct field access (existing logic).
     let obj_type = resolve_obj_type(program, cr, obj_name);
-    let struct_name = match obj_type.clone() {
+    let struct_name = match obj_type {
         Some(Type::Struct(name)) => name,
-        Some(other) => {
-            // Receiver-typed method completions (`str.`, `vec.`, scalar ext
-            // methods, ...): list `ns.method` entries from the merged funcs
-            // table (inherent → extension → stdlib).
-            let nss = match &other {
-                Type::Str => vec!["str"],
-                Type::Array(_) => vec!["vec"],
-                Type::Option(_) => vec!["option"],
-                Type::Result(_, _) => vec!["result"],
-                Type::Int => vec!["int"],
-                Type::Float => vec!["float"],
-                Type::Bool => vec!["bool"],
-                Type::Response | Type::HttpServer => vec!["http"],
-                Type::TcpStream | Type::TcpListener => vec!["net"],
-                Type::Json => vec!["json"],
-                Type::Db => vec!["sqlz", "db"],
-                Type::Chan => vec!["chan"],
-                _ => vec![],
-            };
-            let mut items: Vec<CompletionItem> = Vec::new();
-            for ns in nss {
-                let prefix = format!("{ns}.");
-                for k in cr.funcs.keys() {
-                    if let Some(m) = k.strip_prefix(&prefix) {
-                        if m.starts_with(partial_prefix) && !m.contains('.') {
-                            items.push(CompletionItem {
-                                label: m.to_string(),
-                                kind: Some(CompletionItemKind::METHOD),
-                                detail: Some(format!("{ns}.{m}")),
-                                insert_text: Some(m.to_string()),
-                                ..Default::default()
-                            });
-                        }
-                    }
-                }
-            }
-            if !items.is_empty() {
-                items.sort_by(|a, b| a.label.cmp(&b.label));
-                items.dedup_by(|a, b| a.label == b.label);
-                return items;
-            }
-            // 2. Not a struct — check if obj_name is an imported stdlib module
-            //    alias (e.g. `math` after `import std.math as math`).
-            return stdlib_module_completions(program, cr, obj_name, partial_prefix);
-        }
         _ => {
             // 2. Not a struct — check if obj_name is an imported stdlib module
             //    alias (e.g. `math` after `import std.math as math`).
@@ -223,8 +178,7 @@ fn dot_access_completions(
         None => return Vec::new(),
     };
 
-    let mut items: Vec<CompletionItem> = sig
-        .fields
+    sig.fields
         .iter()
         .filter(|(fname, _)| fname.starts_with(partial_prefix))
         .map(|(fname, fty)| CompletionItem {
@@ -234,24 +188,7 @@ fn dot_access_completions(
             insert_text: Some(fname.clone()),
             ..Default::default()
         })
-        .collect();
-    // Struct methods (inherent + extensions, merged in `funcs`).
-    let prefix = format!("{struct_name}.");
-    for k in cr.funcs.keys() {
-        if let Some(m) = k.strip_prefix(&prefix) {
-            if m.starts_with(partial_prefix) && !m.contains('.') {
-                items.push(CompletionItem {
-                    label: m.to_string(),
-                    kind: Some(CompletionItemKind::METHOD),
-                    detail: Some(format!("{struct_name}.{m}")),
-                    insert_text: Some(m.to_string()),
-                    ..Default::default()
-                });
-            }
-        }
-    }
-    items.sort_by(|a, b| a.label.cmp(&b.label));
-    items
+        .collect()
 }
 
 /// Provide completions for stdlib module access (`math.`, `str.`, etc.).
@@ -275,30 +212,24 @@ fn stdlib_module_completions(
     // using the module's own name.  When the user uses an alias like
     // `import std.math as m`, we need to match against `math.*` keys and
     // present them as `m.*` completions.
-    //
-    // The import namespace itself is also tried: `import std.sqlz.postgres
-    // as pg` registers `pg.connect`, so `pg.` completes from the `pg.`
-    // prefix (likewise any other alias).
-    let prefixes = [format!("{module}."), format!("{obj_name}.")];
-    let _user_prefix = format!("{obj_name}.");
+    let module_prefix = format!("{module}.");
+    let user_prefix = format!("{obj_name}.");
     let mut items: Vec<CompletionItem> = cr
         .funcs
         .keys()
-        .filter_map(|k| {
-            prefixes
-                .iter()
-                .find(|p| k.starts_with(p.as_str()))
-                .map(|p| k[p.len()..].to_string())
-        })
-        .map(|func_name| CompletionItem {
-            label: func_name.clone(),
-            kind: Some(CompletionItemKind::FUNCTION),
-            detail: Some(format!("{obj_name}.{func_name}")),
-            documentation: Some(tower_lsp::lsp_types::Documentation::String(format!(
-                "std.{module}.{func_name}"
-            ))),
-            insert_text: Some(func_name),
-            ..Default::default()
+        .filter(|k| k.starts_with(&module_prefix))
+        .map(|k| {
+            let func_name = &k[module_prefix.len()..];
+            CompletionItem {
+                label: func_name.to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(format!("{obj_name}.{func_name}")),
+                documentation: Some(tower_lsp::lsp_types::Documentation::String(format!(
+                    "std.{module}.{func_name}"
+                ))),
+                insert_text: Some(func_name.to_string()),
+                ..Default::default()
+            }
         })
         .filter(|item| item.label.starts_with(partial_prefix))
         .collect();
@@ -326,11 +257,9 @@ fn find_stdlib_module_for_alias(program: &Program, alias: &str) -> Option<String
                 .or_else(|| path.last().cloned())
                 .unwrap_or_default();
             if ns == alias {
-                // Extract the module name from the path
-                // (`std.math` → `math`, `std.sqlz.postgres` →
-                // `sqlz.postgres`).
+                // Extract the module name from the path (e.g. `std.math` → `math`).
                 if path.len() >= 2 && path[0] == "std" {
-                    return Some(path[1..].join("."));
+                    return Some(path[1].clone());
                 }
                 // Direct import like `import math` — assume it's a stdlib module.
                 if path.len() == 1 && STDLIB_MODULES.contains(&path[0].as_str()) {
@@ -406,11 +335,9 @@ fn find_local_in_block(
                     );
                 }
             }
-            Stmt::For { vars, body, .. } => {
-                for v in vars {
-                    if v.name == name {
-                        return Some(Type::Unit);
-                    }
+            Stmt::For { var, body, .. } => {
+                if var.name == name {
+                    return Some(Type::Unit);
                 }
                 if let Some(ty) = find_local_in_block(body, name, cr) {
                     return Some(ty);
@@ -573,17 +500,15 @@ fn collect_locals_in_stmt(stmt: &Stmt, items: &mut Vec<CompletionItem>, prefix: 
                 });
             }
         }
-        Stmt::For { vars, body, .. } => {
-            for v in vars {
-                if v.name.starts_with(prefix) {
-                    items.push(CompletionItem {
-                        label: v.name.clone(),
-                        kind: Some(CompletionItemKind::VARIABLE),
-                        detail: Some(format!("for var {}", v.name)),
-                        insert_text: Some(v.name.clone()),
-                        ..Default::default()
-                    });
-                }
+        Stmt::For { var, body, .. } => {
+            if var.name.starts_with(prefix) {
+                items.push(CompletionItem {
+                    label: var.name.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: Some(format!("for var {}", var.name)),
+                    insert_text: Some(var.name.clone()),
+                    ..Default::default()
+                });
             }
             collect_locals_in_block(body, items, prefix);
         }

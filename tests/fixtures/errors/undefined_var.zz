@@ -1,2 +1,0 @@
-// E2E: Undefined variable error
-println(undefined_var)

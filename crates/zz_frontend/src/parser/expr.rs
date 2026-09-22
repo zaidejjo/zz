@@ -1,7 +1,7 @@
 //! Expression parsing.
 
-use crate::ast::{BinOp, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, UnOp};
-use crate::diag::error_at;
+use crate::ast::{BinOp, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, Ty, UnOp};
+use crate::diag::{error_at, RawDiag};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
@@ -11,13 +11,12 @@ impl Parser {
     // --- expressions ------------------------------------------------------
 
     pub(crate) fn parse_expr(&mut self) -> Expr {
-        self.parse_elvis()
+        self.parse_pipe()
     }
 
-    /// `a |> f(b)` — pipeline. Binds tighter than `??` but looser than
-    /// range `..`. The right side must be a function call or name; it
-    /// receives the left side as its first argument (`a |> f(b)` desugars
-    /// to `f(a, b)`).
+    /// `a |> f(b)` — pipeline. Lowest precedence. The right side must be a
+    /// function call or name; it receives the left side as its first
+    /// argument (`a |> f(b)` desugars to `f(a, b)`).
     pub(crate) fn parse_pipe(&mut self) -> Expr {
         let mut left = self.parse_range();
         while self.at(TokenKind::PipeGt) {
@@ -47,17 +46,15 @@ impl Parser {
             }
             Expr::Ident { name, span } => Expr::Call {
                 callee: Box::new(Expr::Ident { name, span }),
-                args: vec![lhs.clone()],
+                args: vec![lhs],
                 named: vec![],
-                // The span must cover the piped operand too, not just the
-                // rhs identifier.
-                span: lhs.span().join(span),
+                span,
             },
             Expr::Path { parts, span } => Expr::Call {
                 callee: Box::new(Expr::Path { parts, span }),
-                args: vec![lhs.clone()],
+                args: vec![lhs],
                 named: vec![],
-                span: lhs.span().join(span),
+                span,
             },
             other => {
                 self.error_here("right side of `|>` must be a function call or name");
@@ -66,16 +63,15 @@ impl Parser {
         }
     }
 
-    /// `a..b` — integer range. Binds tighter than pipe `|>` but looser
-    /// than arithmetic. So `a + b |> f` pipes the sum, and `0..n |> f`
-    /// pipes the range.
+    /// `a..b` — integer range. Lowest precedence so `for i in 0..n` parses
+    /// the bounds as full expressions.
     pub(crate) fn parse_range(&mut self) -> Expr {
-        let start = self.parse_or();
+        let start = self.parse_elvis();
         if !self.at(TokenKind::DotDot) {
             return start;
         }
         self.advance();
-        let end = self.parse_or();
+        let end = self.parse_elvis();
         let span = start.span().join(end.span());
         Expr::Range {
             start: Box::new(start),
@@ -84,13 +80,12 @@ impl Parser {
         }
     }
 
-    /// `left ?? right` — Elvis operator. Lowest precedence. Unwraps
-    /// Option or Result; falls back to `right` on None/Err.
+    /// `left ?? right` — Elvis operator. Unwraps Option or falls back.
     pub(crate) fn parse_elvis(&mut self) -> Expr {
-        let mut left = self.parse_pipe();
+        let mut left = self.parse_or();
         while self.at(TokenKind::QuestionQuestion) {
             self.advance();
-            let right = self.parse_pipe();
+            let right = self.parse_or();
             let span = left.span().join(right.span());
             left = Expr::Binary {
                 op: BinOp::Elvis,
@@ -239,20 +234,6 @@ impl Parser {
     }
 
     pub(crate) fn parse_unary(&mut self) -> Expr {
-        // Prefix `try <postfix-chain>` — sugar for postfix `?`.
-        // `try a.b().c()` = `Try(a.b().c())`; `try a.b() + c` = `Try(a.b()) + c`
-        // because we only consume one postfix chain here.
-        // `try try x` nests via recursion. Bare `try` as identifier (followed
-        // by a terminator) still parses as `Ident` to avoid breaking existing code.
-        if self.at_ident("try") && !self.try_is_bare_ident() {
-            let try_tok = self.advance();
-            let inner = self.parse_unary();
-            let span = try_tok.span.join(inner.span());
-            return Expr::Try {
-                expr: Box::new(inner),
-                span,
-            };
-        }
         let op = match self.peek_kind() {
             TokenKind::Minus => UnOp::Neg,
             TokenKind::Plus => UnOp::Pos,
@@ -365,22 +346,6 @@ impl Parser {
         expr
     }
 
-    /// `try` followed by a terminator is a plain identifier, not the prefix operator.
-    fn try_is_bare_ident(&self) -> bool {
-        matches!(
-            self.peek_kind_at(1),
-            TokenKind::Eof
-                | TokenKind::StmtEnd
-                | TokenKind::RParen
-                | TokenKind::RBracket
-                | TokenKind::RBrace
-                | TokenKind::Comma
-                | TokenKind::Colon
-                | TokenKind::Arrow
-        )
-    }
-
-    #[allow(dead_code)]
     pub(crate) fn parse_expr_list(&mut self) -> Vec<Expr> {
         let mut args = Vec::new();
         if self.at(TokenKind::RParen) {
@@ -405,14 +370,11 @@ impl Parser {
             return (args, named);
         }
         loop {
-            // Peek for `IDENT : expr` or `IDENT = expr` pattern (named argument).
-            // `:` is canonical ZZ syntax (`greeting: "Hi"`); `=` is accepted as an
-            // alias so `@test(should_panic = true)` (spec style) also parses.
-            let is_named = self.at(TokenKind::Ident)
-                && matches!(self.peek_kind_at(1), TokenKind::Colon | TokenKind::Assign);
-            if is_named {
+            // Peek for `IDENT : expr` pattern (named argument).
+            // Only treat as named arg if current token is ident AND next is colon.
+            if self.at(TokenKind::Ident) && self.peek_kind_at(1) == TokenKind::Colon {
                 let name = self.advance().text;
-                self.advance(); // consume `:` or `=`
+                self.advance(); // consume `:`
                 let value = self.parse_expr();
                 named.push((name, value));
             } else {
@@ -427,7 +389,7 @@ impl Parser {
     }
 
     /// Assemble an interpolated string from the token sequence produced by
-    /// the lexer: `StrFmt (LBrace expr [: fmt_spec] RBrace StrFmt)* [Str]`.
+    /// the lexer: `Str (LBrace expr [: fmt_spec] RBrace Str)*`.
     pub(crate) fn parse_fmt_string(&mut self, first: Token) -> Expr {
         let mut parts = vec![FmtPart::Text(first.text)];
         let mut end = first.span;
@@ -467,19 +429,11 @@ impl Parser {
                 self.error_here("expected `}` to close interpolation");
             }
             parts.push(FmtPart::Expr(Box::new(expr), fmt_spec));
-            // After `}`, the next token is either StrFmt (more interpolation
-            // segments follow) or Str (final segment, end of string).
             match self.peek_kind() {
-                TokenKind::StrFmt => {
-                    let t = self.advance();
-                    parts.push(FmtPart::Text(t.text));
-                    end = t.span;
-                }
                 TokenKind::Str => {
                     let t = self.advance();
                     parts.push(FmtPart::Text(t.text));
                     end = t.span;
-                    break;
                 }
                 _ => {
                     self.error_here("expected string continuation after interpolation");
@@ -496,14 +450,6 @@ impl Parser {
     pub(crate) fn parse_primary(&mut self) -> Expr {
         let tok = self.peek().clone();
         match tok.kind {
-            TokenKind::Break => {
-                self.advance();
-                Expr::Break { span: tok.span }
-            }
-            TokenKind::Continue => {
-                self.advance();
-                Expr::Continue { span: tok.span }
-            }
             TokenKind::Int => {
                 self.advance();
                 let cleaned = tok.text.replace('_', "");
@@ -533,14 +479,18 @@ impl Parser {
             }
             TokenKind::Str => {
                 self.advance();
-                Expr::Str {
-                    value: tok.text,
-                    span: tok.span,
+                // A string followed by `{` is an interpolated string:
+                // `"Hello {name}"` lexes as Str, LBrace, expr, RBrace, Str...
+                // But if the `{` starts a match arm block (followed by patterns
+                // and `=>`), treat it as a plain string.
+                if self.at(TokenKind::LBrace) && !self.looks_like_match_arm_block() {
+                    self.parse_fmt_string(tok)
+                } else {
+                    Expr::Str {
+                        value: tok.text,
+                        span: tok.span,
+                    }
                 }
-            }
-            TokenKind::StrFmt => {
-                self.advance();
-                self.parse_fmt_string(tok)
             }
             TokenKind::True => {
                 self.advance();
@@ -574,37 +524,15 @@ impl Parser {
                     parts.push(member.text);
                     end = member.span;
                 }
-                // sqlz! macro: `sqlz!{db, """SELECT ... {x}"""}` desugars
-                // directly to `db.query("""...""")` so the whole downstream
-                // pipeline (checker param extraction, runtime bound args,
-                // codegen prepared statements) stays unified.
-                if parts.len() == 1 && parts[0] == "sqlz" && self.at(TokenKind::Bang) {
-                    return self.parse_sqlz_macro(tok.span.join(end));
-                }
                 // Struct construction: `Point{ x: 1 }` or `Point { x: 1 }`.
-                // A `{` is treated as a struct literal when its contents look
-                // like fields (`ident : ...`). Adjacency alone is not enough
-                // because `if x == y{ ... }` would be misparsed as struct init.
+                // A `{` is treated as a struct literal when it is adjacent
+                // (no leading trivia) or when its contents look like fields
+                // (`ident : ...`). Otherwise the `{` belongs to an enclosing
+                // block (`if x { ... }`, `while x { ... }`, if-let values).
                 if self.at(TokenKind::LBrace)
-                    && self.peek_kind_at(1) == TokenKind::Ident
-                    && (self.peek_kind_at(2) == TokenKind::Colon
-                        || self.peek_kind_at(2) == TokenKind::LBrace)
-                {
-                    return self.parse_struct_init(parts, tok.span.join(end));
-                }
-                // Recover from common mistake: `User{ id = 1 }` instead of
-                // `User{ id: 1 }`.  Detect `{ Ident =` and route to struct
-                // init so `parse_struct_init` can emit a clear error and
-                // recover by consuming `=` as if it were `:`.
-                //
-                // Only trigger when `{` is adjacent to the type name (no
-                // whitespace gap), to avoid false positives like
-                // `for x in xs { total = total + x }` where `{` starts the
-                // loop body.
-                if self.at(TokenKind::LBrace)
-                    && self.peek_kind_at(1) == TokenKind::Ident
-                    && self.peek_kind_at(2) == TokenKind::Assign
-                    && end.end == self.peek().span.start
+                    && (self.peek().leading.is_empty()
+                        || (self.peek_kind_at(1) == TokenKind::Ident
+                            && self.peek_kind_at(2) == TokenKind::Colon))
                 {
                     return self.parse_struct_init(parts, tok.span.join(end));
                 }
@@ -623,51 +551,18 @@ impl Parser {
             TokenKind::LParen => {
                 let lparen = self.advance();
                 self.push_delim(TokenKind::LParen, lparen.span);
-                // Check for empty tuple `()`
-                if self.at(TokenKind::RParen) {
-                    let rparen = self.advance().span;
-                    self.pop_delim(TokenKind::RParen, rparen);
-                    return Expr::Tuple {
-                        items: vec![],
-                        span: tok.span.join(rparen),
-                    };
-                }
-                let first = self.parse_expr();
-                let first_span = first.span();
-                // Check for tuple: `(expr, ...)`
-                if self.at(TokenKind::Comma) {
-                    let mut items = vec![first];
-                    while self.eat(TokenKind::Comma) {
-                        if self.at(TokenKind::RParen) {
-                            break;
-                        }
-                        items.push(self.parse_expr());
-                    }
-                    let end = if self.eat_close(TokenKind::RParen) {
-                        let rparen = self.previous().span;
-                        self.pop_delim(TokenKind::RParen, rparen);
-                        rparen
-                    } else {
-                        self.error_here("expected `)` to close tuple expression");
-                        items.last().map(|e| e.span()).unwrap_or(first_span)
-                    };
-                    return Expr::Tuple {
-                        items,
-                        span: tok.span.join(end),
-                    };
-                }
-                // Grouped expression: `(expr)`
+                let inner = self.parse_expr();
                 let end = if self.eat_close(TokenKind::RParen) {
                     let rparen = self.previous().span;
                     self.pop_delim(TokenKind::RParen, rparen);
                     rparen
                 } else {
                     self.error_here("expected `)` to close parenthesized expression");
-                    first.span()
+                    inner.span()
                 };
                 let span = tok.span.join(end);
                 Expr::Paren {
-                    expr: Box::new(first),
+                    expr: Box::new(inner),
                     span,
                 }
             }
@@ -710,33 +605,8 @@ impl Parser {
             let fname = self
                 .expect_ident()
                 .unwrap_or_else(|| dummy_ident(self.peek().span));
-            // Embedded shorthand: `User{Base{id: 1}, age: 30}` means
-            // `User{Base: Base{id: 1}, age: 30}` — a bare `Ident{...}`
-            // with no `:` supplies the embedded field's value directly.
-            if self.at(TokenKind::LBrace) {
-                let value = self.parse_struct_init(vec![fname.name.clone()], fname.span);
-                fields.push((fname.name, value));
-                if self.eat(TokenKind::Comma) {
-                    continue;
-                }
-                self.skip_stmt_ends();
-                if !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-                    self.error_here("expected `,` or `}` after field");
-                }
-                if self.pos == start_pos {
-                    self.advance();
-                }
-                continue;
-            }
             if !self.eat(TokenKind::Colon) {
-                if self.at(TokenKind::Assign) {
-                    self.error_here(
-                        "expected `:` in struct initialization, found `=` — did you mean `:`?",
-                    );
-                    self.advance(); // consume `=`
-                } else {
-                    self.error_here("expected `:` after field name");
-                }
+                self.error_here("expected `:` after field name");
             }
             let value = self.parse_expr();
             fields.push((fname.name, value));
@@ -763,69 +633,6 @@ impl Parser {
             name: parts.join("."),
             fields,
             span: start.join(end),
-        }
-    }
-
-    /// `sqlz!{db, """SELECT ... {x}"""}` — desugars to `db.query(sql)`.
-    /// Also accepts `sqlz!(db, sql)` paren form. The `db` receiver may be
-    /// any expression (ident or path); the SQL arg is any expression but
-    /// is normally an interpolated (Fmt) string so `{expr}` segments
-    /// become bound parameters downstream.
-    pub(crate) fn parse_sqlz_macro(&mut self, start: Span) -> Expr {
-        self.advance(); // `!`
-        let is_brace = self.at(TokenKind::LBrace);
-        let is_paren = self.at(TokenKind::LParen);
-        if !is_brace && !is_paren {
-            self.error_here("expected `{` or `(` after `sqlz!`");
-            return dummy_expr(start);
-        }
-        self.advance(); // `{` or `(`
-        self.skip_stmt_ends();
-        let db_expr = self.parse_expr();
-        if !self.eat(TokenKind::Comma) {
-            self.error_here("expected `,` after db handle in `sqlz!{db, sql}`");
-        }
-        self.skip_stmt_ends();
-        let sql_expr = self.parse_expr();
-        self.skip_stmt_ends();
-        let end = if is_brace {
-            if self.eat_close(TokenKind::RBrace) {
-                self.previous().span
-            } else {
-                self.error_here("expected `}` to close `sqlz!{...}`");
-                sql_expr.span()
-            }
-        } else if self.eat_close(TokenKind::RParen) {
-            self.previous().span
-        } else {
-            self.error_here("expected `)` to close `sqlz!(...)`");
-            sql_expr.span()
-        };
-        let span = start.join(end);
-        // Desugar: `sqlz!{db, sql}` -> `db.query(sql)`.
-        let callee = match db_expr {
-            Expr::Ident { name, span: s } => Expr::Path {
-                parts: vec![name, "query".to_string()],
-                span: s.join(span),
-            },
-            Expr::Path { mut parts, span: s } => {
-                parts.push("query".to_string());
-                Expr::Path {
-                    parts,
-                    span: s.join(span),
-                }
-            }
-            other => Expr::Field {
-                obj: Box::new(other),
-                name: "query".to_string(),
-                span,
-            },
-        };
-        Expr::Call {
-            callee: Box::new(callee),
-            args: vec![sql_expr],
-            named: vec![],
-            span,
         }
     }
 
@@ -863,17 +670,10 @@ impl Parser {
         if !self.eat(TokenKind::Pipe) {
             self.error_here("expected `|` to close closure parameters");
         }
-        // Optional return type annotation: `|x: int| -> int { ... }`
-        let ret_ty = if self.eat(TokenKind::Arrow) {
-            Some(self.parse_type())
-        } else {
-            None
-        };
         let body = self.parse_expr();
         let span = pipe_tok.span.join(body.span());
         Expr::Closure {
             params,
-            ret_ty,
             body: Box::new(body),
             span,
         }
@@ -1074,26 +874,12 @@ impl Parser {
                 break;
             }
             let pat = self.parse_pattern();
-            // Match guard: `pat if guard => body`
-            let guard = if self.at(TokenKind::If) && !self.at(TokenKind::Arrow) {
-                self.advance(); // consume `if`
-                Some(self.parse_expr())
-            } else {
-                None
-            };
             if !self.eat(TokenKind::Arrow) {
                 self.error_here("expected `=>` after match pattern");
             }
             let body = self.parse_expr();
-            let start_span = pat.span();
-            let end_span = body.span();
-            let span = start_span.join(end_span);
-            arms.push(MatchArm {
-                pat,
-                guard,
-                body,
-                span,
-            });
+            let span = pat.span().join(body.span());
+            arms.push(MatchArm { pat, body, span });
             if self.eat(TokenKind::Comma) {
                 continue;
             }
@@ -1130,22 +916,19 @@ impl Parser {
         self.advance();
         let arg = if self.eat(TokenKind::LParen) {
             let e = self.parse_expr();
-            let end = if self.eat_close(TokenKind::RParen) {
-                self.previous().span
-            } else {
+            if !self.eat_close(TokenKind::RParen) {
                 self.error_here("expected `)` to close variant argument");
-                e.span()
-            };
-            Some((Box::new(e), end))
+            }
+            Some(Box::new(e))
         } else {
             None
         };
         let span = dot
             .span
-            .join(arg.as_ref().map(|(_, end)| *end).unwrap_or(name_tok.span));
+            .join(arg.as_ref().map(|e| e.span()).unwrap_or(name_tok.span));
         Expr::Variant {
             name: name_tok.text,
-            arg: arg.map(|(e, _)| e),
+            arg,
             span,
         }
     }
@@ -1153,23 +936,6 @@ impl Parser {
     // --- patterns ---------------------------------------------------------
 
     pub(crate) fn parse_pattern(&mut self) -> Pattern {
-        let first = self.parse_single_pattern();
-        if !self.at(TokenKind::Pipe) {
-            return first;
-        }
-        let mut pats = vec![first];
-        while self.eat(TokenKind::Pipe) {
-            pats.push(self.parse_single_pattern());
-        }
-        let span = pats
-            .first()
-            .map(|p| p.span())
-            .unwrap_or(self.peek().span)
-            .join(pats.last().map(|p| p.span()).unwrap_or(self.peek().span));
-        Pattern::Or { pats, span }
-    }
-
-    fn parse_single_pattern(&mut self) -> Pattern {
         let tok = self.peek().clone();
         match tok.kind {
             TokenKind::Ident if tok.text == "_" => {
@@ -1234,45 +1000,21 @@ impl Parser {
                 self.advance();
                 let arg = if self.eat(TokenKind::LParen) {
                     let p = self.parse_pattern();
-                    let end = if self.eat_close(TokenKind::RParen) {
-                        self.previous().span
-                    } else {
+                    if !self.eat_close(TokenKind::RParen) {
                         self.error_here("expected `)` to close pattern");
-                        p.span()
-                    };
-                    Some((Box::new(p), end))
+                    }
+                    Some(Box::new(p))
                 } else {
                     None
                 };
                 let span = tok
                     .span
-                    .join(arg.as_ref().map(|(_, end)| *end).unwrap_or(name_tok.span));
+                    .join(arg.as_ref().map(|p| p.span()).unwrap_or(name_tok.span));
                 Pattern::Variant {
                     name: name_tok.text,
-                    arg: arg.map(|(p, _)| p),
+                    arg,
                     span,
                 }
-            }
-            TokenKind::LParen => {
-                self.advance(); // consume `(`
-                let mut pats = Vec::new();
-                if !self.at(TokenKind::RParen) {
-                    pats.push(self.parse_pattern());
-                    while self.eat(TokenKind::Comma) {
-                        if self.at(TokenKind::RParen) {
-                            break;
-                        }
-                        pats.push(self.parse_pattern());
-                    }
-                }
-                let end = if self.eat(TokenKind::RParen) {
-                    self.previous().span
-                } else {
-                    self.error_here("expected `)` to close tuple pattern");
-                    self.peek().span
-                };
-                let span = tok.span.join(end);
-                Pattern::Tuple { pats, span }
             }
             _ => {
                 self.error_here(format!("expected pattern, found {}", tok.kind.describe()));

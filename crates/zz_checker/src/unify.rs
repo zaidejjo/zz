@@ -79,10 +79,6 @@ impl Unifier {
             ),
             Type::Union(ts) => Type::Union(ts.iter().map(|x| self.resolve_deep(x)).collect()),
             Type::Range(t) => Type::Range(Box::new(self.resolve_deep(&t))),
-            Type::Ptr { mutable, inner } => Type::Ptr {
-                mutable,
-                inner: Box::new(self.resolve_deep(&inner)),
-            },
             other => other,
         }
     }
@@ -109,24 +105,14 @@ impl Unifier {
             | (Type::Float, Type::Float)
             | (Type::Bool, Type::Bool)
             | (Type::Str, Type::Str)
-            | (Type::Unit, Type::Unit)
-            | (Type::Void, Type::Void) => Ok(()),
+            | (Type::Unit, Type::Unit) => Ok(()),
             // Error is an absorbing type: unify with anything without binding,
             // suppressing cascading type errors from earlier undefined symbols.
             (Type::Error, _) | (_, Type::Error) => Ok(()),
             (Type::Named(a), Type::Named(b)) if a == b => Ok(()),
             (Type::Struct(a), Type::Struct(b)) if a == b => Ok(()),
-            // Opaque handles unify only within the same module tag.
-            (Type::Opaque(a), Type::Opaque(b)) if a == b => Ok(()),
             (Type::Range(x), Type::Range(y)) => self.unify(&x, &y),
-            (Type::Json, Type::Json)
-            | (Type::Db, Type::Db)
-            | (Type::HttpServer, Type::HttpServer)
-            | (Type::TcpStream, Type::TcpStream)
-            | (Type::TcpListener, Type::TcpListener)
-            | (Type::Response, Type::Response)
-            | (Type::Chan, Type::Chan)
-            | (Type::TaskJoin, Type::TaskJoin) => Ok(()),
+            (Type::Json, Type::Json) | (Type::HttpServer, Type::HttpServer) => Ok(()),
             (Type::Tuple(xs), Type::Tuple(ys)) => {
                 if xs.len() != ys.len() {
                     return Err(UnifyError {
@@ -183,33 +169,6 @@ impl Unifier {
                 self.unify(&r1, &r2)
             }
             (Type::Array(x), Type::Array(y)) => self.unify(&x, &y),
-            (
-                Type::Ptr {
-                    mutable: m1,
-                    inner: x,
-                },
-                Type::Ptr {
-                    mutable: m2,
-                    inner: y,
-                },
-            ) => {
-                if m1 != m2 {
-                    return Err(UnifyError {
-                        left: Type::Ptr {
-                            mutable: m1,
-                            inner: x,
-                        }
-                        .to_string(),
-                        right: Type::Ptr {
-                            mutable: m2,
-                            inner: y,
-                        }
-                        .to_string(),
-                        message: "pointer mutability mismatch (`*const` vs `*mut`)".into(),
-                    });
-                }
-                self.unify(&x, &y)
-            }
             (Type::Dict(k1, v1), Type::Dict(k2, v2)) => {
                 self.unify(&k1, &k2)?;
                 self.unify(&v1, &v2)
@@ -263,7 +222,6 @@ impl Unifier {
             Type::Dict(k, v) => self.occurs(id, &k) || self.occurs(id, &v),
             Type::Union(ts) => ts.iter().any(|x| self.occurs(id, x)),
             Type::Range(x) => self.occurs(id, &x),
-            Type::Ptr { inner, .. } => self.occurs(id, &inner),
             _ => false,
         }
     }

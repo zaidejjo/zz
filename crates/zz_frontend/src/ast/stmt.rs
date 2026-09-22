@@ -1,6 +1,6 @@
 //! Statement AST nodes.
 
-use crate::ast::expr::{Expr, Ident, Pattern};
+use crate::ast::expr::{Expr, Ident};
 use crate::ast::types::Ty;
 use crate::span::Span;
 
@@ -10,35 +10,6 @@ pub struct Param {
     pub name: Ident,
     pub ty: Option<Ty>,
     pub default: Option<Box<Expr>>,
-    pub span: Span,
-}
-
-/// A trait/type bound applicable to a generic parameter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TraitBound {
-    Num,
-    Ord,
-    Eq,
-    Display,
-}
-
-impl TraitBound {
-    pub fn name(self) -> &'static str {
-        match self {
-            TraitBound::Num => "Num",
-            TraitBound::Ord => "Ord",
-            TraitBound::Eq => "Eq",
-            TraitBound::Display => "Display",
-        }
-    }
-}
-
-/// A generic parameter declaration with its trait bounds:
-/// `T` in `func id<T>` or `T: Num + Ord` in `func min<T: Num + Ord>`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TypeParam {
-    pub name: Ident,
-    pub bounds: Vec<TraitBound>,
     pub span: Span,
 }
 
@@ -58,90 +29,31 @@ pub struct Program {
     pub span: Span,
 }
 
-/// A single item in a selective import list: `PI`, `PI as pi`, or `*`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ImportItem {
-    /// Wildcard: `import module(*)`
-    Wildcard { span: Span },
-    /// Named import: `name` or `name as alias`
-    Named {
-        name: String,
-        alias: Option<String>,
-        span: Span,
-    },
-}
-
-/// An explicit, compile-time decorator on a function definition.
-///
-/// `@name` applies `name` directly; `@name(args)` first calls `name(args)`
-/// as a factory and applies the result. Application order is bottom-up
-/// (closest to `func` applies first), matching Python semantics without any
-/// runtime reflection: the desugar pass rewrites the decorated function
-/// into an `__inner` function plus a wrapper with the original name.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Decorator {
-    /// Dotted decorator path, e.g. `["auth", "login_required"]`.
-    pub path: Vec<String>,
-    /// Positional factory arguments (`@route("/path")`).
-    pub args: Vec<Expr>,
-    /// Named factory arguments.
-    pub named: Vec<(String, Expr)>,
-    pub span: Span,
-}
-
-/// A single function signature inside `extern "C" { ... }`.
-/// No body — the implementation lives in C and is linked natively.
-///
-/// `name` is the ZZ-visible name, optionally dotted for namespaced plugins
-/// (e.g. `zimg.resize`). `c_symbol` is the underlying C symbol; `None`
-/// means "derive from the ZZ name by replacing `.` with `_`"
-/// (`zimg.resize` → `zimg_resize`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct ExternFunc {
-    pub name: Ident,
-    pub params: Vec<Param>,
-    pub ret: Option<Ty>,
-    pub c_symbol: Option<String>,
-    pub span: Span,
-}
-
 /// Statement AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     /// A variable declaration. `ty == None` is the short form (`x := 10`);
-    /// `ty == Some(t)` is the explicit form (`x: int = 10`). `is_const`
-    /// marks `const x = 10` / `const x: int = 10` — immutable bindings that
-    /// cannot be reassigned.
+    /// `ty == Some(t)` is the explicit form (`x: int = 10`).
     Decl {
         ty: Option<Ty>,
         name: Ident,
         value: Expr,
         span: Span,
-        pub_: bool,
-        is_const: bool,
     },
-    /// `import std.str` — a dotted path of identifiers, optionally aliased
-    /// (`import std.str as s`), with optional selective items
-    /// (`import std.math(PI, sin)`).
+    /// `import std.io` — a dotted path of identifiers, optionally aliased
+    /// (`import std.io as console`).
     Import {
         path: Vec<String>,
         alias: Option<String>,
-        /// Empty = full module import. Non-empty = selective/wildcard import.
-        items: Vec<ImportItem>,
         span: Span,
-        pub_: bool,
     },
     Func {
         name: Vec<String>,
-        generics: Vec<TypeParam>,
+        generics: Vec<Ident>,
         params: Vec<Param>,
         ret: Option<Ty>,
         body: Block,
         span: Span,
-        pub_: bool,
-        /// Explicit decorators (`@name` / `@name(args)`) awaiting the
-        /// compile-time desugar pass. Always empty after expansion.
-        decorators: Vec<Decorator>,
     },
     Return {
         value: Option<Expr>,
@@ -153,20 +65,10 @@ pub enum Stmt {
         name: Vec<String>,
         fields: Vec<(Ident, Ty)>,
         span: Span,
-        pub_: bool,
     },
-    /// `impl Point { func dist(self) -> int { ... } }` — method block.
-    /// Methods inside are registered as `TypeName.method_name` functions.
-    Impl {
-        name: Vec<String>,
-        methods: Vec<Stmt>,
-        span: Span,
-        pub_: bool,
-    },
-    /// `for x in xs { ... }` or `for k, v in dict { ... }` — iterate an
-    /// array, range, or dictionary.
+    /// `for x in xs { ... }` — iterate an array or a range.
     For {
-        vars: Vec<Ident>,
+        var: Ident,
         iter: Box<Expr>,
         body: Block,
         span: Span,
@@ -188,23 +90,6 @@ pub enum Stmt {
         value: Expr,
         span: Span,
     },
-    /// Tuple destructuring: `(a, b) := expr`
-    Destructure {
-        pat: Pattern,
-        value: Expr,
-        span: Span,
-    },
-    /// `extern "C" { func strlen(s: *const u8) -> int ... }` — raw C signatures.
-    ExternBlock {
-        abi: String,
-        items: Vec<ExternFunc>,
-        span: Span,
-    },
-    /// `@link("sqlite3")` — request `-lsqlite3` at native link time.
-    Link {
-        lib: String,
-        span: Span,
-    },
     Expr(Expr),
 }
 
@@ -221,26 +106,7 @@ impl Stmt {
             | Stmt::Continue { span }
             | Stmt::Defer { span, .. }
             | Stmt::Assign { span, .. } => *span,
-            Stmt::ExternBlock { span, .. } | Stmt::Link { span, .. } => *span,
-            Stmt::Impl { span, .. } => *span,
-            Stmt::Destructure { span, .. } => *span,
             Stmt::Expr(e) => e.span(),
-        }
-    }
-
-    /// Returns the function name parts, or `None` if not a `Func`.
-    pub fn func_name(&self) -> Option<&[String]> {
-        match self {
-            Stmt::Func { name, .. } => Some(name),
-            _ => None,
-        }
-    }
-
-    /// Returns the decorators on a `Func` node, or `None` if not a `Func`.
-    pub fn func_decorators(&self) -> Option<&[Decorator]> {
-        match self {
-            Stmt::Func { decorators, .. } => Some(decorators),
-            _ => None,
         }
     }
 }

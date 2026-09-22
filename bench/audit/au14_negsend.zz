@@ -1,7 +1,0 @@
-// AU14 negative: send on a non-channel must not crash (err path -> unit).
-import std.chan
-
-func main() {
-    std.chan.send(1, 2)
-    println("neg_ok")
-}

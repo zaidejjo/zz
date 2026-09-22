@@ -331,10 +331,7 @@ mod tests {
             funcs.insert(
                 "add".to_string(),
                 FuncSig {
-                    is_extern: false,
-                    extern_c_symbol: None,
                     generics: vec![],
-                    bounds: Vec::new(),
                     params: vec![],
                     has_default: vec![],
                     ret: Type::Unit,

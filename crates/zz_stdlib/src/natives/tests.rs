@@ -1,21 +1,17 @@
-use super::super::{stdlib_funcs, stdlib_natives};
-use zz_runtime::{EvalError, Interp, Span, Value};
+use super::super::stdlib_natives;
+use zz_runtime::{EvalError, Interp, Value};
 
 fn call(name: &str, args: Vec<Value>) -> Result<Value, EvalError> {
     let mut interp = Interp::new();
     let mut args = args;
     let entry = stdlib_natives()[name];
-    (entry.f)(&mut interp, &mut args, Span::new(0, 0))
+    (entry.f)(&mut interp, &mut args)
 }
 
 #[test]
 fn str_length_counts_chars() {
     assert_eq!(
-        call(
-            "std.str.length",
-            vec![Value::Str("héllo".to_string().into())]
-        )
-        .unwrap(),
+        call("std.str.length", vec![Value::Str("héllo".into())]).unwrap(),
         Value::Int(5)
     );
 }
@@ -25,17 +21,14 @@ fn str_split_splits() {
     assert_eq!(
         call(
             "std.str.split",
-            vec![
-                Value::Str("a,b,c".to_string().into()),
-                Value::Str(",".to_string().into())
-            ]
+            vec![Value::Str("a,b,c".into()), Value::Str(",".into())]
         )
         .unwrap(),
-        Value::Array(Box::new(vec![
-            Value::Str("a".to_string().into()),
-            Value::Str("b".to_string().into()),
-            Value::Str("c".to_string().into()),
-        ]))
+        Value::Array(vec![
+            Value::Str("a".into()),
+            Value::Str("b".into()),
+            Value::Str("c".into()),
+        ])
     );
 }
 
@@ -44,10 +37,7 @@ fn str_contains_finds_substring() {
     assert_eq!(
         call(
             "std.str.contains",
-            vec![
-                Value::Str("hello".to_string().into()),
-                Value::Str("ell".to_string().into())
-            ]
+            vec![Value::Str("hello".into()), Value::Str("ell".into())]
         )
         .unwrap(),
         Value::Bool(true)
@@ -55,10 +45,7 @@ fn str_contains_finds_substring() {
     assert_eq!(
         call(
             "std.str.contains",
-            vec![
-                Value::Str("hello".to_string().into()),
-                Value::Str("xyz".to_string().into())
-            ]
+            vec![Value::Str("hello".into()), Value::Str("xyz".into())]
         )
         .unwrap(),
         Value::Bool(false)
@@ -70,7 +57,7 @@ fn vec_len_counts() {
     assert_eq!(
         call(
             "std.vec.len",
-            vec![Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)]))]
+            vec![Value::Array(vec![Value::Int(1), Value::Int(2)])]
         )
         .unwrap(),
         Value::Int(2)
@@ -82,10 +69,10 @@ fn vec_push_appends() {
     assert_eq!(
         call(
             "std.vec.push",
-            vec![Value::Array(Box::new(vec![Value::Int(1)])), Value::Int(2),]
+            vec![Value::Array(vec![Value::Int(1)]), Value::Int(2),]
         )
         .unwrap(),
-        Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)]))
+        Value::Array(vec![Value::Int(1), Value::Int(2)])
     );
 }
 
@@ -94,16 +81,16 @@ fn vec_pop_removes_last() {
     assert_eq!(
         call(
             "std.vec.pop",
-            vec![Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)]))]
+            vec![Value::Array(vec![Value::Int(1), Value::Int(2)])]
         )
         .unwrap(),
-        Value::Array(Box::new(vec![Value::Int(1)]))
+        Value::Array(vec![Value::Int(1)])
     );
 }
 
 #[test]
 fn vec_pop_empty_errors() {
-    let err = call("std.vec.pop", vec![Value::Array(Box::default())]).unwrap_err();
+    let err = call("std.vec.pop", vec![Value::Array(vec![])]).unwrap_err();
     assert!(err.message.contains("empty array"), "{}", err.message);
 }
 
@@ -115,222 +102,9 @@ fn wrong_type_errors() {
 
 #[test]
 fn read_line_from_dev_null_is_empty() {
-    // In the test harness stdin is /dev/null, so input yields "".
+    // In the test harness stdin is /dev/null, so read_line yields "".
     assert_eq!(
-        call("input", vec![]).unwrap(),
-        Value::Str(String::new().into())
-    );
-}
-
-#[test]
-fn every_funcs_key_has_a_native() {
-    // Drift census: the checker registry (`stdlib_funcs`) and the interpreter
-    // registry (`stdlib_natives`) must stay in lockstep. Every signature the
-    // checker knows must resolve to a runtime implementation.
-    //
-    // Exception: pure-ZZ stdlib functions (str.repeat, str.count, math.sum,
-    // math.product, math.count, vec.fold) are implemented in .zz files and
-    // compiled at startup — they have no Rust native entry.
-    let pure_zz_funcs = [
-        // str helpers
-        "std.str.repeat",
-        "std.str.count",
-        "std.str.is_empty",
-        "std.str.reverse",
-        "std.str.pad_left",
-        "std.str.pad_right",
-        "str.repeat",
-        "str.count",
-        "str.is_empty",
-        "str.reverse",
-        "str.pad_left",
-        "str.pad_right",
-        // math helpers
-        "std.math.sum",
-        "std.math.product",
-        "std.math.count",
-        "std.math.min",
-        "std.math.max",
-        "std.math.is_even",
-        "std.math.is_odd",
-        "std.math.min_arr",
-        "std.math.max_arr",
-        "std.math.sum_f",
-        "std.math.product_f",
-        "std.math.mean_f",
-        "std.math.median_f",
-        "math.sum",
-        "math.product",
-        "math.count",
-        "math.min",
-        "math.max",
-        "math.is_even",
-        "math.is_odd",
-        "math.min_arr",
-        "math.max_arr",
-        "math.sum_f",
-        "math.product_f",
-        "math.mean_f",
-        "math.median_f",
-        // vec helpers
-        "std.vec.fold",
-        "std.vec.sum",
-        "std.vec.product",
-        "std.vec.min_val",
-        "std.vec.max_val",
-        "std.vec.sum_f",
-        "std.vec.product_f",
-        "std.vec.concat",
-        "std.vec.flatten",
-        "std.vec.index_of",
-        "std.vec.last_index_of",
-        "vec.fold",
-        "vec.sum",
-        "vec.product",
-        "vec.min_val",
-        "vec.max_val",
-        "vec.sum_f",
-        "vec.product_f",
-        "vec.concat",
-        "vec.flatten",
-        "vec.index_of",
-        "vec.last_index_of",
-        // json helpers (pure-ZZ, compiled from zz/json/mod.zz)
-        "std.json.validate",
-        "std.json.parse_or",
-        "std.json.parse_or_null",
-        "std.json.path_exists",
-        "std.json.path_get_or",
-        "std.json.is_null",
-        "std.json.is_bool",
-        "std.json.is_number",
-        "std.json.is_string",
-        "std.json.is_array",
-        "std.json.is_object",
-        "std.json.is_empty",
-        "json.validate",
-        "json.parse_or",
-        "json.parse_or_null",
-        "json.path_exists",
-        "json.path_get_or",
-        "json.is_null",
-        "json.is_bool",
-        "json.is_number",
-        "json.is_string",
-        "json.is_array",
-        "json.is_object",
-        "json.is_empty",
-        // regexp helpers (pure-ZZ, compiled from zz/regexp/mod.zz)
-        "Regexp.new",
-        "std.regexp.is_email",
-        "regexp.is_email",
-        // Duration helpers (pure-ZZ, compiled from zz/time/mod.zz)
-        "time.micros",
-        "time.millis",
-        "time.secs",
-        "time.to_micros",
-        "time.to_millis",
-        "time.to_secs",
-        "time.to_nanos",
-        "time.sleep",
-        // ArgsParser constructor (pure-ZZ, compiled from zz/args/mod.zz)
-        "ArgsParser.new",
-        // colors helpers (pure-ZZ, compiled from zz/colors/mod.zz)
-        "std.colors.black",
-        "std.colors.red",
-        "std.colors.green",
-        "std.colors.yellow",
-        "std.colors.blue",
-        "std.colors.magenta",
-        "std.colors.cyan",
-        "std.colors.white",
-        "std.colors.bright_black",
-        "std.colors.bright_red",
-        "std.colors.bright_green",
-        "std.colors.bright_yellow",
-        "std.colors.bright_blue",
-        "std.colors.bright_magenta",
-        "std.colors.bright_cyan",
-        "std.colors.bright_white",
-        "std.colors.bg_black",
-        "std.colors.bg_red",
-        "std.colors.bg_green",
-        "std.colors.bg_yellow",
-        "std.colors.bg_blue",
-        "std.colors.bg_magenta",
-        "std.colors.bg_cyan",
-        "std.colors.bg_white",
-        "std.colors.bold",
-        "std.colors.dim",
-        "std.colors.italic",
-        "std.colors.underline",
-        "std.colors.reset",
-        "std.colors.strip",
-        "std.colors.clamp255",
-        "std.colors.rgb",
-        "std.colors.bg_rgb",
-        "std.colors.hex_val",
-        "std.colors.hex_byte",
-        "std.colors.hex",
-        "std.colors.hex6",
-        "std.colors.hex3",
-        "colors.black",
-        "colors.red",
-        "colors.green",
-        "colors.yellow",
-        "colors.blue",
-        "colors.magenta",
-        "colors.cyan",
-        "colors.white",
-        "colors.bright_black",
-        "colors.bright_red",
-        "colors.bright_green",
-        "colors.bright_yellow",
-        "colors.bright_blue",
-        "colors.bright_magenta",
-        "colors.bright_cyan",
-        "colors.bright_white",
-        "colors.bg_black",
-        "colors.bg_red",
-        "colors.bg_green",
-        "colors.bg_yellow",
-        "colors.bg_blue",
-        "colors.bg_magenta",
-        "colors.bg_cyan",
-        "colors.bg_white",
-        "colors.bold",
-        "colors.dim",
-        "colors.italic",
-        "colors.underline",
-        "colors.reset",
-        "colors.strip",
-        "colors.clamp255",
-        "colors.rgb",
-        "colors.bg_rgb",
-        "colors.hex_val",
-        "colors.hex_byte",
-        "colors.hex",
-        "colors.hex6",
-        "colors.hex3",
-    ];
-    let funcs = stdlib_funcs();
-    let natives = stdlib_natives();
-    let missing: Vec<String> = funcs
-        .keys()
-        .filter(|k| !natives.contains_key(*k) && !pure_zz_funcs.contains(&k.as_str()))
-        .cloned()
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "stdlib_funcs keys without a stdlib_natives impl: {missing:?}"
-    );
-    let untyped: Vec<String> = natives
-        .keys()
-        .filter(|k| !funcs.contains_key(*k))
-        .cloned()
-        .collect();
-    assert!(
-        untyped.is_empty(),
-        "stdlib_natives keys without a stdlib_funcs signature: {untyped:?}"
+        call("std.io.read_line", vec![]).unwrap(),
+        Value::Str(String::new())
     );
 }

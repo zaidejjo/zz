@@ -36,7 +36,10 @@ pub(crate) async fn handle_completion_resolve(
     for entry in backend.state.documents.iter() {
         let doc = entry.value();
         if doc.check_result.is_some() {
-            crate::completion::resolve_completion_detail(&mut item, doc.check_result.as_ref());
+            crate::completion::resolve_completion_detail(
+                &mut item,
+                doc.check_result.as_ref(),
+            );
             break;
         }
     }
@@ -69,7 +72,10 @@ pub(crate) async fn handle_signature_help(
     Ok(help)
 }
 
-pub(crate) async fn handle_hover(backend: &Backend, params: HoverParams) -> Result<Option<Hover>> {
+pub(crate) async fn handle_hover(
+    backend: &Backend,
+    params: HoverParams,
+) -> Result<Option<Hover>> {
     use zz_frontend::ast::Expr;
 
     let uri = &params.text_document_position_params.text_document.uri;
@@ -90,28 +96,6 @@ pub(crate) async fn handle_hover(backend: &Backend, params: HoverParams) -> Resu
 
     let offset = doc.line_index.position_to_offset(&doc.source, pos);
     let node = crate::lookup::find_node_at(program, &doc.source, offset);
-
-    // Hover on `?` / `try`: show the resolved error conversion (identity vs
-    // `convert_to_` impl). `try_resolutions` is keyed by the `Try` span.
-    if let Some(Expr::Try { span, .. }) = node.expr {
-        if let Some(res) = check_result.try_resolutions.get(span) {
-            let contents = match res {
-                None => "**`try`**: identity conversion (same error type, zero-cost)".to_string(),
-                Some(impl_span) => format!(
-                    "**`try`**: converts via `convert_to_` impl defined at offset {}",
-                    impl_span.start
-                ),
-            };
-            return Ok(Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: contents,
-                }),
-                range: None,
-            }));
-        }
-    }
-
     let name = match &node.name {
         Some(n) => n.clone(),
         None => return Ok(None),
@@ -142,10 +126,7 @@ pub(crate) async fn handle_hover(backend: &Backend, params: HoverParams) -> Resu
         contents.push_str("```\n");
     } else if let Some(ty) = check_result.bindings.get(&name) {
         contents.push_str(&format!("**let** `{name}: {ty}`\n"));
-    } else if let Some(Expr::Field {
-        name: field, obj, ..
-    }) = node.expr
-    {
+    } else if let Some(Expr::Field { name: field, obj, .. }) = node.expr {
         if let Some(zz_checker::Type::Struct(struct_name)) =
             crate::lookup::resolve_type_of_expr(program, check_result, obj)
         {

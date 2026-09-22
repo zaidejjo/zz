@@ -66,12 +66,12 @@ fn round_trip_generic_func() {
 
 #[test]
 fn round_trip_import() {
-    round_trips("import std.str");
+    round_trips("import std.io");
 }
 
 #[test]
 fn round_trip_import_alias() {
-    round_trips("import std.str as s");
+    round_trips("import std.io as console");
 }
 
 #[test]

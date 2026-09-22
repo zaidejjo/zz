@@ -45,7 +45,8 @@ pub(crate) async fn handle_symbol(
                 continue;
             }
             if let Some(program) = &entry.program {
-                let syms = crate::symbols::workspace_symbols(program, &entry.source, uri, None);
+                let syms =
+                    crate::symbols::workspace_symbols(program, &entry.source, uri, None);
                 all_symbols.extend(syms);
             }
         }
