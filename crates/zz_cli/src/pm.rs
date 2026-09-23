@@ -100,8 +100,16 @@ pub fn add(args: &[String]) -> Result<(), String> {
             println!("resolved `{pkg_name}` via local registry (~/.zz/registry.toml)");
             spec
         } else {
-            let req = version.unwrap_or_else(|| "^1.0".into());
-            verify_remote_spec(&pkg_name, &req, registry_base_from(args))?;
+            // Explicit `name@req`: verify the requirement as-is.
+            // Bare `name`: pin the registry's latest as a caret requirement
+            // (`^0.1.1`), so 0.x packages work without spelling a version.
+            let req = match version {
+                Some(v) => {
+                    verify_remote_spec(&pkg_name, &v, registry_base_from(args))?;
+                    v
+                }
+                None => resolve_latest_req(&pkg_name, registry_base_from(args))?,
+            };
             zz_pm::manifest::DepSpec::Version(req)
         }
     };
@@ -110,8 +118,36 @@ pub fn add(args: &[String]) -> Result<(), String> {
     manifest.save(&toml_path)?;
 
     println!("added `{pkg_name}` to zz.toml");
-    println!("hint: run `zz install` to resolve and fetch");
-    Ok(())
+
+    // `add` installs immediately: resolve, fetch into vendor/, write zz.lock.
+    // Same flags apply (`--registry` flows through to the install leg).
+    install(args)
+}
+
+/// Bare `zz add <pkg>`: resolve the latest published version and return it
+/// as a caret requirement.
+///
+/// - Unknown package → hard error suggesting `zz search`.
+/// - Unreachable registry → warning + legacy `^1.0` fallback; `zz install`
+///   retries the fetch (e.g. offline `add` for later install).
+fn resolve_latest_req(pkg_name: &str, base: String) -> Result<String, String> {
+    let client = zz_pm::remote::RegistryClient::new(&base);
+    match client.fetch_metadata(pkg_name) {
+        Ok(info) => {
+            let latest = info.metadata.latest.clone();
+            println!("resolved `{pkg_name}` to latest {latest} on {base}");
+            Ok(format!("^{latest}"))
+        }
+        Err(zz_pm::remote::RemoteError::NotFound(_)) => Err(format!(
+            "package `{pkg_name}` not found on {base}\n\
+             hint: run `zz search {pkg_name}` to check the spelling"
+        )),
+        Err(e) => {
+            eprintln!("warning: registry check skipped ({e})");
+            eprintln!("hint: `zz install` will retry the fetch");
+            Ok("^1.0".into())
+        }
+    }
 }
 
 /// Verify a `name@req` against the remote registry before recording it.

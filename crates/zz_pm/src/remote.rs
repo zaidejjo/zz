@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::hash;
 
 /// Default registry (mirrors `SITE_DOMAIN` in `zz-website/wrangler.toml`).
-pub const DEFAULT_REGISTRY: &str = "https://zz-lang.pages.dev";
+pub const DEFAULT_REGISTRY: &str = "https://zz-registry.onrender.com";
 
 /// Resolve the registry base URL: `ZZ_REGISTRY` env var wins, otherwise
 /// the default. A single trailing `/` is stripped so path joins are stable.
