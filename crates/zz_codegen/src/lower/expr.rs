@@ -1215,7 +1215,7 @@ impl Lowerer {
             if !slots.is_empty() {
                 o.push_str("    for (int __dk = __defer_n - 1; __dk >= 0; __dk--) {\n");
                 o.push_str("        switch (__defers[__dk]) {\n");
-                let snap: Vec<String> = slots.drain(..).collect();
+                let snap: Vec<String> = std::mem::take(&mut *slots);
                 for (idx, snippet) in snap.iter().enumerate() {
                     o.push_str(&format!("        case {idx}:\n"));
                     o.push_str(snippet);

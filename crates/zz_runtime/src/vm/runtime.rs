@@ -389,7 +389,7 @@ impl Vm {
                     }
                 }
 
-                let defers: Vec<Value> = self.defer_stack.drain(..).collect();
+                let defers: Vec<Value> = std::mem::take(&mut self.defer_stack);
                 if !defers.is_empty() {
                     self.defer_return = Some(DeferReturn {
                         return_value: v,
@@ -839,7 +839,7 @@ impl Vm {
                 }
                 Op::Return => {
                     let v = self.stack.pop().unwrap();
-                    let defers: Vec<Value> = self.defer_stack.drain(..).collect();
+                    let defers: Vec<Value> = std::mem::take(&mut self.defer_stack);
                     if defers.is_empty() {
                         // A `try`-conversion call returns here (no defers of its
                         // own): wrap in `Err` and unwind the caller instead of
