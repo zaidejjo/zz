@@ -10,7 +10,7 @@
 //! (e.g., `declarations.zz` → `declarations_ok` or just the stem as a marker).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Locate the workspace root (where `tests/fixtures/` lives).
 fn fixtures_dir() -> PathBuf {
@@ -873,4 +873,74 @@ fn e2e_test_repeat_flag() {
         stderr.contains("aggregate"),
         "should show aggregate. stderr: {stderr}"
     );
+}
+
+/// Run `zz run <file>` with controlled stdin (VM engine only).
+///
+/// `input()` reads the real process stdin: inheriting it hangs the suite on
+/// interactive terminals (TTY) while passing under CI (/dev/null). These
+/// tests pin stdin explicitly so they behave identically everywhere.
+fn run_zz_with_stdin(file: &Path, stdin: Stdio) -> (i32, String, String) {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("run")
+        .arg(file)
+        .stdin(stdin)
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz run {file:?}`: {e}"));
+
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    (exit_code, stdout, stderr)
+}
+
+const INPUT_PROG: &str =
+    "func main() {\n    line := input(\"\")\n    println(\"got:\" + line)\n}\n";
+
+fn write_input_prog(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("zz-e2e-input-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(name);
+    std::fs::write(&file, INPUT_PROG).unwrap();
+    file
+}
+
+#[test]
+fn e2e_input_closed_stdin_yields_empty() {
+    let file = write_input_prog("closed.zz");
+    let (exit, stdout, stderr) = run_zz_with_stdin(&file, Stdio::null());
+    assert_eq!(exit, 0, "exit {exit}. stderr: {stderr}");
+    assert_eq!(stdout.trim_end(), "got:", "stdout: {stdout:?}");
+}
+
+#[test]
+fn e2e_input_reads_piped_line() {
+    use std::io::Write as _;
+
+    let file = write_input_prog("piped.zz");
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let mut child = Command::new(zz_bin)
+        .arg("run")
+        .arg(&file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .spawn()
+        .expect("failed to spawn zz run");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"hello\n")
+        .expect("failed to write stdin");
+    let output = child.wait_with_output().expect("failed to wait");
+
+    let exit = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(exit, 0, "exit {exit}. stderr: {stderr}");
+    assert_eq!(stdout.trim_end(), "got:hello", "stdout: {stdout:?}");
 }

@@ -31,6 +31,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: install native deps
+        # Native codegen links -lcurl -lsqlite3 and compiles with clang.
+        # The runner image doesn't guarantee the headers — install
+        # explicitly so the --native test legs don't fail.
+        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev
       - name: fmt check
         run: cargo fmt --check
       - name: clippy
