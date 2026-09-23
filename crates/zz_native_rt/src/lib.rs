@@ -30,6 +30,8 @@ pub mod crypto_asym;
 pub mod crypto_core;
 /// `std.crypto` password hashing (Argon2id, bcrypt).
 pub mod crypto_pw;
+/// `std.encoding` text codecs (base64-bytes preserving binary payloads).
+pub mod encoding;
 /// `std.log` logging + tracing (levels, sinks, JSON, spans).
 pub mod log;
 /// `std.process` subprocess control (run, spawn/wait, exit, pid).

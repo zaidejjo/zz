@@ -71,6 +71,10 @@ impl Lowerer {
                     if let Some(ctype) = names.lookup_type(name) {
                         match ctype {
                             "int64_t" | "double" | "bool" => cid.to_string(),
+                            // Raw C structs are Copy (not refcounted) — pass
+                            // through; cloning would also be a type error
+                            // (zz_clone takes zz_value).
+                            t if t.starts_with("zz_struct_") => cid.to_string(),
                             _ => format!("zz_clone({cid})"),
                         }
                     } else {
@@ -1914,7 +1918,29 @@ impl Lowerer {
         // vec.push → vec.append (in-place mutation) must not apply here.
         let saved_void = *self.void_context.borrow();
         *self.void_context.borrow_mut() = false;
-        for a in &ordered_args {
+        // Unboxed-struct params of the callee (free functions taking a
+        // struct first are NOT impl methods): the emitted arg is a raw C
+        // struct and must be boxed into a runtime object. Positional: slot
+        // i of ordered_args matches sig param i (named args already
+        // reordered above); the method receiver (if any) lives outside.
+        let struct_box_for_arg: Vec<Option<String>> = match self.tp.funcs.get(&cname) {
+            Some(sig) => ordered_args
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    sig.params.get(i).and_then(|(_, t)| match t {
+                        zz_checker::Type::Struct(s) if self.is_unboxed_struct(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                })
+                .collect(),
+            None => vec![None; ordered_args.len()],
+        };
+        for (arg_idx, a) in ordered_args.iter().enumerate() {
+            if let Some(sname) = struct_box_for_arg.get(arg_idx).and_then(|o| o.clone()) {
+                arg_items.push(self.emit_boxed_value(&sname, a, names, out));
+                continue;
+            }
             let emitted = self.emit_expr(a, names, out);
             // Display builtins (`println`, `print`, `str`, ...) render
             // unboxed structs through their generated `debug_string`
@@ -2188,14 +2214,9 @@ impl Lowerer {
             // Impl methods: callee signature is
             // `zz_fn_X(<struct>* self, zz_value* args, size_t argc)`.
             // The receiver is passed as a pointer; the remaining args
-            // are boxed zz_values in the args array.
-            let is_impl_method = self
-                .tp
-                .funcs
-                .get(&cname_for_native)
-                .and_then(|sig| sig.params.first().map(|(_, t)| t.clone()))
-                .map(|t| matches!(&t, zz_checker::Type::Struct(_)))
-                .unwrap_or(false);
+            // are boxed zz_values in the args array. Name-shape checked
+            // (a free function taking a struct first is NOT a method).
+            let is_impl_method = self.is_impl_method(&cname_for_native);
             if is_impl_method {
                 if let Some(method_receiver) = method_receiver_for_call.as_ref() {
                     // For struct receivers, use the raw C variable name

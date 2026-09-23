@@ -51,11 +51,15 @@ bool zz_rt_handle_tag_eq(uint64_t id, const uint8_t *tag, size_t tag_len);
 pub fn ffi_impl(name: &str) -> Option<&'static str> {
     match name {
         "regexp.compile" | "std.regexp.compile" => Some("zz_regexp_compile"),
+        "encoding.base64_decode_bytes" | "std.encoding.base64_decode_bytes" => {
+            Some("zz_encoding_base64_decode_bytes")
+        }
         "regexp.is_match" | "std.regexp.is_match" => Some("zz_regexp_is_match"),
         "regexp.find" | "std.regexp.find" => Some("zz_regexp_find"),
         "regexp.replace_all" | "std.regexp.replace_all" => Some("zz_regexp_replace_all"),
         "regexp.captures" | "std.regexp.captures" => Some("zz_regexp_captures"),
         "crypto.sha256" | "std.crypto.sha256" => Some("zz_crypto_sha256"),
+        "crypto.sha256_bytes" | "std.crypto.sha256_bytes" => Some("zz_crypto_sha256_bytes"),
         "crypto.sha512" | "std.crypto.sha512" => Some("zz_crypto_sha512"),
         "crypto.hmac_sha256" | "std.crypto.hmac_sha256" => Some("zz_crypto_hmac_sha256"),
         "crypto.random_bytes" | "std.crypto.random_bytes" => Some("zz_crypto_random_bytes"),
@@ -179,6 +183,12 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
             Some("zz_value zz_regexp_captures(zz_value re, zz_value s, int *err);")
         }
         "zz_crypto_sha256" => Some("zz_value zz_crypto_sha256(zz_value s, int *err);"),
+        "zz_crypto_sha256_bytes" => {
+            Some("zz_value zz_crypto_sha256_bytes(zz_value b, int *err);")
+        }
+        "zz_encoding_base64_decode_bytes" => {
+            Some("zz_value zz_encoding_base64_decode_bytes(zz_value s, int *err);")
+        }
         "zz_crypto_sha512" => Some("zz_value zz_crypto_sha512(zz_value s, int *err);"),
         "zz_crypto_hmac_sha256" => {
             Some("zz_value zz_crypto_hmac_sha256(zz_value key, zz_value msg, int *err);")

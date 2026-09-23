@@ -3571,6 +3571,7 @@ name = "zz_native_rt"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "base64 0.22.1",
  "bcrypt",
  "ed25519-dalek",
  "getrandom 0.3.4",

@@ -81,6 +81,8 @@ zz_value zz_bytes_take(unsigned char *data, size_t len);
 zz_bytes_buf *zz_bytes_buf_new(size_t len);
 zz_value zz_bytes_wrap(zz_bytes_buf *buf, size_t off, size_t len);
 zz_value zz_bytes_slice(const zz_bytes *b, int64_t s, int64_t e);
+// Borrow the window bytes for FFI readers (mirrors zz_str_view).
+void zz_bytes_view(zz_value v, const unsigned char **out_ptr, size_t *out_len);
 static inline zz_value zz_bytes_get(const zz_bytes *b, zz_value idx, int *err) {
     *err = 0;
     if (idx.tag != ZZ_INT || !b) {

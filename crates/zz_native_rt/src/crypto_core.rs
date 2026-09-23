@@ -123,6 +123,19 @@ pub extern "C" fn zz_crypto_hmac_sha256(
     }
 }
 
+/// `crypto.sha256_bytes(b: bytes) -> str` (hex over raw bytes).
+#[no_mangle]
+pub extern "C" fn zz_crypto_sha256_bytes(b: CValue, err: *mut std::ffi::c_int) -> CValue {
+    use crate::cabi::cvalue_to_bytes;
+    match cvalue_to_bytes(b) {
+        Some(data) => cvalue_str(sha256_hex(&data).as_bytes()),
+        None => {
+            set_err(err);
+            cvalue_str(b"")
+        }
+    }
+}
+
 /// `crypto.random_bytes(n: int) -> str` (hex of `n` CSPRNG bytes; `""` and
 /// `*err = 1` when out of range).
 #[no_mangle]

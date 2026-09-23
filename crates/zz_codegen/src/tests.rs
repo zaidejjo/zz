@@ -290,6 +290,12 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("sqlz.transaction", "AOT-inlined; no native C impl"),
     ("std.db.transaction", "AOT-inlined; no native C impl"),
     ("db.transaction", "AOT-inlined; no native C impl"),
+    // Response constructor — needs a ZZ_RESPONSE C value plus a
+    // dispatching AOT server (the AOT server stub ignores handlers).
+    (
+        "std.http.respond",
+        "needs ZZ_RESPONSE value + dispatching server",
+    ),
     // Test assertions — VM-only builtins; no C codegen needed.
     ("assert", "test assertion; VM-only"),
     ("assert_eq", "test assertion; VM-only"),

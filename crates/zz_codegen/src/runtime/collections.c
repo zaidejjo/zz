@@ -240,10 +240,22 @@ zz_value zz_bytes_slice(const zz_bytes *b, int64_t s, int64_t e) {
     return zz_bytes_wrap(b->buf, b->off + (size_t)s, (size_t)(e - s));
 }
 
+// Borrow the window bytes for FFI readers (mirrors zz_str_view): sets
+// (*out_ptr, *out_len); null/0 for non-bytes. The view borrows the
+// shared store — copy before retaining beyond the call.
+void zz_bytes_view(zz_value v, const unsigned char **out_ptr, size_t *out_len) {
+    if (v.tag != ZZ_BYTES || v.bytes == NULL || v.bytes->buf == NULL) {
+        *out_ptr = NULL;
+        *out_len = 0;
+        return;
+    }
+    *out_ptr = v.bytes->buf->data + v.bytes->off;
+    *out_len = v.bytes->len;
+}
+
 void zz_retain_bytes(zz_bytes *b) {
     if (!b) return;
-    __atomic_add_fetch(&b->refs, 1, __ATOMIC_RELAXED);
-}
+    __atomic_add_fetch(&b->refs, 1, __ATOMIC_RELAXED);}
 
 void zz_release_bytes(zz_bytes *b) {
     if (!b) return;

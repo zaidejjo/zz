@@ -38,6 +38,9 @@ pub const TAG_ARRAY: u32 = 5;
 /// `ZZ_OPTION_NONE` (10): constructed directly — no linkable `none`
 /// constructor exists, and the payload is always zero.
 pub const TAG_OPTION_NONE: u32 = 10;
+/// `ZZ_BYTES` (24): byte buffer. Reads go through [`zz_bytes_view`];
+/// construction through [`zz_bytes_new`].
+pub const TAG_BYTES: u32 = 24;
 
 impl CValue {
     /// Build a `ZZ_UNIT` value.
@@ -102,6 +105,11 @@ extern "C" {
     pub fn zz_variant_err(inner: CValue) -> CValue;
     /// Read string bytes: sets `(*out_ptr, *out_len)`; null/0 for non-strings.
     pub fn zz_str_view(v: CValue, out_ptr: *mut *const u8, out_len: *mut usize);
+    /// Borrow a `ZZ_BYTES` window: sets `(*out_ptr, *out_len)`; null/0 for
+    /// non-bytes. The view borrows the shared store — copy before use.
+    pub fn zz_bytes_view(v: CValue, out_ptr: *mut *const u8, out_len: *mut usize);
+    /// Build a `ZZ_BYTES` by copying `len` bytes.
+    pub fn zz_bytes_new(data: *const u8, len: usize) -> CValue;
     /// Positional array read (cloned item, or unit when out of range).
     /// The caller owns the clone and must release it with [`zz_release`].
     pub fn zz_array_at(arr: CValue, i: usize) -> CValue;
@@ -134,6 +142,29 @@ pub fn cvalue_to_string(v: CValue) -> Option<String> {
     // we copy to an owned `String` before returning.
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     std::str::from_utf8(bytes).ok().map(|s| s.to_string())
+}
+
+/// Read a `ZZ_BYTES` argument into owned Rust bytes (`None` for non-bytes).
+pub fn cvalue_to_bytes(v: CValue) -> Option<Vec<u8>> {
+    if v.tag != TAG_BYTES {
+        return None;
+    }
+    let mut ptr: *const u8 = std::ptr::null();
+    let mut len: usize = 0;
+    // SAFETY: out-params are valid locals; the call only reads `v`.
+    unsafe { zz_bytes_view(v, &mut ptr, &mut len) };
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: `zz_bytes_view` guarantees `len` readable bytes for this call;
+    // we copy before returning.
+    Some(unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec())
+}
+
+/// Build a `ZZ_BYTES` from Rust bytes via the runtime allocator.
+pub fn cvalue_bytes(data: &[u8]) -> CValue {
+    // SAFETY: `zz_bytes_new` copies `len` bytes synchronously.
+    unsafe { zz_bytes_new(data.as_ptr(), data.len()) }
 }
 
 /// Push a Rust string into a `ZZ_ARRAY` built by [`zz_array_new`].
