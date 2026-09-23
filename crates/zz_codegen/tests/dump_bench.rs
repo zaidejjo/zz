@@ -21,12 +21,17 @@ fn load(src: &str) -> (TypedProgram, String) {
     (pruned, main_key)
 }
 
+/// Dev utility: lower the arena bench and dump the generated C to
+/// `/tmp/bench.c` for inspection. `#[ignore]`d because it asserts nothing
+/// and reads from `examples/` (gitignored — absent in CI checkouts).
+/// Run explicitly when needed:
+///   cargo test -p zz_codegen --test dump_bench -- --ignored --nocapture
 #[test]
+#[ignore]
 fn dump_bench_c() {
-    let src = std::fs::read_to_string(
-        "/home/zaid/Projects/zz_lang/examples/performace_check/arena/bench_memory_arena.zz",
-    )
-    .unwrap();
+    let src_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/performace_check/arena/bench_memory_arena.zz");
+    let src = std::fs::read_to_string(&src_path).unwrap();
     let (pruned, main_key) = load(&src);
     let lowerer = zz_codegen::Lowerer::new(
         std::collections::HashSet::new(),
