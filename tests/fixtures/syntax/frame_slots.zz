@@ -1,0 +1,63 @@
+// E2E: VM frame-slot accounting — locals declared after conditional
+// jumps must read their own slots (regression: LoadSlot OOB / silent
+// corruption from unaccounted jump pops and double-counted && / ||
+// branches). Every check prints its value; the harness matches the
+// trailing marker.
+func pair(ok: bool) -> Result<[int], str> {
+    if ok {
+        .ok([640, 480])
+    } else {
+        .err("nope")
+    }
+}
+
+func dims(ok: bool) -> [int] {
+    match pair(ok) {
+        .ok(v) => v,
+        .err(e) => {
+            fail("dims {e}")
+            [0, 0]
+        },
+    }
+}
+
+func if_block_local(a: bool) -> int {
+    if a {
+        y := 10
+        y + 1
+    } else {
+        0
+    }
+}
+
+func or_declare(a: bool, b: bool) -> bool {
+    ok := a || b
+    ok
+}
+
+func and_declare(a: bool, b: bool) -> bool {
+    ok := a && b
+    ok
+}
+
+func guard_read(x: int) -> int {
+    r := dims(true)
+    m := match x {
+        v if v > 0 => r[0] + v,
+        _ => 0,
+    }
+    m + r[1]
+}
+
+func main() {
+    println("{if_block_local(true)} {if_block_local(false)}")
+    println("{or_declare(true, false)} {or_declare(false, false)}")
+    println("{and_declare(true, true)} {and_declare(true, false)}")
+    r := dims(true)
+    s := dims(true)
+    assert_eq(s[0], r[0])
+    assert_eq(s[1], r[1])
+    assert(r[0] <= 640 && r[1] <= 480)
+    println("{guard_read(5)}")
+    println("frame_slots_ok")
+}

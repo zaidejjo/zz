@@ -1667,22 +1667,30 @@ impl Compiler {
                 span,
             } => match op {
                 BinOp::And => {
+                    // Short-circuit: exactly one branch executes, so the
+                    // linear walk must not count both pushes. Reset to
+                    // `pre` on each path; both converge at pre+1.
+                    let pre = self.stack_height;
                     self.compile_expr(left);
                     let j = self.emit_jump(JumpKind::IfFalse);
                     self.compile_expr(right);
                     self.emit(Op::Truthy);
                     let j2 = self.emit_jump(JumpKind::Always);
                     self.patch_jump(j);
+                    self.stack_height = pre;
                     self.emit_const(Value::Bool(false));
                     self.patch_jump(j2);
                 }
                 BinOp::Or => {
+                    // Same single-branch discipline as `And` above.
+                    let pre = self.stack_height;
                     self.compile_expr(left);
                     let j = self.emit_jump(JumpKind::IfTrue);
                     self.compile_expr(right);
                     self.emit(Op::Truthy);
                     let j2 = self.emit_jump(JumpKind::Always);
                     self.patch_jump(j);
+                    self.stack_height = pre;
                     self.emit_const(Value::Bool(true));
                     self.patch_jump(j2);
                 }
@@ -2349,6 +2357,11 @@ impl Compiler {
                 // guards, the original single-copy approach works.
                 let has_guards = arms.iter().any(|a| a.guard.is_some());
                 if has_guards {
+                    // Arms are exclusive: exactly one body executes, so the
+                    // linear walk must not accumulate every arm's result.
+                    // Reset to `pre` (scrutinee lives in env now) before
+                    // each arm's reload; all arms converge at pre+1.
+                    let pre = self.stack_height;
                     self.compile_expr(scrutinee);
                     // Store scrutinee in a temporary variable, then pop
                     // the stack copy (only env copy remains for reload).
@@ -2359,6 +2372,9 @@ impl Compiler {
                     let mut body_jumps = Vec::with_capacity(arms.len());
                     let mut guard_positions: Vec<usize> = Vec::new();
                     for arm in arms {
+                        // Exclusive-arm reset (see above): discard the
+                        // previous arm's result from the height fiction.
+                        self.stack_height = pre;
                         let has_env = pattern_binds(&arm.pat);
                         self.emit(Op::LoadVar(tmp_name.clone(), *span));
                         let pos = self.chunk.code.len();
