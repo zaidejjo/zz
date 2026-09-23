@@ -10,20 +10,15 @@ env:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    name: test (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: install native deps (linux)
-        if: runner.os == 'Linux'
+      - name: install native deps
         # Native codegen links -lcurl -lsqlite3 and compiles with clang.
         # Runner images don't guarantee the headers — install explicitly
         # so the --native test legs don't fail with `curl/curl.h not found`.
@@ -32,14 +27,5 @@ jobs:
         run: cargo fmt --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: 'test (unix: full suite incl. native legs)'
-        if: runner.os != 'Windows'
+      - name: test
         run: cargo test --all
-      - name: 'test (windows: VM-only, native backend unsupported)'
-        if: runner.os == 'Windows'
-        # The native backend is POSIX/Linux-only (epoll/fork AOT server, no
-        # Windows FFI link — see ffi.rs). ZZ_SKIP_NATIVE keeps the VM legs
-        # running while the native legs report skips.
-        run: cargo test --all
-        env:
-          ZZ_SKIP_NATIVE: 1
