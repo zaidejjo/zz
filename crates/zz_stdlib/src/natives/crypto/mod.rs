@@ -21,6 +21,24 @@ pub(crate) fn crypto_sha256(
     ))
 }
 
+/// `crypto.sha256_bytes(bytes) -> str` — lowercase hex SHA-256 over raw
+/// bytes (binary tarballs cannot round-trip through UTF-8 strings).
+pub(crate) fn crypto_sha256_bytes(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    match crate::natives::arg(args, 0, "std.crypto.sha256_bytes")? {
+        Value::Bytes(b) => Ok(Value::Str(
+            zz_native_rt::crypto_core::sha256_hex(b.as_slice()).into(),
+        )),
+        other => Err(EvalError::new(
+            format!("std.crypto.sha256_bytes: expected bytes, found `{other}`"),
+            span,
+        )),
+    }
+}
+
 pub(crate) fn crypto_sha512(
     _interp: &mut Interp,
     args: &mut Vec<Value>,

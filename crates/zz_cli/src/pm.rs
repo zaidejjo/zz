@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-/// Handle `zz init [--template T]`.
+/// Handle `zz init [--template T] [--author A] [--description D] [--license L] [--repo URL]`.
 pub fn init(args: &[String]) -> Result<(), String> {
     let template = parse_flag_value(args, "--template");
     let dir = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
@@ -20,7 +20,8 @@ pub fn init(args: &[String]) -> Result<(), String> {
             .to_string());
     }
 
-    let _manifest = zz_pm::manifest::Manifest::create_init(&dir, &name)?;
+    let opts = init_options(args);
+    let _manifest = zz_pm::manifest::Manifest::create_init_opts(&dir, &name, &opts)?;
     // Also create src/main.zz if it doesn't exist
     let src_dir = dir.join("src");
     if !src_dir.join("main.zz").exists() {
@@ -39,7 +40,7 @@ pub fn init(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Handle `zz new <name> [--template cli|lib|web]`.
+/// Handle `zz new <name> [--template cli|lib|web] [--author A] [--description D] [--license L] [--repo URL]`.
 pub fn new(args: &[String]) -> Result<(), String> {
     let template = parse_flag_value(args, "--template");
     let name = args
@@ -48,7 +49,9 @@ pub fn new(args: &[String]) -> Result<(), String> {
         .ok_or("missing project name\n\nhint: usage: zz new <name> [--template cli|lib|web]")?;
 
     let parent = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
-    let project_dir = zz_pm::manifest::Manifest::create_new(&parent, name, template.as_deref())?;
+    let opts = init_options(args);
+    let project_dir =
+        zz_pm::manifest::Manifest::create_new_opts(&parent, name, template.as_deref(), &opts)?;
 
     println!("created project `{}` at {}", name, project_dir.display());
     println!("  zz.toml: created");
@@ -57,7 +60,13 @@ pub fn new(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Handle `zz add <pkg>[@version] [--git URL --rev REV] [--path PATH]`.
+/// Handle `zz add <pkg>[@version] [--git URL --rev REV] [--path PATH] [--registry URL]`.
+///
+/// Bare `name[@req]` consults the local alias registry first, then verifies
+/// the package (and requirement) against the remote registry before writing
+/// `zz.toml`. A verification failure is an error for unknown packages and a
+/// warning for unreachable registries (the dep is still recorded; `zz install`
+/// will retry with a precise error).
 pub fn add(args: &[String]) -> Result<(), String> {
     let spec = args
         .iter()
@@ -86,12 +95,14 @@ pub fn add(args: &[String]) -> Result<(), String> {
         })
     } else {
         // Bare name: consult the local registry before falling back to a
-        // plain version range (which needs a hosted registry to resolve).
+        // remote registry version.
         if let Some(spec) = registry_lookup(&pkg_name) {
             println!("resolved `{pkg_name}` via local registry (~/.zz/registry.toml)");
             spec
         } else {
-            zz_pm::manifest::DepSpec::Version(version.unwrap_or_else(|| "^1.0".into()))
+            let req = version.unwrap_or_else(|| "^1.0".into());
+            verify_remote_spec(&pkg_name, &req, registry_base_from(args))?;
+            zz_pm::manifest::DepSpec::Version(req)
         }
     };
 
@@ -100,6 +111,129 @@ pub fn add(args: &[String]) -> Result<(), String> {
 
     println!("added `{pkg_name}` to zz.toml");
     println!("hint: run `zz install` to resolve and fetch");
+    Ok(())
+}
+
+/// Verify a `name@req` against the remote registry before recording it.
+///
+/// - Unknown package → hard error suggesting `zz search`.
+/// - Requirement matching nothing → hard error suggesting `zz info`.
+/// - Unreachable registry → warning; the dep is still recorded so
+///   `zz install` can retry (e.g. offline `add` for later install).
+fn verify_remote_spec(pkg_name: &str, req: &str, base: String) -> Result<(), String> {
+    let client = zz_pm::remote::RegistryClient::new(&base);
+    match client.fetch_metadata(pkg_name) {
+        Ok(info) => match zz_pm::remote::pick_version(&info.metadata.versions, req) {
+            Ok(v) => {
+                println!("verified `{pkg_name}@{v}` on {base}");
+                Ok(())
+            }
+            Err(_) => Err(format!(
+                "no published version of `{pkg_name}` satisfies `{req}`\n\
+                 hint: run `zz info {pkg_name}` to list available versions"
+            )),
+        },
+        Err(zz_pm::remote::RemoteError::NotFound(_)) => Err(format!(
+            "package `{pkg_name}` not found on {base}\n\
+             hint: run `zz search {pkg_name}` to check the spelling"
+        )),
+        Err(e) => {
+            eprintln!("warning: registry check skipped ({e})");
+            eprintln!("hint: `zz install` will retry the fetch");
+            Ok(())
+        }
+    }
+}
+
+/// Handle `zz search <query> [--limit N] [--registry URL]` (public, no login).
+pub fn search(args: &[String]) -> Result<(), String> {
+    let query = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .ok_or("missing search query\n\nhint: usage: zz search <query> [--limit N]")?;
+    let limit: u32 = parse_flag_value(args, "--limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+    let base = registry_base_from(args);
+
+    let hits = zz_pm::remote::RegistryClient::new(&base)
+        .search(query, limit)
+        .map_err(|e| e.to_string())?;
+    if hits.is_empty() {
+        println!("no packages match `{query}` on {base}");
+        return Ok(());
+    }
+    for hit in &hits {
+        let summary = if hit.description.is_empty() {
+            "(no description)".to_string()
+        } else {
+            hit.description.clone()
+        };
+        println!(
+            "{} {} — {} (by {})",
+            hit.name, hit.latest, summary, hit.author
+        );
+    }
+    Ok(())
+}
+
+/// Handle `zz info <pkg> [--registry URL]` (public, no login).
+pub fn info(args: &[String]) -> Result<(), String> {
+    let name = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .ok_or("missing package name\n\nhint: usage: zz info <pkg>")?;
+    let base = registry_base_from(args);
+
+    let pkg = zz_pm::remote::RegistryClient::new(&base)
+        .fetch_metadata(name)
+        .map_err(|e| e.to_string())?;
+    let m = &pkg.metadata;
+    println!("{} {}", m.name, m.latest);
+    if !m.description.is_empty() {
+        println!("  {0}", m.description);
+    }
+    println!("  author:  {}", m.author);
+    if !m.license.is_empty() {
+        println!("  license: {}", m.license);
+    }
+    if !m.repo.is_empty() {
+        println!("  repo:    {}", m.repo);
+    }
+    if m.versions.is_empty() {
+        println!("  versions: (none listed)");
+    } else {
+        let mut shown: Vec<&str> = m.versions.iter().map(String::as_str).collect();
+        shown.sort();
+        // Newest first, cap the list so huge histories stay readable.
+        shown.reverse();
+        let total = shown.len();
+        let list: Vec<&str> = shown.into_iter().take(10).collect();
+        println!(
+            "  versions: {}{}",
+            list.join(", "),
+            if total > 10 {
+                format!(" (+{} more)", total - 10)
+            } else {
+                String::new()
+            }
+        );
+    }
+    if !m.deps.is_empty() {
+        println!("  deps of {}:", m.latest);
+        let mut deps: Vec<(&String, &serde_json::Value)> = m.deps.iter().collect();
+        deps.sort_by_key(|(k, _)| (*k).clone());
+        for (dep, req) in deps {
+            println!("    {dep} = {req}");
+        }
+    }
+    if !pkg.readme.is_empty() {
+        println!();
+        // First 20 lines — enough to recognize the package.
+        for line in pkg.readme.lines().take(20) {
+            println!("  {line}");
+        }
+    }
     Ok(())
 }
 
@@ -184,8 +318,11 @@ pub fn registry(args: &[String]) -> Result<(), String> {
         )),
     }
 }
-/// Handle `zz install` / `zz i`.
-pub fn install(_args: &[String]) -> Result<(), String> {
+/// Handle `zz install` / `zz i` / `zzpm install`.
+///
+/// Registry (`Version`) deps resolve against `--registry` / `ZZ_REGISTRY` /
+/// the default registry; git + path deps stay offline.
+pub fn install(args: &[String]) -> Result<(), String> {
     let dir = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
     let toml_path = dir.join("zz.toml");
 
@@ -224,8 +361,9 @@ pub fn install(_args: &[String]) -> Result<(), String> {
 
     println!("resolving {} dependencies...", manifest.dependencies.len());
 
-    // Use the resolver to resolve all dependencies
-    let resolved = zz_pm::resolve::resolve(&manifest, existing_lock.as_ref(), &dir)
+    // Use the resolver to resolve all dependencies (registry-aware).
+    let opts = zz_pm::resolve::ResolveOptions::remote(&registry_base_from(args));
+    let resolved = zz_pm::resolve::resolve_with(&manifest, existing_lock.as_ref(), &dir, &opts)
         .map_err(|e| e.to_string())?;
 
     // Build new lockfile
@@ -269,6 +407,26 @@ pub fn install(_args: &[String]) -> Result<(), String> {
                 )
                 .map_err(|e| format!("failed to fetch {}: {e}", dep.name))?;
             }
+        } else if dep.source.starts_with("registry+") {
+            // Resolve already staged the CAS entry, but it may have been
+            // GC'd since (or the lock predates the fetch): ensure it.
+            // An empty hash addresses the packages dir itself — never
+            // treat that as a hit (resolve heals such pins by re-fetch).
+            let Some((base, name, version)) = zz_pm::remote::parse_registry_source(&dep.source)
+            else {
+                return Err(format!(
+                    "cannot parse lockfile source for `{}`: {}\n\
+                     hint: delete zz.lock and run `zz install` to regenerate",
+                    dep.name, dep.source
+                ));
+            };
+            if !dep.hash.is_empty() && zz_pm::paths::cas_entry(&dep.hash).exists() {
+                continue;
+            }
+            println!("  fetching {name} @ {version}...");
+            zz_pm::remote::RegistryClient::new(&base)
+                .fetch_to_cas(&name, &version, &dep.hash)
+                .map_err(|e| format!("failed to fetch {}: {e}", dep.name))?;
         }
     }
 
@@ -363,9 +521,23 @@ pub fn cache(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// Handle `zz login`.
-pub fn login(_args: &[String]) -> Result<(), String> {
-    let (url, token, username) = zz_pm::auth::prompt_credentials()?;
+/// Handle `zz login [--browser] [--registry URL]`.
+///
+/// Default: prompt for a token (paste the `zz_pat_*` from the website) and
+/// store it in `~/.zz/credentials.toml` (0600).
+/// `--browser`: print the OAuth entry URL first, then prompt for the token.
+pub fn login(args: &[String]) -> Result<(), String> {
+    let base = registry_base_from(args);
+    if args.iter().any(|a| a == "--browser") {
+        println!("open this URL in your browser to authenticate:");
+        println!("  {base}/api/auth/github");
+        println!("paste the `zz_pat_*` token shown after login when prompted.");
+    }
+    let (url, token, username) = if args.iter().any(|a| a == "--registry") {
+        prompt_credentials_for(&base)?
+    } else {
+        zz_pm::auth::prompt_credentials()?
+    };
 
     let mut creds = zz_pm::auth::Credentials::load()?;
     creds.set_token(&url, token, username);
@@ -379,8 +551,40 @@ pub fn login(_args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Handle `zz publish`.
-pub fn publish(_args: &[String]) -> Result<(), String> {
+/// Prompt for a token bound to a known registry URL (skips the URL prompt).
+fn prompt_credentials_for(base: &str) -> Result<(String, String, Option<String>), String> {
+    eprint!("Auth token for {base}: ");
+    let token = read_login_token()?;
+    if token.is_empty() {
+        return Err("auth token cannot be empty".to_string());
+    }
+    Ok((base.to_string(), token, None))
+}
+
+/// Read one secret line from `/dev/tty` (falls back to stdin).
+fn read_login_token() -> Result<String, String> {
+    use std::io::BufRead;
+    if let Ok(tty) = std::fs::File::open("/dev/tty") {
+        let mut reader = std::io::BufReader::new(tty);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .map_err(|e| format!("cannot read token: {e}"))?;
+        return Ok(line.trim().to_string());
+    }
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| format!("cannot read token: {e}"))?;
+    Ok(line.trim().to_string())
+}
+
+/// Handle `zz publish [--dry-run] [--skip-tests] [--registry URL]`.
+///
+/// Validates, runs `zz test`, packs, then uploads to the registry.
+/// `--dry-run` stops after packing (no network, no token needed).
+/// `--skip-tests` skips the gate (native packages with external harnesses).
+pub fn publish(args: &[String]) -> Result<(), String> {
     let dir = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
     let toml_path = dir.join("zz.toml");
 
@@ -392,27 +596,93 @@ pub fn publish(_args: &[String]) -> Result<(), String> {
 
     // Validate
     zz_pm::publish::validate(&manifest).map_err(|e| e.to_string())?;
+    for warning in zz_pm::publish::warnings(&manifest) {
+        eprintln!("warning: {warning}");
+    }
 
-    // Run tests
-    println!("running tests...");
-    zz_pm::publish::run_tests(&dir).map_err(|e| e.to_string())?;
-    println!("tests passed");
+    // Run tests (skippable for native packages whose suites live
+    // outside `zz test`, e.g. `zz run`-based e2e harnesses — the runner
+    // never dlopens the package's own build/*.so).
+    if args.iter().any(|a| a == "--skip-tests") {
+        println!("skipping tests (--skip-tests)");
+    } else {
+        println!("running tests...");
+        zz_pm::publish::run_tests(&dir).map_err(|e| {
+            format!(
+                "{e}\n\
+                 hint: if this package tests itself outside `zz test`, \
+                 use `zz publish --skip-tests`"
+            )
+        })?;
+        println!("tests passed");
+    }
 
     // Pack
     println!("packing...");
     let tarball = zz_pm::publish::pack(&dir, &manifest).map_err(|e| e.to_string())?;
     println!("created: {}", tarball.display());
-    println!("hint: upload not implemented yet (no real registry target)");
 
+    if args.iter().any(|a| a == "--dry-run") {
+        println!("dry run: skipping upload");
+        return Ok(());
+    }
+
+    let base = registry_base_from(args);
+    let token = zz_pm::auth::Credentials::load()
+        .ok()
+        .and_then(|c| c.get_token(&base).map(str::to_string))
+        .ok_or_else(|| {
+            format!(
+                "not logged in for {base}\n\
+                 hint: run `zz login --registry {base}` first"
+            )
+        })?;
+
+    // Payload: tarball bytes (base64) + manifest metadata.
+    let bytes = std::fs::read(&tarball).map_err(|e| format!("cannot read tarball: {e}"))?;
+    let sha256 = zz_pm::hash::hash_bytes(&bytes);
+    use base64::Engine as _;
+    let req = zz_pm::remote::PublishRequest {
+        name: manifest.package.name.clone(),
+        version: manifest.package.version.clone(),
+        tarball_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        tarball_sha256: sha256,
+        readme_md: std::fs::read_to_string(dir.join("README.md")).ok(),
+        deps: manifest
+            .dependencies
+            .iter()
+            .map(|(k, v)| (k.clone(), dep_spec_string(v)))
+            .collect(),
+        description: manifest.package.description.clone().unwrap_or_default(),
+        repo: manifest.package.repository.clone().unwrap_or_default(),
+        license: manifest.package.license.clone().unwrap_or_default(),
+    };
+
+    println!("uploading {}@{} to {base}...", req.name, req.version);
+    let resp = zz_pm::remote::RegistryClient::new(&base)
+        .publish(&token, &req)
+        .map_err(|e| e.to_string())?;
+    println!("published: {base}{}", resp.url);
+    if !resp.sha256.is_empty() {
+        println!("sha256: {}", resp.sha256);
+    }
     Ok(())
 }
 
-/// Handle `zz update [pkg]`.
-/// Handle `zz update [pkg]`.
+/// Stringify a dep spec for the registry `deps` table.
+fn dep_spec_string(spec: &zz_pm::manifest::DepSpec) -> String {
+    match spec {
+        zz_pm::manifest::DepSpec::Version(v) => v.clone(),
+        zz_pm::manifest::DepSpec::Git(g) => format!("git+{}#{}", g.git, g.rev),
+        zz_pm::manifest::DepSpec::Path(p) => format!("path:{}", p.path),
+    }
+}
+
+/// Handle `zz update [pkg] [--registry URL]`.
 ///
-/// Amendment 8: In M2, `zz update` only re-resolves floating git refs
-/// (branch/tag → new resolved commit). Plain-version deps are a no-op
-/// until a real registry exists.
+/// Re-resolves floating refs: git branch/tags → new commits, registry
+/// requirements → newest matching versions. Path deps are pinned by
+/// content and never updated.
 pub fn update(args: &[String]) -> Result<(), String> {
     let dir = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
     let toml_path = dir.join("zz.toml");
@@ -425,57 +695,28 @@ pub fn update(args: &[String]) -> Result<(), String> {
     let lock_path = dir.join("zz.lock");
     let lockfile = zz_pm::lock::Lockfile::load(&lock_path).ok();
 
-    // Check if there are any git deps to update
-    let has_git_deps = manifest
-        .dependencies
-        .values()
-        .any(|s| matches!(s, zz_pm::manifest::DepSpec::Git(_)));
-
-    let has_plain_deps = manifest
-        .dependencies
-        .values()
-        .any(|s| matches!(s, zz_pm::manifest::DepSpec::Version(_)));
-
-    if has_plain_deps {
-        println!("hint: update only re-resolves git dependencies; no registry configured yet");
-    }
-
-    if !has_git_deps {
-        println!("no git dependencies to update");
-        return Ok(());
-    }
-
-    // Filter to requested packages (or all git deps)
+    // Filter to requested packages (or everything).
     let requested: Vec<&str> = args
         .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
+    let wanted = |name: &str| requested.is_empty() || requested.contains(&name);
 
-    let to_update: Vec<_> = manifest
+    let mut lock = lockfile.unwrap_or_default();
+    let mut changed = false;
+
+    // --- Git deps: re-resolve floating refs to new commits. ---
+    let to_update_git: Vec<_> = manifest
         .dependencies
         .iter()
-        .filter(|(name, spec)| {
-            if !matches!(spec, zz_pm::manifest::DepSpec::Git(_)) {
-                return false;
-            }
-            if requested.is_empty() {
-                return true;
-            }
-            requested.contains(&name.as_str())
-        })
+        .filter(|(name, spec)| matches!(spec, zz_pm::manifest::DepSpec::Git(_)) && wanted(name))
         .collect();
 
-    if to_update.is_empty() {
-        println!("no git dependencies match the filter");
-        return Ok(());
+    if !to_update_git.is_empty() {
+        println!("updating {} git dependencies...", to_update_git.len());
     }
-
-    println!("updating {} git dependencies...", to_update.len());
-
-    // Re-resolve each git dep to get latest commit for its ref
-    let mut lock = lockfile.unwrap_or_default();
-    for (name, spec) in &to_update {
+    for (name, spec) in &to_update_git {
         if let zz_pm::manifest::DepSpec::Git(git_dep) = spec {
             println!("  {} @ {}...", name, git_dep.rev);
             match zz_pm::git::resolve_rev(&git_dep.git, &git_dep.rev) {
@@ -487,6 +728,7 @@ pub fn update(args: &[String]) -> Result<(), String> {
                         hash: String::new(),
                         commit: Some(commit.clone()),
                     });
+                    changed = true;
                     println!("    → {}", &commit[..8.min(commit.len())]);
                 }
                 Err(e) => {
@@ -496,15 +738,95 @@ pub fn update(args: &[String]) -> Result<(), String> {
         }
     }
 
+    // --- Registry deps: newest version still satisfying each requirement. ---
+    let to_update_reg: Vec<_> = manifest
+        .dependencies
+        .iter()
+        .filter(|(name, spec)| matches!(spec, zz_pm::manifest::DepSpec::Version(_)) && wanted(name))
+        .collect();
+
+    if !to_update_reg.is_empty() {
+        let base = registry_base_from(args);
+        let client = zz_pm::remote::RegistryClient::new(&base);
+        println!("updating {} registry dependencies...", to_update_reg.len());
+        for (name, spec) in &to_update_reg {
+            if let zz_pm::manifest::DepSpec::Version(req) = spec {
+                let current = lock
+                    .find(name)
+                    .map(|l| l.version.clone())
+                    .unwrap_or_default();
+                match client.fetch_metadata(name) {
+                    Ok(info) => match zz_pm::remote::pick_version(&info.metadata.versions, req) {
+                        Ok(picked) => {
+                            if picked != current {
+                                let expected = zz_pm::remote::expected_sha(&info, &picked);
+                                lock.upsert(zz_pm::lock::LockedDep {
+                                    name: (*name).clone(),
+                                    version: picked.clone(),
+                                    source: format!("registry+{base}/{name}#{picked}"),
+                                    hash: expected,
+                                    commit: None,
+                                });
+                                changed = true;
+                                println!("    {name}: {current} → {picked}");
+                            } else {
+                                println!("    {name} is up to date ({current})");
+                            }
+                        }
+                        Err(e) => eprintln!("    warning: {e}"),
+                    },
+                    Err(e) => eprintln!("    warning: failed to check {name}: {e}"),
+                }
+            }
+        }
+        println!("hint: run `zz install` to fetch and link");
+    }
+
+    if !changed {
+        if to_update_git.is_empty() && to_update_reg.is_empty() {
+            println!("nothing to update (no git or registry dependencies match)");
+        } else {
+            println!("already up to date");
+        }
+        return Ok(());
+    }
+
     lock.set_manifest_deps_hash(manifest.deps_hash());
     lock.save(&lock_path)?;
     println!("lockfile updated: zz.lock");
+    println!("hint: run `zz install` to fetch and link");
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Registry base URL: `--registry URL` flag wins, then `ZZ_REGISTRY`,
+/// then the default (see `zz_pm::remote::registry_base`).
+fn registry_base_from(args: &[String]) -> String {
+    if let Some(flag) = parse_flag_value(args, "--registry") {
+        return flag.trim_end_matches('/').to_string();
+    }
+    zz_pm::remote::registry_base()
+}
+
+/// Build `InitOptions` from `zz init` / `zz new` flags.
+/// `--author` is repeatable and also splits on commas.
+fn init_options(args: &[String]) -> zz_pm::manifest::InitOptions {
+    let authors: Vec<String> = parse_flag_values(args, "--author")
+        .iter()
+        .flat_map(|s| s.split(','))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    zz_pm::manifest::InitOptions {
+        authors,
+        description: parse_flag_value(args, "--description"),
+        license: parse_flag_value(args, "--license"),
+        repository: parse_flag_value(args, "--repo"),
+    }
+}
 
 /// Parse a `--flag value` or `--flag=value` CLI flag.
 fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
@@ -520,6 +842,22 @@ fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Parse all values of a repeatable `--flag value` / `--flag=value` CLI flag.
+fn parse_flag_values(args: &[String], flag: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut iter = args.iter().peekable();
+    while let Some(a) = iter.next() {
+        if let Some(v) = a.strip_prefix(&format!("{flag}=")) {
+            out.push(v.to_string());
+        } else if a == flag {
+            if let Some(v) = iter.next() {
+                out.push(v.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Parse `name@version` or just `name`.

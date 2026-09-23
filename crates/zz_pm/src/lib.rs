@@ -23,6 +23,9 @@
 //!
 //! Local alias modules:
 //! - `registry` — ~/.zz/registry.toml name → {path|git} aliases (no server)
+//!
+//! Remote registry modules:
+//! - `remote` — HTTP client for the hosted registry (search/info/download/publish)
 
 pub mod auth;
 pub mod build_cache;
@@ -37,4 +40,5 @@ pub mod manifest;
 pub mod paths;
 pub mod publish;
 pub mod registry;
+pub mod remote;
 pub mod resolve;

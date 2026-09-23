@@ -177,6 +177,69 @@ pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Resolve a registry/git dependency's package directory for `import <dep>`.
+/// Unlike [`resolve_plugin_pkg`], no `plugin.zzi` is required: plain-ZZ
+/// packages resolve to their entry file (`src/main.zz`, `src/<dep>.zz`,
+/// or `<dep>.zz`). Prefers the `vendor/<dep>` link when present, else the
+/// CAS entry recorded in `zz.lock`. Returns the ENTRY FILE path.
+fn resolve_registry_entry(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
+    let manifest = zz_pm::manifest::Manifest::load(&project_root.join("zz.toml")).ok()?;
+    let lock = zz_pm::lock::Lockfile::load(&project_root.join("zz.lock")).ok()?;
+    let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
+    // Path deps resolve against the manifest path (same as plugins).
+    if locked.source == "path" {
+        match manifest.dependencies.get(dep_name) {
+            Some(zz_pm::manifest::DepSpec::Path(p)) => {
+                return entry_in(&project_root.join(&p.path), dep_name);
+            }
+            _ => return None,
+        }
+    }
+    // Registry/git deps: the vendor link first, CAS entry as fallback.
+    let linked = project_root.join("vendor").join(dep_name);
+    if linked.exists() {
+        if let Some(entry) = entry_in(&linked, dep_name) {
+            return Some(entry);
+        }
+    }
+    entry_in(&zz_pm::paths::cas_entry(&locked.hash), dep_name)
+}
+
+/// Entry-file convention inside a dependency package directory.
+fn entry_in(pkg_dir: &Path, dep_name: &str) -> Option<PathBuf> {
+    [
+        pkg_dir.join("src").join("main.zz"),
+        pkg_dir.join("src").join(format!("{dep_name}.zz")),
+        pkg_dir.join(format!("{dep_name}.zz")),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
+}
+
+/// All ancestor project roots (nearest first) for `import <dep>` lookup.
+/// The nearest root of a vendored file is the dependency itself (which
+/// has no lock); outer roots must also be tried for transitive deps.
+fn ancestor_roots(start: &Path) -> Vec<PathBuf> {
+    let canonical = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    let mut dir = if canonical.is_file() {
+        match canonical.parent() {
+            Some(p) => p.to_path_buf(),
+            None => return Vec::new(),
+        }
+    } else {
+        canonical
+    };
+    let mut roots = Vec::new();
+    loop {
+        if dir.join("zz.toml").exists() {
+            roots.push(dir.clone());
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    roots
+}
 /// Resolve a plugin dependency's package directory for `import <dep>`.
 /// Returns the package dir only when the dep exists in `zz.lock` and
 /// ships a `plugin.zzi` manifest.
@@ -392,6 +455,29 @@ impl Loader {
                 if let Some(root) = find_project_root(&canon) {
                     if let Some(pkg_dir) = resolve_plugin_pkg(&root, &imp[0]) {
                         self.import_plugin(&imp[0], imp_alias.as_deref(), &pkg_dir, path, &source);
+                        continue;
+                    }
+                }
+                // Registry/git dependency import (`import e2epkg`): plain-ZZ
+                // package, entry file loaded under the dep namespace (or
+                // alias). Every ancestor root is tried so transitive deps
+                // (imported from inside vendor/) resolve against the outer
+                // project lock.
+                {
+                    let mut resolved = None;
+                    for root in ancestor_roots(&canon) {
+                        if let Some(entry) = resolve_registry_entry(&root, &imp[0]) {
+                            resolved = Some(entry);
+                            break;
+                        }
+                    }
+                    if let Some(entry) = resolved {
+                        let alias = imp_alias.clone().unwrap_or_else(|| imp[0].clone());
+                        self.load_file(&entry, Some(alias.as_str()))?;
+                        if is_selective {
+                            self.selective_imports
+                                .push((entry, imp.clone(), imp_items, false));
+                        }
                         continue;
                     }
                 }

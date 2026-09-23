@@ -121,6 +121,7 @@ impl Unifier {
             (Type::Range(x), Type::Range(y)) => self.unify(&x, &y),
             (Type::Json, Type::Json)
             | (Type::Db, Type::Db)
+            | (Type::Bytes, Type::Bytes)
             | (Type::HttpServer, Type::HttpServer)
             | (Type::TcpStream, Type::TcpStream)
             | (Type::TcpListener, Type::TcpListener)

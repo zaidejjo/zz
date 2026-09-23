@@ -1,0 +1,33 @@
+# Pre-built `zz` toolchain image: release CLI binary on slim Debian.
+#
+# Published to GHCR by .github/workflows/docker-publish.yml as
+#   ghcr.io/<owner>/zz:latest   (main branch)
+#   ghcr.io/<owner>/zz:vX.Y.Z   (release tags)
+# `<owner>` follows the repo automatically (`zaidejjo` today,
+# `zz-language` after the move) — no hardcoded owner anywhere.
+#
+# Downstream services (zz-registry) use this as a base image instead of
+# compiling the toolchain themselves:
+#   FROM ghcr.io/<owner>/zz:latest AS tool
+#
+# Local build: docker build -f docker/Dockerfile.toolchain -t zz:local .
+
+FROM rust:1-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang pkg-config libssl-dev git binutils && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+# Locked, release profile: the exact binary CI tested. Stripped: debug
+# symbols stay in the workspace profile (profiling-friendly) but have no
+# place in a production image (~230MB saved).
+RUN cargo install --locked --path crates/zz_cli \
+        --root /opt/zz --profile release \
+    && strip /opt/zz/bin/zz \
+    && /opt/zz/bin/zz --version
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+COPY --from=build /opt/zz/bin/zz /usr/local/bin/zz
+ENTRYPOINT ["zz"]
+CMD ["--version"]

@@ -5,12 +5,20 @@
 //! [package]
 //! name = "my_app"
 //! version = "0.1.0"
+//! authors = ["Alice"]
+//! description = "Does things"
+//! license = "MIT"
+//! repository = "https://github.com/user/my_app"
 //!
 //! [dependencies]
 //! foo = "^1.2.0"
 //! bar = { version = "2.0", git = "https://github.com/user/repo", rev = "main" }
 //! baz = { path = "../baz" }
 //! ```
+//!
+//! The `authors`, `description`, `license`, and `repository` keys are
+//! optional: manifests written before they existed still parse, and
+//! `save()` omits them while empty so diffs stay minimal.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -36,6 +44,10 @@ impl Default for Manifest {
             package: PackageSpec {
                 name: "untitled".to_string(),
                 version: "0.1.0".to_string(),
+                authors: Vec::new(),
+                description: None,
+                license: None,
+                repository: None,
             },
             dependencies: HashMap::new(),
             native: None,
@@ -44,10 +56,38 @@ impl Default for Manifest {
 }
 
 /// Package metadata.
+///
+/// `authors`, `description`, `license`, and `repository` are optional so
+/// pre-enrichment manifests keep parsing; `save()` skips them while empty.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PackageSpec {
     pub name: String,
     pub version: String,
+    /// e.g. `authors = ["Alice <alice@example.com>"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+    /// Short human-readable summary (sent as `description` on publish).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// SPDX identifier (e.g. `"MIT"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    /// Source URL (sent as `repo` on publish).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+}
+
+/// Options for scaffolding a new manifest (`zz init` / `zz new` flags).
+#[derive(Debug, Clone, Default)]
+pub struct InitOptions {
+    /// `--author` (repeatable, comma-separated values also split).
+    pub authors: Vec<String>,
+    /// `--description`.
+    pub description: Option<String>,
+    /// `--license` (e.g. `MIT`).
+    pub license: Option<String>,
+    /// `--repo`.
+    pub repository: Option<String>,
 }
 
 /// Native build configuration for packages that provide C/Rust extensions.
@@ -137,10 +177,19 @@ impl Manifest {
 
     /// Create a minimal init manifest in the current directory.
     pub fn create_init(dir: &Path, name: &str) -> Result<Self, String> {
+        Self::create_init_opts(dir, name, &InitOptions::default())
+    }
+
+    /// Create an init manifest with optional enriched metadata.
+    pub fn create_init_opts(dir: &Path, name: &str, opts: &InitOptions) -> Result<Self, String> {
         let manifest = Manifest {
             package: PackageSpec {
                 name: name.to_string(),
                 version: "0.1.0".to_string(),
+                authors: opts.authors.clone(),
+                description: opts.description.clone(),
+                license: opts.license.clone(),
+                repository: opts.repository.clone(),
             },
             dependencies: HashMap::new(),
             native: None,
@@ -189,6 +238,16 @@ impl Manifest {
         name: &str,
         template: Option<&str>,
     ) -> Result<PathBuf, String> {
+        Self::create_new_opts(parent_dir, name, template, &InitOptions::default())
+    }
+
+    /// Create a new project directory with enriched manifest metadata.
+    pub fn create_new_opts(
+        parent_dir: &Path,
+        name: &str,
+        template: Option<&str>,
+        opts: &InitOptions,
+    ) -> Result<PathBuf, String> {
         let project_dir = parent_dir.join(name);
         std::fs::create_dir_all(&project_dir)
             .map_err(|e| format!("cannot create {}: {e}", project_dir.display()))?;
@@ -196,7 +255,7 @@ impl Manifest {
             .map_err(|e| format!("cannot create src/: {e}"))?;
 
         // Write manifest
-        Self::create_init(&project_dir, name)?;
+        Self::create_init_opts(&project_dir, name, opts)?;
 
         // Write starter source
         let main_content = match template {
@@ -236,6 +295,10 @@ mod tests {
             package: PackageSpec {
                 name: "test_pkg".into(),
                 version: "1.0.0".into(),
+                authors: Vec::new(),
+                description: None,
+                license: None,
+                repository: None,
             },
             dependencies: {
                 let mut d = HashMap::new();
@@ -409,6 +472,82 @@ foo = "^1.0"
         let d = tmp_dir("init_gi");
         Manifest::create_init(&d, "myapp").unwrap();
         assert!(d.join(".gitignore").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn metadata_round_trip() {
+        let m = Manifest {
+            package: PackageSpec {
+                name: "enriched".into(),
+                version: "2.3.4".into(),
+                authors: vec!["Alice <alice@example.com>".into()],
+                description: Some("Does things".into()),
+                license: Some("MIT".into()),
+                repository: Some("https://github.com/user/enriched".into()),
+            },
+            dependencies: HashMap::new(),
+            native: None,
+        };
+
+        let d = tmp_dir("meta_rt");
+        let path = d.join("zz.toml");
+        m.save(&path).unwrap();
+        let loaded = Manifest::load(&path).unwrap();
+        assert_eq!(m, loaded);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn legacy_manifest_without_metadata_parses() {
+        // Manifests written before enrichment have no new keys.
+        let m = Manifest::parse(
+            r#"
+[package]
+name = "legacy"
+version = "0.1.0"
+
+[dependencies]
+foo = "^1.0"
+"#,
+        )
+        .unwrap();
+        assert_eq!(m.package.name, "legacy");
+        assert!(m.package.authors.is_empty());
+        assert_eq!(m.package.description, None);
+        assert_eq!(m.package.license, None);
+        assert_eq!(m.package.repository, None);
+    }
+
+    #[test]
+    fn save_omits_empty_metadata() {
+        // Empty metadata stays out of the TOML so old diffs stay minimal.
+        let m = Manifest::default();
+        let d = tmp_dir("meta_omit");
+        let path = d.join("zz.toml");
+        m.save(&path).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("authors"));
+        assert!(!content.contains("description"));
+        assert!(!content.contains("license"));
+        assert!(!content.contains("repository"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn create_init_opts_writes_metadata() {
+        let d = tmp_dir("init_opts");
+        let opts = InitOptions {
+            authors: vec!["Bob".into()],
+            description: Some("A tool".into()),
+            license: Some("MIT".into()),
+            repository: Some("https://example.com/bob/tool".into()),
+        };
+        let m = Manifest::create_init_opts(&d, "tool", &opts).unwrap();
+        assert_eq!(m.package.authors, vec!["Bob".to_string()]);
+        assert_eq!(m.package.description.as_deref(), Some("A tool"));
+        let reloaded = Manifest::load(&d.join("zz.toml")).unwrap();
+        assert_eq!(m, reloaded);
         let _ = fs::remove_dir_all(&d);
     }
 }

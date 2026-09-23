@@ -1,0 +1,93 @@
+name: docker-publish
+
+# Publishes the pre-built `zz` toolchain image to GHCR. Image name follows
+# the repo owner automatically (`github.repository_owner`), so moving
+# zaidejjo/zz -> zz-language/zz needs zero workflow changes — retagging
+# happens through docker/metadata-action.
+#
+# Triggers: pushes to main, version tags (v*), or manual dispatch.
+# Flow: standard checks + full test suite FIRST; only a green tree is
+# packaged and pushed.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  # Owner-agnostic: resolves to `zaidejjo` now, `zz-language` after the move.
+  IMAGE_NAME: ${{ github.repository_owner }}/zz
+
+jobs:
+  checks:
+    name: checks + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt check
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        run: cargo test --all
+
+  build-push:
+    name: build + push toolchain image
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # main branch -> :latest
+            type=raw,value=latest,enable={{is_default_branch}}
+            # git tags v1.2.3 -> :1.2.3, :1.2, :1, :v1.2.3
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            # every build traceable to its commit
+            type=sha,prefix=sha-,format=short
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # GITHUB_TOKEN gets packages:write from the job permissions above.
+          # No long-lived secret needed. For a PRIVATE package, consumers
+          # (e.g. Render) need a classic PAT with read:packages instead.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.toolchain
+          # linux/arm64 covers Apple-silicon dev machines; amd64 is what
+          # Render runs. Drop an arch here to halve build minutes.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

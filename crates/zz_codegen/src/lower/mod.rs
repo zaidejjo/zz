@@ -159,6 +159,25 @@ fn count_allocating_in_expr(e: &zz_hir::Expr) -> usize {
 }
 
 impl Lowerer {
+    /// True only for real `impl` methods (`{Type}.{method}` where the first
+    /// param is exactly that struct type). A free function that merely
+    /// TAKES a struct first (e.g. `mint_token(gu: GhUser)`) must use the
+    /// plain `(args, argc)` shape — the old first-param-is-struct heuristic
+    /// gave it a `(self, args, argc)` declaration with a 2-argument call.
+    pub(super) fn is_impl_method(&self, fname: &str) -> bool {
+        let Some(sig) = self.tp.funcs.get(fname) else {
+            return false;
+        };
+        let Some((_, first)) = sig.params.first() else {
+            return false;
+        };
+        let zz_checker::Type::Struct(sname) = first else {
+            return false;
+        };
+        let method = fname.rsplit('.').next().unwrap_or(fname);
+        fname == format!("{sname}.{method}")
+    }
+
     pub fn lower(&self) -> LoweredC {
         let mut funcs = String::new();
         let mut body = String::new();
@@ -300,9 +319,8 @@ impl Lowerer {
         // prototype for a same-TU `static` function.
         //
         // Impl methods have a different signature: they take a struct
-        // pointer as the first arg (the `self` receiver), so the prototype
-        // shape depends on the first param's type. Detect by inspecting
-        // `tp.funcs` for the first param being a `Type::Struct`.
+        // pointer as the first arg (the `self` receiver). Name-shape
+        // checked (a free function taking a struct first is NOT a method).
         let mut forward_decls = String::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for fname in &self.reachable_funcs {
@@ -327,6 +345,7 @@ impl Lowerer {
                 .get(fname)
                 .and_then(|sig| sig.params.first().map(|(_, t)| t.clone()))
                 .filter(|t| matches!(t, zz_checker::Type::Struct(_)))
+                .filter(|_| self.is_impl_method(fname))
                 .map(|t| self.type_to_c(&t));
             let proto = match first_struct_c {
                 Some(sct) => format!(

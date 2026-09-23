@@ -12,13 +12,9 @@ impl Lowerer {
         //     The struct-typed `self` is passed by pointer so unboxed
         //     structs (no `zz_value` overhead) are passed efficiently and
         //     field access in the body lowers to raw C `(self).field`.
-        let is_impl_method = self
-            .tp
-            .funcs
-            .get(fname)
-            .and_then(|sig| sig.params.first().map(|(_, t)| t.clone()))
-            .map(|t| matches!(&t, zz_checker::Type::Struct(_)))
-            .unwrap_or(false);
+        // `is_impl_method` requires the `{Type}.{method}` name shape, not
+        // just a struct first param (free functions take structs too).
+        let is_impl_method = self.is_impl_method(fname);
         let cname = format!("zz_fn_{}", mangle(fname));
         let mut o = String::new();
         let first_struct_type = if is_impl_method {

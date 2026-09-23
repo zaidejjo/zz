@@ -10,8 +10,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize},
     Arc, Condvar, Mutex,
 };
-use zz_frontend::ast::{Block, Expr, Param};
-use zz_frontend::span::Span;
+use zz_frontend::ast::{Expr, Param};
 
 use crate::env::EnvLink;
 use crate::lf_chan::LfRing;
@@ -483,10 +482,7 @@ pub fn snapshot_funcs(funcs: &HashMap<String, FuncValue>) -> HashMap<String, Fun
             name.clone(),
             FuncValue {
                 params: fv.params.clone(),
-                body: Expr::Block(Block {
-                    stmts: Vec::new(),
-                    span: Span::new(0, 0),
-                }),
+                body: fv.body.clone(),
                 env: new_env,
                 chunk: fv.chunk.clone(),
             },
@@ -517,10 +513,7 @@ pub fn detach_cached_funcs(cached: &HashMap<String, FuncValue>) -> HashMap<Strin
             name.clone(),
             FuncValue {
                 params: fv.params.clone(),
-                body: Expr::Block(Block {
-                    stmts: Vec::new(),
-                    span: Span::new(0, 0),
-                }),
+                body: fv.body.clone(),
                 env: new_env,
                 chunk: fv.chunk.clone(),
             },
@@ -680,19 +673,42 @@ pub fn detach_cached_subset(
 fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
     match v {
         Value::Func(fv) => {
-            // Use pointer address as the dedup key to prevent infinite recursion
-            // on cyclic closure references.
-            let key = fv.env.id();
+            // Dedup key = env identity + function identity, where function
+            // identity is the compiled chunk pointer when present, else
+            // params/body content. Rationale:
+            // - Keying by env id alone collides: every top-level function
+            //   shares one env, so all siblings returned the FIRST-cloned
+            //   function (wrong arity/bodies after http.route snapshots).
+            // - Keying by FuncValue address never hits: each clone gets a
+            //   fresh Box, so cyclic closures regressed forever (stack
+            //   overflow).
+            // - Bodies alone don't discriminate either: compiled functions
+            //   (`Op::MakeFunc`) carry an EMPTY body with behavior in
+            //   `chunk`, so all same-arity siblings looked identical.
+            // The chunk Arc is shared (not re-allocated) by clones, so its
+            // pointer is stable; env links are Rc-shared the same way. A
+            // true cycle re-presents the identical key and hits the
+            // placeholder below, terminating the walk.
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            use std::sync::Arc;
+            let mut h = DefaultHasher::new();
+            fv.env.id().hash(&mut h);
+            match &fv.chunk {
+                Some(c) => Arc::as_ptr(c).hash(&mut h),
+                None => {
+                    format!("{:?}", fv.params).hash(&mut h);
+                    format!("{:?}", fv.body).hash(&mut h);
+                }
+            }
+            let key = h.finish() as usize;
             if let Some(cloned) = seen.get(&key) {
                 return cloned.clone();
             }
             // Seed with a placeholder so recursive calls return the same Arc.
             let placeholder = FuncValue {
                 params: fv.params.clone(),
-                body: Expr::Block(Block {
-                    stmts: Vec::new(),
-                    span: Span::new(0, 0),
-                }),
+                body: fv.body.clone(),
                 env: EnvLink::new(),
                 chunk: fv.chunk.clone(),
             };
@@ -708,10 +724,7 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
             let new_env = EnvLink::Owned(Rc::new(RefCell::new(fresh)));
             let cloned = Value::Func(Box::new(FuncValue {
                 params: fv.params,
-                body: Expr::Block(Block {
-                    stmts: Vec::new(),
-                    span: Span::new(0, 0),
-                }),
+                body: fv.body,
                 env: new_env,
                 chunk: fv.chunk,
             }));
@@ -1151,5 +1164,57 @@ mod tests {
         assert_ne!(v, other);
         assert_ne!(v, Value::Int(1));
         assert!(zz_native_rt::drop_handle(h.id));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use zz_frontend::span::Span as FSpan;
+
+    fn str_body(s: &str) -> Expr {
+        Expr::Str {
+            value: s.to_string(),
+            span: FSpan::new(0, 0),
+        }
+    }
+
+    fn mk_func(env: &EnvLink, body: &str) -> Value {
+        Value::Func(Box::new(FuncValue {
+            params: vec![],
+            body: str_body(body),
+            env: env.clone(),
+            chunk: None,
+        }))
+    }
+
+    #[test]
+    fn sibling_funcs_survive_snapshot_distinct() {
+        // Two module funcs sharing one env (the top-level norm).
+        let env = EnvLink::new();
+        let snap = {
+            let mut m = HashMap::new();
+            m.insert("help.first".to_string(), mk_func(&env, "one"));
+            m.insert("help.second".to_string(), mk_func(&env, "two"));
+            m
+        };
+        // Simulate flatten output fed through one shared memo.
+        let mut seen: HashMap<usize, Value> = HashMap::new();
+        let c1 = deep_clone_value(snap["help.first"].clone(), &mut seen);
+        let c2 = deep_clone_value(snap["help.second"].clone(), &mut seen);
+        let body_str = |v: &Value| match v {
+            Value::Func(fv) => format!("{:?}", fv.body),
+            other => panic!("not a func: {other:?}"),
+        };
+        assert!(
+            body_str(&c1).contains("one"),
+            "c1 lost body: {}",
+            body_str(&c1)
+        );
+        assert!(
+            body_str(&c2).contains("two"),
+            "c2 lost body: {}",
+            body_str(&c2)
+        );
     }
 }

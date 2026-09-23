@@ -1169,6 +1169,8 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
             return Err(format!("stdlib init error: {e:?}"));
         }
     }
+    // Canonical `std.*` aliases for pure-ZZ helpers.
+    zz_stdlib::define_canonical_purezz_aliases(&mut interp.env, &mut interp.funcs);
 
     {
         let snap = interp.env.flatten();
@@ -1501,7 +1503,13 @@ fn collect_zz_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String
         let path = entry.path();
         if path.is_dir() {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with('.') || name == "target" {
+                // Skip VCS, build outputs, and linked dependencies: `vendor/`
+                // holds symlinks into the CAS (often self-referential via
+                // path deps), which would recurse forever. Matches the
+                // skip sets in `zz_pm::hash` / `zz_pm::cas` and the
+                // scaffolded `.gitignore` (vendor/, build/, src/bin/).
+                if name.starts_with('.') || name == "target" || name == "vendor" || name == "build"
+                {
                     continue;
                 }
             }

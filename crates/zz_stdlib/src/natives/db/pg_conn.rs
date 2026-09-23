@@ -1,13 +1,15 @@
 //! Blocking PostgreSQL connection over the v3.0 wire protocol.
 //!
 //! Design notes (matches the established `net` module pattern):
-//! - Plain blocking `TcpStream` with a connect timeout and generous
-//!   read/write timeouts. There is no reactor in the ZZ runtime; blocking
-//!   natives are safe inside `task.spawn` workers (one OS thread each),
-//!   which is how concurrent PG queries compose.
+//! - Blocking `TcpStream` (optionally upgraded to TLS via rustls) with a
+//!   connect timeout and generous read/write timeouts. There is no reactor
+//!   in the ZZ runtime; blocking natives are safe inside `task.spawn`
+//!   workers (one OS thread each), which is how concurrent PG queries compose.
+//! - `sslmode`: `disable` (default, plaintext), `prefer` (TLS when the
+//!   server answers `S`, else plaintext), `require` (TLS or fail; server
+//!   certificate verified against webpki roots). Supabase needs `require`.
 //! - Authentication: trust (`AuthenticationOk`), cleartext, MD5, and
-//!   SCRAM-SHA-256. GSS/SSPI/Kerberos and SSL-request upgrades report a
-//!   clear error (this driver speaks plaintext protocol 3.0 only).
+//!   SCRAM-SHA-256. GSS/SSPI/Kerberos report a clear error.
 //! - Queries use the extended protocol (`Parse`/`Bind`/`Describe`/
 //!   `Execute`/`Sync`) in a single batch. Parameters travel in text
 //!   format; results are requested in text format.
@@ -16,6 +18,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::pg_wire::{
@@ -52,6 +55,33 @@ pub struct ConnInfo {
     pub password: String,
     pub dbname: String,
     pub connect_timeout: Duration,
+    pub sslmode: SslMode,
+}
+
+/// TLS policy for the connection (libpq `sslmode` names).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SslMode {
+    /// Plaintext (default — preserves historical driver behavior).
+    #[default]
+    Disable,
+    /// TLS when the server answers `S` to SSLRequest, else plaintext.
+    Prefer,
+    /// TLS or fail. Certificates verify against webpki roots.
+    /// Supabase (`db.*.supabase.co`) requires this.
+    Require,
+}
+
+impl SslMode {
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "disable" => Ok(Self::Disable),
+            "prefer" => Ok(Self::Prefer),
+            "require" => Ok(Self::Require),
+            other => Err(format!(
+                "sslmode `{other}` is not supported by this driver (want disable|prefer|require)"
+            )),
+        }
+    }
 }
 
 impl ConnInfo {
@@ -63,6 +93,7 @@ impl ConnInfo {
             password: String::new(),
             dbname: String::new(),
             connect_timeout: Duration::from_secs(10),
+            sslmode: SslMode::Disable,
         };
         let s = s.trim();
         if s.starts_with("postgres://") || s.starts_with("postgresql://") {
@@ -149,12 +180,9 @@ impl ConnInfo {
                             .map_err(|_| "invalid connect_timeout in postgres URL".to_string())?;
                         self.connect_timeout = Duration::from_secs(secs.max(1));
                     }
-                    "sslmode" if v != "disable" && v != "prefer" => {
-                        return Err(format!(
-                            "sslmode `{v}` is not supported by this driver (plaintext only)"
-                        ));
+                    "sslmode" => {
+                        self.sslmode = SslMode::parse(v)?;
                     }
-                    "sslmode" => {}
                     _ => {}
                 }
             }
@@ -179,6 +207,9 @@ impl ConnInfo {
                         .parse()
                         .map_err(|_| format!("invalid connect_timeout `{v}`"))?;
                     self.connect_timeout = Duration::from_secs(secs.max(1));
+                }
+                "sslmode" => {
+                    self.sslmode = SslMode::parse(&v)?;
                 }
                 _ => {}
             }
@@ -293,10 +324,106 @@ fn gen_nonce() -> String {
     s
 }
 
+/// Transport under a live connection: plaintext or rustls TLS.
+/// `Read`/`Write` delegate so the wire protocol above is transport-blind.
+#[derive(Debug)]
+enum PgStream {
+    Plain(TcpStream),
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
+}
+
+impl Read for PgStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(s) => s.read(buf),
+            Self::Tls(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for PgStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(s) => s.write(buf),
+            Self::Tls(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(s) => s.flush(),
+            Self::Tls(s) => s.flush(),
+        }
+    }
+}
+
+/// SSLRequest payload: `Int32(8) Int32(80877103)`.
+const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xD2, 0x16, 0x2F];
+
+/// TLS client config: webpki roots, TLS 1.2/1.3, ring provider.
+fn tls_config() -> Result<Arc<rustls::ClientConfig>, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let provider = rustls::crypto::ring::default_provider();
+    let config = rustls::ClientConfig::builder_with_provider(provider.into())
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(|e| format!("pg.tls: unsupported protocol versions: {e}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
+/// Upgrade `stream` to TLS after the server answered `S`.
+fn tls_upgrade(stream: TcpStream, host: &str) -> Result<PgStream, String> {
+    tls_upgrade_with(stream, host, tls_config()?)
+}
+
+/// Upgrade with an explicit client config (tests inject a loopback trust root).
+fn tls_upgrade_with(
+    stream: TcpStream,
+    host: &str,
+    config: Arc<rustls::ClientConfig>,
+) -> Result<PgStream, String> {
+    let server_name = rustls_pki_types::ServerName::try_from(host.to_string())
+        .map_err(|_| format!("pg.tls: invalid server name `{host}`"))?;
+    let conn = rustls::ClientConnection::new(config, server_name)
+        .map_err(|e| format!("pg.tls: cannot start handshake: {e}"))?;
+    let mut tls = rustls::StreamOwned::new(conn, stream);
+    tls.flush()
+        .map_err(|e| format!("pg.tls: handshake failed for `{host}`: {e}"))?;
+    Ok(PgStream::Tls(Box::new(tls)))
+}
+
+/// Perform the Postgres SSL negotiation dance on a fresh `TcpStream`.
+fn negotiate_tls(mut stream: TcpStream, info: &ConnInfo) -> Result<PgStream, String> {
+    if info.sslmode == SslMode::Disable {
+        return Ok(PgStream::Plain(stream));
+    }
+    stream
+        .write_all(&SSL_REQUEST)
+        .map_err(|e| format!("pg.connect: SSLRequest write failed: {e}"))?;
+    let mut verdict = [0u8; 1];
+    stream
+        .read_exact(&mut verdict)
+        .map_err(|e| format!("pg.connect: no SSL verdict from server (is this Postgres?): {e}"))?;
+    match verdict[0] {
+        b'S' => tls_upgrade(stream, &info.host),
+        b'N' if info.sslmode == SslMode::Prefer => Ok(PgStream::Plain(stream)),
+        b'N' => Err(
+            "pg.connect: server refused TLS but `sslmode=require` (Supabase and \
+             managed Postgres always accept TLS — check host/port)"
+                .to_string(),
+        ),
+        other => Err(format!(
+            "pg.connect: invalid SSL verdict byte `{other}` (is this Postgres?)"
+        )),
+    }
+}
+
 /// A live PostgreSQL connection.
 #[derive(Debug)]
 pub struct PgConn {
-    stream: TcpStream,
+    stream: PgStream,
     /// Server parameters reported during startup (`server_version`, ...).
     pub params: ServerParams,
     /// Cancel key from the backend (for future `pg.cancel` support).
@@ -327,6 +454,7 @@ impl PgConn {
                         .set_read_timeout(Some(IO_TIMEOUT))
                         .and_then(|_| stream.set_write_timeout(Some(IO_TIMEOUT)))
                         .map_err(|e| format!("pg.connect: cannot set timeouts: {e}"))?;
+                    let stream = negotiate_tls(stream, info)?;
                     let mut conn = Self {
                         stream,
                         params: HashMap::new(),
@@ -697,6 +825,7 @@ mod tests {
             password: String::new(),
             dbname: "d".to_string(),
             connect_timeout: Duration::from_secs(5),
+            sslmode: SslMode::Disable,
         }
     }
 
@@ -981,5 +1110,134 @@ mod tests {
         let shared = Arc::clone(&conn);
         let t = std::thread::spawn(move || shared.lock().unwrap().exec("SELECT 1", &[]).unwrap());
         assert_eq!(t.join().unwrap(), 1);
+    }
+
+    // --- TLS (Registry V2 G2) ---
+
+    #[test]
+    fn sslmode_parses_url_and_kv() {
+        let info = ConnInfo::parse("postgres://u:p@h:5433/d?sslmode=require").unwrap();
+        assert_eq!(info.sslmode, SslMode::Require);
+        let info = ConnInfo::parse("host=h user=u sslmode=prefer").unwrap();
+        assert_eq!(info.sslmode, SslMode::Prefer);
+        let info = ConnInfo::parse("postgres://u@h/d").unwrap();
+        assert_eq!(info.sslmode, SslMode::Disable, "default stays plaintext");
+        assert!(ConnInfo::parse("postgres://u@h/d?sslmode=verify-full").is_err());
+        assert!(ConnInfo::parse("host=h sslmode=bogus").is_err());
+    }
+
+    /// Mock that asserts the 8-byte SSLRequest, then answers one verdict byte.
+    fn mock_ssl_verdict(verdict: u8) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut req = [0u8; 8];
+            s.read_exact(&mut req).unwrap();
+            assert_eq!(
+                req, SSL_REQUEST,
+                "client must open with SSLRequest before startup"
+            );
+            s.write_all(&[verdict]).unwrap();
+        });
+        addr
+    }
+
+    fn info_with_ssl(addr: std::net::SocketAddr, sslmode: SslMode) -> ConnInfo {
+        let mut info = info_for(addr);
+        info.sslmode = sslmode;
+        info
+    }
+
+    #[test]
+    fn ssl_refused_require_errors_prefer_falls_back() {
+        // `require` + `N` → hard error naming TLS.
+        let addr = mock_ssl_verdict(b'N');
+        let stream = std::net::TcpStream::connect(addr).unwrap();
+        let err = negotiate_tls(stream, &info_with_ssl(addr, SslMode::Require)).unwrap_err();
+        assert!(err.contains("refused TLS"), "{err}");
+
+        // `prefer` + `N` → plaintext stream; the handshake then proceeds
+        // normally against a mock speaking startup.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut req = [0u8; 8];
+            s.read_exact(&mut req).unwrap();
+            s.write_all(b"N").unwrap();
+            read_startup(&mut s);
+            auth_ok(&mut s);
+            ready(&mut s);
+        });
+        let stream = std::net::TcpStream::connect(addr).unwrap();
+        let negotiated = negotiate_tls(stream, &info_with_ssl(addr, SslMode::Prefer)).unwrap();
+        assert!(
+            matches!(negotiated, PgStream::Plain(_)),
+            "prefer + N must fall back to plaintext"
+        );
+    }
+
+    #[test]
+    fn ssl_garbage_verdict_errors() {
+        let addr = mock_ssl_verdict(b'X');
+        let stream = std::net::TcpStream::connect(addr).unwrap();
+        let err = negotiate_tls(stream, &info_with_ssl(addr, SslMode::Require)).unwrap_err();
+        assert!(err.contains("invalid SSL verdict"), "{err}");
+    }
+
+    /// Full rustls handshake over loopback with an rcgen self-signed cert,
+    /// then byte transfer through the `PgStream` Read/Write impls.
+    #[test]
+    fn tls_loopback_handshake_transfers_bytes() {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert_der = certified.cert.der().clone();
+        let key_der = rustls_pki_types::PrivateKeyDer::Pkcs8(
+            rustls_pki_types::PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()),
+        );
+
+        let provider = rustls::crypto::ring::default_provider();
+        let server_config = rustls::ServerConfig::builder_with_provider(provider.clone().into())
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der.clone()], key_der)
+            .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            sock.set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let server_conn = rustls::ServerConnection::new(Arc::new(server_config)).unwrap();
+            let mut tls = rustls::StreamOwned::new(server_conn, sock);
+            // Complete the handshake, then echo 5 bytes.
+            let mut buf = [0u8; 5];
+            tls.read_exact(&mut buf).unwrap();
+            tls.write_all(&buf).unwrap();
+            tls.flush().unwrap();
+        });
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert_der).unwrap();
+        let client_config = rustls::ClientConfig::builder_with_provider(provider.into())
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+        let sock = std::net::TcpStream::connect(addr).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut stream = tls_upgrade_with(sock, "localhost", Arc::new(client_config)).unwrap();
+        assert!(matches!(stream, PgStream::Tls(_)));
+        stream.write_all(b"hello").unwrap();
+        stream.flush().unwrap();
+        let mut echo = [0u8; 5];
+        stream.read_exact(&mut echo).unwrap();
+        assert_eq!(&echo, b"hello");
     }
 }
