@@ -32,7 +32,7 @@ pub fn sha1(input: &[u8]) -> [u8; 20] {
 
     let mut h: [u32; 5] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
     let mut w = [0u32; 80];
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         for i in 0..16 {
             w[i] = u32::from_be_bytes([
                 chunk[4 * i],

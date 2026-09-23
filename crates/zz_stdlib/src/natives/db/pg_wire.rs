@@ -50,7 +50,7 @@ pub fn md5(input: &[u8]) -> [u8; 16] {
     let mut c0: u32 = 0x98badcfe;
     let mut d0: u32 = 0x10325476;
 
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut m = [0u32; 16];
         for (i, w) in m.iter_mut().enumerate() {
             *w = u32::from_le_bytes([
@@ -134,7 +134,7 @@ pub fn sha256(input: &[u8]) -> [u8; 32] {
 
     let mut h = SHA256_H;
     let mut w = [0u32; 64];
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         for i in 0..16 {
             w[i] = u32::from_be_bytes([
                 chunk[4 * i],
