@@ -113,14 +113,10 @@ fn wrong_type_errors() {
     assert!(err.message.contains("expects a string"), "{}", err.message);
 }
 
-#[test]
-fn read_line_from_dev_null_is_empty() {
-    // In the test harness stdin is /dev/null, so input yields "".
-    assert_eq!(
-        call("input", vec![]).unwrap(),
-        Value::Str(String::new().into())
-    );
-}
+/// `input()` is covered by hermetic stdin integration tests in
+/// `crates/zz_cli/tests/e2e.rs` (`e2e_input_*`). A unit test here would read
+/// the real process stdin and hang on interactive terminals (stdin is only
+/// /dev/null under CI).
 
 #[test]
 fn every_funcs_key_has_a_native() {
