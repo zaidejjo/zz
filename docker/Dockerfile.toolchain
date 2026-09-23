@@ -12,30 +12,37 @@
 #
 # Local build: docker build -f docker/Dockerfile.toolchain -t zz:local .
 
-FROM rust:1-bookworm AS build
+FROM rust:1-bookworm AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends \
         clang pkg-config libssl-dev git binutils && rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --locked
 WORKDIR /src
+
+# Planner: dependency recipe (reruns only when Cargo.toml/lock change).
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Cacher: compile third-party deps once (cached as a layer until the
+# recipe changes). Works on any builder; GHA layer cache (type=gha in
+# the workflow) persists it across CI runs.
+FROM chef AS cacher
+COPY --from=planner /src/recipe.json recipe.json
+RUN cargo chef cook --locked --profile release --recipe-path recipe.json
+
+# Build: sources only — dependencies come from the cached layer above,
+# so reruns recompile just our crates.
+FROM cacher AS build
 COPY . .
 # Locked, release profile: the exact binary CI tested. Stripped: debug
 # symbols stay in the workspace profile (profiling-friendly) but have no
 # place in a production image (~230MB saved).
-#
-# Cache strategy (two levels):
-#   1. GHA layer cache (cache-from/to type=gha in the workflow) reuses
-#      the apt + base layers; any source change still reruns this step.
-#   2. BuildKit cache mounts below persist the cargo registry/git/target
-#      dirs across builds, so reruns recompile only changed crates instead
-#      of the whole workspace from scratch. Needs BuildKit (buildx, which
-#      the workflow uses); plain `docker build` ignores mounts safely.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
-    cargo build --locked --profile release --bin zz \
+RUN cargo build --locked --profile release --bin zz \
+    && mkdir -p /opt/zz-bin \
     && cp target/release/zz /opt/zz-bin/zz \
     && strip /opt/zz-bin/zz \
     && /opt/zz-bin/zz --version
-# Promote out of the cache-mounted target dir (mounts vanish with the step).
+# Promote out of target/ (keeps the final COPY obvious).
 RUN mkdir -p /opt/zz/bin && cp /opt/zz-bin/zz /opt/zz/bin/zz \
     && rm -rf /opt/zz-bin
 
