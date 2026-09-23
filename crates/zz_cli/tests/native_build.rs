@@ -45,8 +45,22 @@ func main() {
 }
 "#;
 
+/// Skip helper: every test in this file needs the native backend, which is
+/// unsupported with `ZZ_SKIP_NATIVE=1` (Windows CI — POSIX C runtime, no FFI
+/// link). Returns false after logging so failures stay visible as skips.
+fn require_native() -> bool {
+    if std::env::var("ZZ_SKIP_NATIVE").is_ok() {
+        eprintln!("skip: native backend unsupported (ZZ_SKIP_NATIVE=1)");
+        return false;
+    }
+    true
+}
+
 #[test]
 fn build_dev_produces_runnable_binary() {
+    if !require_native() {
+        return;
+    }
     // Default build is a fast native debug binary (-O0 -g) in bin/.
     let dir = std::env::temp_dir().join(format!("zz-cli-test-{}", std::process::id()));
     let f = write_fixture(&dir, "app.zz", HELLO);
@@ -64,6 +78,9 @@ fn build_dev_produces_runnable_binary() {
 
 #[test]
 fn build_release_is_small_and_works() {
+    if !require_native() {
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("zz-cli-rel-{}", std::process::id()));
     let f = write_fixture(&dir, "rp.zz", HELLO);
     let (code, out) = run_zz(&["build", "-p", f.to_str().unwrap()]);
@@ -82,6 +99,9 @@ fn build_release_is_small_and_works() {
 
 #[test]
 fn run_native_executes_and_outputs() {
+    if !require_native() {
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("zz-cli-native-{}", std::process::id()));
     let f = write_fixture(&dir, "rn.zz", HELLO);
     let (code, out) = run_zz(&["run", "--native", f.to_str().unwrap()]);
@@ -92,6 +112,9 @@ fn run_native_executes_and_outputs() {
 
 #[test]
 fn build_cache_reuses_fast_on_unchanged_source() {
+    if !require_native() {
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("zz-cli-cache-{}", std::process::id()));
     let f = write_fixture(&dir, "rc.zz", HELLO);
     // First build populates cache (release; dev builds skip native compile).
