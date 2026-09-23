@@ -88,9 +88,10 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.toolchain
-          # linux/arm64 covers Apple-silicon dev machines; amd64 is what
-          # Render runs. Drop an arch here to halve build minutes.
-          platforms: linux/amd64,linux/arm64
+          # Render runs amd64; arm64 (QEMU-emulated, ~5-10x slower) ships on
+          # release tags only. Docker Desktop still runs the amd64 image on
+          # Apple silicon via Rosetta in between.
+          platforms: ${{ startsWith(github.ref, 'refs/tags/v') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
