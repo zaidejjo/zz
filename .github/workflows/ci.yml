@@ -32,5 +32,14 @@ jobs:
         run: cargo fmt --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: test
+      - name: 'test (unix: full suite incl. native legs)'
+        if: runner.os != 'Windows'
         run: cargo test --all
+      - name: 'test (windows: VM-only, native backend unsupported)'
+        if: runner.os == 'Windows'
+        # The native backend is POSIX/Linux-only (epoll/fork AOT server, no
+        # Windows FFI link — see ffi.rs). ZZ_SKIP_NATIVE keeps the VM legs
+        # running while the native legs report skips.
+        run: cargo test --all
+        env:
+          ZZ_SKIP_NATIVE: 1

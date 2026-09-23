@@ -3453,7 +3453,10 @@ static int get_cpu_count(void) {
 }
 
 // ---- Epoll worker loop (runs in each forked process) ----
-
+// Linux-only: epoll + fork exist nowhere else. Other targets (macOS, Windows)
+// get a clear runtime error instead of a compile wall — the AOT HTTP server
+// never supported them; plain `zz run` (VM) remains the portable path.
+#ifdef __linux__
 static void worker_loop(int listen_fd, int worker_id) {
     int epfd = epoll_create1(EPOLL_CLOEXEC);
     if (epfd < 0) {
@@ -3620,6 +3623,19 @@ static int spawn_workers(int listen_fd, int port) {
 
     return 0;
 }
+#else
+// Non-Linux fallback: no fork/epoll here. Emits a clear error so a native
+// binary fails loudly at `listen` time instead of not compiling at all.
+// Uses only stdio so it builds on every target (incl. Windows/MSVC).
+static int spawn_workers(int listen_fd, int port) {
+    (void)listen_fd;
+    (void)port;
+    fprintf(stderr,
+        "zz_http_listen: the AOT HTTP server requires Linux (fork+epoll); "
+        "use `zz run` (VM) on this platform\n");
+    return -1;
+}
+#endif
 
 // ---- HTTP AOT stub implementations ----
 

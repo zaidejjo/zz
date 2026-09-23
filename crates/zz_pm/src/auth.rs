@@ -124,13 +124,14 @@ fn chrono_now() -> String {
     format!("{now}")
 }
 
-/// Verify that the credentials file has correct permissions (0600).
+/// Verify that the credentials file has correct permissions (0600 on Unix;
+/// no-op elsewhere — Windows ACLs have no equivalent notion).
 /// Returns Ok(()) if permissions are correct, Err with a warning message otherwise.
-pub fn verify_permissions(path: &Path) -> Result<(), String> {
+pub fn verify_permissions(_path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(path)
+        let meta = std::fs::metadata(_path)
             .map_err(|e| format!("cannot read credentials metadata: {e}"))?;
         let mode = meta.permissions().mode();
         // Check that group and other bits are clear (0600 = owner rw only)
@@ -138,7 +139,7 @@ pub fn verify_permissions(path: &Path) -> Result<(), String> {
             return Err(format!(
                 "credentials file has insecure permissions: {mode:04o}\n\
                  hint: run `chmod 600 {}` to fix",
-                path.display()
+                _path.display()
             ));
         }
     }

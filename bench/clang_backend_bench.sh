@@ -2,7 +2,8 @@
 # Benchmark: Clang-only `zz build` (feat/clang-only-backend) vs pre-migration baseline.
 #
 # Usage: ./bench/clang_backend_bench.sh
-# Requires: /home/zaid/.bench/zz_new and /home/zaid/.bench/zz_base binaries.
+# Requires: $BENCH_DIR/zz_new and $BENCH_DIR/zz_base binaries
+#   (BENCH_DIR defaults to ~/.bench; override with ZZ_BENCH_DIR).
 # Writes: bench/clang_backend_bench_raw.csv + bench/clang_backend_bench_results.md
 #
 # Design notes (why it stays fast enough):
@@ -13,9 +14,10 @@
 
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-NEW_BIN=/home/zaid/.bench/zz_new
-BASE_BIN=/home/zaid/.bench/zz_base
-TMPD=/home/zaid/.bench/tmp
+BENCH_DIR="${ZZ_BENCH_DIR:-$HOME/.bench}"
+NEW_BIN="$BENCH_DIR/zz_new"
+BASE_BIN="$BENCH_DIR/zz_base"
+TMPD="$BENCH_DIR/tmp"
 export TMPDIR="$TMPD"
 mkdir -p "$TMPD"
 
@@ -94,7 +96,7 @@ for rel in "${FILES[@]}"; do
 	fi
 	for tc in base new; do
 		if [ "$tc" = base ]; then BIN="$BASE_BIN"; else BIN="$NEW_BIN"; fi
-		home="/home/zaid/.bench/home_$tc"
+		home="$BENCH_DIR/home_$tc"
 		for mode in default p; do
 			if [ "$mode" = p ]; then FLAGS=(-p); else FLAGS=(); fi
 			rm -rf "$home"
@@ -132,10 +134,10 @@ done
 # Cross-compile sanity (new binary only): flag presence via --verbose.
 echo "--- cross sanity ---"
 for triple in aarch64-unknown-linux-gnu x86_64-pc-windows-gnu; do
-	rm -rf /home/zaid/.bench/home_new
-	mkdir -p /home/zaid/.bench/home_new
+	rm -rf "$BENCH_DIR/home_new"
+	mkdir -p "$BENCH_DIR/home_new"
 	echo 'println("x")' >"$TMPD/cross.zz"
-	HOME=/home/zaid/.bench/home_new timeout 120 "$NEW_BIN" build -p --verbose --target "$triple" "$TMPD/cross.zz" >"$TMPD/cross.out" 2>&1
+	HOME="$BENCH_DIR/home_new" timeout 120 "$NEW_BIN" build -p --verbose --target "$triple" "$TMPD/cross.zz" >"$TMPD/cross.out" 2>&1
 	code=$?
 	echo "target=$triple exit=$code"
 	grep -o "\-\-target=[^ ]*" "$TMPD/cross.out" | head -1

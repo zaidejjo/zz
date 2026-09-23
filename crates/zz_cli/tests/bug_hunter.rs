@@ -22,6 +22,11 @@ use std::process::Command;
 
 /// Write source to a temp file, run both `zz run` (VM) and `zz run --native`
 /// (AOT), return `(vm_exit, vm_stdout, vm_stderr, native_exit, native_stdout, native_stderr)`.
+///
+/// When `ZZ_SKIP_NATIVE=1` (Windows CI: the native backend is unsupported
+/// there — FFI link unimplemented, POSIX C runtime), the native leg is
+/// skipped and reported as exit 0 with empty output; callers must check the
+/// flag via [`native_skipped`] before comparing outputs.
 fn run_both(src: &str) -> (i32, String, String, i32, String, String) {
     let zz_bin = env!("CARGO_BIN_EXE_zz");
     let dir = std::env::temp_dir().join(format!(
@@ -43,14 +48,24 @@ fn run_both(src: &str) -> (i32, String, String, i32, String, String) {
         .output()
         .unwrap_or_else(|e| panic!("VM exec failed: {e}"));
 
-    // Run native.
-    let native_out = Command::new(zz_bin)
-        .arg("run")
-        .arg("--native")
-        .arg(&file)
-        .current_dir(&cwd)
-        .output()
-        .unwrap_or_else(|e| panic!("native exec failed: {e}"));
+    // Run native (skipped when ZZ_SKIP_NATIVE=1 — see above).
+    let (native_exit, native_stdout, native_stderr) = if native_skipped() {
+        eprintln!("SKIP native leg (ZZ_SKIP_NATIVE=1)");
+        (0, String::new(), String::new())
+    } else {
+        let native_out = Command::new(zz_bin)
+            .arg("run")
+            .arg("--native")
+            .arg(&file)
+            .current_dir(&cwd)
+            .output()
+            .unwrap_or_else(|e| panic!("native exec failed: {e}"));
+        (
+            native_out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&native_out.stdout).to_string(),
+            String::from_utf8_lossy(&native_out.stderr).to_string(),
+        )
+    };
 
     let _ = fs::remove_dir_all(&dir);
 
@@ -58,10 +73,17 @@ fn run_both(src: &str) -> (i32, String, String, i32, String, String) {
         vm_out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&vm_out.stdout).to_string(),
         String::from_utf8_lossy(&vm_out.stderr).to_string(),
-        native_out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&native_out.stdout).to_string(),
-        String::from_utf8_lossy(&native_out.stderr).to_string(),
+        native_exit,
+        native_stdout,
+        native_stderr,
     )
+}
+
+/// True when `ZZ_SKIP_NATIVE=1`: skip the `--native` leg (unsupported C
+/// backend — Windows CI; the epoll/fork AOT server and FFI link are
+/// POSIX/Linux-only). VM legs still run everywhere.
+fn native_skipped() -> bool {
+    std::env::var("ZZ_SKIP_NATIVE").is_ok()
 }
 
 /// Process-wide unique suffix for temp dirs (atomic: tests run in parallel
@@ -74,6 +96,9 @@ fn rand_suffix() -> u64 {
 }
 
 /// Assert VM and native produced identical results.
+///
+/// With `ZZ_SKIP_NATIVE=1`, only the VM leg runs (native auto-passes);
+/// VM coverage is still enforced on every platform.
 fn assert_parity(desc: &str, src: &str) {
     let (vm_exit, vm_stdout, vm_stderr, native_exit, native_stdout, native_stderr) = run_both(src);
 
@@ -82,6 +107,9 @@ fn assert_parity(desc: &str, src: &str) {
         vm_exit, 0,
         "PARITY BUG [{desc}]: VM failed (exit {vm_exit}).\nVM stderr: {vm_stderr}\nSource:\n{src}"
     );
+    if native_skipped() {
+        return;
+    }
     assert_eq!(
         native_exit, 0,
         "PARITY BUG [{desc}]: native failed (exit {native_exit}).\nNative stderr: {native_stderr}\nSource:\n{src}"
