@@ -13,7 +13,7 @@
 //!
 //! ```toml
 //! [packages.zimg]
-//! path = "/home/zaid/Projects/zimg"
+//! path = "/home/user/projects/zimg"
 //!
 //! [packages.foo]
 //! git = "https://example.com/foo.git"
@@ -165,7 +165,7 @@ mod tests {
         reg.add(
             "zimg".to_string(),
             RegistryEntry {
-                path: Some("/home/zaid/Projects/zimg".to_string()),
+                path: Some("/home/user/projects/zimg".to_string()),
                 ..Default::default()
             },
         );

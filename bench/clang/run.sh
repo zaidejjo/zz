@@ -10,9 +10,10 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-NEW=/home/zaid/.bench/zz_new
-BASE=/home/zaid/.bench/zz_base_bin
-TMPD=/home/zaid/.bench/tmp_full
+BENCH_DIR="${ZZ_BENCH_DIR:-$HOME/.bench}"
+NEW="$BENCH_DIR/zz_new"
+BASE="$BENCH_DIR/zz_base_bin"
+TMPD="$BENCH_DIR/tmp_full"
 export TMPDIR="$TMPD"
 mkdir -p "$TMPD"
 
@@ -168,7 +169,7 @@ for rel in "${ALL_PROGS[@]}"; do
 		if [ "$tc" = base ]; then BIN="$BASE"; else BIN="$NEW"; fi
 		for mode in default p; do
 			if [ "$mode" = p ]; then FLAGS=(-p); else FLAGS=(); fi
-			home="/home/zaid/.bench/home_${tc}_${mode}"
+			home="$BENCH_DIR/home_${tc}_${mode}"
 			rm -rf "$home"
 			mkdir -p "$home"
 
@@ -220,7 +221,7 @@ CROSS_CSV="$TMPD/cross.csv"
 echo "target,exit,has_target_flag,has_march_native,has_fuse_lld,has_lws2_32" >"$CROSS_CSV"
 
 for triple in aarch64-unknown-linux-gnu x86_64-pc-windows-gnu; do
-	home="/home/zaid/.bench/home_cross"
+	home="$BENCH_DIR/home_cross"
 	rm -rf "$home"
 	mkdir -p "$home"
 	echo 'println("x")' >"$TMPD/cross.zz"

@@ -40,6 +40,7 @@ fn dump_bench_c() {
         pruned.clone(),
     );
     let lowered = lowerer.lower();
-    std::fs::write("/tmp/bench.c", &lowered.source).unwrap();
-    println!("wrote /tmp/bench.c ({} bytes)", lowered.source.len());
+    let out = std::env::temp_dir().join("bench.c");
+    std::fs::write(&out, &lowered.source).unwrap();
+    println!("wrote {} ({} bytes)", out.display(), lowered.source.len());
 }
