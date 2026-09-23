@@ -12,11 +12,18 @@
 #
 # Local build: docker build -f docker/Dockerfile.toolchain -t zz:local .
 
-FROM rust:1-bookworm AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.98.1-bookworm AS chef
+# cargo-chef ships preinstalled in this image (saves a multi-minute
+# `cargo install`). Pinned to our toolchain (1.98) + distro (bookworm);
+# bump alongside `rust:1-bookworm` drift.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         clang pkg-config libssl-dev git binutils && rm -rf /var/lib/apt/lists/*
-RUN cargo install cargo-chef --locked
 WORKDIR /src
+# The workspace profile sets `debug = true` (profiling-friendly), but this
+# image strips the binary anyway — compiling debuginfo first is pure waste.
+# Env override keeps Cargo.toml untouched while cutting minutes off the
+# release compile. Inherited by planner/cacher/build below.
+ENV CARGO_PROFILE_RELEASE_DEBUG=false
 
 # Planner: dependency recipe (reruns only when Cargo.toml/lock change).
 FROM chef AS planner
@@ -34,9 +41,9 @@ RUN cargo chef cook --locked --profile release --recipe-path recipe.json
 # so reruns recompile just our crates.
 FROM cacher AS build
 COPY . .
-# Locked, release profile: the exact binary CI tested. Stripped: debug
-# symbols stay in the workspace profile (profiling-friendly) but have no
-# place in a production image (~230MB saved).
+# Locked, release profile: the exact binary CI tested. Debuginfo already off
+# via CARGO_PROFILE_RELEASE_DEBUG (see chef stage); strip drops the last
+# remnants (~230MB saved vs an unstripped debug=true binary).
 RUN cargo build --locked --profile release --bin zz \
     && mkdir -p /opt/zz-bin \
     && cp target/release/zz /opt/zz-bin/zz \
