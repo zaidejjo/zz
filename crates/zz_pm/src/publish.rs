@@ -19,6 +19,8 @@ pub enum PublishError {
     PathDepsNotAllowed(Vec<String>),
     /// Missing required field.
     MissingField(String),
+    /// Field value rejected by registry rules (name charset, semver).
+    InvalidField(String),
     /// Test failure.
     TestsFailed(String),
     /// I/O error.
@@ -39,6 +41,9 @@ impl std::fmt::Display for PublishError {
             Self::MissingField(field) => {
                 write!(f, "cannot publish: missing required field `{field}`")
             }
+            Self::InvalidField(detail) => {
+                write!(f, "cannot publish: {detail}")
+            }
             Self::TestsFailed(detail) => {
                 write!(f, "cannot publish: tests failed\n{detail}")
             }
@@ -52,18 +57,37 @@ impl std::error::Error for PublishError {}
 /// Validate a manifest for publishing.
 ///
 /// Checks that:
-/// 1. Package name is set (not "untitled")
-/// 2. Version is set
+/// 1. Package name is set (not "untitled") and registry-legal (`[a-z0-9-_]`)
+/// 2. Version is set and full semver (`1.2.3` — what the registry accepts)
 /// 3. No path dependencies exist
 pub fn validate(manifest: &Manifest) -> Result<(), PublishError> {
     // Check package name
     if manifest.package.name == "untitled" || manifest.package.name.is_empty() {
         return Err(PublishError::MissingField("package.name".to_string()));
     }
+    if !manifest
+        .package
+        .name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return Err(PublishError::InvalidField(format!(
+            "package.name `{}` must match [a-z0-9-_]\n\
+             hint: rename the package in zz.toml",
+            manifest.package.name
+        )));
+    }
 
     // Check version
     if manifest.package.version.is_empty() {
         return Err(PublishError::MissingField("package.version".to_string()));
+    }
+    if semver::Version::parse(&manifest.package.version).is_err() {
+        return Err(PublishError::InvalidField(format!(
+            "package.version `{}` is not semver (want 1.2.3)\n\
+             hint: set a full semantic version in zz.toml",
+            manifest.package.version
+        )));
     }
 
     // Check for path dependencies — these cannot be published
@@ -79,6 +103,37 @@ pub fn validate(manifest: &Manifest) -> Result<(), PublishError> {
     }
 
     Ok(())
+}
+
+/// Non-fatal publish recommendations (printed as hints, not errors).
+///
+/// The registry accepts empty `description`/`license`, but packages
+/// without them are hard to discover — the CLI surfaces these.
+pub fn warnings(manifest: &Manifest) -> Vec<String> {
+    let mut out = Vec::new();
+    if manifest
+        .package
+        .description
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        out.push("package.description is empty — search results will show no summary".to_string());
+    }
+    if manifest
+        .package
+        .license
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        out.push(
+            "package.license is empty — consumers cannot tell how to reuse this code".to_string(),
+        );
+    }
+    out
 }
 
 /// Run `zz test` on the project to verify correctness before publishing.
@@ -140,6 +195,25 @@ pub fn pack(project_dir: &Path, manifest: &Manifest) -> Result<PathBuf, PublishE
         files_to_pack.push(license);
     }
 
+    // Native payload: a published native package must rebuild on the
+    // consumer's machine, so ship the build hook and its sources.
+    if let Some(native) = &manifest.native {
+        let hook = project_dir.join(&native.build);
+        if hook.exists() {
+            files_to_pack.push(hook);
+        }
+        let zzi = project_dir.join("plugin.zzi");
+        if zzi.exists() {
+            files_to_pack.push(zzi);
+        }
+        for tree in ["csrc", "native"] {
+            let dir = project_dir.join(tree);
+            if dir.exists() {
+                collect_native_files(&dir, &mut files_to_pack);
+            }
+        }
+    }
+
     if files_to_pack.is_empty() {
         return Err(PublishError::Io(
             "no files to pack — is this a valid ZZ project?".to_string(),
@@ -174,6 +248,32 @@ fn collect_zz_files(dir: &Path, _base: &Path, files: &mut Vec<PathBuf>) {
             if path.is_dir() {
                 collect_zz_files(&path, _base, files);
             } else if path.extension().is_some_and(|e| e == "zz") {
+                files.push(path);
+            }
+        }
+    }
+}
+
+/// Recursively collect native sources, skipping build outputs that must
+/// never ship (compiled objects, shared libs, cargo `target/`, hook
+/// `build/`, VCS).
+fn collect_native_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    const SKIP_DIRS: &[&str] = &["target", "build", ".git", "vendor", "node_modules"];
+    const SKIP_EXTS: &[&str] = &["o", "so", "dylib", "a", "rlib"];
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if SKIP_DIRS.contains(&name) {
+                    continue;
+                }
+                collect_native_files(&path, files);
+            } else if path.is_file() {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if SKIP_EXTS.contains(&ext) {
+                    continue;
+                }
                 files.push(path);
             }
         }
@@ -268,6 +368,88 @@ mod tests {
         assert!(tarball.exists());
         assert!(tarball.to_string_lossy().contains("test_pkg-0.1.0.tar.gz"));
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn validate_rejects_bad_name() {
+        let mut manifest = Manifest::default();
+        manifest.package.name = "Bad Name!".to_string();
+        manifest.package.version = "1.0.0".to_string();
+        let err = validate(&manifest).unwrap_err();
+        assert!(matches!(err, PublishError::InvalidField(_)), "{err:?}");
+    }
+
+    #[test]
+    fn validate_rejects_non_semver() {
+        let mut manifest = Manifest::default();
+        manifest.package.name = "my_lib".to_string();
+        manifest.package.version = "^1.0".to_string();
+        let err = validate(&manifest).unwrap_err();
+        assert!(matches!(err, PublishError::InvalidField(_)), "{err:?}");
+    }
+
+    #[test]
+    fn warnings_flag_empty_description_and_license() {
+        let mut manifest = Manifest::default();
+        manifest.package.name = "x".to_string();
+        assert_eq!(warnings(&manifest).len(), 2);
+        manifest.package.description = Some("d".to_string());
+        manifest.package.license = Some("MIT".to_string());
+        assert!(warnings(&manifest).is_empty());
+    }
+
+    #[test]
+    fn pack_includes_native_payload() {
+        use crate::manifest::NativeSpec;
+        let d = tmp();
+        let mut manifest = Manifest::default();
+        manifest.package.name = "native_pkg".to_string();
+        manifest.package.version = "0.1.0".to_string();
+        manifest.native = Some(NativeSpec {
+            build: "build.sh".to_string(),
+            pkg_config: None,
+        });
+
+        fs::write(d.join("zz.toml"), "").unwrap();
+        fs::create_dir_all(d.join("src")).unwrap();
+        fs::write(d.join("src/main.zz"), "func main() { }").unwrap();
+        fs::write(d.join("build.sh"), "#!/bin/sh\n").unwrap();
+        fs::write(d.join("plugin.zzi"), "native\n").unwrap();
+        fs::create_dir_all(d.join("csrc")).unwrap();
+        fs::write(d.join("csrc/wrap.c"), "int x;\n").unwrap();
+        fs::create_dir_all(d.join("native/target")).unwrap();
+        fs::write(d.join("native/target/big.o"), "binary").unwrap();
+        fs::write(d.join("native/Cargo.toml"), "[package]\n").unwrap();
+
+        let tarball = pack(&d, &manifest).unwrap();
+        let names = list_tarball(&tarball);
+        assert!(names.contains(&"zz.toml".to_string()), "{names:?}");
+        assert!(names.contains(&"build.sh".to_string()), "{names:?}");
+        assert!(names.contains(&"plugin.zzi".to_string()), "{names:?}");
+        assert!(names.contains(&"csrc/wrap.c".to_string()), "{names:?}");
+        assert!(
+            names.contains(&"native/Cargo.toml".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.contains("target") || n.ends_with(".o")),
+            "build outputs must not ship: {names:?}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// List entry paths of a `.tar.gz` (test helper).
+    fn list_tarball(tarball: &Path) -> Vec<String> {
+        let file = fs::File::open(tarball).unwrap();
+        let gz = flate2::read::GzDecoder::new(file);
+        let mut archive = tar::Archive::new(gz);
+        archive
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect()
     }
 
     #[test]

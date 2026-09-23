@@ -439,9 +439,12 @@ mod tests {
 
     #[test]
     fn symlink_removal_after_readonly() {
-        // Verify symlink removal works when target is read-only CAS
+        // Verify symlink removal works when target is read-only CAS.
+        // NOTE: content must differ from `hardlink_removal_after_readonly`
+        // (`y := 43` vs `x := 42`): identical bytes hash to the same CAS
+        // path, and the two tests racing would delete each other's entry.
         let src = tmp_dir("sl_rm_src");
-        fs::write(src.join("data.zz"), "x := 42\n").unwrap();
+        fs::write(src.join("data.zz"), "y := 43\n").unwrap();
 
         let opts = CasStoreOptions::default();
         let cas_path = store_in_cas(&src, &opts).unwrap();

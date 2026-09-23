@@ -1372,6 +1372,10 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("s", Type::Str)], Type::Str),
     );
     m.insert(
+        "std.crypto.sha256_bytes".into(),
+        sig(vec![("b", Type::Bytes)], Type::Str),
+    );
+    m.insert(
         "std.crypto.sha512".into(),
         sig(vec![("s", Type::Str)], Type::Str),
     );
@@ -1390,6 +1394,10 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "crypto.sha256".into(),
         sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "crypto.sha256_bytes".into(),
+        sig(vec![("b", Type::Bytes)], Type::Str),
     );
     m.insert(
         "crypto.sha512".into(),
@@ -1444,6 +1452,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
 
     // std.encoding
     let result_str = || Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+    let result_bytes = || Type::Result(Box::new(Type::Bytes), Box::new(Type::Str));
     m.insert(
         "std.encoding.base64_encode".into(),
         sig(vec![("data", Type::Str)], Type::Str),
@@ -1451,6 +1460,10 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "std.encoding.base64_decode".into(),
         sig(vec![("encoded", Type::Str)], result_str()),
+    );
+    m.insert(
+        "std.encoding.base64_decode_bytes".into(),
+        sig(vec![("encoded", Type::Str)], result_bytes()),
     );
     m.insert(
         "std.encoding.hex_encode".into(),
@@ -1558,6 +1571,8 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     // std.http — Client
     let result_response = || Type::Result(Box::new(Type::Response), Box::new(Type::Str));
     let dict_str = || Type::Dict(Box::new(Type::Str), Box::new(Type::Str));
+    // POST/PUT bodies accept text or raw bytes (binary asset uploads).
+    let body_t = || Type::Union(vec![Type::Str, Type::Bytes]);
     m.insert(
         "std.http.get".into(),
         sig(
@@ -1570,7 +1585,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(
             vec![
                 ("url", Type::Str),
-                ("body", Type::Str),
+                ("body", body_t()),
                 ("headers", dict_str()),
             ],
             result_response(),
@@ -1581,7 +1596,7 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(
             vec![
                 ("url", Type::Str),
-                ("body", Type::Str),
+                ("body", body_t()),
                 ("headers", dict_str()),
             ],
             result_response(),
@@ -1653,11 +1668,13 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
 
     // std.http — Server (per-route model)
     let server_t = Type::HttpServer;
-    // Handler receives a request dict and returns a string, dict, array, or response.
-    // We use a loose Func type: Dict → Str (the checker doesn't enforce return strictly).
+    // Handler receives a request dict and returns a string, dict, array, or
+    // response. The runtime also accepts Dict/Array (auto-JSON); the checker
+    // models Str and Response (status/headers control).
+    // We use a loose Func type: Dict → Str|Response.
     let handler_t = Type::Func(
         vec![Type::Dict(Box::new(Type::Str), Box::new(Type::Str))],
-        Box::new(Type::Str),
+        Box::new(Type::Union(vec![Type::Str, Type::Response])),
     );
     m.insert("std.http.server".into(), sig(vec![], server_t.clone()));
     m.insert(
@@ -1766,6 +1783,17 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
                 ("method", Type::Str),
                 ("path", Type::Str),
                 ("body", Type::Str),
+            ],
+            Type::Response,
+        ),
+    );
+    m.insert(
+        "std.http.respond".into(),
+        sig(
+            vec![
+                ("status", Type::Int),
+                ("body", Type::Str),
+                ("headers", dict_str()),
             ],
             Type::Response,
         ),
@@ -2966,6 +2994,8 @@ mod tests {
         assert!(funcs.contains_key("std.http.header"));
         assert!(funcs.contains_key("std.http.body_json"));
         assert!(funcs.contains_key("std.http.body_form"));
+        assert!(funcs.contains_key("std.http.respond"));
+        assert!(funcs.contains_key("std.encoding.base64_decode_bytes"));
         assert!(funcs.contains_key("std.fs.read_to_string"));
         assert!(funcs.contains_key("std.fs.read_bytes"));
         assert!(funcs.contains_key("std.fs.write"));
@@ -3074,7 +3104,7 @@ mod tests {
         assert!(funcs.contains_key("colors.red"));
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
-        assert_eq!(funcs.len(), 599);
+        assert_eq!(funcs.len(), 603);
     }
 
     #[test]

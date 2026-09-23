@@ -118,6 +118,41 @@ pub fn zz_stdlib_programs() -> &'static [TypedProgram] {
     COMPILED.get_or_init(compile_all)
 }
 
+/// Define `std.*` canonical aliases for pure-ZZ stdlib functions.
+///
+/// The embedded sources declare short names (`func json.is_null`), so
+/// running them binds only `json.is_null` — but the checker advertises
+/// both spellings (`std.json.is_null` + `json.is_null`). Calls to the
+/// canonical form type-check yet fail at runtime with
+/// "undefined variable". After the programs have run, mirror every dotted
+/// env binding `k` to `std.{k}` when the checker knows that signature and
+/// nothing is bound there yet. Both the value env and the function table
+/// are mirrored (natives live in both maps; keep the same discipline).
+/// Idempotent: re-running skips keys that already exist.
+pub fn define_canonical_purezz_aliases(
+    env: &mut zz_runtime::EnvLink,
+    funcs: &mut HashMap<String, zz_runtime::FuncValue>,
+) {
+    let sigs = crate::funcs::stdlib_funcs();
+    let flat = env.flatten();
+    for (k, v) in &flat {
+        if !k.contains('.') || k.starts_with("std.") {
+            continue;
+        }
+        let canon = format!("std.{k}");
+        if !sigs.contains_key(&canon) {
+            continue;
+        }
+        if env.get(&canon).is_some() {
+            continue;
+        }
+        env.define(&canon, v.clone());
+        if let zz_runtime::Value::Func(fv) = v {
+            funcs.entry(canon).or_insert_with(|| (**fv).clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

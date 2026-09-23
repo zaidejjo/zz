@@ -44,8 +44,10 @@ PACKAGE MANAGER:
     zz install, zz i              resolve deps, fetch into CAS, link
     zz remove <pkg>               remove a dependency
     zz update [pkg]               re-resolve floating versions
-    zz login                      authenticate for publishing
-    zz publish                    validate and pack for publishing
+    zz search <query>             search the package registry
+    zz info <pkg>                 show package metadata and versions
+    zz login [--browser]          authenticate for publishing
+    zz publish [--dry-run]        validate, pack, and upload to the registry
     zz cache gc                   garbage-collect unused CAS entries
     zz cache clean                clear build cache
 
@@ -76,6 +78,16 @@ FLAGS:
     --git <url>        with add, git URL for dependency
     --rev <rev>        with add, git revision (branch, tag, or commit)
     --path <path>      with add, local path dependency
+    --registry <url>   with add/install/search/info/login/publish/update,
+                       registry base URL (default: ZZ_REGISTRY or the public registry)
+    --limit <n>        with search, max results (default 20)
+    --dry-run          with publish, validate + pack without uploading
+    --skip-tests       with publish, skip the `zz test` gate (native pkgs)
+    --browser          with login, print the OAuth URL before prompting
+    --author <name>    with init/new, package author (repeatable, comma-split)
+    --description <t>  with init/new, package description
+    --license <spdx>   with init/new, package license (e.g. MIT)
+    --repo <url>       with init/new, package repository URL
     --help, -h         show this help
     --version, -V      show version
 
@@ -263,6 +275,20 @@ fn main() -> ExitCode {
             }
         },
         Some("update") => match pm::update(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("search") => match pm::search(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("info") => match pm::info(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("zz: {msg}");
@@ -612,6 +638,9 @@ fn run_file(
             return Err("stdlib initialization failed".to_string());
         }
     }
+    // Canonical `std.*` aliases for pure-ZZ helpers: sources declare short
+    // names (`json.is_null`) while the checker advertises both spellings.
+    zz_stdlib::define_canonical_purezz_aliases(&mut interp.env, &mut interp.funcs);
     // Mirror pure-ZZ Env bindings for `import std.X as alias` renames
     // (e.g. `colors.red` → `cl.red`). Natives are already aliased via
     // `loaded.natives`; pure-ZZ funcs live in Env and need the same.

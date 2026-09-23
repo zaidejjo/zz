@@ -287,6 +287,10 @@ mod tests {
             package: crate::manifest::PackageSpec {
                 name: "test".into(),
                 version: "0.1.0".into(),
+                authors: Vec::new(),
+                description: None,
+                license: None,
+                repository: None,
             },
             dependencies: deps,
             native: None,

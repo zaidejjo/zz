@@ -15,5 +15,9 @@ crossbeam-deque = "0.8"
 urlencoding = "2"
 reqwest = { version = "0.12", features = ["blocking"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+rustls-pki-types = { workspace = true }
 
 [dev-dependencies]
+rcgen = "0.13"

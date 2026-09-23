@@ -8,7 +8,9 @@ use std::time::Instant;
 
 use crate::natives::{arg, expect_str};
 use zz_runtime::json::{parse_json, to_json_string, JsonValue};
-use zz_runtime::value::{snapshot_env, FuncValue, HttpServer, Response};
+use zz_runtime::value::{
+    detach_cached_funcs, snapshot_env, snapshot_funcs, FuncValue, HttpServer, Response,
+};
 use zz_runtime::{Chunk, Env, EnvLink, EvalError, Expr, Interp, NativeEntry, Param, Span, Value};
 
 // ===========================================================================
@@ -106,6 +108,7 @@ fn extract_headers(text: &str) -> Vec<(String, String)> {
 
 fn http_reason(status: u16) -> &'static str {
     match status {
+        100 => "Continue",
         200 => "OK",
         201 => "Created",
         204 => "No Content",
@@ -116,6 +119,8 @@ fn http_reason(status: u16) -> &'static str {
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        431 => "Headers Too Large",
         500 => "Internal Server Error",
         _ => "Error",
     }
@@ -143,6 +148,80 @@ fn format_response(status: u16, body: &str) -> String {
         &[("Content-Type".into(), "text/plain; charset=utf-8".into())],
         body,
     )
+}
+
+/// Max buffered request body (50 MiB). Publish tarballs are ~1–10 MiB;
+/// anything larger is rejected with 413 before buffering.
+const MAX_BODY_BYTES: usize = 50 * 1024 * 1024;
+/// Max buffered header block (request line + headers, 64 KiB).
+const MAX_HEAD_BYTES: usize = 64 * 1024;
+
+/// Read until `delim` is observed. Returns `None` when the buffered bytes
+/// exceed `cap` (caller replies 431/413). `Ok(Some(_))` on EOF too, so the
+/// caller can still produce a 400 for a truncated head.
+fn read_until_delim<R: std::io::Read>(
+    stream: &mut R,
+    delim: &[u8],
+    cap: usize,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            break; // EOF: return what we have; caller validates it.
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > cap {
+            return Ok(None);
+        }
+        if find_subslice(&buf, delim).is_some() {
+            break;
+        }
+    }
+    Ok(Some(buf))
+}
+
+/// Locate `needle` in `haystack` (naive scan; heads are small).
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
+}
+
+/// Read exactly `total` body bytes: `buffered` bytes are already in hand,
+/// the rest streams in. Errors on EOF or when `total` exceeds `cap`.
+fn read_exact_capped<R: std::io::Read>(
+    stream: &mut R,
+    buffered: &[u8],
+    total: usize,
+    cap: usize,
+) -> std::io::Result<Vec<u8>> {
+    if total > cap {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::OutOfMemory,
+            "body exceeds limit",
+        ));
+    }
+    let mut out = Vec::with_capacity(total.min(1 << 20));
+    let take = buffered.len().min(total);
+    out.extend_from_slice(&buffered[..take]);
+    let mut remaining = total - take;
+    let mut chunk = [0u8; 65536];
+    while remaining > 0 {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "truncated body",
+            ));
+        }
+        let use_n = n.min(remaining);
+        out.extend_from_slice(&chunk[..use_n]);
+        remaining -= use_n;
+    }
+    Ok(out)
 }
 
 /// Build a Value::Dict request object from parsed HTTP request data.
@@ -242,14 +321,80 @@ pub(crate) fn http_get(
     }
 }
 
-/// `http.post(url: str, body: str, headers: {str: str}) -> Result<Response, str>`
+/// `http.respond(status: int, body: str, headers: {str: str}) -> Response`
+///
+/// Constructor for handler responses with explicit status codes and
+/// headers (e.g. `201 Created`, `302` redirects, `401/404/409` errors).
+/// Handlers returning a `Response` use its status/headers/body verbatim.
+pub(crate) fn http_respond(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let status: i64 = match arg(args, 0, "std.http.respond")? {
+        Value::Int(s) => *s,
+        other => {
+            return Err(EvalError::new(
+                format!("std.http.respond: expected an int status, found `{other}`"),
+                span,
+            ));
+        }
+    };
+    if !(100i64..=599).contains(&status) {
+        return Err(EvalError::new(
+            format!("std.http.respond: status {status} out of range (100–599)"),
+            span,
+        ));
+    }
+    let body = expect_str(args, 1, "std.http.respond")?;
+    let headers = match arg(args, 2, "std.http.respond")? {
+        Value::Dict(entries) => entries
+            .iter()
+            .filter_map(|(k, v)| match (k, v) {
+                (Value::Str(k), Value::Str(v)) => Some((k.to_string(), v.to_string())),
+                _ => None,
+            })
+            .collect(),
+        other => {
+            return Err(EvalError::new(
+                format!("std.http.respond: expected a headers dict, found `{other}`"),
+                span,
+            ));
+        }
+    };
+    Ok(Value::Response(Box::new(Response {
+        status: status as u16,
+        body,
+        headers,
+    })))
+}
+
+/// Extract a request body as raw bytes, accepting `str` or `bytes`
+/// (binary asset uploads cannot round-trip through UTF-8 strings).
+fn expect_body_bytes(
+    args: &[Value],
+    i: usize,
+    name: &str,
+    span: Span,
+) -> Result<Vec<u8>, EvalError> {
+    match args.get(i) {
+        Some(Value::Str(s)) => Ok(s.as_bytes().to_vec()),
+        Some(Value::Bytes(b)) => Ok(b.as_slice().to_vec()),
+        other => Err(EvalError::new(
+            format!("`{name}`: expected a str or bytes body, found `{other:?}`"),
+            span,
+        )),
+    }
+}
+
+/// `http.post(url: str, body: str|bytes, headers: {str: str}) -> Result<Response, str>`
 pub(crate) fn http_post(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    _span: Span,
+    span: Span,
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.post")?;
-    let body = expect_str(args, 1, "std.http.post")?;
+    let body = expect_body_bytes(args, 1, "std.http.post", span)?;
     let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::default()));
     let client = build_client()?;
     let hdrs = dict_to_headers(&headers);
@@ -271,10 +416,10 @@ pub(crate) fn http_post(
 pub(crate) fn http_put(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
-    _span: Span,
+    span: Span,
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.put")?;
-    let body = expect_str(args, 1, "std.http.put")?;
+    let body = expect_body_bytes(args, 1, "std.http.put", span)?;
     let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::default()));
     let client = build_client()?;
     let hdrs = dict_to_headers(&headers);
@@ -609,6 +754,10 @@ pub(crate) fn http_query(
 }
 
 /// `http.header(req: dict, name: str) -> Result<str, str>`
+///
+/// Looks inside the request's `headers` sub-dict (as built by the server
+/// dispatcher); falls back to a top-level scan so a bare headers dict
+/// also works.
 pub(crate) fn http_header(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
@@ -624,6 +773,22 @@ pub(crate) fn http_header(
         }
     };
     let name = expect_str(args, 1, "std.http.header")?;
+    // Prefer the nested `headers` dict when present (server request shape).
+    for (k, v) in &req {
+        if let (Value::Str(key), Value::Dict(inner)) = (k, v) {
+            if (**key).to_lowercase() == "headers" {
+                for (nk, nv) in &**inner {
+                    if let Value::Str(nkey) = nk {
+                        if (**nkey).to_lowercase() == name.to_lowercase() {
+                            return Ok(Value::Result(Box::new(Ok(nv.clone()))));
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+    // Fall back to a top-level scan (bare headers dict).
     for (k, v) in &req {
         if let (Value::Str(key), val) = (k, v) {
             if (**key).to_lowercase() == name.to_lowercase() {
@@ -1021,6 +1186,14 @@ impl FuncSnapshot {
 /// Thread-safe snapshot of the entire HTTP server, containing route and
 /// middleware handler snapshots plus the native function table and struct
 /// definitions needed to create a fresh `Interp` on each connection thread.
+///
+/// `funcs` is a detached copy of the interpreter's function table
+/// (`snapshot_funcs`): connection threads must resolve exactly the same
+/// names as the main thread (user modules, pure-ZZ stdlib like
+/// `json.is_null`, dotted aliases). It sits behind a mutex because
+/// `FuncValue` envs are `Rc`-based (`Send` but not `Sync`); each thread
+/// takes its own `detach_cached_funcs` clone under a short lock and never
+/// touches the shared copy afterwards (same discipline as `task.spawn`).
 #[derive(Clone)]
 struct ServerSnapshot {
     routes: Vec<(String, String, FuncSnapshot)>,
@@ -1029,6 +1202,7 @@ struct ServerSnapshot {
     static_dir: Option<String>,
     natives: Arc<HashMap<String, NativeEntry>>,
     structs: HashMap<String, Vec<String>>,
+    funcs: Arc<std::sync::Mutex<HashMap<String, FuncValue>>>,
 }
 
 /// Snapshot a `Value::Func` handler into a thread-safe `FuncSnapshot`.
@@ -1068,6 +1242,7 @@ impl ServerSnapshot {
             static_dir: server.static_dir.clone(),
             natives: interp.natives.clone(),
             structs: (*interp.structs).clone(),
+            funcs: Arc::new(std::sync::Mutex::new(snapshot_funcs(&interp.funcs))),
         }
     }
 
@@ -1086,10 +1261,16 @@ impl ServerSnapshot {
     }
 
     /// Create a fresh `Interp` on the current thread with shared natives
-    /// and cloned structs but an empty environment.
+    /// and cloned structs but an empty environment. The function table is
+    /// a per-thread detach-clone of the listen-time snapshot, so workers
+    /// resolve the same names (modules, pure-ZZ stdlib) without sharing
+    /// any `Rc` env across threads (same discipline as `task.spawn`).
     fn fresh_interp(&self) -> Interp {
         let mut interp = Interp::with_natives_shared(Arc::clone(&self.natives));
         interp.structs = Arc::new(self.structs.clone());
+        if let Ok(guard) = self.funcs.lock() {
+            interp.funcs = detach_cached_funcs(&guard);
+        }
         interp
     }
 }
@@ -1151,21 +1332,29 @@ fn handle_connection_thread(
     stream: &mut std::net::TcpStream,
     span: Span,
 ) {
-    use std::io::Read;
-
     let start = Instant::now();
 
     // ── Read the raw HTTP request ──
-    let mut buf = [0u8; 8192];
-    let n = match stream.read(&mut buf) {
-        Ok(n) => n,
+    //
+    // G1 (Registry V2): the old code did a single 8 KB `read()`, so any
+    // body arriving in multiple TCP segments (e.g. multi-MB publish
+    // tarballs) was silently truncated. Read in a loop: headers until
+    // `\r\n\r\n` (bounded), then exactly Content-Length body bytes.
+    let head_buf = match read_until_delim(stream, b"\r\n\r\n", MAX_HEAD_BYTES) {
+        Ok(Some(buf)) => buf,
+        Ok(None) => {
+            // Header block exceeded the cap (or client vanished).
+            let _ = stream.write_all(format_response(431, "headers too large").as_bytes());
+            let _ = stream.flush();
+            return;
+        }
         Err(_) => {
             let _ = stream.write_all(format_response(500, "internal error").as_bytes());
             let _ = stream.flush();
             return;
         }
     };
-    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+    let text = String::from_utf8_lossy(&head_buf).to_string();
     let mut lines = text.lines();
     let Some(request_line) = lines.next() else {
         let _ = stream.write_all(format_response(400, "bad request").as_bytes());
@@ -1187,24 +1376,44 @@ fn handle_connection_thread(
 
     let req_headers = extract_headers(&text);
 
-    let mut body = String::new();
     let mut content_length = 0usize;
+    let mut expect_continue = false;
     for line in lines {
         if line.is_empty() {
             break;
         }
-        if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+        let lower = line.to_ascii_lowercase();
+        if let Some(v) = lower.strip_prefix("content-length:") {
             content_length = v.trim().parse().unwrap_or(0);
+        } else if let Some(v) = lower.strip_prefix("expect:") {
+            expect_continue = v.trim() == "100-continue";
         }
     }
-    if content_length > 0 {
-        if let Some(idx) = text.find("\r\n\r\n") {
-            let start = idx + 4;
-            if start < n {
-                body = text[start..].chars().take(content_length).collect();
-            }
-        }
+    if content_length > MAX_BODY_BYTES {
+        let _ = stream.write_all(format_response(413, "payload too large").as_bytes());
+        let _ = stream.flush();
+        return;
     }
+    if expect_continue && content_length > 0 {
+        // Large clients (curl, some SDKs) wait for this before sending.
+        let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+        let _ = stream.flush();
+    }
+    // Bytes already buffered past the header terminator belong to the body.
+    let head_end = text
+        .find("\r\n\r\n")
+        .map(|idx| idx + 4)
+        .unwrap_or(head_buf.len());
+    let buffered: &[u8] = head_buf.get(head_end..).unwrap_or(&[]);
+    let body_bytes = match read_exact_capped(stream, buffered, content_length, MAX_BODY_BYTES) {
+        Ok(b) => b,
+        Err(_) => {
+            let _ = stream.write_all(format_response(400, "truncated body").as_bytes());
+            let _ = stream.flush();
+            return;
+        }
+    };
+    let body = String::from_utf8_lossy(&body_bytes).to_string();
 
     // ── Reconstruct server + interp from snapshot ──
     let server = snapshot.reconstruct_server();
@@ -1249,4 +1458,245 @@ fn handle_connection_thread(
     let response = format_response_with_headers(status, &resp_headers, &resp_body);
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    /// A reader that yields at most `chunk` bytes per `read` call,
+    /// simulating TCP segmentation (the G1 truncation scenario).
+    struct Chunked {
+        data: Vec<u8>,
+        pos: usize,
+        chunk: usize,
+    }
+
+    impl Chunked {
+        fn new(data: Vec<u8>, chunk: usize) -> Self {
+            Self {
+                data,
+                pos: 0,
+                chunk,
+            }
+        }
+    }
+
+    impl Read for Chunked {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.data.len() {
+                return Ok(0);
+            }
+            let n = self.chunk.min(buf.len()).min(self.data.len() - self.pos);
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn head_found_despite_segmentation() {
+        let raw = b"POST /echo HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello".to_vec();
+        // One byte per read: delimiter split across reads must still match.
+        let mut r = Chunked::new(raw, 1);
+        let head = read_until_delim(&mut r, b"\r\n\r\n", 65536)
+            .unwrap()
+            .expect("head must be found");
+        assert!(head.ends_with(b"\r\n\r\n"));
+        assert!(head.starts_with(b"POST /echo"));
+    }
+
+    #[test]
+    fn head_over_cap_returns_none() {
+        let raw = b"GET / HTTP/1.1\r\nX-Pad: ".to_vec();
+        let mut r = Chunked::new([raw, vec![b'x'; 128 * 1024]].concat(), 8192);
+        let head = read_until_delim(&mut r, b"\r\n\r\n", 1024).unwrap();
+        assert!(head.is_none(), "oversize head must be rejected");
+    }
+
+    #[test]
+    fn body_reads_across_segments() {
+        // 200 KB body delivered 7 bytes at a time (old code kept ~first 8 KB).
+        let want: Vec<u8> = (0..200 * 1024).map(|i| (i % 251) as u8).collect();
+        let mut r = Chunked::new(want.clone(), 7);
+        let got = read_exact_capped(&mut r, &[], want.len(), MAX_BODY_BYTES).unwrap();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn body_prefers_buffered_prefix() {
+        let mut r = Chunked::new(b"world".to_vec(), 2);
+        let got = read_exact_capped(&mut r, b"hello ", 11, MAX_BODY_BYTES).unwrap();
+        assert_eq!(got, b"hello world");
+    }
+
+    #[test]
+    fn body_truncated_errors() {
+        let mut r = Chunked::new(b"abc".to_vec(), 16);
+        let err = read_exact_capped(&mut r, &[], 10, MAX_BODY_BYTES).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn body_over_cap_errors_before_buffering() {
+        let mut r = Chunked::new(b"abc".to_vec(), 16);
+        assert!(read_exact_capped(&mut r, &[], usize::MAX, 8).is_err());
+        // Zero-length bodies never touch the stream.
+        let mut empty = Chunked::new(vec![], 1);
+        let got = read_exact_capped(&mut empty, &[], 0, 8).unwrap();
+        assert!(got.is_empty());
+    }
+
+    fn str_val(s: &str) -> Value {
+        Value::Str(s.to_string().into())
+    }
+
+    #[test]
+    fn respond_builds_status_headers_body() {
+        let mut interp = Interp::new();
+        let headers = Value::Dict(Box::new(vec![(str_val("Location"), str_val("/x"))]));
+        let mut args = vec![Value::Int(302), str_val(""), headers];
+        let out = http_respond(&mut interp, &mut args, Span::new(0, 0)).unwrap();
+        match out {
+            Value::Response(r) => {
+                assert_eq!(r.status, 302);
+                assert!(r.body.is_empty());
+                assert_eq!(r.headers, vec![("Location".to_string(), "/x".to_string())]);
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn respond_rejects_bad_status() {
+        let mut interp = Interp::new();
+        let mut args = vec![Value::Int(99), str_val(""), Value::Dict(Box::default())];
+        assert!(http_respond(&mut interp, &mut args, Span::new(0, 0)).is_err());
+    }
+
+    /// POST `bytes` bodies must arrive byte-identical (binary asset upload).
+    #[test]
+    fn post_bytes_body_round_trips() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut acc = Vec::new();
+            let mut buf = [0u8; 8192];
+            let head_end = loop {
+                let n = s.read(&mut buf).unwrap();
+                acc.extend_from_slice(&buf[..n]);
+                if let Some(i) = acc.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break i + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&acc[..head_end]).to_string();
+            let len: usize = head
+                .lines()
+                .skip(1)
+                .filter_map(|l| l.split_once(':'))
+                .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, v)| v.trim().parse().ok())
+                .unwrap_or(0);
+            let mut body = acc[head_end..].to_vec();
+            while body.len() < len {
+                let n = s.read(&mut buf).unwrap();
+                body.extend_from_slice(&buf[..n]);
+            }
+            tx.send(body).unwrap();
+            let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+            s.write_all(resp).unwrap();
+        });
+
+        // Deliberately non-UTF8 bytes: must survive without lossy mangling.
+        let raw = vec![0x1f, 0x8b, 0x08, 0x00, 0xff, 0x00, 0xfe, 0x41];
+        let mut interp = Interp::new();
+        let mut args = vec![
+            str_val(&format!("http://{addr}/upload")),
+            Value::Bytes(Box::new(zz_runtime::BytesData::from_vec(raw.clone()))),
+            Value::Dict(Box::default()),
+        ];
+        let out = http_post(&mut interp, &mut args, Span::new(0, 0)).unwrap();
+        match out {
+            Value::Result(r) => match &*r {
+                Ok(Value::Response(resp)) => assert_eq!(resp.status, 200),
+                other => panic!("expected Ok(Response), got {other:?}"),
+            },
+            other => panic!("expected Result, got {other:?}"),
+        }
+        let got = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(got, raw, "binary body corrupted in transit");
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+    use zz_runtime::Span;
+
+    fn str_val(s: &str) -> Value {
+        Value::Str(s.to_string().into())
+    }
+
+    fn server_req() -> Value {
+        Value::Dict(Box::new(vec![
+            (str_val("method"), str_val("POST")),
+            (str_val("path"), str_val("/api/pkg/publish")),
+            (str_val("body"), str_val("{}")),
+            (
+                str_val("headers"),
+                Value::Dict(Box::new(vec![(
+                    str_val("Authorization"),
+                    str_val("Bearer zz_pat_abc"),
+                )])),
+            ),
+            (str_val("query"), Value::Dict(Box::default())),
+            (str_val("params"), Value::Dict(Box::default())),
+        ]))
+    }
+
+    #[test]
+    fn header_reads_nested_headers_dict() {
+        let mut interp = Interp::new();
+        let mut args = vec![server_req(), str_val("authorization")];
+        let out = http_header(&mut interp, &mut args, Span::new(0, 0)).unwrap();
+        match out {
+            Value::Result(r) => match &*r {
+                Ok(Value::Str(s)) => assert_eq!(s.to_string(), "Bearer zz_pat_abc"),
+                other => panic!("expected Ok(Str), got {other:?}"),
+            },
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn header_missing_is_err() {
+        let mut interp = Interp::new();
+        let mut args = vec![server_req(), str_val("x-nope")];
+        let out = http_header(&mut interp, &mut args, Span::new(0, 0)).unwrap();
+        match out {
+            Value::Result(r) => assert!(r.is_err()),
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn header_bare_dict_still_works() {
+        let mut interp = Interp::new();
+        let bare = Value::Dict(Box::new(vec![(str_val("X-A"), str_val("1"))]));
+        let mut args = vec![bare, str_val("x-a")];
+        let out = http_header(&mut interp, &mut args, Span::new(0, 0)).unwrap();
+        match out {
+            Value::Result(r) => match &*r {
+                Ok(Value::Str(s)) => assert_eq!(s.to_string(), "1"),
+                other => panic!("expected Ok(Str), got {other:?}"),
+            },
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
 }

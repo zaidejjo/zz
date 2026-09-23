@@ -77,6 +77,9 @@ impl Session {
                 panic!("zz: pure-ZZ stdlib error: {e:?}");
             }
         }
+        // Canonical `std.*` aliases for pure-ZZ helpers (short + canonical
+        // both type-check; both must run).
+        zz_stdlib::define_canonical_purezz_aliases(&mut interp.env, &mut interp.funcs);
 
         Session {
             interp,

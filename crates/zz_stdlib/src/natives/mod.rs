@@ -749,6 +749,13 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "std.crypto.sha256_bytes".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_sha256_bytes,
+        },
+    );
+    m.insert(
         "std.crypto.sha512".into(),
         NativeEntry {
             arity: 1,
@@ -781,6 +788,13 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: crypto::crypto_sha256,
+        },
+    );
+    m.insert(
+        "crypto.sha256_bytes".into(),
+        NativeEntry {
+            arity: 1,
+            f: crypto::crypto_sha256_bytes,
         },
     );
     m.insert(
@@ -1195,6 +1209,13 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "std.encoding.base64_decode_bytes".into(),
+        NativeEntry {
+            arity: 1,
+            f: encoding::encoding_base64_decode_bytes,
+        },
+    );
+    m.insert(
         "std.encoding.hex_encode".into(),
         NativeEntry {
             arity: 1,
@@ -1382,6 +1403,13 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 4,
             f: http::http_test,
+        },
+    );
+    m.insert(
+        "std.http.respond".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_respond,
         },
     );
     m.insert(
