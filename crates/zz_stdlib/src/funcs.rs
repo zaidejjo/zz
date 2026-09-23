@@ -1760,7 +1760,8 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
                         vec![Type::Dict(Box::new(Type::Str), Box::new(Type::Str))],
                         Box::new(Type::Result(
                             Box::new(Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
-                            Box::new(Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
+                            // Short-circuit: `.err(response)` answers directly.
+                            Box::new(Type::Response),
                         )),
                     ),
                 ),
