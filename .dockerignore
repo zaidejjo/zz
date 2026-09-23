@@ -1,0 +1,11 @@
+# Keep the toolchain build context to sources only (target/ is 30GB+).
+target/
+.git/
+.github/
+.vscode/
+.idea/
+*.log
+dist/
+bin/
+examples/
+plans/
