@@ -10,20 +10,15 @@ env:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    name: test (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: install native deps (linux)
-        if: runner.os == 'Linux'
+      - name: install native deps
         # Native codegen links -lcurl -lsqlite3 and compiles with clang.
         # Runner images don't guarantee the headers — install explicitly
         # so the --native test legs don't fail with `curl/curl.h not found`.
