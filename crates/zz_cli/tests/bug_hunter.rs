@@ -64,13 +64,13 @@ fn run_both(src: &str) -> (i32, String, String, i32, String, String) {
     )
 }
 
-/// Simple deterministic counter for temp dir uniqueness (no external deps).
-static mut COUNTER: u64 = 0;
+/// Process-wide unique suffix for temp dirs (atomic: tests run in parallel
+/// threads, and a plain `static mut` counter races — two tests then share
+/// one dir and overwrite each other's `bh.zz`, producing mystery failures
+/// where a test parses another test's source).
+static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 fn rand_suffix() -> u64 {
-    unsafe {
-        COUNTER += 1;
-        COUNTER
-    }
+    COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Assert VM and native produced identical results.
