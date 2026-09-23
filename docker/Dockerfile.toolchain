@@ -20,10 +20,24 @@ COPY . .
 # Locked, release profile: the exact binary CI tested. Stripped: debug
 # symbols stay in the workspace profile (profiling-friendly) but have no
 # place in a production image (~230MB saved).
-RUN cargo install --locked --path crates/zz_cli \
-        --root /opt/zz --profile release \
-    && strip /opt/zz/bin/zz \
-    && /opt/zz/bin/zz --version
+#
+# Cache strategy (two levels):
+#   1. GHA layer cache (cache-from/to type=gha in the workflow) reuses
+#      the apt + base layers; any source change still reruns this step.
+#   2. BuildKit cache mounts below persist the cargo registry/git/target
+#      dirs across builds, so reruns recompile only changed crates instead
+#      of the whole workspace from scratch. Needs BuildKit (buildx, which
+#      the workflow uses); plain `docker build` ignores mounts safely.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    cargo build --locked --profile release --bin zz \
+    && cp target/release/zz /opt/zz-bin/zz \
+    && strip /opt/zz-bin/zz \
+    && /opt/zz-bin/zz --version
+# Promote out of the cache-mounted target dir (mounts vanish with the step).
+RUN mkdir -p /opt/zz/bin && cp /opt/zz-bin/zz /opt/zz/bin/zz \
+    && rm -rf /opt/zz-bin
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
