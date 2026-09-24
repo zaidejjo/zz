@@ -1202,25 +1202,10 @@ impl Lowerer {
         }
     }
 
-    pub(super) fn emit_block(&self, block: &Block, names: &mut NameCtx, out: &mut String) {
-        // Control-flow boundary: drop literal-length knowledge from the
-        // enclosing scope so `len(x)` folds never cross a merge point.
-        names.clear_array_lens();
-        // Scope `__tail` so inner block tail captures don't leak to outer scopes.
-        let tail_saved = names.stack.get("__tail").map(|v| v.len()).unwrap_or(0);
-        let n = block.stmts.len();
-        for (i, stmt) in block.stmts.iter().enumerate() {
-            let is_tail = i == n - 1;
-            self.emit_stmt(stmt, names, out, is_tail);
-        }
-        // Restore `__tail` stack to pre-block depth.
-        if let Some(v) = names.stack.get_mut("__tail") {
-            v.truncate(tail_saved);
-        }
-    }
-
-    /// Emit the function body block. Unlike `emit_block`, this preserves
-    /// `__tail` entries so `last_stmt_value` can use them for implicit returns.
+    /// Emit the function body block. Unlike value-position blocks
+    /// (`emit_block_value`, which pops exactly the tail temp this block
+    /// created), this preserves `__tail` entries so `last_stmt_value`
+    /// can use them for implicit returns.
     pub(super) fn emit_func_block(&self, block: &Block, names: &mut NameCtx, out: &mut String) {
         names.clear_array_lens();
         let n = block.stmts.len();

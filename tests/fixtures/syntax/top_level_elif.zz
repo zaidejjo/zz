@@ -1,0 +1,26 @@
+// Top-level elif chains over globals (no `func main` wrapper).
+// Regression: top-level `else if` branches compiled to empty else.
+brothers := ["mohammad", "youssef", "firas"]
+cousins := ["ahmad", "mansoor"]
+neighbors := ["suhaib", "hasan"]
+
+probe := "zaid"
+if brothers.contains(probe) {
+    println("Hello, BRO {probe}")
+} else if cousins.contains(probe) {
+    println("Hello, Cousin {probe}")
+} else if neighbors.contains(probe) {
+    println("Hello, Neighbor {probe}")
+} else {
+    println("Hello, Buddy")
+}
+
+probe2 := "ahmad"
+if brothers.contains(probe2) {
+    println("BRO2")
+} else if cousins.contains(probe2) {
+    println("COUSIN2")
+} else {
+    println("BUDDY2")
+}
+println("top_level_elif_ok")

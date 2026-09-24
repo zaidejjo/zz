@@ -1,12 +1,50 @@
 //! Expression lowering: literals, binary ops, function calls, field access,
 //! collections, variants, closures, and match expressions.
 
-use zz_frontend::ast::{Expr, FmtPart, MatchArm, Param, Pattern};
+use zz_frontend::ast::{Block, Expr, FmtPart, MatchArm, Param, Pattern};
 
 use super::green::GreenCtx;
 use super::*;
 
 impl Lowerer {
+    /// Emit a block in value position, returning a C expression string
+    /// for its tail value. Shared by value-position blocks and if-branch
+    /// bodies so both agree on what a branch yields. A trailing `if`
+    /// tail recurses through value-position if lowering, so elif chains
+    /// yield branch values instead of unit.
+    pub(super) fn emit_block_value(
+        &self,
+        b: &Block,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        names.clear_array_lens();
+        let tail_saved = names.stack.get("__tail").map(|v| v.len()).unwrap_or(0);
+        let n = b.stmts.len();
+        for (i, stmt) in b.stmts.iter().enumerate() {
+            self.emit_stmt(stmt, names, out, i == n - 1);
+        }
+        let tail_tmp = names.stack.get_mut("__tail").and_then(|v| {
+            if v.len() > tail_saved {
+                v.pop().map(|(t, _)| t)
+            } else {
+                None
+            }
+        });
+        if let Some(tmp) = tail_tmp {
+            tmp
+        } else if let Some(Stmt::Expr(e)) = b.stmts.last() {
+            if matches!(e, Expr::If { .. }) {
+                self.emit_expr(e, names, out)
+            } else {
+                let v = self.emit_expr(e, names, out);
+                box_scalar_operand(e, names, &v)
+            }
+        } else {
+            "zz_unit()".to_string()
+        }
+    }
+
     pub(super) fn emit_expr(&self, e: &Expr, names: &mut NameCtx, out: &mut String) -> String {
         // Statement-direct flag: true when this expression is the
         // outermost value of a statement-level position (set by the
@@ -444,52 +482,35 @@ impl Lowerer {
             Expr::If {
                 cond, then, els, ..
             } => {
+                // Value-position if: every branch assigns its tail value
+                // into a shared temp (statement position discards it).
+                // Chained `else if` arrives as a bare If — recurse so
+                // nested branches emit instead of collapsing to unit.
                 let c = self.emit_expr(cond, names, out);
                 let c = box_scalar_operand(cond, names, &c);
+                let tmp = names.fresh("_ifv");
+                out.push_str(&format!("    zz_value {tmp} = zz_unit();\n"));
                 out.push_str(&format!("    if (zz_truthy({c})) {{\n"));
-                self.emit_block(then, names, out);
+                let tv = self.emit_block_value(then, names, out);
+                out.push_str(&format!("        {tmp} = {tv};\n"));
                 if let Some(el) = els {
                     out.push_str("    } else {\n");
-                    // else branch as expression: emit statements then unit
-                    self.emit_block(get_block(el), names, out);
+                    let ev = match el.as_ref() {
+                        Expr::Block(b) => self.emit_block_value(b, names, out),
+                        other => self.emit_expr(other, names, out),
+                    };
+                    out.push_str(&format!("        {tmp} = {ev};\n"));
                     out.push_str("    }\n");
                 } else {
                     out.push_str("    }\n");
                 }
-                "zz_unit()".to_string()
+                tmp
             }
             Expr::Block(b) => {
-                // Value-position block: evaluate statements, yield the tail.
-                // Unlike `emit_block` (statement position, truncates `__tail`
-                // so inner temps never leak), exactly the tail temp THIS
-                // block created is popped into the value; leaf tails skipped
-                // by `emit_stmt` are evaluated directly. If-tails stay unit
-                // (branch-value lowering, same as before).
-                names.clear_array_lens();
-                let tail_saved = names.stack.get("__tail").map(|v| v.len()).unwrap_or(0);
-                let n = b.stmts.len();
-                for (i, stmt) in b.stmts.iter().enumerate() {
-                    self.emit_stmt(stmt, names, out, i == n - 1);
-                }
-                let tail_tmp = names.stack.get_mut("__tail").and_then(|v| {
-                    if v.len() > tail_saved {
-                        v.pop().map(|(t, _)| t)
-                    } else {
-                        None
-                    }
-                });
-                if let Some(tmp) = tail_tmp {
-                    tmp
-                } else if let Some(Stmt::Expr(e)) = b.stmts.last() {
-                    if matches!(e, Expr::If { .. }) {
-                        "zz_unit()".to_string()
-                    } else {
-                        let v = self.emit_expr(e, names, out);
-                        box_scalar_operand(e, names, &v)
-                    }
-                } else {
-                    "zz_unit()".to_string()
-                }
+                // Value-position block: evaluate statements, yield the tail
+                // (see emit_block_value; statement-position emit_block
+                // truncates `__tail` so inner temps never leak there).
+                self.emit_block_value(b, names, out)
             }
             Expr::Range { start, end, .. } => {
                 let s = self.emit_expr(start, names, out);
