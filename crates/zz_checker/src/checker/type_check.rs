@@ -132,22 +132,39 @@ impl Checker {
                     self.imports.push((ns, *span));
                 } else {
                     // Selective/wildcard import: track each imported name.
+                    // Record bare→qualified aliases for call-site fallback
+                    // (generic functions have no value binding to find).
+                    let eff_ns = alias
+                        .as_ref()
+                        .cloned()
+                        .or_else(|| path.last().cloned())
+                        .unwrap_or_default();
                     for item in items {
                         let name = match item {
                             zz_frontend::ast::ImportItem::Wildcard { .. } => {
                                 // Wildcard: track the module namespace.
-                                let ns = alias
-                                    .as_ref()
-                                    .cloned()
-                                    .or_else(|| path.last().cloned())
-                                    .unwrap_or_default();
-                                ns
+                                for k in self.funcs.keys().cloned().collect::<Vec<_>>() {
+                                    if let Some(bare) = k.strip_prefix(&format!("{eff_ns}.")) {
+                                        if !bare.is_empty() && !bare.contains('.') {
+                                            self.import_aliases
+                                                .entry(bare.to_string())
+                                                .or_insert(k);
+                                        }
+                                    }
+                                }
+                                eff_ns.clone()
                             }
                             zz_frontend::ast::ImportItem::Named {
                                 name,
                                 alias: item_alias,
                                 ..
-                            } => item_alias.clone().unwrap_or_else(|| name.clone()),
+                            } => {
+                                let target = item_alias.clone().unwrap_or_else(|| name.clone());
+                                self.import_aliases
+                                    .entry(target.clone())
+                                    .or_insert_with(|| format!("{eff_ns}.{name}"));
+                                target
+                            }
                         };
                         self.imports.push((name, *span));
                     }
@@ -1294,6 +1311,32 @@ impl Checker {
         named: &[(String, Expr)],
         span: Span,
     ) -> Type {
+        // Selective-import alias, resolved FIRST so the result flows
+        // through the direct generic-instantiation path below: a bare
+        // `squared` from `import m(squared)` becomes `m.squared` — but
+        // ONLY on total miss. Locals, seed entries and synthetic Decls
+        // all take precedence; this path exists for generic functions,
+        // which have no value binding to find. Bare *uses* still error.
+        let rewritten;
+        let callee: &Expr = match callee {
+            Expr::Ident { name, span }
+                if !self.funcs.contains_key(name)
+                    && !self.env.iter().any(|s| s.contains_key(name)) =>
+            {
+                match self.import_aliases.get(name).cloned() {
+                    Some(qualified) => {
+                        self.used_names.insert(name.clone());
+                        rewritten = Expr::Path {
+                            parts: qualified.split('.').map(str::to_string).collect(),
+                            span: *span,
+                        };
+                        &rewritten
+                    }
+                    None => callee,
+                }
+            }
+            c => c,
+        };
         // Direct call of a named function: bypass `lookup` so generic
         // functions are instantiated here rather than rejected as values.
         let direct_name = match callee {

@@ -588,6 +588,10 @@ fn run_file(
 
     let mut interp = Interp::with_natives(natives);
     interp.args = script_args.to_vec();
+    // Selective-import aliases for bare generic-function calls (see
+    // LoadResult::import_aliases): the VM compiler emits no code for
+    // import statements, so the runtime map would otherwise stay empty.
+    interp.import_aliases = loaded.import_aliases.clone();
 
     // `--embed <dir>`: serve the asset tree to `fs.embedfs()` for this run.
     if let Some(dir) = embed.as_deref() {

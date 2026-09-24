@@ -581,6 +581,13 @@ pub(crate) struct Checker {
     pub(crate) had_undefined_var: bool,
     /// Imported namespaces: (alias, span). Used to detect unused imports.
     pub(crate) imports: Vec<(String, zz_frontend::span::Span)>,
+    /// Selective-import aliases: bare name → qualified `ns.sym`, from
+    /// `import m(x)` / `import m(x as y)` statements (kept intact by the
+    /// loader). Used ONLY on total miss: locals, seed entries and value
+    /// Decls all take precedence. This is how bare calls to *generic*
+    /// functions resolve — generics have no value type, so no binding
+    /// is ever created for them.
+    pub(crate) import_aliases: HashMap<String, String>,
     /// Resolved type per expression span, recorded during the type walk.
     /// Used by the HIR builder to attach a resolved `Type` to every AST node.
     pub(crate) span_types: std::collections::HashMap<zz_frontend::span::Span, Type>,
@@ -616,6 +623,7 @@ impl Checker {
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,
             imports: Vec::new(),
+            import_aliases: HashMap::new(),
             span_types: std::collections::HashMap::new(),
             link_libs: Vec::new(),
         }

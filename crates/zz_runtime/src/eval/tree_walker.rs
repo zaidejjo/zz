@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Pattern, Stmt};
+use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, ImportItem, Pattern, Stmt};
 use zz_frontend::span::Span;
 
 use crate::env::{Env, EnvLink};
@@ -28,7 +28,44 @@ impl Interp {
                 Flow::Continue(span) => Ok(Flow::Continue(span)),
                 Flow::Yield(_) => Err(EvalError::yield_escape()),
             },
-            Stmt::Import { .. } => Ok(Flow::Value(Value::Unit)),
+            Stmt::Import {
+                path, alias, items, ..
+            } => {
+                // Record selective-import aliases (bare → `ns.sym`) for
+                // miss-only fallback in Ident resolution. Generic functions
+                // have no value binding, so this map is their only runtime
+                // path; everything else resolves before consulting it.
+                if !items.is_empty() {
+                    let ns = alias
+                        .as_ref()
+                        .cloned()
+                        .or_else(|| path.last().cloned())
+                        .unwrap_or_default();
+                    for item in items {
+                        match item {
+                            ImportItem::Named { name, alias, .. } => {
+                                let target = alias.clone().unwrap_or_else(|| name.clone());
+                                self.import_aliases
+                                    .entry(target)
+                                    .or_insert_with(|| format!("{ns}.{name}"));
+                            }
+                            ImportItem::Wildcard { .. } => {
+                                let prefix = format!("{ns}.");
+                                for key in self.funcs.keys().cloned().collect::<Vec<_>>() {
+                                    if let Some(bare) = key.strip_prefix(&prefix) {
+                                        if !bare.is_empty() && !bare.contains('.') {
+                                            self.import_aliases
+                                                .entry(bare.to_string())
+                                                .or_insert(key);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Flow::Value(Value::Unit))
+            }
             Stmt::ExternBlock { .. } => Ok(Flow::Value(Value::Unit)),
             Stmt::Link { .. } => Ok(Flow::Value(Value::Unit)),
             Stmt::Func {
@@ -669,6 +706,14 @@ impl Interp {
                         name: name.clone(),
                         arity: entry.arity,
                     }))));
+                }
+                // Selective-import alias (miss-only): `squared` from
+                // `import m(squared)` resolves to `m.squared`. Locals,
+                // seed entries and Decls all took precedence above; this
+                // path exists for generics, which have no value binding.
+                if let Some(qualified) = self.import_aliases.get(name).cloned() {
+                    let parts: Vec<String> = qualified.split('.').map(str::to_string).collect();
+                    return self.resolve_path_value(&parts, *span).map(Flow::Value);
                 }
                 Err(EvalError::new(
                     format!("undefined variable `{name}`"),
