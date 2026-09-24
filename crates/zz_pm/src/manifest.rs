@@ -48,6 +48,8 @@ impl Default for Manifest {
                 description: None,
                 license: None,
                 repository: None,
+                category: None,
+                keywords: Vec::new(),
             },
             dependencies: HashMap::new(),
             native: None,
@@ -75,6 +77,13 @@ pub struct PackageSpec {
     /// Source URL (sent as `repo` on publish).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    /// Fixed-vocabulary category (sent as `category` on publish).
+    /// Canonical values: backend, cli, frameworks, math, gui, utilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// Free-form discovery keywords (sent as `keywords` on publish).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
 }
 
 /// Options for scaffolding a new manifest (`zz init` / `zz new` flags).
@@ -190,6 +199,8 @@ impl Manifest {
                 description: opts.description.clone(),
                 license: opts.license.clone(),
                 repository: opts.repository.clone(),
+                category: None,
+                keywords: Vec::new(),
             },
             dependencies: HashMap::new(),
             native: None,
@@ -299,6 +310,8 @@ mod tests {
                 description: None,
                 license: None,
                 repository: None,
+                category: None,
+                keywords: Vec::new(),
             },
             dependencies: {
                 let mut d = HashMap::new();
@@ -485,6 +498,8 @@ foo = "^1.0"
                 description: Some("Does things".into()),
                 license: Some("MIT".into()),
                 repository: Some("https://github.com/user/enriched".into()),
+                category: Some("cli".into()),
+                keywords: vec!["tool".into()],
             },
             dependencies: HashMap::new(),
             native: None,

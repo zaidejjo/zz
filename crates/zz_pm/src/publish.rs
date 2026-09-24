@@ -54,12 +54,17 @@ impl std::fmt::Display for PublishError {
 
 impl std::error::Error for PublishError {}
 
+/// Fixed category vocabulary for published packages. The website browses
+/// by these slugs; `keywords` stays free-form for the long tail.
+pub const CATEGORIES: &[&str] = &["backend", "cli", "frameworks", "math", "gui", "utilities"];
+
 /// Validate a manifest for publishing.
 ///
 /// Checks that:
 /// 1. Package name is set (not "untitled") and registry-legal (`[a-z0-9-_]`)
 /// 2. Version is set and full semver (`1.2.3` — what the registry accepts)
 /// 3. No path dependencies exist
+/// 4. `category`, when set, is in the fixed vocabulary (case-insensitive)
 pub fn validate(manifest: &Manifest) -> Result<(), PublishError> {
     // Check package name
     if manifest.package.name == "untitled" || manifest.package.name.is_empty() {
@@ -100,6 +105,18 @@ pub fn validate(manifest: &Manifest) -> Result<(), PublishError> {
 
     if !path_deps.is_empty() {
         return Err(PublishError::PathDepsNotAllowed(path_deps));
+    }
+
+    // Check category against the fixed vocabulary (case-insensitive;
+    // the payload normalizes to the canonical lowercase slug).
+    if let Some(cat) = manifest.package.category.as_deref() {
+        if !CATEGORIES.contains(&cat.to_lowercase().as_str()) {
+            return Err(PublishError::InvalidField(format!(
+                "package.category `{cat}` is not in the vocabulary ({}))\n\
+                 hint: use keywords for anything outside it",
+                CATEGORIES.join(", ")
+            )));
+        }
     }
 
     Ok(())
@@ -304,6 +321,22 @@ mod tests {
         manifest.package.version = "1.0.0".to_string();
 
         assert!(validate(&manifest).is_ok());
+    }
+
+    #[test]
+    fn validate_category_vocabulary() {
+        let mut manifest = Manifest::default();
+        manifest.package.name = "my_lib".to_string();
+        manifest.package.version = "1.0.0".to_string();
+
+        manifest.package.category = Some("CLI".to_string());
+        assert!(validate(&manifest).is_ok());
+
+        manifest.package.category = Some("spaceships".to_string());
+        assert!(matches!(
+            validate(&manifest),
+            Err(PublishError::InvalidField(_))
+        ));
     }
 
     #[test]
