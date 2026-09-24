@@ -692,6 +692,13 @@ pub fn publish(args: &[String]) -> Result<(), String> {
         description: manifest.package.description.clone().unwrap_or_default(),
         repo: manifest.package.repository.clone().unwrap_or_default(),
         license: manifest.package.license.clone().unwrap_or_default(),
+        category: manifest
+            .package
+            .category
+            .as_deref()
+            .map(|c| c.to_lowercase())
+            .unwrap_or_default(),
+        keywords: manifest.package.keywords.clone(),
     };
 
     println!("uploading {}@{} to {base}...", req.name, req.version);

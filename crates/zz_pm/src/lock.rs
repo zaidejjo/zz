@@ -291,6 +291,8 @@ mod tests {
                 description: None,
                 license: None,
                 repository: None,
+                category: None,
+                keywords: Vec::new(),
             },
             dependencies: deps,
             native: None,

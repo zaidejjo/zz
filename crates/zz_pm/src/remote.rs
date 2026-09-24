@@ -376,6 +376,12 @@ pub struct PublishRequest {
     pub repo: String,
     #[serde(default)]
     pub license: String,
+    /// Fixed-vocabulary category slug (e.g. `"cli"`).
+    #[serde(default)]
+    pub category: String,
+    /// Free-form discovery keywords.
+    #[serde(default)]
+    pub keywords: Vec<String>,
 }
 
 /// `POST /api/pkg/publish` success body.
