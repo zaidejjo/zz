@@ -14,6 +14,7 @@ use zz_frontend::ast::{Expr, Param};
 
 use crate::env::EnvLink;
 use crate::lf_chan::LfRing;
+use crate::runtime::NativeEntry;
 use crate::vm::{Chunk, Op};
 
 /// Cached frozen parent per spawner chain: `(parent shape, reachable
@@ -344,6 +345,41 @@ pub fn snapshot_env(env: &EnvLink) -> HashMap<String, Value> {
     // 131 entries); sharing makes it linear.
     let mut seen: HashMap<usize, Value> = HashMap::new();
     flat.into_iter()
+        .map(|(k, v)| (k, deep_clone_value(v, &mut seen)))
+        .collect()
+}
+
+/// Like [`snapshot_env`], but keeps only the `keep` names (exact match).
+/// Used for HTTP route handlers: a handler's captured env is the whole
+/// global scope (every stdlib/user function), and cloning all of it per
+/// route is quadratic across registrations (each new closure captures
+/// the server value holding all previous snapshots). Callers pass the
+/// handler's static load set (see [`reachable_refs`]); anything unkept
+/// resolves at request time through the per-thread funcs/natives tables,
+/// exactly as `task.spawn` workers do. One shared memo, same as above.
+///
+/// Entries whose name is covered by the `funcs`/`natives` tables are
+/// dropped even when kept: at request time they resolve to the same
+/// table entry (module functions live in the table snapshot, not the
+/// env). Without this, a kept dotted name (`routes.handle_search`)
+/// drags its entire captured global scope back in through
+/// [`deep_clone_value`]. Genuine data bindings and table-unknown
+/// closures (e.g. `Decl`-bound) are always cloned.
+pub fn snapshot_env_filtered(
+    env: &EnvLink,
+    keep: &HashSet<String>,
+    funcs: &HashMap<String, FuncValue>,
+    natives: &std::sync::Arc<HashMap<String, NativeEntry>>,
+) -> HashMap<String, Value> {
+    let flat = env.flatten();
+    let mut seen: HashMap<usize, Value> = HashMap::new();
+    flat.into_iter()
+        .filter(|(k, _)| keep.contains(k.as_str()))
+        .filter(|(k, v)| match v {
+            Value::Func(_) => !funcs.contains_key(k.as_str()),
+            Value::Native(_) => !natives.contains_key(k.as_str()),
+            _ => true,
+        })
         .map(|(k, v)| (k, deep_clone_value(v, &mut seen)))
         .collect()
 }

@@ -70,6 +70,14 @@ pub struct LoadResult {
     /// `import std.X as alias` renames for stdlib modules — needed to mirror
     /// pure-ZZ Env bindings under the alias (e.g. `colors.red` → `cl.red`).
     pub stdlib_aliases: Vec<(String, String)>,
+    /// Selective-import aliases: bare name → qualified `ns.sym`, collected
+    /// from every `import m(x)` / `import m(x as y)` / `import m(*)` in all
+    /// modules. Injected into the interpreter before execution so bare
+    /// calls to *generic* functions resolve — generics have no value
+    /// binding, and the VM compiler emits no code for import statements.
+    /// First registration wins (mirrors the loader seed, where an earlier
+    /// import shadows a later one for the same bare name).
+    pub import_aliases: HashMap<String, String>,
 }
 
 struct Loader {
@@ -437,23 +445,23 @@ impl Loader {
             // no bare aliases are created — two plugins must never
             // collide on short names.
             if imp.len() == 1 {
-                if !imp_items.is_empty() {
-                    self.errors.push(LoadError {
-                        name: path.display().to_string(),
-                        source: source.clone(),
-                        diags: vec![error_at(
-                            format!(
-                                "selective imports from plugin `{}` are not supported\n\
-                                 hint: `import {0}` imports the full module; call `{}.*` qualified",
-                                imp[0], imp[0]
-                            ),
-                            Span::new(0, 0),
-                        )],
-                    });
-                    continue;
-                }
                 if let Some(root) = find_project_root(&canon) {
                     if let Some(pkg_dir) = resolve_plugin_pkg(&root, &imp[0]) {
+                        if !imp_items.is_empty() {
+                            self.errors.push(LoadError {
+                                name: path.display().to_string(),
+                                source: source.clone(),
+                                diags: vec![error_at(
+                                    format!(
+                                        "selective imports from plugin `{}` are not supported\n\
+                                         hint: `import {0}` imports the full module; call `{}.*` qualified",
+                                        imp[0], imp[0]
+                                    ),
+                                    Span::new(0, 0),
+                                )],
+                            });
+                            continue;
+                        }
                         self.import_plugin(&imp[0], imp_alias.as_deref(), &pkg_dir, path, &source);
                         continue;
                     }
@@ -475,8 +483,15 @@ impl Loader {
                         let alias = imp_alias.clone().unwrap_or_else(|| imp[0].clone());
                         self.load_file(&entry, Some(alias.as_str()))?;
                         if is_selective {
+                            // Deferred to finish(): seed holds `alias.sym`,
+                            // so record the effective namespace, not the
+                            // package name (they differ with `as`).
+                            let mut sel_path = imp.clone();
+                            if let Some(last) = sel_path.last_mut() {
+                                *last = alias.clone();
+                            }
                             self.selective_imports
-                                .push((entry, imp.clone(), imp_items, false));
+                                .push((entry, sel_path, imp_items, false));
                         }
                         continue;
                     }
@@ -839,8 +854,15 @@ impl Loader {
                                 let full = format!("{prefix}{sym_name}");
                                 let mut found = false;
                                 if let Some(sig) = self.funcs.get(&full).cloned() {
-                                    self.funcs.insert(target.clone(), sig.clone());
-                                    self.all_funcs.insert(target.clone(), sig);
+                                    // Generic functions have no value type:
+                                    // skip the bare seed entry. Bare calls
+                                    // resolve through the import-alias maps
+                                    // (checker + runtimes) instead, and bare
+                                    // *uses* stay errors.
+                                    if sig.generics.is_empty() {
+                                        self.funcs.insert(target.clone(), sig.clone());
+                                        self.all_funcs.insert(target.clone(), sig);
+                                    }
                                     found = true;
                                 }
                                 if let Some(entry) = self.natives.get(&full).cloned() {
@@ -883,8 +905,13 @@ impl Loader {
                                 for key in keys {
                                     let bare = key[prefix.len()..].to_string();
                                     if let Some(sig) = self.funcs.get(&key).cloned() {
-                                        self.funcs.insert(bare.clone(), sig.clone());
-                                        self.all_funcs.insert(bare, sig);
+                                        // Generic functions have no value
+                                        // type: no bare seed entry (calls
+                                        // resolve via import aliases).
+                                        if sig.generics.is_empty() {
+                                            self.funcs.insert(bare.clone(), sig.clone());
+                                            self.all_funcs.insert(bare, sig);
+                                        }
                                     }
                                     if let Some(entry) = self.natives.get(&key).cloned() {
                                         self.natives.insert(key[prefix.len()..].to_string(), entry);
@@ -933,6 +960,7 @@ impl Loader {
                     Stmt::Import {
                         items,
                         path: imp_path,
+                        alias: stmt_alias,
                         span,
                         ..
                     } if !items.is_empty() => {
@@ -953,16 +981,17 @@ impl Loader {
                             // LoadResult.consts (including aliased names).
                             new_stmts.push(stmt);
                         } else {
-                            // Local file: keep the import (items cleared) for
-                            // namespace tracking, then emit synthetic Decls.
-                            new_stmts.push(Stmt::Import {
-                                path: imp_path.clone(),
-                                alias: None,
-                                items: Vec::new(),
-                                pub_: false,
-                                span: *span,
-                            });
-                            let ns = imp_path.last().map(String::as_str).unwrap_or("");
+                            // Local file: keep the import (items intact) so
+                            // every engine can build import-alias maps from
+                            // it, then emit synthetic Decls below.
+                            new_stmts.push(stmt.clone());
+                            // resolve under the effective namespace: the
+                            // statement alias when present (`import m as
+                            // a(x)` binds `a.x`, not `m.x`).
+                            let ns = stmt_alias
+                                .as_deref()
+                                .or_else(|| imp_path.last().map(String::as_str))
+                                .unwrap_or("");
                             let prefix = format!("{ns}.");
                             for item in items {
                                 match item {
@@ -972,6 +1001,17 @@ impl Loader {
                                         span: item_span,
                                     } => {
                                         let target = alias.as_ref().unwrap_or(sym_name);
+                                        // Generic functions have no value
+                                        // type: no value Decl. Bare calls
+                                        // resolve via import aliases.
+                                        let is_generic = self
+                                            .funcs
+                                            .get(&format!("{prefix}{sym_name}"))
+                                            .map(|s| !s.generics.is_empty())
+                                            .unwrap_or(false);
+                                        if is_generic {
+                                            continue;
+                                        }
                                         let parts = vec![ns.to_string(), sym_name.clone()];
                                         new_stmts.push(Stmt::Decl {
                                             ty: None,
@@ -991,11 +1031,22 @@ impl Loader {
                                     ImportItem::Wildcard { span: item_span } => {
                                         // Wildcard: emit a Decl for every pub
                                         // symbol in the imported module.
+                                        // Generic functions get no value
+                                        // Decl (no value type); bare calls
+                                        // to them resolve via import aliases.
                                         let mut names: Vec<String> = Vec::new();
                                         for key in self.funcs.keys() {
                                             if key.starts_with(&prefix) {
                                                 let bare = &key[prefix.len()..];
-                                                if !bare.is_empty() {
+                                                if bare.is_empty() {
+                                                    continue;
+                                                }
+                                                let is_generic = self
+                                                    .funcs
+                                                    .get(key)
+                                                    .map(|s| !s.generics.is_empty())
+                                                    .unwrap_or(false);
+                                                if !is_generic {
                                                     names.push(bare.to_string());
                                                 }
                                             }
@@ -1183,6 +1234,7 @@ impl Loader {
             programs.push(program);
         }
 
+        let import_aliases = collect_import_aliases(&programs, &self.funcs);
         LoadResult {
             programs,
             files,
@@ -1193,8 +1245,64 @@ impl Loader {
             consts: self.selected_consts,
             errors: self.errors,
             stdlib_aliases: self.stdlib_aliases,
+            import_aliases,
         }
     }
+}
+
+/// Collect bare→qualified selective-import aliases from every module's
+/// import statements: `import m(x)` → `x → m.x`,
+/// `import m(x as y)` → `y → m.x`, `import m as a(x)` → `x → a.x`.
+/// Wildcards (`import m(*)`) expand against the seed's `ns.*` keys.
+/// First registration wins, mirroring seed shadowing. Only used as a
+/// miss-only fallback for generic-function calls (generics have no
+/// value binding); locals, seed entries and Decls take precedence.
+fn collect_import_aliases(
+    programs: &[Program],
+    seed_funcs: &HashMap<String, FuncSig>,
+) -> HashMap<String, String> {
+    let mut aliases = HashMap::new();
+    for program in programs {
+        for stmt in &program.stmts {
+            let Stmt::Import {
+                path, alias, items, ..
+            } = stmt
+            else {
+                continue;
+            };
+            if items.is_empty() {
+                continue;
+            }
+            let ns = alias
+                .as_deref()
+                .or_else(|| path.last().map(String::as_str))
+                .unwrap_or("");
+            if ns.is_empty() {
+                continue;
+            }
+            for item in items {
+                match item {
+                    ImportItem::Named { name, alias, .. } => {
+                        let target = alias.as_ref().unwrap_or(name);
+                        aliases
+                            .entry(target.clone())
+                            .or_insert_with(|| format!("{ns}.{name}"));
+                    }
+                    ImportItem::Wildcard { .. } => {
+                        let prefix = format!("{ns}.");
+                        for key in seed_funcs.keys() {
+                            if let Some(bare) = key.strip_prefix(&prefix) {
+                                if !bare.is_empty() && !bare.contains('.') {
+                                    aliases.entry(bare.to_string()).or_insert(key.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    aliases
 }
 
 /// Rewrite a module's AST so its top-level definitions are namespaced:

@@ -7,4 +7,8 @@ pub func triple(x: int) -> int {
     x * 3
 }
 
+pub func squared<T: Num>(number: T) {
+    return number**2
+}
+
 pub PI := 314

@@ -1,0 +1,11 @@
+// E2E: selective import of a generic function from a local file.
+// Generic functions have no value binding; bare calls resolve through
+// the import-alias maps (checker + runtimes).
+import helpers.math_utils(squared, squared as sq)
+
+a := squared(5)
+b := sq(6)
+
+println(a)
+println(b)
+println("generic_selective_ok")

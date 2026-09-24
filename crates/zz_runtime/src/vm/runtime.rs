@@ -459,6 +459,16 @@ impl Vm {
                                 }))
                             })
                         })
+                        .or_else(|| {
+                            // Selective-import alias (miss-only): resolve
+                            // `ns.sym` like a qualified path. See
+                            // tree-walker Ident eval for the full note.
+                            let qualified = interp.import_aliases.get(name).cloned();
+                            qualified.and_then(|q| {
+                                let parts: Vec<String> = q.split('.').map(str::to_string).collect();
+                                interp.resolve_path_value(&parts, *span).ok()
+                            })
+                        })
                         .ok_or_else(|| {
                             EvalError::new(format!("undefined variable `{name}`"), *span)
                         })?;

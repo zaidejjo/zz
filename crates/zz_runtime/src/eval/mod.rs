@@ -60,6 +60,11 @@ pub struct Interp {
     /// Rust call stack and cannot be suspended. Compiled code is unaffected
     /// (every function has a chunk in the unified pipeline).
     pub task_mode: bool,
+    /// Selective-import aliases: bare name → qualified `ns.sym`, recorded
+    /// from `import m(x)` statements at eval time. Consulted ONLY on total
+    /// miss (env, funcs, natives); this is how bare calls to *generic*
+    /// functions resolve, since generics have no value binding to find.
+    pub import_aliases: HashMap<String, String>,
 }
 
 /// Fused-spawn constructor (Phase 6): builds a green-thread task directly
@@ -102,6 +107,7 @@ impl Interp {
             spawn_keep_cache: None,
             reach_cache: HashMap::new(),
             task_mode: false,
+            import_aliases: HashMap::new(),
         }
     }
 
@@ -118,6 +124,7 @@ impl Interp {
             spawn_keep_cache: None,
             reach_cache: HashMap::new(),
             task_mode: false,
+            import_aliases: HashMap::new(),
         }
     }
 
@@ -137,6 +144,7 @@ impl Interp {
             spawn_keep_cache: None,
             reach_cache: HashMap::new(),
             task_mode: false,
+            import_aliases: HashMap::new(),
         }
     }
 
