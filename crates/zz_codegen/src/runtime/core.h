@@ -903,13 +903,16 @@ zz_value zz_http_response_text(zz_value resp, int *err);
 zz_value zz_http_response_json(zz_value resp, int *err);
 zz_value zz_http_response_headers(zz_value resp, int *err);
 
-// ---- std.db SQLite ------------------------------------------------------
-// Opaque handle: sqlite3* boxed as ZZ_DB (refcounted pointer payload).
-// query/exec take a static SQL template (with ?N placeholders) plus
-// bound zz_values; binding uses sqlite3_bind_* (never concatenation).
+// ---- std.db SQL backends (sqlite embedded, postgres via staticlib) ----
+// Opaque handle: a heap `zz_db_handle` recording the backend (sqlite3*
+// or staticlib pool id) boxed as ZZ_DB. `sqlz.open` sniffs the scheme
+// once (postgres:// → PG); query/exec/close dispatch on the handle.
+// query/exec take a static SQL template (with ?N placeholders; the PG
+// path rewrites to $N) plus bound zz_values.
 // Native call convention: (args..., int *err) so codegen can route via
 // zz_call_nativeN. exec/query pack (db, sql_str, binds_array).
 zz_value zz_db_open(zz_value path, int *err);
+zz_value zz_pg_connect(zz_value info, int *err);
 zz_value zz_db_exec(zz_value db, zz_value sql, zz_value binds, int *err);
 zz_value zz_db_query(zz_value db, zz_value sql, zz_value binds, int *err);
 zz_value zz_db_close(zz_value db, int *err);

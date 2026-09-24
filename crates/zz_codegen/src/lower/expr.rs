@@ -546,7 +546,14 @@ impl Lowerer {
                 // For boxed: emit zz_object_get_field(&obj, "field").
                 let obj_val = self.emit_expr(obj, names, out);
                 // Try to determine if the object type is an unboxed struct.
-                let is_unboxed = if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                // Index receivers (`arr[i].field`) are always boxed
+                // `zz_value`s at runtime — array elements (including DB
+                // row dicts standing in for structs) never inhabit raw
+                // C structs — so they must use the runtime accessor even
+                // when the checker type is an unboxed struct.
+                let is_unboxed = if matches!(obj.as_ref(), Expr::Index { .. }) {
+                    false
+                } else if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
                     names
                         .lookup_type(obj_name)
                         .map(|t| t.starts_with("zz_struct_"))
@@ -1745,18 +1752,32 @@ impl Lowerer {
         }
 
         let mut arg_items: Vec<String> = Vec::new();
-        // sqlz early-out: sqlz.query/sqlz.exec (+ db.* alias) lower via
-        // emit_db_call, which needs the raw Exprs (Fmt split into template
-        // + binds). Runs BEFORE the generic receiver/arg loops below, which
-        // would otherwise concatenate the Fmt into a single string.
-        // NOTE: ordered_args holds ONLY user args ([sql]); the receiver
-        // is separate in method_receiver. Both are passed explicitly.
+        // sqlz early-out: sqlz.query/sqlz.exec (+ db.* alias, + pg.* free
+        // form) lower via emit_db_call, which needs the raw Exprs (Fmt
+        // split into template + binds). Runs BEFORE the generic
+        // receiver/arg loops below, which would otherwise concatenate
+        // the Fmt into a single string.
+        // NOTE: ordered_args holds ONLY user args ([sql] in method form);
+        // the receiver is separate in method_receiver. Free-form static
+        // calls (`sqlz.query(db, sql)`, `pg.query(db, sql)`) carry the
+        // handle as the first user arg — emit_db_call splits it off.
+        // Both are passed explicitly.
         if matches!(
             cname.as_str(),
-            "sqlz.query" | "std.sqlz.query" | "db.query" | "std.db.query"
+            "sqlz.query"
+                | "std.sqlz.query"
+                | "db.query"
+                | "std.db.query"
+                | "pg.query"
+                | "std.sqlz.postgres.query"
         ) || matches!(
             cname.as_str(),
-            "sqlz.exec" | "std.sqlz.exec" | "db.exec" | "std.db.exec"
+            "sqlz.exec"
+                | "std.sqlz.exec"
+                | "db.exec"
+                | "std.db.exec"
+                | "pg.exec"
+                | "std.sqlz.postgres.exec"
         ) {
             return self.emit_db_call(&cname, method_receiver.as_ref(), ordered_args, names, out);
         }
@@ -2824,15 +2845,36 @@ impl Lowerer {
         names: &mut NameCtx,
         out: &mut String,
     ) -> String {
-        let recv_c = match method_receiver {
-            Some(r) => {
+        // Free-form static calls carry the handle first (`sqlz.query(db,
+        // sql)`, `pg.exec(db, sql)`); method form carries it as the
+        // receiver. A single bare SQL arg keeps the old unit-receiver
+        // shape (invalid at runtime — the handle tags mismatch — exactly
+        // like the VM's expect_db error, minus the message).
+        let (recv_expr, sql_args): (Option<Expr>, Vec<&Expr>) = match method_receiver {
+            Some(_) => (None, sql_args),
+            None if sql_args.len() >= 2 => {
+                let mut it = sql_args.into_iter();
+                let db = it.next().map(|e| (*e).clone());
+                (db, it.collect())
+            }
+            None => (None, sql_args),
+        };
+        let recv_c = match (method_receiver, recv_expr.as_ref()) {
+            (Some(r), _) => {
                 let raw = self.emit_expr(r, names, out);
                 match r {
                     Expr::Ident { name, .. } => auto_box(&raw, names.lookup_type(name)),
                     _ => raw,
                 }
             }
-            None => "zz_unit()".to_string(),
+            (None, Some(db)) => {
+                let raw = self.emit_expr(db, names, out);
+                match db {
+                    Expr::Ident { name, .. } => auto_box(&raw, names.lookup_type(name)),
+                    _ => raw,
+                }
+            }
+            (None, None) => "zz_unit()".to_string(),
         };
         // Split SQL into template + bound exprs.
         let (template, bound): (String, Vec<Expr>) = match sql_args.first() {
@@ -2914,7 +2956,12 @@ impl Lowerer {
         }
         let is_query = matches!(
             cname,
-            "sqlz.query" | "std.sqlz.query" | "db.query" | "std.db.query"
+            "sqlz.query"
+                | "std.sqlz.query"
+                | "db.query"
+                | "std.db.query"
+                | "pg.query"
+                | "std.sqlz.postgres.query"
         );
         let rt = if is_query {
             "zz_db_query"

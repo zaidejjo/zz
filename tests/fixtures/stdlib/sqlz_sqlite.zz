@@ -33,4 +33,9 @@ alidb.exec("""CREATE TABLE t (v INTEGER)""")
 alidb.exec("""INSERT INTO t VALUES (41)""")
 print("alias_ok")
 
+// Free-form static calls carry the handle first (registry shape).
+print(sqlz.exec(alidb, "INSERT INTO t VALUES (42)"))
+frowns := sqlz.query(alidb, "SELECT v FROM t")
+print(len(frowns))
+
 print("sqlz_ok")

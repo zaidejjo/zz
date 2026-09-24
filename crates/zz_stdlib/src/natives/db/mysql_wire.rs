@@ -14,7 +14,7 @@
 //! native `SHA1(pw) XOR SHA1(seed + SHA1(SHA1(pw)))`, caching
 //! `SHA256(pw) XOR SHA256(SHA256(SHA256(pw)), seed)` (always 32 bytes).
 
-use super::pg_wire::sha256;
+use zz_native_rt::pg_wire::sha256;
 
 // ---------------------------------------------------------------------------
 // SHA-1 (FIPS 180-4)

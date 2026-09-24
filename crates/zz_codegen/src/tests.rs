@@ -267,13 +267,8 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("http.serve_dir", "http fixtures skipped in parity"),
     ("std.http.delete", "http fixtures skipped in parity"),
     ("std.http.put", "http fixtures skipped in parity"),
-    // PostgreSQL wire driver — VM-only (blocking TCP sockets have no C
-    // runtime counterpart; AOT lowers these to Unit like time.now_ms).
-    ("std.sqlz.postgres.connect", "VM-only; no C socket driver"),
-    ("std.sqlz.postgres.exec", "VM-only; no C socket driver"),
-    ("std.sqlz.postgres.query", "VM-only; no C socket driver"),
-    ("std.sqlz.postgres.close", "VM-only; no C socket driver"),
-    // MySQL wire driver — same VM-only rationale as postgres.
+    // MySQL wire driver — VM-only (no staticlib backend like PG has;
+    // AOT lowers these to Unit like time.now_ms).
     ("std.sqlz.mysql.connect", "VM-only; no C socket driver"),
     ("std.sqlz.mysql.exec", "VM-only; no C socket driver"),
     ("std.sqlz.mysql.query", "VM-only; no C socket driver"),

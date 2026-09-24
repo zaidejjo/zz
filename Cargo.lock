@@ -3577,13 +3577,17 @@ dependencies = [
  "getrandom 0.3.4",
  "hmac",
  "rand_core",
+ "rcgen",
  "regex",
  "rsa",
+ "rustls",
+ "rustls-pki-types",
  "serde_json",
  "sha2",
  "subtle",
  "sysinfo",
  "uuid",
+ "webpki-roots",
 ]
 
 [[package]]

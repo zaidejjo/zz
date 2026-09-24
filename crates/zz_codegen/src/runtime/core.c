@@ -2981,10 +2981,73 @@ zz_value zz_tcp_set_write_timeout(zz_value stream, zz_value ms, int *err) {
 #include <sqlite3.h>
 #endif
 
+// ---- SQL backends (sqlite embedded, postgres via staticlib) ----
+//
+// `ZZ_DB` values point at a heap handle recording the backend, so
+// `sqlz.*`/`pg.*` query/exec/close dispatch at runtime (the URL scheme
+// is only sniffed once, at open). Postgres symbols come from
+// `libzz_native_rt.a`, which the build links whenever any sqlz/pg
+// native is reachable (see `needs_native_rt`).
+typedef enum { ZZDB_CLOSED = -1, ZZDB_SQLITE = 0, ZZDB_PG = 1 } zz_db_backend;
+typedef struct {
+    int backend;
+    union {
+        void *sqlite;   // sqlite3* (ZZDB_SQLITE)
+        uint64_t pg_id; // staticlib pool id (ZZDB_PG)
+    };
+} zz_db_handle;
+
+// Postgres backend (Rust staticlib). Weak imports: programs that never
+// touch PG link WITHOUT the staticlib (see `needs_native_rt`), so these
+// resolve to NULL there; any binary that can actually hold a PG handle
+// links the staticlib (the gate keys off sqlz/pg reachability) and sees
+// them. Guards live at the two creation sites below — a live PG handle
+// proves linkage, so use sites call directly.
+#if defined(__APPLE__)
+#define ZZ_WEAK_IMPORT __attribute__((weak_import))
+#else
+#define ZZ_WEAK_IMPORT __attribute__((weak))
+#endif
+uint64_t zz_pg_connect_raw(const char *info, size_t len) ZZ_WEAK_IMPORT;
+int64_t zz_pg_exec_raw(uint64_t id, const char *sql, size_t len, const zz_value *binds, size_t nbinds) ZZ_WEAK_IMPORT;
+zz_value zz_pg_query_raw(uint64_t id, const char *sql, size_t len, const zz_value *binds, size_t nbinds) ZZ_WEAK_IMPORT;
+void zz_pg_close_raw(uint64_t id) ZZ_WEAK_IMPORT;
+
+// `pg.connect(conninfo)` — URL or keyword form (the driver parses both);
+// `ZZ_DB`-NULL on failure, mirroring the SQLite open leniency.
+zz_value zz_pg_connect(zz_value info, int *err) {
+    (void)err;
+    if (info.tag != ZZ_STR || !info.s) return (zz_value){ZZ_DB, {.db = NULL}};
+    if (!zz_pg_connect_raw) return (zz_value){ZZ_DB, {.db = NULL}};
+    uint64_t id = zz_pg_connect_raw(zz_str_cptr(info.s), info.s->len);
+    if (id == 0) return (zz_value){ZZ_DB, {.db = NULL}};
+    zz_db_handle *h = (zz_db_handle *)malloc(sizeof(zz_db_handle));
+    if (!h) {
+        zz_pg_close_raw(id);
+        return (zz_value){ZZ_DB, {.db = NULL}};
+    }
+    h->backend = ZZDB_PG;
+    h->pg_id = id;
+    return (zz_value){ZZ_DB, {.db = h}};
+}
+
 zz_value zz_db_open(zz_value path, int *err) {
     (void)err;
     if (path.tag != ZZ_STR || !path.s) return (zz_value){ZZ_DB, {.db = NULL}};
     const char *p = zz_str_cptr(path.s);
+    // Postgres URLs route to the Rust wire driver (staticlib); the
+    // handle enum below records the backend so query/exec/close
+    // dispatch without re-sniffing.
+    if (strncmp(p, "postgres://", 11) == 0 || strncmp(p, "postgresql://", 13) == 0) {
+        if (!zz_pg_connect_raw) return (zz_value){ZZ_DB, {.db = NULL}};
+        uint64_t id = zz_pg_connect_raw(p, path.s->len);
+        if (id == 0) return (zz_value){ZZ_DB, {.db = NULL}};
+        zz_db_handle *h = (zz_db_handle *)malloc(sizeof(zz_db_handle));
+        if (!h) return (zz_value){ZZ_DB, {.db = NULL}};
+        h->backend = ZZDB_PG;
+        h->pg_id = id;
+        return (zz_value){ZZ_DB, {.db = h}};
+    }
 #ifdef ZZ_HAS_SQLITE3
     sqlite3 *conn = NULL;
     int rc;
@@ -2999,7 +3062,14 @@ zz_value zz_db_open(zz_value path, int *err) {
         if (conn) sqlite3_close(conn);
         return (zz_value){ZZ_DB, {.db = NULL}};
     }
-    return (zz_value){ZZ_DB, {.db = (void *)conn}};
+    zz_db_handle *h = (zz_db_handle *)malloc(sizeof(zz_db_handle));
+    if (!h) {
+        sqlite3_close(conn);
+        return (zz_value){ZZ_DB, {.db = NULL}};
+    }
+    h->backend = ZZDB_SQLITE;
+    h->sqlite = conn;
+    return (zz_value){ZZ_DB, {.db = h}};
 #else
     (void)p;
     return (zz_value){ZZ_DB, {.db = NULL}};
@@ -3054,8 +3124,25 @@ int  zz_tx_has_error(void)   { return _zz_tx_error; }
 zz_value zz_db_exec_raw(zz_value db, const char *sql, zz_value *binds, size_t nbinds, int *err) {
     (void)err;
     if (db.tag != ZZ_DB || !db.db || !sql) return zz_int(0);
+    zz_db_handle *h = (zz_db_handle *)db.db;
+    // Closed tombstones (and NULL handles above) degrade to empty
+    // results — never touch a freed backend through a stale value.
+    if (h->backend != ZZDB_SQLITE && h->backend != ZZDB_PG) {
+        return zz_int(0);
+    }
+    if (h->backend == ZZDB_PG) {
+        int64_t n = zz_pg_exec_raw(h->pg_id, sql, strlen(sql), binds, nbinds);
+        // The Rust side reports failure as -1 (a bare 0 is a legitimate
+        // "no rows changed"); flag it exactly like the SQLite path so
+        // inlined transactions roll back.
+        if (n < 0) {
+            zz_tx_set_error();
+            n = 0;
+        }
+        return zz_int(n);
+    }
 #ifdef ZZ_HAS_SQLITE3
-    sqlite3 *conn = (sqlite3 *)db.db;
+    sqlite3 *conn = (sqlite3 *)h->sqlite;
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(conn, sql, -1, &st, NULL) != SQLITE_OK) return zz_int(0);
     if (zz_db_bind_all(st, binds, nbinds, err) != SQLITE_OK) { sqlite3_finalize(st); return zz_int(0); }
@@ -3074,8 +3161,18 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
     (void)err;
     zz_value out = zz_array_new();
     if (db.tag != ZZ_DB || !db.db || !sql) return out;
+    zz_db_handle *h = (zz_db_handle *)db.db;
+    // Closed tombstones (and NULL handles above) degrade to empty
+    // results — never touch a freed backend through a stale value.
+    if (h->backend != ZZDB_SQLITE && h->backend != ZZDB_PG) {
+        return out;
+    }
+    if (h->backend == ZZDB_PG) {
+        zz_release(&out);
+        return zz_pg_query_raw(h->pg_id, sql, strlen(sql), binds, nbinds);
+    }
 #ifdef ZZ_HAS_SQLITE3
-    sqlite3 *conn = (sqlite3 *)db.db;
+    sqlite3 *conn = (sqlite3 *)h->sqlite;
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(conn, sql, -1, &st, NULL) != SQLITE_OK) return out;
     if (zz_db_bind_all(st, binds, nbinds, err) != SQLITE_OK) { sqlite3_finalize(st); return out; }
@@ -3130,11 +3227,24 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
 
 zz_value zz_db_close(zz_value db, int *err) {
     (void)err;
+    if (db.tag == ZZ_DB && db.db) {
+        zz_db_handle *h = (zz_db_handle *)db.db;
+        if (h->backend == ZZDB_PG) {
+            zz_pg_close_raw(h->pg_id);
+        }
 #ifdef ZZ_HAS_SQLITE3
-    if (db.tag == ZZ_DB && db.db) sqlite3_close((sqlite3 *)db.db);
+        else if (h->backend == ZZDB_SQLITE) {
+            sqlite3_close((sqlite3 *)h->sqlite);
+        }
 #else
-    (void)db;
+        (void)0;
 #endif
+        // Tombstone, don't free: the ZZ value still points here and a
+        // use-after-close must degrade to empty results (like the VM's
+        // error), never a dangling read. One 16-byte shell per close.
+        h->backend = ZZDB_CLOSED;
+        h->sqlite = NULL;
+    }
     return zz_unit();
 }
 

@@ -139,12 +139,56 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
 ///
 /// Note: `args.get_raw` maps to the embedded `zz_env_args` symbol, so it
 /// alone never triggers the staticlib link (keeps `--static` working).
+///
+/// SQL note: the C `zz_db_*` natives reference the Postgres symbols
+/// unconditionally (backend dispatch is runtime), so ANY sqlz/db/pg
+/// reachability links the staticlib — even for sqlite-only programs.
+/// The linker pulls only referenced objects and untouched pages never
+/// fault in, so the cost is link time + file size, never RSS; registry
+/// sources open PG URLs from env vars, which no static analysis can
+/// prove, so the conservative gate is load-bearing, not lazy.
 pub fn needs_native_rt(natives: &HashSet<String>) -> bool {
-    natives
-        .iter()
-        .filter_map(|n| ffi_impl(n))
-        .any(|s| s != "zz_env_args")
+    natives.iter().any(|n| {
+        if is_sql_native(n) {
+            return true;
+        }
+        matches!(ffi_impl(n), Some(s) if s != "zz_env_args")
+    })
 }
+
+/// `sqlz.*` / `db.*` / `pg.*` spellings (both bare and `std.`-qualified):
+/// all lower to the C handle natives whose PG backend lives in the
+/// staticlib. MySQL spellings are excluded (still VM-only, lowered to
+/// unit — no staticlib symbols involved).
+fn is_sql_native(name: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "sqlz.",
+        "std.sqlz.",
+        "db.",
+        "std.db.",
+        "pg.",
+        "std.sqlz.postgres.",
+    ];
+    PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
+/// True when the program can reach the Postgres backend: force-extract
+/// its objects from the archive at link time (see `PG_LINK_SYMBOLS`).
+/// Split from [`needs_native_rt`] (which only decides *whether* to link)
+/// because weak C refs never pull archive members on their own.
+pub fn needs_pg_link(natives: &HashSet<String>) -> bool {
+    natives.iter().any(|n| is_sql_native(n))
+}
+
+/// Staticlib symbols to force-extract (`-u`) when [`needs_pg_link`].
+/// One per C-visible `zz_pg_*_raw` entry point; the linker then pulls
+/// their whole object (plus rustls) instead of leaving weak imports NULL.
+pub const PG_LINK_SYMBOLS: &[&str] = &[
+    "zz_pg_connect_raw",
+    "zz_pg_exec_raw",
+    "zz_pg_query_raw",
+    "zz_pg_close_raw",
+];
 
 /// `extern` declarations to inject into generated C: the handle-primitive
 /// header plus one declaration per used FFI symbol. Emits an empty string

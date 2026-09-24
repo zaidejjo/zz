@@ -90,6 +90,7 @@ pub fn build_native(
     // even when the caller did not opt in explicitly.
     let mut opts = opts;
     opts.native_rt = opts.native_rt || lowered.needs_native_rt;
+    opts.pg_link = opts.pg_link || lowered.needs_pg_link;
     compile::build(&lowered.source, out_path, opts, target)?;
     Ok(lowered)
 }
@@ -114,6 +115,7 @@ pub fn build_native_with(
     let lowered = lowerer.lower();
     let mut opts = opts;
     opts.native_rt = opts.native_rt || lowered.needs_native_rt;
+    opts.pg_link = opts.pg_link || lowered.needs_pg_link;
     compile::build_with(&lowered.source, out_path, opts, target, clang)?;
     Ok(lowered)
 }

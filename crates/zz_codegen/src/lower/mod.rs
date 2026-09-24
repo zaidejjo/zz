@@ -35,6 +35,11 @@ pub struct LoweredC {
     /// True when the program calls natives provided by the Rust static
     /// library; the build must link `libzz_native_rt.a`.
     pub needs_native_rt: bool,
+    /// True when the program can reach the Postgres backend (any sqlz /
+    /// pg spelling): the link must force-extract the PG objects from the
+    /// archive (`-u`), since the C dispatcher references them weakly and
+    /// weak refs alone never pull archive members.
+    pub needs_pg_link: bool,
 }
 
 /// Mangle a zz qualified name to a C identifier.
@@ -423,6 +428,7 @@ impl Lowerer {
         LoweredC {
             source,
             needs_native_rt,
+            needs_pg_link: crate::ffi::needs_pg_link(&self.reachable_natives),
         }
     }
 }
@@ -729,13 +735,19 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "net.local_addr" | "std.net.local_addr" => Some("zz_tcp_local_addr"),
         "net.set_read_timeout" | "std.net.set_read_timeout" => Some("zz_tcp_set_read_timeout"),
         "net.set_write_timeout" | "std.net.set_write_timeout" => Some("zz_tcp_set_write_timeout"),
-        // sqlz (AOT: sqlite3 prepared-statement FFI in core.c).
+        // sqlz (AOT: sqlite3 prepared-statement C impl + postgres via
+        // the staticlib; the C handle records the backend).
         // Canonical `sqlz.*` / `std.sqlz.*`; `db.*` / `std.db.*` are
-        // zero-overhead aliases lowering to the same runtime fns.
+        // zero-overhead aliases; `pg.*` / `std.sqlz.postgres.*` are the
+        // explicit PG spellings (same handle, same dispatch).
         "sqlz.open" | "std.sqlz.open" | "db.open" | "std.db.open" => Some("zz_db_open"),
+        "pg.connect" | "std.sqlz.postgres.connect" => Some("zz_pg_connect"),
         "sqlz.exec" | "std.sqlz.exec" | "db.exec" | "std.db.exec" => Some("zz_db_exec"),
+        "pg.exec" | "std.sqlz.postgres.exec" => Some("zz_db_exec"),
         "sqlz.query" | "std.sqlz.query" | "db.query" | "std.db.query" => Some("zz_db_query"),
+        "pg.query" | "std.sqlz.postgres.query" => Some("zz_db_query"),
         "sqlz.close" | "std.sqlz.close" | "db.close" | "std.db.close" => Some("zz_db_close"),
+        "pg.close" | "std.sqlz.postgres.close" => Some("zz_db_close"),
         // channels
         "chan" | "std.chan" => Some("zz_chan_new"),
         "chan.send" | "std.chan.send" => Some("zz_chan_send"),
