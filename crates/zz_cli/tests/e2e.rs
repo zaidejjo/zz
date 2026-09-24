@@ -245,6 +245,11 @@ e2e_success_test!(
     "http_phase5b_test.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_http_request_response,
+    "stdlib",
+    "http_request_response.zz"
+);
+e2e_success_test!(
     e2e_stdlib_bench_memory_arena,
     "stdlib",
     "bench_memory_arena.zz"

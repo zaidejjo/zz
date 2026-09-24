@@ -3637,28 +3637,620 @@ static int spawn_workers(int listen_fd, int port) {
 }
 #endif
 
-// ---- HTTP AOT stub implementations ----
+// ---- HTTP routes + request/response natives (AOT) ----
+//
+// Route handlers ARE first-class here: AOT lowers closures to C function
+// pointers (`zz_closure_make_ex`), so `http.test` (in-process dispatch)
+// matches routes and calls them exactly like the VM does. The epoll
+// workers (`zz_http_listen`) don't dispatch yet — that's the Step-2 item;
+// they keep serving the static OK.
 
-// Max number of route patterns we track (for debug/future use)
-#define MAX_ROUTES 32
-static char *g_http_routes[MAX_ROUTES];
+// Route table: method + pattern (+ `:param` segments / "*" wildcard) with
+// the ZZ closure value (retained). Single global table: one server per
+// process, same as the VM's single-interp discipline for `zz run`.
+#define HTTP_MAX_ROUTES 64
+#define HTTP_MAX_MIDDLEWARE 16
+typedef struct {
+    char *method;
+    char *pattern;
+    zz_value handler;
+} http_route_entry;
+static http_route_entry g_http_route_table[HTTP_MAX_ROUTES];
 static int g_http_route_count = 0;
+static zz_value g_http_middlewares[HTTP_MAX_MIDDLEWARE];
+static int g_http_middleware_count = 0;
 
-// zz_http_server(unused, err) — creates an HTTP server handle (AOT stub)
+// zz_http_server(unused, err) — creates an HTTP server handle (int 0;
+// routes live in the global table above).
 zz_value zz_http_server(zz_value unused, int *err) {
     (void)unused;
     *err = 0;
     return zz_int(0);
 }
 
-// zz_http_route_get(server, path, handler, err) — tracks route pattern; handler ignored in AOT
-zz_value zz_http_route_get(zz_value server, zz_value path, zz_value handler, int *err) {
+// Shared route registration for GET/POST/PUT/DELETE (the codegen maps all
+// four spellings here; the method is recorded per entry).
+static zz_value http_route_add(const char *method, zz_value path, zz_value handler, int *err) {
     *err = 0;
-    (void)server; (void)handler;
-    if (g_http_route_count < MAX_ROUTES - 1 && path.tag == ZZ_STR) {
-        g_http_routes[g_http_route_count++] = strndup(zz_str_cptr(path.s), path.s->len);
-    }
+    if (path.tag != ZZ_STR || !path.s) return zz_int(0);
+    if (g_http_route_count >= HTTP_MAX_ROUTES - 1) return zz_int(0);
+    http_route_entry *e = &g_http_route_table[g_http_route_count++];
+    e->method = strndup(method, strlen(method));
+    e->pattern = strndup(zz_str_cptr(path.s), path.s->len);
+    e->handler = zz_clone(handler);
     return zz_int(0);
+}
+
+// zz_http_route_get(server, path, handler, err) — records method+pattern+closure.
+zz_value zz_http_route_get(zz_value server, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    return http_route_add("GET", path, handler, err);
+}
+
+// zz_http_route_post/put/delete — same table, own method.
+zz_value zz_http_route_post(zz_value server, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    return http_route_add("POST", path, handler, err);
+}
+
+zz_value zz_http_route_put(zz_value server, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    return http_route_add("PUT", path, handler, err);
+}
+
+zz_value zz_http_route_delete(zz_value server, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    return http_route_add("DELETE", path, handler, err);
+}
+
+// ---- shared request/response helpers ----
+
+// Forward declarations (http_response_new precedes the parse helpers).
+static zz_value http_json_field(zz_str *body);
+
+// Response object constructor shared by respond/test paths.
+// `body` is shared (retained under both "body" and "text", same as the
+// client builder); `headers` is retained.
+static zz_value http_response_new(long status, zz_str *body, zz_value headers) {
+    zz_value names[5];
+    names[0] = zz_str_static("status");
+    names[1] = zz_str_static("body");
+    names[2] = zz_str_static("headers");
+    names[3] = zz_str_static("text");
+    names[4] = zz_str_static("json");
+    zz_value resp = zz_object_new("http.response", names, 5);
+    zz_object_set_field(&resp, "status", (zz_value){ZZ_INT, {.i = (long long)status}});
+    zz_object_set_field(&resp, "body", (zz_value){ZZ_STR, {.s = body}});
+    zz_object_set_field(&resp, "text", (zz_value){ZZ_STR, {.s = body}});
+    zz_object_set_field(&resp, "headers", zz_clone(headers));
+    zz_object_set_field(&resp, "json", http_json_field(body));
+    return resp;
+}
+
+// "field" sub-value of a dict (unit when absent/non-dict). Returns an
+// OWNED clone (zz_object_get_field retains) — callers must release.
+static zz_value http_dict_field(zz_value dict, const char *field) {
+    if (dict.tag != ZZ_DICT || !dict.dict) return zz_unit();
+    return zz_object_get_field(&dict, field);
+}
+
+// Find a str entry by exact key; returns 1 + sets *out (borrowed).
+static int http_dict_find_str(zz_value dict, const char *key, zz_value *out) {
+    if (dict.tag != ZZ_DICT || !dict.dict) return 0;
+    size_t n = dict.dict->len;
+    for (size_t i = 0; i < n; i++) {
+        zz_str *k = dict.dict->entries[i].key;
+        zz_value v = dict.dict->entries[i].val;
+        if (k && v.tag == ZZ_STR && v.s
+            && strlen(key) == k->len && memcmp(key, zz_str_cptr(k), k->len) == 0) {
+            *out = v;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Case-insensitive key lookup over a dict; any value type (mirrors the VM
+// header fallback, which returns the value as-is). Returns 1 + *out.
+static int http_dict_find_ci(zz_value dict, const char *key, zz_value *out) {
+    if (dict.tag != ZZ_DICT || !dict.dict) return 0;
+    size_t n = dict.dict->len;
+    for (size_t i = 0; i < n; i++) {
+        zz_str *k = dict.dict->entries[i].key;
+        if (k && strlen(key) == k->len
+            && strcasecmp(key, zz_str_cptr(k)) == 0) {
+            *out = dict.dict->entries[i].val;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Split "a=1&b=&c" into a str->str dict. No percent-decoding and no pair
+// filtering — mirrors the VM's parse_query_string exactly (every &-piece
+// yields a pair; missing '=' means empty value).
+static zz_value http_parse_query(const char *qs, size_t len) {
+    zz_value d = zz_dict_new();
+    if (len == 0) return d;
+    size_t start = 0;
+    for (size_t i = 0; i <= len; i++) {
+        if (i == len || qs[i] == '&') {
+            size_t piece_len = i - start;
+            const char *eq = memchr(qs + start, '=', piece_len);
+            size_t klen, vlen;
+            const char *vstart;
+            if (eq) {
+                klen = (size_t)(eq - (qs + start));
+                vstart = eq + 1;
+                vlen = piece_len - klen - 1;
+            } else {
+                klen = piece_len;
+                vstart = qs + start + piece_len;
+                vlen = 0;
+            }
+            zz_str *k = str_alloc(klen);
+            memcpy(zz_str_ptr(k), qs + start, klen);
+            zz_str_ptr(k)[klen] = '\0';
+            k->len = klen;
+            zz_str *v = str_alloc(vlen);
+            memcpy(zz_str_ptr(v), vstart, vlen);
+            zz_str_ptr(v)[vlen] = '\0';
+            v->len = vlen;
+            zz_dict_set(d.dict, (zz_value){ZZ_STR, {.s = k}}, (zz_value){ZZ_STR, {.s = v}});
+            start = i + 1;
+        }
+    }
+    return d;
+}
+
+// Match "/users/:id" against "/users/42" (length-aware, no copying).
+// Returns 1 + fills params dict, or 0. Mirrors the VM's match_route_pattern
+// (trim '/', equal segment counts, ':x' captures, '*' matches one segment).
+static int http_match_pattern(const char *pat, size_t patlen, const char *path, size_t pathlen,
+                              zz_value params) {
+    while (patlen > 0 && pat[0] == '/') { pat++; patlen--; }
+    while (patlen > 0 && pat[patlen - 1] == '/') patlen--;
+    while (pathlen > 0 && path[0] == '/') { path++; pathlen--; }
+    while (pathlen > 0 && path[pathlen - 1] == '/') pathlen--;
+    // Segment counts (Rust "".split('/') yields one empty segment).
+    size_t pn = 1, an = 1;
+    for (size_t i = 0; i < patlen; i++) if (pat[i] == '/') pn++;
+    for (size_t i = 0; i < pathlen; i++) if (path[i] == '/') an++;
+    if (pn != an) return 0;
+    size_t pi = 0, ai = 0;
+    for (size_t s = 0; s < pn; s++) {
+        size_t pj = pi, aj = ai;
+        while (pj < patlen && pat[pj] != '/') pj++;
+        while (aj < pathlen && path[aj] != '/') aj++;
+        size_t plen = pj - pi, alen = aj - ai;
+        if (plen > 0 && pat[pi] == ':') {
+            zz_str *k = str_alloc(plen - 1);
+            memcpy(zz_str_ptr(k), pat + pi + 1, plen - 1);
+            zz_str_ptr(k)[plen - 1] = '\0';
+            k->len = plen - 1;
+            zz_str *v = str_alloc(alen);
+            memcpy(zz_str_ptr(v), path + ai, alen);
+            zz_str_ptr(v)[alen] = '\0';
+            v->len = alen;
+            zz_dict_set(params.dict, (zz_value){ZZ_STR, {.s = k}}, (zz_value){ZZ_STR, {.s = v}});
+        } else if (!((plen == alen && memcmp(pat + pi, path + ai, plen) == 0)
+                     || (plen == 1 && pat[pi] == '*'))) {
+            return 0;
+        }
+        pi = pj + 1;
+        ai = aj + 1;
+    }
+    return 1;
+}
+
+// Build an .err(str) variant with a formatted message.
+static zz_value http_errf(const char *fmt, const char *arg) {
+    char buf[512];
+    snprintf(buf, sizeof buf, fmt, arg);
+    size_t n = strlen(buf);
+    return zz_variant_err(zz_str_new(buf, n));
+}
+
+// Move the inner value out of a Result/Option variant: frees the variant
+// box only; ownership of the inner's refs transfers to the caller.
+// (zz_clone + zz_release is WRONG here — the clone shares the variant
+// box and the release frees it, leaving a dangling payload pointer.)
+static zz_value http_variant_take(zz_value r) {
+    zz_value out = *r.payload;
+    free(r.payload);
+    return out;
+}
+
+// Parse a body string the way the VM's response/body json accessors do:
+// valid JSON → the bare json value; anything else → .err("JSON parse
+// error"). (zz_json_parse itself returns a wrapped Result; the VM
+// unwraps it before handing the value to the program.)
+static zz_value http_parse_body_json(zz_value body) {
+    zz_str *s = (body.tag == ZZ_STR && body.s) ? body.s : NULL;
+    // Mirror the VM: an empty/missing body fails parsing like any
+    // invalid JSON (extract_dict_field_str yields "" for missing).
+    zz_value bs = s ? (zz_value){ZZ_STR, {.s = s}} : zz_str_static("");
+    int jerr = 0;
+    zz_value r = zz_json_parse(bs, &jerr);
+    if (r.tag == ZZ_RESULT_OK && r.payload) {
+        return http_variant_take(r);
+    }
+    zz_release(&r);
+    return zz_variant_err(zz_str_static("JSON parse error"));
+}
+
+// Stored "json" field for a fresh response object: bare json on success,
+// unit when the body isn't valid JSON (the .json() METHOD re-parses and
+// yields .err there — see zz_http_response_json).
+static zz_value http_json_field(zz_str *body) {
+    if (!body || body->len == 0) return zz_unit();
+    int jerr = 0;
+    zz_value r = zz_json_parse((zz_value){ZZ_STR, {.s = body}}, &jerr);
+    if (r.tag == ZZ_RESULT_OK && r.payload) {
+        return http_variant_take(r);
+    }
+    zz_release(&r);
+    return zz_unit();
+}
+
+// zz_http_respond(status, body, headers) → HttpResponse object.
+// Mirrors the VM: int status 100-599, str body, str->str headers dict
+// (non-str pairs dropped). Arg violations raise (*err=1).
+zz_value zz_http_respond(zz_value status, zz_value body, zz_value headers, int *err) {
+    if (status.tag != ZZ_INT || status.i < 100 || status.i > 599) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.respond: status out of range (100-599)"));
+    }
+    if (body.tag != ZZ_STR || !body.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.respond: body must be a string"));
+    }
+    if (headers.tag != ZZ_DICT || !headers.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.respond: headers must be a dict"));
+    }
+    *err = 0;
+    zz_value hdrs = zz_dict_new();
+    size_t n = headers.dict->len;
+    for (size_t i = 0; i < n; i++) {
+        zz_str *k = headers.dict->entries[i].key;
+        zz_value v = headers.dict->entries[i].val;
+        if (k && v.tag == ZZ_STR && v.s) {
+            zz_dict_set(hdrs.dict, (zz_value){ZZ_STR, {.s = k}}, zz_clone(v));
+        }
+    }
+    zz_value resp = http_response_new((long)status.i, body.s, hdrs);
+    zz_release(&hdrs);
+    return resp;
+}
+
+// zz_http_param(req, name) → .ok(str) | .err("param `x` not found").
+zz_value zz_http_param(zz_value req, zz_value name, int *err) {
+    if (req.tag != ZZ_DICT || !req.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.param: expected a dict"));
+    }
+    if (name.tag != ZZ_STR || !name.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.param: expected a str name"));
+    }
+    *err = 0;
+    zz_value params = http_dict_field(req, "params");
+    zz_value out;
+    int found = http_dict_find_str(params, zz_str_cptr(name.s), &out);
+    zz_value ret = found ? zz_variant_ok(zz_clone(out))
+                         : http_errf("param `%s` not found", zz_str_cptr(name.s));
+    zz_release(&params);
+    return ret;
+}
+
+// zz_http_query(req) → query dict (empty when absent — mirrors the VM).
+zz_value zz_http_query(zz_value req, int *err) {
+    if (req.tag != ZZ_DICT || !req.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.query: expected a dict"));
+    }
+    *err = 0;
+    zz_value q = http_dict_field(req, "query");
+    zz_value ret = (q.tag == ZZ_DICT && q.dict) ? zz_clone(q) : zz_dict_new();
+    zz_release(&q);
+    return ret;
+}
+
+// zz_http_header(req, name) → .ok(value) | .err("header `x` not found").
+// Nested "headers" dict first (case-insensitive), then a top-level
+// case-insensitive scan — mirrors the VM fallback exactly.
+zz_value zz_http_header(zz_value req, zz_value name, int *err) {
+    if (req.tag != ZZ_DICT || !req.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.header: expected a dict"));
+    }
+    if (name.tag != ZZ_STR || !name.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.header: expected a str name"));
+    }
+    *err = 0;
+    const char *nname = zz_str_cptr(name.s);
+    zz_value hdrs = http_dict_field(req, "headers");
+    zz_value out;
+    zz_value ret;
+    if (http_dict_find_ci(hdrs, nname, &out)) {
+        ret = zz_variant_ok(zz_clone(out));
+    } else if (http_dict_find_ci(req, nname, &out)) {
+        ret = zz_variant_ok(zz_clone(out));
+    } else {
+        ret = http_errf("header `%s` not found", nname);
+    }
+    zz_release(&hdrs);
+    return ret;
+}
+
+// zz_http_body_json(req) → parsed JSON, or .err on parse failure.
+// Missing/non-str body behaves as "" (mirrors extract_dict_field_str).
+zz_value zz_http_body_json(zz_value req, int *err) {
+    if (req.tag != ZZ_DICT || !req.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.body_json: expected a dict"));
+    }
+    *err = 0;
+    zz_value b = http_dict_field(req, "body");
+    zz_value ret = http_parse_body_json(b);
+    zz_release(&b);
+    return ret;
+}
+
+// zz_http_body_form(req) → form-decoded dict of the body string.
+zz_value zz_http_body_form(zz_value req, int *err) {
+    if (req.tag != ZZ_DICT || !req.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.body_form: expected a dict"));
+    }
+    *err = 0;
+    zz_value b = http_dict_field(req, "body");
+    zz_value ret = zz_dict_new();
+    if (b.tag == ZZ_STR && b.s) {
+        zz_release(&ret);
+        ret = http_parse_query(zz_str_cptr(b.s), b.s->len);
+    }
+    zz_release(&b);
+    return ret;
+}
+
+// ---- in-process dispatch (http.test / http.handle) ----
+
+// Find the first route for (method, path): exact match, then :param
+// patterns, then per-method "*". Mirrors the VM's find order. Fills
+// params (possibly empty). Returns handler or unit when none matched.
+// Pattern attempts fill a scratch dict merged only on success — a failed
+// attempt must not leak partial captures into a later route's params
+// (the VM discards its per-route vec the same way).
+static zz_value http_match_route(const char *method, const char *path, size_t pathlen,
+                                 zz_value params) {
+    for (int i = 0; i < g_http_route_count; i++) {
+        http_route_entry *e = &g_http_route_table[i];
+        if (strcmp(e->method, method) != 0) continue;
+        size_t plen = strlen(e->pattern);
+        if (plen == pathlen && memcmp(e->pattern, path, pathlen) == 0) return e->handler;
+        zz_value scratch = zz_dict_new();
+        int hit = http_match_pattern(e->pattern, plen, path, pathlen, scratch);
+        if (hit) {
+            for (size_t k = 0; k < scratch.dict->len; k++) {
+                zz_str *ek = scratch.dict->entries[k].key;
+                zz_value ev = scratch.dict->entries[k].val;
+                zz_dict_set(params.dict, (zz_value){ZZ_STR, {.s = ek}}, zz_clone(ev));
+            }
+            zz_release(&scratch);
+            return e->handler;
+        }
+        zz_release(&scratch);
+    }
+    for (int i = 0; i < g_http_route_count; i++) {
+        http_route_entry *e = &g_http_route_table[i];
+        if (strcmp(e->method, method) == 0 && strcmp(e->pattern, "*") == 0) return e->handler;
+    }
+    return zz_unit();
+}
+
+// Build the request dict the VM dispatcher builds: method/path/body
+// strings, empty headers, parsed query, matched params.
+static zz_value http_test_request(const char *method, const char *path, size_t pathlen,
+                                  zz_value body, zz_value query, zz_value params) {
+    zz_value req = zz_dict_new();
+    zz_dict_set(req.dict, zz_str_static("method"), zz_str_new(method, strlen(method)));
+    zz_dict_set(req.dict, zz_str_static("path"), zz_str_new(path, pathlen));
+    zz_dict_set(req.dict, zz_str_static("body"), zz_clone(body));
+    zz_dict_set(req.dict, zz_str_static("headers"), zz_dict_new());
+    zz_dict_set(req.dict, zz_str_static("query"), query);
+    zz_dict_set(req.dict, zz_str_static("params"), params);
+    return req;
+}
+
+// 500 response object with a text message (dispatch-level failures, which
+// the VM wraps into a 500 Response rather than raising).
+static zz_value http_500(const char *msg, size_t len) {
+    zz_str *b = str_alloc(len);
+    memcpy(zz_str_ptr(b), msg, len);
+    zz_str_ptr(b)[len] = '\0';
+    b->len = len;
+    zz_value hdrs = zz_dict_new();
+    zz_value r = http_response_new(500, b, hdrs);
+    zz_release(&hdrs);
+    return r;
+}
+
+// Wrap a handler return the way the VM dispatcher does: str → 200 text,
+// response object → passthrough, anything else → 500 (VM serializes
+// dict/array to JSON here; no value→JSON helper exists in the C runtime
+// yet — Step-2 remainder).
+static zz_value http_wrap_result(zz_value r) {
+    if (r.tag == ZZ_STR && r.s) {
+        zz_value hdrs = zz_dict_new();
+        zz_str *ct = str_alloc(26);
+        memcpy(zz_str_ptr(ct), "text/plain; charset=utf-8", 26);
+        zz_str_ptr(ct)[26] = '\0';
+        ct->len = 26;
+        zz_dict_set(hdrs.dict, zz_str_static("Content-Type"), (zz_value){ZZ_STR, {.s = ct}});
+        zz_str *b = str_alloc(r.s->len);
+        memcpy(zz_str_ptr(b), zz_str_cptr(r.s), r.s->len);
+        zz_str_ptr(b)[r.s->len] = '\0';
+        b->len = r.s->len;
+        zz_value resp = http_response_new(200, b, hdrs);
+        zz_release(&hdrs);
+        return resp;
+    }
+    if (r.tag == ZZ_OBJECT) {
+        zz_value st = zz_object_get_field(&r, "status");
+        int is_resp = (st.tag == ZZ_INT);
+        zz_release(&st);
+        if (is_resp) return zz_clone(r);
+    }
+    const char *msg = "http.test: unsupported handler return type (Step-2: dict/array JSON)";
+    return http_500(msg, strlen(msg));
+}
+
+// Shared dispatch core: match, middleware chain, handler call. Returns an
+// http.response object in all cases (VM http.test semantics). Sets
+// *failed when the 500 came from the dispatcher itself (no route,
+// middleware violation) as opposed to the handler — http.handle maps the
+// former to .err and the latter to .ok, exactly like the VM.
+static zz_value http_dispatch(const char *method, const char *path, size_t pathlen,
+                              zz_value body, int *failed) {
+    *failed = 0;
+    // Split off '?query' (first '?' wins, like the VM's split_once).
+    const char *qm = memchr(path, '?', pathlen);
+    size_t plen = qm ? (size_t)(qm - path) : pathlen;
+    zz_value query = (qm && (size_t)(qm - path) < pathlen)
+        ? http_parse_query(qm + 1, pathlen - (plen + 1))
+        : zz_dict_new();
+    zz_value params = zz_dict_new();
+    zz_value handler = http_match_route(method, path, plen, params);
+    if (handler.tag == ZZ_UNIT) {
+        char msg[256];
+        snprintf(msg, sizeof msg, "std.http: no route for %s %.*s", method, (int)plen, path);
+        zz_release(&query);
+        zz_release(&params);
+        *failed = 1;
+        return http_500(msg, strlen(msg));
+    }
+    zz_value req = http_test_request(method, path, plen, body, query, params);
+    // Middleware chain in registration order.
+    for (int i = 0; i < g_http_middleware_count; i++) {
+        zz_value r = zz_call_closure(g_http_middlewares[i], &req, 1);
+        if (r.tag == ZZ_RESULT_OK && r.payload) {
+            zz_value inner = *r.payload;
+            if (inner.tag == ZZ_DICT && inner.dict) {
+                zz_release(&req);
+                req = zz_clone(inner);
+                zz_release(&r);
+                continue;
+            }
+            char *disp = zz_value_to_string(&inner);
+            char msg[256];
+            snprintf(msg, sizeof msg,
+                     "std.http: middleware returned `%.200s`, expected .ok or .err", disp);
+            free(disp);
+            zz_release(&req);
+            zz_release(&r);
+            *failed = 1;
+            return http_500(msg, strlen(msg));
+        }
+        if (r.tag == ZZ_RESULT_ERR && r.payload) {
+            zz_value inner = *r.payload;
+            if (inner.tag == ZZ_OBJECT) {
+                zz_value st = zz_object_get_field(&inner, "status");
+                int is_resp = (st.tag == ZZ_INT);
+                zz_release(&st);
+                if (is_resp) {
+                    zz_release(&req);
+                    zz_value out = zz_clone(inner);
+                    zz_release(&r);
+                    return out;
+                }
+            }
+            char *disp = zz_value_to_string(&inner);
+            // 401 with the displayed value as the body.
+            size_t dl = strlen(disp);
+            zz_str *bb = str_alloc(dl);
+            memcpy(zz_str_ptr(bb), disp, dl);
+            zz_str_ptr(bb)[dl] = '\0';
+            bb->len = dl;
+            free(disp);
+            zz_value hdrs = zz_dict_new();
+            zz_value resp = http_response_new(401, bb, hdrs);
+            zz_release(&hdrs);
+            zz_release(&req);
+            zz_release(&r);
+            return resp;
+        }
+        // Non-Result middleware return.
+        {
+            char *disp = zz_value_to_string(&r);
+            char msg[256];
+            snprintf(msg, sizeof msg,
+                     "std.http: middleware returned `%.200s`, expected .ok or .err", disp);
+            free(disp);
+            zz_release(&req);
+            zz_release(&r);
+            *failed = 1;
+            return http_500(msg, strlen(msg));
+        }
+    }
+    zz_value r = zz_call_closure(handler, &req, 1);
+    zz_release(&req);
+    zz_value out = http_wrap_result(r);
+    zz_release(&r);
+    return out;
+}
+
+// zz_http_test(server, method, path, body) → HttpResponse object.
+// Mirrors the VM: query split off '?', middleware + handler dispatch,
+// every outcome wrapped as a response (even "no route" → 500).
+zz_value zz_http_test(zz_value server, zz_value method, zz_value path, zz_value body, int *err) {
+    (void)server;
+    if (method.tag != ZZ_STR || !method.s || path.tag != ZZ_STR || !path.s
+        || body.tag != ZZ_STR || !body.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.test: expected (server, method, path, body) strings"));
+    }
+    int failed = 0;
+    zz_value out = http_dispatch(zz_str_cptr(method.s), zz_str_cptr(path.s), path.s->len, body, &failed);
+    *err = 0;
+    return out;
+}
+
+// zz_http_handle(server, method, path, body) → .ok(body str) | .err(msg).
+// Mirrors the VM: dispatcher failures (no route, middleware violation)
+// are .err, while a handler-produced response (any status) is .ok(text).
+zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_value body, int *err) {
+    (void)server;
+    if (method.tag != ZZ_STR || !method.s || path.tag != ZZ_STR || !path.s
+        || body.tag != ZZ_STR || !body.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.handle: expected (server, method, path, body) strings"));
+    }
+    int failed = 0;
+    zz_value resp = http_dispatch(zz_str_cptr(method.s), zz_str_cptr(path.s), path.s->len, body, &failed);
+    *err = 0;
+    zz_value text = zz_object_get_field(&resp, "text");
+    zz_value out;
+    if (failed) {
+        out = zz_variant_err(text.tag == ZZ_STR ? zz_clone(text) : zz_str_static("request failed"));
+    } else {
+        out = zz_variant_ok(text.tag == ZZ_STR ? zz_clone(text) : zz_str_static(""));
+    }
+    zz_release(&resp);
+    return out;
+}
+
+
+// zz_http_pipe(server, middleware, err) — appends to the middleware chain
+// (run in order by the test dispatcher; epoll workers in Step 2).
+zz_value zz_http_pipe(zz_value server, zz_value middleware, int *err) {
+    *err = 0;
+    if (g_http_middleware_count < HTTP_MAX_MIDDLEWARE - 1) {
+        g_http_middlewares[g_http_middleware_count++] = zz_clone(middleware);
+    }
+    return server;
 }
 
 // zz_http_log(server, enabled, err) — AOT stub: no-op
@@ -3730,13 +4322,6 @@ zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
     return zz_unit();
 }
 
-// zz_http_handle(server, method, path, body, err) — AOT stub: returns "OK"
-zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_value body, int *err) {
-    *err = 0;
-    (void)server; (void)method; (void)path; (void)body;
-    return zz_unit();
-}
-
 // ---- entry --------------------------------------------------------------
 // Process argv for env.args()/args.get_raw(): argv[0] is the binary,
 // everything after is script args (mirrors the VM's interp.args).
@@ -3778,6 +4363,14 @@ zz_value zz_call_native2(zz_value (*f)(zz_value, zz_value, int *), zz_value a, z
 zz_value zz_call_native3(zz_value (*f)(zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c) {
     int err = 0;
     zz_value r = f(a, b, c, &err);
+    return r;
+}
+// 4-arg natives (e.g. http.test/server+method+path+body). Same err
+// discipline as the other shims: the callee signals arg violations
+// through *err and the generated code checks it after the call.
+zz_value zz_call_native4(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d) {
+    int err = 0;
+    zz_value r = f(a, b, c, d, &err);
     return r;
 }
 // Spawn-closure-literal fuse (`task.spawn(|...| ...)`): the lowerer passes
@@ -6850,13 +7443,7 @@ zz_value zz_http_get(zz_value url, zz_value headers, int *err) {
     zz_object_set_field(&resp_val, "text", (zz_value){ZZ_STR, {.s = body_str}});
     zz_object_set_field(&resp_val, "headers", zz_clone(headers_dict));
 
-    zz_value json_val = zz_unit();
-    if (body_str->len > 0) {
-        int jerr = 0;
-        json_val = zz_json_parse((zz_value){ZZ_STR, {.s = body_str}}, &jerr);
-        if (jerr) json_val = zz_unit();
-    }
-    zz_object_set_field(&resp_val, "json", json_val);
+    zz_object_set_field(&resp_val, "json", http_json_field(body_str));
 
     zz_release(&headers_dict);
     return zz_variant_ok(resp_val);
@@ -6951,13 +7538,7 @@ zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
     zz_object_set_field(&resp_val, "text", (zz_value){ZZ_STR, {.s = body_str}});
     zz_object_set_field(&resp_val, "headers", zz_clone(headers_dict));
 
-    zz_value json_val = zz_unit();
-    if (body_str->len > 0) {
-        int jerr = 0;
-        json_val = zz_json_parse((zz_value){ZZ_STR, {.s = body_str}}, &jerr);
-        if (jerr) json_val = zz_unit();
-    }
-    zz_object_set_field(&resp_val, "json", json_val);
+    zz_object_set_field(&resp_val, "json", http_json_field(body_str));
 
     zz_release(&headers_dict);
     return zz_variant_ok(resp_val);
@@ -6975,10 +7556,15 @@ zz_value zz_http_response_text(zz_value resp, int *err) {
     return zz_object_get_field(&resp, "text");
 }
 
-// http.response.json(response) → json
+// http.response.json(response) → parsed body JSON, or .err on parse
+// failure. Re-parses the body at call time exactly like the VM's
+// http_response_json (the stored "json" field is bare-or-unit).
 zz_value zz_http_response_json(zz_value resp, int *err) {
     (void)err;
-    return zz_object_get_field(&resp, "json");
+    zz_value b = zz_object_get_field(&resp, "body");
+    zz_value ret = http_parse_body_json(b);
+    zz_release(&b);
+    return ret;
 }
 
 // http.response.headers(response) → dict

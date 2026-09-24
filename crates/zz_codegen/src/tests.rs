@@ -265,14 +265,8 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // Parity-skipped modules (non-deterministic output):
     ("std.http.serve_dir", "http fixtures skipped in parity"),
     ("http.serve_dir", "http fixtures skipped in parity"),
-    ("std.http.body_form", "http fixtures skipped in parity"),
-    ("std.http.body_json", "http fixtures skipped in parity"),
     ("std.http.delete", "http fixtures skipped in parity"),
-    ("std.http.header", "http fixtures skipped in parity"),
-    ("std.http.param", "http fixtures skipped in parity"),
     ("std.http.put", "http fixtures skipped in parity"),
-    ("std.http.query", "http fixtures skipped in parity"),
-    ("std.http.test", "http fixtures skipped in parity"),
     // PostgreSQL wire driver — VM-only (blocking TCP sockets have no C
     // runtime counterpart; AOT lowers these to Unit like time.now_ms).
     ("std.sqlz.postgres.connect", "VM-only; no C socket driver"),
@@ -290,12 +284,6 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("sqlz.transaction", "AOT-inlined; no native C impl"),
     ("std.db.transaction", "AOT-inlined; no native C impl"),
     ("db.transaction", "AOT-inlined; no native C impl"),
-    // Response constructor — needs a ZZ_RESPONSE C value plus a
-    // dispatching AOT server (the AOT server stub ignores handlers).
-    (
-        "std.http.respond",
-        "needs ZZ_RESPONSE value + dispatching server",
-    ),
     // Test assertions — VM-only builtins; no C codegen needed.
     ("assert", "test assertion; VM-only"),
     ("assert_eq", "test assertion; VM-only"),
@@ -476,8 +464,7 @@ println(2 ** 5)
 #[test]
 fn native_dce_prunes_unused_http() {
     // Import a heavy module but use only io; the generated C must not
-    // reference http.* so compilation succeeds even though the C runtime
-    // doesn't implement http.
+    // reference http.* (DCE prunes the unused natives).
     let src = r#"
 import std.http
 println("only io")

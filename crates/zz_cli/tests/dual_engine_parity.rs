@@ -524,6 +524,11 @@ parity_strict!(parity_stdlib_fs_vfs, "stdlib", "fs_vfs.zz");
 parity_strict!(parity_stdlib_bytes, "stdlib", "bytes.zz");
 parity_strict!(parity_stdlib_env_full, "stdlib", "env_full.zz");
 parity_strict!(parity_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
+parity_strict!(
+    parity_stdlib_http_request_response,
+    "stdlib",
+    "http_request_response.zz"
+);
 
 // --- Error fixture: both engines must error on missing struct field ---
 parity_strict_error!(parity_err_missing_field, "missing_field.zz");

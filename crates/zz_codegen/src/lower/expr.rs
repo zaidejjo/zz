@@ -2198,6 +2198,13 @@ impl Lowerer {
                     let c = &arg_items[2];
                     format!("zz_call_native3({effective_name}, {a}, {b}, {c})")
                 }
+                4 => {
+                    let a = &arg_items[0];
+                    let b = &arg_items[1];
+                    let c = &arg_items[2];
+                    let d = &arg_items[3];
+                    format!("zz_call_native4({effective_name}, {a}, {b}, {c}, {d})")
+                }
                 _ => "zz_unit()".to_string(),
             };
         }

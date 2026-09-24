@@ -1,0 +1,65 @@
+// E2E: HTTP request/response value natives (AOT Step 1).
+// Accessors run inside http.test handlers (dispatcher-built requests,
+// like production — a literal nested dict cannot satisfy the {str: str}
+// request type). No sockets: in-process dispatch only.
+import std.http
+import std.json
+
+func main() {
+    // respond round-trip needs no server.
+    r := http.respond(201, "{\"ok\": \"yes\"}", {"Content-Type": "application/json"})
+    println(r.status())
+    println(r.text())
+    println("ok:{json.as_str(json.get(r.json(), "ok") ?? json.null())}")
+    println(r.headers()["Content-Type"])
+
+    s := http.server()
+    s = http.route_get(s, "/users/:id", |q| "user-{http.param(q, "id") ?? "?"}")
+    s = http.route_get(s, "/noparam", |q| "p:{http.param(q, "zz") ?? "none"}")
+    s = http.route_get(s, "/search", |q| "q:{http.query(q)["q"]}")
+    s = http.route_get(s, "/h", |q| "h:{http.header(q, "content-type") ?? "?"}")
+    s = http.route_get(s, "/hmiss", |q| match http.header(q, "x-nope") {
+        .ok(v) => "h:{v}",
+        .err(e) => "h-err:{e}",
+    })
+    s = http.route_post(s, "/echo", |q| q.body)
+    s = http.route_post(s, "/login", |q| "login:{json.as_str(json.get(http.body_json(q), "login") ?? json.null())}")
+    s = http.route_post(s, "/form", |q| "a:{http.body_form(q)["a"]}")
+    s = http.route_put(s, "/put", |q| http.respond(201, "made", {"X-A": "b"}))
+    s = http.route_delete(s, "/del/:id", |q| http.respond(200, "gone-{http.param(q, "id") ?? "?"}", {"X-A": "b"}))
+    s = http.pipe(s, |q| .ok(q))
+    r1 := http.test(s, "GET", "/users/42", "")
+    println("t1:{r1.status()}:{r1.text()}")
+    r2 := http.test(s, "GET", "/noparam", "")
+    println("t2:{r2.status()}:{r2.text()}")
+    r3 := http.test(s, "GET", "/search?q=hi", "")
+    println("t3:{r3.status()}:{r3.text()}")
+    r4 := http.test(s, "GET", "/h", "")
+    println("t4:{r4.status()}:{r4.text()}")
+    r5 := http.test(s, "GET", "/hmiss", "")
+    println("t5:{r5.status()}:{r5.text()}")
+    r6 := http.test(s, "POST", "/echo", "ping")
+    println("t6:{r6.status()}:{r6.text()}")
+    r7 := http.test(s, "POST", "/login", "{\"login\": \"friend1\"}")
+    println("t7:{r7.status()}:{r7.text()}")
+    r8 := http.test(s, "POST", "/form", "a=1&b=")
+    println("t8:{r8.status()}:{r8.text()}")
+    r9 := http.test(s, "PUT", "/put", "")
+    println("t9:{r9.status()}:{r9.text()}")
+    r10 := http.test(s, "DELETE", "/del/7", "")
+    println("t10:{r10.status()}:{r10.text()}")
+    r11 := http.test(s, "GET", "/missing", "")
+    println("t11:{r11.status()}:{r11.text()}")
+    s = http.route_get(s, "/o/:x/b", |q| "o1:{http.param(q, "x") ?? "none"}")
+    s = http.route_get(s, "/o/c/:y", |q| "o2:{http.param(q, "y") ?? "none"}:{http.param(q, "x") ?? "none"}")
+    r12 := http.test(s, "GET", "/o/c/d", "")
+    println("t12:{r12.status()}:{r12.text()}")
+
+    // Middleware short-circuit on its own server.
+    s2 := http.pipe(http.server(), |q| .err(http.respond(403, "deny", {"X-A": "b"})))
+    s2 = http.route_get(s2, "/x", |q| "never")
+    rm := http.test(s2, "GET", "/x", "")
+    println("mw:{rm.status()}:{rm.text()}")
+
+    println("http_request_response_ok")
+}

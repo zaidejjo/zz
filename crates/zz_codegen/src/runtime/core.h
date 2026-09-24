@@ -694,6 +694,7 @@ zz_value zz_call_native1(zz_value (*f)(zz_value, int *), zz_value a);
 zz_value zz_call_native0(zz_value (*f)(zz_value, int *));
 zz_value zz_call_native2(zz_value (*f)(zz_value, zz_value, int *), zz_value a, zz_value b);
 zz_value zz_call_native3(zz_value (*f)(zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c);
+zz_value zz_call_native4(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d);
 zz_value zz_call_native_spawn(zz_dispatch_fn fn, void **cells,
                               const unsigned char *kinds, const size_t *sizes,
                               size_t nenv, int is_green);
@@ -874,13 +875,25 @@ zz_value zz_tcp_local_addr(zz_value stream, int *err);
 zz_value zz_tcp_set_read_timeout(zz_value stream, zz_value ms, int *err);
 zz_value zz_tcp_set_write_timeout(zz_value stream, zz_value ms, int *err);
 
-// http AOT server — thread-per-connection, returns "OK" for all requests
+// http AOT server — route table with ZZ-closure handlers; http.test
+// dispatches in-process (epoll workers serve a static OK until Step 2).
 // All functions follow the native call convention: (zz_value... , int *err)
 zz_value zz_http_server(zz_value unused, int *err);  // 0 args → unused=unit
-zz_value zz_http_route_get(zz_value server, zz_value path, zz_value handler, int *err);  // 3 args (handler ignored in AOT)
+zz_value zz_http_route_get(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route_post(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route_put(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route_delete(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_pipe(zz_value server, zz_value middleware, int *err);  // 2 args
 zz_value zz_http_log(zz_value server, zz_value enabled, int *err);  // 2 args
 zz_value zz_http_listen(zz_value server, zz_value port, int *err);  // 2 args
+zz_value zz_http_test(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
 zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
+zz_value zz_http_respond(zz_value status, zz_value body, zz_value headers, int *err);  // 3 args
+zz_value zz_http_param(zz_value req, zz_value name, int *err);  // 2 args
+zz_value zz_http_query(zz_value req, int *err);  // 1 arg
+zz_value zz_http_header(zz_value req, zz_value name, int *err);  // 2 args
+zz_value zz_http_body_json(zz_value req, int *err);  // 1 arg
+zz_value zz_http_body_form(zz_value req, int *err);  // 1 arg
 
 // HTTP client stubs (native mode — returns mock responses)
 zz_value zz_http_get(zz_value url, zz_value headers, int *err);
