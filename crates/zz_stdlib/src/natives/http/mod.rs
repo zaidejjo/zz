@@ -1,6 +1,7 @@
 //! `std.http` — HTTP client, web framework, middleware, and developer tools.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::Write;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -9,9 +10,12 @@ use std::time::Instant;
 use crate::natives::{arg, expect_str};
 use zz_runtime::json::{parse_json, to_json_string, JsonValue};
 use zz_runtime::value::{
-    detach_cached_funcs, snapshot_env, snapshot_funcs, FuncValue, HttpServer, Response,
+    detach_cached_funcs, reachable_refs, snapshot_env, snapshot_env_filtered, snapshot_funcs,
+    FuncValue, HttpServer, Response,
 };
-use zz_runtime::{Chunk, Env, EnvLink, EvalError, Expr, Interp, NativeEntry, Param, Span, Value};
+use zz_runtime::{
+    vm::Op, Chunk, Env, EnvLink, EvalError, Expr, Interp, NativeEntry, Param, Span, Value,
+};
 
 // ===========================================================================
 // Helpers
@@ -228,14 +232,15 @@ fn read_exact_capped<R: std::io::Read>(
 fn build_request_dict(
     method: &str,
     path: &str,
-    body: &str,
+    body: String,
     headers: &[(String, String)],
     query_pairs: &[(String, String)],
     params: &[(String, String)],
 ) -> Value {
     let method_val = Value::Str(method.to_string().into());
     let path_val = Value::Str(path.to_string().into());
-    let body_val = Value::Str(body.to_string().into());
+    // Move (no copy): the caller-owned body buffer becomes the dict entry.
+    let body_val = Value::Str(body.into());
 
     let headers_dict: Vec<(Value, Value)> = headers
         .iter()
@@ -605,7 +610,9 @@ fn http_route(
     // ServerSnapshot) never touch the caller's live env RefCell. Without
     // this, a spawned server thread borrowing the handler env races with
     // the caller's own env writes (e.g. top-level chunk completion).
-    let handler = snapshot_func(&handler)
+    // Scoped: only env entries the handler can load are cloned (see
+    // `snapshot_func_scoped`); the rest resolve via per-thread tables.
+    let handler = snapshot_func_scoped(&handler, interp)
         .map(|fs| fs.reconstruct())
         .unwrap_or(handler);
     let _ = interp;
@@ -718,7 +725,7 @@ pub(crate) fn http_test(
         &server,
         &method,
         &path,
-        &body,
+        body.clone(),
         &headers,
         &query_pairs,
         &params,
@@ -950,7 +957,7 @@ fn dispatch_with_request(
     server: &HttpServer,
     method: &str,
     path: &str,
-    body: &str,
+    body: String,
     headers: &[(String, String)],
     query_pairs: &[(String, String)],
     params: &[(String, String)],
@@ -960,10 +967,18 @@ fn dispatch_with_request(
     // Build the request dict
     let req_dict = build_request_dict(method, path, body, headers, query_pairs, params);
 
-    // Run middleware chain
-    let mut current_req = req_dict.clone();
-    for mw in &server.middlewares {
-        match interp.call(mw.clone(), vec![current_req.clone()], span)? {
+    // Run middleware chain. `current_req` moves (no clone): the dict is
+    // rebuilt per request and each stage takes ownership — cloning a
+    // multi-MB body per middleware triples peak publish memory.
+    let mut current_req = req_dict;
+    let nmw = server.middlewares.len();
+    for (i, mw) in server.middlewares.iter().enumerate() {
+        let arg = if i + 1 < nmw {
+            current_req.clone()
+        } else {
+            std::mem::replace(&mut current_req, Value::Unit)
+        };
+        match interp.call(mw.clone(), vec![arg], span)? {
             Value::Result(r) => match &*r {
                 Ok(val) => {
                     // Middleware passed — it may have modified the request dict
@@ -1127,7 +1142,7 @@ pub(crate) fn dispatch(
     interp: &mut Interp,
     span: Span,
 ) -> Result<String, EvalError> {
-    let result = dispatch_with_request(server, method, path, &body, &[], &[], &[], interp, span)?;
+    let result = dispatch_with_request(server, method, path, body, &[], &[], &[], interp, span)?;
     Ok(result.1)
 }
 
@@ -1205,15 +1220,57 @@ struct ServerSnapshot {
     funcs: Arc<std::sync::Mutex<HashMap<String, FuncValue>>>,
 }
 
-/// Snapshot a `Value::Func` handler into a thread-safe `FuncSnapshot`.
-fn snapshot_func(v: &Value) -> Option<FuncSnapshot> {
+/// Names a route handler's frame can load from its captured env: the
+/// handler chunk's static load set ([`reachable_refs`], same discipline
+/// as `task.spawn` workers) plus, transitively, fused `task.spawn`
+/// bodies (`SpawnClosure` captures the handler frame at request time but
+/// `reachable_refs` does not descend into it — the spawn hook snapshots
+/// the worker from the live frame, so every name it can load must be
+/// present here).
+fn handler_loads(fv: &FuncValue, interp: &Interp) -> Option<HashSet<String>> {
+    let root = fv.chunk.as_ref()?;
+    let mut loads = HashSet::new();
+    let mut stack = vec![std::sync::Arc::clone(root)];
+    let mut visited: HashSet<usize> = HashSet::new();
+    while let Some(ch) = stack.pop() {
+        let ptr = std::sync::Arc::as_ptr(&ch) as *const () as usize;
+        if !visited.insert(ptr) {
+            continue;
+        }
+        let (_names, l) = reachable_refs(&ch, &interp.funcs);
+        loads.extend(l);
+        for op in ch.code.iter() {
+            if let Op::SpawnClosure { chunk, .. } = op {
+                stack.push(std::sync::Arc::clone(chunk));
+            }
+        }
+    }
+    Some(loads)
+}
+
+/// Scoped handler snapshot: keeps only env entries the handler can load
+/// (see [`handler_loads`]). Unreferenced globals — the whole stdlib/user
+/// function set for a trivial handler — resolve at request time through
+/// the per-thread funcs/natives tables instead of being cloned per route
+/// (the old full snapshot was quadratic across registrations: ~17MB per
+/// route, 577MB for 9 routes). Falls back to the full snapshot when the
+/// handler has no compiled chunk (interpreted mode).
+fn snapshot_func_scoped(v: &Value, interp: &Interp) -> Option<FuncSnapshot> {
     match v {
-        Value::Func(fv) => Some(FuncSnapshot {
-            params: fv.params.clone(),
-            body: fv.body.clone(),
-            chunk: fv.chunk.clone(),
-            env_snapshot: snapshot_env(&fv.env),
-        }),
+        Value::Func(fv) => {
+            let env_snapshot = match handler_loads(fv, interp) {
+                Some(loads) => {
+                    snapshot_env_filtered(&fv.env, &loads, &interp.funcs, &interp.natives)
+                }
+                None => snapshot_env(&fv.env),
+            };
+            Some(FuncSnapshot {
+                params: fv.params.clone(),
+                body: fv.body.clone(),
+                chunk: fv.chunk.clone(),
+                env_snapshot,
+            })
+        }
         _ => None,
     }
 }
@@ -1225,14 +1282,18 @@ impl ServerSnapshot {
             .routes
             .iter()
             .filter_map(|(method, path, handler)| {
-                Some((method.clone(), path.clone(), snapshot_func(handler)?))
+                Some((
+                    method.clone(),
+                    path.clone(),
+                    snapshot_func_scoped(handler, interp)?,
+                ))
             })
             .collect();
 
         let middleware = server
             .middlewares
             .iter()
-            .filter_map(snapshot_func)
+            .filter_map(|m| snapshot_func_scoped(m, interp))
             .collect();
 
         ServerSnapshot {
@@ -1312,6 +1373,24 @@ pub(crate) fn http_listen(
     // Use eprintln (stderr) since that's where zz programs write their
     // stdout-equivalent in native contexts.
     eprintln!("SERVER_READY");
+    // The accept loop below never touches the caller's interp again: every
+    // connection runs on a per-thread interp rebuilt from `snapshot`.
+    // Release the caller-side function table, env, and caches now — for a
+    // module-heavy service this is the second copy of tens of MB — and
+    // trim the boot peak (loader/checker/HIR temporaries) back to the OS.
+    // Placed after the successful bind so a bind failure still returns
+    // with the interp intact.
+    interp.funcs.clear();
+    interp.funcs.shrink_to_fit();
+    interp.env = EnvLink::new();
+    interp.reach_cache.clear();
+    interp.reach_cache.shrink_to_fit();
+    interp.spawn_funcs_cache = None;
+    interp.spawn_keep_cache = None;
+    // SAFETY: same as the per-request trim below (arena lock only).
+    unsafe {
+        libc::malloc_trim(0);
+    }
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         let snap = Arc::clone(&snapshot);
@@ -1413,7 +1492,13 @@ fn handle_connection_thread(
             return;
         }
     };
-    let body = String::from_utf8_lossy(&body_bytes).to_string();
+    // Reuse the read buffer when it is valid UTF-8 (JSON always is):
+    // `from_utf8_lossy().to_string()` copies the whole body again, which
+    // triples peak memory on multi-MB publishes (buffer + String + dict).
+    let body = match String::from_utf8(body_bytes) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+    };
 
     // ── Reconstruct server + interp from snapshot ──
     let server = snapshot.reconstruct_server();
@@ -1424,7 +1509,7 @@ fn handle_connection_thread(
         &server,
         method,
         &path,
-        &body,
+        body,
         &req_headers,
         &query_pairs,
         &[],
@@ -1458,6 +1543,19 @@ fn handle_connection_thread(
     let response = format_response_with_headers(status, &resp_headers, &resp_body);
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
+    // Large bodies churn tens of MB through this thread's heap (body
+    // buffer + request dict + JSON parse). Freed blocks above the live
+    // set are never returned without help, so a few big publishes would
+    // ratchet idle RSS to the high-water mark forever. Trim only when
+    // the request was big — trim walks the heap and would just add
+    // latency to small requests.
+    if content_length > 8 * 1024 * 1024 {
+        // SAFETY: `malloc_trim` is async-signal-safe w.r.t. the allocator
+        // (it takes the arena lock like `free`); no ZZ state is touched.
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
 }
 
 #[cfg(test)]
