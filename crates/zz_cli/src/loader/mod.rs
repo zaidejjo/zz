@@ -437,23 +437,23 @@ impl Loader {
             // no bare aliases are created — two plugins must never
             // collide on short names.
             if imp.len() == 1 {
-                if !imp_items.is_empty() {
-                    self.errors.push(LoadError {
-                        name: path.display().to_string(),
-                        source: source.clone(),
-                        diags: vec![error_at(
-                            format!(
-                                "selective imports from plugin `{}` are not supported\n\
-                                 hint: `import {0}` imports the full module; call `{}.*` qualified",
-                                imp[0], imp[0]
-                            ),
-                            Span::new(0, 0),
-                        )],
-                    });
-                    continue;
-                }
                 if let Some(root) = find_project_root(&canon) {
                     if let Some(pkg_dir) = resolve_plugin_pkg(&root, &imp[0]) {
+                        if !imp_items.is_empty() {
+                            self.errors.push(LoadError {
+                                name: path.display().to_string(),
+                                source: source.clone(),
+                                diags: vec![error_at(
+                                    format!(
+                                        "selective imports from plugin `{}` are not supported\n\
+                                         hint: `import {0}` imports the full module; call `{}.*` qualified",
+                                        imp[0], imp[0]
+                                    ),
+                                    Span::new(0, 0),
+                                )],
+                            });
+                            continue;
+                        }
                         self.import_plugin(&imp[0], imp_alias.as_deref(), &pkg_dir, path, &source);
                         continue;
                     }
@@ -475,8 +475,15 @@ impl Loader {
                         let alias = imp_alias.clone().unwrap_or_else(|| imp[0].clone());
                         self.load_file(&entry, Some(alias.as_str()))?;
                         if is_selective {
+                            // Deferred to finish(): seed holds `alias.sym`,
+                            // so record the effective namespace, not the
+                            // package name (they differ with `as`).
+                            let mut sel_path = imp.clone();
+                            if let Some(last) = sel_path.last_mut() {
+                                *last = alias.clone();
+                            }
                             self.selective_imports
-                                .push((entry, imp.clone(), imp_items, false));
+                                .push((entry, sel_path, imp_items, false));
                         }
                         continue;
                     }
@@ -933,6 +940,7 @@ impl Loader {
                     Stmt::Import {
                         items,
                         path: imp_path,
+                        alias: stmt_alias,
                         span,
                         ..
                     } if !items.is_empty() => {
@@ -957,12 +965,18 @@ impl Loader {
                             // namespace tracking, then emit synthetic Decls.
                             new_stmts.push(Stmt::Import {
                                 path: imp_path.clone(),
-                                alias: None,
+                                alias: stmt_alias.clone(),
                                 items: Vec::new(),
                                 pub_: false,
                                 span: *span,
                             });
-                            let ns = imp_path.last().map(String::as_str).unwrap_or("");
+                            // resolve under the effective namespace: the
+                            // statement alias when present (`import m as
+                            // a(x)` binds `a.x`, not `m.x`).
+                            let ns = stmt_alias
+                                .as_deref()
+                                .or_else(|| imp_path.last().map(String::as_str))
+                                .unwrap_or("");
                             let prefix = format!("{ns}.");
                             for item in items {
                                 match item {
