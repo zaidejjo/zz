@@ -296,6 +296,10 @@ pub struct BuildOptions {
     /// Link the Rust native runtime (`libzz_native_rt.a`) for FFI natives.
     /// Set automatically from the lowered program; tests can opt in directly.
     pub native_rt: bool,
+    /// Force-extract the Postgres objects from the static archive (`-u`).
+    /// Set automatically alongside `native_rt` when sqlz/pg natives are
+    /// reachable (the C dispatcher's weak refs never pull members alone).
+    pub pg_link: bool,
     /// Extra object files / static libraries from plugin packages to link
     /// into the final binary. Each entry is a path to a `.o` or `.a` file
     /// produced by a plugin's build hook.
@@ -321,6 +325,7 @@ impl BuildOptions {
             thin_lto: false,
             pgo: PgoMode::None,
             native_rt: false,
+            pg_link: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -338,6 +343,7 @@ impl BuildOptions {
             thin_lto: true,
             pgo: PgoMode::None,
             native_rt: false,
+            pg_link: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -355,6 +361,7 @@ impl BuildOptions {
             thin_lto: true,
             pgo: PgoMode::None,
             native_rt: false,
+            pg_link: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -372,6 +379,7 @@ impl BuildOptions {
             thin_lto: true,
             pgo: PgoMode::Generate,
             native_rt: false,
+            pg_link: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -389,6 +397,7 @@ impl BuildOptions {
             thin_lto: true,
             pgo: PgoMode::Use,
             native_rt: false,
+            pg_link: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -416,6 +425,7 @@ impl BuildOptions {
         self.thin_lto.hash(&mut h);
         self.pgo.hash(&mut h);
         self.native_rt.hash(&mut h);
+        self.pg_link.hash(&mut h);
         // Hash plugin artifact paths so cache invalidates when plugins change.
         for p in &self.plugin_artifacts {
             p.hash(&mut h);
@@ -630,6 +640,16 @@ pub fn build_with(
         }
         let extra = crate::ffi::link_args(opts.optimize)
             .map_err(|e| BuildError::NativeRt { reason: e.0 })?;
+        // Postgres backend: the C dispatcher references the symbols
+        // weakly (so sqlite-only programs link cleanly without the
+        // staticlib); force-extract the objects whenever the gate fired.
+        // `-u` precedes the archive that satisfies it (linker order).
+        if opts.pg_link {
+            for sym in crate::ffi::PG_LINK_SYMBOLS {
+                cmd.arg("-u");
+                cmd.arg(sym);
+            }
+        }
         for a in &extra {
             cmd.arg(a);
         }

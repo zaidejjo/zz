@@ -27,16 +27,16 @@ use crate::natives::{arg, expect_str};
 pub(crate) mod hints;
 pub(crate) mod mysql_conn;
 pub(crate) mod mysql_wire;
-pub(crate) mod pg_conn;
-pub(crate) mod pg_wire;
-pub(crate) mod placeholders;
 
 use hints::{dialect_hints, Backend};
 use mysql_conn::{MyConn, MyConnInfo};
 use mysql_wire::{col_type_kind, MyKind, MyParam};
-use pg_conn::{ConnInfo, PgConn, PgParam};
-use pg_wire::{col_oid_kind, ColKind};
-use placeholders::PlaceholderStyle;
+// Wire driver shared with the AOT staticlib from its single source in
+// `zz_native_rt` (also serves `pg.*` natively — same behavior both engines).
+use zz_native_rt::pg_conn::{ConnInfo, PgConn, PgParam};
+use zz_native_rt::pg_wire::{col_oid_kind, ColKind};
+use zz_native_rt::placeholders;
+use zz_native_rt::placeholders::PlaceholderStyle;
 
 /// Build a statement-failure error with smart dialect hints attached as
 /// `hint: ...` notes (see [`hints::dialect_hints`]).

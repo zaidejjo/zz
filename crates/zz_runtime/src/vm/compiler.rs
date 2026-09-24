@@ -1768,7 +1768,11 @@ impl Compiler {
                     let is_db_call = parts.len() == 2
                         && matches!(parts[1].as_str(), "query" | "exec")
                         && !leading_is_module_ns
-                        && self.is_db_path(parts);
+                        && self.is_db_path(parts)
+                        && !self
+                            .native_names
+                            .as_ref()
+                            .is_some_and(|n| n.contains(&parts.join(".")));
                     // Free-function form with explicit receiver:
                     // `pg.query(db, sql)`, `my.exec(db, sql)`,
                     // `sqlz.query(db, sql)`,

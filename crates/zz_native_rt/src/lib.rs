@@ -34,6 +34,18 @@ pub mod crypto_pw;
 pub mod encoding;
 /// `std.log` logging + tracing (levels, sinks, JSON, spans).
 pub mod log;
+/// PostgreSQL wire-protocol driver for AOT (`zz_pg_*_raw` FFI over the
+/// shared [`pg_conn`]/[`pg_wire`] driver + pool-handle API).
+pub mod pg;
+/// PostgreSQL wire-protocol driver (v3.0 extended protocol over blocking
+/// TCP, rustls TLS upgrade): connection/auth, `?N`→`$N` placeholders.
+/// Shared by the VM (`zz_stdlib`) and AOT (`pg` FFI) from this one source.
+pub mod pg_conn;
+/// PostgreSQL message codecs: auth (MD5/SCRAM), startup/parse/bind/
+/// execute frames, backend parsing, column-type mapping.
+pub mod pg_wire;
+/// `?N` marker dialect rendering shared by the SQL backends.
+pub mod placeholders;
 /// `std.process` subprocess control (run, spawn/wait, exit, pid).
 pub mod process;
 /// `std.regexp` implementation (safe pool API + `extern "C"` FFI).

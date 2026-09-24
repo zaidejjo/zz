@@ -35,6 +35,11 @@ pub struct LoweredC {
     /// True when the program calls natives provided by the Rust static
     /// library; the build must link `libzz_native_rt.a`.
     pub needs_native_rt: bool,
+    /// True when the program can reach the Postgres backend (any sqlz /
+    /// pg spelling): the link must force-extract the PG objects from the
+    /// archive (`-u`), since the C dispatcher references them weakly and
+    /// weak refs alone never pull archive members.
+    pub needs_pg_link: bool,
 }
 
 /// Mangle a zz qualified name to a C identifier.
@@ -423,6 +428,7 @@ impl Lowerer {
         LoweredC {
             source,
             needs_native_rt,
+            needs_pg_link: crate::ffi::needs_pg_link(&self.reachable_natives),
         }
     }
 }
@@ -729,13 +735,19 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "net.local_addr" | "std.net.local_addr" => Some("zz_tcp_local_addr"),
         "net.set_read_timeout" | "std.net.set_read_timeout" => Some("zz_tcp_set_read_timeout"),
         "net.set_write_timeout" | "std.net.set_write_timeout" => Some("zz_tcp_set_write_timeout"),
-        // sqlz (AOT: sqlite3 prepared-statement FFI in core.c).
+        // sqlz (AOT: sqlite3 prepared-statement C impl + postgres via
+        // the staticlib; the C handle records the backend).
         // Canonical `sqlz.*` / `std.sqlz.*`; `db.*` / `std.db.*` are
-        // zero-overhead aliases lowering to the same runtime fns.
+        // zero-overhead aliases; `pg.*` / `std.sqlz.postgres.*` are the
+        // explicit PG spellings (same handle, same dispatch).
         "sqlz.open" | "std.sqlz.open" | "db.open" | "std.db.open" => Some("zz_db_open"),
+        "pg.connect" | "std.sqlz.postgres.connect" => Some("zz_pg_connect"),
         "sqlz.exec" | "std.sqlz.exec" | "db.exec" | "std.db.exec" => Some("zz_db_exec"),
+        "pg.exec" | "std.sqlz.postgres.exec" => Some("zz_db_exec"),
         "sqlz.query" | "std.sqlz.query" | "db.query" | "std.db.query" => Some("zz_db_query"),
+        "pg.query" | "std.sqlz.postgres.query" => Some("zz_db_query"),
         "sqlz.close" | "std.sqlz.close" | "db.close" | "std.db.close" => Some("zz_db_close"),
+        "pg.close" | "std.sqlz.postgres.close" => Some("zz_db_close"),
         // channels
         "chan" | "std.chan" => Some("zz_chan_new"),
         "chan.send" | "std.chan.send" => Some("zz_chan_send"),
@@ -745,16 +757,24 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "spawn" | "std.spawn" | "task.spawn" | "std.task.spawn" => Some("zz_spawn"),
         "task.recv" | "std.task.recv" | "task.join" | "std.task.join" => Some("zz_task_join_recv"),
         "task.try_join" | "std.task.try_join" => Some("zz_task_try_join"),
-        // http (AOT: minimal thread-per-connection server returning OK)
+        // http (AOT: route table with closure handlers; http.test
+        // dispatches in-process; epoll workers serve static OK until Step 2)
         "http.server" | "std.http.server" => Some("zz_http_server"),
         "http.route_get" | "std.http.route_get" => Some("zz_http_route_get"),
-        "http.route_post" | "std.http.route_post" => Some("zz_http_route_get"),
-        "http.route_put" | "std.http.route_put" => Some("zz_http_route_get"),
-        "http.route_delete" | "std.http.route_delete" => Some("zz_http_route_get"),
+        "http.route_post" | "std.http.route_post" => Some("zz_http_route_post"),
+        "http.route_put" | "std.http.route_put" => Some("zz_http_route_put"),
+        "http.route_delete" | "std.http.route_delete" => Some("zz_http_route_delete"),
         "http.log" | "std.http.log" => Some("zz_http_log"),
-        "http.pipe" | "std.http.pipe" => Some("zz_http_log"),
+        "http.pipe" | "std.http.pipe" => Some("zz_http_pipe"),
         "http.listen" | "std.http.listen" => Some("zz_http_listen"),
+        "http.test" | "std.http.test" => Some("zz_http_test"),
         "http.handle" | "std.http.handle" => Some("zz_http_handle"),
+        "http.respond" | "std.http.respond" => Some("zz_http_respond"),
+        "http.param" | "std.http.param" => Some("zz_http_param"),
+        "http.query" | "std.http.query" => Some("zz_http_query"),
+        "http.header" | "std.http.header" => Some("zz_http_header"),
+        "http.body_json" | "std.http.body_json" => Some("zz_http_body_json"),
+        "http.body_form" | "std.http.body_form" => Some("zz_http_body_form"),
         // http Response methods
         "http.status" | "std.http.status" => Some("zz_http_response_status"),
         "http.text" | "std.http.text" => Some("zz_http_response_text"),

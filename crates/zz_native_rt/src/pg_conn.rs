@@ -1056,7 +1056,6 @@ mod tests {
         // must be shareable. Compile-time proof (Mutex sharing needs it).
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<PgConn>();
-        assert_send_sync::<super::super::DbConn>();
     }
 
     /// Read one extended batch; `None` on EOF/transport error (lets mock

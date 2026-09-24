@@ -2699,6 +2699,9 @@ void zz_safepoint(void) {
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <poll.h>
+#ifdef __linux__
+#include <malloc.h>
+#endif
 #endif
 
 // One-time network startup (WSAStartup on Windows, no-op on POSIX).
@@ -2978,10 +2981,73 @@ zz_value zz_tcp_set_write_timeout(zz_value stream, zz_value ms, int *err) {
 #include <sqlite3.h>
 #endif
 
+// ---- SQL backends (sqlite embedded, postgres via staticlib) ----
+//
+// `ZZ_DB` values point at a heap handle recording the backend, so
+// `sqlz.*`/`pg.*` query/exec/close dispatch at runtime (the URL scheme
+// is only sniffed once, at open). Postgres symbols come from
+// `libzz_native_rt.a`, which the build links whenever any sqlz/pg
+// native is reachable (see `needs_native_rt`).
+typedef enum { ZZDB_CLOSED = -1, ZZDB_SQLITE = 0, ZZDB_PG = 1 } zz_db_backend;
+typedef struct {
+    int backend;
+    union {
+        void *sqlite;   // sqlite3* (ZZDB_SQLITE)
+        uint64_t pg_id; // staticlib pool id (ZZDB_PG)
+    };
+} zz_db_handle;
+
+// Postgres backend (Rust staticlib). Weak imports: programs that never
+// touch PG link WITHOUT the staticlib (see `needs_native_rt`), so these
+// resolve to NULL there; any binary that can actually hold a PG handle
+// links the staticlib (the gate keys off sqlz/pg reachability) and sees
+// them. Guards live at the two creation sites below — a live PG handle
+// proves linkage, so use sites call directly.
+#if defined(__APPLE__)
+#define ZZ_WEAK_IMPORT __attribute__((weak_import))
+#else
+#define ZZ_WEAK_IMPORT __attribute__((weak))
+#endif
+uint64_t zz_pg_connect_raw(const char *info, size_t len) ZZ_WEAK_IMPORT;
+int64_t zz_pg_exec_raw(uint64_t id, const char *sql, size_t len, const zz_value *binds, size_t nbinds) ZZ_WEAK_IMPORT;
+zz_value zz_pg_query_raw(uint64_t id, const char *sql, size_t len, const zz_value *binds, size_t nbinds) ZZ_WEAK_IMPORT;
+void zz_pg_close_raw(uint64_t id) ZZ_WEAK_IMPORT;
+
+// `pg.connect(conninfo)` — URL or keyword form (the driver parses both);
+// `ZZ_DB`-NULL on failure, mirroring the SQLite open leniency.
+zz_value zz_pg_connect(zz_value info, int *err) {
+    (void)err;
+    if (info.tag != ZZ_STR || !info.s) return (zz_value){ZZ_DB, {.db = NULL}};
+    if (!zz_pg_connect_raw) return (zz_value){ZZ_DB, {.db = NULL}};
+    uint64_t id = zz_pg_connect_raw(zz_str_cptr(info.s), info.s->len);
+    if (id == 0) return (zz_value){ZZ_DB, {.db = NULL}};
+    zz_db_handle *h = (zz_db_handle *)malloc(sizeof(zz_db_handle));
+    if (!h) {
+        zz_pg_close_raw(id);
+        return (zz_value){ZZ_DB, {.db = NULL}};
+    }
+    h->backend = ZZDB_PG;
+    h->pg_id = id;
+    return (zz_value){ZZ_DB, {.db = h}};
+}
+
 zz_value zz_db_open(zz_value path, int *err) {
     (void)err;
     if (path.tag != ZZ_STR || !path.s) return (zz_value){ZZ_DB, {.db = NULL}};
     const char *p = zz_str_cptr(path.s);
+    // Postgres URLs route to the Rust wire driver (staticlib); the
+    // handle enum below records the backend so query/exec/close
+    // dispatch without re-sniffing.
+    if (strncmp(p, "postgres://", 11) == 0 || strncmp(p, "postgresql://", 13) == 0) {
+        if (!zz_pg_connect_raw) return (zz_value){ZZ_DB, {.db = NULL}};
+        uint64_t id = zz_pg_connect_raw(p, path.s->len);
+        if (id == 0) return (zz_value){ZZ_DB, {.db = NULL}};
+        zz_db_handle *h = (zz_db_handle *)malloc(sizeof(zz_db_handle));
+        if (!h) return (zz_value){ZZ_DB, {.db = NULL}};
+        h->backend = ZZDB_PG;
+        h->pg_id = id;
+        return (zz_value){ZZ_DB, {.db = h}};
+    }
 #ifdef ZZ_HAS_SQLITE3
     sqlite3 *conn = NULL;
     int rc;
@@ -2996,7 +3062,14 @@ zz_value zz_db_open(zz_value path, int *err) {
         if (conn) sqlite3_close(conn);
         return (zz_value){ZZ_DB, {.db = NULL}};
     }
-    return (zz_value){ZZ_DB, {.db = (void *)conn}};
+    zz_db_handle *h = (zz_db_handle *)malloc(sizeof(zz_db_handle));
+    if (!h) {
+        sqlite3_close(conn);
+        return (zz_value){ZZ_DB, {.db = NULL}};
+    }
+    h->backend = ZZDB_SQLITE;
+    h->sqlite = conn;
+    return (zz_value){ZZ_DB, {.db = h}};
 #else
     (void)p;
     return (zz_value){ZZ_DB, {.db = NULL}};
@@ -3051,8 +3124,25 @@ int  zz_tx_has_error(void)   { return _zz_tx_error; }
 zz_value zz_db_exec_raw(zz_value db, const char *sql, zz_value *binds, size_t nbinds, int *err) {
     (void)err;
     if (db.tag != ZZ_DB || !db.db || !sql) return zz_int(0);
+    zz_db_handle *h = (zz_db_handle *)db.db;
+    // Closed tombstones (and NULL handles above) degrade to empty
+    // results — never touch a freed backend through a stale value.
+    if (h->backend != ZZDB_SQLITE && h->backend != ZZDB_PG) {
+        return zz_int(0);
+    }
+    if (h->backend == ZZDB_PG) {
+        int64_t n = zz_pg_exec_raw(h->pg_id, sql, strlen(sql), binds, nbinds);
+        // The Rust side reports failure as -1 (a bare 0 is a legitimate
+        // "no rows changed"); flag it exactly like the SQLite path so
+        // inlined transactions roll back.
+        if (n < 0) {
+            zz_tx_set_error();
+            n = 0;
+        }
+        return zz_int(n);
+    }
 #ifdef ZZ_HAS_SQLITE3
-    sqlite3 *conn = (sqlite3 *)db.db;
+    sqlite3 *conn = (sqlite3 *)h->sqlite;
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(conn, sql, -1, &st, NULL) != SQLITE_OK) return zz_int(0);
     if (zz_db_bind_all(st, binds, nbinds, err) != SQLITE_OK) { sqlite3_finalize(st); return zz_int(0); }
@@ -3071,8 +3161,18 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
     (void)err;
     zz_value out = zz_array_new();
     if (db.tag != ZZ_DB || !db.db || !sql) return out;
+    zz_db_handle *h = (zz_db_handle *)db.db;
+    // Closed tombstones (and NULL handles above) degrade to empty
+    // results — never touch a freed backend through a stale value.
+    if (h->backend != ZZDB_SQLITE && h->backend != ZZDB_PG) {
+        return out;
+    }
+    if (h->backend == ZZDB_PG) {
+        zz_release(&out);
+        return zz_pg_query_raw(h->pg_id, sql, strlen(sql), binds, nbinds);
+    }
 #ifdef ZZ_HAS_SQLITE3
-    sqlite3 *conn = (sqlite3 *)db.db;
+    sqlite3 *conn = (sqlite3 *)h->sqlite;
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(conn, sql, -1, &st, NULL) != SQLITE_OK) return out;
     if (zz_db_bind_all(st, binds, nbinds, err) != SQLITE_OK) { sqlite3_finalize(st); return out; }
@@ -3127,11 +3227,24 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
 
 zz_value zz_db_close(zz_value db, int *err) {
     (void)err;
+    if (db.tag == ZZ_DB && db.db) {
+        zz_db_handle *h = (zz_db_handle *)db.db;
+        if (h->backend == ZZDB_PG) {
+            zz_pg_close_raw(h->pg_id);
+        }
 #ifdef ZZ_HAS_SQLITE3
-    if (db.tag == ZZ_DB && db.db) sqlite3_close((sqlite3 *)db.db);
+        else if (h->backend == ZZDB_SQLITE) {
+            sqlite3_close((sqlite3 *)h->sqlite);
+        }
 #else
-    (void)db;
+        (void)0;
 #endif
+        // Tombstone, don't free: the ZZ value still points here and a
+        // use-after-close must degrade to empty results (like the VM's
+        // error), never a dangling read. One 16-byte shell per close.
+        h->backend = ZZDB_CLOSED;
+        h->sqlite = NULL;
+    }
     return zz_unit();
 }
 
@@ -3170,7 +3283,9 @@ zz_value zz_db_query(zz_value db, zz_value sql, zz_value binds, int *err) {
 //    - Pre-allocated Connection array — no malloc per request
 //
 //  Connection state machine:
-//    CONN_CONNECTED → CONN_READING → CONN_PARSED → CONN_WRITING → CONN_KEEP_ALIVE/CONN_CLOSED
+//    CONN_READING → CONN_READING_BODY → dispatch → CONN_WRITING → CONN_CLOSED
+//    (always-Connection: close, mirroring the VM; the KEEP_ALIVE state
+//    is retained for future use but currently unreachable).
 
 #define MAX_CONNECTIONS 1024
 #define READ_BUF_SIZE   8192
@@ -3184,7 +3299,16 @@ typedef enum {
     CONN_WRITING    = 3,
     CONN_KEEP_ALIVE = 4,
     CONN_CLOSED     = 5,
+    CONN_READING_BODY = 6,
 } ConnState;
+
+// Head/body ceilings mirror the VM (Registry V2 G1: multi-MB publishes;
+// anything larger is rejected before buffering).
+#define HTTP_MAX_HEAD_BYTES (64 * 1024)
+#define HTTP_MAX_BODY_BYTES (50 * 1024 * 1024)
+// Responses larger than this after a big request return heap to the OS
+// (same 8 MB tripwire the VM uses after large publishes).
+#define HTTP_TRIM_AFTER_BYTES (8 * 1024 * 1024)
 
 typedef struct {
     int     fd;
@@ -3195,6 +3319,21 @@ typedef struct {
     int     write_pos;
     int     response_len;
     int     keep_alive;
+    // Step-2 dispatch state: grown head buffer when headers exceed
+    // read_buf (NULL = using read_buf), exact Content-Length body
+    // buffer, and the malloc'd response. All freed on free/reset.
+    char   *head_dyn;
+    size_t  head_len;
+    size_t  head_cap;
+    size_t  head_end;   // offset just past \r\n\r\n once found (0 = not yet)
+    char   *body_buf;
+    size_t  body_len;
+    size_t  body_need;
+    char   *wbuf;
+    size_t  wlen;
+    size_t  wpos;
+    int     head_too_large; // sticky: headers exceeded the 64 KB cap
+    int     body_truncated; // sticky: EOF before the full body arrived
 } Connection;
 
 static Connection g_connections[MAX_CONNECTIONS];
@@ -3219,7 +3358,35 @@ static Connection* alloc_connection(int fd) {
     c->write_pos = 0;
     c->response_len = 0;
     c->keep_alive = 0;
+    c->head_dyn = NULL;
+    c->head_len = 0;
+    c->head_cap = 0;
+    c->head_end = 0;
+    c->body_buf = NULL;
+    c->body_len = 0;
+    c->body_need = 0;
+    c->wbuf = NULL;
+    c->wlen = 0;
+    c->wpos = 0;
+    c->head_too_large = 0;
+    c->body_truncated = 0;
     return c;
+}
+
+// Release per-request dynamic buffers (idempotent: safe on reset paths).
+static void http_conn_free_dyn(Connection *c) {
+    if (c->head_dyn) { free(c->head_dyn); c->head_dyn = NULL; }
+    if (c->body_buf) { free(c->body_buf); c->body_buf = NULL; }
+    if (c->wbuf) { free(c->wbuf); c->wbuf = NULL; }
+    c->head_len = 0;
+    c->head_cap = 0;
+    c->head_end = 0;
+    c->body_len = 0;
+    c->body_need = 0;
+    c->wlen = 0;
+    c->wpos = 0;
+    c->head_too_large = 0;
+    c->body_truncated = 0;
 }
 
 static void free_connection(Connection *c) {
@@ -3228,6 +3395,7 @@ static void free_connection(Connection *c) {
         close(c->fd);
         c->fd = -1;
     }
+    http_conn_free_dyn(c);
     c->state = CONN_CLOSED;
     c->read_pos = 0;
     c->write_pos = 0;
@@ -3252,132 +3420,110 @@ static void set_nonblock(int fd) {
     if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-// ---- HTTP parsing ----
+// ---- HTTP head/body buffering (Step-2 true-AOT dispatch) ----
+//
+// The static read_buf serves heads up to 8 KB on the fast path; larger
+// header blocks grow a dynamic buffer up to HTTP_MAX_HEAD_BYTES (431
+// beyond, mirroring the VM). Bodies buffer exactly Content-Length bytes
+// up to HTTP_MAX_BODY_BYTES (413 beyond). Truncated bodies (EOF first)
+// reply 400. Request parsing + ZZ dispatch live after the http natives
+// below (they need the route table); the entry points are fwd-declared.
+static void http_on_head(Connection *c);
+static void http_run_handler(Connection *c);
+static void http_reply(Connection *c, long status, const char *body, size_t body_len);
 
-static int parse_request_headers(Connection *c) {
-    // Find \r\n\r\n — end of headers
-    if (c->read_pos < 4) return 0;
-    void *end = memmem(c->read_buf, c->read_pos, "\r\n\r\n", 4);
-    if (!end) return 0;
-
-    // HTTP/1.1 defaults to keep-alive, only disable if "close" is present
-    c->keep_alive = 1;
-
-    // Find "Connection:" header and check value
-    char *headers_end = (char *)end;
-    for (char *p = c->read_buf; p < headers_end - 12; p++) {
-        // Look for start of a header line (preceded by \r\n)
-        if (p > c->read_buf && p[-1] == '\n' && p[0] == '\r') {
-            p++; // skip the \r, now at start of header name
-            // Skip leading whitespace
-            while (*p == ' ' || *p == '\t') p++;
-            // Check for "Connection:" (case-insensitive)
-            if (strncasecmp(p, "connection:", 11) == 0) {
-                p += 11; // skip "connection:"
-                // Skip whitespace
-                while (*p == ' ' || *p == '\t') p++;
-                // Check if value starts with "close"
-                if (strncasecmp(p, "close", 5) == 0) {
-                    char *after = p + 5;
-                    // Must be at end or followed by \r\n or whitespace
-                    if (*after == '\r' || *after == '\n' || *after == ' ' || *after == '\0' || *after == ';') {
-                        c->keep_alive = 0;
-                    }
-                }
-            }
-        }
-    }
-    return 1;
+// Active head bytes: dynamic buffer when grown, else read_buf/read_pos.
+static const char *http_head_buf(Connection *c) {
+    return c->head_dyn ? c->head_dyn : c->read_buf;
 }
 
-static int parse_request_line(Connection *c) {
-    // Request line: "METHOD URI HTTP/1.1\r\n"
-    // Find first \r\n
-    if (c->read_pos < 2) return 0;
-    int crlf_pos = -1;
-    for (int i = 0; i <= c->read_pos - 2; i++) {
-        if (c->read_buf[i] == '\r' && c->read_buf[i+1] == '\n') {
-            crlf_pos = i;
-            break;
-        }
-    }
-    if (crlf_pos < 0) return 0;
+static size_t http_head_len(Connection *c) {
+    return c->head_dyn ? c->head_len : (size_t)c->read_pos;
+}
 
-    // Look for " HTTP/" before the crlf
-    for (int j = 0; j < crlf_pos - 6; j++) {
-        if (memcmp(c->read_buf + j, " HTTP/", 6) == 0) {
-            // Found " HTTP/" at position j
-            // The space before "HTTP/" is at position j
-            // Find the space that separates METHOD from URI (search backward from j)
-            int space_pos = -1;
-            for (int sp = j - 1; sp >= 0; sp--) {
-                if (c->read_buf[sp] == ' ') {
-                    space_pos = sp;
-                    break;
-                }
-            }
-            if (space_pos < 0) continue;
-            // Validate method (everything before space_pos)
-            int valid = 1;
-            for (int k = 0; k < space_pos; k++) {
-                if (c->read_buf[k] < 'A' || c->read_buf[k] > 'Z') {
-                    valid = 0;
-                    break;
-                }
-            }
-            if (valid) return 1;
+// Offset just past the first \r\n\r\n, or 0 when incomplete.
+static size_t http_head_end(const char *buf, size_t len) {
+    if (len < 4) return 0;
+    void *end = memmem(buf, len, "\r\n\r\n", 4);
+    if (!end) return 0;
+    return (size_t)((const char *)end - buf) + 4;
+}
+
+// Append fresh socket bytes to the head buffer, growing past read_buf up
+// to the cap. Returns 1 with head_end set when the head is complete,
+// 0 while incomplete, -1 when the cap is exceeded (caller replies 431).
+static int http_head_append(Connection *c, const char *data, size_t n) {
+    size_t cur = http_head_len(c);
+    if (cur + n > HTTP_MAX_HEAD_BYTES) {
+        c->head_too_large = 1;
+        return -1;
+    }
+    if (!c->head_dyn && cur + n <= READ_BUF_SIZE - 1) {
+        memcpy(c->read_buf + cur, data, n);
+        c->read_pos = (int)(cur + n);
+        c->read_buf[c->read_pos] = '\0';
+    } else {
+        size_t need = cur + n + 1;
+        size_t cap = c->head_cap ? c->head_cap : 16384;
+        while (cap < need) cap *= 2;
+        if (cap > HTTP_MAX_HEAD_BYTES + 1) cap = HTTP_MAX_HEAD_BYTES + 1;
+        char *nb = (char *)realloc(c->head_dyn, cap);
+        if (!nb) {
+            c->head_too_large = 1;
+            return -1;
         }
+        if (!c->head_dyn) memcpy(nb, c->read_buf, cur);
+        memcpy(nb + cur, data, n);
+        c->head_dyn = nb;
+        c->head_cap = cap;
+        c->head_len = cur + n;
+        c->head_dyn[c->head_len] = '\0';
+    }
+    size_t end = http_head_end(http_head_buf(c), http_head_len(c));
+    if (end > 0) {
+        c->head_end = end;
+        return 1;
     }
     return 0;
 }
 
-// ---- Response builder ----
-
-static void build_response(Connection *c, int status, const char *body, int body_len) {
-    const char *status_line;
-    if (status == 200) status_line = "200 OK";
-    else if (status == 404) status_line = "404 Not Found";
-    else if (status == 400) status_line = "400 Bad Request";
-    else status_line = "500 Internal Server Error";
-
-    char headers[512];
-    int hl = snprintf(headers, sizeof(headers),
-        "HTTP/1.1 %s\r\n"
-        "Content-Type: text/plain\r\n"
-        "Content-Length: %d\r\n"
-        "Connection: %s\r\n"
-        "\r\n",
-        status_line, body_len,
-        c->keep_alive ? "keep-alive" : "close");
-
-    memcpy(c->write_buf, headers, hl);
-    if (body && body_len > 0) {
-        memcpy(c->write_buf + hl, body, body_len);
+// Parse "METHOD TARGET HTTP/x" from the head. Returns 1 with borrowed
+// method/target spans (method must be A-Z alpha, like the old static
+// server's validation; the VM is looser but every real client sends a
+// token here and garbage gets a clean 400).
+static int http_parse_request_line(const char *head, size_t head_end,
+                                   const char **method, size_t *method_len,
+                                   const char **target, size_t *target_len) {
+    size_t eol = 0;
+    while (eol + 1 < head_end && !(head[eol] == '\r' && head[eol + 1] == '\n')) eol++;
+    if (eol + 1 >= head_end) return 0;
+    // " HTTP/" marker before EOL, method/target split on spaces.
+    size_t hs = 0;
+    int found = 0;
+    for (size_t j = 0; j + 6 <= eol; j++) {
+        if (memcmp(head + j, " HTTP/", 6) == 0) { hs = j; found = 1; break; }
     }
-    c->write_pos = hl + body_len;
-    c->response_len = c->write_pos;
-    c->write_pos = 0; // reset write position for actual send
+    // " HTTP/" marker before EOL: the space AT hs ends the target, an
+    // earlier space ends the method.
+    if (!found || hs == 0) return 0;
+    size_t sp = hs;
+    while (sp > 0 && head[sp - 1] != ' ') sp--;
+    // Method is [0, sp-1), target is [sp, hs); both non-empty.
+    if (sp < 2 || sp >= hs) return 0;
+    for (size_t k = 0; k < sp - 1; k++) {
+        if (head[k] < 'A' || head[k] > 'Z') return 0;
+    }
+    *method = head;
+    *method_len = sp - 1;
+    *target = head + sp;
+    *target_len = hs - sp;
+    return 1;
 }
 
 // ---- Connection state machine ----
 
 static void connection_to_reading(Connection *c) {
     c->state = CONN_READING;
-}
-
-static void connection_to_parsed(Connection *c) {
-    c->state = CONN_PARSED;
-    build_response(c, 200, "OK", 2);
-}
-
-static void connection_to_writing(Connection *c) {
-    c->state = CONN_WRITING;
-}
-
-static void connection_to_keep_alive(Connection *c) {
-    c->state = CONN_KEEP_ALIVE;
-    c->read_pos = 0;
-    c->write_pos = 0;
 }
 
 static void connection_to_closed(Connection *c) {
@@ -3388,17 +3534,23 @@ static void connection_to_closed(Connection *c) {
 
 static void process_connection(Connection *c) {
     switch (c->state) {
-        case CONN_READING: {
-            if (parse_request_headers(c)) {
-                if (parse_request_line(c)) {
-                    connection_to_parsed(c);
-                } else {
-                    build_response(c, 400, "Bad Request", 11);
-                    connection_to_writing(c);
-                }
+        case CONN_READING:
+            // Head bytes accumulate in read_from_socket; when the
+            // terminator lands, http_on_head parses + transitions
+            // (direct dispatch, body wait, or error reply).
+            if (c->head_end > 0) {
+                http_on_head(c);
+            } else if (c->head_too_large) {
+                http_reply(c, 431, "headers too large", 17);
             }
             break;
-        }
+        case CONN_READING_BODY:
+            if (c->body_truncated) {
+                http_reply(c, 400, "truncated body", 14);
+            } else if (c->body_len >= c->body_need) {
+                http_run_handler(c);
+            }
+            break;
         case CONN_WRITING:
         case CONN_KEEP_ALIVE:
             // Handled in main loop write phase
@@ -3408,29 +3560,64 @@ static void process_connection(Connection *c) {
     }
 }
 
-// ---- Read from socket ----
+// ---- Read from socket (state-aware) ----
 
+// Returns 1 while the connection is alive (more reads may follow),
+// 0 when it died and the caller should drop it.
 static int read_from_socket(Connection *c) {
-    if (c->read_pos >= READ_BUF_SIZE - 1) return 0; // buffer full
-
-    ssize_t n = read(c->fd, c->read_buf + c->read_pos, READ_BUF_SIZE - c->read_pos - 1);
-    if (n > 0) {
-        c->read_pos += (int)n;
-        c->read_buf[c->read_pos] = '\0';
-        return 1;
-    } else if (n == 0) {
-        // Client closed
-        return 0;
-    } else {
-        // EAGAIN / EWOULDBLOCK — no more data
+    if (c->state == CONN_READING_BODY) {
+        // Append straight into the exact-size body buffer.
+        size_t room = c->body_need - c->body_len;
+        if (room == 0) return 1;
+        ssize_t n = read(c->fd, c->body_buf + c->body_len, room);
+        if (n > 0) {
+            c->body_len += (size_t)n;
+            return 1;
+        }
+        if (n == 0) {
+            // EOF before the full body: sticky 400 (but only if the
+            // body is actually incomplete — a pipelined close after a
+            // complete body still dispatches).
+            if (c->body_len < c->body_need) c->body_truncated = 1;
+            return 1;
+        }
         if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
         return 0;
     }
+    // Head phase: fill the static buffer, growing past it when needed.
+    char tmp[8192];
+    ssize_t n = read(c->fd, tmp, sizeof tmp);
+    if (n > 0) {
+        int rc = http_head_append(c, tmp, (size_t)n);
+        if (rc < 0) return 1; // cap exceeded; process_connection replies 431
+        return 1;
+    }
+    if (n == 0) return 0; // client closed
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
+    return 0;
 }
 
 // ---- Write to socket ----
 
+// True while response bytes remain unsent (dynamic wbuf when the
+// dispatcher built one, else the legacy static buffer).
+static int http_write_pending(Connection *c) {
+    if (c->wbuf) return c->wpos < c->wlen;
+    return c->write_pos < c->response_len;
+}
+
 static int write_to_socket(Connection *c) {
+    if (c->wbuf) {
+        if (c->wpos >= c->wlen) return 1;
+        ssize_t n = write(c->fd, c->wbuf + c->wpos, c->wlen - c->wpos);
+        if (n > 0) {
+            c->wpos += (size_t)n;
+            return 1;
+        }
+        if (n == 0) return 0;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
+        return 0;
+    }
     int remaining = c->response_len - c->write_pos;
     if (remaining <= 0) return 1;
     ssize_t n = write(c->fd, c->write_buf + c->write_pos, remaining);
@@ -3541,7 +3728,8 @@ static void worker_loop(int listen_fd, int worker_id) {
                             connection_to_reading(c);
                         }
                         process_connection(c);
-                        if (c->state != CONN_READING && c->state != CONN_KEEP_ALIVE) {
+                        if (c->state != CONN_READING && c->state != CONN_KEEP_ALIVE
+                            && c->state != CONN_READING_BODY) {
                             break;
                         }
                     }
@@ -3551,16 +3739,9 @@ static void worker_loop(int listen_fd, int worker_id) {
                     }
                 }
 
-                if (c->state == CONN_PARSED) {
-
-                    connection_to_writing(c);
-                    struct epoll_event cev;
-                    cev.events = EPOLLOUT | EPOLLET;
-                    cev.data.fd = fd;
-                    epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &cev);
-                } else if (c->state == CONN_WRITING) {
+                if (c->state == CONN_WRITING) {
                     // Edge-triggered: write all data until EAGAIN
-                    while (c->write_pos < c->response_len) {
+                    while (http_write_pending(c)) {
                         int written = write_to_socket(c);
                         if (!written) {
                             connection_to_closed(c);
@@ -3569,7 +3750,7 @@ static void worker_loop(int listen_fd, int worker_id) {
                         }
                     }
                     // Check if write complete
-                    if (c->fd >= 0 && c->write_pos >= c->response_len) {
+                    if (c->fd >= 0 && !http_write_pending(c)) {
 
                         if (!c->keep_alive) {
                             connection_to_closed(c);
@@ -3580,6 +3761,7 @@ static void worker_loop(int listen_fd, int worker_id) {
                             c->read_pos = 0;
                             c->write_pos = 0;
                             c->response_len = 0;
+                            http_conn_free_dyn(c);
                             struct epoll_event cev;
                             cev.events = EPOLLIN | EPOLLET;
                             cev.data.fd = fd;
@@ -3637,35 +3819,1019 @@ static int spawn_workers(int listen_fd, int port) {
 }
 #endif
 
-// ---- HTTP AOT stub implementations ----
+// ---- HTTP routes + request/response natives (AOT) ----
+//
+// Route handlers ARE first-class here: AOT lowers closures to C function
+// pointers (`zz_closure_make_ex`), so `http.test` (in-process dispatch)
+// matches routes and calls them exactly like the VM does. The epoll
+// workers (`zz_http_listen`) dispatch socket requests through the same
+// table (true-AOT C handlers — no VM involved).
 
-// Max number of route patterns we track (for debug/future use)
-#define MAX_ROUTES 32
-static char *g_http_routes[MAX_ROUTES];
+// Route table: method + pattern (+ `:param` segments / "*" wildcard) with
+// the ZZ closure value (retained). Single global table: one server per
+// process, same as the VM's single-interp discipline for `zz run`.
+#define HTTP_MAX_ROUTES 64
+#define HTTP_MAX_MIDDLEWARE 16
+typedef struct {
+    char *method;
+    char *pattern;
+    zz_value handler;
+} http_route_entry;
+static http_route_entry g_http_route_table[HTTP_MAX_ROUTES];
 static int g_http_route_count = 0;
+static zz_value g_http_middlewares[HTTP_MAX_MIDDLEWARE];
+static int g_http_middleware_count = 0;
+// Access-log flag for the socket serve path (http.log).
+static int g_http_log_enabled = 0;
 
-// zz_http_server(unused, err) — creates an HTTP server handle (AOT stub)
+// zz_http_server(unused, err) — creates an HTTP server handle (int 0;
+// routes live in the global table above).
 zz_value zz_http_server(zz_value unused, int *err) {
     (void)unused;
     *err = 0;
     return zz_int(0);
 }
 
-// zz_http_route_get(server, path, handler, err) — tracks route pattern; handler ignored in AOT
-zz_value zz_http_route_get(zz_value server, zz_value path, zz_value handler, int *err) {
+// Shared route registration for GET/POST/PUT/DELETE (the codegen maps all
+// four spellings here; the method is recorded per entry).
+static zz_value http_route_add(const char *method, zz_value path, zz_value handler, int *err) {
     *err = 0;
-    (void)server; (void)handler;
-    if (g_http_route_count < MAX_ROUTES - 1 && path.tag == ZZ_STR) {
-        g_http_routes[g_http_route_count++] = strndup(zz_str_cptr(path.s), path.s->len);
-    }
+    if (path.tag != ZZ_STR || !path.s) return zz_int(0);
+    if (g_http_route_count >= HTTP_MAX_ROUTES - 1) return zz_int(0);
+    http_route_entry *e = &g_http_route_table[g_http_route_count++];
+    e->method = strndup(method, strlen(method));
+    e->pattern = strndup(zz_str_cptr(path.s), path.s->len);
+    e->handler = zz_clone(handler);
     return zz_int(0);
 }
 
-// zz_http_log(server, enabled, err) — AOT stub: no-op
+// zz_http_route_get(server, path, handler, err) — records method+pattern+closure.
+zz_value zz_http_route_get(zz_value server, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    return http_route_add("GET", path, handler, err);
+}
+
+// zz_http_route_post/put/delete — same table, own method.
+zz_value zz_http_route_post(zz_value server, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    return http_route_add("POST", path, handler, err);
+}
+
+zz_value zz_http_route_put(zz_value server, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    return http_route_add("PUT", path, handler, err);
+}
+
+zz_value zz_http_route_delete(zz_value server, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    return http_route_add("DELETE", path, handler, err);
+}
+
+// ---- shared request/response helpers ----
+
+// Forward declarations (http_response_new precedes the parse helpers).
+static zz_value http_json_field(zz_str *body);
+
+// Response object constructor shared by respond/test paths.
+// `body` is shared (retained under both "body" and "text", same as the
+// client builder); `headers` is retained.
+static zz_value http_response_new(long status, zz_str *body, zz_value headers) {
+    zz_value names[5];
+    names[0] = zz_str_static("status");
+    names[1] = zz_str_static("body");
+    names[2] = zz_str_static("headers");
+    names[3] = zz_str_static("text");
+    names[4] = zz_str_static("json");
+    zz_value resp = zz_object_new("http.response", names, 5);
+    zz_object_set_field(&resp, "status", (zz_value){ZZ_INT, {.i = (long long)status}});
+    zz_object_set_field(&resp, "body", (zz_value){ZZ_STR, {.s = body}});
+    zz_object_set_field(&resp, "text", (zz_value){ZZ_STR, {.s = body}});
+    zz_object_set_field(&resp, "headers", zz_clone(headers));
+    zz_object_set_field(&resp, "json", http_json_field(body));
+    return resp;
+}
+
+// "field" sub-value of a dict (unit when absent/non-dict). Returns an
+// OWNED clone (zz_object_get_field retains) — callers must release.
+static zz_value http_dict_field(zz_value dict, const char *field) {
+    if (dict.tag != ZZ_DICT || !dict.dict) return zz_unit();
+    return zz_object_get_field(&dict, field);
+}
+
+// Find a str entry by exact key; returns 1 + sets *out (borrowed).
+static int http_dict_find_str(zz_value dict, const char *key, zz_value *out) {
+    if (dict.tag != ZZ_DICT || !dict.dict) return 0;
+    size_t n = dict.dict->len;
+    for (size_t i = 0; i < n; i++) {
+        zz_str *k = dict.dict->entries[i].key;
+        zz_value v = dict.dict->entries[i].val;
+        if (k && v.tag == ZZ_STR && v.s
+            && strlen(key) == k->len && memcmp(key, zz_str_cptr(k), k->len) == 0) {
+            *out = v;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Case-insensitive key lookup over a dict; any value type (mirrors the VM
+// header fallback, which returns the value as-is). Returns 1 + *out.
+static int http_dict_find_ci(zz_value dict, const char *key, zz_value *out) {
+    if (dict.tag != ZZ_DICT || !dict.dict) return 0;
+    size_t n = dict.dict->len;
+    for (size_t i = 0; i < n; i++) {
+        zz_str *k = dict.dict->entries[i].key;
+        if (k && strlen(key) == k->len
+            && strcasecmp(key, zz_str_cptr(k)) == 0) {
+            *out = dict.dict->entries[i].val;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Split "a=1&b=&c" into a str->str dict. No percent-decoding and no pair
+// filtering — mirrors the VM's parse_query_string exactly (every &-piece
+// yields a pair; missing '=' means empty value).
+static zz_value http_parse_query(const char *qs, size_t len) {
+    zz_value d = zz_dict_new();
+    if (len == 0) return d;
+    size_t start = 0;
+    for (size_t i = 0; i <= len; i++) {
+        if (i == len || qs[i] == '&') {
+            size_t piece_len = i - start;
+            const char *eq = memchr(qs + start, '=', piece_len);
+            size_t klen, vlen;
+            const char *vstart;
+            if (eq) {
+                klen = (size_t)(eq - (qs + start));
+                vstart = eq + 1;
+                vlen = piece_len - klen - 1;
+            } else {
+                klen = piece_len;
+                vstart = qs + start + piece_len;
+                vlen = 0;
+            }
+            zz_str *k = str_alloc(klen);
+            memcpy(zz_str_ptr(k), qs + start, klen);
+            zz_str_ptr(k)[klen] = '\0';
+            k->len = klen;
+            zz_str *v = str_alloc(vlen);
+            memcpy(zz_str_ptr(v), vstart, vlen);
+            zz_str_ptr(v)[vlen] = '\0';
+            v->len = vlen;
+            zz_dict_set(d.dict, (zz_value){ZZ_STR, {.s = k}}, (zz_value){ZZ_STR, {.s = v}});
+            start = i + 1;
+        }
+    }
+    return d;
+}
+
+// Match "/users/:id" against "/users/42" (length-aware, no copying).
+// Returns 1 + fills params dict, or 0. Mirrors the VM's match_route_pattern
+// (trim '/', equal segment counts, ':x' captures, '*' matches one segment).
+static int http_match_pattern(const char *pat, size_t patlen, const char *path, size_t pathlen,
+                              zz_value params) {
+    while (patlen > 0 && pat[0] == '/') { pat++; patlen--; }
+    while (patlen > 0 && pat[patlen - 1] == '/') patlen--;
+    while (pathlen > 0 && path[0] == '/') { path++; pathlen--; }
+    while (pathlen > 0 && path[pathlen - 1] == '/') pathlen--;
+    // Segment counts (Rust "".split('/') yields one empty segment).
+    size_t pn = 1, an = 1;
+    for (size_t i = 0; i < patlen; i++) if (pat[i] == '/') pn++;
+    for (size_t i = 0; i < pathlen; i++) if (path[i] == '/') an++;
+    if (pn != an) return 0;
+    size_t pi = 0, ai = 0;
+    for (size_t s = 0; s < pn; s++) {
+        size_t pj = pi, aj = ai;
+        while (pj < patlen && pat[pj] != '/') pj++;
+        while (aj < pathlen && path[aj] != '/') aj++;
+        size_t plen = pj - pi, alen = aj - ai;
+        if (plen > 0 && pat[pi] == ':') {
+            zz_str *k = str_alloc(plen - 1);
+            memcpy(zz_str_ptr(k), pat + pi + 1, plen - 1);
+            zz_str_ptr(k)[plen - 1] = '\0';
+            k->len = plen - 1;
+            zz_str *v = str_alloc(alen);
+            memcpy(zz_str_ptr(v), path + ai, alen);
+            zz_str_ptr(v)[alen] = '\0';
+            v->len = alen;
+            zz_dict_set(params.dict, (zz_value){ZZ_STR, {.s = k}}, (zz_value){ZZ_STR, {.s = v}});
+        } else if (!((plen == alen && memcmp(pat + pi, path + ai, plen) == 0)
+                     || (plen == 1 && pat[pi] == '*'))) {
+            return 0;
+        }
+        pi = pj + 1;
+        ai = aj + 1;
+    }
+    return 1;
+}
+
+// Build an .err(str) variant with a formatted message.
+static zz_value http_errf(const char *fmt, const char *arg) {
+    char buf[512];
+    snprintf(buf, sizeof buf, fmt, arg);
+    size_t n = strlen(buf);
+    return zz_variant_err(zz_str_new(buf, n));
+}
+
+// Move the inner value out of a Result/Option variant: frees the variant
+// box only; ownership of the inner's refs transfers to the caller.
+// (zz_clone + zz_release is WRONG here — the clone shares the variant
+// box and the release frees it, leaving a dangling payload pointer.)
+static zz_value http_variant_take(zz_value r) {
+    zz_value out = *r.payload;
+    free(r.payload);
+    return out;
+}
+
+// Parse a body string the way the VM's response/body json accessors do:
+// valid JSON → the bare json value; anything else → .err("JSON parse
+// error"). (zz_json_parse itself returns a wrapped Result; the VM
+// unwraps it before handing the value to the program.)
+static zz_value http_parse_body_json(zz_value body) {
+    zz_str *s = (body.tag == ZZ_STR && body.s) ? body.s : NULL;
+    // Mirror the VM: an empty/missing body fails parsing like any
+    // invalid JSON (extract_dict_field_str yields "" for missing).
+    zz_value bs = s ? (zz_value){ZZ_STR, {.s = s}} : zz_str_static("");
+    int jerr = 0;
+    zz_value r = zz_json_parse(bs, &jerr);
+    if (r.tag == ZZ_RESULT_OK && r.payload) {
+        return http_variant_take(r);
+    }
+    zz_release(&r);
+    return zz_variant_err(zz_str_static("JSON parse error"));
+}
+
+// Stored "json" field for a fresh response object: bare json on success,
+// unit when the body isn't valid JSON (the .json() METHOD re-parses and
+// yields .err there — see zz_http_response_json).
+static zz_value http_json_field(zz_str *body) {
+    if (!body || body->len == 0) return zz_unit();
+    int jerr = 0;
+    zz_value r = zz_json_parse((zz_value){ZZ_STR, {.s = body}}, &jerr);
+    if (r.tag == ZZ_RESULT_OK && r.payload) {
+        return http_variant_take(r);
+    }
+    zz_release(&r);
+    return zz_unit();
+}
+
+// zz_http_respond(status, body, headers) → HttpResponse object.
+// Mirrors the VM: int status 100-599, str body, str->str headers dict
+// (non-str pairs dropped). Arg violations raise (*err=1).
+zz_value zz_http_respond(zz_value status, zz_value body, zz_value headers, int *err) {
+    if (status.tag != ZZ_INT || status.i < 100 || status.i > 599) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.respond: status out of range (100-599)"));
+    }
+    if (body.tag != ZZ_STR || !body.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.respond: body must be a string"));
+    }
+    if (headers.tag != ZZ_DICT || !headers.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.respond: headers must be a dict"));
+    }
+    *err = 0;
+    zz_value hdrs = zz_dict_new();
+    size_t n = headers.dict->len;
+    for (size_t i = 0; i < n; i++) {
+        zz_str *k = headers.dict->entries[i].key;
+        zz_value v = headers.dict->entries[i].val;
+        if (k && v.tag == ZZ_STR && v.s) {
+            zz_dict_set(hdrs.dict, (zz_value){ZZ_STR, {.s = k}}, zz_clone(v));
+        }
+    }
+    zz_value resp = http_response_new((long)status.i, body.s, hdrs);
+    zz_release(&hdrs);
+    return resp;
+}
+
+// zz_http_param(req, name) → .ok(str) | .err("param `x` not found").
+zz_value zz_http_param(zz_value req, zz_value name, int *err) {
+    if (req.tag != ZZ_DICT || !req.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.param: expected a dict"));
+    }
+    if (name.tag != ZZ_STR || !name.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.param: expected a str name"));
+    }
+    *err = 0;
+    zz_value params = http_dict_field(req, "params");
+    zz_value out;
+    int found = http_dict_find_str(params, zz_str_cptr(name.s), &out);
+    zz_value ret = found ? zz_variant_ok(zz_clone(out))
+                         : http_errf("param `%s` not found", zz_str_cptr(name.s));
+    zz_release(&params);
+    return ret;
+}
+
+// zz_http_query(req) → query dict (empty when absent — mirrors the VM).
+zz_value zz_http_query(zz_value req, int *err) {
+    if (req.tag != ZZ_DICT || !req.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.query: expected a dict"));
+    }
+    *err = 0;
+    zz_value q = http_dict_field(req, "query");
+    zz_value ret = (q.tag == ZZ_DICT && q.dict) ? zz_clone(q) : zz_dict_new();
+    zz_release(&q);
+    return ret;
+}
+
+// zz_http_header(req, name) → .ok(value) | .err("header `x` not found").
+// Nested "headers" dict first (case-insensitive), then a top-level
+// case-insensitive scan — mirrors the VM fallback exactly.
+zz_value zz_http_header(zz_value req, zz_value name, int *err) {
+    if (req.tag != ZZ_DICT || !req.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.header: expected a dict"));
+    }
+    if (name.tag != ZZ_STR || !name.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.header: expected a str name"));
+    }
+    *err = 0;
+    const char *nname = zz_str_cptr(name.s);
+    zz_value hdrs = http_dict_field(req, "headers");
+    zz_value out;
+    zz_value ret;
+    if (http_dict_find_ci(hdrs, nname, &out)) {
+        ret = zz_variant_ok(zz_clone(out));
+    } else if (http_dict_find_ci(req, nname, &out)) {
+        ret = zz_variant_ok(zz_clone(out));
+    } else {
+        ret = http_errf("header `%s` not found", nname);
+    }
+    zz_release(&hdrs);
+    return ret;
+}
+
+// zz_http_body_json(req) → parsed JSON, or .err on parse failure.
+// Missing/non-str body behaves as "" (mirrors extract_dict_field_str).
+zz_value zz_http_body_json(zz_value req, int *err) {
+    if (req.tag != ZZ_DICT || !req.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.body_json: expected a dict"));
+    }
+    *err = 0;
+    zz_value b = http_dict_field(req, "body");
+    zz_value ret = http_parse_body_json(b);
+    zz_release(&b);
+    return ret;
+}
+
+// zz_http_body_form(req) → form-decoded dict of the body string.
+zz_value zz_http_body_form(zz_value req, int *err) {
+    if (req.tag != ZZ_DICT || !req.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.body_form: expected a dict"));
+    }
+    *err = 0;
+    zz_value b = http_dict_field(req, "body");
+    zz_value ret = zz_dict_new();
+    if (b.tag == ZZ_STR && b.s) {
+        zz_release(&ret);
+        ret = http_parse_query(zz_str_cptr(b.s), b.s->len);
+    }
+    zz_release(&b);
+    return ret;
+}
+
+// ---- in-process dispatch (http.test / http.handle) ----
+
+// Find the first route for (method, path): exact match, then :param
+// patterns, then per-method "*". Mirrors the VM's find order. Fills
+// params (possibly empty). Returns handler or unit when none matched.
+// Pattern attempts fill a scratch dict merged only on success — a failed
+// attempt must not leak partial captures into a later route's params
+// (the VM discards its per-route vec the same way).
+static zz_value http_match_route(const char *method, const char *path, size_t pathlen,
+                                 zz_value params) {
+    for (int i = 0; i < g_http_route_count; i++) {
+        http_route_entry *e = &g_http_route_table[i];
+        if (strcmp(e->method, method) != 0) continue;
+        size_t plen = strlen(e->pattern);
+        if (plen == pathlen && memcmp(e->pattern, path, pathlen) == 0) return e->handler;
+        zz_value scratch = zz_dict_new();
+        int hit = http_match_pattern(e->pattern, plen, path, pathlen, scratch);
+        if (hit) {
+            for (size_t k = 0; k < scratch.dict->len; k++) {
+                zz_str *ek = scratch.dict->entries[k].key;
+                zz_value ev = scratch.dict->entries[k].val;
+                zz_dict_set(params.dict, (zz_value){ZZ_STR, {.s = ek}}, zz_clone(ev));
+            }
+            zz_release(&scratch);
+            return e->handler;
+        }
+        zz_release(&scratch);
+    }
+    for (int i = 0; i < g_http_route_count; i++) {
+        http_route_entry *e = &g_http_route_table[i];
+        if (strcmp(e->method, method) == 0 && strcmp(e->pattern, "*") == 0) return e->handler;
+    }
+    return zz_unit();
+}
+
+// Build the request dict the VM dispatcher builds: method/path/body
+// strings, headers, parsed query, matched params. `headers` is moved
+// (adopted into the dict).
+static zz_value http_test_request(const char *method, const char *path, size_t pathlen,
+                                  zz_value body, zz_value headers, zz_value query, zz_value params) {
+    zz_value req = zz_dict_new();
+    zz_dict_set(req.dict, zz_str_static("method"), zz_str_new(method, strlen(method)));
+    zz_dict_set(req.dict, zz_str_static("path"), zz_str_new(path, pathlen));
+    zz_dict_set(req.dict, zz_str_static("body"), zz_clone(body));
+    zz_dict_set(req.dict, zz_str_static("headers"), headers);
+    zz_dict_set(req.dict, zz_str_static("query"), query);
+    zz_dict_set(req.dict, zz_str_static("params"), params);
+    return req;
+}
+
+// 500 response object with a text message (dispatch-level failures, which
+// the VM wraps into a 500 Response rather than raising).
+static zz_value http_500(const char *msg, size_t len) {
+    zz_str *b = str_alloc(len);
+    memcpy(zz_str_ptr(b), msg, len);
+    zz_str_ptr(b)[len] = '\0';
+    b->len = len;
+    zz_value hdrs = zz_dict_new();
+    zz_value r = http_response_new(500, b, hdrs);
+    zz_release(&hdrs);
+    zz_value owned = {ZZ_STR, {.s = b}};
+    zz_release(&owned);
+    return r;
+}
+
+// Wrap a handler return the way the VM dispatcher does: str → 200 text,
+// response object → passthrough, other scalars → 200 Display (unit
+// renders empty, exactly like the VM), containers → 500 (the VM
+// serializes dict/array to JSON here; no value→JSON helper exists in
+// the C runtime yet — Step-2 remainder, now socket-visible too).
+// Fresh {"Content-Type": "text/plain; charset=utf-8"} dict (the VM's
+// default for str/scalar handler results).
+static zz_value http_text_plain_hdrs(void) {
+    static const char ct_text[] = "text/plain; charset=utf-8";
+    zz_value hdrs = zz_dict_new();
+    zz_str *ct = str_alloc(sizeof(ct_text) - 1);
+    memcpy(zz_str_ptr(ct), ct_text, sizeof(ct_text) - 1);
+    zz_str_ptr(ct)[sizeof(ct_text) - 1] = '\0';
+    ct->len = sizeof(ct_text) - 1;
+    zz_dict_set(hdrs.dict, zz_str_static("Content-Type"), (zz_value){ZZ_STR, {.s = ct}});
+    return hdrs;
+}
+
+static zz_value http_wrap_result(zz_value r) {
+    if (r.tag == ZZ_STR && r.s) {
+        zz_value hdrs = http_text_plain_hdrs();
+        zz_str *b = str_alloc(r.s->len);
+        memcpy(zz_str_ptr(b), zz_str_cptr(r.s), r.s->len);
+        zz_str_ptr(b)[r.s->len] = '\0';
+        b->len = r.s->len;
+        zz_value resp = http_response_new(200, b, hdrs);
+        zz_release(&hdrs);
+        // http_response_new retains the body under both fields; drop the
+        // fresh allocation's own ref so the object owns exactly two.
+        zz_value owned = {ZZ_STR, {.s = b}};
+        zz_release(&owned);
+        return resp;
+    }
+    if (r.tag == ZZ_OBJECT) {
+        zz_value st = zz_object_get_field(&r, "status");
+        int is_resp = (st.tag == ZZ_INT);
+        zz_release(&st);
+        if (is_resp) return zz_clone(r);
+    }
+    if (r.tag != ZZ_ARRAY && r.tag != ZZ_DICT && r.tag != ZZ_JSON) {
+        // Other scalars (int/float/bool/unit/...) → 200 Display, exactly
+        // like the VM's `format!("{other}")` fallback.
+        char *disp = zz_value_to_string(&r);
+        size_t dl = strlen(disp);
+        zz_str *b = str_alloc(dl);
+        memcpy(zz_str_ptr(b), disp, dl);
+        zz_str_ptr(b)[dl] = '\0';
+        b->len = dl;
+        free(disp);
+        zz_value hdrs = http_text_plain_hdrs();
+        zz_value resp = http_response_new(200, b, hdrs);
+        zz_release(&hdrs);
+        zz_value owned = {ZZ_STR, {.s = b}};
+        zz_release(&owned);
+        return resp;
+    }
+    const char *msg = "http.test: unsupported handler return type (Step-2: dict/array JSON)";
+    return http_500(msg, strlen(msg));
+}
+
+// Shared dispatch core: match, middleware chain, handler call. Returns an
+// http.response object in all cases (VM http.test semantics). Sets
+// *failed when the 500 came from the dispatcher itself (no route,
+// middleware violation) as opposed to the handler — http.handle maps the
+// former to .err and the latter to .ok, exactly like the VM.
+static zz_value http_dispatch(const char *method, const char *path, size_t pathlen,
+                              zz_value body, zz_value headers, int *failed) {
+    *failed = 0;
+    // Split off '?query' (first '?' wins, like the VM's split_once).
+    const char *qm = memchr(path, '?', pathlen);
+    size_t plen = qm ? (size_t)(qm - path) : pathlen;
+    zz_value query = (qm && (size_t)(qm - path) < pathlen)
+        ? http_parse_query(qm + 1, pathlen - (plen + 1))
+        : zz_dict_new();
+    zz_value params = zz_dict_new();
+    zz_value handler = http_match_route(method, path, plen, params);
+    if (handler.tag == ZZ_UNIT) {
+        char msg[256];
+        snprintf(msg, sizeof msg, "std.http: no route for %s %.*s", method, (int)plen, path);
+        zz_release(&query);
+        zz_release(&params);
+        *failed = 1;
+        return http_500(msg, strlen(msg));
+    }
+    zz_value req = http_test_request(method, path, plen, body, headers, query, params);
+    // Middleware chain in registration order.
+    for (int i = 0; i < g_http_middleware_count; i++) {
+        zz_value r = zz_call_closure(g_http_middlewares[i], &req, 1);
+        if (r.tag == ZZ_RESULT_OK && r.payload) {
+            zz_value inner = *r.payload;
+            if (inner.tag == ZZ_DICT && inner.dict) {
+                zz_release(&req);
+                req = zz_clone(inner);
+                zz_release(&r);
+                continue;
+            }
+            char *disp = zz_value_to_string(&inner);
+            char msg[256];
+            snprintf(msg, sizeof msg,
+                     "std.http: middleware returned `%.200s`, expected .ok or .err", disp);
+            free(disp);
+            zz_release(&req);
+            zz_release(&r);
+            *failed = 1;
+            return http_500(msg, strlen(msg));
+        }
+        if (r.tag == ZZ_RESULT_ERR && r.payload) {
+            zz_value inner = *r.payload;
+            if (inner.tag == ZZ_OBJECT) {
+                zz_value st = zz_object_get_field(&inner, "status");
+                int is_resp = (st.tag == ZZ_INT);
+                zz_release(&st);
+                if (is_resp) {
+                    zz_release(&req);
+                    zz_value out = zz_clone(inner);
+                    zz_release(&r);
+                    return out;
+                }
+            }
+            char *disp = zz_value_to_string(&inner);
+            // 401 with the displayed value as the body.
+            size_t dl = strlen(disp);
+            zz_str *bb = str_alloc(dl);
+            memcpy(zz_str_ptr(bb), disp, dl);
+            zz_str_ptr(bb)[dl] = '\0';
+            bb->len = dl;
+            free(disp);
+            zz_value hdrs = zz_dict_new();
+            zz_value resp = http_response_new(401, bb, hdrs);
+            zz_release(&hdrs);
+            zz_release(&req);
+            zz_release(&r);
+            return resp;
+        }
+        // Non-Result middleware return.
+        {
+            char *disp = zz_value_to_string(&r);
+            char msg[256];
+            snprintf(msg, sizeof msg,
+                     "std.http: middleware returned `%.200s`, expected .ok or .err", disp);
+            free(disp);
+            zz_release(&req);
+            zz_release(&r);
+            *failed = 1;
+            return http_500(msg, strlen(msg));
+        }
+    }
+    zz_value r = zz_call_closure(handler, &req, 1);
+    zz_release(&req);
+    zz_value out = http_wrap_result(r);
+    zz_release(&r);
+    return out;
+}
+
+// ---- socket serve path (Step-2 true-AOT dispatch) ----
+//
+// The epoll workers parse real requests and run them through the same
+// route table + middleware + ZZ closures as http.test (http_dispatch).
+// Semantics mirror the VM's handle_connection_thread: 64 KB head cap
+// (431), exact Content-Length bodies up to 50 MB (413), 100-continue,
+// dispatch errors as 500, always-Connection: close, colored log lines,
+// malloc_trim after >8 MB requests.
+
+// Reason phrases — identical table to the VM's http_reason.
+static const char *http_reason_phrase(long status) {
+    switch (status) {
+        case 100: return "Continue";
+        case 200: return "OK";
+        case 201: return "Created";
+        case 204: return "No Content";
+        case 301: return "Moved Permanently";
+        case 304: return "Not Modified";
+        case 400: return "Bad Request";
+        case 401: return "Unauthorized";
+        case 403: return "Forbidden";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 413: return "Payload Too Large";
+        case 431: return "Headers Too Large";
+        case 500: return "Internal Server Error";
+        default: return "Error";
+    }
+}
+
+// Trim ASCII spaces/tabs (plus the \r left by \n-splitting) in place.
+static void http_trim_span(const char **s, size_t *n) {
+    while (*n > 0 && (**s == ' ' || **s == '\t' || **s == '\r')) { (*s)++; (*n)--; }
+    while (*n > 0 && ((*s)[*n - 1] == ' ' || (*s)[*n - 1] == '\t' || (*s)[*n - 1] == '\r')) (*n)--;
+}
+
+// Scan the head for Content-Length (last wins; garbage → 0, like the
+// VM's parse().unwrap_or(0)) and Expect: 100-continue. The request
+// line itself is skipped so an absolute-form target (which contains
+// ':') can never pollute the scan.
+static void http_scan_head(const char *head, size_t head_end,
+                           size_t *content_length, int *expect_continue) {
+    *content_length = 0;
+    *expect_continue = 0;
+    size_t pos = 0;
+    while (pos + 1 < head_end && !(head[pos] == '\r' && head[pos + 1] == '\n')) pos++;
+    if (pos + 1 < head_end) pos += 2;
+    while (pos + 1 < head_end) {
+        size_t eol = pos;
+        while (eol + 1 < head_end && !(head[eol] == '\r' && head[eol + 1] == '\n')) eol++;
+        if (eol == pos) break;
+        const char *colon = memchr(head + pos, ':', eol - pos);
+        if (colon) {
+            const char *ns = head + pos;
+            size_t nn = (size_t)(colon - (head + pos));
+            const char *vs = colon + 1;
+            size_t vn = eol - (size_t)(colon + 1 - head);
+            if (nn == 14 && strncasecmp(ns, "content-length", 14) == 0) {
+                http_trim_span(&vs, &vn);
+                size_t v = 0;
+                int ok = vn > 0;
+                for (size_t k = 0; k < vn && ok; k++) {
+                    if (vs[k] < '0' || vs[k] > '9') ok = 0;
+                    else v = v * 10 + (size_t)(vs[k] - '0');
+                }
+                *content_length = ok ? v : 0;
+            } else if (nn == 6 && strncasecmp(ns, "expect", 6) == 0) {
+                http_trim_span(&vs, &vn);
+                if (vn == 12 && strncasecmp(vs, "100-continue", 12) == 0) *expect_continue = 1;
+            }
+        }
+        pos = eol + 2;
+    }
+}
+
+// Build the headers dict from the head (first-':' split, trimmed
+// pairs, colon-less lines skipped — the VM's extract_headers exactly).
+static zz_value http_build_headers_dict(const char *head, size_t head_end) {
+    zz_value d = zz_dict_new();
+    size_t pos = 0;
+    while (pos + 1 < head_end && !(head[pos] == '\r' && head[pos + 1] == '\n')) pos++;
+    if (pos + 1 < head_end) pos += 2;
+    while (pos + 1 < head_end) {
+        size_t eol = pos;
+        while (eol + 1 < head_end && !(head[eol] == '\r' && head[eol + 1] == '\n')) eol++;
+        if (eol == pos) break;
+        const char *colon = memchr(head + pos, ':', eol - pos);
+        if (colon) {
+            const char *ns = head + pos;
+            size_t nn = (size_t)(colon - (head + pos));
+            const char *vs = colon + 1;
+            size_t vn = eol - (size_t)(colon + 1 - head);
+            http_trim_span(&ns, &nn);
+            http_trim_span(&vs, &vn);
+            zz_str *k = str_alloc(nn);
+            memcpy(zz_str_ptr(k), ns, nn);
+            zz_str_ptr(k)[nn] = '\0';
+            k->len = nn;
+            zz_str *v = str_alloc(vn);
+            memcpy(zz_str_ptr(v), vs, vn);
+            zz_str_ptr(v)[vn] = '\0';
+            v->len = vn;
+            zz_dict_set(d.dict, (zz_value){ZZ_STR, {.s = k}}, (zz_value){ZZ_STR, {.s = v}});
+        }
+        pos = eol + 2;
+    }
+    return d;
+}
+
+// Serialize a dispatch response object to wire bytes (malloc'd, *out_len
+// set). Views the body in place — the caller must keep resp alive until
+// the copy completes (it does: release happens after).
+static char *http_serialize_response(zz_value *resp, size_t *out_len) {
+    long status = 500;
+    zz_value st = zz_object_get_field(resp, "status");
+    if (st.tag == ZZ_INT) status = (long)st.i;
+    zz_release(&st);
+    const char *body = "";
+    size_t body_len = 0;
+    zz_value t = zz_object_get_field(resp, "body");
+    if (t.tag == ZZ_STR && t.s) {
+        body = zz_str_cptr(t.s);
+        body_len = t.s->len;
+    }
+    const char *reason = http_reason_phrase(status);
+    zz_value h = zz_object_get_field(resp, "headers");
+    size_t xlen = 0;
+    if (h.tag == ZZ_DICT && h.dict) {
+        for (size_t i = 0; i < h.dict->len; i++) {
+            zz_str *k = h.dict->entries[i].key;
+            zz_value v = h.dict->entries[i].val;
+            if (k && v.tag == ZZ_STR && v.s) {
+                xlen += k->len + 2 + v.s->len + 2;
+            }
+        }
+    }
+    char hs[256];
+    int hlen = snprintf(hs, sizeof hs,
+        "HTTP/1.1 %ld %s\r\nContent-Length: %zu\r\nConnection: close\r\n",
+        status, reason, body_len);
+    if (hlen < 0 || (size_t)hlen >= sizeof hs) {
+        zz_release(&t);
+        zz_release(&h);
+        return NULL;
+    }
+    size_t total = (size_t)hlen + xlen + 2 + body_len;
+    char *out = (char *)malloc(total + 1);
+    if (!out) {
+        zz_release(&t);
+        zz_release(&h);
+        return NULL;
+    }
+    memcpy(out, hs, (size_t)hlen);
+    size_t off = (size_t)hlen;
+    if (h.tag == ZZ_DICT && h.dict) {
+        for (size_t i = 0; i < h.dict->len; i++) {
+            zz_str *k = h.dict->entries[i].key;
+            zz_value v = h.dict->entries[i].val;
+            if (k && v.tag == ZZ_STR && v.s) {
+                memcpy(out + off, zz_str_cptr(k), k->len);
+                off += k->len;
+                memcpy(out + off, ": ", 2);
+                off += 2;
+                memcpy(out + off, zz_str_cptr(v.s), v.s->len);
+                off += v.s->len;
+                memcpy(out + off, "\r\n", 2);
+                off += 2;
+            }
+        }
+    }
+    memcpy(out + off, "\r\n", 2);
+    off += 2;
+    if (body_len > 0) memcpy(out + off, body, body_len);
+    off += body_len;
+    out[off] = '\0';
+    zz_release(&t);
+    zz_release(&h);
+    *out_len = total;
+    return out;
+}
+
+// Plain-text error reply (400/413/431/500 paths). Drops any buffered
+// request bytes so peak memory stays bounded, then arms the writer.
+static void http_reply(Connection *c, long status, const char *body, size_t body_len) {
+    const char *reason = http_reason_phrase(status);
+    char hs[256];
+    int hlen = snprintf(hs, sizeof hs,
+        "HTTP/1.1 %ld %s\r\nContent-Type: text/plain\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+        status, reason, body_len);
+    if (hlen < 0 || (size_t)hlen >= sizeof hs) {
+        free_connection(c);
+        return;
+    }
+    char *out = (char *)malloc((size_t)hlen + body_len + 1);
+    if (!out) {
+        free_connection(c);
+        return;
+    }
+    memcpy(out, hs, (size_t)hlen);
+    if (body_len > 0) memcpy(out + (size_t)hlen, body, body_len);
+    out[(size_t)hlen + body_len] = '\0';
+    if (c->head_dyn) { free(c->head_dyn); c->head_dyn = NULL; }
+    if (c->body_buf) { free(c->body_buf); c->body_buf = NULL; }
+    c->head_len = 0;
+    c->head_cap = 0;
+    c->head_end = 0;
+    c->body_len = 0;
+    c->body_need = 0;
+    c->wbuf = out;
+    c->wlen = (size_t)hlen + body_len;
+    c->wpos = 0;
+    c->keep_alive = 0;
+    c->state = CONN_WRITING;
+}
+
+// Head complete: validate the request line, size the body, then run or
+// wait for it.
+static void http_on_head(Connection *c) {
+    const char *head = http_head_buf(c);
+    const char *m;
+    const char *tg;
+    size_t ml;
+    size_t tl;
+    if (!http_parse_request_line(head, c->head_end, &m, &ml, &tg, &tl)) {
+        http_reply(c, 400, "bad request", 11);
+        return;
+    }
+    size_t cl = 0;
+    int expect = 0;
+    http_scan_head(head, c->head_end, &cl, &expect);
+    if (cl > HTTP_MAX_BODY_BYTES) {
+        http_reply(c, 413, "payload too large", 17);
+        return;
+    }
+    if (expect && cl > 0) {
+        // Best-effort interim: a dead client surfaces at body-read time.
+        const char *cont = "HTTP/1.1 100 Continue\r\n\r\n";
+        size_t off = 0;
+        while (off < 25) {
+            ssize_t n = write(c->fd, cont + off, 25 - off);
+            if (n <= 0) break;
+            off += (size_t)n;
+        }
+    }
+    if (cl == 0) {
+        http_run_handler(c);
+        return;
+    }
+    char *bb = (char *)malloc(cl);
+    if (!bb) {
+        http_reply(c, 500, "internal error", 14);
+        return;
+    }
+    size_t total = http_head_len(c);
+    size_t tail = (c->head_end < total) ? total - c->head_end : 0;
+    if (tail > cl) tail = cl;
+    if (tail > 0) memcpy(bb, head + c->head_end, tail);
+    c->body_buf = bb;
+    c->body_len = tail;
+    c->body_need = cl;
+    if (tail >= cl) {
+        http_run_handler(c);
+    } else {
+        c->state = CONN_READING_BODY;
+    }
+}
+
+// Full dispatch for a buffered request: ZZ handler runs inline in the
+// worker, the response object serializes to wbuf, always-Connection:
+// close (mirroring the VM, which never keeps socket clients alive).
+static void http_run_handler(Connection *c) {
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    size_t req_bytes = c->body_need;
+    const char *head = http_head_buf(c);
+    const char *m;
+    const char *tg;
+    size_t ml;
+    size_t tl;
+    if (!http_parse_request_line(head, c->head_end, &m, &ml, &tg, &tl)) {
+        http_reply(c, 500, "internal error", 14);
+        return;
+    }
+    char *method = (char *)malloc(ml + 1);
+    if (!method) {
+        http_reply(c, 500, "internal error", 14);
+        return;
+    }
+    memcpy(method, m, ml);
+    method[ml] = '\0';
+    zz_value headers = http_build_headers_dict(head, c->head_end);
+    zz_str *bs;
+    if (c->body_need > 0 && c->body_buf) {
+        bs = str_alloc(c->body_need);
+        memcpy(zz_str_ptr(bs), c->body_buf, c->body_need);
+        zz_str_ptr(bs)[c->body_need] = '\0';
+        bs->len = c->body_need;
+    } else {
+        bs = str_alloc(0);
+    }
+    zz_value bodyval = {ZZ_STR, {.s = bs}};
+    int failed = 0;
+    zz_value resp = http_dispatch(method, tg, tl, bodyval, headers, &failed);
+    zz_release(&bodyval);
+    // The response owns its copies now — drop request bytes before
+    // serializing so peak stays at one body, not two.
+    if (c->head_dyn) { free(c->head_dyn); c->head_dyn = NULL; }
+    if (c->body_buf) { free(c->body_buf); c->body_buf = NULL; }
+    c->head_len = 0;
+    c->head_cap = 0;
+    c->head_end = 0;
+    c->body_len = 0;
+    c->body_need = 0;
+    size_t wlen = 0;
+    char *wbuf = http_serialize_response(&resp, &wlen);
+    long status = 500;
+    zz_value st = zz_object_get_field(&resp, "status");
+    if (st.tag == ZZ_INT) status = (long)st.i;
+    zz_release(&st);
+    zz_release(&resp);
+    if (!wbuf) {
+        http_reply(c, 500, "internal error", 14);
+        return;
+    }
+    c->wbuf = wbuf;
+    c->wlen = wlen;
+    c->wpos = 0;
+    c->keep_alive = 0;
+    c->state = CONN_WRITING;
+    if (g_http_log_enabled) {
+        struct timespec t1;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double ms = (double)(t1.tv_sec - t0.tv_sec) * 1000.0
+            + (double)(t1.tv_nsec - t0.tv_nsec) / 1000000.0;
+        const char *cs = "\x1b[0m";
+        if (status >= 200 && status < 300) cs = "\x1b[32m";
+        else if (status >= 300 && status < 400) cs = "\x1b[33m";
+        else if (status >= 400 && status < 500) cs = "\x1b[31m";
+        else if (status >= 500 && status < 600) cs = "\x1b[35m";
+        const char *qm = memchr(tg, '?', tl);
+        size_t plen = qm ? (size_t)(qm - tg) : tl;
+        fprintf(stderr, "%s[%ld] %s %.*s %s\x1b[0m %.2fms\n",
+            cs, status, method, (int)plen, tg,
+            http_reason_phrase(status), ms);
+    }
+    free(method);
+    if (req_bytes > HTTP_TRIM_AFTER_BYTES) {
+        // Same tripwire as the VM: large requests churn tens of MB
+        // through this worker's heap; hand the freed pages back so a
+        // few big publishes don't ratchet RSS forever.
+#ifdef __linux__
+        malloc_trim(0);
+#endif
+    }
+}
+
+// zz_http_test(server, method, path, body) → HttpResponse object.
+// Mirrors the VM: query split off '?', middleware + handler dispatch,
+// every outcome wrapped as a response (even "no route" → 500).
+zz_value zz_http_test(zz_value server, zz_value method, zz_value path, zz_value body, int *err) {
+    (void)server;
+    if (method.tag != ZZ_STR || !method.s || path.tag != ZZ_STR || !path.s
+        || body.tag != ZZ_STR || !body.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.test: expected (server, method, path, body) strings"));
+    }
+    int failed = 0;
+    zz_value out = http_dispatch(zz_str_cptr(method.s), zz_str_cptr(path.s), path.s->len, body, zz_dict_new(), &failed);
+    *err = 0;
+    return out;
+}
+
+// zz_http_handle(server, method, path, body) → .ok(body str) | .err(msg).
+// Mirrors the VM: dispatcher failures (no route, middleware violation)
+// are .err, while a handler-produced response (any status) is .ok(text).
+zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_value body, int *err) {
+    (void)server;
+    if (method.tag != ZZ_STR || !method.s || path.tag != ZZ_STR || !path.s
+        || body.tag != ZZ_STR || !body.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.handle: expected (server, method, path, body) strings"));
+    }
+    int failed = 0;
+    zz_value resp = http_dispatch(zz_str_cptr(method.s), zz_str_cptr(path.s), path.s->len, body, zz_dict_new(), &failed);
+    *err = 0;
+    zz_value text = zz_object_get_field(&resp, "text");
+    zz_value out;
+    if (failed) {
+        out = zz_variant_err(text.tag == ZZ_STR ? zz_clone(text) : zz_str_static("request failed"));
+    } else {
+        out = zz_variant_ok(text.tag == ZZ_STR ? zz_clone(text) : zz_str_static(""));
+    }
+    zz_release(&resp);
+    return out;
+}
+
+
+// zz_http_pipe(server, middleware, err) — appends to the middleware chain
+// (run in order by the test dispatcher; epoll workers in Step 2).
+zz_value zz_http_pipe(zz_value server, zz_value middleware, int *err) {
+    *err = 0;
+    if (g_http_middleware_count < HTTP_MAX_MIDDLEWARE - 1) {
+        g_http_middlewares[g_http_middleware_count++] = zz_clone(middleware);
+    }
+    return server;
+}
+
+// zz_http_log(server, enabled, err) — arms the per-request access log
+// (same colored format as the VM) and returns the server for chaining.
 zz_value zz_http_log(zz_value server, zz_value enabled, int *err) {
     *err = 0;
-    (void)server; (void)enabled;
-    return zz_unit();
+    g_http_log_enabled = zz_truthy(enabled) ? 1 : 0;
+    return server;
 }
 
 // zz_http_listen(server, port, err) — starts HTTP server, blocks forever
@@ -3716,9 +4882,10 @@ zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
     // Set listen_fd non-blocking
     set_nonblock(listen_fd);
 
-    // Print SERVER_READY so benchmark runners know the port is open
-    fprintf(stdout, "SERVER_READY\n");
-    fflush(stdout);
+    // Print SERVER_READY to stderr so benchmark runners know the port
+    // is open (matches the VM, and keeps program stdout clean).
+    fprintf(stderr, "SERVER_READY\n");
+    fflush(stderr);
 
     g_http_server_running = 1;
 
@@ -3727,13 +4894,6 @@ zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
 
     g_http_server_running = 0;
     close(listen_fd);
-    return zz_unit();
-}
-
-// zz_http_handle(server, method, path, body, err) — AOT stub: returns "OK"
-zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_value body, int *err) {
-    *err = 0;
-    (void)server; (void)method; (void)path; (void)body;
     return zz_unit();
 }
 
@@ -3778,6 +4938,14 @@ zz_value zz_call_native2(zz_value (*f)(zz_value, zz_value, int *), zz_value a, z
 zz_value zz_call_native3(zz_value (*f)(zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c) {
     int err = 0;
     zz_value r = f(a, b, c, &err);
+    return r;
+}
+// 4-arg natives (e.g. http.test/server+method+path+body). Same err
+// discipline as the other shims: the callee signals arg violations
+// through *err and the generated code checks it after the call.
+zz_value zz_call_native4(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d) {
+    int err = 0;
+    zz_value r = f(a, b, c, d, &err);
     return r;
 }
 // Spawn-closure-literal fuse (`task.spawn(|...| ...)`): the lowerer passes
@@ -6850,13 +8018,7 @@ zz_value zz_http_get(zz_value url, zz_value headers, int *err) {
     zz_object_set_field(&resp_val, "text", (zz_value){ZZ_STR, {.s = body_str}});
     zz_object_set_field(&resp_val, "headers", zz_clone(headers_dict));
 
-    zz_value json_val = zz_unit();
-    if (body_str->len > 0) {
-        int jerr = 0;
-        json_val = zz_json_parse((zz_value){ZZ_STR, {.s = body_str}}, &jerr);
-        if (jerr) json_val = zz_unit();
-    }
-    zz_object_set_field(&resp_val, "json", json_val);
+    zz_object_set_field(&resp_val, "json", http_json_field(body_str));
 
     zz_release(&headers_dict);
     return zz_variant_ok(resp_val);
@@ -6951,13 +8113,7 @@ zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
     zz_object_set_field(&resp_val, "text", (zz_value){ZZ_STR, {.s = body_str}});
     zz_object_set_field(&resp_val, "headers", zz_clone(headers_dict));
 
-    zz_value json_val = zz_unit();
-    if (body_str->len > 0) {
-        int jerr = 0;
-        json_val = zz_json_parse((zz_value){ZZ_STR, {.s = body_str}}, &jerr);
-        if (jerr) json_val = zz_unit();
-    }
-    zz_object_set_field(&resp_val, "json", json_val);
+    zz_object_set_field(&resp_val, "json", http_json_field(body_str));
 
     zz_release(&headers_dict);
     return zz_variant_ok(resp_val);
@@ -6975,10 +8131,15 @@ zz_value zz_http_response_text(zz_value resp, int *err) {
     return zz_object_get_field(&resp, "text");
 }
 
-// http.response.json(response) → json
+// http.response.json(response) → parsed body JSON, or .err on parse
+// failure. Re-parses the body at call time exactly like the VM's
+// http_response_json (the stored "json" field is bare-or-unit).
 zz_value zz_http_response_json(zz_value resp, int *err) {
     (void)err;
-    return zz_object_get_field(&resp, "json");
+    zz_value b = zz_object_get_field(&resp, "body");
+    zz_value ret = http_parse_body_json(b);
+    zz_release(&b);
+    return ret;
 }
 
 // http.response.headers(response) → dict

@@ -132,7 +132,7 @@ fn native_skip_reason(file: &Path) -> Option<&'static str> {
     let stem = file.file_stem()?.to_str()?;
     match stem {
         "http_server_test" | "http_client_test" | "http_phase5b_test" | "concurrent_http_test" => {
-            Some("HTTP route handlers use closures not callable from AOT C runtime")
+            Some("live sockets / http.log timing output are non-deterministic between engines")
         }
         "time_ops" | "time_test" | "bench_memory_arena" => {
             Some("output contains time.now_ms() — non-deterministic timestamps")
@@ -524,6 +524,11 @@ parity_strict!(parity_stdlib_fs_vfs, "stdlib", "fs_vfs.zz");
 parity_strict!(parity_stdlib_bytes, "stdlib", "bytes.zz");
 parity_strict!(parity_stdlib_env_full, "stdlib", "env_full.zz");
 parity_strict!(parity_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
+parity_strict!(
+    parity_stdlib_http_request_response,
+    "stdlib",
+    "http_request_response.zz"
+);
 
 // --- Error fixture: both engines must error on missing struct field ---
 parity_strict_error!(parity_err_missing_field, "missing_field.zz");
