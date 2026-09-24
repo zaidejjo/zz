@@ -132,7 +132,7 @@ fn native_skip_reason(file: &Path) -> Option<&'static str> {
     let stem = file.file_stem()?.to_str()?;
     match stem {
         "http_server_test" | "http_client_test" | "http_phase5b_test" | "concurrent_http_test" => {
-            Some("HTTP route handlers use closures not callable from AOT C runtime")
+            Some("live sockets / http.log timing output are non-deterministic between engines")
         }
         "time_ops" | "time_test" | "bench_memory_arena" => {
             Some("output contains time.now_ms() — non-deterministic timestamps")
