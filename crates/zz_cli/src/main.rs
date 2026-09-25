@@ -490,7 +490,12 @@ fn load_vm_plugins(
             };
             match loaded {
                 Ok(()) => {
-                    eprintln!("zz: loaded plugin `{}`", dep.name);
+                    // Progress chatter only on an interactive stderr (same
+                    // rule as the native-runtime build line): piped runs
+                    // stay clean for scripts and parity harnesses.
+                    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                        eprintln!("zz: loaded plugin `{}`", dep.name);
+                    }
                     loaded_count += 1;
                     break;
                 }
