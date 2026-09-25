@@ -776,6 +776,11 @@ pub fn build_release(
 
 /// Copy a cached binary into `bin/` next to the source with the
 /// target-aware name. Returns the `bin/` path.
+///
+/// The copy goes through a unique temp file in the same directory plus an
+/// atomic rename: parallel `zz run --native` / `zz build` invocations for
+/// the same fixture (e.g. `cargo test --all` running several test binaries
+/// at once) must never observe — or execute — a half-written binary.
 fn publish_to_bin(cached: &Path, src: &Path, target: Option<&str>) -> Result<PathBuf, String> {
     let stem = src
         .file_stem()
@@ -784,17 +789,37 @@ fn publish_to_bin(cached: &Path, src: &Path, target: Option<&str>) -> Result<Pat
     let dir = bin_dir_for(src);
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create bin dir: {e}"))?;
     let dest = dir.join(bin_name(&stem, target));
-    std::fs::copy(cached, &dest).map_err(|e| format!("cannot write binary: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(&dest) {
-            let mut perms = meta.permissions();
-            perms.set_mode(perms.mode() | 0o111);
-            let _ = std::fs::set_permissions(&dest, perms);
+    static PUBLISH_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let tmp = dir.join(format!(
+        ".{}.publish-{}.{}.tmp",
+        dest.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        PUBLISH_COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    let res: Result<(), String> = (|| {
+        std::fs::copy(cached, &tmp).map_err(|e| format!("cannot write binary: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&tmp) {
+                let mut perms = meta.permissions();
+                perms.set_mode(perms.mode() | 0o111);
+                let _ = std::fs::set_permissions(&tmp, perms);
+            }
         }
+        // Windows `rename` cannot replace an existing file — drop the old
+        // binary first (a concurrent executor there holds its own handle).
+        #[cfg(windows)]
+        {
+            let _ = std::fs::remove_file(&dest);
+        }
+        std::fs::rename(&tmp, &dest).map_err(|e| format!("cannot publish binary: {e}"))?;
+        Ok(())
+    })();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    Ok(dest)
+    res.map(|()| dest)
 }
 
 /// Build a native binary for `path` in release `mode` with default options.

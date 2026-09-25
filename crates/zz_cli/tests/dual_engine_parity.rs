@@ -286,7 +286,7 @@ fn assert_parity_strict(
     let native_norm = norm_stream(&native_stdout);
     assert_eq!(
         vm_norm, native_norm,
-        "PARITY BUG [{display}]: VM and native stdout differ.\n--- VM ---\n{vm_stdout}\n--- NATIVE ---\n{native_stdout}"
+        "PARITY BUG [{display}]: VM and native stdout differ (exits vm={vm_exit} native={native_exit}).\n--- VM stdout ---\n{vm_stdout}\n--- NATIVE stdout ---\n{native_stdout}\n--- VM stderr ---\n{vm_stderr}\n--- NATIVE stderr ---\n{native_stderr}"
     );
 
     let vm_err_norm = norm_stream(&vm_stderr);
@@ -692,10 +692,14 @@ fn parity_discover_all_fixtures() {
             }
             if !parity_match(&vm, &native) {
                 unexpected.push(format!(
-                    "PARITY BUG {}\n--- VM ---\n{}\n--- NATIVE ---\n{}",
+                    "PARITY BUG {}\n--- exits vm={} native={} ---\n--- VM stdout ---\n{}\n--- NATIVE stdout ---\n{}\n--- VM stderr ---\n{}\n--- NATIVE stderr ---\n{}",
                     file.display(),
+                    vm.0,
+                    native.0,
                     vm.1,
-                    native.1
+                    native.1,
+                    vm.2,
+                    native.2
                 ));
                 continue;
             }
