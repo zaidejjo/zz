@@ -21,6 +21,7 @@ const REGEXP_MOD_ZZ: &str = include_str!("../zz/regexp/mod.zz");
 const TIME_MOD_ZZ: &str = include_str!("../zz/time/mod.zz");
 const ARGS_MOD_ZZ: &str = include_str!("../zz/args/mod.zz");
 const COLORS_MOD_ZZ: &str = include_str!("../zz/colors/mod.zz");
+const PATH_MOD_ZZ: &str = include_str!("../zz/path/mod.zz");
 
 /// All embedded source files, in compilation order.
 const ZZ_SOURCES: &[(&str, &str)] = &[
@@ -32,6 +33,7 @@ const ZZ_SOURCES: &[(&str, &str)] = &[
     ("std:time.mod.zz", TIME_MOD_ZZ),
     ("std:args.mod.zz", ARGS_MOD_ZZ),
     ("std:colors.mod.zz", COLORS_MOD_ZZ),
+    ("std:path.mod.zz", PATH_MOD_ZZ),
 ];
 
 /// Compiled pure-ZZ stdlib programs, computed once.
@@ -160,9 +162,9 @@ mod tests {
     #[test]
     fn compile_pure_zz_stdlib() {
         let programs = zz_stdlib_programs();
-        // Should have compiled eight modules (str, math, collections/vec,
-        // json, regexp, time, args, colors).
-        assert_eq!(programs.len(), 8, "expected 8 pure-ZZ stdlib modules");
+        // Should have compiled nine modules (str, math, collections/vec,
+        // json, regexp, time, args, colors, path).
+        assert_eq!(programs.len(), 9, "expected 9 pure-ZZ stdlib modules");
         // Each module should have a non-empty types map.
         for (i, tp) in programs.iter().enumerate() {
             assert!(
@@ -372,6 +374,26 @@ mod tests {
         ] {
             assert!(
                 time_prog.funcs.contains_key(name),
+                "{name} should be defined"
+            );
+        }
+    }
+
+    #[test]
+    fn pure_zz_path_has_helpers() {
+        let programs = zz_stdlib_programs();
+        let path_prog = &programs[8]; // path/mod.zz
+        for name in [
+            "path.join",
+            "path.join_all",
+            "path.normalize",
+            "path.basename",
+            "path.dirname",
+            "path.is_absolute",
+            "path.extension",
+        ] {
+            assert!(
+                path_prog.funcs.contains_key(name),
                 "{name} should be defined"
             );
         }

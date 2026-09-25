@@ -1,0 +1,10 @@
+// E2E: std.math numeric constants are true values (no `()` needed).
+import std.math
+
+println(math.PI)
+println(math.E)
+println(math.TAU)
+x := math.PI + math.E
+println(x > 3.0)
+println(std.math.PI)
+println("math_consts_ok")

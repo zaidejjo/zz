@@ -240,7 +240,11 @@ impl Lowerer {
                         format!("zz_clone({cid})")
                     }
                 } else {
-                    "zz_unit()".to_string()
+                    // Math constants (`math.PI`, `std.math.PI`) lower to
+                    // float literals — the checker rejects calls, so value
+                    // position is the only valid use. Anything else unknown
+                    // stays unit (the checker rejects it upstream).
+                    super::math_const_c_literal(&joined).unwrap_or_else(|| "zz_unit()".to_string())
                 }
             }
             Expr::Paren { expr, .. } => self.emit_expr(expr, names, out),

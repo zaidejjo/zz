@@ -135,7 +135,35 @@ impl Interp {
                         let mut result = Value::Unit;
                         for item in *items {
                             let mut scope = Env::with_parent(&self.env);
-                            scope.define(&vars[0].name, item);
+                            if vars.len() == 2 {
+                                // `for i, x in xs.enumerate()` — each item
+                                // is a 2-tuple (index, element). `enumerate()`
+                                // builds `Tuple` values while tuple literals
+                                // evaluate to 2-element arrays — accept both.
+                                let pair_vec: Option<Vec<Value>> = match item {
+                                    Value::Tuple(pair) => Some((*pair).clone()),
+                                    Value::Array(items) if items.len() == 2 => {
+                                        Some((*items).clone())
+                                    }
+                                    _ => None,
+                                };
+                                match pair_vec {
+                                    Some(mut pair) => {
+                                        let second = pair.pop().unwrap();
+                                        let first = pair.pop().unwrap();
+                                        scope.define(&vars[0].name, first);
+                                        scope.define(&vars[1].name, second);
+                                    }
+                                    None => {
+                                        return Err(EvalError::new(
+                                            "cannot unpack a non-pair value into 2 loop variables (expected `enumerate()` pairs)",
+                                            iter.span(),
+                                        ));
+                                    }
+                                }
+                            } else {
+                                scope.define(&vars[0].name, item);
+                            }
                             let prev = std::mem::replace(&mut self.env, scope);
                             let flow = self.eval_block(body);
                             self.env = prev;

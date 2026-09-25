@@ -864,22 +864,26 @@ impl Compiler {
             Op::JumpIfFalse(_) => Op::JumpIfFalse(target),
             Op::JumpIfTrue(_) => Op::JumpIfTrue(target),
             Op::JumpIfFalseBool(_, span) => Op::JumpIfFalseBool(target, span),
-            Op::ForNext { vars, in_env, .. } => Op::ForNext {
+            Op::ForNext {
+                vars, in_env, span, ..
+            } => Op::ForNext {
                 vars,
                 exit: target,
                 in_env,
+                span,
             },
             Op::WhileCond { span, .. } => Op::WhileCond { exit: target, span },
             other => panic!("patch_jump on non-jump op: {other:?}"),
         };
     }
 
-    fn emit_for_next(&mut self, vars: Vec<String>, in_env: bool) -> usize {
+    fn emit_for_next(&mut self, vars: Vec<String>, in_env: bool, span: Span) -> usize {
         let pos = self.chunk.code.len();
         self.emit(Op::ForNext {
             vars,
             exit: 0,
             in_env,
+            span,
         });
         pos
     }
@@ -1064,7 +1068,7 @@ impl Compiler {
                 // Determine if any var is captured by an inner closure
                 let any_captured = vars.iter().any(|v| self.captured.contains(&v.name));
                 let var_names: Vec<String> = vars.iter().map(|v| v.name.clone()).collect();
-                let j = self.emit_for_next(var_names.clone(), any_captured);
+                let j = self.emit_for_next(var_names.clone(), any_captured, *span);
                 // Push locals for each var — last var at highest slot,
                 // first at lowest
                 let num_vars = vars.len();
@@ -2254,7 +2258,7 @@ impl Compiler {
                 });
                 let header = self.chunk.code.len();
                 let in_env = self.captured.contains(&var.name);
-                let j = self.emit_for_next(vec![var.name.clone()], in_env);
+                let j = self.emit_for_next(vec![var.name.clone()], in_env, *span);
                 self.locals.push(Local {
                     name: var.name.clone(),
                     slot: self.stack_height - 1,

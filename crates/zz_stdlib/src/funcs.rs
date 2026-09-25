@@ -830,6 +830,18 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             Type::Array(Box::new(t.clone())),
         ),
     );
+    // vec.enumerate — method form of bare `enumerate`, so both
+    // `xs.enumerate()` and `enumerate(xs)` type-check to `[(int, T)]`.
+    // Pairs unpack directly in 2-variable `for` loops.
+    for name in ["vec.enumerate", "std.vec.enumerate"] {
+        m.insert(
+            name.into(),
+            sig_t(
+                vec![("v", Type::Array(Box::new(t.clone())))],
+                Type::Array(Box::new(Type::Tuple(vec![Type::Int, t.clone()]))),
+            ),
+        );
+    }
 
     // Pure-ZZ stdlib: vec helpers (compiled from zz/collections/vec.zz)
     // min_val/max_val are generic <T> returning Option<T>;
@@ -2139,6 +2151,28 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         m.insert(name.into(), sig(params, ret));
     }
 
+    // std.path — pure-ZZ lexical path helpers (from zz/path/mod.zz).
+    // Separator style follows `std.env.os()` (`"windows"` → `\`, else `/`).
+    // `std.fs` keeps its native I/O operations; its `join` shares this
+    // lexical algorithm for backward compatibility.
+    for (name, params, ret) in [
+        ("join", vec![("a", Type::Str), ("b", Type::Str)], Type::Str),
+        (
+            "join_all",
+            vec![("parts", Type::Array(Box::new(Type::Str)))],
+            Type::Str,
+        ),
+        ("normalize", vec![("path", Type::Str)], Type::Str),
+        ("basename", vec![("path", Type::Str)], Type::Str),
+        ("dirname", vec![("path", Type::Str)], Type::Str),
+        ("is_absolute", vec![("path", Type::Str)], Type::Bool),
+        ("extension", vec![("path", Type::Str)], Type::Str),
+    ] {
+        let s = sig(params, ret);
+        m.insert(format!("std.path.{name}"), s.clone());
+        m.insert(format!("path.{name}"), s);
+    }
+
     // std.env
     m.insert(
         "std.env.get_var".into(),
@@ -2241,6 +2275,18 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig_t(vec![("base", t.clone()), ("exp", t.clone())], Type::Float),
     );
     m.insert("std.math.random".into(), sig(vec![], Type::Float));
+
+    // ── std.math numeric constants ──
+    // True `Float` values (see `stdlib_consts`), not zero-arg functions.
+    // The checker resolves them without `()`; calling one is an error.
+    // Fully-qualified `std.math.*` names need no import (like all `std.*`
+    // functions); `import std.math` adds the short `math.*` spellings via
+    // `register_module_namespace`.
+    for name in [
+        "PI", "E", "TAU", "SQRT_2", "SQRT_1_2", "LN_2", "LN_10", "LOG10_E", "LOG2_E", "INF", "NAN",
+    ] {
+        m.insert(format!("std.math.{name}"), sig(vec![], Type::Float));
+    }
 
     // ── std.math utilities & rounding ──
     m.insert(
@@ -3101,6 +3147,25 @@ mod tests {
         assert!(consts.contains_key("std.math.PI"));
         assert!(consts.contains_key("std.math.E"));
         assert!(consts.contains_key("std.math.TAU"));
+        // ... and carry checker signatures so `std.math.PI` resolves
+        // import-free (like every other `std.*` name).
+        assert!(funcs.contains_key("std.math.PI"));
+        assert!(funcs.contains_key("std.math.E"));
+        assert!(funcs.contains_key("std.math.INF"));
+        assert!(funcs.contains_key("std.math.NAN"));
+        // vec.enumerate: method spelling of bare `enumerate`.
+        assert!(funcs.contains_key("vec.enumerate"));
+        assert!(funcs.contains_key("std.vec.enumerate"));
+        // path helpers (pure-ZZ).
+        assert!(funcs.contains_key("std.path.join"));
+        assert!(funcs.contains_key("std.path.join_all"));
+        assert!(funcs.contains_key("std.path.normalize"));
+        assert!(funcs.contains_key("std.path.basename"));
+        assert!(funcs.contains_key("std.path.dirname"));
+        assert!(funcs.contains_key("std.path.is_absolute"));
+        assert!(funcs.contains_key("std.path.extension"));
+        assert!(funcs.contains_key("path.join"));
+        assert!(funcs.contains_key("path.join_all"));
         assert!(funcs.contains_key("std.colors.red"));
         assert!(funcs.contains_key("std.colors.rgb"));
         assert!(funcs.contains_key("std.colors.hex"));
@@ -3108,7 +3173,7 @@ mod tests {
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
         assert!(funcs.contains_key("dbg"));
-        assert_eq!(funcs.len(), 604);
+        assert_eq!(funcs.len(), 631);
     }
 
     #[test]
