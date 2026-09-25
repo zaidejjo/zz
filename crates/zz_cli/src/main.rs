@@ -462,10 +462,21 @@ fn load_vm_plugins(
             // Both paths retain the dlopen handle: dropping it unloads the
             // library, unmapping registered pointers (Rust entries and raw
             // C-registry symbol addresses alike).
-            let loaded = match &c_funcs {
-                Some(funcs) => zz_plugin::load_c_plugin(lib_path, funcs)
-                    .map(keep_plugin_alive)
-                    .map_err(|e| e.to_string()),
+            let loaded: Result<(), String> = match &c_funcs {
+                Some(funcs) => match zz_plugin::load_c_plugin(lib_path, funcs) {
+                    Ok(handle) => {
+                        keep_plugin_alive(handle);
+                        Ok(())
+                    }
+                    // Not a C plugin (e.g. a transitional Rust cdylib next
+                    // to the C .so): try the next library silently.
+                    Err(zz_plugin::LoadError::MissingSymbol { symbol, .. })
+                        if symbol == "ZZ_C_PLUGIN_ABI_VERSION" =>
+                    {
+                        continue;
+                    }
+                    Err(e) => Err(e.to_string()),
+                },
                 None => zz_plugin::load_plugin(lib_path, natives)
                     .map(|handle| {
                         // The handle MUST stay alive (see keep_plugin_alive).
