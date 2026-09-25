@@ -1135,7 +1135,7 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
                 .to_path_buf()
         });
         let plugin_funcs = crate::build::discover_plugin_manifests(&test.file);
-        crate::load_vm_plugins(&project_root, &mut natives, &plugin_funcs)?;
+        crate::load_vm_plugins(&project_root, &mut natives, &plugin_funcs).map(|_| ())?;
     }
 
     let merged_stmts: Vec<_> = loaded
