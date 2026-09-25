@@ -527,6 +527,10 @@ impl Interp {
                 arity: entry.arity,
             })));
         }
+        // C-only plugins (direct dlsym, no Rust shim): same lazy value.
+        if let Some(nv) = crate::c_abi::native_value(&name) {
+            return Ok(nv);
+        }
         if let Some(mut v) = self.env.get(&parts[0]) {
             for field in &parts[1..] {
                 v = object_field(&v, field, span)?;
@@ -548,6 +552,10 @@ impl Interp {
                 name: name.to_string(),
                 arity: entry.arity,
             })));
+        }
+        // C-only plugins (direct dlsym, no Rust shim): same lazy value.
+        if let Some(nv) = crate::c_abi::native_value(name) {
+            return Ok(nv);
         }
         Err(EvalError::new(format!("undefined method `{name}`"), span))
     }
@@ -734,6 +742,10 @@ impl Interp {
                         name: name.clone(),
                         arity: entry.arity,
                     }))));
+                }
+                // C-only plugins (direct dlsym, no Rust shim): same lazy value.
+                if let Some(nv) = crate::c_abi::native_value(name) {
+                    return Ok(Flow::Value(nv));
                 }
                 // Selective-import alias (miss-only): `squared` from
                 // `import m(squared)` resolves to `m.squared`. Locals,
@@ -1317,10 +1329,14 @@ impl Interp {
                 }
                 match self.natives.get(&nf.name) {
                     Some(entry) => (entry.f)(self, &mut args, span),
-                    None => Err(EvalError::new(
-                        format!("unknown native function `{}`", nf.name),
-                        span,
-                    )),
+                    // C-only plugins resolve by name from the global registry.
+                    None => match crate::c_abi::call(&nf.name, &mut args, span) {
+                        Some(result) => result,
+                        None => Err(EvalError::new(
+                            format!("unknown native function `{}`", nf.name),
+                            span,
+                        )),
+                    },
                 }
             }
             Value::Func(fv) => self.call_func(*fv, args, span),
