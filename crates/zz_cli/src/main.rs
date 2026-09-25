@@ -408,9 +408,19 @@ fn load_vm_plugins(
         };
 
         // Only load plugins that have a plugin.zzi manifest
-        if !pkg_dir.join("plugin.zzi").exists() {
+        let zzi_path = pkg_dir.join("plugin.zzi");
+        if !zzi_path.exists() {
             continue;
         }
+
+        // C-only plugins (`// C-ABI: 1` header) resolve symbols directly
+        // with dlsym — no Rust shim. Their manifest functions register in
+        // the runtime C-ABI registry under ZZ-visible names.
+        let c_funcs: Option<std::collections::HashMap<String, zz_checker::FuncSig>> =
+            match zz_plugin::load_manifest(&zzi_path) {
+                Ok(manifest) if manifest.meta.c_abi.is_some() => Some(manifest.funcs),
+                _ => None,
+            };
 
         // Look for shared library in build/ directory
         let build_dir = pkg_dir.join("build");
@@ -449,11 +459,33 @@ fn load_vm_plugins(
         }
 
         for lib_path in &lib_paths {
-            match zz_plugin::load_plugin(lib_path, natives) {
-                Ok(handle) => {
-                    // The handle MUST stay alive: dropping it unloads the
-                    // library, unmapping the registered function pointers.
-                    keep_plugin_alive(handle);
+            // Both paths retain the dlopen handle: dropping it unloads the
+            // library, unmapping registered pointers (Rust entries and raw
+            // C-registry symbol addresses alike).
+            let loaded: Result<(), String> = match &c_funcs {
+                Some(funcs) => match zz_plugin::load_c_plugin(lib_path, funcs) {
+                    Ok(handle) => {
+                        keep_plugin_alive(handle);
+                        Ok(())
+                    }
+                    // Not a C plugin (e.g. a transitional Rust cdylib next
+                    // to the C .so): try the next library silently.
+                    Err(zz_plugin::LoadError::MissingSymbol { symbol, .. })
+                        if symbol == "ZZ_C_PLUGIN_ABI_VERSION" =>
+                    {
+                        continue;
+                    }
+                    Err(e) => Err(e.to_string()),
+                },
+                None => zz_plugin::load_plugin(lib_path, natives)
+                    .map(|handle| {
+                        // The handle MUST stay alive (see keep_plugin_alive).
+                        keep_plugin_alive(handle);
+                    })
+                    .map_err(|e| e.to_string()),
+            };
+            match loaded {
+                Ok(()) => {
                     eprintln!("zz: loaded plugin `{}`", dep.name);
                     break;
                 }
