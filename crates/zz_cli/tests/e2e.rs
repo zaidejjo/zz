@@ -20,14 +20,34 @@ fn fixtures_dir() -> PathBuf {
 }
 
 /// Run `zz run <file>` and return (exit_code, stdout, stderr).
+/// Stdin comes from the `<stem>.stdin` sibling file when present,
+/// otherwise closed (EOF): fixtures calling `input()` behave
+/// identically everywhere instead of hanging on a TTY.
 fn run_zz(file: &Path) -> (i32, String, String) {
+    use std::io::Write as _;
     let zz_bin = env!("CARGO_BIN_EXE_zz");
-    let output = Command::new(zz_bin)
+    let stdin_path = file.with_extension("stdin");
+    let input = std::fs::read(stdin_path).unwrap_or_default();
+    let mut child = Command::new(zz_bin)
         .arg("run")
         .arg(file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
-        .output()
+        .spawn()
         .unwrap_or_else(|e| panic!("failed to exec `zz run {file:?}`: {e}"));
+    if !input.is_empty() {
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(&input);
+        }
+    }
+    // Always close the pipe so the child sees EOF (never blocks on a
+    // held-open stdin when no `.stdin` file exists).
+    drop(child.stdin.take());
+    let output = child
+        .wait_with_output()
+        .unwrap_or_else(|e| panic!("failed to wait `zz run {file:?}`: {e}"));
 
     let exit_code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -170,6 +190,9 @@ e2e_success_test!(e2e_syntax_return_in_loops, "syntax", "return_in_loops.zz");
 e2e_success_test!(e2e_syntax_dict_iteration, "syntax", "dict_iteration.zz");
 e2e_success_test!(e2e_syntax_pipe_elvis, "syntax", "pipe_elvis.zz");
 e2e_success_test!(e2e_syntax_scalar_copy, "syntax", "scalar_copy.zz");
+e2e_success_test!(e2e_syntax_elif_chain, "syntax", "elif_chain.zz");
+e2e_success_test!(e2e_syntax_top_level_elif, "syntax", "top_level_elif.zz");
+e2e_success_test!(e2e_syntax_chained_calls, "syntax", "chained_calls.zz");
 e2e_success_test!(e2e_syntax_empty_infer, "syntax", "empty_infer.zz");
 e2e_success_test!(
     e2e_syntax_closure_annotations,
@@ -237,6 +260,7 @@ e2e_success_test!(
     "str_extended_test.zz"
 );
 e2e_success_test!(e2e_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
+e2e_success_test!(e2e_stdlib_input_chained, "stdlib", "input_chained.zz");
 e2e_success_test!(e2e_stdlib_http_client_test, "stdlib", "http_client_test.zz");
 e2e_success_test!(e2e_stdlib_http_server_test, "stdlib", "http_server_test.zz");
 e2e_success_test!(
@@ -610,8 +634,10 @@ while s == "test" {
 // `#[ignore]` so the default `cargo test` stays fast. Run explicitly with:
 //   cargo test -p zz_cli --test e2e -- --ignored
 
+/// Exhaustive VM sweep: EVERY success fixture must exit 0.
+/// Runs un-ignored as the registration-backstop gate: a new fixture with
+/// no `e2e_success_test!` still runs here (stdin via `<stem>.stdin`).
 #[test]
-#[ignore]
 fn e2e_discover_all_success_fixtures() {
     let fixtures = fixtures_dir();
     let success_dirs = ["syntax", "types", "stdlib"];
@@ -642,8 +668,9 @@ fn e2e_discover_all_success_fixtures() {
     }
 }
 
+/// Exhaustive VM sweep: EVERY error fixture must fail.
+/// Runs un-ignored alongside the success sweep above.
 #[test]
-#[ignore]
 fn e2e_discover_all_error_fixtures() {
     let fixtures = fixtures_dir();
     let err_dir = fixtures.join("errors");

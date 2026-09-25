@@ -1339,16 +1339,19 @@ mod tests {
     }
     #[test]
     fn check_no_arg_errors() {
-        let examples_dir =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples");
-        assert!(examples_dir.is_dir(), "examples dir should exist");
+        // NOTE: `examples/` is gitignored (personal scratch dir, absent in
+        // CI checkouts) — scan the tracked fixtures instead. The point is
+        // directory discovery finds files and does not panic/IO-error.
+        let fixtures_dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+        assert!(fixtures_dir.is_dir(), "tests/fixtures dir should exist");
         let result = check_or_fix_path(
-            &Some(examples_dir.display().to_string()),
+            &Some(fixtures_dir.display().to_string()),
             false,
             false,
             false,
         );
-        // The function may fail type-check on examples; the point is it
+        // The function may fail type-check on fixtures; the point is it
         // should find files and not panic/IO-error.
         match &result {
             Err(msg) if msg.contains("does not exist") || msg.contains("no .zz files") => {

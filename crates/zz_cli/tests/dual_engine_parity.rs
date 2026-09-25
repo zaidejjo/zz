@@ -22,15 +22,48 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
 }
 
-/// Run `zz run <file>` (bytecode VM engine).
-fn run_zz_vm(file: &Path) -> (i32, String, String) {
+/// Stdin bytes for a fixture run: `<stem>.stdin` sitting next to the
+/// `.zz` file when present, otherwise empty.
+///
+/// Piping explicitly (instead of inheriting) keeps runs deterministic:
+/// a fixture calling `input()` sees EOF rather than hanging on a TTY
+/// or inheriting CI's /dev/null unpredictably. Both engines get the
+/// identical bytes, so stdin itself is parity-covered. (Convention:
+/// keep `.stdin` files small — bytes are written before output is
+/// drained, like the existing e2e piped-input test.)
+fn stdin_for(file: &Path) -> Vec<u8> {
+    let stdin_path = file.with_extension("stdin");
+    std::fs::read(stdin_path).unwrap_or_default()
+}
+
+/// Run `zz` with `args` + `file`, feeding `input` on stdin.
+/// Write errors are ignored: fixtures that exit early (e.g. error
+/// fixtures that never read stdin) close the pipe first (EPIPE).
+fn run_zz_with_input(args: &[&str], file: &Path, input: &[u8]) -> (i32, String, String) {
+    use std::io::Write as _;
+    use std::process::Stdio;
     let zz_bin = env!("CARGO_BIN_EXE_zz");
-    let output = Command::new(zz_bin)
-        .arg("run")
+    let mut child = Command::new(zz_bin)
+        .args(args)
         .arg(file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
-        .output()
-        .unwrap_or_else(|e| panic!("failed to exec `zz run {file:?}`: {e}"));
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to exec `zz {args:?} {file:?}`: {e}"));
+    if !input.is_empty() {
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(input);
+        }
+    }
+    // Always close the pipe: the child sees EOF instead of blocking
+    // forever on a held-open stdin (fixtures without a `.stdin` file
+    // read empty input, deterministically, on both engines).
+    drop(child.stdin.take());
+    let output = child
+        .wait_with_output()
+        .unwrap_or_else(|e| panic!("failed to wait `zz {args:?} {file:?}`: {e}"));
     (
         output.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&output.stdout).to_string(),
@@ -38,21 +71,16 @@ fn run_zz_vm(file: &Path) -> (i32, String, String) {
     )
 }
 
+/// Run `zz run <file>` (bytecode VM engine).
+fn run_zz_vm(file: &Path) -> (i32, String, String) {
+    let input = stdin_for(file);
+    run_zz_with_input(&["run"], file, &input)
+}
+
 /// Run `zz run --native <file>` (AOT native compiler engine).
 fn run_zz_native(file: &Path) -> (i32, String, String) {
-    let zz_bin = env!("CARGO_BIN_EXE_zz");
-    let output = Command::new(zz_bin)
-        .arg("run")
-        .arg("--native")
-        .arg(file)
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
-        .output()
-        .unwrap_or_else(|e| panic!("failed to exec `zz run --native {file:?}`: {e}"));
-    (
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stdout).to_string(),
-        String::from_utf8_lossy(&output.stderr).to_string(),
-    )
+    let input = stdin_for(file);
+    run_zz_with_input(&["run", "--native"], file, &input)
 }
 
 /// Strip lines that are purely numeric (timestamps, memory addresses).
@@ -137,6 +165,9 @@ fn native_skip_reason(file: &Path) -> Option<&'static str> {
         "time_ops" | "time_test" | "bench_memory_arena" => {
             Some("output contains time.now_ms() — non-deterministic timestamps")
         }
+        "log_test" => {
+            Some("log output embeds unix timestamps and span durations — non-deterministic")
+        }
         _ => None,
     }
 }
@@ -153,15 +184,40 @@ fn native_skip_reason(file: &Path) -> Option<&'static str> {
 fn known_native_failure(file: &Path) -> Option<&'static str> {
     let stem = file.file_stem()?.to_str()?;
     match stem {
-        // --- C codegen compile errors (not yet fixed) ---
-        "structs" => Some("C codegen: nested field access emits int64_t instead of zz_value"),
-        "variants" => Some("C codegen: undeclared variable in match + else scope error"),
+        // --- C codegen compile errors (scalar boxing class) ---
+        "frame_slots" => Some("C codegen: raw zz_value in scalar comparison `(v0 > 0)`"),
+        "question_operator_newline" => {
+            Some("C codegen: raw int64_t global assigned into zz_value temp")
+        }
+        "struct_impl" => {
+            Some("C codegen: unboxed struct returned/fielded as zz_value and vice versa")
+        }
+        "local_wildcard" => {
+            Some("C codegen: imported scalar global unboxed twice (`(zz_global_PI).i` on int64_t)")
+        }
 
         // --- Output differences (native runs but output differs) ---
         "concurrency_panic_test" => Some("native: panic/fail inside task closures lowers to unit (no err plumbing through zz_call_closure); VM yields .err"),
         "encoding_test" => Some("native: different error message format for bad base64/hex/url"),
         "math_extended_test" => Some("native: float precision + error message differences"),
-        "functions" => Some("native: string concatenation with '+' drops first operand"),
+        "closure_annotations" => Some("native: top-level closure-call results print empty"),
+        "decorators" => Some("native: only the final marker prints; decorator wrapper output missing"),
+        "destructuring" => Some("native: top-level tuple-destructured values print empty"),
+        "extension_methods" => {
+            Some("native: extension-method call results missing + spurious conflict diagnostics on stderr")
+        }
+        "selective_import" | "multi_selective" | "symbol_alias" | "wildcard_import" => {
+            Some("native: imported const binding prints empty (call results are fine)")
+        }
+        "generic_selective" => {
+            Some("native: local-module generic fn call results print empty")
+        }
+
+        // --- Error fixtures where native leniency exits 0 ---
+        "main_result_err" => Some("native: main returning .err exits 0 (no propagation)"),
+        "pg_connect_refused" | "mysql_connect_refused" => {
+            Some("native: refused connect yields a null handle and exits 0 (AOT leniency, documented)")
+        }
         _ => None,
     }
 }
@@ -169,6 +225,22 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
 // ---------------------------------------------------------------------------
 // Parity assertion
 // ---------------------------------------------------------------------------
+
+/// Normalize an output stream for cross-engine comparison: ephemeral
+/// `ip:port` pairs collapse and purely numeric lines (timestamps,
+/// addresses) drop. Single choke point so the macros and the sweep
+/// below can never disagree on what "equal" means.
+fn norm_stream(s: &str) -> String {
+    strip_numeric_lines(&normalize_addrs(s))
+}
+
+/// True when two runs match byte-for-byte after normalization:
+/// exit codes equal and stdout + stderr equal.
+fn parity_match(vm: &(i32, String, String), native: &(i32, String, String)) -> bool {
+    vm.0 == native.0
+        && norm_stream(&vm.1) == norm_stream(&native.1)
+        && norm_stream(&vm.2) == norm_stream(&native.2)
+}
 
 /// Assert strict parity between VM and native output.
 fn assert_parity_strict(
@@ -210,15 +282,15 @@ fn assert_parity_strict(
         "[{display}]: native should exit 0 but got {native_exit}.\nnative stderr: {native_stderr}"
     );
 
-    let vm_norm = strip_numeric_lines(&normalize_addrs(&vm_stdout));
-    let native_norm = strip_numeric_lines(&normalize_addrs(&native_stdout));
+    let vm_norm = norm_stream(&vm_stdout);
+    let native_norm = norm_stream(&native_stdout);
     assert_eq!(
         vm_norm, native_norm,
-        "PARITY BUG [{display}]: VM and native stdout differ.\n--- VM ---\n{vm_stdout}\n--- NATIVE ---\n{native_stdout}"
+        "PARITY BUG [{display}]: VM and native stdout differ (exits vm={vm_exit} native={native_exit}).\n--- VM stdout ---\n{vm_stdout}\n--- NATIVE stdout ---\n{native_stdout}\n--- VM stderr ---\n{vm_stderr}\n--- NATIVE stderr ---\n{native_stderr}"
     );
 
-    let vm_err_norm = strip_numeric_lines(&normalize_addrs(&vm_stderr));
-    let native_err_norm = strip_numeric_lines(&normalize_addrs(&native_stderr));
+    let vm_err_norm = norm_stream(&vm_stderr);
+    let native_err_norm = norm_stream(&native_stderr);
     assert_eq!(
         vm_err_norm, native_err_norm,
         "PARITY BUG [{display}]: VM and native stderr differ.\n--- VM stderr ---\n{vm_stderr}\n--- Native stderr ---\n{native_stderr}"
@@ -405,6 +477,9 @@ parity_strict!(parity_syntax_dicts, "syntax", "dicts.zz");
 parity_strict!(parity_syntax_string_blocks, "syntax", "string_blocks.zz");
 parity_strict!(parity_syntax_pipe_elvis, "syntax", "pipe_elvis.zz");
 parity_strict!(parity_syntax_scalar_copy, "syntax", "scalar_copy.zz");
+parity_strict!(parity_syntax_elif_chain, "syntax", "elif_chain.zz");
+parity_strict!(parity_syntax_top_level_elif, "syntax", "top_level_elif.zz");
+parity_strict!(parity_syntax_chained_calls, "syntax", "chained_calls.zz");
 
 // Types
 parity_strict!(parity_types_generics, "types", "generics.zz");
@@ -524,6 +599,7 @@ parity_strict!(parity_stdlib_fs_vfs, "stdlib", "fs_vfs.zz");
 parity_strict!(parity_stdlib_bytes, "stdlib", "bytes.zz");
 parity_strict!(parity_stdlib_env_full, "stdlib", "env_full.zz");
 parity_strict!(parity_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
+parity_strict!(parity_stdlib_input_chained, "stdlib", "input_chained.zz");
 parity_strict!(
     parity_stdlib_http_request_response,
     "stdlib",
@@ -541,17 +617,25 @@ parity_strict_error!(parity_err_missing_field, "missing_field.zz");
 // Listed here for documentation:
 // - HTTP: http_server_test, http_client_test, http_phase5b_test, concurrent_http_test
 // - Timing: time_ops, time_test, bench_memory_arena
+// - Logging: log_test (embedded timestamps/durations)
 // - Str stdlib: str_extended_test (already strict — passes)
 
 // ===========================================================================
-// Dynamic discovery: exhaustive parity sweep (ignored by default)
+// Exhaustive parity sweep: EVERY fixture through BOTH engines.
 //
-// Runs EVERY .zz fixture through both engines. Reports summary.
-// Run with: cargo test -p zz_cli --test dual_engine_parity -- --ignored
+// This is the strict gate — not documentation. Any `.zz` file under
+// tests/fixtures/{syntax,types,stdlib,errors} runs here with no
+// registration needed, so a new fixture (or a regression in an old one)
+// cannot slip past the per-file macros above. Stdin comes from the
+// `<stem>.stdin` sibling when present (see `stdin_for`), closed
+// otherwise, identically for both engines.
+//
+// Buckets: strict pass / known failure (tracked bug, still broken) /
+// skipped (non-deterministic output) / unexpected (CI-red). Under
+// `ZZ_PARITY_VM_ONLY=1` only the VM leg runs (fast iteration).
 // ===========================================================================
 
 #[test]
-#[ignore]
 fn parity_discover_all_fixtures() {
     let fixtures = fixtures_dir();
     let success_dirs = ["syntax", "types", "stdlib"];
@@ -580,36 +664,42 @@ fn parity_discover_all_fixtures() {
             }
 
             let vm = run_zz_vm(file);
+            if vm.0 != 0 {
+                unexpected.push(format!("VM FAIL {}: {}", file.display(), vm.2));
+                continue;
+            }
+            if vm_only() {
+                strict_pass += 1;
+                continue;
+            }
             let native = run_zz_native(file);
 
-            if known_native_failure(file).is_some() {
+            if let Some(bug) = known_native_failure(file) {
                 known_failures += 1;
-                let native_broken =
-                    native.0 != 0 || strip_numeric_lines(&vm.1) != strip_numeric_lines(&native.1);
-                if !native_broken {
+                if parity_match(&vm, &native) {
                     unexpected.push(format!(
-                        "FIXED! {} — remove from known_native_failures()",
+                        "FIXED! {} — remove from known_native_failures() (was: {bug})",
                         file.display()
                     ));
                 }
                 continue;
             }
 
-            // Strict parity check.
-            if vm.0 != 0 {
-                unexpected.push(format!("VM FAIL {}: {}", file.display(), vm.2));
-                continue;
-            }
+            // Strict parity check (exit + stdout + stderr).
             if native.0 != 0 {
                 unexpected.push(format!("NATIVE FAIL {}: {}", file.display(), native.2));
                 continue;
             }
-            if strip_numeric_lines(&vm.1) != strip_numeric_lines(&native.1) {
+            if !parity_match(&vm, &native) {
                 unexpected.push(format!(
-                    "PARITY BUG {}\n--- VM ---\n{}\n--- NATIVE ---\n{}",
+                    "PARITY BUG {}\n--- exits vm={} native={} ---\n--- VM stdout ---\n{}\n--- NATIVE stdout ---\n{}\n--- VM stderr ---\n{}\n--- NATIVE stderr ---\n{}",
                     file.display(),
+                    vm.0,
+                    native.0,
                     vm.1,
-                    native.1
+                    native.1,
+                    vm.2,
+                    native.2
                 ));
                 continue;
             }
@@ -631,13 +721,37 @@ fn parity_discover_all_fixtures() {
         files.sort();
 
         for file in &files {
-            if known_native_failure(file).is_some() {
+            if let Some(bug) = known_native_failure(file) {
                 err_known += 1;
+                // A "fixed" error fixture fails on native again: surface
+                // it instead of silently counting.
+                let native = if vm_only() {
+                    continue;
+                } else {
+                    run_zz_native(file)
+                };
+                if native.0 != 0 {
+                    unexpected.push(format!(
+                        "FIXED! {} — native errors again; remove from known_native_failures() (was: {bug})",
+                        file.display()
+                    ));
+                }
                 continue;
             }
             let vm = run_zz_vm(file);
+            if vm.0 == 0 {
+                unexpected.push(format!(
+                    "ERROR FIXTURE {} exits 0 on VM (should fail)",
+                    file.display()
+                ));
+                continue;
+            }
+            if vm_only() {
+                err_strict += 1;
+                continue;
+            }
             let native = run_zz_native(file);
-            if vm.0 != 0 && native.0 != 0 {
+            if native.0 != 0 {
                 err_strict += 1;
             } else {
                 unexpected.push(format!(

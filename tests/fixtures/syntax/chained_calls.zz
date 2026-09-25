@@ -1,0 +1,15 @@
+// Chained method calls on call results (temporaries, not idents).
+// Regression probe for receiver-temporary lowering parity.
+func main() {
+    a := "  HI  ".trim().to_lower()
+    println("a:{a}")
+    b := "x,y,z".split(",").join("-")
+    println("b:{b}")
+    c := [3, 1, 2].sort().reverse()
+    println("c:{c}")
+    d := len("  padded  ".trim())
+    println("d:{d}")
+    e := "a,b".split(",").reverse().join("!")
+    println("e:{e}")
+    println("chained_calls_ok")
+}

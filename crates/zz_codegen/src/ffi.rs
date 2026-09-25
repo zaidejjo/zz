@@ -403,7 +403,14 @@ pub fn ensure_staticlib(release: bool) -> Result<PathBuf, FfiError> {
     }
 
     let release_flag = if release { " --release" } else { "" };
-    eprintln!("zz: building native runtime (cargo build -p zz_native_rt{release_flag})...");
+    // Progress chatter only on an interactive stderr: `zz run --native`
+    // execs the program with inherited stderr, so any build log line would
+    // merge with program output (breaking piped `2>` captures and the
+    // dual-engine parity harness on cold caches — whichever fixture
+    // triggers the one-time staticlib build gains a stray stderr line).
+    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        eprintln!("zz: building native runtime (cargo build -p zz_native_rt{release_flag})...");
+    }
     let mut cmd = Command::new("cargo");
     cmd.arg("build")
         .arg("--manifest-path")
