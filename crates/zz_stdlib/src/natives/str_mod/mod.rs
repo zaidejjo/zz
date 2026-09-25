@@ -111,7 +111,8 @@ pub(crate) fn str_join(
         .iter()
         .map(|v| match v {
             Value::Str(s) => (**s).clone(),
-            other => other.to_string(),
+            // Display semantics so Options unwrap instead of leaking wrappers.
+            other => other.to_display_string(),
         })
         .collect();
     Ok(Value::Str(strs.join(&sep).into()))

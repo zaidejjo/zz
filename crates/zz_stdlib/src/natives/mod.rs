@@ -2750,6 +2750,18 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
+    // Built-in: `dbg(v)` — debug print preserving Option wrappers,
+    // returns `v` unchanged. The only display path that keeps
+    // `.some(v)` / `.none`; `println`, interpolation, and `str()`
+    // all unwrap.
+    m.insert(
+        "dbg".into(),
+        NativeEntry {
+            arity: 1,
+            f: builtins::dbg_fn,
+        },
+    );
+
     m
 }
 

@@ -593,6 +593,11 @@ parity_strict!(
     "fs_comprehensive.zz"
 );
 parity_strict!(parity_stdlib_result_print, "stdlib", "result_print.zz");
+parity_strict!(
+    parity_stdlib_option_interpolation,
+    "stdlib",
+    "option_interpolation.zz"
+);
 parity_strict!(parity_stdlib_import_alias, "stdlib", "import_alias.zz");
 parity_strict!(parity_stdlib_fs_path, "stdlib", "fs_path.zz");
 parity_strict!(parity_stdlib_fs_vfs, "stdlib", "fs_vfs.zz");

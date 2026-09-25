@@ -81,7 +81,9 @@ zz_value zz_to_str(zz_value v, int *err);
 
 // ---- formatting --------------------------------------------------------
 void zz_print_value(FILE *out, const zz_value *v);
-char *zz_value_to_string(const zz_value *v);  // malloc'd
+void zz_print_value_display(FILE *out, const zz_value *v);
+char *zz_value_to_string(const zz_value *v);  // malloc'd (debug: keeps wrappers)
+char *zz_value_to_display_string(const zz_value *v);  // malloc'd (display: unwraps Option)
 char *zz_to_str_fmt(zz_value v, const char *spec);  // malloc'd
 
 #ifdef __cplusplus

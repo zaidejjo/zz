@@ -341,9 +341,18 @@ static void zz_print_double(FILE *out, double x) {
 // only a safety bound against reference cycles built through mutation.
 #define ZZ_PRINT_MAX_DEPTH 32
 static void zz_print_value_depth(FILE *out, const zz_value *v, int depth);
+static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth);
 
 void zz_print_value(FILE *out, const zz_value *v) {
     zz_print_value_depth(out, v, 0);
+}
+
+// Display printer: auto-unwraps Option for user-facing output
+// (interpolation, println nesting). `.some(v)` renders as `v`,
+// `.none` renders as `none` (no dot). Only `zz_dbg` / `:?` keep the
+// explicit `.some(...)` / `.none` debug form above.
+void zz_print_value_display(FILE *out, const zz_value *v) {
+    zz_print_value_display_depth(out, v, 0);
 }
 
 static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
@@ -469,6 +478,156 @@ static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
             }
             fputs(": ", out);
             zz_print_value_depth(out, &o->fields[i * 2 + 1], depth + 1);
+        }
+        fputc('}', out);
+        break;
+    }
+    case ZZ_TCP_STREAM:
+        fputs("<tcp stream>", out);
+        break;
+    case ZZ_TCP_LISTENER:
+        fputs("<tcp listener>", out);
+        break;
+    case ZZ_FILE:
+        fputs("<file>", out);
+        break;
+    case ZZ_JSON:
+        if (v->payload) {
+            char *j = json_to_cstr(*v);
+            fputs(j, out);
+            free(j);
+        }
+        break;
+    default:
+        fputs("<value>", out);
+        break;
+    }
+}
+
+static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth) {
+    // Unwrap consecutive `.some` layers; bare `.none` is `none`.
+    while (v->tag == ZZ_OPTION_SOME && v->payload) {
+        v = v->payload;
+        if (depth >= ZZ_PRINT_MAX_DEPTH) {
+            fputs("...", out);
+            return;
+        }
+    }
+    if (v->tag == ZZ_OPTION_NONE) {
+        fputs("none", out);
+        return;
+    }
+    switch (v->tag) {
+    case ZZ_UNIT:
+        break;
+    case ZZ_INT:
+        fprintf(out, "%lld", (long long)v->i);
+        break;
+    case ZZ_FLOAT: {
+        double x = v->f;
+        if (x != x) { fputs("nan", out); break; }
+        if (x == 1.0/0.0) { fputs("inf", out); break; }
+        if (x == -1.0/0.0) { fputs("-inf", out); break; }
+        if (x == (int64_t)x && x < 1e15 && x > -1e15) {
+            fprintf(out, "%.1f", x);
+        } else {
+            zz_print_double(out, x);
+        }
+        break;
+    }
+    case ZZ_BOOL:
+        fputs(v->b ? "true" : "false", out);
+        break;
+    case ZZ_STR:
+        fwrite(zz_str_ptr(v->s), 1, v->s->len, out);
+        break;
+    case ZZ_ARRAY:
+        fputs("[", out);
+        if (v->arr) {
+            for (size_t i = 0; i < v->arr->len; i++) {
+                if (i > 0) fputs(", ", out);
+                zz_print_value_display_depth(out, &v->arr->items[i], depth + 1);
+            }
+        }
+        fputs("]", out);
+        break;
+    case ZZ_BYTES: {
+        fputs("[", out);
+        if (v->bytes && v->bytes->buf) {
+            for (size_t i = 0; i < v->bytes->len; i++) {
+                if (i > 0) fputs(", ", out);
+                fprintf(out, "%u", v->bytes->buf->data[v->bytes->off + i]);
+            }
+        }
+        fputs("]", out);
+        break;
+    }
+    case ZZ_DICT:
+        fputs("{", out);
+        if (v->dict) {
+            for (size_t i = 0; i < v->dict->len; i++) {
+                if (i > 0) fputs(", ", out);
+                fwrite(zz_str_ptr(v->dict->entries[i].key), 1,
+                       v->dict->entries[i].key->len, out);
+                fputs(": ", out);
+                zz_print_value_display_depth(out, &v->dict->entries[i].val, depth + 1);
+            }
+        }
+        fputs("}", out);
+        break;
+    case ZZ_RESULT_OK:
+        fputs(".ok(", out);
+        if (v->payload) zz_print_value_display_depth(out, v->payload, depth + 1);
+        fputs(")", out);
+        break;
+    case ZZ_RESULT_ERR:
+        fputs(".err(", out);
+        if (v->payload) zz_print_value_display_depth(out, v->payload, depth + 1);
+        fputs(")", out);
+        break;
+    case ZZ_RANGE:
+        fprintf(out, "%lld..%lld", (long long)v->i, (long long)v->i);
+        break;
+    case ZZ_FUNC:
+        fputs("<func>", out);
+        break;
+    case ZZ_CHAN:
+        fputs("<chan>", out);
+        break;
+    case ZZ_TASK_JOIN:
+        fputs("<task.join>", out);
+        break;
+    case ZZ_TUPLE:
+        fputs("(", out);
+        if (v->payload) {
+            zz_value *arr = (zz_value *)v->payload;
+            if ((*arr).tag == ZZ_ARRAY) {
+                for (size_t i = 0; i < (*arr).arr->len; i++) {
+                    if (i > 0) fputs(", ", out);
+                    zz_print_value_display_depth(out, &(*arr).arr->items[i], depth + 1);
+                }
+            }
+        }
+        fputs(")", out);
+        break;
+    case ZZ_OBJECT: {
+        if (!v->obj || depth >= ZZ_PRINT_MAX_DEPTH) {
+            fputs("...", out);
+            break;
+        }
+        const zz_object *o = v->obj;
+        fputs(o->type_name ? o->type_name : "<struct>", out);
+        fputc('{', out);
+        for (size_t i = 0; i < o->len; i++) {
+            if (i > 0) fputs(", ", out);
+            const zz_value *fname = &o->fields[i * 2];
+            if (fname->tag == ZZ_STR && fname->s) {
+                fwrite(zz_str_ptr(fname->s), 1, fname->s->len, out);
+            } else {
+                fputs("?", out);
+            }
+            fputs(": ", out);
+            zz_print_value_display_depth(out, &o->fields[i * 2 + 1], depth + 1);
         }
         fputc('}', out);
         break;
@@ -723,11 +882,198 @@ char *zz_value_to_string(const zz_value *v) {
     return sb.buf;
 }
 
+// Display variant: auto-unwraps Option (`.some(v)` → `v`, `.none` →
+// `none`) recursively, so interpolation / `str()` / `println` nesting
+// never leak the raw variant structure. Only `zz_dbg` / `:?` keep it.
+static void zz_value_to_display_strbuf_depth(strbuf *sb, const zz_value *v, int depth);
+
+static void zz_value_to_display_strbuf(strbuf *sb, const zz_value *v) {
+    zz_value_to_display_strbuf_depth(sb, v, 0);
+}
+
+static void zz_value_to_display_strbuf_depth(strbuf *sb, const zz_value *v, int depth) {
+    if (depth >= ZZ_PRINT_MAX_DEPTH) {
+        sb_append_str(sb, "...");
+        return;
+    }
+    // Unwrap consecutive `.some` layers; bare `.none` is `none`.
+    while (v->tag == ZZ_OPTION_SOME && v->payload) {
+        v = v->payload;
+    }
+    if (v->tag == ZZ_OPTION_NONE) {
+        sb_append_str(sb, "none");
+        return;
+    }
+    char buf[128];
+    switch (v->tag) {
+    case ZZ_UNIT:
+        break;
+    case ZZ_INT:
+        snprintf(buf, sizeof buf, "%lld", (long long)v->i);
+        sb_append_str(sb, buf);
+        break;
+    case ZZ_FLOAT: {
+        double x = v->f;
+        if (x != x) { sb_append_str(sb, "nan"); break; }
+        if (x == 1.0/0.0) { sb_append_str(sb, "inf"); break; }
+        if (x == -1.0/0.0) { sb_append_str(sb, "-inf"); break; }
+        if (x == (int64_t)x && x < 1e15 && x > -1e15) {
+            char fbuf[32];
+            snprintf(fbuf, sizeof fbuf, "%.1f", x);
+            sb_append_str(sb, fbuf);
+        } else {
+            zz_append_double(sb, x);
+        }
+        break;
+    }
+    case ZZ_BOOL:
+        sb_append_str(sb, v->b ? "true" : "false");
+        break;
+    case ZZ_STR:
+        sb_append(sb, zz_str_ptr(v->s), v->s->len);
+        break;
+    case ZZ_ARRAY:
+        sb_append_c(sb, '[');
+        if (v->arr) {
+            for (size_t i = 0; i < v->arr->len; i++) {
+                if (i > 0) sb_append_str(sb, ", ");
+                zz_value_to_display_strbuf_depth(sb, &v->arr->items[i], depth + 1);
+            }
+        }
+        sb_append_c(sb, ']');
+        break;
+    case ZZ_BYTES: {
+        sb_append_c(sb, '[');
+        if (v->bytes && v->bytes->buf) {
+            for (size_t i = 0; i < v->bytes->len; i++) {
+                if (i > 0) sb_append_str(sb, ", ");
+                char num[4];
+                snprintf(num, sizeof num, "%u",
+                         v->bytes->buf->data[v->bytes->off + i]);
+                sb_append_str(sb, num);
+            }
+        }
+        sb_append_c(sb, ']');
+        break;
+    }
+    case ZZ_DICT:
+        sb_append_c(sb, '{');
+        if (v->dict) {
+            for (size_t i = 0; i < v->dict->len; i++) {
+                if (i > 0) sb_append_str(sb, ", ");
+                sb_append(sb, zz_str_ptr(v->dict->entries[i].key),
+                          v->dict->entries[i].key->len);
+                sb_append_str(sb, ": ");
+                zz_value_to_display_strbuf_depth(sb, &v->dict->entries[i].val, depth + 1);
+            }
+        }
+        sb_append_c(sb, '}');
+        break;
+    case ZZ_RESULT_OK:
+        sb_append_str(sb, ".ok(");
+        if (v->payload) zz_value_to_display_strbuf_depth(sb, v->payload, depth + 1);
+        sb_append_c(sb, ')');
+        break;
+    case ZZ_RESULT_ERR:
+        sb_append_str(sb, ".err(");
+        if (v->payload) zz_value_to_display_strbuf_depth(sb, v->payload, depth + 1);
+        sb_append_c(sb, ')');
+        break;
+    case ZZ_RANGE:
+        snprintf(buf, sizeof buf, "%lld..%lld", (long long)v->i, (long long)v->i);
+        sb_append_str(sb, buf);
+        break;
+    case ZZ_FUNC:
+        sb_append_str(sb, "<func>");
+        break;
+    case ZZ_CHAN:
+        sb_append_str(sb, "<chan>");
+        break;
+    case ZZ_TASK_JOIN:
+        sb_append_str(sb, "<task.join>");
+        break;
+    case ZZ_TUPLE:
+        sb_append_str(sb, "(");
+        if (v->payload) {
+            zz_value *arr = (zz_value *)v->payload;
+            if ((*arr).tag == ZZ_ARRAY) {
+                for (size_t i = 0; i < (*arr).arr->len; i++) {
+                    if (i > 0) sb_append_str(sb, ", ");
+                    zz_value_to_display_strbuf_depth(sb, &(*arr).arr->items[i], depth + 1);
+                }
+            }
+        }
+        sb_append_str(sb, ")");
+        break;
+    case ZZ_OBJECT: {
+        if (!v->obj || depth >= ZZ_PRINT_MAX_DEPTH) {
+            sb_append_str(sb, "...");
+            break;
+        }
+        const zz_object *o = v->obj;
+        sb_append_str(sb, o->type_name ? o->type_name : "<struct>");
+        sb_append_c(sb, '{');
+        for (size_t i = 0; i < o->len; i++) {
+            if (i > 0) sb_append_str(sb, ", ");
+            const zz_value *fname = &o->fields[i * 2];
+            if (fname->tag == ZZ_STR && fname->s) {
+                sb_append(sb, zz_str_ptr(fname->s), fname->s->len);
+            } else {
+                sb_append_c(sb, '?');
+            }
+            sb_append_str(sb, ": ");
+            zz_value_to_display_strbuf_depth(sb, &o->fields[i * 2 + 1], depth + 1);
+        }
+        sb_append_c(sb, '}');
+        break;
+    }
+    case ZZ_TCP_STREAM:
+        sb_append_str(sb, "<tcp stream>");
+        break;
+    case ZZ_TCP_LISTENER:
+        sb_append_str(sb, "<tcp listener>");
+        break;
+    case ZZ_FILE:
+        sb_append_str(sb, "<file>");
+        break;
+    case ZZ_JSON:
+        if (v->payload) {
+            char *j = json_to_cstr(*v);
+            sb_append_str(sb, j);
+            free(j);
+        }
+        break;
+    default:
+        sb_append_str(sb, "<value>");
+        break;
+    }
+}
+
+char *zz_value_to_display_string(const zz_value *v) {
+    strbuf sb;
+    sb_init(&sb);
+    zz_value_to_display_strbuf(&sb, v);
+    return sb.buf;
+}
+
 // zz_to_str_fmt(val, spec) — format a value using a format spec string.
 // The spec is the part after `:` in f-strings, e.g. ".2f", "x", "X", "o", "b".
-// If spec is NULL or empty, falls back to zz_value_to_string.
+// Display semantics: Option auto-unwraps (`.some(v)` → `v`, `.none` →
+// `none`); explicit `?` / `debug` specs preserve the debug form.
+// If spec is NULL or empty, falls back to display string.
 char *zz_to_str_fmt(zz_value v, const char *spec) {
-    if (!spec || spec[0] == '\0') return zz_value_to_string(&v);
+    if (!spec || spec[0] == '\0') return zz_value_to_display_string(&v);
+    // Explicit debug formatting preserves wrappers.
+    if (strcmp(spec, "?") == 0 || strcmp(spec, "debug") == 0) {
+        return zz_value_to_string(&v);
+    }
+    // Auto-unwrap Option layers for display before applying the spec.
+    while (v.tag == ZZ_OPTION_SOME && v.payload) {
+        v = *v.payload;
+    }
+    if (v.tag == ZZ_OPTION_NONE) {
+        return strdup_len("none", 4);
+    }
     // Float format: .Nf, .Ne, .Ng, etc.
     if (v.tag == ZZ_FLOAT || (v.tag == ZZ_INT && spec[0] == '.')) {
         double d = v.tag == ZZ_FLOAT ? v.f : (double)v.i;
@@ -769,7 +1115,7 @@ char *zz_to_str_fmt(zz_value v, const char *spec) {
         snprintf(buf, sizeof buf, fmt, d);
         return strdup_len(buf, strlen(buf));
     }
-    return zz_value_to_string(&v);
+    return zz_value_to_display_string(&v);
 }
 zz_value zz_binop_cat(zz_value a, zz_value b) {
     if (a.tag == ZZ_STR && b.tag == ZZ_STR) {
@@ -837,7 +1183,7 @@ zz_value zz_binop_cat_arena(zz_value a, zz_value b, zz_arena *arena) {
 
 
 zz_value zz_binop_cat_str(zz_value a, zz_value b) {
-    char *sv = zz_value_to_string(&b);
+    char *sv = zz_value_to_display_string(&b);
     zz_value sb = zz_str_owned(sv);
     zz_value r = zz_binop_cat(a, sb);
     zz_release(&sb);
@@ -1032,28 +1378,54 @@ zz_value zz_str_trim_end(zz_value s, int *err) {
     return zz_str_new(d, end);
 }
 
-// str.join(items, sep) — join array of strings with separator
+// str.join(items, sep) — join array of strings with separator.
+// Display semantics: non-string items stringify via display conversion
+// (Options unwrap), matching the VM's `vec.join` / `str.join`.
 zz_value zz_str_join(zz_value items, zz_value sep, int *err) {
     (void)err;
     if (items.tag != ZZ_ARRAY || !items.arr) return zz_str_static("");
     const char *sep_d = "";
     size_t sep_len = 0;
     if (sep.tag == ZZ_STR) { sep_d = zz_str_ptr(sep.s); sep_len = sep.s->len; }
-    // Calculate total length.
+    size_t n = items.arr->len;
+    if (n == 0) return zz_str_static("");
+    // Materialize each item as bytes (borrowed for STR, owned display
+    // string otherwise), then join.
+    const char **parts = (const char **)malloc(n * sizeof(char *));
+    size_t *lens = (size_t *)malloc(n * sizeof(size_t));
+    char **owned = (char **)malloc(n * sizeof(char *));
+    if (!parts || !lens || !owned) {
+        free(parts); free(lens); free(owned);
+        return zz_str_static("");
+    }
     size_t total = 0;
-    for (size_t i = 0; i < items.arr->len; i++) {
+    for (size_t i = 0; i < n; i++) {
         zz_value v = items.arr->items[i];
-        if (v.tag == ZZ_STR) total += v.s->len;
+        owned[i] = NULL;
+        if (v.tag == ZZ_STR && v.s) {
+            parts[i] = zz_str_cptr(v.s);
+            lens[i] = v.s->len;
+        } else {
+            char *s = zz_value_to_display_string(&v);
+            owned[i] = s;
+            parts[i] = s;
+            lens[i] = strlen(s);
+        }
+        total += lens[i];
         if (i > 0) total += sep_len;
     }
     char *buf = (char *)malloc(total + 1);
     size_t pos = 0;
-    for (size_t i = 0; i < items.arr->len; i++) {
+    for (size_t i = 0; i < n; i++) {
         if (i > 0) { memcpy(buf + pos, sep_d, sep_len); pos += sep_len; }
-        zz_value v = items.arr->items[i];
-        if (v.tag == ZZ_STR) { memcpy(buf + pos, zz_str_ptr(v.s), v.s->len); pos += v.s->len; }
+        memcpy(buf + pos, parts[i], lens[i]);
+        pos += lens[i];
+        free(owned[i]);
     }
     buf[pos] = '\0';
+    free(parts);
+    free(lens);
+    free(owned);
     return zz_str_owned(buf);
 }
 
@@ -1147,17 +1519,17 @@ zz_value zz_str_from_int(int64_t n) {
 }
 
 // typeof(v) — return type name as string.
-// zz_str(v) — cast to string.
+// zz_str(v) — cast to string (display semantics: unwraps Option).
 zz_value zz_str_cast(zz_value v, int *err) {
     (void)err;
     if (v.tag == ZZ_INT) return zz_str_from_int(v.i);
-    char *s = zz_value_to_string(&v);
+    char *s = zz_value_to_display_string(&v);
     return zz_str_owned(s);
 }
 
 // Arena-aware str cast: converts v to string and allocates the result on
-// the arena (refs=0 sentinel). The intermediate char* from zz_value_to_string
-// is freed after copying to the arena.
+// the arena (refs=0 sentinel). The intermediate char* from display
+// conversion is freed after copying to the arena.
 zz_value zz_str_cast_arena(zz_value v, int *err, zz_arena *arena) {
     (void)err;
     if (!arena) return zz_str_cast(v, err);
@@ -1169,7 +1541,7 @@ zz_value zz_str_cast_arena(zz_value v, int *err, zz_arena *arena) {
         const char *p = zz_fmt_i64(ibuf + sizeof ibuf, v.i, &ilen);
         return zz_str_new_arena(p, ilen, arena);
     }
-    char *s = zz_value_to_string(&v);
+    char *s = zz_value_to_display_string(&v);
     size_t len = strlen(s);
     zz_str *str = (zz_str *)zz_arena_alloc(arena, sizeof(zz_str), 8);
     str->refs = 0;
@@ -1193,8 +1565,9 @@ zz_value zz_str_cast_arena(zz_value v, int *err, zz_arena *arena) {
 }
 
 // to_str(v) — convert any value to a string zz_value (for fstring interpolation).
+// Display semantics: auto-unwraps Option; only `zz_dbg` / `:?` keep wrappers.
 zz_value zz_to_str(zz_value v, int *err) {
     (void)err;
-    char *s = zz_value_to_string(&v);
+    char *s = zz_value_to_display_string(&v);
     return zz_str_owned(s);
 }

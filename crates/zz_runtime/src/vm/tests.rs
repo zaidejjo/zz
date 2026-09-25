@@ -259,6 +259,48 @@ fn vm_matches_tree_walker_on_basics() {
 }
 
 #[test]
+fn vm_interpolation_unwraps_option_parity() {
+    // VM and tree-walker must render interpolated Options identically:
+    // `.some(v)` unwraps to `v`, `.none` renders as `none`, while `:?`
+    // preserves the debug wrappers.
+    for src in [
+        "x := .some(42)\n\"{x}\"",
+        "x := .some(\"hi\")\n\"{x}\"",
+        "x := .none\n\"{x}\"",
+        "x := .some(.some(7))\n\"{x}\"",
+        "x := .some(42)\n\"val={x}!\"",
+        "x := .some(255)\n\"{x:x}\"",
+        "x := .some(3.14)\n\"{x:.2f}\"",
+        "x := .some(42)\n\"{x:?}\"",
+        "x := .none\n\"{x:?}\"",
+        "x := .some(42)\n\"{x:debug}\"",
+    ] {
+        assert_same(src);
+    }
+    // Expected display values (not just agreement).
+    assert_eq!(
+        run_src("x := .some(42)\n\"{x}\"").unwrap(),
+        Value::Str("42".to_string().into())
+    );
+    assert_eq!(
+        run_src("x := .none\n\"{x}\"").unwrap(),
+        Value::Str("none".to_string().into())
+    );
+    assert_eq!(
+        run_src("x := .some(.some(7))\n\"{x}\"").unwrap(),
+        Value::Str("7".to_string().into())
+    );
+    assert_eq!(
+        run_src("x := .some(42)\n\"{x:?}\"").unwrap(),
+        Value::Str(".some(42)".to_string().into())
+    );
+    assert_eq!(
+        run_src("x := .none\n\"{x:?}\"").unwrap(),
+        Value::Str(".none".to_string().into())
+    );
+}
+
+#[test]
 fn vm_multiline_pipe() {
     for src in [
         "func inc(n: int) -> int { n + 1 }\nfunc dbl(n: int) -> int { n * 2 }\n5\n  |> inc\n  |> dbl",
