@@ -459,6 +459,8 @@ impl Vm {
                                 }))
                             })
                         })
+                        // C-only plugins (direct dlsym, no Rust shim).
+                        .or_else(|| crate::c_abi::native_value(name))
                         .or_else(|| {
                             // Selective-import alias (miss-only): resolve
                             // `ns.sym` like a qualified path. See
@@ -1757,19 +1759,34 @@ impl Vm {
                     // sqlz.query/sqlz.exec (+ db.* alias) carry a variable
                     // number of bound params; resolve the entry without an
                     // arity gate (Interp::call skips it for sqlz.* too).
-                    let entry =
-                        interp.natives.get(name).copied().ok_or_else(|| {
-                            EvalError::new(format!("unknown native `{name}`"), span)
-                        })?;
-                    if !is_db && args.len() != entry.arity {
+                    let entry = interp.natives.get(name).copied();
+                    let arity = match &entry {
+                        Some(e) => e.arity,
+                        // C-only plugins resolve by name from the registry.
+                        None => match crate::c_abi::arity_of(name) {
+                            Some(a) => a,
+                            None => {
+                                return Err(self.error(format!("unknown native `{name}`"), span));
+                            }
+                        },
+                    };
+                    if !is_db && args.len() != arity {
                         return_scratch_args(args);
                         return Err(self.error(
-                            format!("expected {} arguments, found {}", entry.arity, argc),
+                            format!("expected {} arguments, found {}", arity, argc),
                             span,
                         ));
                     }
                     self.frames.last_mut().unwrap().ip = ip;
-                    let result = (entry.f)(interp, &mut args, span)?;
+                    let result = match entry {
+                        Some(e) => (e.f)(interp, &mut args, span)?,
+                        None => match crate::c_abi::call(name, &mut args, span) {
+                            Some(r) => r?,
+                            None => {
+                                return Err(self.error(format!("unknown native `{name}`"), span));
+                            }
+                        },
+                    };
                     self.stack.push(result);
                     return_scratch_args(args);
                     re_cache!();
