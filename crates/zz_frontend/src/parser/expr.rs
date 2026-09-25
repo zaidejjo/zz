@@ -440,7 +440,8 @@ impl Parser {
             // Optional format spec: `{val:.2f}`, `{val:x}`, etc.
             let fmt_spec = if self.eat(TokenKind::Colon) {
                 // Consume everything up to `}` as the format spec.
-                // The spec is a simple identifier or dot-prefixed like `.2f`.
+                // The spec is a simple identifier, `?` (debug), or
+                // dot-prefixed like `.2f`.
                 let mut spec = String::new();
                 if self.at(TokenKind::Dot) {
                     spec.push('.');
@@ -458,6 +459,10 @@ impl Parser {
                 } else if self.at(TokenKind::Ident) {
                     let t = self.advance();
                     spec.push_str(&t.text);
+                } else if self.at(TokenKind::Question) {
+                    // Rust-style debug spec `{x:?}` preserves wrappers.
+                    self.advance();
+                    spec.push('?');
                 }
                 Some(spec)
             } else {

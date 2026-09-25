@@ -9,8 +9,11 @@ use zz_runtime::{EvalError, Interp, Span, Value};
 /// `println(.ok(v))` prints `v` directly instead of `.ok(v)`, and
 /// `println(.some(v))` prints `v` instead of `.some(v)`, so standard
 /// execution output stays clean. A bare `.none` prints `none`.
-/// Interpolation (`"{v}"`), `str(v)`, and `Debug` keep the full
-/// `.ok(...)` / `.some(...)` representation.
+/// String interpolation (`"{v}"`), `str(v)`, and `print`/`println`
+/// nesting share the same display unwrapping (see
+/// `Value::to_display_string`); only `dbg(...)` and explicit `:?` /
+/// `:debug` specs keep the full `.ok(...)` / `.some(...)` / `.none`
+/// debug representation.
 fn for_stdout(mut v: Value, span: Span) -> Result<Value, EvalError> {
     loop {
         match v {
@@ -117,7 +120,8 @@ pub(crate) fn print(
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument for print", span))?;
     // A printed `.err` throws (readable + hinted); see `for_stdout`.
-    print!("{}", for_stdout(v, span)?);
+    // Display form unwraps nested Options as well (not just top-level).
+    print!("{}", for_stdout(v, span)?.to_display_string());
     Ok(Value::Unit)
 }
 
@@ -131,7 +135,8 @@ pub(crate) fn println(
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument for println", span))?;
     // A printed `.err` throws (readable + hinted); see `for_stdout`.
-    println!("{}", for_stdout(v, span)?);
+    // Display form unwraps nested Options as well (not just top-level).
+    println!("{}", for_stdout(v, span)?.to_display_string());
     Ok(Value::Unit)
 }
 

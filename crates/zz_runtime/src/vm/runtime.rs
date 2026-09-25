@@ -1652,7 +1652,9 @@ impl Vm {
                     parts.reverse();
                     let mut out = String::new();
                     for p in parts {
-                        out.push_str(&p.to_string());
+                        // Display semantics (see `Value::to_display_string`):
+                        // interpolation unwraps Option; `dbg`/`:?` keeps it.
+                        out.push_str(&p.to_display_string());
                     }
                     self.stack.push(Value::Str(out.into()));
                 }

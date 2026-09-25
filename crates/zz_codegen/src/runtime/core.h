@@ -703,6 +703,7 @@ zz_value zz_call_native_spawn(zz_dispatch_fn fn, void **cells,
 zz_value zz_io_println(zz_value v, int *err);
 zz_value zz_io_print(zz_value v, int *err);
 zz_value zz_io_input(zz_value prompt, int *err);
+zz_value zz_dbg(zz_value v, int *err);
 zz_value zz_math_abs(zz_value v, int *err);
 zz_value zz_math_sqrt(zz_value v, int *err);
 zz_value zz_math_pow(zz_value a, zz_value b, int *err);

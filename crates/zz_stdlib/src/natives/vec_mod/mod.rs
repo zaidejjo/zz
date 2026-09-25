@@ -57,7 +57,8 @@ pub(crate) fn vec_join(
 ) -> Result<Value, EvalError> {
     let vs = expect_array(args, 0, "vec.join")?;
     let sep = expect_str(args, 1, "vec.join")?;
-    let parts: Vec<String> = vs.iter().map(|v| v.to_string()).collect();
+    // Display semantics so Options unwrap (`[.some("a")]` joins as `a`).
+    let parts: Vec<String> = vs.iter().map(|v| v.to_display_string()).collect();
     Ok(Value::Str(parts.join(&sep).into()))
 }
 

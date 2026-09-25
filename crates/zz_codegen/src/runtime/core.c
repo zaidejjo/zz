@@ -580,10 +580,11 @@ zz_value zz_io_println(zz_value v, int *err) {
     // Unwrap consecutive `Result::Ok` / `Option::Some` layers for stdout
     // presentation (mirrors the VM's `for_stdout`): `println(.ok(x))`
     // prints `x`, `println(.some(x))` prints `x`, bare `.none` prints
-    // `none`. A printed `.err` throws a readable, hinted diagnostic on
-    // stderr instead of a raw `.err(...)` line. A bare function value is
-    // always a missing `()` — abort with a hint instead of rendering
-    // `<func>` / `<value>`.
+    // `none`. Nested Options inside containers unwrap via the display
+    // printer below; only `zz_dbg` / `:?` keep wrappers. A printed `.err`
+    // throws a readable, hinted diagnostic on stderr instead of a raw
+    // `.err(...)` line. A bare function value is always a missing `()`
+    // — abort with a hint instead of rendering `<func>` / `<value>`.
     for (;;) {
         if (v.tag == ZZ_RESULT_OK && v.payload) {
             v = *v.payload;
@@ -621,10 +622,21 @@ zz_value zz_io_println(zz_value v, int *err) {
         // Unreachable: `zz_throw_printed_err` exits the process.
         return zz_unit();
     }
-    zz_print_value(stdout, &v);
+    zz_print_value_display(stdout, &v);
     fputc('\n', stdout);
     fflush(stdout);
     return zz_unit();
+}
+
+zz_value zz_dbg(zz_value v, int *err) {
+    (void)err;
+    // Debug path: preserves explicit `.some(v)` / `.none` wrappers,
+    // unlike interpolation / println / str() which unwrap for display.
+    char *s = zz_value_to_string(&v);
+    fprintf(stderr, "[dbg] %s\n", s);
+    fflush(stderr);
+    free(s);
+    return zz_clone(v);
 }
 
 zz_value zz_io_print(zz_value v, int *err) {
@@ -665,7 +677,7 @@ zz_value zz_io_print(zz_value v, int *err) {
         zz_throw_printed_err(v.payload);
         return zz_unit();
     }
-    zz_print_value(stdout, &v);
+    zz_print_value_display(stdout, &v);
     return zz_unit();
 }
 

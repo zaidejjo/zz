@@ -513,6 +513,8 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "println" => Some("zz_io_println"),
         "print" => Some("zz_io_print"),
         "input" => Some("zz_io_input"),
+        // Debug print preserving Option wrappers; returns its argument.
+        "dbg" => Some("zz_dbg"),
         "len" => Some("zz_len"),
         "map" | "vec.map" | "std.vec.map" => Some("zz_iter_map"),
         "filter" | "vec.filter" | "std.vec.filter" => Some("zz_iter_filter"),

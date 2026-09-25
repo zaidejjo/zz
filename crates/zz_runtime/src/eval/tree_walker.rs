@@ -739,7 +739,9 @@ impl Interp {
                             let v = self.eval(e)?.into_value()?;
                             match fmt {
                                 Some(spec) => out.push_str(&format_value_with_spec(&v, spec)),
-                                None => out.push_str(&v.to_string()),
+                                // Display semantics: auto-unwrap Option so
+                                // interpolation never shows `.some(...)`.
+                                None => out.push_str(&v.to_display_string()),
                             }
                         }
                     }
