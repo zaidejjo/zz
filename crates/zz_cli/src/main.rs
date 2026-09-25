@@ -382,6 +382,11 @@ fn load_vm_plugins(
 ) -> Result<usize, String> {
     use zz_pm::lock::Lockfile;
 
+    // Canonicalize: callers pass roots derived from relative script paths
+    // (possibly empty = CWD); every join below must be unambiguous.
+    let project_dir =
+        std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+
     let lock_path = project_dir.join("zz.lock");
     let lock = match Lockfile::load(&lock_path) {
         Ok(l) => l,
@@ -394,21 +399,11 @@ fn load_vm_plugins(
 
     let mut loaded_count = 0;
     for dep in &lock.deps {
-        // Resolve package directory: path deps use local path, git deps use CAS
-        let pkg_dir = if dep.source == "path" {
-            if let Some(ref m) = manifest {
-                if let Some(zz_pm::manifest::DepSpec::Path(ref path_dep)) =
-                    m.dependencies.get(&dep.name)
-                {
-                    project_dir.join(&path_dep.path)
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
-            }
-        } else {
-            zz_pm::paths::cas_entry(&dep.hash)
+        // Resolve package directory (canonicalized: a relative dep path
+        // must never leak `..` into hook/dlsym paths downstream).
+        let Some(pkg_dir) = crate::build::resolve_pkg_dir(&project_dir, dep, manifest.as_ref())
+        else {
+            continue;
         };
 
         // Only load plugins that have a plugin.zzi manifest
