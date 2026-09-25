@@ -1,0 +1,47 @@
+// elif chains: tail position, non-tail position (trailing statement),
+// and value position (if as an expression). Regression: the AOT
+// expression-position lowering silently dropped `else if` branches.
+func classify(n: int) -> str {
+    if n < 0 {
+        "neg"
+    } else if n == 0 {
+        "zero"
+    } else if n < 10 {
+        "small"
+    } else {
+        "big"
+    }
+}
+
+func main() {
+    // Tail-position elif chain.
+    x := "zaid"
+    if x == "a" {
+        println("A")
+    } else if x == "b" {
+        println("B")
+    } else {
+        println("C")
+    }
+    // Non-tail elif chain (statement follows).
+    y := 5
+    if y < 0 {
+        println("neg")
+    } else if y == 0 {
+        println("zero")
+    } else {
+        println("pos")
+    }
+    println("after")
+    // Value-position elif chain.
+    v := if y > 10 {
+        "big"
+    } else if y > 0 {
+        "small"
+    } else {
+        "none"
+    }
+    println("v:{v}")
+    println("fn:{classify(-3)}:{classify(0)}:{classify(7)}:{classify(42)}")
+    println("elif_chain_ok")
+}

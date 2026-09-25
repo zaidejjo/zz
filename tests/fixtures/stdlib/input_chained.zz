@@ -1,0 +1,15 @@
+// Chained input processing over globals (family.zz essence):
+// input().to_lower() on a call result, multi-branch elif over
+// array.contains. stdin comes from input_chained.stdin in tests.
+brothers := ["mohammad", "youssef", "firas"]
+cousins := ["ahmad", "mansoor"]
+
+username := input("Enter name: ").to_lower()
+if brothers.contains(username) {
+    println("Hello, BRO {username}")
+} else if cousins.contains(username) {
+    println("Hello, Cousin {username}")
+} else {
+    println("Hello, Buddy")
+}
+println("input_chained_ok")

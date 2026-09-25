@@ -17,7 +17,7 @@ mod fn_decl;
 mod green;
 mod stmt;
 
-use zz_frontend::ast::{Block, Expr, Stmt};
+use zz_frontend::ast::{Expr, Stmt};
 
 pub use context::{Lowerer, NameCtx};
 
@@ -447,22 +447,6 @@ pub(crate) fn strip_quoted_includes(src: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Get a Block from an else-expression (or empty block).
-fn get_block(e: &Expr) -> &Block {
-    match e {
-        Expr::Block(b) => b,
-        _ => {
-            // Wrap expression in an implicit block reference is not possible;
-            // return a static empty block via leak — MVPs accept unit.
-            static EMPTY: Block = Block {
-                stmts: Vec::new(),
-                span: zz_frontend::span::Span { start: 0, end: 0 },
-            };
-            &EMPTY
-        }
-    }
 }
 
 /// Whether an AST expression was (or will be) lowered to a raw scalar
