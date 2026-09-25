@@ -111,6 +111,25 @@ func main() {
 
 const EXPECTED: &str = "add: 42\nsw: 1\nsw2: 0\nscale: 42\nctoy-ok\n";
 
+const PLUGIN_TEST: &str = r#"import ctoy
+
+@test
+func test_ctoy_add() {
+    assert_eq(ctoy.add(40, 2), 42)
+}
+
+@test
+func test_ctoy_starts_with() {
+    assert_eq(ctoy.starts_with("hello world", "hello"), 1)
+    assert_eq(ctoy.starts_with("hello world", "world"), 0)
+}
+
+@test
+func test_ctoy_scale() {
+    assert_eq(ctoy.scale(21, 2.0), 42)
+}
+"#;
+
 /// Layout: <tmp>/ctoy (package) + <tmp>/use (consumer with path dep).
 fn scaffold(dir: &Path) {
     let toy = dir.join("ctoy");
@@ -153,6 +172,12 @@ fn c_plugin_vm_and_aot_agree() {
     let (code, stdout, stderr) = run_zz(&consumer, &["run", "src/main.zz"]);
     assert_eq!(code, 0, "run failed: {stderr}");
     assert_eq!(stdout, EXPECTED);
+
+    // `zz test` phase: @test functions calling C natives — the runner
+    // dlopens build/*.so exactly like `zz run`.
+    write(&consumer, "tests/ctoy_test.zz", PLUGIN_TEST);
+    let (code, stdout, stderr) = run_zz(&consumer, &["test"]);
+    assert_eq!(code, 0, "test failed:\n{stdout}\n{stderr}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
