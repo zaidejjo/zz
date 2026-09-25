@@ -95,6 +95,7 @@ struct Server {
 }
 
 fn start_server() -> Server {
+    static SERVER_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let base = aot_server_bin();
     let mut last_err = String::new();
     for _ in 0..5 {
@@ -102,7 +103,13 @@ fn start_server() -> Server {
         // Per-test binary copy: the server forks workers that outlive
         // the parent, so Drop kills the whole family via this unique
         // path (a shared binary would nuke other tests' servers).
-        let bin = base.with_extension(format!("t{port}"));
+        // The path must ALSO be unique per attempt, not just per port:
+        // free_port() is probe-bind-close, so parallel tests can observe
+        // the same port and would otherwise copy over / exec one shared
+        // path (spawn fails with ETXTBSY "Text file busy"). pid + counter
+        // makes every attempt's copy exclusive.
+        let uniq = SERVER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let bin = base.with_extension(format!("t{port}.{}-{uniq}", std::process::id()));
         std::fs::copy(&base, &bin).expect("copy AOT server");
         #[cfg(unix)]
         {
@@ -111,12 +118,37 @@ fn start_server() -> Server {
             perms.set_mode(0o755);
             std::fs::set_permissions(&bin, perms).expect("bin chmod");
         }
-        let mut child = Command::new(&bin)
-            .env("ZZ_AOT_PORT", port.to_string())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn AOT server");
+        // Spawn can transiently fail with ETXTBSY ("Text file busy") under
+        // parallel load even though this copy's path is exclusive and fully
+        // written (observed: complete file, no /proc holders) — back off and
+        // retry the exec before falling through to a fresh port + path.
+        let mut child = None;
+        for _ in 0..50 {
+            match Command::new(&bin)
+                .env("ZZ_AOT_PORT", port.to_string())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => {
+                    child = Some(c);
+                    break;
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        || e.raw_os_error() == Some(26) =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("spawn AOT server {}: {e}", bin.display()),
+            }
+        }
+        let Some(mut child) = child else {
+            last_err = format!("spawn ETXTBSY persisted on {}", bin.display());
+            kill_family(&bin);
+            let _ = std::fs::remove_file(&bin);
+            continue;
+        };
 
         // `http.listen` prints SERVER_READY to stderr once bound.
         let stderr = child.stderr.take().expect("piped stderr");
