@@ -45,10 +45,16 @@ pub enum ManifestError {
 pub struct ManifestMeta {
     /// Manifest format version (currently 1).
     pub version: u32,
-    /// Exact rustc version used to build the plugin.
+    /// Exact rustc version used to build the plugin. Empty for C-only
+    /// plugins (no Rust toolchain involved) — ABI refusal keys off the
+    /// link-time `ZZ_*_ABI_VERSION` symbols, never this string.
     pub rustc: String,
     /// Plugin version (semver).
     pub plugin_version: String,
+    /// C-plugin ABI version (`// C-ABI: 1` header). `Some` = pure-C plugin
+    /// loaded via direct `dlsym` (`load_c_plugin`); `None` = legacy Rust
+    /// plugin via `zz_plugin_register`.
+    pub c_abi: Option<u32>,
 }
 
 /// A loaded plugin manifest with metadata and function signatures.
@@ -112,10 +118,18 @@ pub fn load_manifest(path: &Path) -> Result<PluginManifest, ManifestError> {
 /// // Rustc: 1.85.0
 /// // Plugin-version: 0.1.0
 /// ```
+///
+/// C-only plugins replace the `Rustc` line with `C-ABI`:
+/// ```text
+/// // Version: 1
+/// // C-ABI: 1
+/// // Plugin-version: 0.2.0
+/// ```
 fn parse_metadata(source: &str, path: &str) -> Result<ManifestMeta, ManifestError> {
     let mut version: Option<u32> = None;
     let mut rustc: Option<String> = None;
     let mut plugin_version: Option<String> = None;
+    let mut c_abi: Option<u32> = None;
 
     for line in source.lines() {
         let trimmed = line.trim();
@@ -133,24 +147,41 @@ fn parse_metadata(source: &str, path: &str) -> Result<ManifestMeta, ManifestErro
             })?);
         } else if let Some(val) = content.strip_prefix("Rustc:") {
             rustc = Some(val.trim().to_string());
+        } else if let Some(val) = content.strip_prefix("C-ABI:") {
+            let val = val.trim();
+            c_abi = Some(val.parse().map_err(|_| ManifestError::InvalidField {
+                path: path.to_string(),
+                field: "C-ABI".to_string(),
+                detail: format!("expected integer, got `{val}`"),
+            })?);
         } else if let Some(val) = content.strip_prefix("Plugin-version:") {
             plugin_version = Some(val.trim().to_string());
         }
     }
 
+    // `Rustc` is required for legacy Rust plugins; C-only plugins
+    // (`C-ABI` present) carry no Rust toolchain stamp.
+    let rustc = match (rustc, c_abi) {
+        (Some(r), _) => r,
+        (None, Some(_)) => String::new(),
+        (None, None) => {
+            return Err(ManifestError::MissingField {
+                path: path.to_string(),
+                field: "Rustc".to_string(),
+            });
+        }
+    };
     Ok(ManifestMeta {
         version: version.ok_or(ManifestError::MissingField {
             path: path.to_string(),
             field: "Version".to_string(),
         })?,
-        rustc: rustc.ok_or(ManifestError::MissingField {
-            path: path.to_string(),
-            field: "Rustc".to_string(),
-        })?,
+        rustc,
         plugin_version: plugin_version.ok_or(ManifestError::MissingField {
             path: path.to_string(),
             field: "Plugin-version".to_string(),
         })?,
+        c_abi,
     })
 }
 
@@ -366,6 +397,75 @@ extern "C" {
         let load = manifest.funcs.get("load").unwrap();
         assert!(matches!(load.params[0].1, Type::Ptr { mutable: false, .. }));
         assert!(matches!(load.ret, Type::Ptr { mutable: true, .. }));
+    }
+
+    #[test]
+    fn test_c_abi_manifest_needs_no_rustc() {
+        let f = write_manifest(
+            r#"// Version: 1
+// C-ABI: 1
+// Plugin-version: 0.2.0
+
+extern "C" {
+    func zimg_load(path: str) -> int
+}
+"#,
+        );
+        let manifest = load_manifest(f.path()).unwrap();
+        assert_eq!(manifest.meta.version, 1);
+        assert_eq!(manifest.meta.c_abi, Some(1));
+        assert!(manifest.meta.rustc.is_empty());
+        assert!(manifest.funcs.contains_key("zimg_load"));
+    }
+
+    #[test]
+    fn test_c_abi_and_rustc_coexist() {
+        let f = write_manifest(
+            r#"// Version: 1
+// Rustc: 1.97.1
+// C-ABI: 1
+// Plugin-version: 0.2.0
+
+extern "C" {
+    func ping() -> int
+}
+"#,
+        );
+        let manifest = load_manifest(f.path()).unwrap();
+        assert_eq!(manifest.meta.c_abi, Some(1));
+        assert_eq!(manifest.meta.rustc, "1.97.1");
+    }
+
+    #[test]
+    fn test_invalid_c_abi_format() {
+        let f = write_manifest(
+            r#"// Version: 1
+// C-ABI: not-a-number
+// Plugin-version: 0.2.0
+
+extern "C" {
+    func ping() -> int
+}
+"#,
+        );
+        let err = load_manifest(f.path()).unwrap_err();
+        assert!(err.to_string().contains("C-ABI"));
+    }
+
+    #[test]
+    fn test_legacy_manifest_has_no_c_abi() {
+        let f = write_manifest(
+            r#"// Version: 1
+// Rustc: 1.85.0
+// Plugin-version: 0.1.0
+
+extern "C" {
+    func add(a: int, b: int) -> int
+}
+"#,
+        );
+        let manifest = load_manifest(f.path()).unwrap();
+        assert_eq!(manifest.meta.c_abi, None);
     }
 
     #[test]
