@@ -912,6 +912,91 @@ impl Value {
         }
     }
 
+    /// Display string for user-facing output (interpolation, `str()`,
+    /// `println` nesting): auto-unwraps `Option` layers so `.some(v)`
+    /// renders as `v` and `.none` renders as `none` (no dot), without
+    /// exposing the raw variant structure. Nested options inside
+    /// arrays/dicts/tuples/objects/results are unwrapped recursively.
+    /// `Display` (`to_string`) keeps the explicit `.some(v)` / `.none`
+    /// debug form for `dbg(...)` and `:?` specs.
+    pub fn to_display_string(&self) -> String {
+        let mut out = String::new();
+        self.write_display(&mut out, 0);
+        out
+    }
+
+    fn write_display(&self, out: &mut String, depth: usize) {
+        const MAX_DEPTH: usize = 32;
+        if depth >= MAX_DEPTH {
+            out.push_str("...");
+            return;
+        }
+        match self {
+            // Auto-unwrap: consecutive `.some` layers collapse to inner.
+            Value::Option(Some(v)) => v.write_display(out, depth + 1),
+            Value::Option(None) => out.push_str("none"),
+            Value::Array(vs) => {
+                out.push('[');
+                for (i, v) in vs.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    v.write_display(out, depth + 1);
+                }
+                out.push(']');
+            }
+            Value::Dict(entries) => {
+                out.push('{');
+                for (i, (k, v)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    k.write_display(out, depth + 1);
+                    out.push_str(": ");
+                    v.write_display(out, depth + 1);
+                }
+                out.push('}');
+            }
+            Value::Tuple(vs) => {
+                out.push('(');
+                for (i, v) in vs.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    v.write_display(out, depth + 1);
+                }
+                out.push(')');
+            }
+            Value::Object(o) => {
+                out.push_str(&o.name);
+                out.push('{');
+                for (i, (k, v)) in o.fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(k);
+                    out.push_str(": ");
+                    v.write_display(out, depth + 1);
+                }
+                out.push('}');
+            }
+            Value::Result(r) => match &**r {
+                Ok(v) => {
+                    out.push_str(".ok(");
+                    v.write_display(out, depth + 1);
+                    out.push(')');
+                }
+                Err(e) => {
+                    out.push_str(".err(");
+                    e.write_display(out, depth + 1);
+                    out.push(')');
+                }
+            },
+            // All other variants render like `Display`.
+            other => out.push_str(&other.to_string()),
+        }
+    }
+
     #[inline(always)]
     pub fn is_truthy(&self) -> bool {
         matches!(self, Value::Bool(true))
@@ -1183,6 +1268,35 @@ mod tests {
             Value::Result(Box::new(Err(Value::Str("x".to_string().into())))).to_string(),
             ".err(x)"
         );
+    }
+
+    #[test]
+    fn option_display_unwraps_for_interpolation() {
+        // Top-level `.some` unwraps; `.none` becomes `none` (no dot).
+        assert_eq!(
+            Value::Option(Some(Box::new(Value::Int(42)))).to_display_string(),
+            "42"
+        );
+        assert_eq!(Value::Option(None).to_display_string(), "none");
+        // Nested layers collapse recursively.
+        assert_eq!(
+            Value::Option(Some(Box::new(Value::Option(Some(Box::new(Value::Int(1)))))))
+                .to_display_string(),
+            "1"
+        );
+        // Debug form still preserves wrappers for `dbg(...)`.
+        assert_eq!(
+            Value::Option(Some(Box::new(Value::Int(42)))).to_string(),
+            ".some(42)"
+        );
+        // Containers unwrap nested Options for display but keep them for debug.
+        let arr = Value::Array(Box::new(vec![
+            Value::Option(Some(Box::new(Value::Int(1)))),
+            Value::Option(None),
+            Value::Int(3),
+        ]));
+        assert_eq!(arr.to_display_string(), "[1, none, 3]");
+        assert_eq!(arr.to_string(), "[.some(1), .none, 3]");
     }
 
     #[test]

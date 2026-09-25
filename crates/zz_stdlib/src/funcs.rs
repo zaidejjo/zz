@@ -2206,6 +2206,8 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     // Built-in conversions.
     // `str(v)` — stringify any value (total).
     m.insert("str".into(), sig_t(vec![("v", t.clone())], Type::Str));
+    // `dbg(v)` — debug print preserving `.some`/`.none`, returns `v`.
+    m.insert("dbg".into(), sig_t(vec![("v", t.clone())], t.clone()));
     // `int(v)` — parse a string, truncate a float, or pass through an int.
     // Invalid parses yield `.none`.
     m.insert(
@@ -3105,7 +3107,8 @@ mod tests {
         assert!(funcs.contains_key("colors.red"));
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
-        assert_eq!(funcs.len(), 603);
+        assert!(funcs.contains_key("dbg"));
+        assert_eq!(funcs.len(), 604);
     }
 
     #[test]

@@ -1,0 +1,36 @@
+// E2E: Option display semantics — interpolation / println unwrap,
+// dbg / :? preserve wrappers. Must match byte-for-byte on VM and AOT.
+opt_int := .some(42)
+opt_str := .some("hello")
+opt_none := .none
+nested := .some(.some(7))
+
+// Interpolation unwraps `.some` and renders `.none` as `none`.
+println("{opt_int}")
+println("{opt_str}")
+println("{opt_none}")
+println("{nested}")
+println("val={opt_int}!")
+
+// Format specs apply to the unwrapped inner value.
+println("{opt_int:x}")
+opt_pi := .some(3.14159)
+println("{opt_pi:.2f}")
+
+// `str()` shares display semantics.
+println(str(opt_int))
+println(str(opt_none))
+println(str(nested))
+
+// Explicit debug formatting preserves wrappers.
+println("{opt_int:?}")
+println("{opt_none:?}")
+
+// `dbg` preserves wrappers on stderr and returns its argument.
+dbg(opt_int)
+dbg(opt_none)
+// `dbg` returns its argument, so display of the result still unwraps.
+println("{dbg(opt_int)}")
+println("{dbg(opt_none)}")
+
+println("option_interpolation_ok")

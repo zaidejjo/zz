@@ -638,9 +638,13 @@ impl<'a> FmtCtx<'a> {
                 for part in parts {
                     match part {
                         FmtPart::Text(t) => self.write_str(t),
-                        FmtPart::Expr(e, _) => {
+                        FmtPart::Expr(e, spec) => {
                             self.write_str("{");
                             self.fmt_expr(e, source);
+                            if let Some(s) = spec {
+                                self.write_str(":");
+                                self.write_str(s);
+                            }
                             self.write_str("}");
                         }
                     }

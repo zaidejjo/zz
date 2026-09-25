@@ -21,7 +21,9 @@ pub(crate) fn conv_str(
         .first()
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument for str", span))?;
-    Ok(Value::Str(v.to_string().into()))
+    // Display semantics: auto-unwrap Option (`.some(v)` → `v`,
+    // `.none` → `none`); debug form stays behind `dbg(...)` / `:?`.
+    Ok(Value::Str(v.to_display_string().into()))
 }
 
 pub(crate) fn conv_int(
@@ -58,6 +60,26 @@ pub(crate) fn conv_float(
         _ => f64::NAN,
     };
     Ok(Value::Float(result))
+}
+
+/// Built-in `dbg(v)` — debug print preserving Option wrappers.
+///
+/// Prints the explicit debug form (`.some(v)` / `.none`) to stderr and
+/// returns `v` unchanged, so it can wrap any expression inline. This is
+/// the only user-facing path that keeps wrappers; `println`, string
+/// interpolation, and `str()` all unwrap for display.
+pub(crate) fn dbg_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for dbg", span))?;
+    // `Display` is the debug form (keeps `.some`/`.none`).
+    eprintln!("[dbg] {v}");
+    Ok(v)
 }
 
 /// Built-in `append(arr, val)` — returns the array with val appended.
