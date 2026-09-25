@@ -231,6 +231,46 @@ fn opts_for(mode: BuildMode) -> BuildOptions {
     }
 }
 
+/// Walk up from a source file to the enclosing project root (has zz.lock),
+/// canonicalized to an absolute path.
+///
+/// Canonicalization matters: a relative root (e.g. `src/main.zz` invoked
+/// from the project dir finds root `""`) joined with a `path = "../.."`
+/// dep once produced `../../build.sh`, which bash resolved against the
+/// hook CWD instead of the package dir. Absolute roots make every
+/// downstream join unambiguous.
+fn canonical_project_root(project_path: &Path) -> Option<PathBuf> {
+    let mut dir = project_path.parent().unwrap_or(project_path);
+    if dir.as_os_str().is_empty() {
+        dir = Path::new(".");
+    }
+    loop {
+        if dir.join("zz.lock").exists() {
+            return Some(std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()));
+        }
+        dir = dir.parent()?;
+    }
+}
+
+/// Resolve a locked dependency to its package directory, canonicalized
+/// (same `..` rationale as [`canonical_project_root`]).
+pub(crate) fn resolve_pkg_dir(
+    project_root: &Path,
+    dep: &zz_pm::lock::LockedDep,
+    manifest: Option<&zz_pm::manifest::Manifest>,
+) -> Option<PathBuf> {
+    let dir = if dep.source == "path" {
+        let m = manifest?;
+        match m.dependencies.get(&dep.name)? {
+            zz_pm::manifest::DepSpec::Path(path_dep) => project_root.join(&path_dep.path),
+            _ => return None,
+        }
+    } else {
+        zz_pm::paths::cas_entry(&dep.hash)
+    };
+    Some(std::fs::canonicalize(&dir).unwrap_or(dir))
+}
+
 /// Discover plugin manifests (`.zzi` files) from installed dependencies.
 ///
 /// Reads `zz.lock` and `zz.toml` from the project directory, looks up each
@@ -240,16 +280,8 @@ fn opts_for(mode: BuildMode) -> BuildOptions {
 pub(crate) fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_checker::FuncSig)> {
     let mut plugin_funcs = Vec::new();
 
-    // Walk up from the source file to find the project root (has zz.lock)
-    let mut dir = project_path.parent().unwrap_or(project_path);
-    let project_root = loop {
-        if dir.join("zz.lock").exists() {
-            break dir.to_path_buf();
-        }
-        dir = match dir.parent() {
-            Some(d) => d,
-            None => return plugin_funcs,
-        };
+    let Some(project_root) = canonical_project_root(project_path) else {
+        return plugin_funcs;
     };
 
     let lock = match zz_pm::lock::Lockfile::load(&project_root.join("zz.lock")) {
@@ -262,21 +294,8 @@ pub(crate) fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_
     let manifest = zz_pm::manifest::Manifest::load(&manifest_path).ok();
 
     for dep in &lock.deps {
-        // Resolve package directory: path deps use vendor/<name>/, git deps use CAS
-        let pkg_dir = if dep.source == "path" {
-            if let Some(ref m) = manifest {
-                if let Some(zz_pm::manifest::DepSpec::Path(ref path_dep)) =
-                    m.dependencies.get(&dep.name)
-                {
-                    project_root.join(&path_dep.path)
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
-            }
-        } else {
-            zz_pm::paths::cas_entry(&dep.hash)
+        let Some(pkg_dir) = resolve_pkg_dir(&project_root, dep, manifest.as_ref()) else {
+            continue;
         };
 
         let manifest_path = pkg_dir.join("plugin.zzi");
@@ -308,8 +327,10 @@ pub(crate) fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_
 /// (tarballs exclude `build/`). Hook failures warn per-dependency inside
 /// [`discover_native_artifacts`] and never fail the caller.
 pub(crate) fn ensure_native_hooks(project_root: &Path) {
-    // discover_native_artifacts walks up from its argument's parent
-    // looking for zz.lock — anchor inside the root.
+    // Discover_native_artifacts walks up from its argument's parent
+    // looking for zz.lock — anchor inside the canonical root.
+    let project_root =
+        std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
     let anchor = project_root.join("zz.toml");
     let _ = discover_native_artifacts(&anchor);
 }
@@ -324,16 +345,8 @@ fn discover_native_artifacts(project_path: &Path) -> (Vec<PathBuf>, Vec<String>)
     let mut artifacts = Vec::new();
     let mut link_args: Vec<String> = Vec::new();
 
-    // Walk up from the source file to find the project root (has zz.lock)
-    let mut dir = project_path.parent().unwrap_or(project_path);
-    let project_root = loop {
-        if dir.join("zz.lock").exists() {
-            break dir.to_path_buf();
-        }
-        dir = match dir.parent() {
-            Some(d) => d,
-            None => return (artifacts, link_args),
-        };
+    let Some(project_root) = canonical_project_root(project_path) else {
+        return (artifacts, link_args);
     };
 
     let lock = match zz_pm::lock::Lockfile::load(&project_root.join("zz.lock")) {
@@ -346,21 +359,8 @@ fn discover_native_artifacts(project_path: &Path) -> (Vec<PathBuf>, Vec<String>)
     let manifest = zz_pm::manifest::Manifest::load(&manifest_path).ok();
 
     for dep in &lock.deps {
-        // Resolve package directory: path deps use the local path, git deps use CAS
-        let pkg_dir = if dep.source == "path" {
-            if let Some(ref m) = manifest {
-                if let Some(zz_pm::manifest::DepSpec::Path(ref path_dep)) =
-                    m.dependencies.get(&dep.name)
-                {
-                    project_root.join(&path_dep.path)
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
-            }
-        } else {
-            zz_pm::paths::cas_entry(&dep.hash)
+        let Some(pkg_dir) = resolve_pkg_dir(&project_root, dep, manifest.as_ref()) else {
+            continue;
         };
 
         // Check for plugin.zzi (this is a native package)
