@@ -1085,7 +1085,7 @@ impl Compiler {
                     self.emit(Op::EnterScope);
                 }
                 self.scope_depth += 1;
-                if self.compile_block_body(body) {
+                if self.compile_block_body(body, true) {
                     // Trailing slot declaration (see `compile_block_body`):
                     // supply the loop-result value `SetLoopResult` pops.
                     self.emit_const(Value::Unit);
@@ -1335,7 +1335,7 @@ impl Compiler {
             self.emit(Op::EnterScope);
         }
         self.scope_depth += 1;
-        self.compile_block_body(block);
+        self.compile_block_body(block, false);
         self.scope_depth -= 1;
         if needs_env {
             self.emit(Op::ExitScope);
@@ -1346,9 +1346,14 @@ impl Compiler {
     /// body's final statement left slot storage that `PopN` consumed: loop
     /// callers (`for`/`while`, which pop one more value via `SetLoopResult`
     /// for the loop result) must then emit a `Unit` to stay balanced.
-    /// Other callers (plain blocks, function bodies) ignore the return and
-    /// keep existing behavior.
-    fn compile_block_body(&mut self, block: &Block) -> bool {
+    /// Other callers (plain blocks, function bodies) ignore the return.
+    ///
+    /// `is_loop_body`: loop bodies sit above live loop-var slots, so their
+    /// cleanup keeps the full `PopN(n)` count (the result lands in the top
+    /// var slot — the `SetLoopResult` dance below). Plain blocks with a
+    /// trailing slot declaration instead hold only n values (the result IS
+    /// the last local) and need `PopN(n - 1)`.
+    fn compile_block_body(&mut self, block: &Block, is_loop_body: bool) -> bool {
         let scope_base = self.locals.len();
         let mut last = StmtValue::None;
         for (i, stmt) in block.stmts.iter().enumerate() {
@@ -1364,19 +1369,31 @@ impl Compiler {
             .iter()
             .filter(|l| !l.in_env)
             .count();
-        if n > 0 {
-            self.emit(Op::PopN {
-                n: n as u16,
-                span: block.span,
-            });
-        }
         // A trailing slot declaration's value doubles as its slot storage:
         // `PopN` just consumed it, so a loop result pop would eat into the
         // loop frame (the `ForNext on non-iterable` misalignment). An
         // env-captured (`in_env`) trailing declaration instead leaves its
         // `DefineVar` value behind, which already serves as the result.
-        let need_result_unit = matches!(last, StmtValue::Keep)
+        let trailing_slot_decl = matches!(last, StmtValue::Keep)
             && self.locals[scope_base..].last().is_some_and(|l| !l.in_env);
+        if n > 0 {
+            // Trailing slot declaration in a plain block: the stack holds
+            // n values (the result IS the last local), not n+1 — PopN(n-1).
+            // Otherwise the cleanup underflows (or corrupts silently in
+            // release). Loop bodies keep PopN(n): see `is_loop_body`.
+            let drop = if trailing_slot_decl && !is_loop_body {
+                n - 1
+            } else {
+                n
+            };
+            if drop > 0 {
+                self.emit(Op::PopN {
+                    n: drop as u16,
+                    span: block.span,
+                });
+            }
+        }
+        let need_result_unit = trailing_slot_decl;
         self.locals.truncate(scope_base);
         need_result_unit
     }
@@ -1415,7 +1432,7 @@ impl Compiler {
             }
         }
         sub.stack_height = params.len();
-        sub.compile_block_body(block);
+        sub.compile_block_body(block, false);
         if needs_env {
             sub.emit(Op::ExitScope);
         }
@@ -2212,7 +2229,7 @@ impl Compiler {
                     self.emit(Op::EnterScope);
                 }
                 self.scope_depth += 1;
-                if self.compile_block_body(body) {
+                if self.compile_block_body(body, true) {
                     // Trailing slot declaration (see `compile_block_body`):
                     // supply the loop-result value `SetLoopResult` pops.
                     self.emit_const(Value::Unit);

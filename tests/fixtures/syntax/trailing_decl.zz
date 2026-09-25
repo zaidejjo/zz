@@ -1,0 +1,42 @@
+// Trailing declarations: a block ending in `:=` keeps the declared value
+// as slot storage, so cleanup pops one fewer value. Regression: the VM
+// compiler emitted PopN(n) for n stack values (subtract overflow / silent
+// corruption in release).
+func tail_decl() -> int {
+    x := 1
+    y := x + 2
+}
+
+func block_tail() -> int {
+    v := {
+        a := 10
+        b := a * 2
+    }
+    v + 1
+}
+
+func loop_tail() -> int {
+    total := 0
+    for i in [1, 2, 3] {
+        total = total + i
+        tmp := total * 10
+    }
+    total
+}
+
+func while_tail() -> int {
+    n := 0
+    while n < 3 {
+        n = n + 1
+        dbl := n * 2
+    }
+    n
+}
+
+func main() {
+    assert_eq(tail_decl(), 3)
+    assert_eq(block_tail(), 21)
+    assert_eq(loop_tail(), 6)
+    assert_eq(while_tail(), 3)
+    println("trailing_decl_ok")
+}
