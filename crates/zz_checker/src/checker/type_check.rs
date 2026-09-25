@@ -285,7 +285,9 @@ impl Checker {
                         self.pop_scope();
                     }
                     2 => {
-                        // `for k, v in dict` — key-value pair
+                        // `for k, v in dict` — key-value pair — or
+                        // `for i, x in xs.enumerate()` — index + element
+                        // over an array of 2-tuples.
                         match it {
                             Type::Dict(k, v) => {
                                 self.push_scope();
@@ -295,6 +297,48 @@ impl Checker {
                                 self.check_block(body);
                                 self.loop_depth -= 1;
                                 self.pop_scope();
+                            }
+                            Type::Array(elem) => {
+                                match self.unifier.resolve(&elem) {
+                                    Type::Tuple(pair) if pair.len() == 2 => {
+                                        self.push_scope();
+                                        self.define(&vars[0].name, pair[0].clone());
+                                        self.define(&vars[1].name, pair[1].clone());
+                                        self.loop_depth += 1;
+                                        self.check_block(body);
+                                        self.loop_depth -= 1;
+                                        self.pop_scope();
+                                    }
+                                    Type::Var(_) => {
+                                        // Element type not yet inferred
+                                        // (e.g. generic): fresh vars; body
+                                        // usage constrains them later.
+                                        let k_var = self.unifier.fresh_var();
+                                        let v_var = self.unifier.fresh_var();
+                                        self.push_scope();
+                                        self.define(&vars[0].name, k_var);
+                                        self.define(&vars[1].name, v_var);
+                                        self.loop_depth += 1;
+                                        self.check_block(body);
+                                        self.loop_depth -= 1;
+                                        self.pop_scope();
+                                    }
+                                    other => {
+                                        self.errors.push(error_at(
+                                            format!(
+                                                "expected a dictionary or an array of tuples for `for k, v in ...`, got `{other}`"
+                                            ),
+                                            *span,
+                                        ));
+                                        self.push_scope();
+                                        self.define(&vars[0].name, Type::Unit);
+                                        self.define(&vars[1].name, Type::Unit);
+                                        self.loop_depth += 1;
+                                        self.check_block(body);
+                                        self.loop_depth -= 1;
+                                        self.pop_scope();
+                                    }
+                                }
                             }
                             Type::Var(_) => {
                                 self.errors.push(error_at(
@@ -328,7 +372,7 @@ impl Checker {
                     }
                     _ => {
                         self.errors.push(error_at(
-                            "for loop supports at most 2 variables (e.g. `for k, v in dict`)",
+                            "for loop supports at most 2 variables (e.g. `for k, v in dict` or `for i, x in xs.enumerate()`)",
                             *span,
                         ));
                     }
@@ -1448,6 +1492,25 @@ impl Checker {
             _ => None,
         };
         if let Some(name) = &direct_name {
+            // Math constants are values, not functions: `math.PI()` is
+            // always an error — use bare `math.PI`.
+            if Self::is_math_const(name) && self.funcs.contains_key(name) {
+                self.used_names.insert(name.clone());
+                // Still check the args so nested errors inside them surface.
+                for arg in args {
+                    self.check_expr(arg);
+                }
+                for (_, val) in named {
+                    self.check_expr(val);
+                }
+                self.errors.push(error_at(
+                    format!(
+                        "cannot call `{name}`: it is a numeric constant value, remove the `()`"
+                    ),
+                    span,
+                ));
+                return Type::Float;
+            }
             // sqlz foundation: `sqlz.query(sql)` / `sqlz.exec(sql)` (canonical;
             // `db.*` / `std.db.*` are zero-overhead aliases) take an
             // interpolated SQL string. `{expr}` segments are extracted as
@@ -1600,7 +1663,8 @@ impl Checker {
                         let is_func = matches!(
                             arg_t.as_ref().map(|t| self.unifier.resolve(t)),
                             Some(Type::Func(_, _))
-                        ) || matches!(fname.as_deref(), Some(n) if self.funcs.contains_key(n));
+                        ) || matches!(fname.as_deref(), Some(n)
+                            if self.funcs.contains_key(n) && !Self::is_math_const(n));
                         if is_func {
                             if let Some(fname) = fname {
                                 let mut diag = error_at(

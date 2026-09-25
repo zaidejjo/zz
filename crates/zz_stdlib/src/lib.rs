@@ -50,6 +50,7 @@ pub const STDLIB_MODULES: &[&str] = &[
     "json",
     "http",
     "fs",
+    "path",
     "env",
     "math",
     "time",

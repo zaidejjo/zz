@@ -133,6 +133,7 @@ pub enum Op {
         vars: Vec<String>,
         exit: usize,
         in_env: bool,
+        span: Span,
     },
     /// Push a `while` loop frame. `exit`/`header` are patched by the
     /// compiler.

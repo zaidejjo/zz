@@ -1,0 +1,11 @@
+// E2E: two-variable for loops unpack `enumerate()` pairs.
+xs := ["a", "b", "c"]
+for i, x in xs.enumerate() {
+    println(i)
+    println(x)
+}
+for j, y in enumerate(xs) {
+    println(j)
+    println(y)
+}
+println("enumerate_loop_ok")

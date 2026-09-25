@@ -24,6 +24,29 @@ impl Checker {
         }
     }
 
+    /// True when `name` spells a `std.math` numeric constant:
+    /// `std.math.PI`, `math.PI` (via `import std.math`), or bare `PI`
+    /// (via `import std.math(PI)` / `import std.math(*)`).
+    ///
+    /// Constants are true `Float` values, not zero-arg functions. Call sites
+    /// additionally require the name to be present in `funcs` so import
+    /// gating still applies (using `math.PI` without the import stays an
+    /// "undefined variable" error).
+    pub(crate) fn is_math_const(name: &str) -> bool {
+        const LEAVES: &[&str] = &[
+            "PI", "E", "TAU", "SQRT_2", "SQRT_1_2", "LN_2", "LN_10", "LOG10_E", "LOG2_E", "INF",
+            "NAN",
+        ];
+        let (prefix, leaf) = match name.rsplit_once('.') {
+            Some((p, l)) => (p, l),
+            None => ("", name),
+        };
+        if !LEAVES.contains(&leaf) {
+            return false;
+        }
+        matches!(prefix, "" | "math" | "std.math")
+    }
+
     pub(crate) fn pop_scope(&mut self) {
         // Warn about unused variables in this scope (skip the global scope).
         if let Some(defined) = self.defined_names.pop() {
@@ -250,6 +273,13 @@ impl Checker {
             self.used_names.insert(name.to_string());
             if !sig.generics.is_empty() {
                 return None;
+            }
+            // Math constants (`math.PI`, `std.math.PI`, bare `PI` via a
+            // selective import) are true `Float` values, not function
+            // values — `println(math.PI)` must not suggest `()`.
+            if sig.params.is_empty() && matches!(sig.ret, Type::Float) && Self::is_math_const(name)
+            {
+                return Some(Type::Float);
             }
             // Function used as a value: give its (uninstantiated) type. Call
             // sites handle generic instantiation via the Named path below.

@@ -925,7 +925,10 @@ impl Vm {
                     }
                 }
                 Op::ForNext {
-                    vars, exit, in_env, ..
+                    vars,
+                    exit,
+                    in_env,
+                    span,
                 } => {
                     let num_vars = vars.len();
                     // Pop num_vars loop variables from previous iteration
@@ -957,12 +960,42 @@ impl Vm {
                                     iter_done = true;
                                     next_idx = Value::Unit;
                                     push_val = Value::Unit;
+                                    push_val2 = None;
                                 } else {
                                     iter_done = false;
                                     next_idx = Value::Int(i + 1);
-                                    push_val = arr[i as usize].clone();
+                                    let item = arr[i as usize].clone();
+                                    if num_vars == 2 {
+                                        // `for i, x in xs.enumerate()` —
+                                        // each item is a 2-tuple.
+                                        // `enumerate()` builds `Tuple`
+                                        // values while tuple literals
+                                        // evaluate to 2-element arrays —
+                                        // accept both.
+                                        let pair_vec: Option<Vec<Value>> = match item {
+                                            Value::Tuple(pair) => Some(*pair),
+                                            Value::Array(items) if items.len() == 2 => Some(*items),
+                                            _ => None,
+                                        };
+                                        match pair_vec {
+                                            Some(mut pair) => {
+                                                let second = pair.pop().unwrap();
+                                                let first = pair.pop().unwrap();
+                                                push_val = first;
+                                                push_val2 = Some(second);
+                                            }
+                                            None => {
+                                                return Err(self.error(
+                                                    "cannot unpack a non-pair value into 2 loop variables (expected `enumerate()` pairs)",
+                                                    *span,
+                                                ));
+                                            }
+                                        }
+                                    } else {
+                                        push_val = item;
+                                        push_val2 = None;
+                                    }
                                 }
-                                push_val2 = None;
                             }
                             (Value::Bytes(b), Value::Int(i)) => {
                                 let i = *i;

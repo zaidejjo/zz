@@ -96,6 +96,30 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("std.math.product_f", "pure ZZ; no C codegen"),
     ("std.math.mean_f", "pure ZZ; no C codegen"),
     ("std.math.median_f", "pure ZZ; no C codegen"),
+    // Math numeric constants without a zero-arg C entry (`PI`/`E`/`TAU`/
+    // `INF`/`NAN` have one; these never needed it): value uses lower to
+    // float literals, and the checker rejects calls.
+    (
+        "std.math.SQRT_2",
+        "numeric constant; lowers to float literal",
+    ),
+    (
+        "std.math.SQRT_1_2",
+        "numeric constant; lowers to float literal",
+    ),
+    ("std.math.LN_2", "numeric constant; lowers to float literal"),
+    (
+        "std.math.LN_10",
+        "numeric constant; lowers to float literal",
+    ),
+    (
+        "std.math.LOG10_E",
+        "numeric constant; lowers to float literal",
+    ),
+    (
+        "std.math.LOG2_E",
+        "numeric constant; lowers to float literal",
+    ),
     ("std.str.repeat", "pure ZZ; no C codegen"),
     ("std.str.count", "pure ZZ; no C codegen"),
     ("std.str.is_empty", "pure ZZ; no C codegen"),
@@ -174,6 +198,22 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // into AOT builds as ZZ functions (no C/FFI native needed).
     ("Regexp.new", "pure ZZ; lowered as ZZ fn"),
     ("ArgsParser.new", "pure ZZ; lowered as ZZ fn"),
+    // Pure-ZZ path helpers — compiled from zz/path/mod.zz and merged
+    // into AOT builds as ZZ functions (no C native needed).
+    ("std.path.join", "pure ZZ; lowered as ZZ fn"),
+    ("std.path.join_all", "pure ZZ; lowered as ZZ fn"),
+    ("std.path.normalize", "pure ZZ; lowered as ZZ fn"),
+    ("std.path.basename", "pure ZZ; lowered as ZZ fn"),
+    ("std.path.dirname", "pure ZZ; lowered as ZZ fn"),
+    ("std.path.is_absolute", "pure ZZ; lowered as ZZ fn"),
+    ("std.path.extension", "pure ZZ; lowered as ZZ fn"),
+    ("path.join", "pure ZZ alias"),
+    ("path.join_all", "pure ZZ alias"),
+    ("path.normalize", "pure ZZ alias"),
+    ("path.basename", "pure ZZ alias"),
+    ("path.dirname", "pure ZZ alias"),
+    ("path.is_absolute", "pure ZZ alias"),
+    ("path.extension", "pure ZZ alias"),
     ("std.regexp.is_email", "pure ZZ; lowered as ZZ fn"),
     ("regexp.is_email", "pure ZZ alias"),
     // Pure-ZZ time helpers — compiled from zz/time/mod.zz, same deal.
