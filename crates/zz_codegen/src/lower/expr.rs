@@ -1558,7 +1558,9 @@ impl Lowerer {
                                 }
                             }
                             if found_ns.is_empty() {
-                                eprintln!("[codegen-warn] method {}.{}: no namespace found. reach_natives={:?}", obj_name, method, self.reachable_natives);
+                                // No namespace resolved — the fallthrough
+                                // below emits a bare call and lets later
+                                // stages (checker/runtime) report it.
                             }
                         }
                         if found_ns.is_empty() {
