@@ -482,6 +482,9 @@ pub fn install(args: &[String]) -> Result<(), String> {
     if linked_count > 0 {
         println!("linked {linked_count} dependencies into vendor/");
     }
+    // Native plugins: run build hooks now so `zz run` works without a
+    // prior `zz build` (registry tarballs exclude hook outputs).
+    crate::build::ensure_native_hooks(&dir);
     println!("hint: run `zz build` to compile");
     Ok(())
 }
