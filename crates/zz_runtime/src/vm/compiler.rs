@@ -450,7 +450,7 @@ impl Compiler {
             // template + params back: net 0 (reordering only).
             Op::DbQuery { .. } => 0,
             Op::EnterScope | Op::ExitScope => 0,
-            Op::PopN(n) => -(*n as i64),
+            Op::PopN { n, .. } => -(*n as i64),
             Op::DeferRecord => -1,
         }
     }
@@ -1365,7 +1365,10 @@ impl Compiler {
             .filter(|l| !l.in_env)
             .count();
         if n > 0 {
-            self.emit(Op::PopN(n as u16));
+            self.emit(Op::PopN {
+                n: n as u16,
+                span: block.span,
+            });
         }
         // A trailing slot declaration's value doubles as its slot storage:
         // `PopN` just consumed it, so a loop result pop would eat into the

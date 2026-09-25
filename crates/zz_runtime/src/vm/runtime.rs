@@ -1736,10 +1736,20 @@ impl Vm {
                     let parent = interp.env.parent_link().expect("ExitScope at top level");
                     interp.env = parent;
                 }
-                Op::PopN(n) => {
+                Op::PopN { n, span } => {
                     let len = self.stack.len();
+                    // Checked (never wrapping): a short stack is a compiler
+                    // imbalance — report it with location instead of
+                    // panicking (debug) or corrupting silently (release).
+                    let drop = (*n as usize).saturating_add(1);
+                    if len < drop {
+                        return Err(self.error(
+                            format!("block cleanup drops {drop} values from a {len}-deep stack"),
+                            *span,
+                        ));
+                    }
                     let result = self.stack.pop().unwrap();
-                    self.stack.truncate(len - 1 - *n as usize);
+                    self.stack.truncate(len - drop);
                     self.stack.push(result);
                 }
                 Op::DeferRecord => {
