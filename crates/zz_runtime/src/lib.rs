@@ -3,6 +3,7 @@
 //! Powers the REPL and `zz run` until the bytecode VM lands in a later
 //! phase. The frontend stays shared between all execution modes.
 
+pub mod c_abi;
 pub mod env;
 pub mod eval;
 pub mod json;

@@ -1122,6 +1122,22 @@ fn run_test_attempt(test: &TestInfo, nocapture: bool) -> TestResult {
 fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
     let loaded = loader::load_program(&test.file)?;
 
+    // Native plugins: dlopen each dependency's build/*.so so `@test`
+    // functions can call plugin natives — same as `zz run` (previously the
+    // runner type-checked plugin imports but never loaded them, failing
+    // at runtime with "undefined variable").
+    let mut natives = loaded.natives.clone();
+    {
+        let project_root = loader::find_project_root(&test.file).unwrap_or_else(|| {
+            test.file
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf()
+        });
+        let plugin_funcs = crate::build::discover_plugin_manifests(&test.file);
+        crate::load_vm_plugins(&project_root, &mut natives, &plugin_funcs)?;
+    }
+
     let merged_stmts: Vec<_> = loaded
         .programs
         .iter()
@@ -1145,7 +1161,7 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
     let types = Arc::new(typed.program.types);
     let structs = typed.program.structs;
 
-    let mut interp = Interp::with_natives(loaded.natives.clone());
+    let mut interp = Interp::with_natives(natives);
 
     for (key, val) in zz_stdlib::stdlib_consts() {
         interp.env.define(&key, Value::Float(val));
