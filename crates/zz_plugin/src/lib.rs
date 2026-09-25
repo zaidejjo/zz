@@ -9,5 +9,7 @@
 pub mod loader;
 pub mod manifest;
 
-pub use loader::{load_plugin, LoadError, PluginLib, CURRENT_ABI_VERSION};
+pub use loader::{
+    load_c_plugin, load_plugin, LoadError, PluginLib, CURRENT_ABI_VERSION, CURRENT_C_ABI_VERSION,
+};
 pub use manifest::{load_manifest, ManifestError, ManifestMeta, PluginManifest};
