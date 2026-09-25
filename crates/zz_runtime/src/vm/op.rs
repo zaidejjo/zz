@@ -133,6 +133,7 @@ pub enum Op {
         vars: Vec<String>,
         exit: usize,
         in_env: bool,
+        span: Span,
     },
     /// Push a `while` loop frame. `exit`/`header` are patched by the
     /// compiler.
@@ -297,7 +298,7 @@ pub enum Op {
     ExitScope,
     /// Pop the top value, discard `n` values below it, and push the value
     /// back: leaves a scope's result while dropping its local slots.
-    PopN(u16),
+    PopN { n: u16, span: Span },
 
     // ---- defer ----
     /// Record a deferred closure: pop a closure value, push onto the

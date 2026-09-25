@@ -390,6 +390,21 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
             f: vec_mod::vec_push,
         },
     );
+    // vec.enumerate / std.vec.enumerate — method spellings of `enumerate`.
+    m.insert(
+        "vec.enumerate".into(),
+        NativeEntry {
+            arity: 1,
+            f: iterators::enumerate,
+        },
+    );
+    m.insert(
+        "std.vec.enumerate".into(),
+        NativeEntry {
+            arity: 1,
+            f: iterators::enumerate,
+        },
+    );
 
     // option.* methods (for method dispatch: .some(1).unwrap_or(0))
     m.insert(

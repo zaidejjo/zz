@@ -91,8 +91,14 @@ pub fn fetch_to_cas(url: &str, commit: &str) -> Result<PathBuf, ResolveError> {
             .map_err(|e| ResolveError::Io(format!("cannot create CAS parent: {e}")))?;
     }
 
-    // Clone into a temp dir first, then move to CAS
-    let tmp_dir = unique_clone_dir(&format!("{url}@{commit}"))?;
+    // Clone into a scratch sibling of the CAS entry (same filesystem —
+    // the system temp dir is often tmpfs while ~/.zz lives on disk),
+    // then stage it.
+    let tmp_dir = crate::cas::scratch_sibling(&cas_dir, &format!("git-{commit}"));
+    if let Some(parent) = tmp_dir.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ResolveError::Io(format!("cannot create CAS parent: {e}")))?;
+    }
 
     let output = Command::new("git")
         .args(["clone", "--depth", "1", url, &tmp_dir.to_string_lossy()])
@@ -137,8 +143,8 @@ pub fn fetch_to_cas(url: &str, commit: &str) -> Result<PathBuf, ResolveError> {
     // Remove .git dir — we only need the source content in CAS
     let _ = std::fs::remove_dir_all(tmp_dir.join(".git"));
 
-    // Move to CAS
-    std::fs::rename(&tmp_dir, &cas_dir)
+    // Move to CAS (rename, EXDEV-safe copy fallback, race-tolerant).
+    crate::cas::stage_dir(&tmp_dir, &cas_dir)
         .map_err(|e| ResolveError::Io(format!("cannot move clone to CAS: {e}")))?;
 
     Ok(cas_dir)

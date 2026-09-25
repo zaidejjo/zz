@@ -371,24 +371,28 @@ fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
 /// `plugin_funcs` carries the manifest signatures keyed by ZZ-visible name;
 /// after loading, C-symbol registrations are aliased to those ZZ names so
 /// VM dispatch and AOT lowering resolve identically.
+///
+/// Returns the number of plugin libraries loaded (0 with no plugins, or
+/// when every candidate failed — failures warn per-library above).
 #[cfg(unix)]
 fn load_vm_plugins(
     project_dir: &std::path::Path,
     natives: &mut std::collections::HashMap<String, zz_runtime::NativeEntry>,
     plugin_funcs: &[(String, zz_checker::FuncSig)],
-) -> Result<(), String> {
+) -> Result<usize, String> {
     use zz_pm::lock::Lockfile;
 
     let lock_path = project_dir.join("zz.lock");
     let lock = match Lockfile::load(&lock_path) {
         Ok(l) => l,
-        Err(_) => return Ok(()), // no lock file, no plugins
+        Err(_) => return Ok(0), // no lock file, no plugins
     };
 
     // Load manifest to resolve path deps
     let manifest_path = project_dir.join("zz.toml");
     let manifest = zz_pm::manifest::Manifest::load(&manifest_path).ok();
 
+    let mut loaded_count = 0;
     for dep in &lock.deps {
         // Resolve package directory: path deps use local path, git deps use CAS
         let pkg_dir = if dep.source == "path" {
@@ -486,7 +490,12 @@ fn load_vm_plugins(
             };
             match loaded {
                 Ok(()) => {
-                    eprintln!("zz: loaded plugin `{}`", dep.name);
+                    // Progress chatter only under ZZ_VERBOSE: everyday runs
+                    // (and program output) stay clean; piped runs especially.
+                    if std::env::var("ZZ_VERBOSE").is_ok() {
+                        eprintln!("zz: loaded plugin `{}`", dep.name);
+                    }
+                    loaded_count += 1;
                     break;
                 }
                 Err(e) => {
@@ -508,7 +517,7 @@ fn load_vm_plugins(
         }
     }
 
-    Ok(())
+    Ok(loaded_count)
 }
 
 /// Loaded plugin libraries, kept alive for the process lifetime.
@@ -532,9 +541,9 @@ fn load_vm_plugins(
     _project_dir: &std::path::Path,
     _natives: &mut std::collections::HashMap<String, zz_runtime::NativeEntry>,
     _plugin_funcs: &[(String, zz_checker::FuncSig)],
-) -> Result<(), String> {
+) -> Result<usize, String> {
     // dlopen not supported on this platform yet
-    Ok(())
+    Ok(0)
 }
 
 fn run_file(
@@ -586,9 +595,21 @@ fn run_file(
     }
 
     // Load plugin shared libraries for VM-based native dispatch.
+    // When manifests exist but nothing loaded, the hooks never ran
+    // (fresh resolve without install): build natively once, then retry.
     let mut natives = loaded.natives.clone();
-    if let Err(e) = crate::load_vm_plugins(&project_root, &mut natives, &plugin_funcs) {
-        eprintln!("zz: warning: {e}");
+    let first_try = match crate::load_vm_plugins(&project_root, &mut natives, &plugin_funcs) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("zz: warning: {e}");
+            0
+        }
+    };
+    if !plugin_funcs.is_empty() && first_try == 0 {
+        crate::build::ensure_native_hooks(&project_root);
+        if let Err(e) = crate::load_vm_plugins(&project_root, &mut natives, &plugin_funcs) {
+            eprintln!("zz: warning: {e}");
+        }
     }
 
     // Build the typed program (HIR) to get the resolved type map.

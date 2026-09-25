@@ -56,6 +56,34 @@ pub fn mangle(name: &str) -> String {
         .collect()
 }
 
+/// Lower a `std.math` numeric constant path (`std.math.PI`, `math.PI`) to a
+/// `zz_float(...)` literal. Constants are true values — the checker rejects
+/// calls like `math.PI()`, so value position is the only valid use.
+/// Returns `None` for anything that is not a known constant spelling.
+pub(crate) fn math_const_c_literal(joined: &str) -> Option<String> {
+    let leaf = joined
+        .strip_prefix("std.math.")
+        .or_else(|| joined.strip_prefix("math."))?;
+    // Shortest round-trip decimals, matching Rust's `to_string()` output.
+    let num = match leaf {
+        "PI" => std::f64::consts::PI.to_string(),
+        "E" => std::f64::consts::E.to_string(),
+        "TAU" => std::f64::consts::TAU.to_string(),
+        "SQRT_2" => std::f64::consts::SQRT_2.to_string(),
+        "SQRT_1_2" => std::f64::consts::FRAC_1_SQRT_2.to_string(),
+        "LN_2" => std::f64::consts::LN_2.to_string(),
+        "LN_10" => std::f64::consts::LN_10.to_string(),
+        "LOG10_E" => std::f64::consts::LOG10_E.to_string(),
+        "LOG2_E" => std::f64::consts::LOG2_E.to_string(),
+        // No decimal literal for non-finite values: use the same
+        // expressions as the C runtime (`zz_math_inf` / `zz_math_nan`).
+        "INF" => "(1.0/0.0)".to_string(),
+        "NAN" => "(0.0/0.0)".to_string(),
+        _ => return None,
+    };
+    Some(format!("zz_float({num})"))
+}
+
 /// Extract the raw C string literal body from a `zz_str_static("...")`
 /// expression emitted by `emit_str_literal`. The wrapper is
 /// `zz_str_static( <literal> )` — we strip just the function-call syntax

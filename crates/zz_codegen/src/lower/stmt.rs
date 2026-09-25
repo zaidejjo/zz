@@ -1111,7 +1111,9 @@ impl Lowerer {
                 out.push_str("    }\n");
                 names.pop_scope();
             } else if vars.len() == 2 {
-                // for k, v in <dict>: iterate dict entries (key, value).
+                // for k, v in <dict> — dict entries — or
+                // for i, x in <array of pairs> (e.g. `xs.enumerate()`) —
+                // tuple elements. Runtime tag dispatch like the 1-var path.
                 names.push_scope();
                 let k_name = &vars[0].name;
                 let v_name = &vars[1].name;
@@ -1141,36 +1143,72 @@ impl Lowerer {
                     (k_cid, v_cid)
                 };
                 // Green: drivers are frame cells (a resume may land inside
-                // the loop); plain path keeps stack counters.
+                // the loop); plain path keeps stack counters. Length covers
+                // both arrays (pairs) and dicts.
+                //
+                // Pairs come in two shapes: `enumerate()`/`zip()` build real
+                // `ZZ_TUPLE` values (payload → heap array), while tuple
+                // literals lower as plain arrays — handle both.
+                let pair_access = |pair: &str, idx: u8, pe: &str| {
+                    format!(
+                        "(({pair}.tag == ZZ_TUPLE) \
+                         ? zz_clone(((zz_value*)({pair}.payload))->arr->items[{idx}]) \
+                         : zz_index_get({pair}, zz_int({idx}), &{pe}))"
+                    )
+                };
                 if green_iter {
                     let (_, ideref, _) = self.green_cell(names, "int64_t", false, out);
                     let (_, lderef, _) = self.green_cell(names, "int64_t", false, out);
                     out.push_str(&format!("    {ideref} = 0;\n"));
                     out.push_str(&format!(
-                        "    {lderef} = ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
+                        "    {lderef} = ({iter_tmp}.tag == ZZ_ARRAY) ? (int64_t){iter_tmp}.arr->len : ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
                     ));
                     out.push_str(&format!("    for (; {ideref} < {lderef}; {ideref}++) {{\n"));
                     out.push_str("    zz_safepoint();\n");
+                    let (_, pederef, _) = self.green_cell(names, "int", false, out);
+                    out.push_str(&format!("    {pederef} = 0;\n"));
+                    let (_, pairderef, _) = self.green_cell(names, "zz_value", false, out);
                     out.push_str(&format!(
-                        "        {k_cid} = (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{ideref}].key}}}};\n"
+                        "    {pairderef} = ({iter_tmp}.tag == ZZ_ARRAY) ? zz_clone({iter_tmp}.arr->items[{ideref}]) : zz_unit();\n"
+                    ));
+                    let k_pair = pair_access(&pairderef, 0, &pederef);
+                    let v_pair = pair_access(&pairderef, 1, &pederef);
+                    out.push_str(&format!(
+                        "        {k_cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
+                         ? {k_pair}\n\
+                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{ideref}].key}}}};\n"
                     ));
                     out.push_str(&format!(
-                        "        {v_cid} = zz_clone({iter_tmp}.dict->entries[{ideref}].val);\n"
+                        "        {v_cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
+                         ? {v_pair}\n\
+                         : zz_clone({iter_tmp}.dict->entries[{ideref}].val);\n"
                     ));
                 } else {
                     let idx = names.fresh("_idx");
                     let len = names.fresh("_len");
                     out.push_str(&format!("    int64_t {idx} = 0;\n"));
                     out.push_str(&format!(
-                        "    int64_t {len} = ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
+                        "    int64_t {len} = ({iter_tmp}.tag == ZZ_ARRAY) ? (int64_t){iter_tmp}.arr->len : ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
                     ));
                     out.push_str(&format!("    for (; {idx} < {len}; {idx}++) {{\n"));
                     out.push_str("    zz_safepoint();\n");
+                    let pe = names.fresh("_pe");
+                    out.push_str(&format!("    int {pe} = 0;\n"));
+                    let pair = names.fresh("_pair");
                     out.push_str(&format!(
-                        "        zz_value {k_cid} = (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}};\n"
+                        "    zz_value {pair} = ({iter_tmp}.tag == ZZ_ARRAY) ? zz_clone({iter_tmp}.arr->items[{idx}]) : zz_unit();\n"
+                    ));
+                    let k_pair = pair_access(&pair, 0, &pe);
+                    let v_pair = pair_access(&pair, 1, &pe);
+                    out.push_str(&format!(
+                        "        zz_value {k_cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
+                         ? {k_pair}\n\
+                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}};\n"
                     ));
                     out.push_str(&format!(
-                        "        zz_value {v_cid} = zz_clone({iter_tmp}.dict->entries[{idx}].val);\n"
+                        "        zz_value {v_cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
+                         ? {v_pair}\n\
+                         : zz_clone({iter_tmp}.dict->entries[{idx}].val);\n"
                     ));
                 }
                 // Captured iteration variables: per-iteration shared cells.

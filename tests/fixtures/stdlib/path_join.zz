@@ -1,0 +1,29 @@
+// E2E: std.path lexical helpers (pure ZZ) + fs.join compatibility.
+// Host-style assertions (unix here; windows shapes are pinned by the
+// native `fs::path` unit tests, which the pure-ZZ port mirrors).
+import std.path
+import std.fs
+
+func main() {
+    println(path.normalize("/a//b/./c/../d"))
+    println(path.normalize("a/b/../../c"))
+    println(path.normalize("/../.."))
+    println(path.normalize(""))
+    println(path.join("/a/b", "c/d"))
+    println(path.join("/a/b", "/c"))
+    println(path.join("/a", "../x"))
+    println(path.join_all(["/a", "b", "c"]))
+    println(path.join_all([]))
+    println(path.basename("/a/b/c.txt"))
+    println(path.basename("/a/b/"))
+    println(path.dirname("/a/b/c.txt"))
+    println(path.dirname("c.txt"))
+    println(path.is_absolute("/a"))
+    println(path.is_absolute("a/b"))
+    println(path.extension("archive.tar.gz"))
+    println(path.extension(".gitignore"))
+    println(path.extension("README"))
+    // fs.join shares the lexical algorithm (backward compatible).
+    println(fs.join("/a/b", "c/d"))
+    println("path_join_ok")
+}

@@ -450,7 +450,7 @@ impl Compiler {
             // template + params back: net 0 (reordering only).
             Op::DbQuery { .. } => 0,
             Op::EnterScope | Op::ExitScope => 0,
-            Op::PopN(n) => -(*n as i64),
+            Op::PopN { n, .. } => -(*n as i64),
             Op::DeferRecord => -1,
         }
     }
@@ -864,22 +864,26 @@ impl Compiler {
             Op::JumpIfFalse(_) => Op::JumpIfFalse(target),
             Op::JumpIfTrue(_) => Op::JumpIfTrue(target),
             Op::JumpIfFalseBool(_, span) => Op::JumpIfFalseBool(target, span),
-            Op::ForNext { vars, in_env, .. } => Op::ForNext {
+            Op::ForNext {
+                vars, in_env, span, ..
+            } => Op::ForNext {
                 vars,
                 exit: target,
                 in_env,
+                span,
             },
             Op::WhileCond { span, .. } => Op::WhileCond { exit: target, span },
             other => panic!("patch_jump on non-jump op: {other:?}"),
         };
     }
 
-    fn emit_for_next(&mut self, vars: Vec<String>, in_env: bool) -> usize {
+    fn emit_for_next(&mut self, vars: Vec<String>, in_env: bool, span: Span) -> usize {
         let pos = self.chunk.code.len();
         self.emit(Op::ForNext {
             vars,
             exit: 0,
             in_env,
+            span,
         });
         pos
     }
@@ -1064,7 +1068,7 @@ impl Compiler {
                 // Determine if any var is captured by an inner closure
                 let any_captured = vars.iter().any(|v| self.captured.contains(&v.name));
                 let var_names: Vec<String> = vars.iter().map(|v| v.name.clone()).collect();
-                let j = self.emit_for_next(var_names.clone(), any_captured);
+                let j = self.emit_for_next(var_names.clone(), any_captured, *span);
                 // Push locals for each var — last var at highest slot,
                 // first at lowest
                 let num_vars = vars.len();
@@ -1081,7 +1085,7 @@ impl Compiler {
                     self.emit(Op::EnterScope);
                 }
                 self.scope_depth += 1;
-                if self.compile_block_body(body) {
+                if self.compile_block_body(body, true) {
                     // Trailing slot declaration (see `compile_block_body`):
                     // supply the loop-result value `SetLoopResult` pops.
                     self.emit_const(Value::Unit);
@@ -1331,7 +1335,7 @@ impl Compiler {
             self.emit(Op::EnterScope);
         }
         self.scope_depth += 1;
-        self.compile_block_body(block);
+        self.compile_block_body(block, false);
         self.scope_depth -= 1;
         if needs_env {
             self.emit(Op::ExitScope);
@@ -1342,9 +1346,14 @@ impl Compiler {
     /// body's final statement left slot storage that `PopN` consumed: loop
     /// callers (`for`/`while`, which pop one more value via `SetLoopResult`
     /// for the loop result) must then emit a `Unit` to stay balanced.
-    /// Other callers (plain blocks, function bodies) ignore the return and
-    /// keep existing behavior.
-    fn compile_block_body(&mut self, block: &Block) -> bool {
+    /// Other callers (plain blocks, function bodies) ignore the return.
+    ///
+    /// `is_loop_body`: loop bodies sit above live loop-var slots, so their
+    /// cleanup keeps the full `PopN(n)` count (the result lands in the top
+    /// var slot — the `SetLoopResult` dance below). Plain blocks with a
+    /// trailing slot declaration instead hold only n values (the result IS
+    /// the last local) and need `PopN(n - 1)`.
+    fn compile_block_body(&mut self, block: &Block, is_loop_body: bool) -> bool {
         let scope_base = self.locals.len();
         let mut last = StmtValue::None;
         for (i, stmt) in block.stmts.iter().enumerate() {
@@ -1360,16 +1369,31 @@ impl Compiler {
             .iter()
             .filter(|l| !l.in_env)
             .count();
-        if n > 0 {
-            self.emit(Op::PopN(n as u16));
-        }
         // A trailing slot declaration's value doubles as its slot storage:
         // `PopN` just consumed it, so a loop result pop would eat into the
         // loop frame (the `ForNext on non-iterable` misalignment). An
         // env-captured (`in_env`) trailing declaration instead leaves its
         // `DefineVar` value behind, which already serves as the result.
-        let need_result_unit = matches!(last, StmtValue::Keep)
+        let trailing_slot_decl = matches!(last, StmtValue::Keep)
             && self.locals[scope_base..].last().is_some_and(|l| !l.in_env);
+        if n > 0 {
+            // Trailing slot declaration in a plain block: the stack holds
+            // n values (the result IS the last local), not n+1 — PopN(n-1).
+            // Otherwise the cleanup underflows (or corrupts silently in
+            // release). Loop bodies keep PopN(n): see `is_loop_body`.
+            let drop = if trailing_slot_decl && !is_loop_body {
+                n - 1
+            } else {
+                n
+            };
+            if drop > 0 {
+                self.emit(Op::PopN {
+                    n: drop as u16,
+                    span: block.span,
+                });
+            }
+        }
+        let need_result_unit = trailing_slot_decl;
         self.locals.truncate(scope_base);
         need_result_unit
     }
@@ -1408,7 +1432,7 @@ impl Compiler {
             }
         }
         sub.stack_height = params.len();
-        sub.compile_block_body(block);
+        sub.compile_block_body(block, false);
         if needs_env {
             sub.emit(Op::ExitScope);
         }
@@ -2205,7 +2229,7 @@ impl Compiler {
                     self.emit(Op::EnterScope);
                 }
                 self.scope_depth += 1;
-                if self.compile_block_body(body) {
+                if self.compile_block_body(body, true) {
                     // Trailing slot declaration (see `compile_block_body`):
                     // supply the loop-result value `SetLoopResult` pops.
                     self.emit_const(Value::Unit);
@@ -2254,7 +2278,7 @@ impl Compiler {
                 });
                 let header = self.chunk.code.len();
                 let in_env = self.captured.contains(&var.name);
-                let j = self.emit_for_next(vec![var.name.clone()], in_env);
+                let j = self.emit_for_next(vec![var.name.clone()], in_env, *span);
                 self.locals.push(Local {
                     name: var.name.clone(),
                     slot: self.stack_height - 1,

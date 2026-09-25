@@ -301,6 +301,19 @@ pub(crate) fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_
     plugin_funcs
 }
 
+/// Run native build hooks for every dependency and discard the artifacts.
+///
+/// `zz install` calls this post-link so `zz run` (VM dlopen) works without
+/// a prior `zz build`: registry consumers never see hook outputs otherwise
+/// (tarballs exclude `build/`). Hook failures warn per-dependency inside
+/// [`discover_native_artifacts`] and never fail the caller.
+pub(crate) fn ensure_native_hooks(project_root: &Path) {
+    // discover_native_artifacts walks up from its argument's parent
+    // looking for zz.lock — anchor inside the root.
+    let anchor = project_root.join("zz.toml");
+    let _ = discover_native_artifacts(&anchor);
+}
+///
 /// Discover and invoke build hooks for plugin packages with native code.
 ///
 /// Reads `zz.lock` and `zz.toml`, finds dependencies that have a `plugin.zzi`
