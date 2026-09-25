@@ -254,23 +254,17 @@ impl RegistryClient {
             std::fs::create_dir_all(parent)
                 .map_err(|e| RemoteError::Io(format!("cannot create CAS parent: {e}")))?;
         }
-        // Extract to a unique temp dir first, then rename — a crashed
-        // unpack never leaves a half-populated CAS entry behind.
-        let tmp = unique_scratch_dir(name, version)?;
-        extract_tarball(&bytes, &tmp)?;
-        match std::fs::rename(&tmp, &cas_dir) {
-            Ok(()) => {}
-            Err(e) if cas_dir.exists() => {
-                // Lost a staging race with another process: our bytes are
-                // verified above, so the winner holds identical content.
-                let _ = std::fs::remove_dir_all(&tmp);
-                let _ = e;
-            }
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&tmp);
-                return Err(RemoteError::Io(format!("cannot stage CAS entry: {e}")));
-            }
+        // Extract to a scratch sibling of the CAS entry (same filesystem —
+        // /tmp is often tmpfs while ~/.zz lives on disk) then stage: a
+        // crashed unpack never leaves a half-populated CAS entry behind.
+        let tmp = crate::cas::scratch_sibling(&cas_dir, &format!("{name}-{version}"));
+        if let Some(parent) = tmp.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| RemoteError::Io(format!("cannot create CAS parent: {e}")))?;
         }
+        extract_tarball(&bytes, &tmp)?;
+        crate::cas::stage_dir(&tmp, &cas_dir)
+            .map_err(|e| RemoteError::Io(format!("cannot stage CAS entry: {e}")))?;
         Ok((cas_dir, actual))
     }
 
@@ -483,17 +477,6 @@ pub fn parse_registry_source(source: &str) -> Option<(String, String, String)> {
         return None;
     }
     Some((base.to_string(), name.to_string(), version.to_string()))
-}
-
-/// Unique scratch dir for staging a download before the CAS rename.
-fn unique_scratch_dir(name: &str, version: &str) -> Result<PathBuf, RemoteError> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let pid = std::process::id();
-    let digest = hash::hash_bytes(format!("{name}:{version}:{pid}:{nanos}").as_bytes());
-    Ok(std::env::temp_dir().join(format!("zz_pm_dl_{}", &digest[..16])))
 }
 
 #[cfg(test)]

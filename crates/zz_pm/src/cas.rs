@@ -19,6 +19,56 @@ use serde::{Deserialize, Serialize};
 use crate::hash;
 use crate::paths;
 
+/// Scratch dir for staging `dest`, as a sibling inside `dest`'s parent:
+/// same filesystem, so the staging rename never crosses devices
+/// (`/tmp` is often tmpfs while `~/.zz` lives on disk — EXDEV).
+/// Unique per process + counter + nanos (parallel-safe).
+pub fn scratch_sibling(dest: &Path, tag: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let parent = dest.parent().unwrap_or(Path::new("."));
+    parent.join(format!(
+        ".zz_stage_{tag}.{}.{n}.{nanos}",
+        std::process::id()
+    ))
+}
+
+/// EXDEV errno on all supported platforms (libc constant 18).
+fn is_cross_device(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(18)
+}
+
+/// Atomically stage populated scratch dir `tmp` at `dest`.
+///
+/// Prefers `rename`; on cross-device (EXDEV — scratch on tmpfs, CAS on
+/// disk) falls back to recursive copy + scratch cleanup. A `dest` that
+/// appears mid-stage is a won race (verified content is identical):
+/// the scratch is dropped and staging reports success.
+pub fn stage_dir(tmp: &Path, dest: &Path) -> Result<(), String> {
+    match std::fs::rename(tmp, dest) {
+        Ok(()) => Ok(()),
+        Err(e) if dest.exists() => {
+            // Lost a staging race: identical content won.
+            let _ = std::fs::remove_dir_all(tmp);
+            let _ = e;
+            Ok(())
+        }
+        Err(e) if is_cross_device(&e) => {
+            copy_dir_recursive(tmp, dest)?;
+            let _ = std::fs::remove_dir_all(tmp);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(tmp);
+            Err(format!("cannot stage {}: {e}", dest.display()))
+        }
+    }
+}
 /// Options for storing content into CAS.
 #[derive(Debug, Clone)]
 pub struct CasStoreOptions {
@@ -550,5 +600,73 @@ mod tests {
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&cas_path);
         let _ = fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn scratch_sibling_lives_beside_dest() {
+        let base = tmp_dir("sib_base");
+        let dest = base.join("aa").join("bb");
+        let sib = scratch_sibling(&dest, "t");
+        assert_eq!(sib.parent().unwrap(), base.join("aa"));
+        assert!(sib.to_string_lossy().contains(".zz_stage_t."));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn stage_dir_renames_fresh_dest() {
+        let base = tmp_dir("stage_fresh");
+        let src = base.join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.zz"), "a").unwrap();
+        fs::write(src.join("sub").join("b.zz"), "b").unwrap();
+        let dest = base.join("dest");
+        stage_dir(&src, &dest).unwrap();
+        assert!(dest.join("a.zz").exists());
+        assert!(dest.join("sub").join("b.zz").exists());
+        assert!(!src.exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn stage_dir_won_race_is_success() {
+        let base = tmp_dir("stage_race");
+        let src = base.join("src");
+        let dest = base.join("dest");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.zz"), "a").unwrap();
+        // Winner holds identical content (verified upstream before staging).
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("a.zz"), "a").unwrap();
+        stage_dir(&src, &dest).unwrap();
+        assert!(!src.exists());
+        assert!(dest.join("a.zz").exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn copy_dir_recursive_keeps_tree() {
+        let base = tmp_dir("copy_tree");
+        let src = base.join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.zz"), "a").unwrap();
+        fs::write(src.join("sub").join("b.zz"), "b").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("a.zz", src.join("link.zz")).unwrap();
+        let dest = base.join("dest");
+        copy_dir_recursive(&src, &dest).unwrap();
+        assert_eq!(fs::read_to_string(dest.join("a.zz")).unwrap(), "a");
+        assert_eq!(
+            fs::read_to_string(dest.join("sub").join("b.zz")).unwrap(),
+            "b"
+        );
+        // Fallback contract: symlinks materialize as regular files with
+        // the target's bytes (same as the link.rs copy fallback).
+        #[cfg(unix)]
+        {
+            let meta = fs::symlink_metadata(dest.join("link.zz")).unwrap();
+            assert!(meta.is_file());
+            assert_eq!(fs::read_to_string(dest.join("link.zz")).unwrap(), "a");
+        }
+        let _ = fs::remove_dir_all(&base);
     }
 }
