@@ -490,10 +490,9 @@ fn load_vm_plugins(
             };
             match loaded {
                 Ok(()) => {
-                    // Progress chatter only on an interactive stderr (same
-                    // rule as the native-runtime build line): piped runs
-                    // stay clean for scripts and parity harnesses.
-                    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                    // Progress chatter only under ZZ_VERBOSE: everyday runs
+                    // (and program output) stay clean; piped runs especially.
+                    if std::env::var("ZZ_VERBOSE").is_ok() {
                         eprintln!("zz: loaded plugin `{}`", dep.name);
                     }
                     loaded_count += 1;
