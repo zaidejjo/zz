@@ -664,15 +664,7 @@ pub fn publish(args: &[String]) -> Result<(), String> {
     }
 
     let base = registry_base_from(args);
-    let token = zz_pm::auth::Credentials::load()
-        .ok()
-        .and_then(|c| c.get_token(&base).map(str::to_string))
-        .ok_or_else(|| {
-            format!(
-                "not logged in for {base}\n\
-                 hint: run `zz login --registry {base}` first"
-            )
-        })?;
+    let token = resolve_publish_token(&base)?;
 
     // Payload: tarball bytes (base64) + manifest metadata.
     let bytes = std::fs::read(&tarball).map_err(|e| format!("cannot read tarball: {e}"))?;
@@ -710,6 +702,49 @@ pub fn publish(args: &[String]) -> Result<(), String> {
         println!("sha256: {}", resp.sha256);
     }
     Ok(())
+}
+
+/// Resolve the registry token for publishing, first hit wins:
+/// stored credentials → `ZZ_REGISTRY_TOKEN` env → interactive prompt
+/// (same secret entry as `zz login`). Non-interactive sessions without
+/// the env var keep the clean error — there is nobody to ask.
+fn resolve_publish_token(base: &str) -> Result<String, String> {
+    if let Some(token) = zz_pm::auth::Credentials::load()
+        .ok()
+        .and_then(|c| c.get_token(base).map(str::to_string))
+    {
+        return Ok(token);
+    }
+    if let Ok(env_token) = std::env::var("ZZ_REGISTRY_TOKEN") {
+        let env_token = env_token.trim().to_string();
+        if !env_token.is_empty() {
+            return Ok(env_token);
+        }
+    }
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin())
+        || std::fs::File::open("/dev/tty").is_ok();
+    if !interactive {
+        return Err(format!(
+            "not logged in for {base}\n\
+             hint: `zz login --registry {base}` or set ZZ_REGISTRY_TOKEN"
+        ));
+    }
+    eprint!("Auth token for {base} (paste `zz_pat_*`, Enter to abort): ");
+    let token = read_login_token()?;
+    if token.is_empty() {
+        return Err(format!(
+            "no token provided\n\
+             hint: `zz login --registry {base}` or set ZZ_REGISTRY_TOKEN"
+        ));
+    }
+    // Remember for next time (the store `zz login` uses).
+    if let Ok(mut creds) = zz_pm::auth::Credentials::load() {
+        creds.set_token(base, token.clone(), None);
+        if let Err(e) = creds.save() {
+            eprintln!("warning: could not save credentials: {e}");
+        }
+    }
+    Ok(token)
 }
 
 /// Stringify a dep spec for the registry `deps` table.
