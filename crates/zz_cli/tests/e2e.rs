@@ -174,6 +174,11 @@ e2e_success_test!(e2e_syntax_control_flow, "syntax", "control_flow.zz");
 e2e_success_test!(e2e_syntax_pipelines, "syntax", "pipelines.zz");
 e2e_success_test!(e2e_syntax_hof, "syntax", "hof.zz");
 e2e_success_test!(e2e_syntax_match, "syntax", "match.zz");
+e2e_success_test!(
+    e2e_syntax_match_bare_return,
+    "syntax",
+    "match_bare_return.zz"
+);
 e2e_success_test!(e2e_syntax_frame_slots, "syntax", "frame_slots.zz");
 e2e_success_test!(e2e_syntax_operators, "syntax", "operators.zz");
 e2e_success_test!(e2e_syntax_fstrings, "syntax", "fstrings.zz");
