@@ -307,6 +307,19 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("http.serve_dir", "http fixtures skipped in parity"),
     ("std.http.delete", "http fixtures skipped in parity"),
     ("std.http.put", "http fixtures skipped in parity"),
+    // HTTP helpers (pure-ZZ, compiled from zz/http/mod.zz)
+    ("std.http.use", "pure ZZ; no C codegen"),
+    ("http.use", "pure ZZ alias"),
+    ("std.http.route", "pure ZZ; no C codegen"),
+    ("http.route", "pure ZZ alias"),
+    ("std.http.ok", "pure ZZ; no C codegen"),
+    ("http.ok", "pure ZZ alias"),
+    ("std.http.created", "pure ZZ; no C codegen"),
+    ("http.created", "pure ZZ alias"),
+    ("std.http.not_found", "pure ZZ; no C codegen"),
+    ("http.not_found", "pure ZZ alias"),
+    ("std.http.redirect", "pure ZZ; no C codegen"),
+    ("http.redirect", "pure ZZ alias"),
     // MySQL wire driver — VM-only (no staticlib backend like PG has;
     // AOT lowers these to Unit like time.now_ms).
     ("std.sqlz.mysql.connect", "VM-only; no C socket driver"),

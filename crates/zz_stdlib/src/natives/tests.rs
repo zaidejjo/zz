@@ -246,6 +246,19 @@ fn every_funcs_key_has_a_native() {
         "path.dirname",
         "path.is_absolute",
         "path.extension",
+        // http helpers (pure-ZZ, compiled from zz/http/mod.zz)
+        "std.http.use",
+        "http.use",
+        "std.http.route",
+        "http.route",
+        "std.http.ok",
+        "std.http.created",
+        "std.http.not_found",
+        "std.http.redirect",
+        "http.ok",
+        "http.created",
+        "http.not_found",
+        "http.redirect",
         // math numeric constants (true Float values, see `stdlib_consts`;
         // no runtime function to implement)
         "std.math.PI",

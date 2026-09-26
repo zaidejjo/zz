@@ -688,6 +688,23 @@ impl Checker {
                         }
                         *v
                     }
+                    Type::HttpRequest => {
+                        // Typed request field access: `req.method/path/body`
+                        // are `str`; `req.headers/query/params` are `{str: str}`.
+                        match name.as_str() {
+                            "method" | "path" | "body" => Type::Str,
+                            "headers" | "query" | "params" => {
+                                Type::Dict(Box::new(Type::Str), Box::new(Type::Str))
+                            }
+                            _ => {
+                                self.errors.push(error_at(
+                                    format!("http.request has no field `{name}`"),
+                                    *span,
+                                ));
+                                Type::Unit
+                            }
+                        }
+                    }
                     Type::Var(_id) => {
                         // Inference variable — not yet resolved (e.g. untyped closure param).
                         // Return a fresh var; unification will catch real mismatches later.
@@ -1408,6 +1425,9 @@ impl Checker {
                         Type::Float => sig = self.funcs.get(&format!("float.{method}")).cloned(),
                         Type::Bool => sig = self.funcs.get(&format!("bool.{method}")).cloned(),
                         Type::Response => sig = self.funcs.get(&format!("http.{method}")).cloned(),
+                        Type::HttpRequest => {
+                            sig = self.funcs.get(&format!("http.{method}")).cloned()
+                        }
                         Type::TcpStream => sig = self.funcs.get(&format!("net.{method}")).cloned(),
                         Type::TcpListener => {
                             sig = self.funcs.get(&format!("net.{method}")).cloned()
@@ -1772,6 +1792,9 @@ impl Checker {
                             sig = self.funcs.get(&format!("bool.{method}")).cloned();
                         }
                         Type::Response => {
+                            sig = self.funcs.get(&format!("http.{method}")).cloned();
+                        }
+                        Type::HttpRequest => {
                             sig = self.funcs.get(&format!("http.{method}")).cloned();
                         }
                         Type::TcpStream => {

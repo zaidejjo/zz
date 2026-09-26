@@ -111,6 +111,7 @@ impl Unifier {
             | (Type::TcpStream, Type::TcpStream)
             | (Type::TcpListener, Type::TcpListener)
             | (Type::Response, Type::Response)
+            | (Type::HttpRequest, Type::HttpRequest)
             | (Type::Chan, Type::Chan)
             | (Type::TaskJoin, Type::TaskJoin)
             | (Type::Error, _)
@@ -318,6 +319,7 @@ impl Unifier {
             | (Type::TcpStream, Type::TcpStream)
             | (Type::TcpListener, Type::TcpListener)
             | (Type::Response, Type::Response)
+            | (Type::HttpRequest, Type::HttpRequest)
             | (Type::Chan, Type::Chan)
             | (Type::TaskJoin, Type::TaskJoin) => Ok(()),
             (Type::Tuple(xs), Type::Tuple(ys)) => {
