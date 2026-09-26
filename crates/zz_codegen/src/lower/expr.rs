@@ -1400,172 +1400,136 @@ impl Lowerer {
                 (resolved, None)
             }
             Expr::Path { parts, span, .. } if parts.len() == 2 => {
-                let obj_name = &parts[0];
-                let method = &parts[1];
-                if names.lookup(obj_name).is_some() {
-                    // obj_name is a LOCAL variable — this is a method call.
-                    let first_ident_end = span.start + obj_name.len() as u32;
-                    let first_ident_span =
-                        zz_frontend::span::Span::new(span.start, first_ident_end);
+                // Module-namespace collision: the loader qualifies same-file
+                // calls (`greet_user` in `server.zz` -> `server.greet_user`),
+                // which collides with a local of the same name as the file
+                // stem (`server := http.server()`). An exact function match
+                // is a direct call, never a method on the local.
+                let joined = parts.join(".");
+                if self.reachable_funcs.contains(&joined) || self.tp.funcs.contains_key(&joined) {
+                    (joined, None)
+                } else {
+                    let obj_name = &parts[0];
+                    let method = &parts[1];
+                    if names.lookup(obj_name).is_some() {
+                        // obj_name is a LOCAL variable — this is a method call.
+                        let first_ident_end = span.start + obj_name.len() as u32;
+                        let first_ident_span =
+                            zz_frontend::span::Span::new(span.start, first_ident_end);
 
-                    // Struct method dispatch: if the local's C type is a
-                    // struct (e.g. `zz_struct_mod__Rectangle`), look up
-                    // `<StructType>.<method>` in `reachable_funcs` (impl
-                    // methods are stored as `Type.method` using the
-                    // un-mangled struct name like `mod.Rectangle`). This
-                    // handles `rect.area()` regardless of whether `rect`
-                    // is bare or module-prefixed. Boxed structs (C type
-                    // `zz_value`, e.g. containing strings) resolve through
-                    // the checker's type map instead; embedded promotion
-                    // (`u.area()` → `Base.area`) applies to both shapes.
-                    let struct_dispatch: Option<(String, Expr)> = self
-                        .dispatch_struct_name(
-                            names,
-                            names.lookup_type(obj_name),
-                            obj_name,
-                            first_ident_span,
-                        )
-                        .and_then(|unmangled| {
-                            self.struct_method_target(&unmangled, method).map(
-                                |(impl_name, path)| {
-                                    let recv = if path.is_empty() {
-                                        Expr::Ident {
-                                            name: obj_name.clone(),
-                                            span: first_ident_span,
-                                        }
-                                    } else {
-                                        let mut parts = vec![obj_name.clone()];
-                                        parts.extend(path);
-                                        Expr::Path {
-                                            parts,
-                                            span: first_ident_span,
-                                        }
-                                    };
-                                    (impl_name, recv)
-                                },
+                        // Struct method dispatch: if the local's C type is a
+                        // struct (e.g. `zz_struct_mod__Rectangle`), look up
+                        // `<StructType>.<method>` in `reachable_funcs` (impl
+                        // methods are stored as `Type.method` using the
+                        // un-mangled struct name like `mod.Rectangle`). This
+                        // handles `rect.area()` regardless of whether `rect`
+                        // is bare or module-prefixed. Boxed structs (C type
+                        // `zz_value`, e.g. containing strings) resolve through
+                        // the checker's type map instead; embedded promotion
+                        // (`u.area()` → `Base.area`) applies to both shapes.
+                        let struct_dispatch: Option<(String, Expr)> = self
+                            .dispatch_struct_name(
+                                names,
+                                names.lookup_type(obj_name),
+                                obj_name,
+                                first_ident_span,
                             )
-                        });
-                    if let Some((c, r)) = struct_dispatch {
-                        (c, Some(r))
-                    } else {
-                        // Use the receiver's type from the type checker to
-                        // select the correct namespace. Without this, the
-                        // generic loop picks "vec" before "str" for methods
-                        // like `.contains()` that exist on multiple types.
-                        let mut found_ns = "";
-                        // Try type-based dispatch: check NameCtx's checker_types
-                        // (populated at Decl) for the receiver variable's resolved
-                        // type, then map to the matching namespace.
-                        let recv_type_ns =
-                            names.checker_types.get(obj_name).and_then(|ty| match ty {
-                                zz_checker::Type::Str => Some("str"),
-                                zz_checker::Type::Array(_) => Some("vec"),
-                                zz_checker::Type::Dict(_, _) => Some("dict"),
-                                zz_checker::Type::Option(_) => Some("option"),
-                                zz_checker::Type::Result(_, _) => Some("result"),
-                                zz_checker::Type::Db => Some("sqlz"),
-                                zz_checker::Type::TcpStream | zz_checker::Type::TcpListener => {
-                                    Some("net")
-                                }
-                                zz_checker::Type::HttpServer
-                                | zz_checker::Type::Response
-                                | zz_checker::Type::HttpRequest => Some("http"),
-                                zz_checker::Type::Json => Some("json"),
-                                zz_checker::Type::Bytes => Some("bytes"),
-                                zz_checker::Type::Chan => Some("chan"),
-                                // Opaque handles dispatch on their module tag.
-                                // Tags are dynamic, so leak once per tag —
-                                // same pattern as struct namespaces in the VM.
-                                zz_checker::Type::Opaque(tag) => {
-                                    Some(Box::leak(tag.clone().into_boxed_str()) as &str)
-                                }
-                                _ => None,
+                            .and_then(|unmangled| {
+                                self.struct_method_target(&unmangled, method).map(
+                                    |(impl_name, path)| {
+                                        let recv = if path.is_empty() {
+                                            Expr::Ident {
+                                                name: obj_name.clone(),
+                                                span: first_ident_span,
+                                            }
+                                        } else {
+                                            let mut parts = vec![obj_name.clone()];
+                                            parts.extend(path);
+                                            Expr::Path {
+                                                parts,
+                                                span: first_ident_span,
+                                            }
+                                        };
+                                        (impl_name, recv)
+                                    },
+                                )
                             });
-                        // Also check the type checker's span_types map
-                        // using the receiver's source span.
-                        let span_type_ns = if let Some(zzty) = self.tp.types.get(&first_ident_span)
-                        {
-                            match zzty {
-                                zz_checker::Type::Str => Some("str"),
-                                zz_checker::Type::Array(_) => Some("vec"),
-                                zz_checker::Type::Dict(_, _) => Some("dict"),
-                                zz_checker::Type::Option(_) => Some("option"),
-                                zz_checker::Type::Result(_, _) => Some("result"),
-                                zz_checker::Type::Db => Some("sqlz"),
-                                zz_checker::Type::TcpStream | zz_checker::Type::TcpListener => {
-                                    Some("net")
-                                }
-                                zz_checker::Type::HttpServer
-                                | zz_checker::Type::Response
-                                | zz_checker::Type::HttpRequest => Some("http"),
-                                zz_checker::Type::Json => Some("json"),
-                                zz_checker::Type::Bytes => Some("bytes"),
-                                zz_checker::Type::Chan => Some("chan"),
-                                zz_checker::Type::Opaque(tag) => {
-                                    Some(Box::leak(tag.clone().into_boxed_str()) as &str)
-                                }
-                                _ => None,
-                            }
+                        if let Some((c, r)) = struct_dispatch {
+                            (c, Some(r))
                         } else {
-                            None
-                        };
-                        let type_ns = recv_type_ns.or(span_type_ns).unwrap_or("");
-                        if !type_ns.is_empty() {
-                            let candidate = format!("{type_ns}.{method}");
-                            let std_candidate = format!("std.{type_ns}.{method}");
-                            if self.reachable_natives.contains(&candidate)
-                                || self.reachable_natives.contains(&std_candidate)
-                                || native_supported(&candidate)
-                            {
-                                found_ns = type_ns;
-                            }
-                        }
-                        // Fallback: generic namespace search (untyped
-                        // receivers, e.g. variables without type annotations).
-                        if found_ns.is_empty() {
-                            let namespaces = [
-                                "vec", "str", "dict", "option", "result", "http", "sqlz", "db",
-                                "file",
-                            ];
-                            for ns in &namespaces {
-                                let candidate = format!("{ns}.{method}");
-                                let std_candidate = format!("std.{ns}.{method}");
+                            // Use the receiver's type from the type checker to
+                            // select the correct namespace. Without this, the
+                            // generic loop picks "vec" before "str" for methods
+                            // like `.contains()` that exist on multiple types.
+                            let mut found_ns = "";
+                            // Try type-based dispatch: check NameCtx's checker_types
+                            // (populated at Decl) for the receiver variable's resolved
+                            // type, then map to the matching namespace.
+                            let recv_type_ns =
+                                names.checker_types.get(obj_name).and_then(|ty| match ty {
+                                    zz_checker::Type::Str => Some("str"),
+                                    zz_checker::Type::Array(_) => Some("vec"),
+                                    zz_checker::Type::Dict(_, _) => Some("dict"),
+                                    zz_checker::Type::Option(_) => Some("option"),
+                                    zz_checker::Type::Result(_, _) => Some("result"),
+                                    zz_checker::Type::Db => Some("sqlz"),
+                                    zz_checker::Type::TcpStream | zz_checker::Type::TcpListener => {
+                                        Some("net")
+                                    }
+                                    zz_checker::Type::HttpServer
+                                    | zz_checker::Type::Response
+                                    | zz_checker::Type::HttpRequest => Some("http"),
+                                    zz_checker::Type::Json => Some("json"),
+                                    zz_checker::Type::Bytes => Some("bytes"),
+                                    zz_checker::Type::Chan => Some("chan"),
+                                    // Opaque handles dispatch on their module tag.
+                                    // Tags are dynamic, so leak once per tag —
+                                    // same pattern as struct namespaces in the VM.
+                                    zz_checker::Type::Opaque(tag) => {
+                                        Some(Box::leak(tag.clone().into_boxed_str()) as &str)
+                                    }
+                                    _ => None,
+                                });
+                            // Also check the type checker's span_types map
+                            // using the receiver's source span.
+                            let span_type_ns =
+                                if let Some(zzty) = self.tp.types.get(&first_ident_span) {
+                                    match zzty {
+                                        zz_checker::Type::Str => Some("str"),
+                                        zz_checker::Type::Array(_) => Some("vec"),
+                                        zz_checker::Type::Dict(_, _) => Some("dict"),
+                                        zz_checker::Type::Option(_) => Some("option"),
+                                        zz_checker::Type::Result(_, _) => Some("result"),
+                                        zz_checker::Type::Db => Some("sqlz"),
+                                        zz_checker::Type::TcpStream
+                                        | zz_checker::Type::TcpListener => Some("net"),
+                                        zz_checker::Type::HttpServer
+                                        | zz_checker::Type::Response
+                                        | zz_checker::Type::HttpRequest => Some("http"),
+                                        zz_checker::Type::Json => Some("json"),
+                                        zz_checker::Type::Bytes => Some("bytes"),
+                                        zz_checker::Type::Chan => Some("chan"),
+                                        zz_checker::Type::Opaque(tag) => {
+                                            Some(Box::leak(tag.clone().into_boxed_str()) as &str)
+                                        }
+                                        _ => None,
+                                    }
+                                } else {
+                                    None
+                                };
+                            let type_ns = recv_type_ns.or(span_type_ns).unwrap_or("");
+                            if !type_ns.is_empty() {
+                                let candidate = format!("{type_ns}.{method}");
+                                let std_candidate = format!("std.{type_ns}.{method}");
                                 if self.reachable_natives.contains(&candidate)
                                     || self.reachable_natives.contains(&std_candidate)
+                                    || native_supported(&candidate)
                                 {
-                                    found_ns = ns;
-                                    break;
+                                    found_ns = type_ns;
                                 }
                             }
-                        }
-                        if found_ns.is_empty() {
-                            // Reachable-based dynamic scan FIRST (FFI-module
-                            // namespaces like regexp, uuid, file, … plus any
-                            // embedded namespace): any reachable
-                            // `<ns>.<method>` wins, sorted for determinism.
-                            // This must precede the `native_supported`
-                            // fallback below: global support without
-                            // reachability misroutes (e.g. `f.close()` on a
-                            // file handle would pick `sqlz.close`, which is
-                            // always "supported" but not reachable here).
-                            let suffix = format!(".{method}");
-                            let mut cands: Vec<&str> = self
-                                .reachable_natives
-                                .iter()
-                                .filter_map(|n| {
-                                    n.strip_suffix(suffix.as_str())
-                                        .map(|ns| ns.strip_prefix("std.").unwrap_or(ns))
-                                })
-                                .collect();
-                            cands.sort_unstable();
-                            cands.dedup();
-                            if let Some(ns) = cands.into_iter().next() {
-                                found_ns = ns;
-                            }
-                            // Last resort: match by native_impl — checks if
-                            // there's a C runtime function registered for
-                            // this method under any namespace, even when
-                            // reachability missed it.
+                            // Fallback: generic namespace search (untyped
+                            // receivers, e.g. variables without type annotations).
                             if found_ns.is_empty() {
                                 let namespaces = [
                                     "vec", "str", "dict", "option", "result", "http", "sqlz", "db",
@@ -1573,45 +1537,90 @@ impl Lowerer {
                                 ];
                                 for ns in &namespaces {
                                     let candidate = format!("{ns}.{method}");
-                                    if native_supported(&candidate) {
+                                    let std_candidate = format!("std.{ns}.{method}");
+                                    if self.reachable_natives.contains(&candidate)
+                                        || self.reachable_natives.contains(&std_candidate)
+                                    {
                                         found_ns = ns;
                                         break;
                                     }
                                 }
                             }
                             if found_ns.is_empty() {
-                                // No namespace resolved — the fallthrough
-                                // below emits a bare call and lets later
-                                // stages (checker/runtime) report it.
+                                // Reachable-based dynamic scan FIRST (FFI-module
+                                // namespaces like regexp, uuid, file, … plus any
+                                // embedded namespace): any reachable
+                                // `<ns>.<method>` wins, sorted for determinism.
+                                // This must precede the `native_supported`
+                                // fallback below: global support without
+                                // reachability misroutes (e.g. `f.close()` on a
+                                // file handle would pick `sqlz.close`, which is
+                                // always "supported" but not reachable here).
+                                let suffix = format!(".{method}");
+                                let mut cands: Vec<&str> = self
+                                    .reachable_natives
+                                    .iter()
+                                    .filter_map(|n| {
+                                        n.strip_suffix(suffix.as_str())
+                                            .map(|ns| ns.strip_prefix("std.").unwrap_or(ns))
+                                    })
+                                    .collect();
+                                cands.sort_unstable();
+                                cands.dedup();
+                                if let Some(ns) = cands.into_iter().next() {
+                                    found_ns = ns;
+                                }
+                                // Last resort: match by native_impl — checks if
+                                // there's a C runtime function registered for
+                                // this method under any namespace, even when
+                                // reachability missed it.
+                                if found_ns.is_empty() {
+                                    let namespaces = [
+                                        "vec", "str", "dict", "option", "result", "http", "sqlz",
+                                        "db", "file",
+                                    ];
+                                    for ns in &namespaces {
+                                        let candidate = format!("{ns}.{method}");
+                                        if native_supported(&candidate) {
+                                            found_ns = ns;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if found_ns.is_empty() {
+                                    // No namespace resolved — the fallthrough
+                                    // below emits a bare call and lets later
+                                    // stages (checker/runtime) report it.
+                                }
                             }
-                        }
-                        if found_ns.is_empty() {
-                            // Also check if the bare method name is a native
-                            // (e.g. `len`, `println`).
-                            if self.reachable_natives.contains(method) {
-                                // Bare builtin — no receiver injection needed.
-                                (method.clone(), None)
+                            if found_ns.is_empty() {
+                                // Also check if the bare method name is a native
+                                // (e.g. `len`, `println`).
+                                if self.reachable_natives.contains(method) {
+                                    // Bare builtin — no receiver injection needed.
+                                    (method.clone(), None)
+                                } else {
+                                    // Unknown — fall through
+                                    (method.clone(), None)
+                                }
                             } else {
-                                // Unknown — fall through
-                                (method.clone(), None)
+                                let receiver = Expr::Ident {
+                                    name: obj_name.clone(),
+                                    span: first_ident_span,
+                                };
+                                (format!("{found_ns}.{method}"), Some(receiver))
                             }
-                        } else {
-                            let receiver = Expr::Ident {
-                                name: obj_name.clone(),
-                                span: first_ident_span,
-                            };
-                            (format!("{found_ns}.{method}"), Some(receiver))
                         }
+                    } else {
+                        // obj_name is NOT a local — it's a namespace like `vec`, `io`,
+                        // or a module head alias (`f` from `import std.fs as f`).
+                        let head = self
+                            .import_ns_aliases
+                            .get(obj_name)
+                            .cloned()
+                            .unwrap_or_else(|| obj_name.clone());
+                        (format!("{head}.{method}"), None)
                     }
-                } else {
-                    // obj_name is NOT a local — it's a namespace like `vec`, `io`,
-                    // or a module head alias (`f` from `import std.fs as f`).
-                    let head = self
-                        .import_ns_aliases
-                        .get(obj_name)
-                        .cloned()
-                        .unwrap_or_else(|| obj_name.clone());
-                    (format!("{head}.{method}"), None)
                 }
             }
             Expr::Path { parts, .. } => {
@@ -1624,7 +1633,15 @@ impl Lowerer {
                 //     and uses its struct type to look up
                 //     `<StructType>.<method>` in funcs.
                 if parts.len() >= 2 {
-                    if let Some((recv_cname, recv_expr)) = self.resolve_path_receiver(parts, names)
+                    // Same collision rule as the 2-part arm above: an exact
+                    // user-function match is a direct call even when a local
+                    // shares the head segment.
+                    let joined = parts.join(".");
+                    if self.reachable_funcs.contains(&joined) || self.tp.funcs.contains_key(&joined)
+                    {
+                        (joined, None)
+                    } else if let Some((recv_cname, recv_expr)) =
+                        self.resolve_path_receiver(parts, names)
                     {
                         (recv_cname, Some(recv_expr))
                     } else {
@@ -2322,6 +2339,38 @@ impl Lowerer {
             let _ = (cname_for_native.is_empty(),);
             return "zz_unit()".to_string();
         }
+
+        // Bare-name fallback: the loader qualifies same-file calls, but a
+        // bare `greet_user` can still arrive here (generated code, REPL).
+        // A unique `*.name` reachable function is that same-file target.
+        let owned_fallback: Option<String>;
+        let cname_ref: &str = if !cname_for_native.contains('.')
+            && !self.reachable_funcs.contains(&cname_for_native)
+            && !self.tp.funcs.contains_key(&cname_for_native)
+        {
+            let suffix = format!(".{cname_for_native}");
+            let mut hits: Vec<&String> = self
+                .reachable_funcs
+                .iter()
+                .filter(|f| f.ends_with(suffix.as_str()))
+                .collect();
+            hits.sort_unstable();
+            hits.dedup();
+            if hits.len() == 1 {
+                owned_fallback = Some(hits[0].clone());
+                owned_fallback.as_deref().unwrap()
+            } else {
+                owned_fallback = None;
+                cname_for_native.as_str()
+            }
+        } else {
+            owned_fallback = None;
+            cname_for_native.as_str()
+        };
+        // Shadow `cname_for_native` with the resolved name for the rest of
+        // this function (avoids touching every use below).
+        let cname_for_native: String = cname_ref.to_string();
+        let _ = &owned_fallback;
 
         if self.reachable_funcs.contains(&cname_for_native) {
             let cf = format!("zz_fn_{}", mangle(&cname_for_native));

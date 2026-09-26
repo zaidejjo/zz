@@ -4985,6 +4985,31 @@ zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
     int opt = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
+    // SO_REUSEPORT lets bind() succeed even when a stale server still
+    // holds the port, silently splitting traffic between old and new
+    // processes (the classic "empty 200 / white screen" after rebuild).
+    // Probe first: if something already answers on 127.0.0.1:port, warn
+    // so the operator kills the stale workers or picks a free port.
+    {
+        int probe = socket(AF_INET, SOCK_STREAM, 0);
+        if (probe >= 0) {
+            struct sockaddr_in paddr;
+            memset(&paddr, 0, sizeof(paddr));
+            paddr.sin_family = AF_INET;
+            paddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            paddr.sin_port = htons((unsigned short)p);
+            if (connect(probe, (struct sockaddr *)&paddr, sizeof(paddr)) == 0) {
+                fprintf(stderr,
+                    "zz_http_listen: WARNING port %d already in use;"
+                    " SO_REUSEPORT will share it with the stale process"
+                    " (expect split traffic / stale responses;"
+                    " kill old workers or use a free port)\n", p);
+                fflush(stderr);
+            }
+            close(probe);
+        }
+    }
+
     // SO_REUSEPORT for multi-core scaling
     int reuseport = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &reuseport, sizeof(reuseport));

@@ -28,6 +28,11 @@ use crate::manifest::{DepSpec, Manifest};
 pub struct CacheKey {
     /// SHA-256 hash of the main source file content.
     pub source_hash: String,
+    /// Canonical absolute path of the entry source file. Two different
+    /// files with identical content must not share a cache entry: the
+    /// module namespace derives from the file stem, so same-content
+    /// files (`server.zz` vs `other.zz`) lower to different symbols.
+    pub source_path: String,
     /// SHA-256 hashes of path dependencies, keyed by dependency name.
     /// Empty if no path deps exist.
     pub dep_hashes: HashMap<String, String>,
@@ -62,6 +67,13 @@ impl CacheKey {
         runtime_mtime: Option<u64>,
     ) -> Result<Self, String> {
         let source_hash = hash::hash_bytes(source_content.as_bytes());
+        // Canonical entry path participates in the key (see `source_path`):
+        // identical bytes under different paths lower to different module
+        // namespaces and must never share an entry.
+        let canonical_entry = source_path
+            .canonicalize()
+            .unwrap_or_else(|_| source_path.to_path_buf());
+        let source_path_str = canonical_entry.to_string_lossy().into_owned();
 
         // Look for zz.toml starting at the source file's directory and
         // walking up (entry files often live in `src/`, one level below
@@ -90,6 +102,7 @@ impl CacheKey {
 
         Ok(Self {
             source_hash,
+            source_path: source_path_str,
             dep_hashes,
             build_fingerprint,
             target: target.unwrap_or("host").to_string(),
@@ -106,8 +119,11 @@ impl CacheKey {
 
     /// Serialize to a deterministic string for use as a cache directory name.
     ///
-    /// The format is: `<source_hash_16>-<deps_hash_16>-<build_fp>-<target>-<rt_16>-<art_16>-<flags_8>`
-    /// where each component is truncated for readability. The trailing
+    /// The format is: `<source_hash_16>-<path_8>-<deps_hash_16>-<build_fp>-<target>-<rt_16>-<art_16>-<flags_8>`
+    /// where each component is truncated for readability. The `path`
+    /// segment hashes the canonical entry path: without it, two files with
+    /// identical content (`a.zz` vs `b.zz`) share an entry even though the
+    /// module namespace (file stem) changes every emitted symbol. The trailing
     /// `rt` segment carries the runtime/compiler mtime sum (`none` when
     /// unavailable): without it, a compiler change reuses binaries built
     /// by the older compiler. The `art`/`flags` segments carry the plugin
@@ -118,6 +134,8 @@ impl CacheKey {
     /// orphans pre-fix entries (safe: cold rebuild once, old entries age
     /// out via gc).
     pub fn to_slug(&self) -> String {
+        let path_hash = hash::hash_bytes(self.source_path.as_bytes());
+        let path_slug = path_hash[..8.min(path_hash.len())].to_string();
         let deps_slug = if self.dep_hashes.is_empty() {
             "nodeps".to_string()
         } else {
@@ -153,8 +171,9 @@ impl CacheKey {
         };
 
         format!(
-            "{}-{}-{}-{}-{}-{}-{}",
+            "{}-{}-{}-{}-{}-{}-{}-{}",
             &self.source_hash[..16.min(self.source_hash.len())],
+            path_slug,
             deps_slug,
             &build_hex[..16.min(build_hex.len())],
             self.target,
@@ -644,6 +663,27 @@ dep_a = { path = "dep_a" }
         );
         let key = result.unwrap();
         assert!(key.dep_hashes.is_empty());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn cache_key_differs_on_entry_path() {
+        // Same bytes under different paths lower to different module
+        // namespaces (file stem), so they must never share a cache entry.
+        // Regression: `examples/bin/server` once contained symbols from a
+        // different same-content file.
+        let d = tmp();
+        let a = d.join("server.zz");
+        let b = d.join("other.zz");
+        let content = "func main() { }";
+        fs::write(&a, content).unwrap();
+        fs::write(&b, content).unwrap();
+
+        let ka = CacheKey::compute(&a, content, 42, None, None).unwrap();
+        let kb = CacheKey::compute(&b, content, 42, None, None).unwrap();
+        assert_eq!(ka.source_hash, kb.source_hash);
+        assert_ne!(ka.source_path, kb.source_path);
+        assert_ne!(ka.to_slug(), kb.to_slug());
         let _ = fs::remove_dir_all(&d);
     }
 }

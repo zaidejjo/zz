@@ -282,6 +282,7 @@ e2e_success_test!(
     "http_request_response.zz"
 );
 e2e_success_test!(e2e_stdlib_http_fetch_test, "stdlib", "http_fetch_test.zz");
+e2e_success_test!(e2e_stdlib_ns_collision, "stdlib", "ns_collision.zz");
 e2e_success_test!(
     e2e_stdlib_bench_memory_arena,
     "stdlib",

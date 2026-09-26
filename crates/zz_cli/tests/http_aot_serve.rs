@@ -397,3 +397,86 @@ fn aot_serve_concurrent() {
     // Keep the server alive until all workers finish.
     drop(server);
 }
+
+/// Regression: file stem colliding with a local (`server.zz` holding
+/// `server := http.server()`) once lowered same-file closure calls to
+/// `zz_unit()` — the handler returned an empty 200 (white screen).
+/// The entry file MUST be named `server.zz` so the module namespace
+/// collides with the local.
+#[test]
+fn aot_serve_ns_collision_helper() {
+    if !require_native_serve() {
+        return;
+    }
+    const SRC: &str = r#"import std.http
+import std.env
+
+func greet_user(username: str) -> str {
+    "Hello, {username}"
+}
+
+func main() {
+    port := int(env.var("ZZ_AOT_PORT") ?? "0") ?? 8931
+    server := http.server()
+    server = http.route_get(server, "/hello/:username", |req| {
+        user := http.param(req, "username") ?? "Guest"
+        greet_user(user)
+    })
+    http.listen(server, port)
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("zz_aot_nscoll_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src = dir.join("server.zz");
+    std::fs::write(&src, SRC).expect("write server.zz");
+    let out = Command::new(zz_bin())
+        .arg("build")
+        .arg(&src)
+        .output()
+        .expect("spawn zz build");
+    assert!(
+        out.status.success(),
+        "zz build server.zz failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bin = dir.join("bin").join("server");
+    assert!(bin.exists(), "built binary missing: {}", bin.display());
+    let port = free_port();
+    let mut child = Command::new(&bin)
+        .env("ZZ_AOT_PORT", port.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn collision server");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if line.contains("SERVER_READY") {
+                        let _ = tx.send(true);
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    rx.recv_timeout(Duration::from_secs(30))
+        .expect("SERVER_READY timeout");
+    let (status, _, body) = get(port, "/hello/zaid", &[]);
+    assert_eq!(status, 200);
+    assert_eq!(
+        body, b"Hello, zaid",
+        "closure helper call returned empty (ns collision)"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+    kill_family(&bin);
+}
