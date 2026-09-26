@@ -70,6 +70,9 @@ impl Checker {
                     self.define_var_at(&name.name, fv, name.span, *is_const);
                 }
                 let vt = self.check_expr(value);
+                // Phase 2.2: inherit `std.http` route tables across server
+                // builder chains (`s2 := s.route_get(...)`, `s2 := s`).
+                self.propagate_http_routes(&name.name, value);
                 if let Some(ann) = ty {
                     let gens = self.current_generics.clone();
                     let at = self.ast_to_type(ann, &gens);
@@ -460,6 +463,13 @@ impl Checker {
                 let errors_before = self.errors.len();
                 let tt = self.check_assign_target(target);
                 let vt = self.check_expr(value);
+                // Phase 2.2: `s = s.route_get(...)` keeps the same root, but
+                // `t = s.route_get(...)` must inherit `s`'s table under `t`.
+                match target {
+                    Expr::Ident { name, .. } => self.propagate_http_routes(name, value),
+                    Expr::Path { parts, .. } => self.propagate_http_routes(&parts.join("."), value),
+                    _ => {}
+                }
                 if self.errors.len() == errors_before {
                     if let Err(e) = self.unifier.unify(&vt, &tt) {
                         self.report_mismatch(e, *span);
@@ -1407,6 +1417,21 @@ impl Checker {
                 let recv_t = self.check_expr(obj);
                 let recv_t = self.unifier.resolve(&recv_t);
                 let method = name.clone();
+                // Phase 2.2: `std.http` route + param lint on typed receivers.
+                if matches!(self.unifier.resolve(&recv_t), Type::HttpServer)
+                    && crate::checker::http_lint::is_route_method(&method)
+                {
+                    let root = match obj.as_ref() {
+                        Expr::Ident { name, .. } => Some(name.clone()),
+                        _ => None,
+                    };
+                    self.lint_http_route_method(root, &method, args, span);
+                } else if method == "param"
+                    && matches!(self.unifier.resolve(&recv_t), Type::HttpRequest)
+                {
+                    // Field-call args exclude the receiver: `req.param(name)`.
+                    self.lint_http_param(args.first());
+                }
                 let mut sig = self.funcs.get(&method).cloned();
                 if sig.is_none() {
                     match &self.unifier.resolve(&recv_t) {
@@ -1611,6 +1636,20 @@ impl Checker {
                     }
                 }
             }
+            // Phase 2.2: `std.http` route + param lint for qualified calls.
+            // Runs before generic arg checking so the route's own params are
+            // registered before handler bodies are checked. `s.route(...)`
+            // arrives as a Path callee (receiver-implicit); `http.route...`
+            // as a module call — `lint_http_path_call` sorts out the form.
+            if let Expr::Path { parts, .. } = callee {
+                self.lint_http_path_call(parts, args, span);
+            }
+            // NOTE: bare-`Ident` callees are deliberately NOT linted here:
+            // genuine selective imports (`import std.http(route)`) are
+            // rewritten to qualified `Path` callees at the top of
+            // `check_call`, so a bare `route`/`param` reaching this point
+            // is user code (e.g. a `@route` decorator) — linting it would
+            // false-positive (see `syntax/decorators.zz`).
             if let Some(sig) = self.funcs.get(name).cloned() {
                 self.used_names.insert(name.clone());
                 let (ps, ret, subs) = self.instantiate(&sig);

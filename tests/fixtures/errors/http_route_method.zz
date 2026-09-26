@@ -1,0 +1,9 @@
+// E2E: unknown method in std.http.route is a compile error
+import std.http
+
+func main() -> Result<int, str> {
+    s := http.server()
+    s = s.route("FROB", "/x", |_req| "bad-method")
+    println("unreachable_ok")
+    .ok(0)
+}

@@ -1906,6 +1906,23 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             Type::Unit,
         ),
     );
+    // `listen_cfg(server, port, opts)` — socket limits + shutdown budget.
+    // All keys optional ints: read_ms, max_reqs_conn, max_body_bytes,
+    // shutdown_ms. Both spellings like every other `std.http.*` name.
+    let dict_str_int = Type::Dict(Box::new(Type::Str), Box::new(Type::Int));
+    for name in ["std.http.listen_cfg", "http.listen_cfg"] {
+        m.insert(
+            name.into(),
+            sig(
+                vec![
+                    ("server", server_t.clone()),
+                    ("port", Type::Int),
+                    ("opts", dict_str_int.clone()),
+                ],
+                Type::Unit,
+            ),
+        );
+    }
 
     // std.http — Phase 5B features
     let dict_str_str = Type::Dict(Box::new(Type::Str), Box::new(Type::Str));
@@ -1945,6 +1962,43 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             Type::HttpServer,
         ),
     );
+    for name in ["std.http.serve_dir_at", "http.serve_dir_at"] {
+        m.insert(
+            name.into(),
+            sig(
+                vec![
+                    ("server", Type::HttpServer),
+                    ("prefix", Type::Str),
+                    ("dir", Type::Str),
+                ],
+                Type::HttpServer,
+            ),
+        );
+    }
+    // Post-middleware: `fn(req, res) -> res`, applied to handler output.
+    let post_t = Type::Func(
+        vec![Type::HttpRequest, Type::Response],
+        Box::new(Type::Response),
+    );
+    for name in ["std.http.pipe_post", "http.pipe_post"] {
+        m.insert(
+            name.into(),
+            sig(
+                vec![("server", Type::HttpServer), ("post", post_t.clone())],
+                Type::HttpServer,
+            ),
+        );
+    }
+    // `with_headers(res, extra)` merges headers (`extra` wins).
+    for name in ["std.http.with_headers", "http.with_headers"] {
+        m.insert(
+            name.into(),
+            sig(
+                vec![("res", Type::Response), ("extra", dict_str())],
+                Type::Response,
+            ),
+        );
+    }
     m.insert(
         "std.http.test".into(),
         sig(
@@ -1952,6 +2006,19 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
                 ("server", Type::HttpServer),
                 ("method", Type::Str),
                 ("path", Type::Str),
+                ("body", Type::Str),
+            ],
+            Type::Response,
+        ),
+    );
+    m.insert(
+        "std.http.test_req".into(),
+        sig(
+            vec![
+                ("server", Type::HttpServer),
+                ("method", Type::Str),
+                ("path", Type::Str),
+                ("headers", dict_str()),
                 ("body", Type::Str),
             ],
             Type::Response,
@@ -2051,6 +2118,29 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         let s = sig(params, ret);
         m.insert(format!("std.http.{name}"), s.clone());
         m.insert(format!("http.{name}"), s);
+    }
+    // Pure-ZZ middleware kits (`zz/http/mod.zz`): `cors(server, origins)`
+    // gates origins + answers preflights + echoes `Allow-Origin`;
+    // `secure_headers(server)` injects CSP/nosniff/referrer/frame headers;
+    // `secure_header_dict()` exposes the raw map for manual merges.
+    let str_arr = || Type::Array(Box::new(Type::Str));
+    for name in ["std.http.cors", "http.cors"] {
+        m.insert(
+            name.into(),
+            sig(
+                vec![("server", Type::HttpServer), ("origins", str_arr())],
+                Type::HttpServer,
+            ),
+        );
+    }
+    for name in ["std.http.secure_headers", "http.secure_headers"] {
+        m.insert(
+            name.into(),
+            sig(vec![("server", Type::HttpServer)], Type::HttpServer),
+        );
+    }
+    for name in ["std.http.secure_header_dict", "http.secure_header_dict"] {
+        m.insert(name.into(), sig(vec![], dict_str()));
     }
 
     // std.net — TCP networking
@@ -3342,6 +3432,13 @@ mod tests {
         assert!(funcs.contains_key("std.http.body_json"));
         assert!(funcs.contains_key("std.http.body_form"));
         assert!(funcs.contains_key("std.http.respond"));
+        assert!(funcs.contains_key("std.http.test_req"));
+        assert!(funcs.contains_key("std.http.serve_dir_at"));
+        assert!(funcs.contains_key("std.http.pipe_post"));
+        assert!(funcs.contains_key("std.http.with_headers"));
+        assert!(funcs.contains_key("std.http.listen_cfg"));
+        assert!(funcs.contains_key("std.http.cors"));
+        assert!(funcs.contains_key("std.http.secure_headers"));
         assert!(funcs.contains_key("std.encoding.base64_decode_bytes"));
         assert!(funcs.contains_key("std.fs.read_to_string"));
         assert!(funcs.contains_key("std.fs.read_bytes"));
@@ -3545,7 +3642,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 679);
+        assert_eq!(funcs.len(), 694);
     }
 
     #[test]

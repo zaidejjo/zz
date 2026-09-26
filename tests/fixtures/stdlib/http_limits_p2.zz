@@ -1,0 +1,80 @@
+// tests/fixtures/stdlib/http_limits_p2.zz — Phase 2 listen_cfg over live TCP
+// Single server (one blocking listen): max_body_bytes 413 vs 200 echo,
+// max_reqs_conn close-after-N — all reconnections explicit.
+import std.http
+import std.net
+import std.task
+import std.time
+
+func main() -> Result<int, str> {
+    s := http.server()
+    s = s.route("POST", "/echo", |req| req.body)
+    task.spawn(|_| {
+        http.listen_cfg(s, 8138, {"max_body_bytes": 16, "max_reqs_conn": 1})
+    })
+    tries := 0
+    stream := net.tcp_connect("127.0.0.1:8138", 200)
+    while tries < 50 {
+        match stream {
+            .ok(_) => break
+            .err(_) => {
+                time.sleep_ms(100)
+                stream = net.tcp_connect("127.0.0.1:8138", 200)
+                tries = tries + 1
+            }
+        }
+    }
+    c := stream?
+    c.set_read_timeout(5000)?
+
+    // over the cap -> 413 (413 always closes: unread body breaks framing)
+    big := "0123456789ABCDEF0123456789ABCDEF"
+    c.write("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 32\r\nConnection: keep-alive\r\n\r\n{big}")?
+    st1 := c.read_line()?
+    assert(st1.contains("413"))
+    while true {
+        h := c.read_line()?
+        if h == "" || h == "\r" {
+            break
+        }
+    }
+    b1 := ""
+    g1 := 0
+    while b1.len() < 17 && g1 < 20 {
+        chunk := c.read(64)?
+        b1 = "{b1}{chunk}"
+        g1 = g1 + 1
+    }
+    assert(b1.len() == 17)
+    println("cap413_ok")
+
+    // under the cap -> 200 echo on a fresh connection (max 1 req/conn)
+    c2 := net.tcp_connect("127.0.0.1:8138", 5000)?
+    c2.set_read_timeout(5000)?
+    c2.write("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello")?
+    st2 := c2.read_line()?
+    assert(st2.contains("200"))
+    while true {
+        h2 := c2.read_line()?
+        if h2 == "" || h2 == "\r" {
+            break
+        }
+    }
+    b2 := c2.read_bytes(5)?
+    assert(b2.len() == 5)
+    println("echo200_ok")
+
+    // server served its 1 request: second request must fail (write or read)
+    match c2.write("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello") {
+        .ok(_) => {
+            match c2.read_line() {
+                .ok(_) => println("ERROR: conn should be closed")
+                .err(_) => println("reqcap_ok")
+            }
+        }
+        .err(_) => println("reqcap_ok")
+    }
+
+    println("http_limits_p2_ok")
+    .ok(0)
+}

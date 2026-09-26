@@ -318,6 +318,23 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("http.not_found", "pure ZZ alias"),
     ("std.http.redirect", "pure ZZ; no C codegen"),
     ("http.redirect", "pure ZZ alias"),
+    ("std.http.cors", "pure ZZ; no C codegen"),
+    ("http.cors", "pure ZZ alias"),
+    ("std.http.secure_headers", "pure ZZ; no C codegen"),
+    ("http.secure_headers", "pure ZZ alias"),
+    ("std.http.secure_header_dict", "pure ZZ; no C codegen"),
+    ("http.secure_header_dict", "pure ZZ alias"),
+    // Phase 2 HTTP natives — VM-only until the P3 AOT HTTP leg lands
+    // (post-middleware chain, prefix static roots, listen limits, test_req).
+    ("std.http.pipe_post", "P3 AOT; post-middleware C impl"),
+    ("http.pipe_post", "P3 AOT; post-middleware C impl"),
+    ("std.http.with_headers", "P3 AOT; response-merge C impl"),
+    ("http.with_headers", "P3 AOT; response-merge C impl"),
+    ("std.http.serve_dir_at", "P3 AOT; prefix-static C impl"),
+    ("http.serve_dir_at", "P3 AOT; prefix-static C impl"),
+    ("std.http.listen_cfg", "P3 AOT; listen-limits C impl"),
+    ("http.listen_cfg", "P3 AOT; listen-limits C impl"),
+    ("std.http.test_req", "P3 AOT; header-injecting test C impl"),
     // MySQL wire driver — VM-only (no staticlib backend like PG has;
     // AOT lowers these to Unit like time.now_ms).
     ("std.sqlz.mysql.connect", "VM-only; no C socket driver"),

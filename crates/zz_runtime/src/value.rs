@@ -872,8 +872,13 @@ impl BytesData {
 pub struct HttpServer {
     pub routes: Vec<(String, String, Value)>,
     pub middlewares: Vec<Value>,
+    /// Post-middleware: `fn(req, res) -> res`, applied to handler output
+    /// (response-header injection like CORS/secure-headers lives here).
+    pub post_middlewares: Vec<Value>,
     pub log_enabled: bool,
-    pub static_dir: Option<String>,
+    /// Static roots: `(url_prefix, dir)` in registration order.
+    /// `serve_dir` registers `("/", dir)`; first matching prefix wins.
+    pub static_dirs: Vec<(String, String)>,
 }
 
 /// An HTTP response: status code, body, and headers.

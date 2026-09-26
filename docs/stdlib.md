@@ -197,13 +197,21 @@ import std.http
 | `http.route_post` | `http.route_post(server, path, handler) -> http.server` | Register POST route |
 | `http.route_put` | `http.route_put(server, path, handler) -> http.server` | Register PUT route |
 | `http.route_delete` | `http.route_delete(server, path, handler) -> http.server` | Register DELETE route |
-| `http.route` | `http.route(server, method, path, handler) -> http.server` | Single-entry routing (unknown methods are a loud error) |
+| `http.route` | `http.route(server, method, path, handler) -> http.server` | Single-entry routing (`GET`/`POST`/`PUT`/`DELETE`/`PATCH`/`HEAD`/`OPTIONS`; unknown methods are a loud error) |
 | `http.use` | `http.use(server, middleware) -> http.server` | Register middleware (`http.pipe` is a legacy alias) |
+| `http.pipe_post` | `http.pipe_post(server, post_fn) -> http.server` | Post-middleware `fn(req, res) -> res` (response headers) |
+| `http.with_headers` | `http.with_headers(res, extra) -> http.response` | Merge headers (`extra` wins) |
 | `http.log` | `http.log(server, enabled) -> http.server` | Toggle request logging |
-| `http.serve_dir` | `http.serve_dir(server, dir) -> http.server` | Serve static files |
+| `http.serve_dir` | `http.serve_dir(server, dir) -> http.server` | Serve static files (traversal-proof, ETag, Range) |
+| `http.serve_dir_at` | `http.serve_dir_at(server, prefix, dir) -> http.server` | Serve static files under a URL prefix |
 | `http.test` | `http.test(server, method, path, body) -> http.response` | Dispatch in-process (no sockets) |
+| `http.test_req` | `http.test_req(server, method, path, headers, body) -> http.response` | Like `test`, with request headers |
 | `http.handle` | `http.handle(server, method, path, body) -> Result<str, str>` | Legacy dispatch (prefer `test`) |
-| `http.listen` | `http.listen(server, port) -> unit` | Start blocking server |
+| `http.listen` | `http.listen(server, port) -> unit` | Start blocking server (keep-alive, graceful SIGINT/SIGTERM drain) |
+| `http.listen_cfg` | `http.listen_cfg(server, port, opts) -> unit` | `opts`: `read_ms`, `max_reqs_conn`, `max_body_bytes`, `shutdown_ms` (all optional ints) |
+| `http.cors` | `http.cors(server, origins) -> http.server` | CORS: origin gate + preflight + `Allow-Origin` echo |
+| `http.secure_headers` | `http.secure_headers(server) -> http.server` | Inject CSP/nosniff/referrer/frame headers |
+| `http.secure_header_dict` | `http.secure_header_dict() -> {str: str}` | Raw secure-headers map for manual merges |
 | `http.respond` | `http.respond(status, body, headers = {}) -> http.response` | Explicit status/headers |
 | `http.ok` | `http.ok(body) -> http.response` | 200 response |
 | `http.created` | `http.created(body) -> http.response` | 201 response |
@@ -233,6 +241,27 @@ s := http.server()
 s = s.route("GET", "/hi", |req| http.ok("hi"))
 s = s.use(|req| .ok(req))
 s = s.log(true)
+```
+
+Routes use one syntax: `:id` captures a segment, `:rest...` captures the
+greedy tail (must be last), `*` is a catch-all. Exact routes beat params,
+params beat wildcards; a path matched only by other methods returns 405
+with `Allow`. The checker validates literal paths, methods, handler arity,
+duplicate routes, and `param("typo")` names at compile time.
+
+Static files are traversal-proof (`..`, `%2e%2e`, symlink escapes → 403),
+binary-safe, and support `ETag`/`If-None-Match` (304) plus single
+`Range` (206, unsatisfiable → 416). Directories need `index.html`.
+Static responses flow through post-middleware, so CORS and secure
+headers apply to file responses as well; longest matching prefix wins.
+
+```zz
+s := http.server()
+s = http.serve_dir(s, "./public")            // catch-all fallback
+s = http.serve_dir_at(s, "/assets", "./dist") // prefix-scoped
+s = http.cors(s, ["https://app.example.com"])
+s = http.secure_headers(s)
+http.listen_cfg(s, 8080, {"max_body_bytes": 10000000})
 ```
 
 ### Request (`http.request`)

@@ -213,9 +213,16 @@ pub fn best_match(
 
 /// True when `path` matches at least one route registered for a *different*
 /// method — lets dispatch return 405 instead of 404.
+///
+/// Whole-pattern `*` catch-alls never count: they match everything by
+/// design (e.g. an `OPTIONS *` CORS preflight), so counting them would turn
+/// every static-file GET into a 405.
 pub fn matches_other_method(routes: &[(String, String)], method: &str, path: &str) -> bool {
     for (m, pattern_str) in routes {
         if m == method {
+            continue;
+        }
+        if pattern_str == "*" {
             continue;
         }
         if pattern_str == path {
@@ -303,6 +310,15 @@ mod tests {
         assert!(best_match(&routes, "POST", "/users/42").is_none());
         assert!(matches_other_method(&routes, "POST", "/users/42"));
         assert!(!matches_other_method(&routes, "POST", "/nope"));
+    }
+
+    #[test]
+    fn catch_all_does_not_trigger_405() {
+        // An `OPTIONS *` CORS preflight must not turn every other-method
+        // request (e.g. GETs for static files) into 405s.
+        let routes = vec![("OPTIONS".to_string(), "*".to_string())];
+        assert!(!matches_other_method(&routes, "GET", "/assets/logo.txt"));
+        assert!(!matches_other_method(&routes, "POST", "/api/hi"));
     }
 
     #[test]

@@ -1,0 +1,9 @@
+// E2E: malformed std.http route path is a compile error
+import std.http
+
+func main() -> Result<int, str> {
+    s := http.server()
+    s = s.route("GET", "/files/:p.../x", |_req| "bad-tail")
+    println("unreachable_ok")
+    .ok(0)
+}
