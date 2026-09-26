@@ -409,6 +409,23 @@ impl Checker {
                     }
                     ty = *v;
                 }
+                Type::HttpRequest => {
+                    // Typed request field access: `req.method/path/body`
+                    // are `str`; `req.headers/query/params` are `{str: str}`.
+                    ty = match field.as_str() {
+                        "method" | "path" | "body" => Type::Str,
+                        "headers" | "query" | "params" => {
+                            Type::Dict(Box::new(Type::Str), Box::new(Type::Str))
+                        }
+                        _ => {
+                            self.errors.push(error_at(
+                                format!("http.request has no field `{field}`"),
+                                span,
+                            ));
+                            return Type::Error;
+                        }
+                    };
+                }
                 Type::Var(_) => {
                     // Inference variable — not yet resolved (e.g. untyped closure param).
                     // Return a fresh var; unification will catch real mismatches later.

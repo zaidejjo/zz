@@ -174,6 +174,11 @@ e2e_success_test!(e2e_syntax_control_flow, "syntax", "control_flow.zz");
 e2e_success_test!(e2e_syntax_pipelines, "syntax", "pipelines.zz");
 e2e_success_test!(e2e_syntax_hof, "syntax", "hof.zz");
 e2e_success_test!(e2e_syntax_match, "syntax", "match.zz");
+e2e_success_test!(
+    e2e_syntax_match_bare_return,
+    "syntax",
+    "match_bare_return.zz"
+);
 e2e_success_test!(e2e_syntax_frame_slots, "syntax", "frame_slots.zz");
 e2e_success_test!(e2e_syntax_operators, "syntax", "operators.zz");
 e2e_success_test!(e2e_syntax_fstrings, "syntax", "fstrings.zz");
@@ -276,6 +281,14 @@ e2e_success_test!(
     "stdlib",
     "http_request_response.zz"
 );
+e2e_success_test!(e2e_stdlib_http_fetch_test, "stdlib", "http_fetch_test.zz");
+e2e_success_test!(e2e_stdlib_http_router_p1, "stdlib", "http_router_p1.zz");
+e2e_success_test!(
+    e2e_stdlib_http_keepalive_p1,
+    "stdlib",
+    "http_keepalive_p1.zz"
+);
+e2e_success_test!(e2e_stdlib_ns_collision, "stdlib", "ns_collision.zz");
 e2e_success_test!(
     e2e_stdlib_bench_memory_arena,
     "stdlib",
@@ -372,6 +385,11 @@ e2e_success_test!(
     "json_extended_test.zz"
 );
 e2e_success_test!(e2e_stdlib_selective_import, "stdlib", "selective_import.zz");
+e2e_success_test!(
+    e2e_stdlib_str_selective_methods,
+    "stdlib",
+    "str_selective_methods.zz"
+);
 e2e_success_test!(e2e_stdlib_wildcard_import, "stdlib", "wildcard_import.zz");
 e2e_success_test!(e2e_stdlib_symbol_alias, "stdlib", "symbol_alias.zz");
 e2e_success_test!(e2e_stdlib_multi_selective, "stdlib", "multi_selective.zz");

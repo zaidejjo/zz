@@ -1,0 +1,60 @@
+// ztasks — Todo application golden fixture for `zz fmt` parity.
+//
+// This file exercises the formatter's lossless guarantees:
+//   a) multiline SQL inside `db.exec("""...""")` must survive byte-for-byte,
+//   b) string interpolation `{expr}` and escapes (`\x0a`, `\n`) immutable,
+//   c) all `//` and `/* */` comments preserved without displacement.
+// Formatting must also be idempotent: fmt(fmt(x)) == fmt(x).
+
+import std.sqlz
+import std.io
+
+// Task status filter.
+/* Block comment: status values are
+   `todo`, `doing`, `done` — kept verbatim. */
+struct Task {
+    id: int,
+    name: str,
+    is_done: bool,
+}
+
+// Ensure the tasks table exists. Multiline SQL layout is significant.
+func ensure_schema(db: str) -> str {
+    db.exec("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            is_done INTEGER NOT NULL DEFAULT 0
+        )
+        """)
+    return db
+}
+
+// Add a task; `\x0a` escape and `{expr}` interpolation must not mutate.
+func add_task(db: str, name: str) -> str {
+    // trailing comment: insertion uses bound params
+    db.exec("""INSERT INTO tasks (name, is_done) VALUES ({name}, 0)""")
+    line := "added\x0aline:{name}\n"
+    io.println(line)
+    return db
+}
+
+// List tasks with interpolation and format specs.
+func list_tasks(db: str) -> int {
+    n := 0
+    for t in db.query("""SELECT id, name FROM tasks WHERE is_done = {n}""") {
+        io.println("{t} done? {n}")
+        n = n + 1
+    }
+    return n
+}
+
+// Entry: wire everything with pipe-friendly calls.
+func main() -> int {
+    db := sqlz.open(":memory:")
+    ensure_schema(db)
+    add_task(db, "write docs")
+    total := list_tasks(db)
+    // done: {total} tasks listed
+    return total
+}

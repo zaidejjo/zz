@@ -22,6 +22,7 @@ const TIME_MOD_ZZ: &str = include_str!("../zz/time/mod.zz");
 const ARGS_MOD_ZZ: &str = include_str!("../zz/args/mod.zz");
 const COLORS_MOD_ZZ: &str = include_str!("../zz/colors/mod.zz");
 const PATH_MOD_ZZ: &str = include_str!("../zz/path/mod.zz");
+const HTTP_MOD_ZZ: &str = include_str!("../zz/http/mod.zz");
 
 /// All embedded source files, in compilation order.
 const ZZ_SOURCES: &[(&str, &str)] = &[
@@ -34,6 +35,7 @@ const ZZ_SOURCES: &[(&str, &str)] = &[
     ("std:args.mod.zz", ARGS_MOD_ZZ),
     ("std:colors.mod.zz", COLORS_MOD_ZZ),
     ("std:path.mod.zz", PATH_MOD_ZZ),
+    ("std:http.mod.zz", HTTP_MOD_ZZ),
 ];
 
 /// Compiled pure-ZZ stdlib programs, computed once.
@@ -162,9 +164,9 @@ mod tests {
     #[test]
     fn compile_pure_zz_stdlib() {
         let programs = zz_stdlib_programs();
-        // Should have compiled nine modules (str, math, collections/vec,
-        // json, regexp, time, args, colors, path).
-        assert_eq!(programs.len(), 9, "expected 9 pure-ZZ stdlib modules");
+        // Should have compiled ten modules (str, math, collections/vec,
+        // json, regexp, time, args, colors, path, http).
+        assert_eq!(programs.len(), 10, "expected 10 pure-ZZ stdlib modules");
         // Each module should have a non-empty types map.
         for (i, tp) in programs.iter().enumerate() {
             assert!(
@@ -394,6 +396,24 @@ mod tests {
         ] {
             assert!(
                 path_prog.funcs.contains_key(name),
+                "{name} should be defined"
+            );
+        }
+    }
+
+    #[test]
+    fn pure_zz_http_has_helpers() {
+        let programs = zz_stdlib_programs();
+        let http_prog = &programs[9]; // http/mod.zz
+        for name in [
+            "http.use",
+            "http.ok",
+            "http.created",
+            "http.not_found",
+            "http.redirect",
+        ] {
+            assert!(
+                http_prog.funcs.contains_key(name),
                 "{name} should be defined"
             );
         }

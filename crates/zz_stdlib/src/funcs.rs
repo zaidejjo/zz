@@ -52,10 +52,55 @@ fn sig_tu(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
     }
 }
 
+/// Build a signature where the trailing `n_defaults` parameters may be
+/// omitted at call sites (checker fills nothing — natives that declare
+/// defaults must tolerate the shorter arity at runtime; see the
+/// arity-flexible natives in `natives/mod.rs`).
+fn sig_defaults(params: Vec<(&str, Type)>, n_defaults: usize, ret: Type) -> FuncSig {
+    let total = params.len();
+    let mut has_default = vec![false; total];
+    for slot in has_default
+        .iter_mut()
+        .skip(total.saturating_sub(n_defaults))
+    {
+        *slot = true;
+    }
+    FuncSig {
+        generics: Vec::new(),
+        bounds: Vec::new(),
+        params: params
+            .into_iter()
+            .map(|(n, t)| (n.to_string(), t))
+            .collect(),
+        has_default,
+        ret,
+        is_extern: false,
+        extern_c_symbol: None,
+    }
+}
+
 /// All standard library function signatures, keyed by qualified name
 /// (e.g. `std.str.length`). Console I/O lives here as bare builtins
 /// (`print`, `println`, `input`) — there is no `std.io` module.
+///
+/// The table is built once per process and cloned on each call: building
+/// from scratch costs ~475 inserts with fresh `Type` trees, while cloning
+/// the cached table is a single pass with no type construction. Hot paths
+/// (`import` namespace registration runs once per import) should prefer
+/// [`stdlib_funcs_cached`] to avoid even the clone.
 pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
+    stdlib_funcs_cached().clone()
+}
+
+/// Borrow the process-wide cached signature table. Zero build cost after
+/// the first call (a single atomic load + `HashMap` traversal).
+pub fn stdlib_funcs_cached() -> &'static HashMap<String, FuncSig> {
+    static CACHED: std::sync::OnceLock<HashMap<String, FuncSig>> = std::sync::OnceLock::new();
+    CACHED.get_or_init(build_stdlib_funcs)
+}
+
+/// Uncached constructor (runs once via [`stdlib_funcs_cached`]).
+fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     let mut m = HashMap::new();
 
     // Builtin console I/O — no import required.
@@ -142,6 +187,54 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "std.str.contains".into(),
         sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Bool),
+    );
+    // Canonical `std.str.*` twins of the method-dispatch entries below, so
+    // selective imports (`import std.str(trim)`) and qualified calls
+    // (`std.str.trim(s)`) resolve. Signatures mirror `str.*` exactly.
+    m.insert(
+        "std.str.trim".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.str.to_upper".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.str.to_lower".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.str.replace".into(),
+        sig(
+            vec![("s", Type::Str), ("old", Type::Str), ("new", Type::Str)],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "std.str.starts_with".into(),
+        sig(vec![("s", Type::Str), ("prefix", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.str.ends_with".into(),
+        sig(vec![("s", Type::Str), ("suffix", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.str.join".into(),
+        sig(
+            vec![
+                ("items", Type::Array(Box::new(Type::Str))),
+                ("sep", Type::Str),
+            ],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "std.str.trim_start".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.str.trim_end".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
     );
 
     // str.* methods (for method dispatch: "hello".trim())
@@ -1580,47 +1673,104 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("s", Type::Str)], Type::Bool),
     );
 
-    // std.http — Client
+    // std.http — Client (`headers` is optional, defaults to `{}`).
     let result_response = || Type::Result(Box::new(Type::Response), Box::new(Type::Str));
     let dict_str = || Type::Dict(Box::new(Type::Str), Box::new(Type::Str));
     // POST/PUT bodies accept text or raw bytes (binary asset uploads).
     let body_t = || Type::Union(vec![Type::Str, Type::Bytes]);
     m.insert(
         "std.http.get".into(),
-        sig(
+        sig_defaults(
             vec![("url", Type::Str), ("headers", dict_str())],
+            1,
             result_response(),
         ),
     );
     m.insert(
         "std.http.post".into(),
-        sig(
+        sig_defaults(
             vec![
                 ("url", Type::Str),
                 ("body", body_t()),
                 ("headers", dict_str()),
             ],
+            1,
             result_response(),
         ),
     );
     m.insert(
         "std.http.put".into(),
-        sig(
+        sig_defaults(
             vec![
                 ("url", Type::Str),
                 ("body", body_t()),
                 ("headers", dict_str()),
             ],
+            1,
             result_response(),
         ),
     );
     m.insert(
         "std.http.delete".into(),
-        sig(
+        sig_defaults(
             vec![("url", Type::Str), ("headers", dict_str())],
+            1,
             result_response(),
         ),
     );
+    // Unified client: `fetch(url, method?, headers?, body?, timeout_ms?)`.
+    // Options bag in fixed order (most-omitted last); see
+    // `fill_default_args` for the runtime defaults.
+    m.insert(
+        "std.http.fetch".into(),
+        sig_defaults(
+            vec![
+                ("url", Type::Str),
+                ("method", Type::Str),
+                ("headers", dict_str()),
+                ("body", body_t()),
+                ("timeout_ms", Type::Int),
+            ],
+            4,
+            result_response(),
+        ),
+    );
+    m.insert(
+        "http.fetch".into(),
+        sig_defaults(
+            vec![
+                ("url", Type::Str),
+                ("method", Type::Str),
+                ("headers", dict_str()),
+                ("body", body_t()),
+                ("timeout_ms", Type::Int),
+            ],
+            4,
+            result_response(),
+        ),
+    );
+    // JSON client: `post_json(url, body: T, headers?)` — serializes any
+    // value via the JSON serializer + sets `Content-Type: application/json`.
+    // Generic over the body like `json.stringify` so dicts/arrays of any
+    // element type check.
+    for name in ["std.http.post_json", "http.post_json"] {
+        m.insert(
+            name.into(),
+            FuncSig {
+                generics: vec!["T".to_string()],
+                bounds: Vec::new(),
+                params: vec![
+                    ("url".to_string(), Type::Str),
+                    ("body".to_string(), Type::Named("T".to_string())),
+                    ("headers".to_string(), dict_str()),
+                ],
+                has_default: vec![false, false, true],
+                ret: result_response(),
+                is_extern: false,
+                extern_c_symbol: None,
+            },
+        );
+    }
 
     // std.http — Response methods (dispatched via method_namespace "http")
     m.insert(
@@ -1633,7 +1783,10 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert(
         "http.json".into(),
-        sig(vec![("res", Type::Response)], Type::Json),
+        sig(
+            vec![("res", Type::Response)],
+            Type::Result(Box::new(Type::Json), Box::new(Type::Str)),
+        ),
     );
     m.insert(
         "http.headers".into(),
@@ -1659,10 +1812,11 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
                 (
                     "middleware",
                     Type::Func(
-                        vec![Type::Dict(Box::new(Type::Str), Box::new(Type::Str))],
+                        vec![Type::HttpRequest],
                         Box::new(Type::Result(
-                            Box::new(Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
-                            Box::new(Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
+                            Box::new(Type::HttpRequest),
+                            // Short-circuit: `.err(response)` answers directly.
+                            Box::new(Type::Response),
                         )),
                     ),
                 ),
@@ -1680,12 +1834,12 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
 
     // std.http — Server (per-route model)
     let server_t = Type::HttpServer;
-    // Handler receives a request dict and returns a string, dict, array, or
+    // Handler receives a typed request and returns a string, dict, array, or
     // response. The runtime also accepts Dict/Array (auto-JSON); the checker
     // models Str and Response (status/headers control).
-    // We use a loose Func type: Dict → Str|Response.
+    // We use a loose Func type: HttpRequest → Str|Response.
     let handler_t = Type::Func(
-        vec![Type::Dict(Box::new(Type::Str), Box::new(Type::Str))],
+        vec![Type::HttpRequest],
         Box::new(Type::Union(vec![Type::Str, Type::Response])),
     );
     m.insert("std.http.server".into(), sig(vec![], server_t.clone()));
@@ -1747,7 +1901,10 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert(
         "std.http.listen".into(),
-        sig(vec![("server", server_t), ("port", Type::Int)], Type::Unit),
+        sig(
+            vec![("server", server_t.clone()), ("port", Type::Int)],
+            Type::Unit,
+        ),
     );
 
     // std.http — Phase 5B features
@@ -1769,9 +1926,9 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
                 (
                     "middleware",
                     Type::Func(
-                        vec![Type::Dict(Box::new(Type::Str), Box::new(Type::Str))],
+                        vec![Type::HttpRequest],
                         Box::new(Type::Result(
-                            Box::new(Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
+                            Box::new(Type::HttpRequest),
                             // Short-circuit: `.err(response)` answers directly.
                             Box::new(Type::Response),
                         )),
@@ -1802,41 +1959,99 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert(
         "std.http.respond".into(),
-        sig(
+        sig_defaults(
             vec![
                 ("status", Type::Int),
                 ("body", Type::Str),
                 ("headers", dict_str()),
             ],
+            1,
             Type::Response,
         ),
     );
     m.insert(
         "std.http.param".into(),
         sig(
-            vec![("req", dict_str_str.clone()), ("name", Type::Str)],
+            vec![("req", Type::HttpRequest), ("name", Type::Str)],
             Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
         ),
     );
     m.insert(
         "std.http.query".into(),
-        sig(vec![("req", dict_str_str.clone())], dict_str_str.clone()),
+        sig(vec![("req", Type::HttpRequest)], dict_str_str.clone()),
     );
     m.insert(
         "std.http.header".into(),
         sig(
-            vec![("req", dict_str_str.clone()), ("name", Type::Str)],
+            vec![("req", Type::HttpRequest), ("name", Type::Str)],
             Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
         ),
     );
     m.insert(
         "std.http.body_json".into(),
-        sig(vec![("req", dict_str_str.clone())], Type::Json),
+        sig(
+            vec![("req", Type::HttpRequest)],
+            Type::Result(Box::new(Type::Json), Box::new(Type::Str)),
+        ),
     );
     m.insert(
         "std.http.body_form".into(),
-        sig(vec![("req", dict_str_str.clone())], dict_str_str.clone()),
+        sig(vec![("req", Type::HttpRequest)], dict_str_str.clone()),
     );
+
+    // std.http — middleware alias + single-entry routing + response helpers.
+    // `use` is the `pipe` spelling without the `|>` concept collision;
+    // `route` collapses the four verb entries behind one method dispatch.
+    // Helpers are pure-ZZ (`zz/http/mod.zz`), signatures live here so both
+    // spellings type-check import-free like every other `std.*` name.
+    for name in ["std.http.use", "http.use"] {
+        m.insert(
+            name.into(),
+            sig(
+                vec![
+                    ("server", Type::HttpServer),
+                    (
+                        "middleware",
+                        Type::Func(
+                            vec![Type::HttpRequest],
+                            Box::new(Type::Result(
+                                Box::new(Type::HttpRequest),
+                                // Short-circuit: `.err(response)` answers directly.
+                                Box::new(Type::Response),
+                            )),
+                        ),
+                    ),
+                ],
+                Type::HttpServer,
+            ),
+        );
+    }
+    for name in ["std.http.route", "http.route"] {
+        m.insert(
+            name.into(),
+            sig(
+                vec![
+                    ("server", server_t.clone()),
+                    ("method", Type::Str),
+                    ("path", Type::Str),
+                    ("handler", handler_t.clone()),
+                ],
+                server_t.clone(),
+            ),
+        );
+    }
+    // Response constructors: `ok(body)` → 200, `created(body)` → 201,
+    // `not_found()` → 404, `redirect(url)` → 302 + `Location` header.
+    for (name, params, ret) in [
+        ("ok", vec![("body", Type::Str)], Type::Response),
+        ("created", vec![("body", Type::Str)], Type::Response),
+        ("not_found", vec![], Type::Response),
+        ("redirect", vec![("url", Type::Str)], Type::Response),
+    ] {
+        let s = sig(params, ret);
+        m.insert(format!("std.http.{name}"), s.clone());
+        m.insert(format!("http.{name}"), s);
+    }
 
     // std.net — TCP networking
     let result_tcp_stream = || Type::Result(Box::new(Type::TcpStream), Box::new(Type::Str));
@@ -1903,6 +2118,89 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
             result_bool(),
         ),
     );
+    // std.net — binary-safe transfers + real shutdown.
+    let result_bytes = || Type::Result(Box::new(Type::Bytes), Box::new(Type::Str));
+    let result_unit = || Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
+    m.insert(
+        "std.net.tcp_read_bytes".into(),
+        sig(
+            vec![("stream", Type::TcpStream), ("max_bytes", Type::Int)],
+            result_bytes(),
+        ),
+    );
+    m.insert(
+        "std.net.tcp_write_bytes".into(),
+        sig(
+            vec![("stream", Type::TcpStream), ("data", Type::Bytes)],
+            result_int(),
+        ),
+    );
+    for name in ["std.net.tcp_shutdown", "std.net.shutdown", "net.shutdown"] {
+        m.insert(
+            name.into(),
+            sig(vec![("stream", Type::TcpStream)], result_unit()),
+        );
+    }
+    // std.net — ergonomic method aliases (same arities/shapes as the
+    // `tcp_*` canonicals, so `listener.accept()?`, `stream.read_line()?`,
+    // `stream.close()?` type-check; both spellings registered like
+    // `http.log` / `std.http.log`).
+    for (short, params, ret) in [
+        (
+            "accept",
+            vec![("listener", Type::TcpListener)],
+            result_tcp_stream(),
+        ),
+        (
+            "read",
+            vec![("stream", Type::TcpStream), ("max_bytes", Type::Int)],
+            result_str(),
+        ),
+        ("read_line", vec![("stream", Type::TcpStream)], result_str()),
+        (
+            "read_bytes",
+            vec![("stream", Type::TcpStream), ("max_bytes", Type::Int)],
+            result_bytes(),
+        ),
+        (
+            "write",
+            vec![("stream", Type::TcpStream), ("data", Type::Str)],
+            result_int(),
+        ),
+        (
+            "write_bytes",
+            vec![("stream", Type::TcpStream), ("data", Type::Bytes)],
+            result_int(),
+        ),
+        ("peer_addr", vec![("stream", Type::TcpStream)], result_str()),
+        (
+            "local_addr",
+            vec![("stream", Type::TcpStream)],
+            result_str(),
+        ),
+        (
+            "set_read_timeout",
+            vec![("stream", Type::TcpStream), ("ms", Type::Int)],
+            result_bool(),
+        ),
+        (
+            "set_write_timeout",
+            vec![("stream", Type::TcpStream), ("ms", Type::Int)],
+            result_bool(),
+        ),
+    ] {
+        let s = sig(params, ret);
+        m.insert(format!("std.net.{short}"), s.clone());
+        m.insert(format!("net.{short}"), s);
+    }
+    // `close` is the real shutdown under its ergonomic name
+    // (`tcp_close` stays a legacy no-op alias).
+    for name in ["std.net.close", "net.close"] {
+        m.insert(
+            name.into(),
+            sig(vec![("stream", Type::TcpStream)], result_unit()),
+        );
+    }
 
     // std.fs — comprehensive non-blocking filesystem. All fallible ops
     // return `Result<_, str>` with unified `fs:<op>:<code>: <path>`
@@ -3173,7 +3471,81 @@ mod tests {
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
         assert!(funcs.contains_key("dbg"));
-        assert_eq!(funcs.len(), 631);
+        // net method aliases + binary transfers + shutdown.
+        for name in [
+            "std.net.tcp_read_bytes",
+            "std.net.tcp_write_bytes",
+            "std.net.tcp_shutdown",
+            "std.net.shutdown",
+            "net.shutdown",
+            "std.net.accept",
+            "net.accept",
+            "std.net.read",
+            "net.read",
+            "std.net.read_line",
+            "net.read_line",
+            "std.net.read_bytes",
+            "net.read_bytes",
+            "std.net.write",
+            "net.write",
+            "std.net.write_bytes",
+            "net.write_bytes",
+            "std.net.close",
+            "net.close",
+            "std.net.peer_addr",
+            "net.peer_addr",
+            "std.net.local_addr",
+            "net.local_addr",
+            "std.net.set_read_timeout",
+            "net.set_read_timeout",
+            "std.net.set_write_timeout",
+            "net.set_write_timeout",
+        ] {
+            assert!(funcs.contains_key(name), "missing {name}");
+        }
+        // http helpers (pure-ZZ, compiled from zz/http/mod.zz).
+        for name in [
+            "std.http.use",
+            "http.use",
+            "std.http.route",
+            "http.route",
+            "std.http.ok",
+            "std.http.created",
+            "std.http.not_found",
+            "std.http.redirect",
+            "http.ok",
+            "http.created",
+            "http.not_found",
+            "http.redirect",
+        ] {
+            assert!(funcs.contains_key(name), "missing {name}");
+        }
+        // Unified client + JSON client.
+        for name in [
+            "std.http.fetch",
+            "http.fetch",
+            "std.http.post_json",
+            "http.post_json",
+        ] {
+            assert!(funcs.contains_key(name), "missing {name}");
+        }
+        // 9 canonical `std.str.*` twins of the `str.*` method entries
+        // (trim, to_upper, to_lower, replace, starts_with, ends_with,
+        // join, trim_start, trim_end).
+        for name in [
+            "std.str.trim",
+            "std.str.to_upper",
+            "std.str.to_lower",
+            "std.str.replace",
+            "std.str.starts_with",
+            "std.str.ends_with",
+            "std.str.join",
+            "std.str.trim_start",
+            "std.str.trim_end",
+        ] {
+            assert!(funcs.contains_key(name), "missing {name}");
+        }
+        assert_eq!(funcs.len(), 679);
     }
 
     #[test]

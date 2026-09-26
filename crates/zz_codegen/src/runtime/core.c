@@ -2925,6 +2925,84 @@ zz_value zz_tcp_close(zz_value stream, int *err) {
     return zz_variant_ok((zz_value){ZZ_BOOL, {.b = true}});
 }
 
+// net.tcp_read_bytes(stream, max_bytes) → Result<Ok(bytes), Err(msg)>
+// Binary-safe read: raw bytes with no UTF-8 decoding (unlike zz_tcp_read,
+// which decodes lossy by construction).
+zz_value zz_tcp_read_bytes(zz_value stream, zz_value max_bytes, int *err) {
+    (void)err;
+    if (stream.tag != ZZ_TCP_STREAM || !stream.net || stream.net->closed) {
+        return zz_variant_err(zz_str_static("tcp_read_bytes failed: not a stream"));
+    }
+    size_t cap = max_bytes.tag == ZZ_INT && max_bytes.i > 0 ? (size_t)max_bytes.i : 1024;
+    char *buf = (char *)malloc(cap);
+    if (!buf) return zz_variant_err(zz_str_static("tcp_read_bytes failed: out of memory"));
+    ssize_t n = recv(stream.net->fd, buf, cap, 0);
+    if (n < 0) {
+        free(buf);
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return zz_variant_err(zz_str_static("tcp_read_bytes failed: timed out"));
+        }
+        char msg[192];
+        int m = snprintf(msg, sizeof msg, "tcp_read_bytes failed: %s", strerror(errno));
+        return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
+    }
+    if (n == 0) {
+        free(buf);
+        return zz_variant_err(zz_str_static("tcp_read_bytes failed: connection closed"));
+    }
+    zz_value out = zz_bytes_new((const unsigned char *)buf, (size_t)n);
+    free(buf);
+    if (out.tag != ZZ_BYTES) {
+        return zz_variant_err(zz_str_static("tcp_read_bytes failed: out of memory"));
+    }
+    return zz_variant_ok(out);
+}
+
+// net.tcp_write_bytes(stream, bytes) → Result<Ok(int), Err(msg)>
+zz_value zz_tcp_write_bytes(zz_value stream, zz_value data, int *err) {
+    (void)err;
+    if (stream.tag != ZZ_TCP_STREAM || !stream.net || stream.net->closed) {
+        return zz_variant_err(zz_str_static("tcp_write_bytes failed: not a stream"));
+    }
+    if (data.tag != ZZ_BYTES || !data.bytes) {
+        return zz_variant_err(zz_str_static("tcp_write_bytes failed: expected bytes"));
+    }
+    const unsigned char *p = data.bytes->buf->data + data.bytes->off;
+    size_t len = data.bytes->len;
+    size_t total = 0;
+    while (total < len) {
+        ssize_t w = send(stream.net->fd, p + total, len - total, 0);
+        if (w <= 0) {
+            char buf[192];
+            int n = snprintf(buf, sizeof buf, "tcp_write_bytes failed: %s", strerror(errno));
+            return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
+        }
+        total += (size_t)w;
+    }
+    return zz_variant_ok((zz_value){ZZ_INT, {.i = (int64_t)total}});
+}
+
+// net.tcp_shutdown(stream) → Result<Ok(unit), Err(msg)>
+// Real shutdown: both directions stop. The fd stays valid for
+// address queries; later I/O fails naturally at the syscall layer.
+zz_value zz_tcp_shutdown(zz_value stream, int *err) {
+    (void)err;
+    if (stream.tag != ZZ_TCP_STREAM || !stream.net || stream.net->closed) {
+        return zz_variant_err(zz_str_static("tcp_shutdown failed: not a stream"));
+    }
+#ifdef ZZ_OS_WINDOWS
+    int how = SD_BOTH;
+#else
+    int how = SHUT_RDWR;
+#endif
+    if (shutdown(stream.net->fd, how) != 0 && errno != ENOTCONN) {
+        char msg[192];
+        int m = snprintf(msg, sizeof msg, "tcp_shutdown failed: %s", strerror(errno));
+        return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
+    }
+    return zz_variant_ok(zz_unit());
+}
+
 static zz_value tcp_addr(zz_value stream, int peer, int *err) {
     (void)err;
     if (stream.tag != ZZ_TCP_STREAM || !stream.net || stream.net->closed) {
@@ -3877,6 +3955,39 @@ static zz_value http_route_add(const char *method, zz_value path, zz_value handl
     return zz_int(0);
 }
 
+// zz_http_route(server, method, path, handler, err) — validated
+// single-entry routing. Unknown methods are a loud error (not a silently
+// dropped route).
+zz_value zz_http_route(zz_value server, zz_value method, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    if (method.tag != ZZ_STR || !method.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.route: method must be a string"));
+    }
+    const char *m = zz_str_cptr(method.s);
+    size_t mlen = method.s->len;
+    // Upper-copy so `route(s, "get", …)` behaves like the VM (which
+    // uppercases before matching). Methods are a few bytes; stack is fine.
+    char up[16];
+    const char *known = NULL;
+    if (mlen < sizeof up) {
+        for (size_t i = 0; i < mlen; i++) {
+            char c = m[i];
+            up[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+        }
+        up[mlen] = '\0';
+        if (mlen == 3 && memcmp(up, "GET", 3) == 0) known = "GET";
+        else if (mlen == 4 && memcmp(up, "POST", 4) == 0) known = "POST";
+        else if (mlen == 3 && memcmp(up, "PUT", 3) == 0) known = "PUT";
+        else if (mlen == 6 && memcmp(up, "DELETE", 6) == 0) known = "DELETE";
+    }
+    if (!known) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.route: unknown method (expected GET, POST, PUT or DELETE)"));
+    }
+    return http_route_add(known, path, handler, err);
+}
+
 // zz_http_route_get(server, path, handler, err) — records method+pattern+closure.
 zz_value zz_http_route_get(zz_value server, zz_value path, zz_value handler, int *err) {
     (void)server;
@@ -4058,9 +4169,10 @@ static zz_value http_variant_take(zz_value r) {
 }
 
 // Parse a body string the way the VM's response/body json accessors do:
-// valid JSON → the bare json value; anything else → .err("JSON parse
-// error"). (zz_json_parse itself returns a wrapped Result; the VM
-// unwraps it before handing the value to the program.)
+// always a Result — `.ok(json)` on success (so `res.json()?` works),
+// `.err("JSON parse error")` otherwise. (zz_json_parse itself returns a
+// wrapped Result; the payload is taken out and re-wrapped to keep one
+// uniform shape.)
 static zz_value http_parse_body_json(zz_value body) {
     zz_str *s = (body.tag == ZZ_STR && body.s) ? body.s : NULL;
     // Mirror the VM: an empty/missing body fails parsing like any
@@ -4069,7 +4181,11 @@ static zz_value http_parse_body_json(zz_value body) {
     int jerr = 0;
     zz_value r = zz_json_parse(bs, &jerr);
     if (r.tag == ZZ_RESULT_OK && r.payload) {
-        return http_variant_take(r);
+        // Always a Result (like the VM): take the payload out (frees the
+        // parse wrapper; ownership transfers) and re-wrap as .ok so
+        // `res.json()?` works on both engines. No release: take consumed it.
+        zz_value inner = http_variant_take(r);
+        return zz_variant_ok(inner);
     }
     zz_release(&r);
     return zz_variant_err(zz_str_static("JSON parse error"));
@@ -4869,6 +4985,31 @@ zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
     int opt = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
+    // SO_REUSEPORT lets bind() succeed even when a stale server still
+    // holds the port, silently splitting traffic between old and new
+    // processes (the classic "empty 200 / white screen" after rebuild).
+    // Probe first: if something already answers on 127.0.0.1:port, warn
+    // so the operator kills the stale workers or picks a free port.
+    {
+        int probe = socket(AF_INET, SOCK_STREAM, 0);
+        if (probe >= 0) {
+            struct sockaddr_in paddr;
+            memset(&paddr, 0, sizeof(paddr));
+            paddr.sin_family = AF_INET;
+            paddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            paddr.sin_port = htons((unsigned short)p);
+            if (connect(probe, (struct sockaddr *)&paddr, sizeof(paddr)) == 0) {
+                fprintf(stderr,
+                    "zz_http_listen: WARNING port %d already in use;"
+                    " SO_REUSEPORT will share it with the stale process"
+                    " (expect split traffic / stale responses;"
+                    " kill old workers or use a free port)\n", p);
+                fflush(stderr);
+            }
+            close(probe);
+        }
+    }
+
     // SO_REUSEPORT for multi-core scaling
     int reuseport = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &reuseport, sizeof(reuseport));
@@ -4958,6 +5099,11 @@ zz_value zz_call_native3(zz_value (*f)(zz_value, zz_value, zz_value, int *), zz_
 zz_value zz_call_native4(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d) {
     int err = 0;
     zz_value r = f(a, b, c, d, &err);
+    return r;
+}
+zz_value zz_call_native5(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d, zz_value e) {
+    int err = 0;
+    zz_value r = f(a, b, c, d, e, &err);
     return r;
 }
 // Spawn-closure-literal fuse (`task.spawn(|...| ...)`): the lowerer passes
@@ -7945,6 +8091,223 @@ static size_t curl_header_cb(void *data, size_t size, size_t nmemb, void *userp)
 
     zz_dict_set(hdrs_val->dict, (zz_value){ZZ_STR, {.s = key}}, (zz_value){ZZ_STR, {.s = value_str}});
     return realsize;
+}
+
+// Shared client perform for fetch/post_json: method already validated,
+// timeout_ms > 0. `body`/`body_len` may be NULL/0 (no request body).
+// Returns a Result of the 5-field response object (see http_response_new).
+// Forward: defined with the other verb clients below.
+zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err);
+static zz_value http_client_perform(const char *method, const char *url, size_t url_len,
+        zz_value headers, const unsigned char *body, size_t body_len,
+        long timeout_ms, const char *label, int *err) {
+    CURL *curl = curl_easy_init();
+    if (!curl) { *err = 1; return zz_variant_err(zz_str_static("http client: curl_easy_init failed")); }
+
+    curl_buf body_buf = {0};
+    zz_value headers_dict = zz_dict_new();
+
+    char *url_c = (char *)malloc(url_len + 1);
+    if (!url_c) {
+        curl_easy_cleanup(curl);
+        zz_release(&headers_dict);
+        *err = 1;
+        return zz_variant_err(zz_str_static("http client: out of memory"));
+    }
+    memcpy(url_c, url, url_len);
+    url_c[url_len] = '\0';
+    curl_easy_setopt(curl, CURLOPT_URL, url_c);
+    // Custom request covers every verb uniformly (GET/POST/PUT/DELETE/PATCH).
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body_buf);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, curl_header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &headers_dict);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    if (body && body_len > 0) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, (const char *)body);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body_len);
+    }
+
+    struct curl_slist *header_list = NULL;
+    if (headers.tag == ZZ_DICT && headers.dict && headers.dict->len > 0) {
+        for (size_t i = 0; i < headers.dict->len; i++) {
+            zz_str *k = headers.dict->entries[i].key;
+            zz_value *v = &headers.dict->entries[i].val;
+            if (k && v->tag == ZZ_STR) {
+                size_t hlen = k->len + 2 + v->s->len;
+                char *h = (char *)malloc(hlen + 1);
+                if (!h) continue;
+                memcpy(h, zz_str_cptr(k), k->len);
+                h[k->len] = ':';
+                h[k->len + 1] = ' ';
+                memcpy(h + k->len + 2, zz_str_cptr(v->s), v->s->len);
+                h[k->len + 2 + v->s->len] = '\0';
+                header_list = curl_slist_append(header_list, h);
+                free(h);
+            }
+        }
+        if (header_list) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    free(url_c);
+    if (header_list) curl_slist_free_all(header_list);
+
+    if (res != CURLE_OK) {
+        char errbuf[256];
+        snprintf(errbuf, sizeof errbuf, "%s: %s", label, curl_easy_strerror(res));
+        curl_easy_cleanup(curl);
+        if (body_buf.data) free(body_buf.data);
+        zz_release(&headers_dict);
+        *err = 1;
+        return zz_variant_err(zz_str_static(errbuf));
+    }
+
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+
+    zz_str *body_str;
+    if (body_buf.data && body_buf.len > 0) {
+        body_str = str_alloc(body_buf.len);
+        if (!body_str) {
+            free(body_buf.data);
+            zz_release(&headers_dict);
+            *err = 1;
+            return zz_variant_err(zz_str_static("http client: out of memory"));
+        }
+        memcpy(zz_str_ptr(body_str), body_buf.data, body_buf.len);
+        zz_str_ptr(body_str)[body_buf.len] = '\0';
+        free(body_buf.data);
+    } else {
+        body_str = str_alloc(0);
+        if (!body_str) {
+            zz_release(&headers_dict);
+            *err = 1;
+            return zz_variant_err(zz_str_static("http client: out of memory"));
+        }
+    }
+
+    zz_value resp = http_response_new(http_code, body_str, headers_dict);
+    zz_release(&headers_dict);
+    return zz_variant_ok(resp);
+}
+
+// http.fetch(url, method, headers, body, timeout_ms) → .ok(HttpResponse) or .err(str)
+zz_value zz_http_fetch(zz_value url, zz_value method, zz_value headers, zz_value body, zz_value timeout_ms, int *err) {
+    *err = 0;
+    if (url.tag != ZZ_STR || !url.s) { *err = 1; return zz_variant_err(zz_str_static("http.fetch: url must be a string")); }
+    if (method.tag != ZZ_STR || !method.s) { *err = 1; return zz_variant_err(zz_str_static("http.fetch: method must be a string")); }
+    const char *m = zz_str_cptr(method.s);
+    size_t mlen = method.s->len;
+    char up[16];
+    const char *verb = NULL;
+    if (mlen < sizeof up) {
+        for (size_t i = 0; i < mlen; i++) {
+            char c = m[i];
+            up[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+        }
+        up[mlen] = '\0';
+        if ((mlen == 3 && memcmp(up, "GET", 3) == 0) ||
+            (mlen == 4 && memcmp(up, "POST", 4) == 0) ||
+            (mlen == 3 && memcmp(up, "PUT", 3) == 0) ||
+            (mlen == 6 && memcmp(up, "DELETE", 6) == 0) ||
+            (mlen == 5 && memcmp(up, "PATCH", 5) == 0)) {
+            verb = up;
+        }
+    }
+    if (!verb) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("http.fetch: unknown method (expected GET, POST, PUT, DELETE or PATCH)"));
+    }
+    long toms = (timeout_ms.tag == ZZ_INT && timeout_ms.i > 0) ? (long)timeout_ms.i : -1;
+    if (toms < 0) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("http.fetch: timeout_ms must be a positive int"));
+    }
+    const unsigned char *bdata = NULL;
+    size_t blen = 0;
+    if (body.tag == ZZ_STR && body.s) {
+        bdata = (const unsigned char *)zz_str_cptr(body.s);
+        blen = body.s->len;
+    } else if (body.tag == ZZ_BYTES && body.bytes) {
+        bdata = body.bytes->buf->data + body.bytes->off;
+        blen = body.bytes->len;
+    } else if (body.tag != ZZ_STR) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("http.fetch: body must be a string or bytes"));
+    }
+    // `verb` aliases the stack buffer `up` — copy it: perform only reads it.
+    char verb_copy[16];
+    memcpy(verb_copy, verb, mlen + 1);
+    return http_client_perform(verb_copy, zz_str_cptr(url.s), url.s->len,
+        headers, bdata, blen, toms, "http.fetch", err);
+}
+
+// http.post_json(url, body, headers) → .ok(HttpResponse) or .err(str)
+// Serializes any value to JSON, defaults Content-Type when absent, POSTs it.
+zz_value zz_http_post_json(zz_value url, zz_value body, zz_value headers, int *err) {
+    char *text = json_to_cstr(body);
+    if (!text) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("http.post_json: could not serialize body"));
+    }
+    zz_value hdrs = zz_dict_new();
+    if (headers.tag == ZZ_DICT && headers.dict) {
+        for (size_t i = 0; i < headers.dict->len; i++) {
+            zz_str *k = headers.dict->entries[i].key;
+            zz_value v = headers.dict->entries[i].val;
+            if (k && v.tag == ZZ_STR) {
+                zz_dict_set(hdrs.dict, (zz_value){ZZ_STR, {.s = k}}, zz_clone(v));
+            }
+        }
+    }
+    int has_ct = 0;
+    if (hdrs.tag == ZZ_DICT && hdrs.dict) {
+        for (size_t i = 0; i < hdrs.dict->len; i++) {
+            zz_str *k = hdrs.dict->entries[i].key;
+            if (k && k->len == 12) {
+                char low[12];
+                for (size_t j = 0; j < 12; j++) {
+                    char c = zz_str_cptr(k)[j];
+                    low[j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+                }
+                if (memcmp(low, "content-type", 12) == 0) { has_ct = 1; break; }
+            }
+        }
+    }
+    if (!has_ct) {
+        zz_str *ck = str_alloc(12);
+        zz_str *cv = str_alloc(16);
+        if (!ck || !cv) {
+            free(text);
+            zz_release(&hdrs);
+            *err = 1;
+            return zz_variant_err(zz_str_static("http.post_json: out of memory"));
+        }
+        memcpy(zz_str_ptr(ck), "Content-Type", 12);
+        zz_str_ptr(ck)[12] = '\0';
+        memcpy(zz_str_ptr(cv), "application/json", 16);
+        zz_str_ptr(cv)[16] = '\0';
+        zz_dict_set(hdrs.dict, (zz_value){ZZ_STR, {.s = ck}}, (zz_value){ZZ_STR, {.s = cv}});
+    }
+    zz_str *bs = str_alloc(strlen(text));
+    if (!bs) {
+        free(text);
+        zz_release(&hdrs);
+        *err = 1;
+        return zz_variant_err(zz_str_static("http.post_json: out of memory"));
+    }
+    memcpy(zz_str_ptr(bs), text, strlen(text));
+    zz_str_ptr(bs)[strlen(text)] = '\0';
+    free(text);
+    zz_value out = zz_http_post(url, (zz_value){ZZ_STR, {.s = bs}}, hdrs, err);
+    zz_release(&hdrs);
+    return out;
 }
 
 // http.get(url, headers) → .ok(HttpResponse) or .err(str)

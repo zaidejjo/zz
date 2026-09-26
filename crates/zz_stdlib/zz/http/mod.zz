@@ -1,0 +1,44 @@
+// Pure-ZZ HTTP helpers — compiled once, shared by VM and AOT.
+// Module: std.http
+//
+// Low-level routing, dispatch, client, and response primitives stay as
+// native Rust in src/natives/http/mod.rs. Everything below is thin
+// composition over those primitives and runs on both engines.
+// Canonical `std.http.*` names are used throughout (pure-ZZ sources
+// take no imports); short `http.*` spellings are mirrored at startup
+// by `define_canonical_purezz_aliases`.
+//
+// Design notes:
+//   - `http.use` is the `http.pipe` spelling without the `|>` concept
+//     collision; it forwards to the native middleware registrar.
+//   - `http.route` collapses the four verb entries behind one method
+//     string so call sites read `srv.route("GET", path, handler)`.
+//   - `http.ok/created/not_found/redirect` are concise `http.respond`
+//     constructors for the common status codes.
+
+// ── Middleware registration ──────────────────────────────────────────────────
+
+func http.use(server: http.server, middleware) -> http.server {
+    std.http.pipe(server, middleware)
+}
+
+// NOTE: `http.route` lives in native Rust (validated single-entry routing
+// with a loud error on unknown methods) — see src/natives/http/mod.rs.
+
+// ── Response constructors ────────────────────────────────────────────────────
+
+func http.ok(body: str) -> http.response {
+    std.http.respond(200, body, {})
+}
+
+func http.created(body: str) -> http.response {
+    std.http.respond(201, body, {})
+}
+
+func http.not_found() -> http.response {
+    std.http.respond(404, "Not Found", {})
+}
+
+func http.redirect(url: str) -> http.response {
+    std.http.respond(302, "", {"Location": url})
+}

@@ -1,0 +1,111 @@
+// tests/fixtures/stdlib/http_keepalive_p1.zz — live socket Phase 1 checks
+// keep-alive reuse on one connection, 405 + Allow, close semantics.
+import std.http
+import std.net
+import std.task
+import std.time
+
+func main() -> Result<int, str> {
+    s := http.server()
+    s = s.route("GET", "/ping", |_req| "pong")
+    s = s.route("GET", "/users/:id", |req| "user-{http.param(req, "id").expect("id")}")
+    task.spawn(|_| {
+        http.listen(s, 8137)
+    })
+
+    // wait for bind (retry: spawn scheduling is async)
+    tries := 0
+    stream := net.tcp_connect("127.0.0.1:8137", 200)
+    while tries < 50 {
+        match stream {
+            .ok(_) => break
+            .err(_) => {
+                time.sleep_ms(100)
+                stream = net.tcp_connect("127.0.0.1:8137", 200)
+                tries = tries + 1
+            }
+        }
+    }
+    c := stream?
+    c.set_read_timeout(5000)?
+    println("connected")
+
+    // req 1: keep-alive GET /ping
+    c.write("GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n")?
+    st1 := c.read_line()?
+    assert(st1.contains("200"))
+    conn := ""
+    while true {
+        h := c.read_line()?
+        if h == "" || h == "\r" {
+            break
+        }
+        if h.contains("Connection") {
+            conn = h
+        }
+    }
+    assert(conn.contains("keep-alive"))
+    b1 := c.read_bytes(4)?
+    assert(b1.len() == 4)
+    println("req1_ok")
+
+    // req 2: same connection, param route
+    c.write("GET /users/7 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n")?
+    st2 := c.read_line()?
+    assert(st2.contains("200"))
+    while true {
+        h2 := c.read_line()?
+        if h2 == "" || h2 == "\r" {
+            break
+        }
+    }
+    b2 := c.read_bytes(6)?
+    assert(b2.len() == 6)
+    println("req2_ok")
+
+    // req 3: wrong method -> 405 + Allow (framing intact, conn reusable)
+    c.write("POST /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n")?
+    st3 := c.read_line()?
+    assert(st3.contains("405"))
+    allow := ""
+    while true {
+        h3 := c.read_line()?
+        if h3 == "" || h3 == "\r" {
+            break
+        }
+        if h3.contains("Allow") {
+            allow = h3
+        }
+    }
+    assert(allow.contains("GET"))
+    // drain 405 body ("Method Not Allowed" = 18 bytes, may segment)
+    got := ""
+    nguard := 0
+    while got.len() < 18 && nguard < 20 {
+        chunk := c.read(64)?
+        got = "{got}{chunk}"
+        nguard = nguard + 1
+    }
+    assert(got.len() == 18)
+    println("req3_ok")
+
+    // req 4: close -> server must drop the socket after responding
+    c.write("GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")?
+    st4 := c.read_line()?
+    assert(st4.contains("200"))
+    while true {
+        h4 := c.read_line()?
+        if h4 == "" || h4 == "\r" {
+            break
+        }
+    }
+    b4 := c.read_bytes(4)?
+    assert(b4.len() == 4)
+    match c.read_line() {
+        .ok(_) => println("ERROR: conn should be closed")
+        .err(_) => println("close_ok")
+    }
+
+    println("http_keepalive_p1_ok")
+    .ok(0)
+}

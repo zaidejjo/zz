@@ -144,6 +144,28 @@ fn object_field_depth(
             .find(|(k, _)| matches!(k, Value::Str(s) if s.as_str() == name))
             .map(|(_, v)| v.clone())
             .ok_or_else(|| EvalError::new(format!("dict has no key `{name}`"), span)),
+        Value::HttpRequest(req) => match name {
+            "method" => Ok(Value::Str(req.method.clone().into())),
+            "path" => Ok(Value::Str(req.path.clone().into())),
+            "body" => Ok(Value::Str(req.body.clone().into())),
+            "headers" | "query" | "params" => {
+                let pairs = match name {
+                    "headers" => &req.headers,
+                    "query" => &req.query,
+                    _ => &req.params,
+                };
+                Ok(Value::Dict(Box::new(
+                    pairs
+                        .iter()
+                        .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
+                        .collect(),
+                )))
+            }
+            _ => Err(EvalError::new(
+                format!("http.request has no field `{name}`"),
+                span,
+            )),
+        },
         other => Err(EvalError::new(
             format!("cannot access field `{name}` on a value of type `{other}`"),
             span,
@@ -201,6 +223,61 @@ fn set_object_field_depth(
             span,
         )),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Indexing helpers
+// ---------------------------------------------------------------------------
+
+/// Fill omitted trailing default args for natives with `has_default`
+/// checker signatures (see `sig_defaults` in `zz_stdlib`). Covers both the
+/// canonical `std.http.*` keys and the short `http.*` spellings created by
+/// `import std.http` namespace registration. Returns true when it filled
+/// (all missing trailing params); false leaves `args` untouched so the
+/// caller reports the arity error.
+pub(crate) fn fill_default_headers(name: &str, args: &mut Vec<Value>, arity: usize) -> bool {
+    const OPTIONAL_HEADERS: &[&str] = &[
+        "std.http.get",
+        "std.http.post",
+        "std.http.put",
+        "std.http.delete",
+        "std.http.respond",
+        "http.get",
+        "http.post",
+        "http.put",
+        "http.delete",
+        "http.respond",
+        "std.http.post_json",
+        "http.post_json",
+    ];
+    if OPTIONAL_HEADERS.contains(&name) && args.len() + 1 == arity {
+        args.push(Value::Dict(Box::default()));
+        return true;
+    }
+    // Unified client defaults, in signature order:
+    // (url, method="GET", headers={}, body="", timeout_ms=30000).
+    const FETCH: &[&str] = &["std.http.fetch", "http.fetch"];
+    if FETCH.contains(&name) && args.len() < arity && args.len() >= arity - 4 {
+        let missing = arity - args.len();
+        // Defaults from the tail: timeout_ms, body, headers, method.
+        let mut tail: Vec<Value> = Vec::with_capacity(missing);
+        if missing >= 1 {
+            tail.push(Value::Int(30000));
+        }
+        if missing >= 2 {
+            tail.push(Value::Str(String::new().into()));
+        }
+        if missing >= 3 {
+            tail.push(Value::Dict(Box::default()));
+        }
+        if missing >= 4 {
+            tail.push(Value::Str("GET".to_string().into()));
+        }
+        tail.reverse();
+        args.extend(tail);
+        return true;
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------

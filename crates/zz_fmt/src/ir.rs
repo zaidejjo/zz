@@ -87,21 +87,60 @@ pub fn lower_program<'src>(program: &Program, source: &'src str) -> (Doc<'src>, 
         consecutive_nls: 0,
         pipe_starts,
         bang_starts,
+        emitted_comments: std::collections::HashSet::new(),
     };
 
-    // Imports are hoisted to the top of the file, in their source order,
-    // followed by a single blank line. Everything else keeps its order.
-    let (imports, _): (Vec<&Stmt>, Vec<&Stmt>) = program
+    // Imports are hoisted to the top of the file, sorted with the
+    // standard library group first (`std.*`, alphabetical) then external
+    // packages (alphabetical), separated by a blank line — goimports/isort
+    // style. Everything else keeps its source order.
+    // Import gaps that span code (interleaved `import` after statements)
+    // must NOT leak newlines into the import group: imports are separated
+    // by exactly one newline, with one blank line after the group.
+    // Attached `//` docs move with their import (looked up by span).
+    let (mut imports, _): (Vec<&Stmt>, Vec<&Stmt>) = program
         .stmts
         .iter()
         .partition(|s| matches!(s, Stmt::Import { .. }));
-    let mut prev_end: u32 = 0;
+    // Stable sort: equal keys keep source order (deterministic output).
+    // `sort_by_key` evaluates each key once (no repeated path joins).
+    imports.sort_by_key(|s| import_sort_key(s));
+    // Byte offset of the earliest import: the file-header gap (comments
+    // before any import) belongs to the group, regardless of sort order.
+    let header_end: u32 = imports.iter().map(|s| s.span().start).min().unwrap_or(0);
+    let mut prev_group: Option<bool> = None;
     for (i, stmt) in imports.iter().enumerate() {
         let span = stmt.span();
-        ctx.emit_gap(if i == 0 { 0 } else { prev_end }, span.start);
+        if i == 0 {
+            ctx.emit_gap(0, header_end);
+            if span.start != header_end {
+                // First in *sorted* order but hoisted from later in the
+                // file: its attached `//` docs are not in the header gap
+                // (which ends at the earliest import), so emit them here.
+                // When the first sorted import is also first in source,
+                // the gap already covered them — skip to avoid duplication.
+                ctx.emit_attached_import_comments(span.start);
+            }
+        } else {
+            // End the previous import line first so attached comments
+            // start on their own line (not trailing the previous import).
+            ctx.hard_line();
+            ctx.consecutive_nls = 1;
+            let group = is_std_import(stmt);
+            if prev_group != Some(group) {
+                // Blank line between the std group and the external group.
+                ctx.hard_line();
+            }
+            // Hoisted import: emit comments immediately attached to it
+            // (e.g. `// docs` on the line(s) directly above the import),
+            // which live on preceding StmtEnd tokens, not on the `import`
+            // token itself. This prevents dropped-comment verification
+            // failures when imports move to the top.
+            ctx.emit_attached_import_comments(span.start);
+        }
         ctx.emit_boundary_comments(span.start);
         ctx.emit_stmt(stmt);
-        prev_end = span.end;
+        prev_group = Some(is_std_import(stmt));
     }
     if !imports.is_empty() {
         ctx.ensure_blank_line();
@@ -160,6 +199,11 @@ struct Ctx<'src, 'a> {
     consecutive_nls: usize,
     pipe_starts: Vec<u32>,
     bang_starts: Vec<u32>,
+    /// Spans of comments already emitted. Import sorting reorders
+    /// statements, so an attached-docs walk can rediscover comments the
+    /// header gap already emitted — the set keeps each comment exactly
+    /// once (idempotence + no duplication).
+    emitted_comments: std::collections::HashSet<(u32, u32)>,
 }
 
 impl<'src, 'a> Ctx<'src, 'a> {
@@ -174,19 +218,19 @@ impl<'src, 'a> Ctx<'src, 'a> {
         self.out.push(Doc::Text(" "));
     }
 
-    /// Emit a string value in canonical form: a triple-quoted block when the
-    /// value spans lines (and is dedent-safe), otherwise a single-line
-    /// literal with escapes. The triple form uses a column-0 closer so the
-    /// lexer's dedent is a no-op and the value round-trips exactly.
-    fn emit_str_value(&mut self, s: &str) {
-        if is_triple_safe(s) {
-            self.text("\"\"\"\n");
-            self.text(escape_str_triple(s));
-            self.text("\n\"\"\"");
-        } else {
-            self.text("\"");
-            self.text(escape_str(s));
-            self.text("\"");
+    /// Emit an exact source slice verbatim (zero-copy borrow).
+    ///
+    /// Used for **all string literals** (`"..."`, `"""..."""`, interpolated
+    /// strings): string contents, escapes (`\x0a`, `\n`), `{expr}`
+    /// interpolations and multiline layouts are immutable raw tokens and
+    /// must never be re-synthesized. The `Span` comes from the AST node,
+    /// which covers the full literal including its delimiters.
+    fn emit_raw(&mut self, span: Span) {
+        let s = span.start as usize;
+        let e = (span.end as usize).min(self.source.len());
+        if e > s {
+            self.consecutive_nls = 0;
+            self.out.push(Doc::Text(&self.source[s..e]));
         }
     }
 
@@ -207,6 +251,28 @@ impl<'src, 'a> Ctx<'src, 'a> {
         }
     }
 
+    /// Ensure a single space separates trailing comments from preceding
+    /// code (`x := 1// c` -> `x := 1 // c`). Standalone comments that
+    /// already start on a fresh line (last output is a newline) need no
+    /// space. Inspects the last emitted Doc without rendering.
+    fn ensure_space_before_comment(&mut self) {
+        let need_space = match self.out.last() {
+            None => false,
+            Some(Doc::HardLine) => false,
+            Some(Doc::Text(t)) => !t.is_empty() && !t.ends_with('\n') && !t.ends_with(' '),
+            Some(Doc::TextOwned(t)) => !t.is_empty() && !t.ends_with('\n') && !t.ends_with(' '),
+            // After Indent/Group/Concat the true suffix is inside; be
+            // conservative and add a space — an extra space before a
+            // comment never changes semantics and keeps idempotence
+            // (the second pass sees the space and adds none).
+            Some(_) => true,
+        };
+        if need_space {
+            self.out.push(Doc::Text(" "));
+            self.consecutive_nls = 0;
+        }
+    }
+
     fn emit_trivia(&mut self, c: &ClassifiedTrivia) {
         match &c.kind {
             ClassifiedKind::Spacing(_) => {
@@ -224,59 +290,72 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.hard_line();
                 }
             }
-            ClassifiedKind::Line(body) => {
-                self.out.push(Doc::Text("// "));
-                self.out.push(Doc::text_owned(body.clone()));
-                self.consecutive_nls = 0;
-            }
-            ClassifiedKind::Doc(body) => {
-                self.out.push(Doc::Text("/// "));
-                self.out.push(Doc::text_owned(body.clone()));
-                self.consecutive_nls = 0;
-            }
-            ClassifiedKind::Block(body) => {
-                // Copy multi-line block comments byte-for-byte from the
-                // source; re-wrapping would alter their text (and fail the
-                // comment-preservation check).
-                if body.contains('\n') {
-                    let s = c.start as usize;
-                    let e = (c.end as usize).min(self.source.len());
-                    if e > s {
-                        self.out
-                            .push(Doc::text_owned(Cow::Owned(self.source[s..e].to_string())));
-                        self.out.push(Doc::line());
-                        return;
-                    }
-                }
-                self.out.push(Doc::Text("/* "));
-                self.out.push(Doc::text_owned(body.clone()));
-                self.out.push(Doc::Text(" */"));
-                if !body.contains('\n') {
-                    self.out.push(Doc::line());
-                }
+            // Lossless: comments re-emit byte-for-byte from the original
+            // source slice. Never normalize spacing (`//hello` stays
+            // `//hello`), never re-wrap block comments.
+            ClassifiedKind::Line(_) | ClassifiedKind::Doc(_) | ClassifiedKind::Block(_) => {
+                self.emit_comment_trivia(c);
             }
         }
+    }
+
+    /// Emit one comment's raw text and record its span as emitted.
+    fn emit_comment_trivia(&mut self, c: &ClassifiedTrivia) {
+        self.emitted_comments.insert((c.start, c.end));
+        self.ensure_space_before_comment();
+        let s = c.start as usize;
+        let e = (c.end as usize).min(self.source.len());
+        if e > s {
+            self.out
+                .push(Doc::text_owned(Cow::Owned(self.source[s..e].to_string())));
+            self.consecutive_nls = 0;
+        } else {
+            // Fallback: classified text without a usable span
+            // (whitespace-derived). Emit the stored raw text.
+            let raw = match &c.kind {
+                ClassifiedKind::Line(t) | ClassifiedKind::Doc(t) | ClassifiedKind::Block(t) => {
+                    t.clone()
+                }
+                _ => String::new(),
+            };
+            if !raw.is_empty() {
+                self.out.push(Doc::text_owned(Cow::Owned(raw)));
+                self.consecutive_nls = 0;
+            }
+        }
+    }
+
+    /// Emit one comment unless its span was already emitted (import
+    /// sorting can rediscover header comments via multiple walks).
+    /// Returns true when the comment was actually emitted.
+    fn emit_comment_once(&mut self, c: &ClassifiedTrivia) -> bool {
+        if self.emitted_comments.contains(&(c.start, c.end)) {
+            return false;
+        }
+        self.emit_comment_trivia(c);
+        true
     }
 
     /// Does `span` cover any `|>` pipeline operator? Pipeline chains are
     /// desugared by the parser into nested `Call` nodes; re-emitting them
     /// structurally would lose the `|>` token, so the emitter renders
     /// their original source range verbatim.
+    ///
+    /// `pipe_starts` is built in source order (sorted), so containment is
+    /// a binary search — O(log n) per call site instead of O(pipes).
     fn has_pipe_in(&self, span: Span) -> bool {
-        let (lo, hi) = (span.start as i64, span.end as i64);
-        self.pipe_starts
-            .iter()
-            .any(|&p| (p as i64) >= lo && (p as i64) < hi)
+        let idx = self.pipe_starts.partition_point(|&p| p < span.start);
+        self.pipe_starts.get(idx).is_some_and(|&p| p < span.end)
     }
 
     /// Does `span` cover a `!` macro bang? `sqlz!{...}` desugars to a
     /// `Call` node; re-emitting structurally would lose the `!`, so the
     /// emitter renders the original source range verbatim.
+    ///
+    /// Sorted offsets → binary search, matching [`Self::has_pipe_in`].
     fn has_bang_in(&self, span: Span) -> bool {
-        let (lo, hi) = (span.start as i64, span.end as i64);
-        self.bang_starts
-            .iter()
-            .any(|&p| (p as i64) >= lo && (p as i64) < hi)
+        let idx = self.bang_starts.partition_point(|&p| p < span.start);
+        self.bang_starts.get(idx).is_some_and(|&p| p < span.end)
     }
 
     /// Emit a statement with AST-aware spacing. Stmt tokens include
@@ -497,24 +576,40 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.text(n);
                 }
                 self.space();
-                self.text("{");
-                for (i, (n, t)) in fields.iter().enumerate() {
-                    if i > 0 {
-                        self.text(", ");
+                if fields.is_empty() {
+                    self.text("{}");
+                } else {
+                    // Canonical expanded form (4-space indent, trailing comma):
+                    // struct Task {
+                    //     id: int,
+                    //     name: str,
+                    // }
+                    self.text("{");
+                    let saved = std::mem::take(&mut self.out);
+                    for (n, t) in fields.iter() {
+                        self.out.push(Doc::hard_line());
+                        self.consecutive_nls = 1;
+                        // Embedded (anonymous) fields print in short form.
+                        let embedded = matches!(&t.kind, TyKind::Named(full, args)
+                            if args.is_empty()
+                                && full.rsplit('.').next().unwrap_or(full) == n.name);
+                        if embedded {
+                            self.text(n.name.clone());
+                        } else {
+                            self.text(n.name.clone());
+                            self.text(": ");
+                            self.emit_ty(t);
+                        }
+                        self.text(",");
                     }
-                    // Embedded (anonymous) fields print in short form.
-                    let embedded = matches!(&t.kind, TyKind::Named(full, args)
-                        if args.is_empty()
-                            && full.rsplit('.').next().unwrap_or(full) == n.name);
-                    if embedded {
-                        self.text(n.name.clone());
-                    } else {
-                        self.text(n.name.clone());
-                        self.text(": ");
-                        self.emit_ty(t);
-                    }
+                    let body = std::mem::replace(&mut self.out, saved);
+                    self.out.push(Doc::Indent {
+                        contents: Box::new(Doc::Concat(body)),
+                    });
+                    self.out.push(Doc::hard_line());
+                    self.consecutive_nls = 1;
+                    self.text("}");
                 }
-                self.text("}");
             }
             Stmt::Impl {
                 name,
@@ -674,13 +769,88 @@ impl<'src, 'a> Ctx<'src, 'a> {
         if idx >= self.toks.len() {
             return;
         }
-        let t = &self.toks[idx];
-        if t.start != byte {
+        // Clone to avoid holding an immutable borrow across the mutable
+        // `emit_trivia` call.
+        let (start, leading) = {
+            let t = &self.toks[idx];
+            if t.start != byte {
+                return;
+            }
+            (t.start, t.leading.clone())
+        };
+        let _ = start;
+        for c in &leading {
+            if c.is_comment() && self.emit_comment_once(c) {
+                self.out.push(Doc::hard_line());
+                self.consecutive_nls = 1;
+            }
+        }
+    }
+
+    /// Emit comments immediately attached above a hoisted `import`.
+    ///
+    /// Line comments preceding an `import` attach (in the lexer) to the
+    /// intervening `StmtEnd` token, not to the `import` token itself, so
+    /// `emit_boundary_comments` misses them. Walk backwards from the
+    /// import, collecting comment trivia on `StmtEnd` / `import` tokens
+    /// until hitting real code; emit the collected comments in source
+    /// order. Stops at blank separation implicitly by hitting code —
+    /// blank lines are just empty `StmtEnd`s which we skip over while
+    /// still collecting (the comment stays attached to the import).
+    fn emit_attached_import_comments(&mut self, import_start: u32) {
+        let idx = token_index_at_or_after(self.toks, import_start);
+        if idx >= self.toks.len() {
             return;
         }
-        for c in &t.leading {
-            if c.is_comment() {
-                self.emit_trivia(c);
+        let mut collected: Vec<ClassifiedTrivia> = Vec::new();
+        let mut j = idx.saturating_sub(1);
+        let mut first = true;
+        loop {
+            let (kind, start, leading) = {
+                let t = &self.toks[j];
+                (t.kind, t.start, t.leading.clone())
+            };
+            if start >= import_start {
+                if j == 0 {
+                    break;
+                }
+                j -= 1;
+                continue;
+            }
+            // Stop at real code: any significant token other than the
+            // statement terminator means we've reached the preceding
+            // statement/expression.
+            if kind != TokenKind::StmtEnd {
+                break;
+            }
+            for c in leading.iter().rev() {
+                if c.is_comment() {
+                    collected.push(c.clone());
+                }
+            }
+            if j == 0 {
+                break;
+            }
+            // Only walk back over contiguous StmtEnd chain; the first
+            // non-StmtEnd (code) stops the search on the next iteration.
+            // To avoid pulling distant file-header comments across code,
+            // stop after crossing code — handled above — but allow
+            // multiple StmtEnds (blank lines) between comment and import.
+            j -= 1;
+            if first {
+                first = false;
+                // Always inspect at least two tokens back (StmtEnd + maybe
+                // code) to find the attached comment.
+            }
+            // Safety bound: don't walk more than a handful of tokens back;
+            // attached comments are always within 2-3 tokens.
+            if idx.saturating_sub(j) > 8 {
+                break;
+            }
+        }
+        collected.reverse();
+        for c in &collected {
+            if self.emit_comment_once(c) {
                 self.out.push(Doc::hard_line());
                 self.consecutive_nls = 1;
             }
@@ -743,7 +913,11 @@ impl<'src, 'a> Ctx<'src, 'a> {
         match p {
             Pattern::Wildcard { .. } => self.text("_"),
             Pattern::Binding { name } => self.text(name.name.clone()),
-            Pattern::Literal { value, .. } => self.emit_lit(value),
+            Pattern::Literal { value, span } => match value {
+                // String patterns are raw-immutable (escapes preserved).
+                Lit::Str(_) => self.emit_raw(*span),
+                _ => self.emit_lit(value, *span),
+            },
             Pattern::Variant { name, arg, .. } => {
                 self.text(".");
                 self.text(name.clone());
@@ -855,13 +1029,12 @@ impl<'src, 'a> Ctx<'src, 'a> {
         }
     }
 
-    fn emit_lit(&mut self, l: &Lit) {
+    fn emit_lit(&mut self, l: &Lit, lit_span: Span) {
         match l {
             Lit::Int(n) => self.text(n.to_string()),
             Lit::Float(f) => self.text(format_float(*f)),
-            Lit::Str(s) => {
-                self.emit_str_value(s);
-            }
+            // Lossless: raw source slice (escapes, quotes preserved).
+            Lit::Str(_) => self.emit_raw(lit_span),
             Lit::Bool(b) => self.text(b.to_string()),
         }
     }
@@ -870,8 +1043,12 @@ impl<'src, 'a> Ctx<'src, 'a> {
         match e {
             Expr::Int { value, .. } => self.text(value.to_string()),
             Expr::Float { value, .. } => self.text(format_float(*value)),
-            Expr::Str { value, .. } => {
-                self.emit_str_value(value);
+            // CRITICAL: strings are immutable raw tokens. Emit the exact
+            // source slice (delimiters, escapes like `\x0a`, internal
+            // newlines/whitespace in `"""` blocks) verbatim. Never
+            // re-escape or convert `"` <-> `"""`.
+            Expr::Str { span, .. } => {
+                self.emit_raw(*span);
             }
             Expr::Bool { value, .. } => self.text(value.to_string()),
             Expr::Ident { name, .. } => self.text(name.clone()),
@@ -883,42 +1060,13 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.text(p);
                 }
             }
-            Expr::Fmt { parts, .. } => {
-                if fmt_parts_use_triple(parts) {
-                    self.text("\"\"\"\n");
-                    for p in parts {
-                        match p {
-                            FmtPart::Text(t) => self.text(escape_str_triple(t)),
-                            FmtPart::Expr(e, spec) => {
-                                self.text("{");
-                                self.emit_expr(e);
-                                if let Some(s) = spec {
-                                    self.text(":");
-                                    self.text(s);
-                                }
-                                self.text("}");
-                            }
-                        }
-                    }
-                    self.text("\n\"\"\"");
-                } else {
-                    self.text("\"");
-                    for p in parts {
-                        match p {
-                            FmtPart::Text(t) => self.text(escape_str(t)),
-                            FmtPart::Expr(e, spec) => {
-                                self.text("{");
-                                self.emit_expr(e);
-                                if let Some(s) = spec {
-                                    self.text(":");
-                                    self.text(s);
-                                }
-                                self.text("}");
-                            }
-                        }
-                    }
-                    self.text("\"");
-                }
+            // Interpolated strings are also raw-immutable as a whole: the
+            // outer literal (text, escapes, `"""` layout) is verbatim.
+            // Inner `{expr}` nodes keep their source spelling too since
+            // the whole span is copied; this guarantees no mutation of
+            // string contents and trivial idempotence.
+            Expr::Fmt { span, .. } => {
+                self.emit_raw(*span);
             }
             Expr::Paren { expr, .. } => {
                 self.text("(");
@@ -959,13 +1107,30 @@ impl<'src, 'a> Ctx<'src, 'a> {
             } => {
                 // Pipeline chains (`a |> f(b)`) are desugared into nested
                 // `Call`s by the parser; re-emit their original source text
-                // verbatim since no AST shape can reproduce the `|>` token.
+                // since no AST shape can reproduce the `|>` token.
                 // Same for `sqlz!{...}` macros (desugared to `db.query`).
+                //
+                // Lossless with standardized spacing: single-line chains get
+                // exactly one space around each `|>` (`a|>f` -> `a |> f`);
+                // multiline chains keep their verbatim layout (newlines are
+                // significant style). Splitting only at real `|>` token
+                // offsets (never inside strings) guarantees no mutation of
+                // string contents.
                 if self.has_pipe_in(*span) || self.has_bang_in(*span) {
                     let s = span.start as usize;
                     let e = (span.end as usize).min(self.source.len());
                     if e > s {
-                        self.out.push(Doc::Text(&self.source[s..e]));
+                        let raw = &self.source[s..e];
+                        if self.has_bang_in(*span) || raw.contains('\n') {
+                            self.out.push(Doc::Text(raw));
+                        } else if let Some(normalized) =
+                            normalize_single_line_pipes(raw, s, &self.pipe_starts)
+                        {
+                            self.out.push(Doc::text_owned(Cow::Owned(normalized)));
+                            self.consecutive_nls = 0;
+                        } else {
+                            self.out.push(Doc::Text(raw));
+                        }
                     }
                     return;
                 }
@@ -1290,6 +1455,90 @@ fn stmt_is_pub(stmt: &Stmt) -> bool {
     }
 }
 
+/// True for standard-library imports (`import std.*`): these sort first,
+/// before third-party / local packages (goimports/isort grouping).
+fn is_std_import(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Import { path, .. } => path.first().is_some_and(|p| p == "std"),
+        _ => false,
+    }
+}
+
+/// Total sort key for an import: `(group, path, pub_, alias, items)`.
+///
+/// Group 0 = `std.*`, group 1 = external/local packages. Paths compare
+/// as dotted strings; `pub import` sorts after plain `import` of the same
+/// path so the order is fully deterministic. The caller uses a stable
+/// sort, so imports that compare equal keep their source order.
+fn import_sort_key(stmt: &Stmt) -> (bool, String, bool, String, String) {
+    match stmt {
+        Stmt::Import {
+            path,
+            alias,
+            items,
+            pub_,
+            ..
+        } => {
+            let external = !path.first().is_some_and(|p| p == "std");
+            let mut items_key = String::new();
+            for item in items {
+                match item {
+                    ImportItem::Wildcard { .. } => items_key.push('*'),
+                    ImportItem::Named { name, alias, .. } => {
+                        items_key.push_str(name);
+                        if let Some(a) = alias {
+                            items_key.push_str(" as ");
+                            items_key.push_str(a);
+                        }
+                        items_key.push(';');
+                    }
+                }
+            }
+            (
+                external,
+                path.join("."),
+                *pub_,
+                alias.clone().unwrap_or_default(),
+                items_key,
+            )
+        }
+        _ => (true, String::new(), false, String::new(), String::new()),
+    }
+}
+
+/// Normalize single-line `|>` chains to exactly one space on each side.
+///
+/// `raw` is the source slice for a Call span starting at byte `base`;
+/// `pipe_starts` holds absolute byte offsets of real `|>` tokens (never
+/// inside strings). Splitting only at those offsets guarantees string
+/// contents (which may contain the characters `|>`) are untouched.
+/// Returns `None` when no pipe lies inside (caller falls back to verbatim).
+fn normalize_single_line_pipes(raw: &str, base: usize, pipe_starts: &[u32]) -> Option<String> {
+    // Binary-search the sorted offsets to the slice window [base, base+len];
+    // only pipes inside the span are relevant. No full scan, no re-sort.
+    let base_u = base as u32;
+    let end_u = base_u.saturating_add(raw.len() as u32);
+    let lo = pipe_starts.partition_point(|&p| p < base_u);
+    let hi = pipe_starts.partition_point(|&p| p < end_u);
+    let window = &pipe_starts[lo..hi];
+    if window.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(window.len() + 1);
+    let mut prev = 0usize;
+    for &p in window {
+        let rel = (p - base_u) as usize;
+        // `|>` is two bytes; guard against malformed offsets.
+        if rel < prev || rel + 2 > raw.len() {
+            return None;
+        }
+        parts.push(raw[prev..rel].trim().to_string());
+        prev = rel + 2;
+    }
+    parts.push(raw[prev..].trim().to_string());
+    Some(parts.join(" |> "))
+}
+
 /// Render an `f64` literal exactly as the lexer accepted it: integers
 /// keep their floating-point suffix/representation (`1.0` stays `1.0`,
 /// never degrades to `1`), and `NAN`/infinity round-trip too. The lexer
@@ -1311,99 +1560,6 @@ fn format_float(value: f64) -> String {
         return format!("{s}.0");
     }
     s
-}
-
-/// Re-escape a decoded string value so the emitted literal source matches
-/// the lexer's accepted escapes (`\n`, `\t`, `\r`, `\\`, `\"`, `\{`, `\}`,
-/// `\e`, `\xHH`). The parser stores decoded text; re-escaping keeps
-/// significant-token verification green and output parseable.
-///
-/// `{` is always escaped: a literal `{` followed by an identifier character
-/// would otherwise re-lex as the start of an interpolation. `}` needs no
-/// escape — outside an interpolation it is always literal text. Other C0
-/// control bytes (including ESC) use `\e` / `\xHH` so no raw control bytes
-/// ever land in formatted source.
-fn escape_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
-        match c {
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '{' => out.push_str("\\{"),
-            '\x1b' => out.push_str("\\e"),
-            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", c as u32));
-            }
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-/// Triple-quoted emission escaping: newlines stay raw (that is the point of
-/// the block form); runs of quotes that could form a `"""` closer are broken
-/// up with `\"`; `{` is escaped so literal braces never re-lex as
-/// interpolation.
-fn escape_str_triple(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let mut out = String::with_capacity(s.len() + 8);
-    for (i, c) in chars.iter().enumerate() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '\x1b' => out.push_str("\\e"),
-            c if (*c as u32) < 0x20 || (*c as u32) == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", *c as u32));
-            }
-            '"' => {
-                let adjacent_quote =
-                    (i > 0 && chars[i - 1] == '"') || (i + 1 < chars.len() && chars[i + 1] == '"');
-                if adjacent_quote {
-                    out.push_str("\\\"");
-                } else {
-                    out.push('"');
-                }
-            }
-            '{' => out.push_str("\\{"),
-            _ => out.push(*c),
-        }
-    }
-    out
-}
-
-/// True when `s` should be emitted as a `"""` block: it spans lines and every
-/// line survives the lexer's dedent unchanged. With a column-0 closer the
-/// dedent width is 0, so the only lossy case is whitespace-only lines (the
-/// lexer collapses those to empty) — those fall back to escaped single-line.
-fn is_triple_safe(s: &str) -> bool {
-    if !s.contains('\n') {
-        return false;
-    }
-    !s.split('\n')
-        .any(|line| !line.is_empty() && line.trim().is_empty())
-}
-
-/// True when an interpolated string should use the `"""` block form: some
-/// text part spans lines and every text part is dedent-safe.
-fn fmt_parts_use_triple(parts: &[FmtPart]) -> bool {
-    let mut any_multiline = false;
-    for p in parts {
-        if let FmtPart::Text(t) = p {
-            if t.contains('\n') {
-                any_multiline = true;
-            }
-            if t.contains('\n') && !is_triple_safe(t) {
-                // A text part that is multiline but not dedent-safe forces
-                // the whole literal back to escaped single-line form.
-                return false;
-            }
-        }
-    }
-    any_multiline
 }
 
 #[cfg(test)]

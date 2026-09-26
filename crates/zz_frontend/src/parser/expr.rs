@@ -1,6 +1,6 @@
 //! Expression parsing.
 
-use crate::ast::{BinOp, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, UnOp};
+use crate::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, UnOp};
 use crate::diag::error_at;
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
@@ -1089,8 +1089,25 @@ impl Parser {
             if !self.eat(TokenKind::Arrow) {
                 self.error_here("expected `=>` after match pattern");
             }
-            let body = self.parse_expr();
+            // A bare `return` reads naturally as an arm body but is a
+            // statement, not an expression. Recover by wrapping the
+            // single statement in a block — identical AST to the braced
+            // form, so the checker and both runtimes need no changes.
+            // (`break`/`continue` are already expressions via
+            // `parse_primary`, with diverge handling in `check_match` —
+            // they must keep parsing as expressions, not blocks.)
+            // Anything else parses as an expression as before.
             let start_span = pat.span();
+            let body = if self.peek_kind() == TokenKind::Return {
+                let stmt = self.parse_stmt();
+                let span = start_span.join(stmt.span());
+                Expr::Block(Block {
+                    stmts: vec![stmt],
+                    span,
+                })
+            } else {
+                self.parse_expr()
+            };
             let end_span = body.span();
             let span = start_span.join(end_span);
             arms.push(MatchArm {

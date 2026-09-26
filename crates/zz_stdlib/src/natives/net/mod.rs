@@ -194,10 +194,113 @@ pub(crate) fn tcp_readline(
     Ok(Value::Result(Box::new(Ok(Value::Str(s.into())))))
 }
 
+/// `net.tcp_read_bytes(stream: tcp.stream, max_bytes: int) -> Result<bytes, str>`
+///
+/// Binary-safe read: raw bytes with no UTF-8 decoding (unlike `tcp_read`,
+/// which is lossy on arbitrary bytes by construction).
+pub(crate) fn tcp_read_bytes(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let stream = match arg(args, 0, "std.net.tcp_read_bytes")? {
+        Value::TcpStream(s) => s.clone(),
+        other => {
+            return Err(EvalError::new(
+                format!("std.net.tcp_read_bytes: expected a tcp.stream, found `{other}`"),
+                span,
+            ))
+        }
+    };
+    let max_bytes = expect_int(args, 1, "std.net.tcp_read_bytes")? as usize;
+    let mut lock = stream
+        .lock()
+        .map_err(|e| EvalError::new(format!("std.net.tcp_read_bytes: lock poisoned: {e}"), span))?;
+    let mut buf = vec![0u8; max_bytes];
+    match lock.read(&mut buf) {
+        Ok(n) => {
+            buf.truncate(n);
+            Ok(Value::Result(Box::new(Ok(Value::Bytes(Box::new(
+                zz_runtime::BytesData::from_vec(buf),
+            ))))))
+        }
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("tcp_read_bytes failed: {e}").into(),
+        ))))),
+    }
+}
+
+/// `net.tcp_write_bytes(stream: tcp.stream, data: bytes) -> Result<int, str>`
+pub(crate) fn tcp_write_bytes(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let stream = match arg(args, 0, "std.net.tcp_write_bytes")? {
+        Value::TcpStream(s) => s.clone(),
+        other => {
+            return Err(EvalError::new(
+                format!("std.net.tcp_write_bytes: expected a tcp.stream, found `{other}`"),
+                span,
+            ))
+        }
+    };
+    let data = match arg(args, 1, "std.net.tcp_write_bytes")? {
+        Value::Bytes(b) => b.clone(),
+        other => {
+            return Err(EvalError::new(
+                format!("std.net.tcp_write_bytes: expected bytes, found `{other}`"),
+                span,
+            ))
+        }
+    };
+    let mut lock = stream.lock().map_err(|e| {
+        EvalError::new(format!("std.net.tcp_write_bytes: lock poisoned: {e}"), span)
+    })?;
+    match lock.write_all(data.as_slice()) {
+        Ok(()) => {
+            let len = data.len() as i64;
+            Ok(Value::Result(Box::new(Ok(Value::Int(len)))))
+        }
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("tcp_write_bytes failed: {e}").into(),
+        ))))),
+    }
+}
+
+/// `net.tcp_shutdown(stream: tcp.stream) -> Result<unit, str>`
+///
+/// Real socket shutdown (`Shutdown::Both`): both directions stop, unlike
+/// `tcp_close`, which is a no-op kept for API completeness.
+pub(crate) fn tcp_shutdown(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let stream = match arg(args, 0, "std.net.tcp_shutdown")? {
+        Value::TcpStream(s) => s.clone(),
+        other => {
+            return Err(EvalError::new(
+                format!("std.net.tcp_shutdown: expected a tcp.stream, found `{other}`"),
+                span,
+            ))
+        }
+    };
+    let lock = stream
+        .lock()
+        .map_err(|e| EvalError::new(format!("std.net.tcp_shutdown: lock poisoned: {e}"), span))?;
+    match lock.shutdown(std::net::Shutdown::Both) {
+        Ok(()) => Ok(Value::Result(Box::new(Ok(Value::Unit)))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("tcp_shutdown failed: {e}").into(),
+        ))))),
+    }
+}
+
 /// `net.tcp_close(stream: tcp.stream) -> Result<bool, str>`
 ///
-/// Note: TCP streams are automatically closed when dropped.
-/// This function exists for API completeness and returns true.
+/// Legacy no-op (returns true): TCP streams close when dropped.
+/// Prefer `tcp_shutdown`/`close` for a real shutdown.
 pub(crate) fn tcp_close(
     _interp: &mut Interp,
     _args: &mut Vec<Value>,
