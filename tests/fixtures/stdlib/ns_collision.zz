@@ -1,0 +1,11 @@
+func helper(name: str) -> str {
+    "hi {name}"
+}
+
+func main() {
+    ns_collision := "shadow"
+    greet := |who| helper(who)
+    println(greet("bob"))
+    println(ns_collision)
+    println("ns_collision_ok")
+}
