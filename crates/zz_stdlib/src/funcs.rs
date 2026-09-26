@@ -1718,6 +1718,59 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             result_response(),
         ),
     );
+    // Unified client: `fetch(url, method?, headers?, body?, timeout_ms?)`.
+    // Options bag in fixed order (most-omitted last); see
+    // `fill_default_args` for the runtime defaults.
+    m.insert(
+        "std.http.fetch".into(),
+        sig_defaults(
+            vec![
+                ("url", Type::Str),
+                ("method", Type::Str),
+                ("headers", dict_str()),
+                ("body", body_t()),
+                ("timeout_ms", Type::Int),
+            ],
+            4,
+            result_response(),
+        ),
+    );
+    m.insert(
+        "http.fetch".into(),
+        sig_defaults(
+            vec![
+                ("url", Type::Str),
+                ("method", Type::Str),
+                ("headers", dict_str()),
+                ("body", body_t()),
+                ("timeout_ms", Type::Int),
+            ],
+            4,
+            result_response(),
+        ),
+    );
+    // JSON client: `post_json(url, body: T, headers?)` — serializes any
+    // value via the JSON serializer + sets `Content-Type: application/json`.
+    // Generic over the body like `json.stringify` so dicts/arrays of any
+    // element type check.
+    for name in ["std.http.post_json", "http.post_json"] {
+        m.insert(
+            name.into(),
+            FuncSig {
+                generics: vec!["T".to_string()],
+                bounds: Vec::new(),
+                params: vec![
+                    ("url".to_string(), Type::Str),
+                    ("body".to_string(), Type::Named("T".to_string())),
+                    ("headers".to_string(), dict_str()),
+                ],
+                has_default: vec![false, false, true],
+                ret: result_response(),
+                is_extern: false,
+                extern_c_symbol: None,
+            },
+        );
+    }
 
     // std.http — Response methods (dispatched via method_namespace "http")
     m.insert(
@@ -1730,7 +1783,10 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert(
         "http.json".into(),
-        sig(vec![("res", Type::Response)], Type::Json),
+        sig(
+            vec![("res", Type::Response)],
+            Type::Result(Box::new(Type::Json), Box::new(Type::Str)),
+        ),
     );
     m.insert(
         "http.headers".into(),
@@ -1933,7 +1989,10 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert(
         "std.http.body_json".into(),
-        sig(vec![("req", Type::HttpRequest)], Type::Json),
+        sig(
+            vec![("req", Type::HttpRequest)],
+            Type::Result(Box::new(Type::Json), Box::new(Type::Str)),
+        ),
     );
     m.insert(
         "std.http.body_form".into(),
@@ -3461,6 +3520,15 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
+        // Unified client + JSON client.
+        for name in [
+            "std.http.fetch",
+            "http.fetch",
+            "std.http.post_json",
+            "http.post_json",
+        ] {
+            assert!(funcs.contains_key(name), "missing {name}");
+        }
         // 9 canonical `std.str.*` twins of the `str.*` method entries
         // (trim, to_upper, to_lower, replace, starts_with, ends_with,
         // join, trim_start, trim_end).
@@ -3477,7 +3545,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 675);
+        assert_eq!(funcs.len(), 679);
     }
 
     #[test]

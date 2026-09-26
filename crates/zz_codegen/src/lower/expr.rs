@@ -2214,9 +2214,10 @@ impl Lowerer {
                     return format!("zz_str_cast_arena({a}, &(int){{0}}, &{arena})");
                 }
             }
-            // `http.get/post/put/delete/respond` accept an omitted trailing
-            // `headers` (checker `has_default`); pad with an empty dict like
-            // `range` pads missing bounds above.
+            // `http.get/post/put/delete/respond/post_json` accept an omitted
+            // trailing `headers` (checker `has_default`); `http.fetch`
+            // accepts up to four omitted trailing options
+            // (method/headers/body/timeout_ms). Pad like `range` above.
             if matches!(
                 effective_name,
                 "zz_http_get"
@@ -2224,6 +2225,7 @@ impl Lowerer {
                     | "zz_http_put"
                     | "zz_http_delete"
                     | "zz_http_respond"
+                    | "zz_http_post_json"
             ) {
                 let full_arity = match effective_name {
                     "zz_http_get" | "zz_http_delete" => 2,
@@ -2231,6 +2233,18 @@ impl Lowerer {
                 };
                 if arg_items.len() + 1 == full_arity {
                     arg_items.push("zz_dict_new()".to_string());
+                }
+            }
+            if effective_name == "zz_http_fetch" {
+                // Signature: (url, method, headers, body, timeout_ms).
+                while arg_items.len() < 5 {
+                    let pad = match 5 - arg_items.len() {
+                        4 => "zz_str_static(\"GET\")".to_string(),
+                        3 => "zz_dict_new()".to_string(),
+                        2 => "zz_str_static(\"\")".to_string(),
+                        _ => "zz_int(30000)".to_string(),
+                    };
+                    arg_items.push(pad);
                 }
             }
             return match arg_items.len() {
@@ -2289,6 +2303,14 @@ impl Lowerer {
                     let c = &arg_items[2];
                     let d = &arg_items[3];
                     format!("zz_call_native4({effective_name}, {a}, {b}, {c}, {d})")
+                }
+                5 => {
+                    let a = &arg_items[0];
+                    let b = &arg_items[1];
+                    let c = &arg_items[2];
+                    let d = &arg_items[3];
+                    let e = &arg_items[4];
+                    format!("zz_call_native5({effective_name}, {a}, {b}, {c}, {d}, {e})")
                 }
                 _ => "zz_unit()".to_string(),
             };

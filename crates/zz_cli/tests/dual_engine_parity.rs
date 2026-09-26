@@ -613,6 +613,11 @@ parity_strict!(
     "stdlib",
     "http_request_response.zz"
 );
+parity_strict!(
+    parity_stdlib_http_fetch_test,
+    "stdlib",
+    "http_fetch_test.zz"
+);
 
 // --- Error fixture: both engines must error on missing struct field ---
 parity_strict_error!(parity_err_missing_field, "missing_field.zz");

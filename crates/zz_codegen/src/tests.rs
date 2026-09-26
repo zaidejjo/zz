@@ -310,8 +310,6 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // HTTP helpers (pure-ZZ, compiled from zz/http/mod.zz)
     ("std.http.use", "pure ZZ; no C codegen"),
     ("http.use", "pure ZZ alias"),
-    ("std.http.route", "pure ZZ; no C codegen"),
-    ("http.route", "pure ZZ alias"),
     ("std.http.ok", "pure ZZ; no C codegen"),
     ("http.ok", "pure ZZ alias"),
     ("std.http.created", "pure ZZ; no C codegen"),
