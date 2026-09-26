@@ -1,0 +1,32 @@
+// tests/fixtures/stdlib/http_router_p1.zz — Phase 1 radix router
+// Tests: exact-beats-param precedence, :id capture, :path... tail,
+// 405 with Allow, PATCH via generic route, legacy * fallback.
+import std.http
+
+func main() -> Result<int, str> {
+    s := http.server()
+    s = s.route("GET", "/users/new", |_req| "new-user")
+    s = s.route("GET", "/users/:id", |req| "user-{http.param(req, "id").expect("id")}")
+    s = s.route("GET", "/files/:path...", |req| "file-{http.param(req, "path").expect("path")}")
+    s = s.route("PATCH", "/items/:id", |req| "patched-{http.param(req, "id").expect("id")}")
+    s = s.route("GET", "*", |_req| "fallback")
+
+    r1 := http.test(s, "GET", "/users/new", "")
+    println("precedence: {r1.text()}")
+    r2 := http.test(s, "GET", "/users/42", "")
+    println("param: {r2.text()}")
+    r3 := http.test(s, "GET", "/files/a/b/c", "")
+    println("tail: {r3.text()}")
+    r4 := http.test(s, "POST", "/users/42", "")
+    println("not_allowed: {r4.status()}")
+    println("allow: {r4.headers()["Allow"]}")
+    r5 := http.test(s, "PATCH", "/items/7", "")
+    println("patch: {r5.text()}")
+    r6 := http.test(s, "GET", "/files", "")
+    println("tail_empty: {r6.text()}")
+    r7 := http.test(s, "GET", "/nope", "")
+    println("wild: {r7.text()}")
+
+    println("http_router_p1_ok")
+    .ok(0)
+}

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::natives::{arg, expect_str};
+use router::{best_match, matches_other_method};
 use zz_runtime::json::{parse_json, to_json_string, JsonValue};
 use zz_runtime::value::{
     detach_cached_funcs, reachable_refs, snapshot_env, snapshot_env_filtered, snapshot_funcs,
@@ -16,6 +17,8 @@ use zz_runtime::value::{
 use zz_runtime::{
     vm::Op, Chunk, Env, EnvLink, EvalError, Expr, Interp, NativeEntry, Param, Span, Value,
 };
+
+pub(crate) mod router;
 
 // ===========================================================================
 // Helpers
@@ -126,6 +129,7 @@ fn http_reason(status: u16) -> &'static str {
         413 => "Payload Too Large",
         431 => "Headers Too Large",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "Error",
     }
 }
@@ -134,10 +138,12 @@ fn format_response_with_headers(
     status: u16,
     extra_headers: &[(String, String)],
     body: &str,
+    keep_alive: bool,
 ) -> String {
     let reason = http_reason(status);
+    let conn = if keep_alive { "keep-alive" } else { "close" };
     let mut hdrs = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close",
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: {conn}",
         body.len()
     );
     for (k, v) in extra_headers {
@@ -151,8 +157,15 @@ fn format_response(status: u16, body: &str) -> String {
         status,
         &[("Content-Type".into(), "text/plain; charset=utf-8".into())],
         body,
+        false,
     )
 }
+
+/// Max requests served per keep-alive connection (anti-slowloris bound).
+const MAX_REQS_PER_CONN: usize = 1000;
+/// Per-read timeout: idle keep-alive connections die here instead of
+/// pinning a thread forever (the pool in 1.2 reclaims the slot sooner).
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Max buffered request body (50 MiB). Publish tarballs are ~1–10 MiB;
 /// anything larger is rejected with 413 before buffering.
@@ -312,14 +325,41 @@ fn view_request(v: &Value) -> Option<RequestView<'_>> {
 }
 
 // ===========================================================================
-// HTTP Client (reqwest blocking)
+// HTTP Client (reqwest blocking, shared pool)
 // ===========================================================================
 
-fn build_client() -> Result<reqwest::blocking::Client, EvalError> {
-    reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| EvalError::new(format!("failed to build HTTP client: {e}"), Span::new(0, 0)))
+/// Process-wide shared client: connection pooling, keep-alive, and session
+/// reuse across calls. Built once; per-request `.timeout()` overrides the
+/// 30s default (see `http_fetch`). Previously every call ran
+/// `Client::builder().build()` — new pool, new TLS session, no reuse.
+fn shared_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
+        std::sync::LazyLock::new(|| {
+            reqwest::blocking::Client::builder()
+                .pool_max_idle_per_host(32)
+                .pool_idle_timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(30))
+                .tcp_keepalive(std::time::Duration::from_secs(60))
+                .build()
+                .expect("failed to build shared HTTP client")
+        });
+    &CLIENT
+}
+
+/// Default per-request timeout for the fixed-timeout verbs (30s, matches the
+/// old per-call client). `http_fetch` passes its own `timeout_ms`.
+const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
+/// Map a `reqwest` send error to `.err(str)`: timeouts name the deadline so
+/// users know to raise it via `fetch` instead of guessing.
+fn client_err(verb: &str, e: reqwest::Error, timeout_ms: u64) -> Value {
+    let msg = if e.is_timeout() {
+        format!("HTTP {verb} timed out after {timeout_ms}ms")
+    } else {
+        format!("HTTP {verb} failed: {e}")
+    };
+    Value::Result(Box::new(Err(Value::Str(msg.into()))))
 }
 
 fn build_response_from_reqwest(resp: reqwest::blocking::Response) -> Value {
@@ -345,9 +385,11 @@ pub(crate) fn http_get(
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.get")?;
     let headers = args.get(1).cloned().unwrap_or(Value::Dict(Box::default()));
-    let client = build_client()?;
+    let client = shared_client();
     let hdrs = dict_to_headers(&headers);
-    let mut req = client.get(&url);
+    let mut req = client
+        .get(&url)
+        .timeout(std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS));
     for (k, v) in &hdrs {
         req = req.header(k, v);
     }
@@ -355,9 +397,7 @@ pub(crate) fn http_get(
         Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
-            format!("HTTP GET failed: {e}").into(),
-        ))))),
+        Err(e) => Ok(client_err("GET", e, DEFAULT_TIMEOUT_MS)),
     }
 }
 
@@ -439,9 +479,11 @@ pub(crate) fn http_post(
     let url = expect_str(args, 0, "std.http.post")?;
     let body = expect_body_bytes(args, 1, "std.http.post", span)?;
     let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::default()));
-    let client = build_client()?;
+    let client = shared_client();
     let hdrs = dict_to_headers(&headers);
-    let mut req = client.post(&url);
+    let mut req = client
+        .post(&url)
+        .timeout(std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS));
     for (k, v) in &hdrs {
         req = req.header(k, v);
     }
@@ -449,9 +491,7 @@ pub(crate) fn http_post(
         Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
-            format!("HTTP POST failed: {e}").into(),
-        ))))),
+        Err(e) => Ok(client_err("POST", e, DEFAULT_TIMEOUT_MS)),
     }
 }
 
@@ -510,10 +550,7 @@ pub(crate) fn http_fetch(
             ));
         }
     };
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_millis(timeout_ms))
-        .build()
-        .map_err(|e| EvalError::new(format!("failed to build HTTP client: {e}"), span))?;
+    let client = shared_client();
     let hdrs = dict_to_headers(&headers);
     let mut req = match method.as_str() {
         "GET" => client.get(&url),
@@ -521,7 +558,8 @@ pub(crate) fn http_fetch(
         "PUT" => client.put(&url),
         "DELETE" => client.delete(&url),
         _ => client.patch(&url),
-    };
+    }
+    .timeout(std::time::Duration::from_millis(timeout_ms));
     for (k, v) in &hdrs {
         req = req.header(k, v);
     }
@@ -532,9 +570,7 @@ pub(crate) fn http_fetch(
         Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
-            format!("HTTP fetch failed: {e}").into(),
-        ))))),
+        Err(e) => Ok(client_err(&method, e, timeout_ms)),
     }
 }
 
@@ -586,9 +622,11 @@ pub(crate) fn http_put(
     let url = expect_str(args, 0, "std.http.put")?;
     let body = expect_body_bytes(args, 1, "std.http.put", span)?;
     let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::default()));
-    let client = build_client()?;
+    let client = shared_client();
     let hdrs = dict_to_headers(&headers);
-    let mut req = client.put(&url);
+    let mut req = client
+        .put(&url)
+        .timeout(std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS));
     for (k, v) in &hdrs {
         req = req.header(k, v);
     }
@@ -596,9 +634,7 @@ pub(crate) fn http_put(
         Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
-            format!("HTTP PUT failed: {e}").into(),
-        ))))),
+        Err(e) => Ok(client_err("PUT", e, DEFAULT_TIMEOUT_MS)),
     }
 }
 
@@ -610,9 +646,11 @@ pub(crate) fn http_delete(
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.delete")?;
     let headers = args.get(1).cloned().unwrap_or(Value::Dict(Box::default()));
-    let client = build_client()?;
+    let client = shared_client();
     let hdrs = dict_to_headers(&headers);
-    let mut req = client.delete(&url);
+    let mut req = client
+        .delete(&url)
+        .timeout(std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS));
     for (k, v) in &hdrs {
         req = req.header(k, v);
     }
@@ -620,9 +658,7 @@ pub(crate) fn http_delete(
         Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
-            format!("HTTP DELETE failed: {e}").into(),
-        ))))),
+        Err(e) => Ok(client_err("DELETE", e, DEFAULT_TIMEOUT_MS)),
     }
 }
 
@@ -752,7 +788,7 @@ pub(crate) fn http_route_delete(
 /// `http.route(server, method, path, handler) -> http.server`
 ///
 /// Single-entry routing. Unknown methods are a loud error (not a silently
-/// dropped route): `GET`, `POST`, `PUT`, `DELETE`.
+/// dropped route): `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`.
 pub(crate) fn http_route_any(
     interp: &mut Interp,
     args: &mut Vec<Value>,
@@ -760,9 +796,14 @@ pub(crate) fn http_route_any(
 ) -> Result<Value, EvalError> {
     const NAME: &str = "std.http.route";
     let method = expect_str(args, 1, NAME)?.to_ascii_uppercase();
-    if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE") {
+    if !matches!(
+        method.as_str(),
+        "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS"
+    ) {
         return Err(EvalError::new(
-            format!("`{NAME}`: unknown method `{method}` (expected GET, POST, PUT or DELETE)"),
+            format!(
+                "`{NAME}`: unknown method `{method}` (expected GET, POST, PUT, DELETE, PATCH, HEAD or OPTIONS)"
+            ),
             span,
         ));
     }
@@ -1107,25 +1148,22 @@ fn request_body(
 // Route pattern matching (Feature 1: Dynamic Routing)
 // ===========================================================================
 
-/// Match a route pattern like "/users/:id" against an actual path.
-/// Returns Some(params) if matched, None otherwise.
-fn match_route_pattern(pattern: &str, actual: &str) -> Option<Vec<(String, String)>> {
-    let pattern_segments: Vec<&str> = pattern.trim_matches('/').split('/').collect();
-    let actual_segments: Vec<&str> = actual.trim_matches('/').split('/').collect();
-
-    if pattern_segments.len() != actual_segments.len() {
-        return None;
-    }
-
-    let mut params = Vec::new();
-    for (pat, act) in pattern_segments.iter().zip(actual_segments.iter()) {
-        if let Some(param_name) = pat.strip_prefix(':') {
-            params.push((param_name.to_string(), act.to_string()));
-        } else if *pat != *act && *pat != "*" {
-            return None;
+/// Comma-joined methods whose routes match `path` (for 405 `Allow`).
+fn allowed_methods(routes: &[(String, String, Value)], path: &str) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for (m, p, _) in routes {
+        if seen.contains(&m.as_str()) {
+            continue;
+        }
+        let hit = p == path
+            || router::compile_pattern(p)
+                .and_then(|c| router::match_pattern(&c, path))
+                .is_some();
+        if hit {
+            seen.push(m.as_str());
         }
     }
-    Some(params)
+    seen.join(", ")
 }
 
 // ===========================================================================
@@ -1190,36 +1228,26 @@ fn dispatch_with_request(
         }
     }
 
-    // Find matching route (exact match first, then pattern match, then wildcard)
-    let mut matched_params: Vec<(String, String)> = Vec::new();
-    let handler = server
+    // Radix-style match (exact > param > wildcard, see `router`).
+    // Project (method, pattern) pairs; handlers stay in `server.routes`
+    // (cloned only for the winning route — not per candidate).
+    let pairs: Vec<(String, String)> = server
         .routes
         .iter()
-        .find(|(m, p, _)| {
-            if m != method {
-                return false;
-            }
-            if p == path {
-                return true;
-            }
-            // Try pattern matching
-            if let Some(mut pm) = match_route_pattern(p, path) {
-                matched_params.append(&mut pm);
-                return true;
-            }
-            false
-        })
-        .or_else(|| {
-            server
-                .routes
-                .iter()
-                .find(|(m, p, _)| m == method && p == "*")
-        })
-        .map(|r| r.2.clone());
-
-    let handler = match handler {
-        Some(h) => h,
+        .map(|(m, p, _)| (m.clone(), p.clone()))
+        .collect();
+    let (matched_params, handler) = match best_match(&pairs, method, path) {
+        Some((idx, params)) => (params, server.routes[idx].2.clone()),
         None => {
+            // Path exists under another method → 405 with `Allow`, not 404.
+            if matches_other_method(&pairs, method, path) {
+                let allow = allowed_methods(&server.routes, path);
+                return Ok((
+                    405,
+                    "Method Not Allowed".into(),
+                    vec![("Allow".into(), allow)],
+                ));
+            }
             // No route matched — try static file serving
             if let Some(ref dir) = server.static_dir {
                 return serve_static_file(dir, path, span);
@@ -1520,11 +1548,12 @@ impl ServerSnapshot {
     }
 }
 
-/// Blocking HTTP server loop.  Dispatches each incoming TCP connection to
-/// its own OS thread so route handlers execute in parallel across cores.
+/// Blocking HTTP server loop. Dispatches accepted TCP connections to a
+/// bounded worker pool (not one OS thread per connection) so route handlers
+/// execute in parallel across cores without thread-spawn churn.
 ///
-/// Each connection thread receives its own fresh `Interp` and a reconstructed
-/// `HttpServer` from a pre-computed snapshot, avoiding lock contention.
+/// Each worker reconstructs its own `Interp` + `HttpServer` from the
+/// pre-computed snapshot, avoiding lock contention on the hot path.
 pub(crate) fn http_listen(
     interp: &mut Interp,
     args: &mut Vec<Value>,
@@ -1575,28 +1604,106 @@ pub(crate) fn http_listen(
     unsafe {
         libc::malloc_trim(0);
     }
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(std::net::TcpStream, Arc<ServerSnapshot>)>(
+        POOL_QUEUE_DEPTH,
+    );
+    spawn_pool(rx, span);
     for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
-        let snap = Arc::clone(&snapshot);
-        std::thread::spawn(move || {
-            handle_connection_thread(&snap, &mut stream, span);
-        });
+        let Ok(stream) = stream else { continue };
+        match tx.try_send((stream, Arc::clone(&snapshot))) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::TrySendError::Full((mut stream, _))) => {
+                // Backpressure: pool saturated — fail fast with 503 instead
+                // of queueing unboundedly (slowloris-shaped traffic would
+                // otherwise pin memory per pending connection).
+                let busy = format_response_with_headers(
+                    503,
+                    &[
+                        ("Content-Type".into(), "text/plain; charset=utf-8".into()),
+                        ("Retry-After".into(), "1".into()),
+                    ],
+                    "server busy",
+                    false,
+                );
+                let _ = stream.write_all(busy.as_bytes());
+                let _ = stream.flush();
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+        }
     }
     Ok(Value::Unit)
 }
 
+/// Bounded worker pool for accepted connections.
+///
+/// `available_parallelism * 2`, clamped to `[4, 64]`: enough to overlap
+/// handler compute with socket I/O, small enough that 10k idle keep-alive
+/// connections no longer mean 10k threads (previously one
+/// `thread::spawn` per connection).
+fn pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get() * 2)
+        .unwrap_or(8)
+        .clamp(4, 64)
+}
+
+/// Depth of the pending-connection queue (see backpressure above).
+const POOL_QUEUE_DEPTH: usize = 1024;
+
+/// Spawn pool workers sharing one `mpsc::Receiver` behind a mutex.
+/// Workers exit when all senders disconnect (server shutdown).
+fn spawn_pool(
+    rx: std::sync::mpsc::Receiver<(std::net::TcpStream, Arc<ServerSnapshot>)>,
+    span: Span,
+) {
+    let rx = Arc::new(std::sync::Mutex::new(rx));
+    for _ in 0..pool_size() {
+        let rx = Arc::clone(&rx);
+        std::thread::spawn(move || loop {
+            let job = rx.lock().ok().and_then(|rx| rx.recv().ok());
+            let Some((mut stream, snap)) = job else {
+                return;
+            };
+            handle_connection_thread(&snap, &mut stream, span);
+        });
+    }
+}
+
 /// Handle a single TCP connection on a dedicated thread.
 ///
-/// Reconstructs the HTTP server and interpreter from the snapshot, parses
-/// the HTTP request, dispatches it through the route/middleware pipeline,
-/// and writes the response.
+/// Reconstructs the HTTP server and interpreter from the snapshot once per
+/// connection, then serves up to [`MAX_REQS_PER_CONN`] requests on the same
+/// socket (HTTP/1.1 keep-alive). Each request parses the head (bounded),
+/// reads exactly `Content-Length` body bytes, dispatches through the
+/// route/middleware pipeline, and writes a framed response.
 fn handle_connection_thread(
     snapshot: &ServerSnapshot,
     stream: &mut std::net::TcpStream,
     span: Span,
 ) {
-    let start = Instant::now();
+    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+    // Reconstruct once per connection: every request on this socket shares
+    // the same server + interp (sequential — no cross-request aliasing).
+    let server = snapshot.reconstruct_server();
+    let mut interp = snapshot.fresh_interp();
 
+    for _ in 0..MAX_REQS_PER_CONN {
+        let start = Instant::now();
+        if !handle_one_request(&server, &mut interp, stream, span, start) {
+            return;
+        }
+    }
+}
+
+/// Serve one request on an already-open connection.
+/// Returns `true` to keep serving this socket, `false` to close it.
+fn handle_one_request(
+    server: &HttpServer,
+    interp: &mut Interp,
+    stream: &mut std::net::TcpStream,
+    span: Span,
+    start: Instant,
+) -> bool {
     // ── Read the raw HTTP request ──
     //
     // G1 (Registry V2): the old code did a single 8 KB `read()`, so any
@@ -1604,17 +1711,22 @@ fn handle_connection_thread(
     // tarballs) was silently truncated. Read in a loop: headers until
     // `\r\n\r\n` (bounded), then exactly Content-Length body bytes.
     let head_buf = match read_until_delim(stream, b"\r\n\r\n", MAX_HEAD_BYTES) {
-        Ok(Some(buf)) => buf,
+        Ok(Some(buf)) => {
+            if buf.is_empty() {
+                return false; // clean client close between requests
+            }
+            buf
+        }
         Ok(None) => {
             // Header block exceeded the cap (or client vanished).
             let _ = stream.write_all(format_response(431, "headers too large").as_bytes());
             let _ = stream.flush();
-            return;
+            return false;
         }
         Err(_) => {
-            let _ = stream.write_all(format_response(500, "internal error").as_bytes());
-            let _ = stream.flush();
-            return;
+            // Timeout (idle keep-alive expiry) or I/O error: close silently
+            // when no bytes are mid-flight, else a 500 with close.
+            return false;
         }
     };
     let text = String::from_utf8_lossy(&head_buf).to_string();
@@ -1622,14 +1734,15 @@ fn handle_connection_thread(
     let Some(request_line) = lines.next() else {
         let _ = stream.write_all(format_response(400, "bad request").as_bytes());
         let _ = stream.flush();
-        return;
+        return false;
     };
     let mut parts = request_line.split_whitespace();
     let (Some(method), Some(raw_path)) = (parts.next(), parts.next()) else {
         let _ = stream.write_all(format_response(400, "bad request").as_bytes());
         let _ = stream.flush();
-        return;
+        return false;
     };
+    let version = parts.next().unwrap_or("");
 
     let (path, query_pairs) = if let Some((p, q)) = raw_path.split_once('?') {
         (p.to_string(), parse_query_string(q))
@@ -1641,6 +1754,7 @@ fn handle_connection_thread(
 
     let mut content_length = 0usize;
     let mut expect_continue = false;
+    let mut conn_hdr: Option<String> = None;
     for line in lines {
         if line.is_empty() {
             break;
@@ -1650,12 +1764,25 @@ fn handle_connection_thread(
             content_length = v.trim().parse().unwrap_or(0);
         } else if let Some(v) = lower.strip_prefix("expect:") {
             expect_continue = v.trim() == "100-continue";
+        } else if let Some(v) = lower.strip_prefix("connection:") {
+            conn_hdr = Some(v.trim().to_string());
+        }
+    }
+    // HTTP/1.1 persists by default, HTTP/1.0 (or unknown) closes by
+    // default; an explicit `Connection:` header overrides either way.
+    let mut keep_alive = version != "HTTP/1.0" && !version.is_empty();
+    if let Some(conn) = conn_hdr.as_deref() {
+        let lower = conn.to_ascii_lowercase();
+        if lower.contains("close") {
+            keep_alive = false;
+        } else if lower.contains("keep-alive") {
+            keep_alive = true;
         }
     }
     if content_length > MAX_BODY_BYTES {
         let _ = stream.write_all(format_response(413, "payload too large").as_bytes());
         let _ = stream.flush();
-        return;
+        return false;
     }
     if expect_continue && content_length > 0 {
         // Large clients (curl, some SDKs) wait for this before sending.
@@ -1673,7 +1800,7 @@ fn handle_connection_thread(
         Err(_) => {
             let _ = stream.write_all(format_response(400, "truncated body").as_bytes());
             let _ = stream.flush();
-            return;
+            return false;
         }
     };
     // Reuse the read buffer when it is valid UTF-8 (JSON always is):
@@ -1684,20 +1811,16 @@ fn handle_connection_thread(
         Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
     };
 
-    // ── Reconstruct server + interp from snapshot ──
-    let server = snapshot.reconstruct_server();
-    let mut interp = snapshot.fresh_interp();
-
     // ── Dispatch ──
     let result = dispatch_with_request(
-        &server,
+        server,
         method,
         &path,
         body,
         &req_headers,
         &query_pairs,
         &[],
-        &mut interp,
+        interp,
         span,
     );
 
@@ -1724,9 +1847,18 @@ fn handle_connection_thread(
         );
     }
 
-    let response = format_response_with_headers(status, &resp_headers, &resp_body);
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.flush();
+    let mut response = format_response_with_headers(status, &resp_headers, &resp_body, keep_alive);
+    if method == "HEAD" {
+        // HEAD: same headers (with the true Content-Length) but no body bytes.
+        // `resp_body` is the exact suffix, so truncating by its length is safe.
+        response.truncate(response.len() - resp_body.len());
+    }
+    if stream.write_all(response.as_bytes()).is_err() {
+        return false;
+    }
+    if stream.flush().is_err() {
+        return false;
+    }
     // Large bodies churn tens of MB through this thread's heap (body
     // buffer + request dict + JSON parse). Freed blocks above the live
     // set are never returned without help, so a few big publishes would
@@ -1740,6 +1872,7 @@ fn handle_connection_thread(
             libc::malloc_trim(0);
         }
     }
+    keep_alive
 }
 
 #[cfg(test)]
