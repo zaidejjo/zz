@@ -22,23 +22,8 @@ func http.use(server: http.server, middleware) -> http.server {
     std.http.pipe(server, middleware)
 }
 
-// ── Single-entry routing ─────────────────────────────────────────────────────
-
-func http.route(server: http.server, method: str, path: str, handler) -> http.server {
-    if method == "GET" {
-        return std.http.route_get(server, path, handler)
-    }
-    if method == "POST" {
-        return std.http.route_post(server, path, handler)
-    }
-    if method == "PUT" {
-        return std.http.route_put(server, path, handler)
-    }
-    if method == "DELETE" {
-        return std.http.route_delete(server, path, handler)
-    }
-    return server
-}
+// NOTE: `http.route` lives in native Rust (validated single-entry routing
+// with a loud error on unknown methods) — see src/natives/http/mod.rs.
 
 // ── Response constructors ────────────────────────────────────────────────────
 

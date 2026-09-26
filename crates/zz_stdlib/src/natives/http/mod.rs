@@ -455,6 +455,128 @@ pub(crate) fn http_post(
     }
 }
 
+/// `http.fetch(url, method = "GET", headers = {}, body = "", timeout_ms = 30000)`
+///   -> `Result<Response, str>`
+///
+/// Unified client: one entry for every verb, with a configurable timeout.
+/// Unknown methods are a loud `EvalError` (programming error, not data).
+pub(crate) fn http_fetch(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.fetch";
+    let url = expect_str(args, 0, NAME)?;
+    let method = args
+        .get(1)
+        .cloned()
+        .map(|v| match v {
+            Value::Str(s) => Ok(s.to_string()),
+            other => Err(EvalError::new(
+                format!("`{NAME}`: expected a str method, found `{other}`"),
+                span,
+            )),
+        })
+        .transpose()?
+        .unwrap_or_else(|| "GET".to_string());
+    let method = method.to_ascii_uppercase();
+    if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "PATCH") {
+        return Err(EvalError::new(
+            format!(
+                "`{NAME}`: unknown method `{method}` (expected GET, POST, PUT, DELETE or PATCH)"
+            ),
+            span,
+        ));
+    }
+    let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::default()));
+    let body: Vec<u8> = match args.get(3) {
+        None => Vec::new(),
+        Some(Value::Str(s)) => s.as_bytes().to_vec(),
+        Some(Value::Bytes(b)) => b.as_slice().to_vec(),
+        Some(other) => {
+            return Err(EvalError::new(
+                format!("`{NAME}`: expected a str or bytes body, found `{other:?}`"),
+                span,
+            ));
+        }
+    };
+    let timeout_ms = match args.get(4) {
+        None => 30000,
+        Some(Value::Int(n)) if *n > 0 => *n as u64,
+        Some(other) => {
+            return Err(EvalError::new(
+                format!("`{NAME}`: expected a positive int timeout_ms, found `{other}`"),
+                span,
+            ));
+        }
+    };
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+        .map_err(|e| EvalError::new(format!("failed to build HTTP client: {e}"), span))?;
+    let hdrs = dict_to_headers(&headers);
+    let mut req = match method.as_str() {
+        "GET" => client.get(&url),
+        "POST" => client.post(&url),
+        "PUT" => client.put(&url),
+        "DELETE" => client.delete(&url),
+        _ => client.patch(&url),
+    };
+    for (k, v) in &hdrs {
+        req = req.header(k, v);
+    }
+    if matches!(method.as_str(), "POST" | "PUT" | "PATCH") {
+        req = req.body(body);
+    }
+    match req.send() {
+        Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
+            resp,
+        ))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("HTTP fetch failed: {e}").into(),
+        ))))),
+    }
+}
+
+/// `http.post_json(url, body: T, headers = {}) -> Result<Response, str>`
+///
+/// Serializes any value to JSON, sets `Content-Type: application/json`
+/// unless the caller already set one, and POSTs it.
+pub(crate) fn http_post_json(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.post_json";
+    let url = expect_str(args, 0, NAME)?;
+    let body_val = arg(args, 1, NAME)?.clone();
+    let text = to_json_string(&jsonify_value(&body_val));
+    let headers = match args.get(2).cloned().unwrap_or(Value::Dict(Box::default())) {
+        // Non-dict headers are ignored (mirrors the C client + `dict_to_headers`
+        // leniency); the checker guarantees `{str: str}` statically.
+        Value::Dict(entries) => {
+            let mut out: Vec<(Value, Value)> = (**entries).to_vec();
+            let has_ct = out.iter().any(|(k, _)| match k {
+                Value::Str(key) => key.to_lowercase() == "content-type",
+                _ => false,
+            });
+            if !has_ct {
+                out.push((
+                    Value::Str("Content-Type".to_string().into()),
+                    Value::Str("application/json".to_string().into()),
+                ));
+            }
+            Value::Dict(Box::new(out))
+        }
+        _ => Value::Dict(Box::new(vec![(
+            Value::Str("Content-Type".to_string().into()),
+            Value::Str("application/json".to_string().into()),
+        )])),
+    };
+    let mut sub = vec![Value::Str(url.into()), Value::Str(text.into()), headers];
+    http_post(interp, &mut sub, span)
+}
+
 /// `http.put(url: str, body: str, headers: {str: str}) -> Result<Response, str>`
 pub(crate) fn http_put(
     _interp: &mut Interp,
@@ -542,8 +664,10 @@ pub(crate) fn http_response_json(
     span: Span,
 ) -> Result<Value, EvalError> {
     match arg(args, 0, "std.http.json")? {
+        // Always a `Result`: `.ok(json)` on success so `res.json()?`
+        // propagates parse failures like every other fallible API.
         Value::Response(r) => match parse_json(&r.body) {
-            Ok(j) => Ok(Value::Json(Box::new(j))),
+            Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(j)))))),
             Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
                 format!("JSON parse error: {e}").into(),
             ))))),
@@ -623,6 +747,30 @@ pub(crate) fn http_route_delete(
     span: Span,
 ) -> Result<Value, EvalError> {
     http_route(interp, args, "DELETE", span)
+}
+
+/// `http.route(server, method, path, handler) -> http.server`
+///
+/// Single-entry routing. Unknown methods are a loud error (not a silently
+/// dropped route): `GET`, `POST`, `PUT`, `DELETE`.
+pub(crate) fn http_route_any(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.route";
+    let method = expect_str(args, 1, NAME)?.to_ascii_uppercase();
+    if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE") {
+        return Err(EvalError::new(
+            format!("`{NAME}`: unknown method `{method}` (expected GET, POST, PUT or DELETE)"),
+            span,
+        ));
+    }
+    let server = arg(args, 0, NAME)?.clone();
+    let path = arg(args, 2, NAME)?.clone();
+    let handler = arg(args, 3, NAME)?.clone();
+    let mut sub = vec![server, path, handler];
+    http_route(interp, &mut sub, &method, span)
 }
 
 fn http_route(
@@ -864,7 +1012,7 @@ pub(crate) fn http_header(
     )))))
 }
 
-/// `http.body_json(req: Request) -> json`
+/// `http.body_json(req: Request) -> Result<json, str>`
 pub(crate) fn http_body_json(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
@@ -872,7 +1020,8 @@ pub(crate) fn http_body_json(
 ) -> Result<Value, EvalError> {
     let body = request_body(args, 0, "std.http.body_json", span)?;
     match parse_json(&body) {
-        Ok(j) => Ok(Value::Json(Box::new(j))),
+        // Always a `Result` (see `http_response_json`).
+        Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(j)))))),
         Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
             format!("JSON parse error: {e}").into(),
         ))))),

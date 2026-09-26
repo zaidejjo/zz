@@ -249,8 +249,6 @@ fn every_funcs_key_has_a_native() {
         // http helpers (pure-ZZ, compiled from zz/http/mod.zz)
         "std.http.use",
         "http.use",
-        "std.http.route",
-        "http.route",
         "std.http.ok",
         "std.http.created",
         "std.http.not_found",

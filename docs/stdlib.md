@@ -197,7 +197,7 @@ import std.http
 | `http.route_post` | `http.route_post(server, path, handler) -> http.server` | Register POST route |
 | `http.route_put` | `http.route_put(server, path, handler) -> http.server` | Register PUT route |
 | `http.route_delete` | `http.route_delete(server, path, handler) -> http.server` | Register DELETE route |
-| `http.route` | `http.route(server, method, path, handler) -> http.server` | Single-entry routing (`"GET"`/`"POST"`/`"PUT"`/`"DELETE"`) |
+| `http.route` | `http.route(server, method, path, handler) -> http.server` | Single-entry routing (unknown methods are a loud error) |
 | `http.use` | `http.use(server, middleware) -> http.server` | Register middleware (`http.pipe` is a legacy alias) |
 | `http.log` | `http.log(server, enabled) -> http.server` | Toggle request logging |
 | `http.serve_dir` | `http.serve_dir(server, dir) -> http.server` | Serve static files |
@@ -251,7 +251,7 @@ s = s.log(true)
 | `http.param` | `http.param(req, name) -> Result<str, str>` | Route param or `.err` |
 | `http.query` | `http.query(req) -> {str: str}` | Query dict |
 | `http.header` | `http.header(req, name) -> Result<str, str>` | Header (case-insensitive) or `.err` |
-| `http.body_json` | `http.body_json(req) -> json` | Parse body as JSON |
+| `http.body_json` | `http.body_json(req) -> Result<json, str>` | Parse body as JSON (`?`-able) |
 | `http.body_form` | `http.body_form(req) -> {str: str}` | Parse form-encoded body |
 
 Handler type: `func(http.request) -> str | http.response`
@@ -262,7 +262,7 @@ Handler type: `func(http.request) -> str | http.response`
 |----------|-----------|-------------|
 | `http.status` | `http.status(res) -> int` | Status code (method syntax: `res.status()`) |
 | `http.text` | `http.text(res) -> str` | Body text (`res.text()`) |
-| `http.json` | `http.json(res) -> json` | Parse body as JSON (`res.json()`) |
+| `http.json` | `http.json(res) -> Result<json, str>` | Parse body as JSON (`res.json()?`) |
 | `http.headers` | `http.headers(res) -> {str: str}` | Response headers (`res.headers()`) |
 
 ### Client (`headers` optional, defaults to `{}`)
@@ -273,11 +273,40 @@ Handler type: `func(http.request) -> str | http.response`
 | `http.post` | `http.post(url, body, headers = {}) -> Result<http.response, str>` | POST (`body`: `str` or `bytes`) |
 | `http.put` | `http.put(url, body, headers = {}) -> Result<http.response, str>` | PUT (`body`: `str` or `bytes`) |
 | `http.delete` | `http.delete(url, headers = {}) -> Result<http.response, str>` | DELETE request |
+| `http.fetch` | `http.fetch(url, method = "GET", headers = {}, body = "", timeout_ms = 30000) -> Result<http.response, str>` | Unified client, any verb (`GET`/`POST`/`PUT`/`DELETE`/`PATCH`), configurable timeout |
+| `http.post_json` | `http.post_json(url, body: T, headers = {}) -> Result<http.response, str>` | POST any value as JSON (sets `Content-Type` unless present) |
 
 ```zz
 import std.http
 
+// One-liner with defaults.
 match http.get("https://api.example.com/users") {
+    .ok(res)  => println("users: {res.text()}"),
+    .err(e)   => println("request failed: {e}"),
+}
+
+// Full control: verb + headers + body + timeout.
+match http.fetch("https://api.example.com/users", "POST", {}, "{\"a\": 1}", 5000) {
+    .ok(res)  => println("created: {res.status()}"),
+    .err(e)   => println("request failed: {e}"),
+}
+
+// JSON ergonomics: any value serializes, Content-Type is automatic.
+match http.post_json("https://api.example.com/users", {"name": "zz"}) {
+    .ok(res)  => println("created: {res.status()}"),
+    .err(e)   => println("request failed: {e}"),
+}
+
+// `res.json()` is always a `Result` — `?` propagates parse failures:
+import std.json
+
+func main() -> Result<int, str> {
+    res := http.get("https://api.example.com/users")?
+    body := res.json()?
+    println(json.stringify(body) ?? "{}")
+    .ok(0)
+}
+```
     .ok(res)  => println("users: {res.text()}"),
     .err(e)   => println("request failed: {e}"),
 }

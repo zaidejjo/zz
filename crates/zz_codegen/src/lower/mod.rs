@@ -791,6 +791,7 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "http.route_post" | "std.http.route_post" => Some("zz_http_route_post"),
         "http.route_put" | "std.http.route_put" => Some("zz_http_route_put"),
         "http.route_delete" | "std.http.route_delete" => Some("zz_http_route_delete"),
+        "http.route" | "std.http.route" => Some("zz_http_route"),
         "http.log" | "std.http.log" => Some("zz_http_log"),
         "http.pipe" | "std.http.pipe" => Some("zz_http_pipe"),
         "http.listen" | "std.http.listen" => Some("zz_http_listen"),
@@ -810,6 +811,8 @@ fn native_impl(name: &str) -> Option<&'static str> {
         // http request functions
         "http.get" | "std.http.get" => Some("zz_http_get"),
         "http.post" | "std.http.post" => Some("zz_http_post"),
+        "http.fetch" | "std.http.fetch" => Some("zz_http_fetch"),
+        "http.post_json" | "std.http.post_json" => Some("zz_http_post_json"),
         _ => None,
     }
 }

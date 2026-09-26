@@ -1369,6 +1369,34 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: http::http_delete,
         },
     );
+    m.insert(
+        "std.http.fetch".into(),
+        NativeEntry {
+            arity: 5,
+            f: http::http_fetch,
+        },
+    );
+    m.insert(
+        "http.fetch".into(),
+        NativeEntry {
+            arity: 5,
+            f: http::http_fetch,
+        },
+    );
+    m.insert(
+        "std.http.post_json".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_post_json,
+        },
+    );
+    m.insert(
+        "http.post_json".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_post_json,
+        },
+    );
 
     // std.http — Response methods (dispatched via method_namespace "http")
     m.insert(
@@ -1434,6 +1462,20 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 3,
             f: http::http_route_delete,
+        },
+    );
+    m.insert(
+        "std.http.route".into(),
+        NativeEntry {
+            arity: 4,
+            f: http::http_route_any,
+        },
+    );
+    m.insert(
+        "http.route".into(),
+        NativeEntry {
+            arity: 4,
+            f: http::http_route_any,
         },
     );
     m.insert(

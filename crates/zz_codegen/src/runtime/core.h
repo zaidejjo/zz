@@ -695,6 +695,7 @@ zz_value zz_call_native0(zz_value (*f)(zz_value, int *));
 zz_value zz_call_native2(zz_value (*f)(zz_value, zz_value, int *), zz_value a, zz_value b);
 zz_value zz_call_native3(zz_value (*f)(zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c);
 zz_value zz_call_native4(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d);
+zz_value zz_call_native5(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d, zz_value e);
 zz_value zz_call_native_spawn(zz_dispatch_fn fn, void **cells,
                               const unsigned char *kinds, const size_t *sizes,
                               size_t nenv, int is_green);
@@ -887,6 +888,7 @@ zz_value zz_http_route_get(zz_value server, zz_value path, zz_value handler, int
 zz_value zz_http_route_post(zz_value server, zz_value path, zz_value handler, int *err);
 zz_value zz_http_route_put(zz_value server, zz_value path, zz_value handler, int *err);
 zz_value zz_http_route_delete(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route(zz_value server, zz_value method, zz_value path, zz_value handler, int *err);  // 4 args, validated
 zz_value zz_http_pipe(zz_value server, zz_value middleware, int *err);  // 2 args
 zz_value zz_http_log(zz_value server, zz_value enabled, int *err);  // 2 args
 zz_value zz_http_listen(zz_value server, zz_value port, int *err);  // 2 args
@@ -902,6 +904,8 @@ zz_value zz_http_body_form(zz_value req, int *err);  // 1 arg
 // HTTP client stubs (native mode — returns mock responses)
 zz_value zz_http_get(zz_value url, zz_value headers, int *err);
 zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err);
+zz_value zz_http_fetch(zz_value url, zz_value method, zz_value headers, zz_value body, zz_value timeout_ms, int *err);  // 5 args
+zz_value zz_http_post_json(zz_value url, zz_value body, zz_value headers, int *err);  // 3 args
 zz_value zz_http_response_status(zz_value resp, int *err);
 zz_value zz_http_response_text(zz_value resp, int *err);
 zz_value zz_http_response_json(zz_value resp, int *err);

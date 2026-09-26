@@ -407,7 +407,6 @@ mod tests {
         let http_prog = &programs[9]; // http/mod.zz
         for name in [
             "http.use",
-            "http.route",
             "http.ok",
             "http.created",
             "http.not_found",
