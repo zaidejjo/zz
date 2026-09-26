@@ -36,13 +36,28 @@ pub(crate) mod uuid;
 pub(crate) mod vec_mod;
 
 /// All standard library native functions, keyed by qualified name.
+///
+/// Built once per process and cloned per call (362 `Copy` entries — the
+/// clone is `memcpy`-cheap; the build is not). Hot paths should prefer
+/// [`stdlib_natives_cached`] to skip even the clone.
 pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
+    stdlib_natives_cached().clone()
+}
+
+/// Borrow the process-wide cached native table. Zero build cost after the
+/// first call.
+pub fn stdlib_natives_cached() -> &'static HashMap<String, NativeEntry> {
+    static CACHED: std::sync::OnceLock<HashMap<String, NativeEntry>> = std::sync::OnceLock::new();
+    CACHED.get_or_init(build_stdlib_natives)
+}
+
+/// Uncached constructor (runs once via [`stdlib_natives_cached`]).
+fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // Register the fused-spawn constructor (see `SpawnHook`): idempotent,
     // and every interpreter-building path calls this function, so the VM's
     // `SpawnClosure` op always finds it.
     let _ = zz_runtime::SPAWN_HOOK.get_or_init(|| concurrency::spawn_hook);
     let mut m = HashMap::new();
-
     // Builtin console I/O — no import required, no `std.io` module.
     m.insert(
         "print".into(),
@@ -208,6 +223,72 @@ pub fn stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 2,
             f: str_mod::str_contains,
+        },
+    );
+    // Canonical `std.str.*` twins of the method-dispatch entries below.
+    // Same implementations, qualified names — keeps selective imports
+    // (`import std.str(trim)`) and the runtime registry in lockstep.
+    m.insert(
+        "std.str.trim".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_trim,
+        },
+    );
+    m.insert(
+        "std.str.to_upper".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_to_upper,
+        },
+    );
+    m.insert(
+        "std.str.to_lower".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_to_lower,
+        },
+    );
+    m.insert(
+        "std.str.replace".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_replace,
+        },
+    );
+    m.insert(
+        "std.str.starts_with".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_mod::str_starts_with,
+        },
+    );
+    m.insert(
+        "std.str.ends_with".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_mod::str_ends_with,
+        },
+    );
+    m.insert(
+        "std.str.join".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_mod::str_join,
+        },
+    );
+    m.insert(
+        "std.str.trim_start".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_trim_start,
+        },
+    );
+    m.insert(
+        "std.str.trim_end".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_trim_end,
         },
     );
     // str.* methods (for method dispatch: "hello".trim())

@@ -372,6 +372,11 @@ e2e_success_test!(
     "json_extended_test.zz"
 );
 e2e_success_test!(e2e_stdlib_selective_import, "stdlib", "selective_import.zz");
+e2e_success_test!(
+    e2e_stdlib_str_selective_methods,
+    "stdlib",
+    "str_selective_methods.zz"
+);
 e2e_success_test!(e2e_stdlib_wildcard_import, "stdlib", "wildcard_import.zz");
 e2e_success_test!(e2e_stdlib_symbol_alias, "stdlib", "symbol_alias.zz");
 e2e_success_test!(e2e_stdlib_multi_selective, "stdlib", "multi_selective.zz");

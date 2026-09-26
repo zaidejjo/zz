@@ -55,7 +55,25 @@ fn sig_tu(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
 /// All standard library function signatures, keyed by qualified name
 /// (e.g. `std.str.length`). Console I/O lives here as bare builtins
 /// (`print`, `println`, `input`) — there is no `std.io` module.
+///
+/// The table is built once per process and cloned on each call: building
+/// from scratch costs ~475 inserts with fresh `Type` trees, while cloning
+/// the cached table is a single pass with no type construction. Hot paths
+/// (`import` namespace registration runs once per import) should prefer
+/// [`stdlib_funcs_cached`] to avoid even the clone.
 pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
+    stdlib_funcs_cached().clone()
+}
+
+/// Borrow the process-wide cached signature table. Zero build cost after
+/// the first call (a single atomic load + `HashMap` traversal).
+pub fn stdlib_funcs_cached() -> &'static HashMap<String, FuncSig> {
+    static CACHED: std::sync::OnceLock<HashMap<String, FuncSig>> = std::sync::OnceLock::new();
+    CACHED.get_or_init(build_stdlib_funcs)
+}
+
+/// Uncached constructor (runs once via [`stdlib_funcs_cached`]).
+fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     let mut m = HashMap::new();
 
     // Builtin console I/O — no import required.
@@ -142,6 +160,54 @@ pub fn stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "std.str.contains".into(),
         sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Bool),
+    );
+    // Canonical `std.str.*` twins of the method-dispatch entries below, so
+    // selective imports (`import std.str(trim)`) and qualified calls
+    // (`std.str.trim(s)`) resolve. Signatures mirror `str.*` exactly.
+    m.insert(
+        "std.str.trim".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.str.to_upper".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.str.to_lower".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.str.replace".into(),
+        sig(
+            vec![("s", Type::Str), ("old", Type::Str), ("new", Type::Str)],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "std.str.starts_with".into(),
+        sig(vec![("s", Type::Str), ("prefix", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.str.ends_with".into(),
+        sig(vec![("s", Type::Str), ("suffix", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "std.str.join".into(),
+        sig(
+            vec![
+                ("items", Type::Array(Box::new(Type::Str))),
+                ("sep", Type::Str),
+            ],
+            Type::Str,
+        ),
+    );
+    m.insert(
+        "std.str.trim_start".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
+    );
+    m.insert(
+        "std.str.trim_end".into(),
+        sig(vec![("s", Type::Str)], Type::Str),
     );
 
     // str.* methods (for method dispatch: "hello".trim())
@@ -3173,7 +3239,23 @@ mod tests {
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
         assert!(funcs.contains_key("dbg"));
-        assert_eq!(funcs.len(), 631);
+        // 9 canonical `std.str.*` twins of the `str.*` method entries
+        // (trim, to_upper, to_lower, replace, starts_with, ends_with,
+        // join, trim_start, trim_end).
+        for name in [
+            "std.str.trim",
+            "std.str.to_upper",
+            "std.str.to_lower",
+            "std.str.replace",
+            "std.str.starts_with",
+            "std.str.ends_with",
+            "std.str.join",
+            "std.str.trim_start",
+            "std.str.trim_end",
+        ] {
+            assert!(funcs.contains_key(name), "missing {name}");
+        }
+        assert_eq!(funcs.len(), 640);
     }
 
     #[test]

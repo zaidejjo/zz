@@ -18,6 +18,11 @@
 use zz_frontend::token::{Trivia, TriviaKind};
 
 /// What kind of trivia a chunk represents.
+///
+/// Comment variants carry the **raw source text byte-for-byte**
+/// (including `//`, `///`, `/* */` delimiters and all inner spacing).
+/// The formatter must never normalize comment text — it re-emits the
+/// raw slice verbatim to guarantee lossless fidelity and idempotence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// A single newline (hard line).
 pub enum ClassifiedKind {
@@ -29,11 +34,11 @@ pub enum ClassifiedKind {
     BlankLine {
         count: usize,
     },
-    /// `//` line comment (without the trailing newline).
+    /// `//...` line comment, raw text without trailing newline.
     Line(String),
-    /// `///` doc comment.
+    /// `///...` doc comment, raw text.
     Doc(String),
-    /// `/* ... */` block comment.
+    /// `/* ... */` block comment, raw text (may span lines).
     Block(String),
 }
 
@@ -116,24 +121,17 @@ fn classify_whitespace(text: &str) -> Option<ClassifiedTrivia> {
 }
 
 fn classify_comment(text: &str) -> Option<ClassifiedKind> {
-    let stripped = text
-        .strip_prefix("///")
-        .unwrap_or_else(|| text.strip_prefix("//").unwrap_or(text));
-    let stripped = stripped.strip_prefix(' ').unwrap_or(stripped);
+    // Lossless: preserve the comment byte-for-byte. Any normalization
+    // (trimming, re-spacing) would break `verify`'s byte-identical check
+    // (e.g. `//hello` vs `// hello`) and violate idempotence.
     if text.starts_with("///") {
-        Some(ClassifiedKind::Doc(stripped.to_string()))
+        Some(ClassifiedKind::Doc(text.to_string()))
     } else if text.starts_with("//") {
-        Some(ClassifiedKind::Line(stripped.to_string()))
-    } else if text.starts_with("/*") && text.ends_with("*/") {
-        let inner = &text[2..text.len() - 2];
-        let inner = inner.strip_prefix('*').unwrap_or(inner);
-        let inner = inner
-            .strip_suffix('/')
-            .map(|s| &s[..s.len() - 1])
-            .unwrap_or(inner);
-        Some(ClassifiedKind::Block(inner.trim().to_string()))
+        Some(ClassifiedKind::Line(text.to_string()))
+    } else if text.starts_with("/*") {
+        Some(ClassifiedKind::Block(text.to_string()))
     } else {
-        // Unknown comment shape — treat as a block.
+        // Unknown comment shape — preserve verbatim as a block.
         Some(ClassifiedKind::Block(text.to_string()))
     }
 }
@@ -145,19 +143,32 @@ mod tests {
     #[test]
     fn classify_line_comment() {
         let k = classify_comment("// hello").unwrap();
-        assert_eq!(k, ClassifiedKind::Line("hello".to_string()));
+        assert_eq!(k, ClassifiedKind::Line("// hello".to_string()));
+    }
+
+    #[test]
+    fn classify_line_comment_no_space_preserved() {
+        // No normalization: `//hello` must stay byte-identical.
+        let k = classify_comment("//hello").unwrap();
+        assert_eq!(k, ClassifiedKind::Line("//hello".to_string()));
     }
 
     #[test]
     fn classify_doc_comment() {
         let k = classify_comment("/// doc").unwrap();
-        assert_eq!(k, ClassifiedKind::Doc("doc".to_string()));
+        assert_eq!(k, ClassifiedKind::Doc("/// doc".to_string()));
     }
 
     #[test]
     fn classify_block_comment() {
         let k = classify_comment("/* hi */").unwrap();
-        assert_eq!(k, ClassifiedKind::Block("hi".to_string()));
+        assert_eq!(k, ClassifiedKind::Block("/* hi */".to_string()));
+    }
+
+    #[test]
+    fn classify_block_comment_spacing_preserved() {
+        let k = classify_comment("/*  spaced  */").unwrap();
+        assert_eq!(k, ClassifiedKind::Block("/*  spaced  */".to_string()));
     }
 
     #[test]

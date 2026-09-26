@@ -1,0 +1,13 @@
+// E2E: selective import of method-dispatch string helpers.
+// Regression: `import std.str(trim)` used to fail with
+// "symbol `trim` not found in `std.str`" because only the `str.*`
+// method namespace had these entries, not the canonical `std.str.*`.
+import std.str(trim, to_lower)
+
+a := trim("  hello  ")
+println(a)
+b := "  WORLD  ".to_lower() |> trim()
+println(b)
+c := trim("  padded  ") |> to_lower()
+println(c)
+println("str_selective_ok")

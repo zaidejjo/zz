@@ -15,8 +15,11 @@ impl Checker {
         }
         let mut distinct: Vec<Type> = Vec::new();
         for t in types {
-            let rt = self.unifier.resolve(&t);
-            if let Some(existing) = distinct.iter().find(|d| self.unifier.resolve(d) == rt) {
+            // Clone-free comparison through var chains (the old
+            // `resolve(d) == resolve(t)` cloned two subtrees per pair).
+            // `existing` borrows the local vec — disjoint from the
+            // `&mut self.unifier` below, so no clone is needed at all.
+            if let Some(existing) = distinct.iter().find(|d| self.unifier.eq_resolved(d, &t)) {
                 let _ = self.unifier.unify(existing, &t);
             } else {
                 distinct.push(t);
