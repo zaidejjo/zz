@@ -6,8 +6,8 @@ use zz_frontend::span::Span;
 use crate::env::{Env, EnvLink};
 use crate::runtime::format::{format_value_with_spec, value_matches_lit};
 use crate::runtime::ops::{
-    eval_binary, eval_unary, get_index, is_embedded_value, object_field, set_index,
-    set_object_field, slice_value,
+    eval_binary, eval_unary, fill_default_headers, get_index, is_embedded_value, object_field,
+    set_index, set_object_field, slice_value,
 };
 use crate::runtime::{EvalError, Flow};
 use crate::value::NativeFunc;
@@ -1321,7 +1321,10 @@ impl Interp {
                         | "std.sqlz.mysql.query"
                         | "std.sqlz.mysql.exec"
                 );
-                if !is_db && args.len() != nf.arity {
+                if !is_db
+                    && args.len() != nf.arity
+                    && !fill_default_headers(&nf.name, &mut args, nf.arity)
+                {
                     return Err(EvalError::new(
                         format!("expected {} arguments, found {}", nf.arity, args.len()),
                         span,

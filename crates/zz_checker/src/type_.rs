@@ -46,6 +46,10 @@ pub enum Type {
     TcpListener,
     /// Opaque HTTP response (produced by `std.http.get`, etc.).
     Response,
+    /// HTTP request (produced by the `std.http` dispatcher for route
+    /// handlers and middleware: `method`, `path`, `body`, `headers`,
+    /// `query`, `params`).
+    HttpRequest,
     /// Generic opaque handle into the `zz_native_rt` pool. The tag names the
     /// owning module (e.g. `"regex"`) and selects the method namespace, so
     /// `Opaque("regex")` and `Opaque("uuid")` are distinct types.
@@ -130,6 +134,7 @@ impl fmt::Display for Type {
             Type::TcpStream => write!(f, "tcp.stream"),
             Type::TcpListener => write!(f, "tcp.listener"),
             Type::Response => write!(f, "http.response"),
+            Type::HttpRequest => write!(f, "http.request"),
             Type::Opaque(tag) => write!(f, "{tag}"),
             Type::Chan => write!(f, "chan"),
             Type::TaskJoin => write!(f, "task.join"),

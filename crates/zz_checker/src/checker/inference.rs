@@ -182,6 +182,8 @@ impl Checker {
                     Type::TcpListener
                 } else if name == "http.response" {
                     Type::Response
+                } else if name == "http.request" {
+                    Type::HttpRequest
                 } else {
                     self.errors
                         .push(error_at(format!("unknown type `{name}`"), ty.span));

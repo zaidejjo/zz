@@ -8,8 +8,8 @@ use super::op::Op;
 use crate::env::{Env, EnvLink};
 use crate::eval::{EvalError, Interp};
 use crate::runtime::ops::{
-    eval_binary, eval_int_binary, eval_unary, get_index, object_field, set_index, set_object_field,
-    slice_value,
+    eval_binary, eval_int_binary, eval_unary, fill_default_headers, get_index, object_field,
+    set_index, set_object_field, slice_value,
 };
 use crate::runtime::Flow;
 use crate::value::{FuncValue, NativeFunc, RangeValue, Value};
@@ -1813,7 +1813,10 @@ impl Vm {
                             }
                         },
                     };
-                    if !is_db && args.len() != arity {
+                    if !is_db
+                        && args.len() != arity
+                        && !fill_default_headers(name, &mut args, arity)
+                    {
                         return_scratch_args(args);
                         return Err(self.error(
                             format!("expected {} arguments, found {}", arity, argc),

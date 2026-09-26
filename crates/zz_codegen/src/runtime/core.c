@@ -2925,6 +2925,84 @@ zz_value zz_tcp_close(zz_value stream, int *err) {
     return zz_variant_ok((zz_value){ZZ_BOOL, {.b = true}});
 }
 
+// net.tcp_read_bytes(stream, max_bytes) → Result<Ok(bytes), Err(msg)>
+// Binary-safe read: raw bytes with no UTF-8 decoding (unlike zz_tcp_read,
+// which decodes lossy by construction).
+zz_value zz_tcp_read_bytes(zz_value stream, zz_value max_bytes, int *err) {
+    (void)err;
+    if (stream.tag != ZZ_TCP_STREAM || !stream.net || stream.net->closed) {
+        return zz_variant_err(zz_str_static("tcp_read_bytes failed: not a stream"));
+    }
+    size_t cap = max_bytes.tag == ZZ_INT && max_bytes.i > 0 ? (size_t)max_bytes.i : 1024;
+    char *buf = (char *)malloc(cap);
+    if (!buf) return zz_variant_err(zz_str_static("tcp_read_bytes failed: out of memory"));
+    ssize_t n = recv(stream.net->fd, buf, cap, 0);
+    if (n < 0) {
+        free(buf);
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return zz_variant_err(zz_str_static("tcp_read_bytes failed: timed out"));
+        }
+        char msg[192];
+        int m = snprintf(msg, sizeof msg, "tcp_read_bytes failed: %s", strerror(errno));
+        return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
+    }
+    if (n == 0) {
+        free(buf);
+        return zz_variant_err(zz_str_static("tcp_read_bytes failed: connection closed"));
+    }
+    zz_value out = zz_bytes_new((const unsigned char *)buf, (size_t)n);
+    free(buf);
+    if (out.tag != ZZ_BYTES) {
+        return zz_variant_err(zz_str_static("tcp_read_bytes failed: out of memory"));
+    }
+    return zz_variant_ok(out);
+}
+
+// net.tcp_write_bytes(stream, bytes) → Result<Ok(int), Err(msg)>
+zz_value zz_tcp_write_bytes(zz_value stream, zz_value data, int *err) {
+    (void)err;
+    if (stream.tag != ZZ_TCP_STREAM || !stream.net || stream.net->closed) {
+        return zz_variant_err(zz_str_static("tcp_write_bytes failed: not a stream"));
+    }
+    if (data.tag != ZZ_BYTES || !data.bytes) {
+        return zz_variant_err(zz_str_static("tcp_write_bytes failed: expected bytes"));
+    }
+    const unsigned char *p = data.bytes->buf->data + data.bytes->off;
+    size_t len = data.bytes->len;
+    size_t total = 0;
+    while (total < len) {
+        ssize_t w = send(stream.net->fd, p + total, len - total, 0);
+        if (w <= 0) {
+            char buf[192];
+            int n = snprintf(buf, sizeof buf, "tcp_write_bytes failed: %s", strerror(errno));
+            return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
+        }
+        total += (size_t)w;
+    }
+    return zz_variant_ok((zz_value){ZZ_INT, {.i = (int64_t)total}});
+}
+
+// net.tcp_shutdown(stream) → Result<Ok(unit), Err(msg)>
+// Real shutdown: both directions stop. The fd stays valid for
+// address queries; later I/O fails naturally at the syscall layer.
+zz_value zz_tcp_shutdown(zz_value stream, int *err) {
+    (void)err;
+    if (stream.tag != ZZ_TCP_STREAM || !stream.net || stream.net->closed) {
+        return zz_variant_err(zz_str_static("tcp_shutdown failed: not a stream"));
+    }
+#ifdef ZZ_OS_WINDOWS
+    int how = SD_BOTH;
+#else
+    int how = SHUT_RDWR;
+#endif
+    if (shutdown(stream.net->fd, how) != 0 && errno != ENOTCONN) {
+        char msg[192];
+        int m = snprintf(msg, sizeof msg, "tcp_shutdown failed: %s", strerror(errno));
+        return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
+    }
+    return zz_variant_ok(zz_unit());
+}
+
 static zz_value tcp_addr(zz_value stream, int peer, int *err) {
     (void)err;
     if (stream.tag != ZZ_TCP_STREAM || !stream.net || stream.net->closed) {

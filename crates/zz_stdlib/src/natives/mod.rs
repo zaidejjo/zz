@@ -2560,6 +2560,48 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "std.net.tcp_read_bytes".into(),
+        NativeEntry {
+            arity: 2,
+            f: net::tcp_read_bytes,
+        },
+    );
+    m.insert(
+        "std.net.tcp_write_bytes".into(),
+        NativeEntry {
+            arity: 2,
+            f: net::tcp_write_bytes,
+        },
+    );
+    m.insert(
+        "std.net.tcp_shutdown".into(),
+        NativeEntry {
+            arity: 1,
+            f: net::tcp_shutdown,
+        },
+    );
+    // Ergonomic aliases: same implementations, short `net.*` method names
+    // (plus `std.net.*` twins so qualified calls work import-free).
+    // `close`/`shutdown` perform a real shutdown; legacy `tcp_close`
+    // stays a no-op.
+    for (name, arity, func) in [
+        ("accept", 1_usize, net::tcp_accept as zz_runtime::NativeFn),
+        ("read", 2, net::tcp_read),
+        ("read_line", 1, net::tcp_readline),
+        ("read_bytes", 2, net::tcp_read_bytes),
+        ("write", 2, net::tcp_write),
+        ("write_bytes", 2, net::tcp_write_bytes),
+        ("close", 1, net::tcp_shutdown),
+        ("shutdown", 1, net::tcp_shutdown),
+        ("peer_addr", 1, net::peer_addr),
+        ("local_addr", 1, net::local_addr),
+        ("set_read_timeout", 2, net::set_read_timeout),
+        ("set_write_timeout", 2, net::set_write_timeout),
+    ] {
+        m.insert(format!("std.net.{name}"), NativeEntry { arity, f: func });
+        m.insert(format!("net.{name}"), NativeEntry { arity, f: func });
+    }
+    m.insert(
         "std.net.peer_addr".into(),
         NativeEntry {
             arity: 1,

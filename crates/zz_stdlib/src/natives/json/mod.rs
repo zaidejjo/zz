@@ -332,6 +332,7 @@ pub(crate) fn value_to_json(v: &Value) -> Result<JsonValue, EvalError> {
         Value::TcpStream(_) => Err(err("a tcp stream")),
         Value::TcpListener(_) => Err(err("a tcp listener")),
         Value::Response(_) => Err(err("an http response")),
+        Value::HttpRequest(_) => Err(err("an http request")),
         Value::Object { .. } => Err(err("a struct instance")),
         Value::Range(..) => Err(err("a range")),
         Value::Tuple(vs) => {

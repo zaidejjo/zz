@@ -11,7 +11,7 @@ use crate::natives::{arg, expect_str};
 use zz_runtime::json::{parse_json, to_json_string, JsonValue};
 use zz_runtime::value::{
     detach_cached_funcs, reachable_refs, snapshot_env, snapshot_env_filtered, snapshot_funcs,
-    FuncValue, HttpServer, Response,
+    FuncValue, HttpRequest, HttpServer, Response,
 };
 use zz_runtime::{
     vm::Op, Chunk, Env, EnvLink, EvalError, Expr, Interp, NativeEntry, Param, Span, Value,
@@ -228,7 +228,7 @@ fn read_exact_capped<R: std::io::Read>(
     Ok(out)
 }
 
-/// Build a Value::Dict request object from parsed HTTP request data.
+/// Build a `Value::HttpRequest` from parsed HTTP request data.
 fn build_request_dict(
     method: &str,
     path: &str,
@@ -237,43 +237,78 @@ fn build_request_dict(
     query_pairs: &[(String, String)],
     params: &[(String, String)],
 ) -> Value {
-    let method_val = Value::Str(method.to_string().into());
-    let path_val = Value::Str(path.to_string().into());
-    // Move (no copy): the caller-owned body buffer becomes the dict entry.
-    let body_val = Value::Str(body.into());
+    // Move (no copy): the caller-owned body buffer becomes the request field.
+    Value::HttpRequest(Box::new(HttpRequest {
+        method: method.to_string(),
+        path: path.to_string(),
+        body,
+        headers: headers.to_vec(),
+        query: query_pairs.to_vec(),
+        params: params.to_vec(),
+    }))
+}
 
-    let headers_dict: Vec<(Value, Value)> = headers
-        .iter()
-        .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
-        .collect();
+/// A borrowed view over a request — either the typed `HttpRequest` value
+/// or a legacy `Dict` (accepted during the Dict→`HttpRequest` migration so
+/// old snapshots and hand-built dicts keep working).
+struct RequestView<'a> {
+    body: &'a str,
+    headers: Vec<(&'a str, &'a str)>,
+    query: Vec<(&'a str, &'a str)>,
+    params: Vec<(&'a str, &'a str)>,
+}
 
-    let query_dict: Vec<(Value, Value)> = query_pairs
-        .iter()
-        .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
-        .collect();
-
-    let params_dict: Vec<(Value, Value)> = params
-        .iter()
-        .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
-        .collect();
-
-    Value::Dict(Box::new(vec![
-        (Value::Str("method".to_string().into()), method_val),
-        (Value::Str("path".to_string().into()), path_val),
-        (Value::Str("body".to_string().into()), body_val),
-        (
-            Value::Str("headers".to_string().into()),
-            Value::Dict(Box::new(headers_dict)),
-        ),
-        (
-            Value::Str("query".to_string().into()),
-            Value::Dict(Box::new(query_dict)),
-        ),
-        (
-            Value::Str("params".to_string().into()),
-            Value::Dict(Box::new(params_dict)),
-        ),
-    ]))
+fn view_request(v: &Value) -> Option<RequestView<'_>> {
+    match v {
+        Value::HttpRequest(r) => Some(RequestView {
+            body: &r.body,
+            headers: r
+                .headers
+                .iter()
+                .map(|(k, val)| (k.as_str(), val.as_str()))
+                .collect(),
+            query: r
+                .query
+                .iter()
+                .map(|(k, val)| (k.as_str(), val.as_str()))
+                .collect(),
+            params: r
+                .params
+                .iter()
+                .map(|(k, val)| (k.as_str(), val.as_str()))
+                .collect(),
+        }),
+        Value::Dict(entries) => {
+            let field = |name: &str| {
+                entries.iter().find_map(|(k, val)| match (k, val) {
+                    (Value::Str(k), Value::Str(v)) if k.as_str() == name => Some(v.as_str()),
+                    _ => None,
+                })
+            };
+            let sub = |name: &str| {
+                entries
+                    .iter()
+                    .find_map(|(k, val)| match (k, val) {
+                        (Value::Str(k), Value::Dict(inner)) if k.as_str() == name => {
+                            Some(inner.iter().filter_map(|(ik, iv)| match (ik, iv) {
+                                (Value::Str(k), Value::Str(v)) => Some((k.as_str(), v.as_str())),
+                                _ => None,
+                            }))
+                        }
+                        _ => None,
+                    })
+                    .map(|it| it.collect())
+                    .unwrap_or_default()
+            };
+            Some(RequestView {
+                body: field("body")?,
+                headers: sub("headers"),
+                query: sub("query"),
+                params: sub("params"),
+            })
+        }
+        _ => None,
+    }
 }
 
 // ===========================================================================
@@ -352,7 +387,10 @@ pub(crate) fn http_respond(
         ));
     }
     let body = expect_str(args, 1, "std.http.respond")?;
-    let headers = match arg(args, 2, "std.http.respond")? {
+    // `headers` is optional (defaults to `{}` — the arity gate in
+    // `fill_default_headers` pads it, but direct `Interp::call` users and
+    // tests may also omit it).
+    let headers = match args.get(2).cloned().unwrap_or(Value::Dict(Box::default())) {
         Value::Dict(entries) => entries
             .iter()
             .filter_map(|(k, v)| match (k, v) {
@@ -751,55 +789,73 @@ pub(crate) fn http_test(
 // Feature 3: Query & Form Data Parsing
 // ===========================================================================
 
-/// `http.query(req: dict) -> {str: str}`
+/// `http.query(req: Request) -> {str: str}`
 pub(crate) fn http_query(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    extract_dict_field(args, 0, "query", "std.http.query", span)
+    let req = match arg(args, 0, "std.http.query")? {
+        v @ (Value::HttpRequest(_) | Value::Dict(_)) => v.clone(),
+        other => {
+            return Err(EvalError::new(
+                format!("std.http.query: expected a request, found `{other}`"),
+                span,
+            ))
+        }
+    };
+    let Some(view) = view_request(&req) else {
+        return Ok(Value::Dict(Box::default()));
+    };
+    Ok(Value::Dict(Box::new(
+        view.query
+            .iter()
+            .map(|(k, v)| {
+                (
+                    Value::Str((*k).to_string().into()),
+                    Value::Str((*v).to_string().into()),
+                )
+            })
+            .collect(),
+    )))
 }
 
-/// `http.header(req: dict, name: str) -> Result<str, str>`
+/// `http.header(req: Request, name: str) -> Result<str, str>`
 ///
-/// Looks inside the request's `headers` sub-dict (as built by the server
-/// dispatcher); falls back to a top-level scan so a bare headers dict
-/// also works.
+/// Looks inside the request's `headers` (case-insensitive); falls back to a
+/// top-level scan so a bare headers dict also works.
 pub(crate) fn http_header(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
     let req = match arg(args, 0, "std.http.header")? {
-        Value::Dict(entries) => (**entries).clone(),
+        v @ (Value::HttpRequest(_) | Value::Dict(_)) => v.clone(),
         other => {
             return Err(EvalError::new(
-                format!("std.http.header: expected a dict, found `{other}`"),
+                format!("std.http.header: expected a request, found `{other}`"),
                 span,
             ))
         }
     };
     let name = expect_str(args, 1, "std.http.header")?;
-    // Prefer the nested `headers` dict when present (server request shape).
-    for (k, v) in &req {
-        if let (Value::Str(key), Value::Dict(inner)) = (k, v) {
-            if (**key).to_lowercase() == "headers" {
-                for (nk, nv) in &**inner {
-                    if let Value::Str(nkey) = nk {
-                        if (**nkey).to_lowercase() == name.to_lowercase() {
-                            return Ok(Value::Result(Box::new(Ok(nv.clone()))));
-                        }
-                    }
-                }
-                break;
+    // Typed request (or legacy request dict): scan the `headers` section.
+    if let Some(view) = view_request(&req) {
+        for (k, v) in &view.headers {
+            if k.to_lowercase() == name.to_lowercase() {
+                return Ok(Value::Result(Box::new(Ok(Value::Str(
+                    (*v).to_string().into(),
+                )))));
             }
         }
     }
     // Fall back to a top-level scan (bare headers dict).
-    for (k, v) in &req {
-        if let (Value::Str(key), val) = (k, v) {
-            if (**key).to_lowercase() == name.to_lowercase() {
-                return Ok(Value::Result(Box::new(Ok(val.clone()))));
+    if let Value::Dict(entries) = &req {
+        for (k, v) in &**entries {
+            if let (Value::Str(key), val) = (k, v) {
+                if (**key).to_lowercase() == name.to_lowercase() {
+                    return Ok(Value::Result(Box::new(Ok(val.clone()))));
+                }
             }
         }
     }
@@ -808,13 +864,13 @@ pub(crate) fn http_header(
     )))))
 }
 
-/// `http.body_json(req: dict) -> json`
+/// `http.body_json(req: Request) -> json`
 pub(crate) fn http_body_json(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let body = extract_dict_field_str(args, 0, "body", "std.http.body_json", span)?;
+    let body = request_body(args, 0, "std.http.body_json", span)?;
     match parse_json(&body) {
         Ok(j) => Ok(Value::Json(Box::new(j))),
         Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
@@ -823,13 +879,13 @@ pub(crate) fn http_body_json(
     }
 }
 
-/// `http.body_form(req: dict) -> {str: str}`
+/// `http.body_form(req: Request) -> {str: str}`
 pub(crate) fn http_body_form(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let body = extract_dict_field_str(args, 0, "body", "std.http.body_form", span)?;
+    let body = request_body(args, 0, "std.http.body_form", span)?;
     let pairs = parse_query_string(&body);
     let dict: Vec<(Value, Value)> = pairs
         .iter()
@@ -842,32 +898,28 @@ pub(crate) fn http_body_form(
 // Feature 1: Dynamic Routing — Path Parameters
 // ===========================================================================
 
-/// `http.param(req: dict, name: str) -> Result<str, str>`
+/// `http.param(req: Request, name: str) -> Result<str, str>`
 pub(crate) fn http_param(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
     let req = match arg(args, 0, "std.http.param")? {
-        Value::Dict(entries) => (**entries).clone(),
+        v @ (Value::HttpRequest(_) | Value::Dict(_)) => v.clone(),
         other => {
             return Err(EvalError::new(
-                format!("std.http.param: expected a dict, found `{other}`"),
+                format!("std.http.param: expected a request, found `{other}`"),
                 span,
             ))
         }
     };
     let name = expect_str(args, 1, "std.http.param")?;
-    for (k, v) in &req {
-        if let (Value::Str(key), Value::Dict(params)) = (k, v) {
-            if &**key == "params" {
-                for (pk, pv) in &**params {
-                    if let (Value::Str(pname), Value::Str(pval)) = (pk, pv) {
-                        if **pname == name.as_str() {
-                            return Ok(Value::Result(Box::new(Ok(Value::Str(pval.clone())))));
-                        }
-                    }
-                }
+    if let Some(view) = view_request(&req) {
+        for (k, v) in &view.params {
+            if *k == name.as_str() {
+                return Ok(Value::Result(Box::new(Ok(Value::Str(
+                    (*v).to_string().into(),
+                )))));
             }
         }
     }
@@ -877,47 +929,29 @@ pub(crate) fn http_param(
 }
 
 // ===========================================================================
-// Request dict helpers (used by query, header, param, body_json, body_form)
+// Request helpers (used by query, header, param, body_json, body_form)
 // ===========================================================================
 
-fn extract_dict_field(
+/// Read the `body` of a request: typed `HttpRequest` or legacy request dict
+/// (empty string when absent, mirroring the old dict behavior).
+fn request_body(
     args: &mut Vec<Value>,
     i: usize,
-    field: &str,
     func_name: &str,
     span: Span,
-) -> Result<Value, EvalError> {
+) -> Result<String, EvalError> {
     let req = match arg(args, i, func_name)? {
-        Value::Dict(entries) => (**entries).clone(),
+        v @ (Value::HttpRequest(_) | Value::Dict(_)) => v.clone(),
         other => {
             return Err(EvalError::new(
-                format!("{func_name}: expected a dict, found `{other}`"),
+                format!("{func_name}: expected a request, found `{other}`"),
                 span,
             ))
         }
     };
-    for (k, v) in &req {
-        if let Value::Str(key) = k {
-            if **key == field {
-                return Ok(v.clone());
-            }
-        }
-    }
-    Ok(Value::Dict(Box::default()))
-}
-
-fn extract_dict_field_str(
-    args: &mut Vec<Value>,
-    i: usize,
-    field: &str,
-    func_name: &str,
-    span: Span,
-) -> Result<String, EvalError> {
-    let val = extract_dict_field(args, i, field, func_name, span)?;
-    match val {
-        Value::Str(s) => Ok((*s).clone()),
-        _ => Ok("".to_string()),
-    }
+    Ok(view_request(&req)
+        .map(|v| v.body.to_string())
+        .unwrap_or_default())
 }
 
 // ===========================================================================
@@ -964,10 +998,10 @@ fn dispatch_with_request(
     interp: &mut Interp,
     span: Span,
 ) -> DispatchResult {
-    // Build the request dict
+    // Build the typed request value
     let req_dict = build_request_dict(method, path, body, headers, query_pairs, params);
 
-    // Run middleware chain. `current_req` moves (no clone): the dict is
+    // Run middleware chain. `current_req` moves (no clone): the request is
     // rebuilt per request and each stage takes ownership — cloning a
     // multi-MB body per middleware triples peak publish memory.
     let mut current_req = req_dict;
@@ -981,8 +1015,8 @@ fn dispatch_with_request(
         match interp.call(mw.clone(), vec![arg], span)? {
             Value::Result(r) => match &*r {
                 Ok(val) => {
-                    // Middleware passed — it may have modified the request dict
-                    if let Value::Dict(_) = val {
+                    // Middleware passed — it may have modified the request
+                    if let Value::HttpRequest(_) | Value::Dict(_) = val {
                         current_req = (*val).clone();
                     }
                 }
@@ -1048,25 +1082,26 @@ fn dispatch_with_request(
         }
     };
 
-    // Build enriched request dict with params
+    // Build enriched request with route params
     let enriched_req = if matched_params.is_empty() {
         current_req
-    } else {
+    } else if let Value::HttpRequest(mut req) = current_req {
+        req.params = matched_params;
+        Value::HttpRequest(req)
+    } else if let Value::Dict(mut entries) = current_req {
+        // Legacy dict request (e.g. returned from old middleware): patch params.
         let params_dict: Vec<(Value, Value)> = matched_params
             .iter()
             .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
             .collect();
-        // Replace the "params" key in the request dict
-        if let Value::Dict(mut entries) = current_req {
-            entries.retain(|(k, _)| k != &Value::Str("params".to_string().into()));
-            entries.push((
-                Value::Str("params".to_string().into()),
-                Value::Dict(Box::new(params_dict)),
-            ));
-            Value::Dict(entries)
-        } else {
-            current_req
-        }
+        entries.retain(|(k, _)| k != &Value::Str("params".to_string().into()));
+        entries.push((
+            Value::Str("params".to_string().into()),
+            Value::Dict(Box::new(params_dict)),
+        ));
+        Value::Dict(entries)
+    } else {
+        current_req
     };
 
     // Call handler

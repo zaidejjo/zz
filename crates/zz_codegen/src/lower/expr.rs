@@ -1464,6 +1464,15 @@ impl Lowerer {
                                 zz_checker::Type::Option(_) => Some("option"),
                                 zz_checker::Type::Result(_, _) => Some("result"),
                                 zz_checker::Type::Db => Some("sqlz"),
+                                zz_checker::Type::TcpStream | zz_checker::Type::TcpListener => {
+                                    Some("net")
+                                }
+                                zz_checker::Type::HttpServer
+                                | zz_checker::Type::Response
+                                | zz_checker::Type::HttpRequest => Some("http"),
+                                zz_checker::Type::Json => Some("json"),
+                                zz_checker::Type::Bytes => Some("bytes"),
+                                zz_checker::Type::Chan => Some("chan"),
                                 // Opaque handles dispatch on their module tag.
                                 // Tags are dynamic, so leak once per tag —
                                 // same pattern as struct namespaces in the VM.
@@ -1483,6 +1492,15 @@ impl Lowerer {
                                 zz_checker::Type::Option(_) => Some("option"),
                                 zz_checker::Type::Result(_, _) => Some("result"),
                                 zz_checker::Type::Db => Some("sqlz"),
+                                zz_checker::Type::TcpStream | zz_checker::Type::TcpListener => {
+                                    Some("net")
+                                }
+                                zz_checker::Type::HttpServer
+                                | zz_checker::Type::Response
+                                | zz_checker::Type::HttpRequest => Some("http"),
+                                zz_checker::Type::Json => Some("json"),
+                                zz_checker::Type::Bytes => Some("bytes"),
+                                zz_checker::Type::Chan => Some("chan"),
                                 zz_checker::Type::Opaque(tag) => {
                                     Some(Box::leak(tag.clone().into_boxed_str()) as &str)
                                 }
@@ -2194,6 +2212,25 @@ impl Lowerer {
                 if let Some(ref arena) = *self.current_loop_arena.borrow() {
                     let a = &arg_items[0];
                     return format!("zz_str_cast_arena({a}, &(int){{0}}, &{arena})");
+                }
+            }
+            // `http.get/post/put/delete/respond` accept an omitted trailing
+            // `headers` (checker `has_default`); pad with an empty dict like
+            // `range` pads missing bounds above.
+            if matches!(
+                effective_name,
+                "zz_http_get"
+                    | "zz_http_post"
+                    | "zz_http_put"
+                    | "zz_http_delete"
+                    | "zz_http_respond"
+            ) {
+                let full_arity = match effective_name {
+                    "zz_http_get" | "zz_http_delete" => 2,
+                    _ => 3,
+                };
+                if arg_items.len() + 1 == full_arity {
+                    arg_items.push("zz_dict_new()".to_string());
                 }
             }
             return match arg_items.len() {

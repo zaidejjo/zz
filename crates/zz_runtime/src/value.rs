@@ -305,6 +305,8 @@ pub enum Value {
     Opaque(Box<zz_native_rt::Handle>),
     /// An HTTP response (status + body + headers).
     Response(Box<Response>),
+    /// An HTTP request (method/path/body/headers/query/params).
+    HttpRequest(Box<HttpRequest>),
     /// A struct instance: its type name and insertion-ordered fields.
     Object(Box<ObjectValue>),
     /// `a..b` or `a..b..step` — an integer range (used by `for` loops).
@@ -882,6 +884,19 @@ pub struct Response {
     pub headers: Vec<(String, String)>,
 }
 
+/// An HTTP request passed to route handlers and middleware: method, path,
+/// body, headers, query pairs, and route params. Owned strings so requests
+/// are `Send` and snapshot-safe across connection threads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HttpRequest {
+    pub method: String,
+    pub path: String,
+    pub body: String,
+    pub headers: Vec<(String, String)>,
+    pub query: Vec<(String, String)>,
+    pub params: Vec<(String, String)>,
+}
+
 /// A native function reference: name + arity. The implementation lives in
 /// the interpreter's native registry.
 #[derive(Debug, Clone, PartialEq)]
@@ -1025,6 +1040,7 @@ impl Value {
             Value::Db(_) => "db".to_string(),
             Value::Opaque(h) => h.tag.clone(),
             Value::Response(_) => "http.response".to_string(),
+            Value::HttpRequest(_) => "http.request".to_string(),
             Value::Object(o) => o.name.clone(),
             Value::Range(_) => "range".to_string(),
             Value::Tuple(_) => "tuple".to_string(),
@@ -1048,6 +1064,7 @@ impl Value {
             Value::Bool(_) => Some("bool"),
             Value::TcpStream(_) => Some("net"),
             Value::TcpListener(_) => Some("net"),
+            Value::HttpServer(_) => Some("http"),
             Value::Db(_) => Some("sqlz"),
             // Opaque handles dispatch on their tag (e.g. a `"regex"` handle
             // resolves `regex.is_match`). Tags are dynamic, so the `&str`
@@ -1055,6 +1072,7 @@ impl Value {
             // namespaces below.
             Value::Opaque(h) => Some(Box::leak(h.tag.clone().into_boxed_str()) as &str),
             Value::Response(_) => Some("http"),
+            Value::HttpRequest(_) => Some("http"),
             Value::Chan(_) => Some("chan"),
             Value::TaskJoin(_) => None,
             Value::Object(o) => {
@@ -1128,6 +1146,7 @@ impl fmt::Display for Value {
             Value::TcpStream(_) => write!(f, "<tcp stream>"),
             Value::TcpListener(_) => write!(f, "<tcp listener>"),
             Value::Response(res) => write!(f, "<http response {}>", res.status),
+            Value::HttpRequest(req) => write!(f, "<http request {} {}>", req.method, req.path),
             Value::Object(o) => {
                 write!(f, "{}{{", o.name)?;
                 for (i, (k, v)) in o.fields.iter().enumerate() {
@@ -1179,6 +1198,7 @@ impl PartialEq for Value {
             (Value::Json(a), Value::Json(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Response(a), Value::Response(b)) => a == b,
+            (Value::HttpRequest(a), Value::HttpRequest(b)) => a == b,
             (Value::HttpServer(_), Value::HttpServer(_)) => std::ptr::eq(self, other),
             (Value::Object(a), Value::Object(b)) => a == b,
             // Opaque types: compare by Arc pointer (identity, not deep equality)

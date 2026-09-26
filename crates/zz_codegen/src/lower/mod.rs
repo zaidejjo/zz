@@ -530,6 +530,7 @@ fn ty_to_ctype(ty: &zz_hir::Type) -> String {
         zz_hir::Type::TcpStream => "zz_value".to_string(), // TcpStream is heap-allocated
         zz_hir::Type::TcpListener => "zz_value".to_string(), // TcpListener is heap-allocated
         zz_hir::Type::Response => "zz_value".to_string(), // Response is heap-allocated
+        zz_hir::Type::HttpRequest => "zz_value".to_string(), // Request is heap-allocated
         _ => "zz_value".to_string(),                  // All other types are heap-allocated
     }
 }
@@ -745,6 +746,18 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "net.tcp_read" | "std.net.tcp_read" => Some("zz_tcp_read"),
         "net.tcp_readline" | "std.net.tcp_readline" => Some("zz_tcp_readline"),
         "net.tcp_close" | "std.net.tcp_close" => Some("zz_tcp_close"),
+        "net.tcp_read_bytes" | "std.net.tcp_read_bytes" => Some("zz_tcp_read_bytes"),
+        "net.tcp_write_bytes" | "std.net.tcp_write_bytes" => Some("zz_tcp_write_bytes"),
+        "net.tcp_shutdown" | "std.net.tcp_shutdown" => Some("zz_tcp_shutdown"),
+        // Ergonomic `net.*` method aliases (same C impls as the canonicals).
+        "net.accept" | "std.net.accept" => Some("zz_tcp_accept"),
+        "net.read" | "std.net.read" => Some("zz_tcp_read"),
+        "net.read_line" | "std.net.read_line" => Some("zz_tcp_readline"),
+        "net.read_bytes" | "std.net.read_bytes" => Some("zz_tcp_read_bytes"),
+        "net.write" | "std.net.write" => Some("zz_tcp_write"),
+        "net.write_bytes" | "std.net.write_bytes" => Some("zz_tcp_write_bytes"),
+        "net.close" | "std.net.close" => Some("zz_tcp_shutdown"),
+        "net.shutdown" | "std.net.shutdown" => Some("zz_tcp_shutdown"),
         "net.peer_addr" | "std.net.peer_addr" => Some("zz_tcp_peer_addr"),
         "net.local_addr" | "std.net.local_addr" => Some("zz_tcp_local_addr"),
         "net.set_read_timeout" | "std.net.set_read_timeout" => Some("zz_tcp_set_read_timeout"),

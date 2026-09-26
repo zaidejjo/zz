@@ -29,7 +29,8 @@ Available without imports:
 | `std.str` | String manipulation |
 | `std.vec` | Array operations |
 | `std.json` | JSON parsing/serialization |
-| `std.http` | HTTP server |
+| `std.http` | HTTP server + client |
+| `std.net` | TCP networking |
 | `std.fs` | Filesystem operations |
 | `std.env` | Environment variables, CLI args |
 | `std.math` | Math functions |
@@ -181,32 +182,105 @@ json.stringify(person)  // {"age":25,"name":"Bob"}
 
 ---
 
-## `std.http` -- HTTP Server
+## `std.http` -- HTTP Server + Client
 
 ```zz
 import std.http
 ```
 
+### Server
+
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `http.server` | `http.server() -> http.server` | Create server handle |
-| `http.get` | `http.get(server, path, handler) -> http.server` | Register GET route |
-| `http.post` | `http.post(server, path, handler) -> http.server` | Register POST route |
-| `http.handle` | `http.handle(server, method, path, body) -> str` | Dispatch a request |
+| `http.route_get` | `http.route_get(server, path, handler) -> http.server` | Register GET route |
+| `http.route_post` | `http.route_post(server, path, handler) -> http.server` | Register POST route |
+| `http.route_put` | `http.route_put(server, path, handler) -> http.server` | Register PUT route |
+| `http.route_delete` | `http.route_delete(server, path, handler) -> http.server` | Register DELETE route |
+| `http.route` | `http.route(server, method, path, handler) -> http.server` | Single-entry routing (`"GET"`/`"POST"`/`"PUT"`/`"DELETE"`) |
+| `http.use` | `http.use(server, middleware) -> http.server` | Register middleware (`http.pipe` is a legacy alias) |
+| `http.log` | `http.log(server, enabled) -> http.server` | Toggle request logging |
+| `http.serve_dir` | `http.serve_dir(server, dir) -> http.server` | Serve static files |
+| `http.test` | `http.test(server, method, path, body) -> http.response` | Dispatch in-process (no sockets) |
+| `http.handle` | `http.handle(server, method, path, body) -> Result<str, str>` | Legacy dispatch (prefer `test`) |
 | `http.listen` | `http.listen(server, port) -> unit` | Start blocking server |
+| `http.respond` | `http.respond(status, body, headers = {}) -> http.response` | Explicit status/headers |
+| `http.ok` | `http.ok(body) -> http.response` | 200 response |
+| `http.created` | `http.created(body) -> http.response` | 201 response |
+| `http.not_found` | `http.not_found() -> http.response` | 404 response |
+| `http.redirect` | `http.redirect(url) -> http.response` | 302 + `Location` header |
 
-Handler type: `func(str) -> str`
+Handlers take a typed `Request` and return `str` (200 text), a
+`Response` (explicit status/headers), or a dict/array (auto-JSON):
 
 ```zz
 import std.http
 
 server := http.server()
-    |> http.get(_, "/", |body: str| "Hello, World!")
-    |> http.get(_, "/greet", |body: str| "Welcome!")
-    |> http.post(_, "/echo", |body: str| body)
+    |> http.route("GET", "/", |_req: http.request| "Hello, World!")
+    |> http.route("GET", "/users/:id", |req| "user-{http.param(req, "id") ?? "?"}")
+    |> http.route("POST", "/echo", |req| req.body)
 
 println("Server running on :8080")
 http.listen(server, 8080)
+```
+
+Method syntax works on server handles (`http.*` methods dispatch on
+`http.server` receivers):
+
+```zz
+s := http.server()
+s = s.route("GET", "/hi", |req| http.ok("hi"))
+s = s.use(|req| .ok(req))
+s = s.log(true)
+```
+
+### Request (`http.request`)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `method` | `str` | `"GET"`, `"POST"`, … |
+| `path` | `str` | Path without query string |
+| `body` | `str` | Raw request body |
+| `headers` | `{str: str}` | Request headers (case-insensitive lookup via `http.header`) |
+| `query` | `{str: str}` | Parsed query string |
+| `params` | `{str: str}` | Route path params (`:id` segments) |
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `http.param` | `http.param(req, name) -> Result<str, str>` | Route param or `.err` |
+| `http.query` | `http.query(req) -> {str: str}` | Query dict |
+| `http.header` | `http.header(req, name) -> Result<str, str>` | Header (case-insensitive) or `.err` |
+| `http.body_json` | `http.body_json(req) -> json` | Parse body as JSON |
+| `http.body_form` | `http.body_form(req) -> {str: str}` | Parse form-encoded body |
+
+Handler type: `func(http.request) -> str | http.response`
+
+### Response (`http.response`)
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `http.status` | `http.status(res) -> int` | Status code (method syntax: `res.status()`) |
+| `http.text` | `http.text(res) -> str` | Body text (`res.text()`) |
+| `http.json` | `http.json(res) -> json` | Parse body as JSON (`res.json()`) |
+| `http.headers` | `http.headers(res) -> {str: str}` | Response headers (`res.headers()`) |
+
+### Client (`headers` optional, defaults to `{}`)
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `http.get` | `http.get(url, headers = {}) -> Result<http.response, str>` | GET request |
+| `http.post` | `http.post(url, body, headers = {}) -> Result<http.response, str>` | POST (`body`: `str` or `bytes`) |
+| `http.put` | `http.put(url, body, headers = {}) -> Result<http.response, str>` | PUT (`body`: `str` or `bytes`) |
+| `http.delete` | `http.delete(url, headers = {}) -> Result<http.response, str>` | DELETE request |
+
+```zz
+import std.http
+
+match http.get("https://api.example.com/users") {
+    .ok(res)  => println("users: {res.text()}"),
+    .err(e)   => println("request failed: {e}"),
+}
 ```
 
 ### Testing Handlers
@@ -215,10 +289,61 @@ http.listen(server, 8080)
 import std.http
 
 server := http.server()
-    |> http.get(_, "/", |body: str| "Hello!")
+    |> http.route("GET", "/", |_req| "Hello!")
 
 // Test without starting a server
-response := http.handle(server, "GET", "/", "")   // "Hello!"
+response := http.test(server, "GET", "/", "")
+println(response.status())   // 200
+println(response.text())     // "Hello!"
+```
+
+---
+
+## `std.net` -- TCP Networking
+
+```zz
+import std.net
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `net.tcp_listen` | `net.tcp_listen(addr) -> Result<tcp.listener, str>` | Bind listener (`"127.0.0.1:8080"`) |
+| `net.tcp_connect` | `net.tcp_connect(addr, timeout_ms) -> Result<tcp.stream, str>` | Connect with timeout |
+| `net.tcp_accept` | `net.tcp_accept(listener) -> Result<tcp.stream, str>` | Accept (method: `listener.accept()`) |
+| `net.tcp_write` | `net.tcp_write(stream, data: str) -> Result<int, str>` | Write UTF-8 text (method: `stream.write()`) |
+| `net.tcp_read` | `net.tcp_read(stream, max_bytes) -> Result<str, str>` | Read text — lossy on non-UTF8 (method: `stream.read()`) |
+| `net.tcp_readline` | `net.tcp_readline(stream) -> Result<str, str>` | Read a `\n`-terminated line (method: `stream.read_line()`) |
+| `net.tcp_read_bytes` | `net.tcp_read_bytes(stream, max_bytes) -> Result<bytes, str>` | Binary-safe read (method: `stream.read_bytes()`) |
+| `net.tcp_write_bytes` | `net.tcp_write_bytes(stream, data: bytes) -> Result<int, str>` | Binary-safe write (method: `stream.write_bytes()`) |
+| `net.tcp_shutdown` | `net.tcp_shutdown(stream) -> Result<unit, str>` | Real shutdown, both directions (methods: `stream.close()`, `stream.shutdown()`) |
+| `net.tcp_close` | `net.tcp_close(stream) -> Result<bool, str>` | Legacy no-op (returns true; prefer `close`) |
+| `net.peer_addr` | `net.peer_addr(stream) -> Result<str, str>` | Remote `"ip:port"` |
+| `net.local_addr` | `net.local_addr(stream) -> Result<str, str>` | Local `"ip:port"` |
+| `net.set_read_timeout` | `net.set_read_timeout(stream, ms) -> Result<bool, str>` | Read deadline |
+| `net.set_write_timeout` | `net.set_write_timeout(stream, ms) -> Result<bool, str>` | Write deadline |
+
+Short `net.*` aliases (`accept`, `read`, `write`, `read_line`,
+`read_bytes`, `write_bytes`, `close`, `shutdown`, `peer_addr`,
+`local_addr`, `set_read_timeout`, `set_write_timeout`) dispatch on
+`tcp.stream` / `tcp.listener` receivers, so method syntax works with or
+without `import std.net` namespace prefixing. `tcp_read` is
+text-oriented (lossy on arbitrary bytes by construction); use
+`read_bytes` for binary protocols.
+
+```zz
+import std.net
+
+func main() -> Result<int, str> {
+    listener := net.tcp_listen("127.0.0.1:8080")?
+    client := net.tcp_connect("127.0.0.1:8080", 5000)?
+    server := listener.accept()?
+    client.write("ping\n")?
+    line := server.read_line()?
+    println("got: {line}")
+    client.close()?
+    server.close()?
+    .ok(0)
+}
 ```
 
 ---
