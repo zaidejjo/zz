@@ -3373,14 +3373,19 @@ zz_value zz_db_query(zz_value db, zz_value sql, zz_value binds, int *err) {
 //    - Pre-allocated Connection array — no malloc per request
 //
 //  Connection state machine:
-//    CONN_READING → CONN_READING_BODY → dispatch → CONN_WRITING → CONN_CLOSED
-//    (always-Connection: close, mirroring the VM; the KEEP_ALIVE state
-//    is retained for future use but currently unreachable).
+//    CONN_READING → CONN_READING_BODY → dispatch → CONN_WRITING
+//      → CONN_KEEP_ALIVE (HTTP/1.1 or explicit keep-alive) or CONN_CLOSED.
+//    Error replies (400/413/431/500) always close: framing past a failed
+//    request cannot be trusted.
 
-#define MAX_CONNECTIONS 1024
+// 512 slots x (8K read + 16K write) ~= 12 MB per worker (was 24 MB at
+// 1024). 512 per worker (2048 total across 4 workers) still dwarfs the
+// wrk -c100 bench and any realistic single-box load; overflow gracefully
+// closes the new fd (no 503 body — socket servers shed load by refusing).
+#define MAX_CONNECTIONS 512
 #define READ_BUF_SIZE   8192
 #define WRITE_BUF_SIZE  16384
-#define MAX_EVENTS      64
+#define MAX_EVENTS      128
 
 typedef enum {
     CONN_CONNECTED  = 0,
@@ -3424,10 +3429,19 @@ typedef struct {
     size_t  wpos;
     int     head_too_large; // sticky: headers exceeded the 64 KB cap
     int     body_truncated; // sticky: EOF before the full body arrived
+    size_t  req_consumed;   // head bytes belonging to the dispatched request
+    // Parsed request line, stashed at head time so the handler never
+    // re-parses: method copy (verbs are short) + target span. Valid from
+    // http_on_head until the next request on this connection.
+    char    req_method[16];
+    size_t  req_tgt_off;
+    size_t  req_tgt_len;
 } Connection;
 
 static Connection g_connections[MAX_CONNECTIONS];
 static int g_http_server_running = 0;
+
+
 
 // ---- Connection slot management (no malloc) ----
 
@@ -3460,6 +3474,7 @@ static Connection* alloc_connection(int fd) {
     c->wpos = 0;
     c->head_too_large = 0;
     c->body_truncated = 0;
+    c->req_consumed = 0;
     return c;
 }
 
@@ -3477,6 +3492,7 @@ static void http_conn_free_dyn(Connection *c) {
     c->wpos = 0;
     c->head_too_large = 0;
     c->body_truncated = 0;
+    c->req_consumed = 0;
 }
 
 static void free_connection(Connection *c) {
@@ -3741,10 +3757,11 @@ static void worker_loop(int listen_fd, int worker_id) {
         return;
     }
 
-    // Add listen_fd to epoll
+    // Add listen_fd to epoll. Clients carry their Connection* in
+    // data.ptr (O(1) lookup); the listen fd uses the NULL sentinel.
     struct epoll_event ev;
     ev.events = EPOLLIN | EPOLLET;
-    ev.data.fd = listen_fd;
+    ev.data.ptr = NULL;
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
         fprintf(stderr, "worker %d: epoll_ctl ADD listen_fd failed: %s\n", worker_id, strerror(errno));
         close(epfd);
@@ -3761,10 +3778,10 @@ static void worker_loop(int listen_fd, int worker_id) {
         }
 
         for (int i = 0; i < nfds; i++) {
-            int fd = events[i].data.fd;
+            void *ptr = events[i].data.ptr;
             uint32_t revents = events[i].events;
 
-            if (fd == listen_fd) {
+            if (ptr == NULL) {
                 // Accept all pending connections
                 while (1) {
                     struct sockaddr_in client_addr;
@@ -3786,7 +3803,7 @@ static void worker_loop(int listen_fd, int worker_id) {
                     set_nonblock(client_fd);
                     struct epoll_event cev;
                     cev.events = EPOLLIN | EPOLLET;
-                    cev.data.fd = client_fd;
+                    cev.data.ptr = c;
                     if (epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev) < 0) {
                         free_connection(c);
                         continue;
@@ -3794,15 +3811,10 @@ static void worker_loop(int listen_fd, int worker_id) {
 
                 }
             } else {
-                // Client socket event
-                Connection *c = NULL;
-                for (int j = 0; j < MAX_CONNECTIONS; j++) {
-                    if (g_connections[j].fd == fd) {
-                        c = &g_connections[j];
-                        break;
-                    }
-                }
-                if (!c) continue;
+                // Client socket event: O(1) via data.ptr (no fd scan).
+                Connection *c = (Connection *)ptr;
+                int fd = c->fd;
+                if (fd < 0) continue;
 
                 if (revents & (EPOLLERR | EPOLLHUP)) {
                     connection_to_closed(c);
@@ -3829,7 +3841,11 @@ static void worker_loop(int listen_fd, int worker_id) {
                     }
                 }
 
-                if (c->state == CONN_WRITING) {
+                // Drive writes plus any pipelined requests already
+                // buffered: edge-triggered epoll won't refire for bytes
+                // sitting in read_buf, so loop inline (bounded per turn
+                // to avoid starving other connections).
+                for (int pipeline = 0; pipeline < 16 && c->state == CONN_WRITING; pipeline++) {
                     // Edge-triggered: write all data until EAGAIN
                     while (http_write_pending(c)) {
                         int written = write_to_socket(c);
@@ -3846,17 +3862,100 @@ static void worker_loop(int listen_fd, int worker_id) {
                             connection_to_closed(c);
                             epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
                         } else {
-                            // Reset for keep-alive
-                            c->state = CONN_KEEP_ALIVE;
-                            c->read_pos = 0;
+                            // Keep-alive reset: compact any pipelined bytes
+                            // (a second request already in the head buffer)
+                            // to the front instead of dropping them.
+                            // Prefers the static buffer; keeps (and shrinks
+                            // when oversized) the dynamic one otherwise.
+                            size_t total = http_head_len(c);
+                            size_t leftover = (total > c->req_consumed)
+                                ? total - c->req_consumed
+                                : 0;
+                            const char *hbuf = http_head_buf(c);
+                            if (leftover > 0 && leftover < READ_BUF_SIZE) {
+                                memmove(c->read_buf, hbuf + c->req_consumed, leftover);
+                                if (c->head_dyn) {
+                                    free(c->head_dyn);
+                                    c->head_dyn = NULL;
+                                }
+                                c->read_pos = (int)leftover;
+                                c->read_buf[c->read_pos] = '\0';
+                                c->head_len = 0;
+                                c->head_cap = 0;
+                            } else if (leftover > 0) {
+                                if (!c->head_dyn) {
+                                    c->head_dyn = (char *)malloc(leftover + 1);
+                                    if (c->head_dyn) {
+                                        memcpy(c->head_dyn, hbuf + c->req_consumed, leftover);
+                                        c->head_dyn[leftover] = '\0';
+                                    } else {
+                                        leftover = 0;
+                                    }
+                                } else {
+                                    memmove(c->head_dyn, hbuf + c->req_consumed, leftover);
+                                    c->head_dyn[leftover] = '\0';
+                                    if (c->head_cap > 16384) {
+                                        char *nb = (char *)realloc(
+                                            c->head_dyn, leftover + 1);
+                                        if (nb) {
+                                            c->head_dyn = nb;
+                                            c->head_cap = leftover + 1;
+                                        }
+                                    }
+                                }
+                                c->head_len = leftover;
+                                c->read_pos = 0;
+                            } else {
+                                http_conn_free_dyn(c);
+                                c->read_pos = 0;
+                            }
+                            // Response and body state are always done here
+                            // (dispatch freed the buffers; NULL defensively).
+                            if (c->wbuf) {
+                                free(c->wbuf);
+                                c->wbuf = NULL;
+                            }
+                            c->wlen = 0;
+                            c->wpos = 0;
+                            if (c->body_buf) {
+                                free(c->body_buf);
+                                c->body_buf = NULL;
+                            }
+                            c->body_len = 0;
+                            c->body_need = 0;
+                            c->head_end = 0;
+                            c->head_too_large = 0;
+                            c->body_truncated = 0;
                             c->write_pos = 0;
                             c->response_len = 0;
-                            http_conn_free_dyn(c);
+                            c->req_consumed = 0;
+                            // Pipelined second request already buffered:
+                            // dispatch immediately (no new EPOLLIN will fire
+                            // for bytes already in the buffer).
+                            int pipelined = 0;
+                            if (leftover > 0) {
+                                size_t hend = http_head_end(http_head_buf(c), http_head_len(c));
+                                if (hend > 0) {
+                                    c->head_end = hend;
+                                    c->state = CONN_READING;
+                                    process_connection(c);
+                                    pipelined = (c->fd >= 0
+                                        && (c->state == CONN_WRITING
+                                            || c->state == CONN_READING_BODY));
+                                } else {
+                                    c->state = CONN_KEEP_ALIVE;
+                                }
+                            } else {
+                                c->state = CONN_KEEP_ALIVE;
+                            }
                             struct epoll_event cev;
                             cev.events = EPOLLIN | EPOLLET;
-                            cev.data.fd = fd;
+                            cev.data.ptr = c;
                             epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &cev);
+                            if (pipelined) continue; // loop: drain new response
                         }
+                    } else {
+                        break; // write incomplete (EAGAIN): wait for EPOLLOUT
                     }
                 }
             }
@@ -3925,7 +4024,14 @@ static int spawn_workers(int listen_fd, int port) {
 typedef struct {
     char *method;
     char *pattern;
+    size_t plen;     // strlen(pattern) cached at registration (hot path)
+    int has_param;   // pattern contains ':' or is "*" (needs dict match)
     zz_value handler;
+    // Set at registration when lowering proves the handler closure never
+    // references its request param: the socket fast path then skips
+    // request-dict construction entirely (behavior-identical — the arg
+    // is provably unread). http.test always builds the full request.
+    int uses_req;
 } http_route_entry;
 static http_route_entry g_http_route_table[HTTP_MAX_ROUTES];
 static int g_http_route_count = 0;
@@ -3944,7 +4050,8 @@ zz_value zz_http_server(zz_value unused, int *err) {
 
 // Shared route registration for GET/POST/PUT/DELETE (the codegen maps all
 // four spellings here; the method is recorded per entry).
-static zz_value http_route_add(const char *method, zz_value path, zz_value handler, int *err) {
+static zz_value http_route_add(const char *method, zz_value path, zz_value handler,
+                               int uses_req, int *err) {
     *err = 0;
     if (path.tag != ZZ_STR || !path.s) return zz_int(0);
     if (g_http_route_count >= HTTP_MAX_ROUTES - 1) return zz_int(0);
@@ -3952,6 +4059,9 @@ static zz_value http_route_add(const char *method, zz_value path, zz_value handl
     e->method = strndup(method, strlen(method));
     e->pattern = strndup(zz_str_cptr(path.s), path.s->len);
     e->handler = zz_clone(handler);
+    e->uses_req = uses_req;
+    e->plen = strlen(e->pattern);
+    e->has_param = (strchr(e->pattern, ':') != NULL || strcmp(e->pattern, "*") == 0);
     return zz_int(0);
 }
 
@@ -3985,29 +4095,78 @@ zz_value zz_http_route(zz_value server, zz_value method, zz_value path, zz_value
         *err = 1;
         return zz_variant_err(zz_str_static("std.http.route: unknown method (expected GET, POST, PUT or DELETE)"));
     }
-    return http_route_add(known, path, handler, err);
+    return http_route_add(known, path, handler, 1, err);
+}
+
+// `_fast` twin of `zz_http_route`: same validation, flag off.
+zz_value zz_http_route_fast(zz_value server, zz_value method, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    if (method.tag != ZZ_STR || !method.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.route: method must be a string"));
+    }
+    const char *m = zz_str_cptr(method.s);
+    size_t mlen = method.s->len;
+    char up[16];
+    const char *known = NULL;
+    if (mlen < sizeof up) {
+        for (size_t i = 0; i < mlen; i++) {
+            char c = m[i];
+            up[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+        }
+        up[mlen] = '\0';
+        if (mlen == 3 && memcmp(up, "GET", 3) == 0) known = "GET";
+        else if (mlen == 4 && memcmp(up, "POST", 4) == 0) known = "POST";
+        else if (mlen == 3 && memcmp(up, "PUT", 3) == 0) known = "PUT";
+        else if (mlen == 6 && memcmp(up, "DELETE", 6) == 0) known = "DELETE";
+    }
+    if (!known) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.route: unknown method (expected GET, POST, PUT or DELETE)"));
+    }
+    return http_route_add(known, path, handler, 0, err);
 }
 
 // zz_http_route_get(server, path, handler, err) — records method+pattern+closure.
 zz_value zz_http_route_get(zz_value server, zz_value path, zz_value handler, int *err) {
     (void)server;
-    return http_route_add("GET", path, handler, err);
+    return http_route_add("GET", path, handler, 1, err);
 }
 
 // zz_http_route_post/put/delete — same table, own method.
 zz_value zz_http_route_post(zz_value server, zz_value path, zz_value handler, int *err) {
     (void)server;
-    return http_route_add("POST", path, handler, err);
+    return http_route_add("POST", path, handler, 1, err);
 }
 
 zz_value zz_http_route_put(zz_value server, zz_value path, zz_value handler, int *err) {
     (void)server;
-    return http_route_add("PUT", path, handler, err);
+    return http_route_add("PUT", path, handler, 1, err);
 }
 
 zz_value zz_http_route_delete(zz_value server, zz_value path, zz_value handler, int *err) {
     (void)server;
-    return http_route_add("DELETE", path, handler, err);
+    return http_route_add("DELETE", path, handler, 1, err);
+}
+
+// `_fast` twins: identical registration, but the handler provably ignores
+// its request argument (set by lowering analysis), so the socket fast
+// path may skip request-dict construction. Behavior-identical by proof.
+zz_value zz_http_route_get_fast(zz_value server, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    return http_route_add("GET", path, handler, 0, err);
+}
+zz_value zz_http_route_post_fast(zz_value server, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    return http_route_add("POST", path, handler, 0, err);
+}
+zz_value zz_http_route_put_fast(zz_value server, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    return http_route_add("PUT", path, handler, 0, err);
+}
+zz_value zz_http_route_delete_fast(zz_value server, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    return http_route_add("DELETE", path, handler, 0, err);
 }
 
 // ---- shared request/response helpers ----
@@ -4336,13 +4495,13 @@ zz_value zz_http_body_form(zz_value req, int *err) {
 // Pattern attempts fill a scratch dict merged only on success — a failed
 // attempt must not leak partial captures into a later route's params
 // (the VM discards its per-route vec the same way).
-static zz_value http_match_route(const char *method, const char *path, size_t pathlen,
-                                 zz_value params) {
+static http_route_entry *http_match_entry(const char *method, const char *path, size_t pathlen,
+                                          zz_value params) {
     for (int i = 0; i < g_http_route_count; i++) {
         http_route_entry *e = &g_http_route_table[i];
         if (strcmp(e->method, method) != 0) continue;
-        size_t plen = strlen(e->pattern);
-        if (plen == pathlen && memcmp(e->pattern, path, pathlen) == 0) return e->handler;
+        size_t plen = e->plen;
+        if (plen == pathlen && memcmp(e->pattern, path, pathlen) == 0) return e;
         zz_value scratch = zz_dict_new();
         int hit = http_match_pattern(e->pattern, plen, path, pathlen, scratch);
         if (hit) {
@@ -4352,15 +4511,35 @@ static zz_value http_match_route(const char *method, const char *path, size_t pa
                 zz_dict_set(params.dict, (zz_value){ZZ_STR, {.s = ek}}, zz_clone(ev));
             }
             zz_release(&scratch);
-            return e->handler;
+            return e;
         }
         zz_release(&scratch);
     }
     for (int i = 0; i < g_http_route_count; i++) {
         http_route_entry *e = &g_http_route_table[i];
-        if (strcmp(e->method, method) == 0 && strcmp(e->pattern, "*") == 0) return e->handler;
+        if (strcmp(e->method, method) == 0 && strcmp(e->pattern, "*") == 0) return e;
     }
-    return zz_unit();
+    return NULL;
+}
+
+// Exact-only match without any allocation: used by the socket fast path
+// probe so exact routes (the common case) never touch the heap. Returns
+// NULL when no exact hit (caller falls back to the full matcher for
+// :param patterns and "*").
+static http_route_entry *http_match_exact(const char *method, const char *path, size_t pathlen) {
+    for (int i = 0; i < g_http_route_count; i++) {
+        http_route_entry *e = &g_http_route_table[i];
+        if (e->has_param) continue;
+        if (strcmp(e->method, method) != 0) continue;
+        if (e->plen == pathlen && memcmp(e->pattern, path, pathlen) == 0) return e;
+    }
+    return NULL;
+}
+
+static zz_value http_match_route(const char *method, const char *path, size_t pathlen,
+                                 zz_value params) {
+    http_route_entry *e = http_match_entry(method, path, pathlen, params);
+    return e ? e->handler : zz_unit();
 }
 
 // Build the request dict the VM dispatcher builds: method/path/body
@@ -4587,10 +4766,33 @@ static void http_trim_span(const char **s, size_t *n) {
 // VM's parse().unwrap_or(0)) and Expect: 100-continue. The request
 // line itself is skipped so an absolute-form target (which contains
 // ':') can never pollute the scan.
+// Case-insensitive substring search (header values may be oddly
+// cased: `Close`, `Keep-Alive`). Naive scan; values are short.
+static int has_token_ci(const char *hay, size_t hn, const char *nd, size_t nn) {
+    if (nn == 0 || hn < nn) return 0;
+    for (size_t i = 0; i + nn <= hn; i++) {
+        size_t k = 0;
+        while (k < nn && (hay[i + k] | 32) == (nd[k] | 32)) k++;
+        if (k == nn) return 1;
+    }
+    return 0;
+}
+
 static void http_scan_head(const char *head, size_t head_end,
-                           size_t *content_length, int *expect_continue) {
+                           size_t *content_length, int *expect_continue,
+                           int *keep_alive) {
     *content_length = 0;
     *expect_continue = 0;
+    // Version default: HTTP/1.1 persists, anything else closes.
+    int keep = 0;
+    size_t req_eol = 0;
+    while (req_eol + 1 < head_end && !(head[req_eol] == '\r' && head[req_eol + 1] == '\n')) req_eol++;
+    for (size_t j = 0; j + 9 <= req_eol; j++) {
+        if (memcmp(head + j, " HTTP/", 6) == 0 && j + 9 <= head_end) {
+            keep = (head[j + 6] == '1' && head[j + 7] == '.' && head[j + 8] == '1');
+            break;
+        }
+    }
     size_t pos = 0;
     while (pos + 1 < head_end && !(head[pos] == '\r' && head[pos + 1] == '\n')) pos++;
     if (pos + 1 < head_end) pos += 2;
@@ -4616,10 +4818,19 @@ static void http_scan_head(const char *head, size_t head_end,
             } else if (nn == 6 && strncasecmp(ns, "expect", 6) == 0) {
                 http_trim_span(&vs, &vn);
                 if (vn == 12 && strncasecmp(vs, "100-continue", 12) == 0) *expect_continue = 1;
+            } else if (nn == 10 && strncasecmp(ns, "connection", 10) == 0) {
+                // Explicit Connection overrides the version default.
+                // Trim only leading SP/TAB for token search (values short).
+                const char *tvs = vs;
+                size_t tvn = vn;
+                while (tvn > 0 && (*tvs == ' ' || *tvs == '\t')) { tvs++; tvn--; }
+                if (has_token_ci(tvs, tvn, "close", 5)) keep = 0;
+                else if (has_token_ci(tvs, tvn, "keep-alive", 10)) keep = 1;
             }
         }
         pos = eol + 2;
     }
+    if (keep_alive) *keep_alive = keep;
 }
 
 // Build the headers dict from the head (first-':' split, trimmed
@@ -4659,7 +4870,7 @@ static zz_value http_build_headers_dict(const char *head, size_t head_end) {
 // Serialize a dispatch response object to wire bytes (malloc'd, *out_len
 // set). Views the body in place — the caller must keep resp alive until
 // the copy completes (it does: release happens after).
-static char *http_serialize_response(zz_value *resp, size_t *out_len) {
+static char *http_serialize_response(zz_value *resp, size_t *out_len, int keep_alive) {
     long status = 500;
     zz_value st = zz_object_get_field(resp, "status");
     if (st.tag == ZZ_INT) status = (long)st.i;
@@ -4685,8 +4896,8 @@ static char *http_serialize_response(zz_value *resp, size_t *out_len) {
     }
     char hs[256];
     int hlen = snprintf(hs, sizeof hs,
-        "HTTP/1.1 %ld %s\r\nContent-Length: %zu\r\nConnection: close\r\n",
-        status, reason, body_len);
+        "HTTP/1.1 %ld %s\r\nContent-Length: %zu\r\nConnection: %s\r\n",
+        status, reason, body_len, keep_alive ? "keep-alive" : "close");
     if (hlen < 0 || (size_t)hlen >= sizeof hs) {
         zz_release(&t);
         zz_release(&h);
@@ -4774,9 +4985,21 @@ static void http_on_head(Connection *c) {
         http_reply(c, 400, "bad request", 11);
         return;
     }
+    // Stash the parsed line for the handler (parse once): method
+    // copy + target span into the head buffer. The buffer is untouched
+    // between head completion and dispatch (bodies stream elsewhere).
+    {
+        size_t mcpy = ml < sizeof c->req_method - 1 ? ml : sizeof c->req_method - 1;
+        memcpy(c->req_method, m, mcpy);
+        c->req_method[mcpy] = '\0';
+        c->req_tgt_off = (size_t)(tg - head);
+        c->req_tgt_len = tl;
+    }
     size_t cl = 0;
     int expect = 0;
-    http_scan_head(head, c->head_end, &cl, &expect);
+    int ka = 0;
+    http_scan_head(head, c->head_end, &cl, &expect, &ka);
+    c->keep_alive = ka;
     if (cl > HTTP_MAX_BODY_BYTES) {
         http_reply(c, 413, "payload too large", 17);
         return;
@@ -4792,6 +5015,7 @@ static void http_on_head(Connection *c) {
         }
     }
     if (cl == 0) {
+        c->req_consumed = c->head_end;
         http_run_handler(c);
         return;
     }
@@ -4808,6 +5032,7 @@ static void http_on_head(Connection *c) {
     c->body_len = tail;
     c->body_need = cl;
     if (tail >= cl) {
+        c->req_consumed = c->head_end + tail;
         http_run_handler(c);
     } else {
         c->state = CONN_READING_BODY;
@@ -4815,66 +5040,171 @@ static void http_on_head(Connection *c) {
 }
 
 // Full dispatch for a buffered request: ZZ handler runs inline in the
-// worker, the response object serializes to wbuf, always-Connection:
-// close (mirroring the VM, which never keeps socket clients alive).
+// worker; the response lands in wbuf (large) or the static write_buf
+// (small). Persistence follows the fused head scan (HTTP/1.1 default).
 static void http_run_handler(Connection *c) {
     struct timespec t0;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
+    if (g_http_log_enabled) clock_gettime(CLOCK_MONOTONIC, &t0);
     size_t req_bytes = c->body_need;
+    // Request line stashed at head time (parse once): the head buffer is
+    // still alive here; target length rides along for dispatch.
     const char *head = http_head_buf(c);
-    const char *m;
-    const char *tg;
-    size_t ml;
-    size_t tl;
-    if (!http_parse_request_line(head, c->head_end, &m, &ml, &tg, &tl)) {
-        http_reply(c, 500, "internal error", 14);
-        return;
-    }
-    char *method = (char *)malloc(ml + 1);
-    if (!method) {
-        http_reply(c, 500, "internal error", 14);
-        return;
-    }
-    memcpy(method, m, ml);
-    method[ml] = '\0';
-    zz_value headers = http_build_headers_dict(head, c->head_end);
-    zz_str *bs;
-    if (c->body_need > 0 && c->body_buf) {
-        bs = str_alloc(c->body_need);
-        memcpy(zz_str_ptr(bs), c->body_buf, c->body_need);
-        zz_str_ptr(bs)[c->body_need] = '\0';
-        bs->len = c->body_need;
-    } else {
-        bs = str_alloc(0);
-    }
-    zz_value bodyval = {ZZ_STR, {.s = bs}};
-    int failed = 0;
-    zz_value resp = http_dispatch(method, tg, tl, bodyval, headers, &failed);
-    zz_release(&bodyval);
-    // The response owns its copies now — drop request bytes before
-    // serializing so peak stays at one body, not two.
-    if (c->head_dyn) { free(c->head_dyn); c->head_dyn = NULL; }
-    if (c->body_buf) { free(c->body_buf); c->body_buf = NULL; }
-    c->head_len = 0;
-    c->head_cap = 0;
-    c->head_end = 0;
-    c->body_len = 0;
-    c->body_need = 0;
-    size_t wlen = 0;
-    char *wbuf = http_serialize_response(&resp, &wlen);
+    const char *method = c->req_method;
+    const char *tg = head + c->req_tgt_off;
+    size_t tl = c->req_tgt_len;
+    // Persistence stashed at head time by the fused scan (no rescan).
+    int keep_alive = c->keep_alive;
+    // ── FAST PATH (socket only) ──
+    // No middleware, matched entry provably ignores its request: skip
+    // request-dict construction AND (for string results) the
+    // response-object round-trip. Anything else falls through to full
+    // dispatch below with identical semantics (http.test always takes
+    // the full path, so parity is structural).
     long status = 500;
-    zz_value st = zz_object_get_field(&resp, "status");
-    if (st.tag == ZZ_INT) status = (long)st.i;
-    zz_release(&st);
-    zz_release(&resp);
-    if (!wbuf) {
+    size_t wlen = 0;
+    char *wbuf = NULL;
+    int fast_done = 0;
+    // Zero-alloc probe: exact routes hit without touching the heap.
+    // Param patterns (":id", "*") fall back to the allocating matcher
+    // only when the exact probe misses.
+    if (g_http_middleware_count == 0) {
+        const char *qm0 = memchr(tg, '?', tl);
+        size_t plen0 = qm0 ? (size_t)(qm0 - tg) : tl;
+        http_route_entry *fe = http_match_exact(method, tg, plen0);
+        if (!fe) {
+            zz_value fparams = zz_dict_new();
+            fe = http_match_entry(method, tg, plen0, fparams);
+            // Full matcher fills params; fast handlers ignore them.
+            zz_release(&fparams);
+        }
+        if (fe && !fe->uses_req) {
+            zz_value unit = zz_unit();
+            zz_value r = zz_call_closure(fe->handler, &unit, 1);
+            if (r.tag == ZZ_STR && r.s) {
+                // Byte-parity with the slow path: status + CL +
+                // Connection, then the text/plain Content-Type the
+                // wrapper would inject, then blank + body.
+                const char *reason = http_reason_phrase(200);
+                static const char ct[] = "Content-Type: text/plain; charset=utf-8\r\n";
+                char hs[256];
+                int hlen = snprintf(hs, sizeof hs,
+                    "HTTP/1.1 200 %s\r\nContent-Length: %zu\r\nConnection: %s\r\n%s\r\n",
+                    reason, r.s->len, keep_alive ? "keep-alive" : "close", ct);
+                if (hlen > 0 && (size_t)hlen < sizeof hs) {
+                    size_t total = (size_t)hlen + r.s->len;
+                    if (total <= WRITE_BUF_SIZE) {
+                        // Static per-connection buffer: zero malloc,
+                        // zero free on reset (memory-efficient path).
+                        memcpy(c->write_buf, hs, (size_t)hlen);
+                        if (r.s->len > 0)
+                            memcpy(c->write_buf + hlen, zz_str_cptr(r.s), r.s->len);
+                        c->response_len = (int)total;
+                        c->write_pos = 0;
+                        status = 200;
+                    } else {
+                        char *out = (char *)malloc(total + 1);
+                        if (out) {
+                            memcpy(out, hs, (size_t)hlen);
+                            memcpy(out + hlen, zz_str_cptr(r.s), r.s->len);
+                            out[total] = '\0';
+                            wbuf = out;
+                            wlen = total;
+                            status = 200;
+                        }
+                    }
+                }
+                zz_release(&r);
+            } else {
+                // Non-string result: wrap needs no request (proven
+                // unread), then the normal object serialization.
+                zz_value out = http_wrap_result(r);
+                zz_release(&r);
+                size_t wl2 = 0;
+                char *wb2 = http_serialize_response(&out, &wl2, keep_alive);
+                long st2 = 500;
+                zz_value stv = zz_object_get_field(&out, "status");
+                if (stv.tag == ZZ_INT) st2 = (long)stv.i;
+                zz_release(&stv);
+                zz_release(&out);
+                if (wb2) {
+                    if (wl2 <= WRITE_BUF_SIZE) {
+                        memcpy(c->write_buf, wb2, wl2);
+                        c->response_len = (int)wl2;
+                        c->write_pos = 0;
+                        free(wb2);
+                        status = st2;
+                    } else {
+                        wbuf = wb2;
+                        wlen = wl2;
+                        status = st2;
+                    }
+                }
+            }
+            fast_done = 1;
+        }
+    }
+    if (!fast_done) {
+        // SLOW PATH: full dispatch (middleware present, req-using
+        // handler, or route miss).
+        zz_value headers = http_build_headers_dict(head, c->head_end);
+        zz_str *bs;
+        if (c->body_need > 0 && c->body_buf) {
+            bs = str_alloc(c->body_need);
+            memcpy(zz_str_ptr(bs), c->body_buf, c->body_need);
+            zz_str_ptr(bs)[c->body_need] = '\0';
+            bs->len = c->body_need;
+        } else {
+            bs = str_alloc(0);
+        }
+        zz_value bodyval = {ZZ_STR, {.s = bs}};
+        int failed = 0;
+        zz_value resp = http_dispatch(method, tg, tl, bodyval, headers, &failed);
+        zz_release(&bodyval);
+        // The response owns its copies now — drop request bytes before
+        // serializing so peak stays at one body, not two.
+        if (c->head_dyn) { free(c->head_dyn); c->head_dyn = NULL; }
+        if (c->body_buf) { free(c->body_buf); c->body_buf = NULL; }
+        c->head_len = 0;
+        c->head_cap = 0;
+        c->head_end = 0;
+        c->body_len = 0;
+        c->body_need = 0;
+        size_t wlen2 = 0;
+        char *wbuf2 = http_serialize_response(&resp, &wlen2, keep_alive);
+        long st3 = 500;
+        zz_value stv3 = zz_object_get_field(&resp, "status");
+        if (stv3.tag == ZZ_INT) st3 = (long)stv3.i;
+        zz_release(&stv3);
+        zz_release(&resp);
+        if (wbuf2) {
+            wbuf = wbuf2;
+            wlen = wlen2;
+            status = st3;
+        }
+    } else {
+        // Fast path took over: same peak discipline (drop request bytes).
+        if (c->head_dyn) { free(c->head_dyn); c->head_dyn = NULL; }
+        if (c->body_buf) { free(c->body_buf); c->body_buf = NULL; }
+        c->head_len = 0;
+        c->head_cap = 0;
+        c->head_end = 0;
+        c->body_len = 0;
+        c->body_need = 0;
+    }
+    if (!wbuf && c->response_len <= 0) {
         http_reply(c, 500, "internal error", 14);
         return;
     }
-    c->wbuf = wbuf;
-    c->wlen = wlen;
-    c->wpos = 0;
-    c->keep_alive = 0;
+    // wbuf (malloc'd) takes precedence; otherwise the response already
+    // sits in the per-connection static write_buf (small-response path).
+    if (wbuf) {
+        c->wbuf = wbuf;
+        c->wlen = wlen;
+        c->wpos = 0;
+        c->write_pos = 0;
+        c->response_len = 0;
+    }
+    c->keep_alive = keep_alive;
     c->state = CONN_WRITING;
     if (g_http_log_enabled) {
         struct timespec t1;
@@ -4892,7 +5222,6 @@ static void http_run_handler(Connection *c) {
             cs, status, method, (int)plen, tg,
             http_reason_phrase(status), ms);
     }
-    free(method);
     if (req_bytes > HTTP_TRIM_AFTER_BYTES) {
         // Same tripwire as the VM: large requests churn tens of MB
         // through this worker's heap; hand the freed pages back so a
@@ -5026,7 +5355,7 @@ zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
         return zz_unit();
     }
 
-    if (listen(listen_fd, 128) < 0) {
+    if (listen(listen_fd, 1024) < 0) {
         fprintf(stderr, "zz_http_listen: listen() failed: %s\n", strerror(errno));
         close(listen_fd);
         return zz_unit();

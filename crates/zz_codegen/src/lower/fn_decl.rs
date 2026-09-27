@@ -32,9 +32,9 @@ impl Lowerer {
         };
         o.push_str(&signature);
         o.push_str("    (void)argc;\n");
-        // --- Arena allocator: init on function entry, reset on exit ---
-        o.push_str("    zz_arena _arena;\n");
-        o.push_str("    zz_arena_init(&_arena, 65536);\n"); // 64KB default
+        // No function arena: nothing lowers allocations into it (loop
+        // bodies use their own sub-arenas, everything else is heap). A
+        // per-call 64KB init here used to leak on every invocation.
         let mut names = NameCtx::new();
         // Module-level globals are visible inside every function.
         // Locals (params + body decls) shadow them via the stack.
@@ -139,8 +139,6 @@ impl Lowerer {
         if self.last_stmt_value(block, &mut names, &mut o).is_none() {
             o.push_str("    return zz_unit();\n");
         }
-        // --- Arena reset: O(1) cleanup of all non-escaping allocations ---
-        o.push_str("    zz_arena_reset_trim(&_arena);\n");
         o.push_str("}\n\n");
         o
     }

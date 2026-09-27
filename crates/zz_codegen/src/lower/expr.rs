@@ -1,10 +1,176 @@
 //! Expression lowering: literals, binary ops, function calls, field access,
 //! collections, variants, closures, and match expressions.
 
-use zz_frontend::ast::{Block, Expr, FmtPart, MatchArm, Param, Pattern};
+use zz_frontend::ast::{Block, Decorator, Expr, FmtPart, MatchArm, Param, Pattern};
 
 use super::green::GreenCtx;
 use super::*;
+
+// ── Route-handler request-use analysis ───────────────────────────────────
+// True when a 1-param closure never references its parameter, letting the
+// socket fast path skip request-dict construction. Deliberately
+// over-approximate: ANY same-name Ident counts as a use (shadowing
+// ignored), non-literal handlers never qualify. Misses only lose the
+// optimization; a wrong `true` would miscompile, so every AST node type
+// is matched explicitly — no wildcards (new variants fail loudly here).
+fn closure_ignores_param(params: &[Param], body: &Expr) -> bool {
+    let [p] = params else { return false };
+    !mentions_ident(body, &p.name.name)
+}
+
+fn mentions_ident(e: &Expr, name: &str) -> bool {
+    match e {
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Str { .. }
+        | Expr::Bool { .. }
+        | Expr::Break { .. }
+        | Expr::Continue { .. } => false,
+        Expr::Ident { name: n, .. } => n == name,
+        // Dotted chains: any segment match counts (over-approx, safe).
+        Expr::Path { parts, .. } => parts.iter().any(|p| p == name),
+        Expr::Fmt { parts, .. } => parts.iter().any(|pt| match pt {
+            FmtPart::Text(_) => false,
+            FmtPart::Expr(inner, _) => mentions_ident(inner, name),
+        }),
+        Expr::Paren { expr, .. } => mentions_ident(expr, name),
+        Expr::Tuple { items, .. } => items.iter().any(|i| mentions_ident(i, name)),
+        Expr::Unary { expr, .. } => mentions_ident(expr, name),
+        Expr::Binary { left, right, .. } => {
+            mentions_ident(left, name) || mentions_ident(right, name)
+        }
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            mentions_ident(callee, name)
+                || args.iter().any(|a| mentions_ident(a, name))
+                || named.iter().any(|(_, v)| mentions_ident(v, name))
+        }
+        Expr::Closure { params, body, .. } => {
+            params.iter().any(|p| mentions_default(&p.default, name)) || mentions_ident(body, name)
+        }
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            mentions_ident(cond, name)
+                || mentions_block(then, name)
+                || els.as_ref().is_some_and(|b| mentions_ident(b, name))
+        }
+        Expr::While { cond, body, .. } => mentions_ident(cond, name) || mentions_block(body, name),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => mentions_ident(scrutinee, name) || arms.iter().any(|a| mentions_match_arm(a, name)),
+        Expr::IfLet {
+            pat,
+            value,
+            then,
+            els,
+            ..
+        } => {
+            mentions_pat(pat, name)
+                || mentions_ident(value, name)
+                || mentions_block(then, name)
+                || els.as_ref().is_some_and(|b| mentions_ident(b, name))
+        }
+        Expr::Try { expr, .. } => mentions_ident(expr, name),
+        Expr::Block(b) => mentions_block(b, name),
+        Expr::Variant { arg, .. } => arg.as_ref().is_some_and(|a| mentions_ident(a, name)),
+        Expr::Array { elems, .. } => elems.iter().any(|el| mentions_ident(el, name)),
+        Expr::Dict { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| mentions_ident(k, name) || mentions_ident(v, name)),
+        // Field name is a static member, never a variable use.
+        Expr::Field { obj, .. } => mentions_ident(obj, name),
+        Expr::Range { start, end, .. } => mentions_ident(start, name) || mentions_ident(end, name),
+        Expr::StructInit { fields, .. } => fields.iter().any(|(_, v)| mentions_ident(v, name)),
+        Expr::Index { obj, index, .. } => mentions_ident(obj, name) || mentions_ident(index, name),
+        Expr::Slice {
+            obj, start, end, ..
+        } => {
+            mentions_ident(obj, name)
+                || start.as_ref().is_some_and(|s| mentions_ident(s, name))
+                || end.as_ref().is_some_and(|e| mentions_ident(e, name))
+        }
+        Expr::ListComp {
+            body, iter, filter, ..
+        } => {
+            mentions_ident(body, name)
+                || mentions_ident(iter, name)
+                || filter.as_ref().is_some_and(|f| mentions_ident(f, name))
+        }
+    }
+}
+
+fn mentions_default(default: &Option<Box<Expr>>, name: &str) -> bool {
+    default.as_ref().is_some_and(|d| mentions_ident(d, name))
+}
+
+fn mentions_block(b: &Block, name: &str) -> bool {
+    b.stmts.iter().any(|s| mentions_stmt(s, name))
+}
+
+fn mentions_match_arm(a: &MatchArm, name: &str) -> bool {
+    mentions_pat(&a.pat, name)
+        || a.guard.as_ref().is_some_and(|g| mentions_ident(g, name))
+        || mentions_ident(&a.body, name)
+}
+
+// Pattern bindings declare names; references in guards/bodies are walked
+// separately (counting a binding as a use would only ever miss the opt).
+fn mentions_pat(p: &Pattern, _name: &str) -> bool {
+    // Bindings declare names; a use in a guard/body is walked separately.
+    // Always false here (over-approx would only ever miss the opt).
+    match p {
+        Pattern::Wildcard { .. } | Pattern::Binding { .. } | Pattern::Literal { .. } => false,
+        Pattern::Variant { arg, .. } => arg.as_ref().is_some_and(|a| mentions_pat(a, _name)),
+        Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
+            pats.iter().any(|q| mentions_pat(q, _name))
+        }
+    }
+}
+
+fn mentions_stmt(s: &Stmt, name: &str) -> bool {
+    match s {
+        Stmt::Decl { value, .. } => mentions_ident(value, name),
+        Stmt::Import { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Link { .. } => {
+            false
+        }
+        Stmt::Func {
+            params,
+            body,
+            decorators,
+            ..
+        } => {
+            params.iter().any(|p| mentions_default(&p.default, name))
+                || mentions_block(body, name)
+                || decorators.iter().any(|d| mentions_decorator(d, name))
+        }
+        Stmt::Return { value, .. } => value.as_ref().is_some_and(|v| mentions_ident(v, name)),
+        // Struct shapes carry types only.
+        Stmt::Struct { .. } => false,
+        Stmt::Impl { methods, .. } => methods.iter().any(|m| mentions_stmt(m, name)),
+        Stmt::For { iter, body, .. } => mentions_ident(iter, name) || mentions_block(body, name),
+        Stmt::Defer { expr, .. } => mentions_ident(expr, name),
+        Stmt::Assign { target, value, .. } => {
+            mentions_ident(target, name) || mentions_ident(value, name)
+        }
+        Stmt::Destructure { pat, value, .. } => {
+            mentions_pat(pat, name) || mentions_ident(value, name)
+        }
+        Stmt::ExternBlock { items, .. } => items
+            .iter()
+            .any(|f| f.params.iter().any(|p| mentions_default(&p.default, name))),
+        Stmt::Expr(e) => mentions_ident(e, name),
+    }
+}
+
+fn mentions_decorator(d: &Decorator, name: &str) -> bool {
+    d.args.iter().any(|a| mentions_ident(a, name))
+        || d.named.iter().any(|(_, v)| mentions_ident(v, name))
+}
 
 impl Lowerer {
     /// Emit a block in value position, returning a C expression string
@@ -1186,8 +1352,10 @@ impl Lowerer {
             o.push_str("        return zz_unit();\n");
             o.push_str("    }\n");
         } else {
-            o.push_str("    zz_arena _arena;\n");
-            o.push_str("    zz_arena_init(&_arena, 65536);\n");
+            // No function arena: nothing lowers allocations into it
+            // (loop bodies use their own sub-arenas, everything else is
+            // heap). A per-call 64KB init here used to leak on every
+            // closure invocation (epilogue unreachable past `return`).
         }
         o.push_str("    int __defers[32];\n");
         o.push_str("    int __defer_n = 0;\n");
@@ -1264,11 +1432,6 @@ impl Lowerer {
             }
         } else {
             o.push_str(&format!("    return {val};\n"));
-        }
-        // Green closures run heap-only (no function arena to reset); the
-        // frame owns every cell. Blocking closures keep arena discipline.
-        if !green {
-            o.push_str("    zz_arena_reset_trim(&_arena);\n");
         }
         o.push_str("}\n");
         o
@@ -2222,6 +2385,39 @@ impl Lowerer {
                 "zz_vec_append"
             } else {
                 impl_name
+            };
+            // Route-handler fast path: a 1-param closure literal that
+            // never references its parameter registers under the `_fast`
+            // twin, letting the socket server skip request-dict
+            // construction. The handler is always the last user arg
+            // (receiver excluded) across all five spellings.
+            let effective_name: &str = match effective_name {
+                "zz_http_route_get"
+                | "zz_http_route_post"
+                | "zz_http_route_put"
+                | "zz_http_route_delete"
+                | "zz_http_route" => {
+                    let ignores = ordered_args.last().is_some_and(|h| match *h {
+                        Expr::Closure {
+                            ref params,
+                            ref body,
+                            ..
+                        } => closure_ignores_param(params, body),
+                        _ => false,
+                    });
+                    if ignores {
+                        match effective_name {
+                            "zz_http_route_get" => "zz_http_route_get_fast",
+                            "zz_http_route_post" => "zz_http_route_post_fast",
+                            "zz_http_route_put" => "zz_http_route_put_fast",
+                            "zz_http_route_delete" => "zz_http_route_delete_fast",
+                            _ => "zz_http_route_fast",
+                        }
+                    } else {
+                        effective_name
+                    }
+                }
+                _ => effective_name,
             };
             // Arena-aware str_cast inside loops: allocate result on arena
             // to avoid heap malloc for intermediate string conversions.
