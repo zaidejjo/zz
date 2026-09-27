@@ -263,6 +263,12 @@ fn every_funcs_key_has_a_native() {
         "http.secure_headers",
         "std.http.secure_header_dict",
         "http.secure_header_dict",
+        "std.http.csrf_token",
+        "http.csrf_token",
+        "std.http.csrf_check",
+        "http.csrf_check",
+        "std.http.request_id",
+        "http.request_id",
         // math numeric constants (true Float values, see `stdlib_consts`;
         // no runtime function to implement)
         "std.math.PI",

@@ -39,6 +39,8 @@ pub(crate) enum RouteCall {
     PerMethod { method: &'static str },
     /// `route` — method is a string-literal user arg.
     Generic,
+    /// `hijack` — upgrade route, `handler(req, tcp.stream)`, arity 2.
+    Hijack,
 }
 
 /// Classify a qualified callee name (`http.*` and `std.http.*` spellings).
@@ -52,6 +54,7 @@ pub(crate) fn route_call_kind(name: &str) -> Option<RouteCall> {
         "route_put" => Some(RouteCall::PerMethod { method: "PUT" }),
         "route_delete" => Some(RouteCall::PerMethod { method: "DELETE" }),
         "route" => Some(RouteCall::Generic),
+        "hijack" => Some(RouteCall::Hijack),
         _ => None,
     }
 }
@@ -60,9 +63,13 @@ pub(crate) fn route_call_kind(name: &str) -> Option<RouteCall> {
 pub(crate) fn is_route_method(method: &str) -> bool {
     matches!(
         method,
-        "route_get" | "route_post" | "route_put" | "route_delete" | "route"
+        "route_get" | "route_post" | "route_put" | "route_delete" | "route" | "hijack"
     )
 }
+
+/// Lint table tag for hijack routes: separate namespace from `GET` so a
+/// normal route and an upgrade on one path coexist without dup errors.
+pub(crate) const HIJACK_METHOD: &str = "HIJACK";
 
 /// Is this a `param` lookup (`http.param` / `std.http.param` / `req.param`)?
 /// (Method-form receivers are checked by call-site type; this covers the
@@ -307,14 +314,20 @@ impl Checker {
         method: &str,
         path_expr: Option<&Expr>,
         handler_expr: Option<&Expr>,
+        handler_arity: usize,
         span: Span,
     ) {
         if let Some(handler) = handler_expr {
             if let Expr::Closure { params, .. } = handler {
-                if params.len() != 1 {
+                if params.len() != handler_arity {
+                    let what = if handler_arity == 1 {
+                        "the request"
+                    } else {
+                        "the request and the socket"
+                    };
                     self.errors.push(error_at(
                         format!(
-                            "route handler must take exactly 1 argument (the request), found {}",
+                            "route handler must take exactly {handler_arity} argument(s) ({what}), found {}",
                             params.len()
                         ),
                         handler.span(),
@@ -362,9 +375,11 @@ impl Checker {
             if method.is_empty() {
                 return; // dynamic method — normal checking reports arity issues
             }
-            self.lint_route(root, method, args.get(1), args.get(2), span);
+            self.lint_route(root, method, args.get(1), args.get(2), 1, span);
         } else if let Some(RouteCall::PerMethod { method }) = route_call_kind(method_name) {
-            self.lint_route(root, method, args.first(), args.get(1), span);
+            self.lint_route(root, method, args.first(), args.get(1), 1, span);
+        } else if route_call_kind(method_name) == Some(RouteCall::Hijack) {
+            self.lint_route(root, HIJACK_METHOD, args.first(), args.get(1), 2, span);
         }
     }
 
@@ -376,7 +391,10 @@ impl Checker {
         };
         match kind {
             RouteCall::PerMethod { method } => {
-                self.lint_route(root, method, args.get(1), args.get(2), span);
+                self.lint_route(root, method, args.get(1), args.get(2), 1, span);
+            }
+            RouteCall::Hijack => {
+                self.lint_route(root, HIJACK_METHOD, args.get(1), args.get(2), 2, span);
             }
             RouteCall::Generic => {
                 let method = args.get(1).and_then(str_lit).unwrap_or("");
@@ -393,7 +411,7 @@ impl Checker {
                 if method.is_empty() {
                     return;
                 }
-                self.lint_route(root, method, args.get(2), args.get(3), span);
+                self.lint_route(root, method, args.get(2), args.get(3), 1, span);
             }
         }
     }
@@ -423,9 +441,18 @@ impl Checker {
             if method.is_empty() {
                 return;
             }
-            self.lint_route(Some(root), method, args.get(1), args.get(2), span);
+            self.lint_route(Some(root), method, args.get(1), args.get(2), 1, span);
         } else if let Some(RouteCall::PerMethod { method }) = route_call_kind(short) {
-            self.lint_route(Some(root), method, args.first(), args.get(1), span);
+            self.lint_route(Some(root), method, args.first(), args.get(1), 1, span);
+        } else if route_call_kind(short) == Some(RouteCall::Hijack) {
+            self.lint_route(
+                Some(root),
+                HIJACK_METHOD,
+                args.first(),
+                args.get(1),
+                2,
+                span,
+            );
         }
     }
 
@@ -618,6 +645,8 @@ mod tests {
         assert!(route_call_kind("http.param").is_none());
         assert!(is_route_method("route_get"));
         assert!(is_route_method("route"));
+        assert!(is_route_method("hijack"));
+        assert_eq!(route_call_kind("http.hijack"), Some(RouteCall::Hijack));
         assert!(!is_route_method("test"));
         assert!(ROUTE_METHODS.contains(&"PATCH"));
         assert!(!ROUTE_METHODS.contains(&"FROB"));

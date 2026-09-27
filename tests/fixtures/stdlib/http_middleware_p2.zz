@@ -55,6 +55,25 @@ func main() -> Result<int, str> {
     m := http.with_headers(base, {"X-Over": "new", "X-Add": "2"})
     println("merge: {m.headers()["X-Keep"]}:{m.headers()["X-Over"]}:{m.headers()["X-Add"]}")
 
+    // rate limit: 2 per minute, 3rd short-circuits with Retry-After
+    rl := http.server()
+    rl = rl.route("GET", "/x", |_req| "x")
+    rl = http.rate_limit(rl, 2, 60000)
+    q1 := http.test(rl, "GET", "/x", "")
+    q2 := http.test(rl, "GET", "/x", "")
+    q3 := http.test(rl, "GET", "/x", "")
+    println("rl: {q1.status()}:{q2.status()}:{q3.status()}:{q3.headers()["Retry-After"]}")
+
+    // CSRF token helpers + request IDs
+    t1 := http.csrf_token()
+    t2 := http.csrf_token()
+    println("csrf: {http.csrf_check(t1, t1)}:{http.csrf_check(t1, t2)}:{t1.len()}")
+    rid := http.server()
+    rid = rid.route("GET", "/y", |_req| "y")
+    rid = http.request_id(rid)
+    r8 := http.test(rid, "GET", "/y", "")
+    println("rid: {r8.headers()["X-Request-Id"].len()}")
+
     println("http_middleware_p2_ok")
     .ok(0)
 }

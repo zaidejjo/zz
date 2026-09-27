@@ -1,0 +1,71 @@
+// tests/fixtures/stdlib/http_hijack_p3.zz — Phase 3 WebSocket upgrade
+// 101 + RFC 6455 accept vector, same-path GET coexistence, handoff close.
+import std.http
+import std.net
+import std.task
+import std.time
+
+func main() -> Result<int, str> {
+    s := http.server()
+    s = s.route("GET", "/chat", |_req| "plain-get")
+    s = http.hijack(s, "/chat", |req, stream| {
+        return "owned"
+    })
+    task.spawn(|_| {
+        http.listen(s, 8142)
+    })
+    tries := 0
+    stream := net.tcp_connect("127.0.0.1:8142", 200)
+    while tries < 50 {
+        match stream {
+            .ok(_) => break
+            .err(_) => {
+                time.sleep_ms(100)
+                stream = net.tcp_connect("127.0.0.1:8142", 200)
+                tries = tries + 1
+            }
+        }
+    }
+    c := stream?
+    c.set_read_timeout(5000)?
+
+    // plain GET on the same path: normal dispatch, no upgrade
+    c.write("GET /chat HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")?
+    st1 := c.read_line()?
+    assert(st1.contains("200"))
+    while true {
+        h := c.read_line()?
+        if h == "" || h == "\r" {
+            break
+        }
+    }
+    b1 := c.read_bytes(9)?
+    assert(b1.len() == 9)
+    println("coexist_ok")
+
+    // RFC 6455 §1.2 test vector key → exact accept hash
+    c.write("GET /chat HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")?
+    st2 := c.read_line()?
+    assert(st2.contains("101"))
+    accept := ""
+    while true {
+        h2 := c.read_line()?
+        if h2 == "" || h2 == "\r" {
+            break
+        }
+        if h2.contains("Sec-WebSocket-Accept") {
+            accept = h2
+        }
+    }
+    assert(accept.contains("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="))
+    println("handshake_ok")
+
+    // handler returned without spawning: socket closes, no hang
+    match c.read_line() {
+        .ok(_) => println("ERROR: conn should be closed")
+        .err(_) => println("handoff_close_ok")
+    }
+
+    println("http_hijack_p3_ok")
+    .ok(0)
+}

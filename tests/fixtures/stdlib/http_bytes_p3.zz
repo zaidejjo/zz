@@ -1,0 +1,54 @@
+// tests/fixtures/stdlib/http_bytes_p3.zz — Phase 3 binary bodies
+// Non-UTF8 POST bytes survive socket → handler exact via body_bytes().
+import std.http
+import std.net
+import std.task
+import std.time
+import std.encoding
+
+func main() -> Result<int, str> {
+    s := http.server()
+    s = s.route("POST", "/bin", |req| {
+        b := req.body_bytes()
+        return "{b.len()}:{b[0]}:{b[4]}:{b[7]}"
+    })
+    task.spawn(|_| {
+        http.listen(s, 8141)
+    })
+    tries := 0
+    stream := net.tcp_connect("127.0.0.1:8141", 200)
+    while tries < 50 {
+        match stream {
+            .ok(_) => break
+            .err(_) => {
+                time.sleep_ms(100)
+                stream = net.tcp_connect("127.0.0.1:8141", 200)
+                tries = tries + 1
+            }
+        }
+    }
+    c := stream?
+    c.set_read_timeout(5000)?
+    // 1f 8b 08 00 ff 00 fe 41 — gzip magic + non-UTF8 tail
+    raw := encoding.base64_decode_bytes("H4sIAP8A/kE=")?
+    c.write("POST /bin HTTP/1.1\r\nHost: x\r\nContent-Length: 8\r\nConnection: close\r\n\r\n")?
+    c.write_bytes(raw)?
+    st := c.read_line()?
+    assert(st.contains("200"))
+    while true {
+        h := c.read_line()?
+        if h == "" || h == "\r" {
+            break
+        }
+    }
+    got := ""
+    g := 0
+    while got.len() < 11 && g < 20 {
+        chunk := c.read(64)?
+        got = "{got}{chunk}"
+        g = g + 1
+    }
+    assert(got == "8:31:255:65")
+    println("http_bytes_p3_ok")
+    .ok(0)
+}

@@ -1749,10 +1749,27 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             result_response(),
         ),
     );
-    // JSON client: `post_json(url, body: T, headers?)` — serializes any
-    // value via the JSON serializer + sets `Content-Type: application/json`.
+    // Test-only insecure fetch (self-signed fixtures). Same shape as fetch.
+    for name in ["std.http.fetch_insecure", "http.fetch_insecure"] {
+        m.insert(
+            name.into(),
+            sig_defaults(
+                vec![
+                    ("url", Type::Str),
+                    ("method", Type::Str),
+                    ("headers", dict_str()),
+                    ("body", body_t()),
+                    ("timeout_ms", Type::Int),
+                ],
+                4,
+                result_response(),
+            ),
+        );
+    }
     // Generic over the body like `json.stringify` so dicts/arrays of any
     // element type check.
+    // JSON client: `post_json(url, body: T, headers?)` — serializes any
+    // value via the JSON serializer + sets `Content-Type: application/json`.
     for name in ["std.http.post_json", "http.post_json"] {
         m.insert(
             name.into(),
@@ -1842,6 +1859,25 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         vec![Type::HttpRequest],
         Box::new(Type::Union(vec![Type::Str, Type::Response])),
     );
+    // Hijack handlers take (request, tcp.stream); the return is ignored
+    // (the socket outlives the call via Arc), so accept anything.
+    let hijack_t = Type::Func(
+        vec![Type::HttpRequest, Type::TcpStream],
+        Box::new(Type::Union(vec![Type::Str, Type::Unit])),
+    );
+    for name in ["std.http.hijack", "http.hijack"] {
+        m.insert(
+            name.into(),
+            sig(
+                vec![
+                    ("server", server_t.clone()),
+                    ("path", Type::Str),
+                    ("handler", hijack_t.clone()),
+                ],
+                server_t.clone(),
+            ),
+        );
+    }
     m.insert("std.http.server".into(), sig(vec![], server_t.clone()));
     m.insert(
         "std.http.route_get".into(),
@@ -1917,6 +1953,35 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
                 vec![
                     ("server", server_t.clone()),
                     ("port", Type::Int),
+                    ("opts", dict_str_int.clone()),
+                ],
+                Type::Unit,
+            ),
+        );
+    }
+    for name in ["std.http.listen_tls", "http.listen_tls"] {
+        m.insert(
+            name.into(),
+            sig(
+                vec![
+                    ("server", server_t.clone()),
+                    ("port", Type::Int),
+                    ("cert_path", Type::Str),
+                    ("key_path", Type::Str),
+                ],
+                Type::Unit,
+            ),
+        );
+    }
+    for name in ["std.http.listen_tls_cfg", "http.listen_tls_cfg"] {
+        m.insert(
+            name.into(),
+            sig(
+                vec![
+                    ("server", server_t.clone()),
+                    ("port", Type::Int),
+                    ("cert_path", Type::Str),
+                    ("key_path", Type::Str),
                     ("opts", dict_str_int.clone()),
                 ],
                 Type::Unit,
@@ -1999,6 +2064,20 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             ),
         );
     }
+    // Token bucket per client IP: `max_requests` per rolling `window_ms`.
+    for name in ["std.http.rate_limit", "http.rate_limit"] {
+        m.insert(
+            name.into(),
+            sig(
+                vec![
+                    ("server", Type::HttpServer),
+                    ("max_requests", Type::Int),
+                    ("window_ms", Type::Int),
+                ],
+                Type::HttpServer,
+            ),
+        );
+    }
     m.insert(
         "std.http.test".into(),
         sig(
@@ -2065,6 +2144,12 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.http.body_form".into(),
         sig(vec![("req", Type::HttpRequest)], dict_str_str.clone()),
     );
+    for name in ["std.http.body_bytes", "http.body_bytes"] {
+        m.insert(
+            name.into(),
+            sig(vec![("req", Type::HttpRequest)], Type::Bytes),
+        );
+    }
 
     // std.http — middleware alias + single-entry routing + response helpers.
     // `use` is the `pipe` spelling without the `|>` concept collision;
@@ -2141,6 +2226,26 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     }
     for name in ["std.http.secure_header_dict", "http.secure_header_dict"] {
         m.insert(name.into(), sig(vec![], dict_str()));
+    }
+    // Pure-ZZ kits: CSRF token helpers (CSPRNG hex + constant-time compare)
+    // and per-response `X-Request-Id` (uuid v7) post-middleware.
+    for (name, params, ret) in [
+        ("csrf_token", vec![], Type::Str),
+        (
+            "csrf_check",
+            vec![("a", Type::Str), ("b", Type::Str)],
+            Type::Bool,
+        ),
+    ] {
+        let s = sig(params, ret);
+        m.insert(format!("std.http.{name}"), s.clone());
+        m.insert(format!("http.{name}"), s);
+    }
+    for name in ["std.http.request_id", "http.request_id"] {
+        m.insert(
+            name.into(),
+            sig(vec![("server", Type::HttpServer)], Type::HttpServer),
+        );
     }
 
     // std.net — TCP networking
@@ -3431,10 +3536,12 @@ mod tests {
         assert!(funcs.contains_key("std.http.header"));
         assert!(funcs.contains_key("std.http.body_json"));
         assert!(funcs.contains_key("std.http.body_form"));
+        assert!(funcs.contains_key("std.http.body_bytes"));
         assert!(funcs.contains_key("std.http.respond"));
         assert!(funcs.contains_key("std.http.test_req"));
         assert!(funcs.contains_key("std.http.serve_dir_at"));
         assert!(funcs.contains_key("std.http.pipe_post"));
+        assert!(funcs.contains_key("std.http.rate_limit"));
         assert!(funcs.contains_key("std.http.with_headers"));
         assert!(funcs.contains_key("std.http.listen_cfg"));
         assert!(funcs.contains_key("std.http.cors"));
@@ -3642,7 +3749,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 694);
+        assert_eq!(funcs.len(), 712);
     }
 
     #[test]

@@ -12,14 +12,16 @@ use router::{best_match, matches_other_method};
 use zz_runtime::json::{parse_json, to_json_string, JsonValue};
 use zz_runtime::value::{
     detach_cached_funcs, reachable_refs, snapshot_env, snapshot_env_filtered, snapshot_funcs,
-    FuncValue, HttpRequest, HttpServer, Response,
+    FuncValue, HttpRequest, HttpServer, RateBucket, RateLimit, Response, RATE_LIMIT_MAX_KEYS,
 };
 use zz_runtime::{
     vm::Op, Chunk, Env, EnvLink, EvalError, Expr, Interp, NativeEntry, Param, Span, Value,
 };
 
+pub(crate) mod parse;
 pub(crate) mod router;
 pub(crate) mod static_files;
+pub(crate) mod tls;
 
 // ===========================================================================
 // Helpers
@@ -83,19 +85,6 @@ fn parse_query_string(qs: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-fn extract_headers(text: &str) -> Vec<(String, String)> {
-    let mut headers = Vec::new();
-    for line in text.lines() {
-        if line.is_empty() {
-            break;
-        }
-        if let Some((key, val)) = line.split_once(':') {
-            headers.push((key.trim().to_string(), val.trim().to_string()));
-        }
-    }
-    headers
-}
-
 fn http_reason(status: u16) -> &'static str {
     match status {
         100 => "Continue",
@@ -112,6 +101,7 @@ fn http_reason(status: u16) -> &'static str {
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
         416 => "Range Not Satisfiable",
+        429 => "Too Many Requests",
         431 => "Headers Too Large",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
@@ -230,19 +220,23 @@ fn read_exact_capped<R: std::io::Read>(
 }
 
 /// Build a `Value::HttpRequest` from parsed HTTP request data.
+/// Takes the raw body bytes: `body` is the lossy-text view, `body_raw` the
+/// exact bytes (moved, no copy — shared into the request by `Arc`).
 fn build_request_dict(
     method: &str,
     path: &str,
-    body: String,
+    body_bytes: Vec<u8>,
     headers: &[(String, String)],
     query_pairs: &[(String, String)],
     params: &[(String, String)],
 ) -> Value {
-    // Move (no copy): the caller-owned body buffer becomes the request field.
+    use zz_runtime::BytesData;
+    let body = String::from_utf8_lossy(&body_bytes).into_owned();
     Value::HttpRequest(Box::new(HttpRequest {
         method: method.to_string(),
         path: path.to_string(),
         body,
+        body_raw: Some(BytesData::from_vec(body_bytes)),
         headers: headers.to_vec(),
         query: query_pairs.to_vec(),
         params: params.to_vec(),
@@ -338,6 +332,24 @@ fn shared_client() -> &'static reqwest::blocking::Client {
 /// Default per-request timeout for the fixed-timeout verbs (30s, matches the
 /// old per-call client). `http_fetch` passes its own `timeout_ms`.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
+/// Test-only client: skips TLS verification (self-signed fixtures).
+/// Never the default — `fetch` verifies like any sane client.
+fn insecure_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
+        std::sync::LazyLock::new(|| {
+            reqwest::blocking::Client::builder()
+                .pool_max_idle_per_host(32)
+                .pool_idle_timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(30))
+                .tcp_keepalive(std::time::Duration::from_secs(60))
+                .danger_accept_invalid_certs(true)
+                .build()
+                .expect("failed to build insecure HTTP client")
+        });
+    &CLIENT
+}
 
 /// Map a `reqwest` send error to `.err(str)`: timeouts name the deadline so
 /// users know to raise it via `fetch` instead of guessing.
@@ -489,19 +501,46 @@ pub(crate) fn http_post(
 /// Unified client: one entry for every verb, with a configurable timeout.
 /// Unknown methods are a loud `EvalError` (programming error, not data).
 pub(crate) fn http_fetch(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    fetch_with_client(shared_client(), "std.http.fetch", interp, args, span)
+}
+
+/// `http.fetch_insecure(url, method?, headers?, body?, timeout_ms?)`
+/// — `fetch` without TLS verification. Test-only (self-signed fixtures);
+/// production code must use `fetch`.
+pub(crate) fn http_fetch_insecure(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    fetch_with_client(
+        insecure_client(),
+        "std.http.fetch_insecure",
+        interp,
+        args,
+        span,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_with_client(
+    client: &reqwest::blocking::Client,
+    name: &str,
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    const NAME: &str = "std.http.fetch";
-    let url = expect_str(args, 0, NAME)?;
+    let url = expect_str(args, 0, name)?;
     let method = args
         .get(1)
         .cloned()
         .map(|v| match v {
             Value::Str(s) => Ok(s.to_string()),
             other => Err(EvalError::new(
-                format!("`{NAME}`: expected a str method, found `{other}`"),
+                format!("`{name}`: expected a str method, found `{other}`"),
                 span,
             )),
         })
@@ -511,7 +550,7 @@ pub(crate) fn http_fetch(
     if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "PATCH") {
         return Err(EvalError::new(
             format!(
-                "`{NAME}`: unknown method `{method}` (expected GET, POST, PUT, DELETE or PATCH)"
+                "`{name}`: unknown method `{method}` (expected GET, POST, PUT, DELETE or PATCH)"
             ),
             span,
         ));
@@ -523,7 +562,7 @@ pub(crate) fn http_fetch(
         Some(Value::Bytes(b)) => b.as_slice().to_vec(),
         Some(other) => {
             return Err(EvalError::new(
-                format!("`{NAME}`: expected a str or bytes body, found `{other:?}`"),
+                format!("`{name}`: expected a str or bytes body, found `{other:?}`"),
                 span,
             ));
         }
@@ -533,12 +572,11 @@ pub(crate) fn http_fetch(
         Some(Value::Int(n)) if *n > 0 => *n as u64,
         Some(other) => {
             return Err(EvalError::new(
-                format!("`{NAME}`: expected a positive int timeout_ms, found `{other}`"),
+                format!("`{name}`: expected a positive int timeout_ms, found `{other}`"),
                 span,
             ));
         }
     };
-    let client = shared_client();
     let hdrs = dict_to_headers(&headers);
     let mut req = match method.as_str() {
         "GET" => client.get(&url),
@@ -739,6 +777,9 @@ pub(crate) fn http_server(
         post_middlewares: Vec::new(),
         log_enabled: false,
         static_dirs: Vec::new(),
+        rate_limit: None,
+        hsts: false,
+        hijack_routes: Vec::new(),
     })))
 }
 
@@ -837,6 +878,95 @@ fn http_route(
     Ok(Value::HttpServer(Box::new(server)))
 }
 
+/// `http.hijack(server, path: str, handler: fn) -> Server`
+///
+/// WebSocket-upgrade routes: `handler(req, tcp_stream)` takes over the
+/// socket after the `101` handshake (framing stays userland via
+/// `std.net`). Path syntax is the same `:id` router as normal routes;
+/// the checker validates literals and requires a 2-arg handler.
+/// Cleartext only — upgrades over TLS fall through to normal dispatch.
+pub(crate) fn http_hijack(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.hijack";
+    let mut server = expect_server(args, 0, NAME)?;
+    let path = expect_str(args, 1, NAME)?;
+    let handler = args
+        .get(2)
+        .cloned()
+        .ok_or_else(|| EvalError::new(format!("`{NAME}`: missing handler function"), span))?;
+    if !matches!(handler, Value::Func(_)) {
+        return Err(EvalError::new(
+            format!("`{NAME}`: handler must be a function"),
+            span,
+        ));
+    }
+    // Same registration-time env snapshot as normal routes.
+    let handler = snapshot_func_scoped(&handler, interp)
+        .map(|fs| fs.reconstruct())
+        .unwrap_or(handler);
+    server.hijack_routes.push((path, handler));
+    Ok(Value::HttpServer(Box::new(server)))
+}
+
+/// RFC 6455 accept hash: `base64(sha1(key + GUID))`.
+/// GUID is `258EAFA5-E914-47DA-95CA-C5AB0DC85B11` (RFC 6455 §1.3).
+fn ws_accept_key(client_key: &str) -> String {
+    use sha1::{Digest, Sha1};
+    let mut h = Sha1::new();
+    h.update(client_key.as_bytes());
+    h.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, h.finalize())
+}
+
+/// A matched upgrade: handler + request value for its first arg.
+struct HijackReq {
+    handler: Value,
+    req: Value,
+    key: String,
+}
+
+/// Match a WebSocket upgrade against the hijack table. Returns `None`
+/// (fall through to normal dispatch) when: wrong method, no key, no
+/// `Upgrade: websocket`, or no pattern hit — so one path serves both
+/// plain GET and upgrade.
+fn match_hijack(
+    server: &HttpServer,
+    method: &str,
+    path: &str,
+    headers: &[(String, String)],
+    query_pairs: &[(String, String)],
+) -> Option<HijackReq> {
+    if method != "GET" || server.hijack_routes.is_empty() {
+        return None;
+    }
+    let mut upgrade = false;
+    let mut key: Option<&str> = None;
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("upgrade") && v.to_ascii_lowercase().contains("websocket") {
+            upgrade = true;
+        } else if k.eq_ignore_ascii_case("sec-websocket-key") && !v.trim().is_empty() {
+            key = Some(v.as_str());
+        }
+    }
+    let key = key.filter(|_| upgrade)?;
+    let pairs: Vec<(String, String)> = server
+        .hijack_routes
+        .iter()
+        .map(|(p, _)| ("GET".to_string(), p.clone()))
+        .collect();
+    let (idx, params) = best_match(&pairs, "GET", path)?;
+    let handler = server.hijack_routes[idx].1.clone();
+    let req = build_request_dict(method, path, Vec::new(), headers, query_pairs, &params);
+    Some(HijackReq {
+        handler,
+        req,
+        key: key.to_string(),
+    })
+}
+
 fn expect_server(args: &mut Vec<Value>, i: usize, name: &str) -> Result<HttpServer, EvalError> {
     match arg(args, i, name)? {
         Value::HttpServer(s) => Ok((**s).clone()),
@@ -893,6 +1023,77 @@ pub(crate) fn http_pipe(
         ));
     }
     server.middlewares.push(middleware);
+    Ok(Value::HttpServer(Box::new(server)))
+}
+
+/// Token-bucket take: refill lazily from `last`, consume one token.
+/// Returns `None` when admitted, else seconds until the next token
+/// (minimum 1 — a usable `Retry-After`).
+fn bucket_take(bucket: &mut RateBucket, max: u64, window_ms: u64, now: Instant) -> Option<u64> {
+    let elapsed_ms = now.duration_since(bucket.last).as_millis() as f64;
+    bucket.tokens = (bucket.tokens + elapsed_ms * max as f64 / window_ms as f64).min(max as f64);
+    bucket.last = now;
+    if bucket.tokens >= 1.0 {
+        bucket.tokens -= 1.0;
+        return None;
+    }
+    let wait_ms = ((1.0 - bucket.tokens) * window_ms as f64 / max as f64).ceil() as u64;
+    Some(wait_ms.div_ceil(1000).max(1))
+}
+
+/// Shared rate-limit check for one client key. `None` = admitted.
+fn check_rate_limit(limiter: &RateLimit, key: &str) -> Option<u64> {
+    let Ok(mut map) = limiter.state.lock() else {
+        return None; // poisoned lock: fail open, never 500 on limiter state
+    };
+    if map.len() >= RATE_LIMIT_MAX_KEYS && !map.contains_key(key) {
+        // Key flood: reset rather than grow without bound (fail-open).
+        map.clear();
+    }
+    let now = Instant::now();
+    let bucket = map.entry(key.to_string()).or_insert(RateBucket {
+        tokens: limiter.max_requests as f64,
+        last: now,
+    });
+    bucket_take(bucket, limiter.max_requests, limiter.window_ms, now)
+}
+
+/// `http.rate_limit(server, max_requests: int, window_ms: int) -> Server`
+///
+/// Token bucket per client IP (`max_requests` per rolling `window_ms`).
+/// Over-limit requests short-circuit with `429 + Retry-After` before any
+/// handler or middleware runs. State rides the server's `Arc`, so pool
+/// workers and `http.test` share one budget set.
+pub(crate) fn http_rate_limit(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.rate_limit";
+    let mut server = expect_server(args, 0, NAME)?;
+    let max_requests = match args.get(1) {
+        Some(Value::Int(n)) if *n > 0 => *n as u64,
+        other => {
+            return Err(EvalError::new(
+                format!("`{NAME}`: expected a positive int max_requests, found `{other:?}`"),
+                span,
+            ));
+        }
+    };
+    let window_ms = match args.get(2) {
+        Some(Value::Int(n)) if *n > 0 => *n as u64,
+        other => {
+            return Err(EvalError::new(
+                format!("`{NAME}`: expected a positive int window_ms, found `{other:?}`"),
+                span,
+            ));
+        }
+    };
+    server.rate_limit = Some(RateLimit {
+        max_requests,
+        window_ms,
+        state: Arc::new(std::sync::Mutex::new(HashMap::new())),
+    });
     Ok(Value::HttpServer(Box::new(server)))
 }
 
@@ -1116,10 +1317,11 @@ fn test_dispatch(
         server,
         method,
         &path,
-        body,
+        body.into_bytes(),
         headers,
         &query_pairs,
         &params,
+        "http.test",
         interp,
         span,
     );
@@ -1250,6 +1452,42 @@ pub(crate) fn http_body_form(
     Ok(Value::Dict(Box::new(dict)))
 }
 
+/// `http.body_bytes(req: Request) -> bytes`
+///
+/// Exact received body bytes — unlike `req.body` (lossy text),
+/// `body_form`, and `body_json`, binary uploads round-trip intact.
+pub(crate) fn http_body_bytes(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    use zz_runtime::BytesData;
+    const NAME: &str = "std.http.body_bytes";
+    match arg(args, 0, NAME)? {
+        Value::HttpRequest(r) => {
+            Ok(Value::Bytes(Box::new(r.body_raw.clone().unwrap_or_else(
+                || BytesData::from_vec(r.body.as_bytes().to_vec()),
+            ))))
+        }
+        Value::Dict(entries) => {
+            let body = entries
+                .iter()
+                .find_map(|(k, v)| match (k, v) {
+                    (Value::Str(k), Value::Str(v)) if k.as_str() == "body" => {
+                        Some(v.as_bytes().to_vec())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default();
+            Ok(Value::Bytes(Box::new(BytesData::from_vec(body))))
+        }
+        other => Err(EvalError::new(
+            format!("{NAME}: expected a request, found `{other}`"),
+            span,
+        )),
+    }
+}
+
 // ===========================================================================
 // Feature 1: Dynamic Routing — Path Parameters
 // ===========================================================================
@@ -1346,13 +1584,29 @@ fn dispatch_with_request(
     server: &HttpServer,
     method: &str,
     path: &str,
-    body: String,
+    body: Vec<u8>,
     headers: &[(String, String)],
     query_pairs: &[(String, String)],
     params: &[(String, String)],
+    peer: &str,
     interp: &mut Interp,
     span: Span,
 ) -> DispatchResult {
+    // Rate limit first: cheap shared check before any handler work.
+    // Short-circuits like pre-middleware `.err` (no post chain).
+    if let Some(limiter) = server.rate_limit.as_ref() {
+        if let Some(retry_after) = check_rate_limit(limiter, peer) {
+            return Ok((
+                429,
+                b"Too Many Requests".to_vec(),
+                vec![
+                    ("Content-Type".into(), "text/plain; charset=utf-8".into()),
+                    ("Retry-After".into(), retry_after.to_string()),
+                ],
+            ));
+        }
+    }
+
     // Build the typed request value
     let req_dict = build_request_dict(method, path, body, headers, query_pairs, params);
 
@@ -1558,7 +1812,18 @@ pub(crate) fn dispatch(
     interp: &mut Interp,
     span: Span,
 ) -> Result<String, EvalError> {
-    let result = dispatch_with_request(server, method, path, body, &[], &[], &[], interp, span)?;
+    let result = dispatch_with_request(
+        server,
+        method,
+        path,
+        body.into_bytes(),
+        &[],
+        &[],
+        &[],
+        "http.test",
+        interp,
+        span,
+    )?;
     Ok(String::from_utf8_lossy(&result.1).into_owned())
 }
 
@@ -1632,6 +1897,12 @@ struct ServerSnapshot {
     post_middleware: Vec<FuncSnapshot>,
     log_enabled: bool,
     static_dirs: Vec<(String, String)>,
+    hsts: bool,
+    /// Shared limiter: cloned `Arc` state keeps one bucket set per server
+    /// across all pool workers (same discipline as the funcs table).
+    rate_limit: Option<RateLimit>,
+    /// Upgrade routes: same snapshot discipline as middleware.
+    hijack: Vec<(String, FuncSnapshot)>,
     natives: Arc<HashMap<String, NativeEntry>>,
     structs: HashMap<String, Vec<String>>,
     funcs: Arc<std::sync::Mutex<HashMap<String, FuncValue>>>,
@@ -1725,6 +1996,15 @@ impl ServerSnapshot {
             post_middleware,
             log_enabled: server.log_enabled,
             static_dirs: server.static_dirs.clone(),
+            rate_limit: server.rate_limit.clone(),
+            hsts: server.hsts,
+            hijack: server
+                .hijack_routes
+                .iter()
+                .filter_map(|(path, handler)| {
+                    Some((path.clone(), snapshot_func_scoped(handler, interp)?))
+                })
+                .collect(),
             natives: interp.natives.clone(),
             structs: (*interp.structs).clone(),
             funcs: Arc::new(std::sync::Mutex::new(snapshot_funcs(&interp.funcs))),
@@ -1747,6 +2027,13 @@ impl ServerSnapshot {
                 .collect(),
             log_enabled: self.log_enabled,
             static_dirs: self.static_dirs.clone(),
+            rate_limit: self.rate_limit.clone(),
+            hsts: self.hsts,
+            hijack_routes: self
+                .hijack
+                .iter()
+                .map(|(path, fs)| (path.clone(), fs.reconstruct()))
+                .collect(),
         }
     }
 
@@ -1843,7 +2130,7 @@ pub(crate) fn http_listen(
             ))
         }
     };
-    listen_inner(interp, server, port, ServerLimits::default(), span)
+    listen_inner(interp, server, port, ServerLimits::default(), None, span)
 }
 
 /// `http.listen_cfg(server, port, opts: {str: int}) -> unit`
@@ -1871,47 +2158,119 @@ pub(crate) fn http_listen_cfg(
     };
     let mut limits = ServerLimits::default();
     if let Some(opts) = args.get(2) {
-        let entries = match opts {
-            Value::Dict(entries) => entries.clone(),
+        limits = parse_listen_opts(opts, NAME, span)?;
+    }
+    listen_inner(interp, server, port, limits, None, span)
+}
+
+/// Shared `listen_*_cfg` opts parsing: all keys optional positive ints.
+fn parse_listen_opts(opts: &Value, name: &str, span: Span) -> Result<ServerLimits, EvalError> {
+    let mut limits = ServerLimits::default();
+    let entries = match opts {
+        Value::Dict(entries) => entries.clone(),
+        other => {
+            return Err(EvalError::new(
+                format!("`{name}`: expected an opts dict, found `{other}`"),
+                span,
+            ));
+        }
+    };
+    for (k, v) in entries.iter() {
+        let (Value::Str(key), Value::Int(n)) = (k, v) else {
+            return Err(EvalError::new(
+                format!("`{name}`: opts values must be positive ints, found `{v}` for `{k}`"),
+                span,
+            ));
+        };
+        if *n <= 0 {
+            return Err(EvalError::new(
+                format!("`{name}`: opts value for `{key}` must be positive, found `{n}`"),
+                span,
+            ));
+        }
+        let n = *n as u64;
+        match key.as_str() {
+            "read_ms" => limits.read_timeout = std::time::Duration::from_millis(n),
+            "max_reqs_conn" => limits.max_reqs_per_conn = n as usize,
+            "max_body_bytes" => limits.max_body_bytes = n as usize,
+            "shutdown_ms" => limits.shutdown_timeout = std::time::Duration::from_millis(n),
             other => {
                 return Err(EvalError::new(
-                    format!("`{NAME}`: expected an opts dict, found `{other}`"),
+                    format!(
+                        "`{name}`: unknown opts key `{other}` \
+                         (expected read_ms, max_reqs_conn, max_body_bytes or shutdown_ms)"
+                    ),
                     span,
                 ));
-            }
-        };
-        for (k, v) in entries.iter() {
-            let (Value::Str(key), Value::Int(n)) = (k, v) else {
-                return Err(EvalError::new(
-                    format!("`{NAME}`: opts values must be positive ints, found `{v}` for `{k}`"),
-                    span,
-                ));
-            };
-            if *n <= 0 {
-                return Err(EvalError::new(
-                    format!("`{NAME}`: opts value for `{key}` must be positive, found `{n}`"),
-                    span,
-                ));
-            }
-            let n = *n as u64;
-            match key.as_str() {
-                "read_ms" => limits.read_timeout = std::time::Duration::from_millis(n),
-                "max_reqs_conn" => limits.max_reqs_per_conn = n as usize,
-                "max_body_bytes" => limits.max_body_bytes = n as usize,
-                "shutdown_ms" => limits.shutdown_timeout = std::time::Duration::from_millis(n),
-                other => {
-                    return Err(EvalError::new(
-                        format!(
-                            "`{NAME}`: unknown opts key `{other}` \
-                             (expected read_ms, max_reqs_conn, max_body_bytes or shutdown_ms)"
-                        ),
-                        span,
-                    ));
-                }
             }
         }
     }
-    listen_inner(interp, server, port, limits, span)
+    Ok(limits)
+}
+
+/// `http.listen_tls(server, port, cert_path, key_path) -> unit`
+///
+/// Same loop as `listen`, wrapped in rustls TLS (1.3 + 1.2, ALPN
+/// `http/1.1`). Enables HSTS injection on the server. Cert/key load
+/// failures are loud errors — never silent cleartext fallback.
+pub(crate) fn http_listen_tls(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.listen_tls";
+    let mut server = expect_server(args, 0, NAME)?;
+    let port = match args.get(1) {
+        Some(Value::Int(p)) => *p,
+        other => {
+            return Err(EvalError::new(
+                format!("`{NAME}`: expected an int port, found `{other:?}`"),
+                span,
+            ));
+        }
+    };
+    let cert = expect_str(args, 2, NAME)?;
+    let key = expect_str(args, 3, NAME)?;
+    let cfg = tls::load_server_config(&cert, &key, span)?;
+    server.hsts = true;
+    listen_inner(
+        interp,
+        server,
+        port,
+        ServerLimits::default(),
+        Some(cfg),
+        span,
+    )
+}
+
+/// `http.listen_tls_cfg(server, port, cert_path, key_path, opts) -> unit`
+///
+/// `listen_tls` + `listen_cfg` limits (same opts keys).
+pub(crate) fn http_listen_tls_cfg(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.listen_tls_cfg";
+    let mut server = expect_server(args, 0, NAME)?;
+    let port = match args.get(1) {
+        Some(Value::Int(p)) => *p,
+        other => {
+            return Err(EvalError::new(
+                format!("`{NAME}`: expected an int port, found `{other:?}`"),
+                span,
+            ));
+        }
+    };
+    let cert = expect_str(args, 2, NAME)?;
+    let key = expect_str(args, 3, NAME)?;
+    let limits = match args.get(4) {
+        None => ServerLimits::default(),
+        Some(opts) => parse_listen_opts(opts, NAME, span)?,
+    };
+    let cfg = tls::load_server_config(&cert, &key, span)?;
+    server.hsts = true;
+    listen_inner(interp, server, port, limits, Some(cfg), span)
 }
 
 fn listen_inner(
@@ -1919,6 +2278,7 @@ fn listen_inner(
     server: HttpServer,
     port: i64,
     limits: ServerLimits,
+    tls: Option<Arc<rustls::ServerConfig>>,
     span: Span,
 ) -> Result<Value, EvalError> {
     // Snapshot the server + interp state before entering the accept loop.
@@ -1960,9 +2320,7 @@ fn listen_inner(
     unsafe {
         libc::malloc_trim(0);
     }
-    let (tx, rx) = std::sync::mpsc::sync_channel::<(std::net::TcpStream, Arc<ServerSnapshot>)>(
-        POOL_QUEUE_DEPTH,
-    );
+    let (tx, rx) = std::sync::mpsc::sync_channel::<PoolJob>(POOL_QUEUE_DEPTH);
     // In-flight connections: incremented on accept, decremented when the
     // connection thread finishes. The shutdown drain waits on this.
     let inflight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1982,12 +2340,22 @@ fn listen_inner(
         match listener.accept() {
             Ok((stream, _)) => {
                 inflight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                match tx.try_send((stream, Arc::clone(&snapshot))) {
+                // Read timeouts live on the socket, so TLS reads (which go
+                // through this same fd) inherit them after the handshake.
+                let _ = stream.set_read_timeout(Some(limits.read_timeout));
+                let job = PoolJob {
+                    stream,
+                    snapshot: Arc::clone(&snapshot),
+                    tls: tls.clone(),
+                };
+                match tx.try_send(job) {
                     Ok(()) => {}
-                    Err(std::sync::mpsc::TrySendError::Full((mut stream, _))) => {
+                    Err(std::sync::mpsc::TrySendError::Full(mut job)) => {
                         // Backpressure: pool saturated — fail fast with 503 instead
                         // of queueing unboundedly (slowloris-shaped traffic would
                         // otherwise pin memory per pending connection).
+                        // TLS handshakes haven't run yet here, so a plain
+                        // 503 is correct on both listeners.
                         let busy = format_response_with_headers(
                             503,
                             &[
@@ -1997,8 +2365,8 @@ fn listen_inner(
                             b"server busy",
                             false,
                         );
-                        let _ = stream.write_all(&busy);
-                        let _ = stream.flush();
+                        let _ = job.stream.write_all(&busy);
+                        let _ = job.stream.flush();
                         inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
@@ -2038,10 +2406,18 @@ fn pool_size() -> usize {
 /// Depth of the pending-connection queue (see backpressure above).
 const POOL_QUEUE_DEPTH: usize = 1024;
 
+/// One accepted connection: the socket, the server snapshot, and the
+/// optional TLS config (shared `Arc` — `None` is cleartext).
+struct PoolJob {
+    stream: std::net::TcpStream,
+    snapshot: Arc<ServerSnapshot>,
+    tls: Option<Arc<rustls::ServerConfig>>,
+}
+
 /// Spawn pool workers sharing one `mpsc::Receiver` behind a mutex.
 /// Workers exit when all senders disconnect (server shutdown).
 fn spawn_pool(
-    rx: std::sync::mpsc::Receiver<(std::net::TcpStream, Arc<ServerSnapshot>)>,
+    rx: std::sync::mpsc::Receiver<PoolJob>,
     span: Span,
     limits: ServerLimits,
     inflight: Arc<std::sync::atomic::AtomicUsize>,
@@ -2052,29 +2428,113 @@ fn spawn_pool(
         let inflight = Arc::clone(&inflight);
         std::thread::spawn(move || loop {
             let job = rx.lock().ok().and_then(|rx| rx.recv().ok());
-            let Some((mut stream, snap)) = job else {
+            let Some(job) = job else {
                 return;
             };
-            handle_connection_thread(&snap, &mut stream, span, limits);
+            // Peer IP before a potential TLS wrap (the encrypted stream
+            // borrows the socket, so grab it while we own it).
+            let peer = job
+                .stream
+                .peer_addr()
+                .map(|a| a.ip().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+            let mut stream = job.stream;
+            if let Some(cfg) = job.tls {
+                let mut conn = match rustls::ServerConnection::new(cfg) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                };
+                // Blocking handshake, bounded by the accept-path read
+                // timeout on the socket. Probes and wrong-protocol
+                // clients fail here and just close.
+                let mut ok = true;
+                while conn.is_handshaking() {
+                    if conn.complete_io(&mut stream).is_err() {
+                        ok = false;
+                        break;
+                    }
+                }
+                if !ok {
+                    inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    continue;
+                }
+                let mut tls_stream = rustls::Stream::new(&mut conn, &mut stream);
+                // TLS has no raw socket to hand over: upgrades are disabled.
+                match handle_connection_thread(
+                    &job.snapshot,
+                    &mut tls_stream,
+                    &peer,
+                    span,
+                    limits,
+                    false,
+                ) {
+                    ConnEnd::Closed => {}
+                    ConnEnd::Hijacked { .. } => {
+                        // Unreachable: `allow_hijack` is false above.
+                    }
+                }
+            } else {
+                match handle_connection_thread(
+                    &job.snapshot,
+                    &mut stream,
+                    &peer,
+                    span,
+                    limits,
+                    true,
+                ) {
+                    ConnEnd::Closed => {}
+                    ConnEnd::Hijacked(boxed) => {
+                        // Borrow of `stream` ended with the call above:
+                        // move the socket into the upgrade handoff.
+                        hijack_serve(boxed.interp, stream, boxed.hijack, span);
+                    }
+                }
+            }
             inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         });
     }
+}
+
+/// Per-request outcome on a connection: keep going, close, or hand the
+/// socket to a hijack handler (WebSocket upgrade).
+enum Loop {
+    Continue,
+    Close,
+    Hijack(HijackReq),
+}
+
+/// How a connection ended. `Hijacked` carries the server/interp back to
+/// the worker (same thread — no `Send` crossing) along with the upgrade.
+enum ConnEnd {
+    Closed,
+    Hijacked(Box<HijackedConn>),
+}
+
+/// Upgrade handoff: the connection interpreter plus the matched upgrade.
+/// Boxed — `ConnEnd` travels by value and `Interp` is hundreds of bytes.
+struct HijackedConn {
+    interp: Interp,
+    hijack: HijackReq,
 }
 
 /// Handle a single TCP connection on a dedicated thread.
 ///
 /// Reconstructs the HTTP server and interpreter from the snapshot once per
 /// connection, then serves up to the configured requests-per-connection on
-/// the same socket (HTTP/1.1 keep-alive). Each request parses the head
-/// (bounded), reads exactly `Content-Length` body bytes, dispatches through
-/// the route/middleware pipeline, and writes a framed response.
-fn handle_connection_thread(
+/// the same socket (HTTP/1.1 keep-alive). Generic over the byte stream so
+/// cleartext (`TcpStream`) and TLS (`rustls::Stream`) share the loop;
+/// `allow_hijack` is false on TLS (no raw socket to hand over).
+fn handle_connection_thread<S: std::io::Read + std::io::Write>(
     snapshot: &ServerSnapshot,
-    stream: &mut std::net::TcpStream,
+    stream: &mut S,
+    peer: &str,
     span: Span,
     limits: ServerLimits,
-) {
-    let _ = stream.set_read_timeout(Some(limits.read_timeout));
+    allow_hijack: bool,
+) -> ConnEnd {
     // Reconstruct once per connection: every request on this socket shares
     // the same server + interp (sequential — no cross-request aliasing).
     let server = snapshot.reconstruct_server();
@@ -2082,23 +2542,57 @@ fn handle_connection_thread(
 
     for _ in 0..limits.max_reqs_per_conn {
         let start = Instant::now();
-        if !handle_one_request(&server, &mut interp, stream, span, limits, start) {
-            return;
+        match handle_one_request(
+            &server,
+            &mut interp,
+            stream,
+            peer,
+            span,
+            limits,
+            allow_hijack,
+            start,
+        ) {
+            Loop::Continue => {}
+            Loop::Close => return ConnEnd::Closed,
+            Loop::Hijack(hijack) => {
+                return ConnEnd::Hijacked(Box::new(HijackedConn { interp, hijack }));
+            }
         }
+    }
+    ConnEnd::Closed
+}
+
+/// Answer a matched upgrade: write the `101`, wrap the socket, and run
+/// `handler(req, tcp.stream)`. The ZZ side owns the socket afterwards
+/// (usually by spawning its frame loop into a task); returning from the
+/// handler drops our handle and closes our end of the sharing.
+fn hijack_serve(mut interp: Interp, stream: std::net::TcpStream, hijack: HijackReq, span: Span) {
+    let accept = ws_accept_key(&hijack.key);
+    let resp = format!(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+    );
+    let mut stream = stream;
+    if stream.write_all(resp.as_bytes()).is_err() || stream.flush().is_err() {
+        return;
+    }
+    let sock = Value::TcpStream(Arc::new(std::sync::Mutex::new(stream)));
+    if let Err(e) = interp.call(hijack.handler, vec![hijack.req, sock], span) {
+        eprintln!("[ERROR] std.http.hijack handler failed: {}", e.message);
     }
 }
 
 /// Serve one request on an already-open connection.
-/// Returns `true` to keep serving this socket, `false` to close it.
 #[allow(clippy::too_many_arguments)]
-fn handle_one_request(
+fn handle_one_request<S: std::io::Read + std::io::Write>(
     server: &HttpServer,
     interp: &mut Interp,
-    stream: &mut std::net::TcpStream,
+    stream: &mut S,
+    peer: &str,
     span: Span,
     limits: ServerLimits,
+    allow_hijack: bool,
     start: Instant,
-) -> bool {
+) -> Loop {
     // ── Read the raw HTTP request ──
     //
     // G1 (Registry V2): the old code did a single 8 KB `read()`, so any
@@ -2108,7 +2602,7 @@ fn handle_one_request(
     let head_buf = match read_until_delim(stream, b"\r\n\r\n", MAX_HEAD_BYTES) {
         Ok(Some(buf)) => {
             if buf.is_empty() {
-                return false; // clean client close between requests
+                return Loop::Close; // clean client close between requests
             }
             buf
         }
@@ -2116,28 +2610,32 @@ fn handle_one_request(
             // Header block exceeded the cap (or client vanished).
             let _ = stream.write_all(&format_response(431, "headers too large"));
             let _ = stream.flush();
-            return false;
+            return Loop::Close;
         }
         Err(_) => {
             // Timeout (idle keep-alive expiry) or I/O error: close silently
             // when no bytes are mid-flight, else a 500 with close.
-            return false;
+            return Loop::Close;
         }
     };
-    let text = String::from_utf8_lossy(&head_buf).to_string();
-    let mut lines = text.lines();
-    let Some(request_line) = lines.next() else {
-        let _ = stream.write_all(&format_response(400, "bad request"));
-        let _ = stream.flush();
-        return false;
+    // Zero-copy head parse over the buffered bytes: method/path/headers
+    // are views (no whole-head `String`, no `lines()` split). Strict
+    // framing — garbage closes with 400, >128 headers with 431.
+    let head = match parse::parse_head(&head_buf) {
+        Ok(h) => h,
+        Err(parse::HeadError::TooManyHeaders) => {
+            let _ = stream.write_all(&format_response(431, "headers too large"));
+            let _ = stream.flush();
+            return Loop::Close;
+        }
+        Err(parse::HeadError::Malformed) => {
+            let _ = stream.write_all(&format_response(400, "bad request"));
+            let _ = stream.flush();
+            return Loop::Close;
+        }
     };
-    let mut parts = request_line.split_whitespace();
-    let (Some(method), Some(raw_path)) = (parts.next(), parts.next()) else {
-        let _ = stream.write_all(&format_response(400, "bad request"));
-        let _ = stream.flush();
-        return false;
-    };
-    let version = parts.next().unwrap_or("");
+    let method = head.method;
+    let raw_path = head.raw_path;
 
     let (path, query_pairs) = if let Some((p, q)) = raw_path.split_once('?') {
         (p.to_string(), parse_query_string(q))
@@ -2145,85 +2643,96 @@ fn handle_one_request(
         (raw_path.to_string(), Vec::new())
     };
 
-    let req_headers = extract_headers(&text);
+    // Materialize owned headers once (dispatch + middleware need `String`s).
+    let mut req_headers = Vec::with_capacity(head.headers.len());
+    for (k, v) in head.headers {
+        req_headers.push((k.to_string(), String::from_utf8_lossy(v).into_owned()));
+    }
 
-    let mut content_length = 0usize;
-    let mut expect_continue = false;
-    let mut conn_hdr: Option<String> = None;
-    for line in lines {
-        if line.is_empty() {
-            break;
-        }
-        let lower = line.to_ascii_lowercase();
-        if let Some(v) = lower.strip_prefix("content-length:") {
-            content_length = v.trim().parse().unwrap_or(0);
-        } else if let Some(v) = lower.strip_prefix("expect:") {
-            expect_continue = v.trim() == "100-continue";
-        } else if let Some(v) = lower.strip_prefix("connection:") {
-            conn_hdr = Some(v.trim().to_string());
+    // WebSocket upgrade: hijack routes win before the body read.
+    // Anything unmatched here (wrong method, no key, no pattern hit)
+    // falls through to normal dispatch — one path serves both.
+    if allow_hijack {
+        if let Some(hijack) = match_hijack(server, method, &path, &req_headers, &query_pairs) {
+            if let Some(limiter) = server.rate_limit.as_ref() {
+                if let Some(retry_after) = check_rate_limit(limiter, peer) {
+                    let busy = format_response_with_headers(
+                        429,
+                        &[
+                            ("Content-Type".into(), "text/plain; charset=utf-8".into()),
+                            ("Retry-After".into(), retry_after.to_string()),
+                        ],
+                        b"Too Many Requests",
+                        false,
+                    );
+                    let _ = stream.write_all(&busy);
+                    let _ = stream.flush();
+                    return Loop::Close;
+                }
+            }
+            return Loop::Hijack(hijack);
         }
     }
+
+    let content_length = head.content_length;
+    let expect_continue = head.expect_continue;
     // HTTP/1.1 persists by default, HTTP/1.0 (or unknown) closes by
     // default; an explicit `Connection:` header overrides either way.
-    let mut keep_alive = version != "HTTP/1.0" && !version.is_empty();
-    if let Some(conn) = conn_hdr.as_deref() {
-        let lower = conn.to_ascii_lowercase();
-        if lower.contains("close") {
-            keep_alive = false;
-        } else if lower.contains("keep-alive") {
-            keep_alive = true;
-        }
-    }
+    let keep_alive = parse::fold_connection(head.version_1_1, head.connection);
     if content_length > limits.max_body_bytes {
         let _ = stream.write_all(&format_response(413, "payload too large"));
         let _ = stream.flush();
-        return false;
+        return Loop::Close;
     }
     if expect_continue && content_length > 0 {
         // Large clients (curl, some SDKs) wait for this before sending.
         let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
         let _ = stream.flush();
     }
-    // Bytes already buffered past the header terminator belong to the body.
-    let head_end = text
-        .find("\r\n\r\n")
-        .map(|idx| idx + 4)
-        .unwrap_or(head_buf.len());
-    let buffered: &[u8] = head_buf.get(head_end..).unwrap_or(&[]);
+    // Bytes already buffered past the header terminator belong to the body
+    // (`head_len` comes from the parser — no re-scan for `\r\n\r\n`).
+    let buffered: &[u8] = head_buf.get(head.head_len..).unwrap_or(&[]);
     let body_bytes =
         match read_exact_capped(stream, buffered, content_length, limits.max_body_bytes) {
             Ok(b) => b,
             Err(_) => {
                 let _ = stream.write_all(&format_response(400, "truncated body"));
                 let _ = stream.flush();
-                return false;
+                return Loop::Close;
             }
         };
-    // Reuse the read buffer when it is valid UTF-8 (JSON always is):
-    // `from_utf8_lossy().to_string()` copies the whole body again, which
-    // triples peak memory on multi-MB publishes (buffer + String + dict).
-    let body = match String::from_utf8(body_bytes) {
-        Ok(s) => s,
-        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
-    };
-
     // ── Dispatch ──
+    // `body_bytes` moves straight in: no UTF-8 copy on the hot path.
+    // Text views are derived once inside `build_request_dict`.
     let result = dispatch_with_request(
         server,
         method,
         &path,
-        body,
+        body_bytes,
         &req_headers,
         &query_pairs,
         &[],
+        peer,
         interp,
         span,
     );
 
-    let (status, resp_body, resp_headers) = match result {
+    let (status, resp_body, mut resp_headers) = match result {
         Ok(r) => r,
         Err(e) => (500, e.message.into_bytes(), vec![]),
     };
+    // HSTS on TLS listeners only (never on cleartext — that would poison
+    // caches if TLS is later removed). Handler-set values win.
+    if server.hsts
+        && !resp_headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("strict-transport-security"))
+    {
+        resp_headers.push((
+            "Strict-Transport-Security".into(),
+            "max-age=31536000; includeSubDomains".into(),
+        ));
+    }
 
     let elapsed = start.elapsed();
 
@@ -2250,10 +2759,10 @@ fn handle_one_request(
         response.truncate(response.len() - resp_body.len());
     }
     if stream.write_all(&response).is_err() {
-        return false;
+        return Loop::Close;
     }
     if stream.flush().is_err() {
-        return false;
+        return Loop::Close;
     }
     // Large bodies churn tens of MB through this thread's heap (body
     // buffer + request dict + JSON parse). Freed blocks above the live
@@ -2268,7 +2777,11 @@ fn handle_one_request(
             libc::malloc_trim(0);
         }
     }
-    keep_alive
+    if keep_alive {
+        Loop::Continue
+    } else {
+        Loop::Close
+    }
 }
 
 #[cfg(test)]
@@ -2442,6 +2955,89 @@ mod tests {
         }
         let got = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         assert_eq!(got, raw, "binary body corrupted in transit");
+    }
+
+    fn test_limiter(max: u64, window_ms: u64) -> RateLimit {
+        RateLimit {
+            max_requests: max,
+            window_ms,
+            state: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    #[test]
+    fn bucket_admits_burst_then_rejects() {
+        let lim = test_limiter(3, 60_000);
+        assert_eq!(check_rate_limit(&lim, "c"), None);
+        assert_eq!(check_rate_limit(&lim, "c"), None);
+        assert_eq!(check_rate_limit(&lim, "c"), None);
+        let retry = check_rate_limit(&lim, "c").expect("4th must reject");
+        assert!(retry >= 1, "Retry-After must be usable");
+    }
+
+    #[test]
+    fn bucket_keys_are_isolated() {
+        let lim = test_limiter(1, 60_000);
+        assert_eq!(check_rate_limit(&lim, "a"), None);
+        assert!(check_rate_limit(&lim, "a").is_some());
+        assert_eq!(check_rate_limit(&lim, "b"), None);
+    }
+
+    #[test]
+    fn bucket_refills_after_window() {
+        let lim = test_limiter(1, 100);
+        assert_eq!(check_rate_limit(&lim, "c"), None);
+        assert!(check_rate_limit(&lim, "c").is_some());
+        // Age the bucket past the window instead of sleeping.
+        {
+            let mut map = lim.state.lock().unwrap();
+            let b = map.get_mut("c").unwrap();
+            b.last -= std::time::Duration::from_millis(200);
+        }
+        assert_eq!(check_rate_limit(&lim, "c"), None);
+    }
+
+    #[test]
+    fn bucket_map_capped_fail_open() {
+        let lim = test_limiter(1, 60_000);
+        for i in 0..RATE_LIMIT_MAX_KEYS {
+            assert_eq!(check_rate_limit(&lim, &format!("k{i}")), None);
+        }
+        // Overflow resets rather than growing: still admitted.
+        assert_eq!(check_rate_limit(&lim, "fresh"), None);
+        assert!(lim.state.lock().unwrap().len() <= RATE_LIMIT_MAX_KEYS);
+    }
+
+    #[test]
+    fn rate_limit_native_validates_args() {
+        let mut interp = Interp::new();
+        let srv = http_server(&mut interp, &mut Vec::new(), Span::new(0, 0)).unwrap();
+        for bad in [
+            vec![srv.clone(), Value::Int(0), Value::Int(1000)],
+            vec![srv.clone(), Value::Int(5), Value::Int(-1)],
+        ] {
+            let mut args = bad;
+            assert!(http_rate_limit(&mut interp, &mut args, Span::new(0, 0)).is_err());
+        }
+        let mut args = vec![srv, Value::Int(5), Value::Int(1000)];
+        match http_rate_limit(&mut interp, &mut args, Span::new(0, 0)).unwrap() {
+            Value::HttpServer(s) => {
+                let rl = s.rate_limit.as_ref().expect("limiter set");
+                assert_eq!(rl.max_requests, 5);
+                assert_eq!(rl.window_ms, 1000);
+            }
+            other => panic!("expected server, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ws_accept_matches_rfc_vector() {
+        // RFC 6455 §1.2: key `dGhlIHNhbXBsZSBub25jZQ==` must yield
+        // `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`.
+        assert_eq!(
+            ws_accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
     }
 }
 

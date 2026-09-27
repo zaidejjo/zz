@@ -10,6 +10,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize},
     Arc, Condvar, Mutex,
 };
+use std::time::Instant;
 use zz_frontend::ast::{Expr, Param};
 
 use crate::env::EnvLink;
@@ -879,7 +880,45 @@ pub struct HttpServer {
     /// Static roots: `(url_prefix, dir)` in registration order.
     /// `serve_dir` registers `("/", dir)`; first matching prefix wins.
     pub static_dirs: Vec<(String, String)>,
+    /// Token-bucket rate limit shared across clones/workers (`Arc` state;
+    /// equality compares config only — buckets are runtime state).
+    pub rate_limit: Option<RateLimit>,
+    /// Append `Strict-Transport-Security` when absent. Set by `listen_tls*`
+    /// (never on cleartext); handler-set values always win.
+    pub hsts: bool,
+    /// WebSocket-upgrade routes: `(path_pattern, handler)` where the
+    /// handler is `fn(req, tcp_stream)`. Checked before normal dispatch
+    /// when the request carries `Upgrade: websocket` (+ key).
+    pub hijack_routes: Vec<(String, Value)>,
 }
+
+/// Shared token-bucket limiter: `max_requests` per `window_ms`, per client
+/// key (peer IP on sockets, `"http.test"` in-process). Buckets refill
+/// lazily; the map is capped (fail-open reset) so distinct-IP floods can't
+/// grow memory without bound.
+#[derive(Debug, Clone)]
+pub struct RateLimit {
+    pub max_requests: u64,
+    pub window_ms: u64,
+    pub state: Arc<Mutex<HashMap<String, RateBucket>>>,
+}
+
+impl PartialEq for RateLimit {
+    fn eq(&self, other: &Self) -> bool {
+        self.max_requests == other.max_requests && self.window_ms == other.window_ms
+    }
+}
+
+/// One client's bucket: fractional tokens + last refill instant.
+#[derive(Debug, Clone)]
+pub struct RateBucket {
+    pub tokens: f64,
+    pub last: Instant,
+}
+
+/// Max tracked client keys per limiter; overflow resets all buckets
+/// (fail-open: availability over precision under key floods).
+pub const RATE_LIMIT_MAX_KEYS: usize = 4096;
 
 /// An HTTP response: status code, body, and headers.
 #[derive(Debug, Clone, PartialEq)]
@@ -892,11 +931,16 @@ pub struct Response {
 /// An HTTP request passed to route handlers and middleware: method, path,
 /// body, headers, query pairs, and route params. Owned strings so requests
 /// are `Send` and snapshot-safe across connection threads.
+///
+/// `body` is the lossy-text view (back-compat for `req.body`, `body_json`,
+/// `body_form`); `body_raw` is the exact received bytes (`req.body_bytes()`),
+/// so binary uploads round-trip without UTF-8 mangling.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HttpRequest {
     pub method: String,
     pub path: String,
     pub body: String,
+    pub body_raw: Option<BytesData>,
     pub headers: Vec<(String, String)>,
     pub query: Vec<(String, String)>,
     pub params: Vec<(String, String)>,

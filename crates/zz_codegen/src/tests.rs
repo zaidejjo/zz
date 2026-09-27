@@ -324,6 +324,12 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("http.secure_headers", "pure ZZ alias"),
     ("std.http.secure_header_dict", "pure ZZ; no C codegen"),
     ("http.secure_header_dict", "pure ZZ alias"),
+    ("std.http.csrf_token", "pure ZZ; no C codegen"),
+    ("http.csrf_token", "pure ZZ alias"),
+    ("std.http.csrf_check", "pure ZZ; no C codegen"),
+    ("http.csrf_check", "pure ZZ alias"),
+    ("std.http.request_id", "pure ZZ; no C codegen"),
+    ("http.request_id", "pure ZZ alias"),
     // Phase 2 HTTP natives — VM-only until the P3 AOT HTTP leg lands
     // (post-middleware chain, prefix static roots, listen limits, test_req).
     ("std.http.pipe_post", "P3 AOT; post-middleware C impl"),
@@ -334,7 +340,19 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("http.serve_dir_at", "P3 AOT; prefix-static C impl"),
     ("std.http.listen_cfg", "P3 AOT; listen-limits C impl"),
     ("http.listen_cfg", "P3 AOT; listen-limits C impl"),
+    ("std.http.rate_limit", "P3 AOT; token-bucket C impl"),
+    ("http.rate_limit", "P3 AOT; token-bucket C impl"),
     ("std.http.test_req", "P3 AOT; header-injecting test C impl"),
+    ("std.http.body_bytes", "P3 AOT; request-bytes C impl"),
+    ("http.body_bytes", "P3 AOT; request-bytes C impl"),
+    ("std.http.listen_tls", "P3 AOT; TLS listener C impl"),
+    ("http.listen_tls", "P3 AOT; TLS listener C impl"),
+    ("std.http.listen_tls_cfg", "P3 AOT; TLS listener C impl"),
+    ("http.listen_tls_cfg", "P3 AOT; TLS listener C impl"),
+    ("std.http.fetch_insecure", "P3 AOT; insecure client C impl"),
+    ("http.fetch_insecure", "P3 AOT; insecure client C impl"),
+    ("std.http.hijack", "P3 AOT; upgrade-handoff C impl"),
+    ("http.hijack", "P3 AOT; upgrade-handoff C impl"),
     // MySQL wire driver — VM-only (no staticlib backend like PG has;
     // AOT lowers these to Unit like time.now_ms).
     ("std.sqlz.mysql.connect", "VM-only; no C socket driver"),

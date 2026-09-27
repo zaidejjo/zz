@@ -100,3 +100,21 @@ func http.secure_headers(server: http.server) -> http.server {
         std.http.with_headers(res, std.http.secure_header_dict())
     })
 }
+
+// ── CSRF ─────────────────────────────────────────────────────────────────────
+
+func http.csrf_token() -> str {
+    std.crypto.random_bytes(32)
+}
+
+func http.csrf_check(a: str, b: str) -> bool {
+    std.crypto.ct_eq(a, b)
+}
+
+// ── Request IDs ──────────────────────────────────────────────────────────────
+
+func http.request_id(server: http.server) -> http.server {
+    std.http.pipe_post(server, |req, res| {
+        std.http.with_headers(res, {"X-Request-Id": std.uuid.v7()})
+    })
+}

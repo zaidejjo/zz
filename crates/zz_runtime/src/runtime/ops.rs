@@ -256,7 +256,12 @@ pub(crate) fn fill_default_headers(name: &str, args: &mut Vec<Value>, arity: usi
     }
     // Unified client defaults, in signature order:
     // (url, method="GET", headers={}, body="", timeout_ms=30000).
-    const FETCH: &[&str] = &["std.http.fetch", "http.fetch"];
+    const FETCH: &[&str] = &[
+        "std.http.fetch",
+        "http.fetch",
+        "std.http.fetch_insecure",
+        "http.fetch_insecure",
+    ];
     if FETCH.contains(&name) && args.len() < arity && args.len() >= arity - 4 {
         let missing = arity - args.len();
         // Defaults from the tail: timeout_ms, body, headers, method.
