@@ -2,6 +2,7 @@
 
 pub mod diagnostics;
 pub mod funcs;
+pub mod http_lint;
 pub mod inference;
 pub mod scope;
 pub mod structs;
@@ -593,6 +594,8 @@ pub(crate) struct Checker {
     pub(crate) span_types: std::collections::HashMap<zz_frontend::span::Span, Type>,
     /// Native libraries requested via `@link`, in source order, deduped.
     pub(crate) link_libs: Vec<String>,
+    /// `std.http` route registrations per server-var root (Phase 2.2 lint).
+    pub(crate) http_lint: http_lint::HttpLintState,
 }
 
 impl Checker {
@@ -626,6 +629,7 @@ impl Checker {
             import_aliases: HashMap::new(),
             span_types: std::collections::HashMap::new(),
             link_libs: Vec::new(),
+            http_lint: http_lint::HttpLintState::default(),
         }
     }
 

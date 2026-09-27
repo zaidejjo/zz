@@ -411,6 +411,9 @@ mod tests {
             "http.created",
             "http.not_found",
             "http.redirect",
+            "http.cors",
+            "http.secure_headers",
+            "http.secure_header_dict",
         ] {
             assert!(
                 http_prog.funcs.contains_key(name),

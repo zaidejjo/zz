@@ -42,3 +42,61 @@ func http.not_found() -> http.response {
 func http.redirect(url: str) -> http.response {
     std.http.respond(302, "", {"Location": url})
 }
+
+// ── CORS ─────────────────────────────────────────────────────────────────────
+
+func http.cors(server: http.server, origins: [str]) -> http.server {
+    s := std.http.pipe(server, |req| {
+        origin := std.http.header(req, "Origin").unwrap_or("")
+        if origin == "" {
+            return .ok(req)
+        }
+        denied := true
+        for o in origins {
+            if o == origin {
+                denied = false
+            }
+        }
+        if denied {
+            return .err(std.http.respond(403, "CORS origin denied", {}))
+        }
+        return .ok(req)
+    })
+    s = std.http.pipe_post(s, |req, res| {
+        origin := std.http.header(req, "Origin").unwrap_or("")
+        if origin == "" {
+            return res
+        }
+        std.http.with_headers(res, {
+            "Access-Control-Allow-Origin": origin,
+            "Vary": "Origin",
+        })
+    })
+    s = std.http.route(s, "OPTIONS", "*", |req| {
+        origin := std.http.header(req, "Origin").unwrap_or("")
+        std.http.respond(204, "", {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Max-Age": "86400",
+        })
+    })
+    return s
+}
+
+// ── Secure headers ───────────────────────────────────────────────────────────
+
+func http.secure_header_dict() -> {str: str} {
+    {
+        "Content-Security-Policy": "default-src 'self'",
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "X-Frame-Options": "DENY",
+    }
+}
+
+func http.secure_headers(server: http.server) -> http.server {
+    std.http.pipe_post(server, |req, res| {
+        std.http.with_headers(res, std.http.secure_header_dict())
+    })
+}

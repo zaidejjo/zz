@@ -19,6 +19,7 @@ use zz_runtime::{
 };
 
 pub(crate) mod router;
+pub(crate) mod static_files;
 
 // ===========================================================================
 // Helpers
@@ -68,24 +69,6 @@ fn jsonify_value(v: &Value) -> JsonValue {
     }
 }
 
-fn guess_mime(path: &str) -> &'static str {
-    match path.rsplit('.').next() {
-        Some("html") | Some("htm") => "text/html; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("js") => "application/javascript; charset=utf-8",
-        Some("json") => "application/json",
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("svg") => "image/svg+xml",
-        Some("txt") => "text/plain; charset=utf-8",
-        Some("ico") => "image/x-icon",
-        Some("woff") => "font/woff",
-        Some("woff2") => "font/woff2",
-        _ => "application/octet-stream",
-    }
-}
-
 fn parse_query_string(qs: &str) -> Vec<(String, String)> {
     if qs.is_empty() {
         return Vec::new();
@@ -119,6 +102,7 @@ fn http_reason(status: u16) -> &'static str {
         200 => "OK",
         201 => "Created",
         204 => "No Content",
+        206 => "Partial Content",
         301 => "Moved Permanently",
         304 => "Not Modified",
         400 => "Bad Request",
@@ -127,6 +111,7 @@ fn http_reason(status: u16) -> &'static str {
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
+        416 => "Range Not Satisfiable",
         431 => "Headers Too Large",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
@@ -137,26 +122,29 @@ fn http_reason(status: u16) -> &'static str {
 fn format_response_with_headers(
     status: u16,
     extra_headers: &[(String, String)],
-    body: &str,
+    body: &[u8],
     keep_alive: bool,
-) -> String {
+) -> Vec<u8> {
     let reason = http_reason(status);
     let conn = if keep_alive { "keep-alive" } else { "close" };
-    let mut hdrs = format!(
+    let mut head = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: {conn}",
         body.len()
     );
     for (k, v) in extra_headers {
-        hdrs.push_str(&format!("\r\n{k}: {v}"));
+        head.push_str(&format!("\r\n{k}: {v}"));
     }
-    format!("{hdrs}\r\n\r\n{body}")
+    head.push_str("\r\n\r\n");
+    let mut out = head.into_bytes();
+    out.extend_from_slice(body);
+    out
 }
 
-fn format_response(status: u16, body: &str) -> String {
+fn format_response(status: u16, body: &str) -> Vec<u8> {
     format_response_with_headers(
         status,
         &[("Content-Type".into(), "text/plain; charset=utf-8".into())],
-        body,
+        body.as_bytes(),
         false,
     )
 }
@@ -748,8 +736,9 @@ pub(crate) fn http_server(
     Ok(Value::HttpServer(Box::new(HttpServer {
         routes: Vec::new(),
         middlewares: Vec::new(),
+        post_middlewares: Vec::new(),
         log_enabled: false,
-        static_dir: None,
+        static_dirs: Vec::new(),
     })))
 }
 
@@ -907,6 +896,79 @@ pub(crate) fn http_pipe(
     Ok(Value::HttpServer(Box::new(server)))
 }
 
+/// `http.pipe_post(server, post_fn) -> Server`
+///
+/// Post-middleware runs AFTER the handler: `post_fn(req, res) -> res`.
+/// This is where response-header injection lives (CORS `Allow-Origin`,
+/// secure-headers) — pre-middleware can only see requests. A post function
+/// returning anything but a `Response` is a loud dispatch error.
+pub(crate) fn http_pipe_post(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let mut server = expect_server(args, 0, "std.http.pipe_post")?;
+    let middleware = args.get(1).cloned().ok_or_else(|| {
+        EvalError::new("std.http.pipe_post: missing post-middleware function", span)
+    })?;
+    if !matches!(middleware, Value::Func(_)) {
+        return Err(EvalError::new(
+            "std.http.pipe_post: post-middleware must be a function",
+            span,
+        ));
+    }
+    server.post_middlewares.push(middleware);
+    Ok(Value::HttpServer(Box::new(server)))
+}
+
+/// `http.with_headers(res: Response, extra: {str: str}) -> Response`
+///
+/// Returns a copy of `res` with `extra` merged in (`extra` wins,
+/// case-insensitively). Workhorse for post-middleware and handlers that
+/// decorate a base response.
+pub(crate) fn http_with_headers(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let mut res = match arg(args, 0, "std.http.with_headers")? {
+        Value::Response(r) => (**r).clone(),
+        other => {
+            return Err(EvalError::new(
+                format!("std.http.with_headers: expected an http.response, found `{other}`"),
+                span,
+            ));
+        }
+    };
+    let extra = match args.get(1).cloned().unwrap_or(Value::Dict(Box::default())) {
+        Value::Dict(entries) => entries
+            .iter()
+            .filter_map(|(k, v)| match (k, v) {
+                (Value::Str(k), Value::Str(v)) => Some((k.to_string(), v.to_string())),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        other => {
+            return Err(EvalError::new(
+                format!("std.http.with_headers: expected a headers dict, found `{other}`"),
+                span,
+            ));
+        }
+    };
+    for (k, v) in extra {
+        if let Some(slot) = res
+            .headers
+            .iter_mut()
+            .find(|(ek, _)| ek.eq_ignore_ascii_case(&k))
+        {
+            slot.1 = v;
+        } else {
+            res.headers.push((k, v));
+        }
+    }
+    Ok(Value::Response(Box::new(res)))
+}
+
 // ===========================================================================
 // Feature 4: Static File Serving
 // ===========================================================================
@@ -919,7 +981,59 @@ pub(crate) fn http_serve_dir(
 ) -> Result<Value, EvalError> {
     let mut server = expect_server(args, 0, "std.http.serve_dir")?;
     let dir = expect_str(args, 1, "std.http.serve_dir")?;
-    server.static_dir = Some(dir);
+    server.static_dirs.push(("/".to_string(), dir));
+    Ok(Value::HttpServer(Box::new(server)))
+}
+
+/// Normalize a static prefix: leading `/`, no trailing `/` (root stays `/`).
+fn normalize_static_prefix(prefix: &str) -> String {
+    let mut p = prefix.to_string();
+    if !p.starts_with('/') {
+        p.insert(0, '/');
+    }
+    while p.len() > 1 && p.ends_with('/') {
+        p.pop();
+    }
+    p
+}
+
+/// If `path` falls under `prefix`, return the sub-path to serve
+/// (always with a leading `/`). Root prefix `/` matches everything.
+fn strip_static_prefix(prefix: &str, path: &str) -> Option<String> {
+    if prefix == "/" {
+        return Some(path.to_string());
+    }
+    if path == prefix {
+        return Some("/".to_string());
+    }
+    path.strip_prefix(prefix)
+        .filter(|rest| rest.starts_with('/'))
+        .map(|rest| rest.to_string())
+}
+
+/// `http.serve_dir_at(server, prefix: str, dir_path: str) -> Server`
+///
+/// Scope a static root under a URL prefix: `serve_dir_at(s, "/assets", "./pub")`
+/// serves `./pub/logo.png` at `/assets/logo.png`. Longest matching prefix
+/// wins (registration order irrelevant); plain `serve_dir` is prefix `/`.
+pub(crate) fn http_serve_dir_at(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.serve_dir_at";
+    let mut server = expect_server(args, 0, NAME)?;
+    let prefix = expect_str(args, 1, NAME)?;
+    let dir = expect_str(args, 2, NAME)?;
+    if !prefix.starts_with('/') {
+        return Err(EvalError::new(
+            format!("`{NAME}`: prefix `{prefix}` must start with `/`"),
+            span,
+        ));
+    }
+    server
+        .static_dirs
+        .push((normalize_static_prefix(&prefix), dir));
     Ok(Value::HttpServer(Box::new(server)))
 }
 
@@ -937,23 +1051,73 @@ pub(crate) fn http_test(
     let method = expect_str(args, 1, "std.http.test")?;
     let path_with_query = expect_str(args, 2, "std.http.test")?;
     let body = expect_str(args, 3, "std.http.test")?;
+    test_dispatch(
+        interp,
+        span,
+        "std.http.test",
+        &server,
+        &method,
+        &path_with_query,
+        &[],
+        body,
+    )
+}
 
+/// `http.test_req(server, method, path, headers: {str: str}, body: str) -> Response`
+///
+/// Like `http.test` but injects request headers — conditionals
+/// (`If-None-Match`), ranges, and auth flows without a socket.
+pub(crate) fn http_test_req(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.test_req";
+    let server = expect_server(args, 0, NAME)?;
+    let method = expect_str(args, 1, NAME)?;
+    let path_with_query = expect_str(args, 2, NAME)?;
+    let headers_val = args.get(3).cloned().unwrap_or(Value::Dict(Box::default()));
+    let headers_map = dict_to_headers(&headers_val);
+    let headers: Vec<(String, String)> = headers_map.into_iter().collect();
+    let body = expect_str(args, 4, NAME)?;
+    test_dispatch(
+        interp,
+        span,
+        NAME,
+        &server,
+        &method,
+        &path_with_query,
+        &headers,
+        body,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn test_dispatch(
+    interp: &mut Interp,
+    span: Span,
+    _name: &str,
+    server: &HttpServer,
+    method: &str,
+    path_with_query: &str,
+    headers: &[(String, String)],
+    body: String,
+) -> Result<Value, EvalError> {
     // Split path and query
     let (path, query_pairs) = if let Some((p, q)) = path_with_query.split_once('?') {
         (p.to_string(), parse_query_string(q))
     } else {
-        (path_with_query.clone(), Vec::new())
+        (path_with_query.to_string(), Vec::new())
     };
 
-    let headers = Vec::new();
     let params = Vec::new();
 
     let result = dispatch_with_request(
-        &server,
-        &method,
+        server,
+        method,
         &path,
-        body.clone(),
-        &headers,
+        body,
+        headers,
         &query_pairs,
         &params,
         interp,
@@ -963,7 +1127,9 @@ pub(crate) fn http_test(
     match result {
         Ok((status, resp_body, resp_headers)) => Ok(Value::Response(Box::new(Response {
             status,
-            body: resp_body,
+            // `http.test` is a text-oriented helper: binary bodies arrive
+            // lossy here (the socket path writes raw bytes — see P2 static).
+            body: String::from_utf8_lossy(&resp_body).into_owned(),
             headers: resp_headers,
         }))),
         Err(e) => Ok(Value::Response(Box::new(Response {
@@ -1170,8 +1336,10 @@ fn allowed_methods(routes: &[(String, String, Value)], path: &str) -> String {
 // Dispatch — Core request handling with middleware, params, auto-JSON
 // ===========================================================================
 
-/// Dispatch result: (status, body, headers)
-type DispatchResult = Result<(u16, String, Vec<(String, String)>), EvalError>;
+/// Dispatch result: (status, raw body bytes, headers). Bodies are bytes
+/// (not `String`) so static files serve binary-identical content; text
+/// handlers convert via `.into_bytes()` and the socket writes raw.
+type DispatchResult = Result<(u16, Vec<u8>, Vec<(String, String)>), EvalError>;
 
 #[allow(clippy::too_many_arguments)]
 fn dispatch_with_request(
@@ -1211,10 +1379,10 @@ fn dispatch_with_request(
                     // Middleware rejected — err_val should be a Response
                     match err_val {
                         Value::Response(r) => {
-                            return Ok((r.status, r.body.clone(), r.headers.clone()));
+                            return Ok((r.status, r.body.clone().into_bytes(), r.headers.clone()));
                         }
                         other => {
-                            return Ok((401, format!("{other}"), vec![]));
+                            return Ok((401, format!("{other}").into_bytes(), vec![]));
                         }
                     }
                 }
@@ -1244,13 +1412,24 @@ fn dispatch_with_request(
                 let allow = allowed_methods(&server.routes, path);
                 return Ok((
                     405,
-                    "Method Not Allowed".into(),
+                    b"Method Not Allowed".to_vec(),
                     vec![("Allow".into(), allow)],
                 ));
             }
-            // No route matched — try static file serving
-            if let Some(ref dir) = server.static_dir {
-                return serve_static_file(dir, path, span);
+            // No route matched — try static roots (longest prefix wins, so
+            // a catch-all `serve_dir` never shadows a scoped `serve_dir_at`).
+            let mut best: Option<(usize, &str, String)> = None; // (prefix len, dir, sub-path)
+            for (prefix, dir) in &server.static_dirs {
+                if let Some(sub) = strip_static_prefix(prefix, path) {
+                    let longer = best.as_ref().is_none_or(|(n, _, _)| prefix.len() > *n);
+                    if longer {
+                        best = Some((prefix.len(), dir.as_str(), sub));
+                    }
+                }
+            }
+            if let Some((_, dir, sub)) = best {
+                let (st, bd, hd) = static_files::serve_static_file(dir, &sub, headers)?;
+                return apply_post_middlewares(server, interp, current_req, st, bd, hd, span);
             }
             return Err(EvalError::new(
                 format!("std.http: no route for {method} {path}"),
@@ -1281,67 +1460,92 @@ fn dispatch_with_request(
         current_req
     };
 
-    // Call handler
+    // Call handler. The request is cloned for the post-middleware chain
+    // only when one is registered (avoids a body copy per request).
+    let req_for_post = if server.post_middlewares.is_empty() {
+        None
+    } else {
+        Some(enriched_req.clone())
+    };
     let return_val = interp.call(handler, vec![enriched_req], span)?;
-    match return_val {
+    let (status, body, headers) = match return_val {
         // String response → 200 text/plain
-        Value::Str(s) => Ok((
+        Value::Str(s) => (
             200,
-            (*s).clone(),
+            s.as_bytes().to_vec(),
             vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
-        )),
+        ),
         // Response object → use its status/headers/body
-        Value::Response(r) => Ok((r.status, r.body, r.headers)),
+        Value::Response(r) => (r.status, r.body.into_bytes(), r.headers),
         // Dict/Array → auto-serialize to JSON
         ref val @ (Value::Dict(_) | Value::Array(_)) => {
             let json_val = jsonify_value(val);
             let body = to_json_string(&json_val);
-            Ok((
+            (
                 200,
-                body,
+                body.into_bytes(),
                 vec![(
                     "Content-Type".into(),
                     "application/json; charset=utf-8".into(),
                 )],
-            ))
+            )
         }
         // Other values → convert to string
         other => {
             // Other values → convert to string
-            Ok((
+            (
                 200,
-                format!("{other}"),
+                format!("{other}").into_bytes(),
                 vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
-            ))
+            )
         }
+    };
+
+    // Post-middleware: skipped entirely when unregistered (zero-cost:
+    // no request clone above, no Response round-trip here).
+    match req_for_post {
+        None => Ok((status, body, headers)),
+        Some(req) => apply_post_middlewares(server, interp, req, status, body, headers, span),
     }
 }
 
-/// Serve a static file from the given directory.
-fn serve_static_file(dir: &str, path: &str, _span: Span) -> DispatchResult {
-    let clean_path = if path.starts_with('/') {
-        path.strip_prefix('/').unwrap_or(path)
-    } else {
-        path
-    };
-
-    // Prevent directory traversal
-    if clean_path.contains("..") {
-        return Ok((403, "Forbidden".into(), vec![]));
-    }
-
-    let file_path = if clean_path.is_empty() {
-        format!("{dir}/index.html")
-    } else {
-        format!("{dir}/{clean_path}")
-    };
-
-    match std::fs::read_to_string(&file_path) {
-        Ok(contents) => {
-            let mime = guess_mime(&file_path);
-            Ok((200, contents, vec![("Content-Type".into(), mime.into())]))
+/// Run the post-middleware chain over a handler (or static-file) result.
+/// `post_fn(req, res) -> res` in registration order; anything but a
+/// `Response` out is a loud error. Static hits flow through here too so
+/// CORS/secure-headers apply to file responses as well.
+#[allow(clippy::too_many_arguments)]
+fn apply_post_middlewares(
+    server: &HttpServer,
+    interp: &mut Interp,
+    req: Value,
+    status: u16,
+    body: Vec<u8>,
+    headers: Vec<(String, String)>,
+    span: Span,
+) -> DispatchResult {
+    let mut res_val = Value::Response(Box::new(Response {
+        status,
+        body: String::from_utf8_lossy(&body).into_owned(),
+        headers,
+    }));
+    // Static bodies may be binary; post-middleware sees them lossy through
+    // `text()` (same contract as `http.test`). Binary + post-mw stays
+    // exact only for UTF-8 bodies.
+    for post in &server.post_middlewares {
+        let out = interp.call(post.clone(), vec![req.clone(), res_val], span)?;
+        match out {
+            Value::Response(r) => res_val = Value::Response(r),
+            other => {
+                return Err(EvalError::new(
+                    format!("std.http: post-middleware returned `{other}`, expected http.response"),
+                    span,
+                ));
+            }
         }
-        Err(_) => Ok((404, "Not Found".into(), vec![])),
+    }
+    match res_val {
+        Value::Response(r) => Ok((r.status, r.body.into_bytes(), r.headers)),
+        _ => unreachable!("post chain preserves Response"),
     }
 }
 
@@ -1355,7 +1559,7 @@ pub(crate) fn dispatch(
     span: Span,
 ) -> Result<String, EvalError> {
     let result = dispatch_with_request(server, method, path, body, &[], &[], &[], interp, span)?;
-    Ok(result.1)
+    Ok(String::from_utf8_lossy(&result.1).into_owned())
 }
 
 // ===========================================================================
@@ -1425,8 +1629,9 @@ impl FuncSnapshot {
 struct ServerSnapshot {
     routes: Vec<(String, String, FuncSnapshot)>,
     middleware: Vec<FuncSnapshot>,
+    post_middleware: Vec<FuncSnapshot>,
     log_enabled: bool,
-    static_dir: Option<String>,
+    static_dirs: Vec<(String, String)>,
     natives: Arc<HashMap<String, NativeEntry>>,
     structs: HashMap<String, Vec<String>>,
     funcs: Arc<std::sync::Mutex<HashMap<String, FuncValue>>>,
@@ -1508,11 +1713,18 @@ impl ServerSnapshot {
             .filter_map(|m| snapshot_func_scoped(m, interp))
             .collect();
 
+        let post_middleware = server
+            .post_middlewares
+            .iter()
+            .filter_map(|m| snapshot_func_scoped(m, interp))
+            .collect();
+
         ServerSnapshot {
             routes,
             middleware,
+            post_middleware,
             log_enabled: server.log_enabled,
-            static_dir: server.static_dir.clone(),
+            static_dirs: server.static_dirs.clone(),
             natives: interp.natives.clone(),
             structs: (*interp.structs).clone(),
             funcs: Arc::new(std::sync::Mutex::new(snapshot_funcs(&interp.funcs))),
@@ -1528,8 +1740,13 @@ impl ServerSnapshot {
                 .map(|(method, path, fs)| (method.clone(), path.clone(), fs.reconstruct()))
                 .collect(),
             middlewares: self.middleware.iter().map(|fs| fs.reconstruct()).collect(),
+            post_middlewares: self
+                .post_middleware
+                .iter()
+                .map(|fs| fs.reconstruct())
+                .collect(),
             log_enabled: self.log_enabled,
-            static_dir: self.static_dir.clone(),
+            static_dirs: self.static_dirs.clone(),
         }
     }
 
@@ -1548,12 +1765,69 @@ impl ServerSnapshot {
     }
 }
 
+/// Per-server socket limits (see `http.listen_cfg`). Defaults preserve the
+/// historic constants below so plain `http.listen` behaves identically.
+#[derive(Debug, Clone, Copy)]
+struct ServerLimits {
+    read_timeout: std::time::Duration,
+    max_reqs_per_conn: usize,
+    max_body_bytes: usize,
+    shutdown_timeout: std::time::Duration,
+}
+
+impl Default for ServerLimits {
+    fn default() -> Self {
+        ServerLimits {
+            read_timeout: READ_TIMEOUT,
+            max_reqs_per_conn: MAX_REQS_PER_CONN,
+            max_body_bytes: MAX_BODY_BYTES,
+            shutdown_timeout: std::time::Duration::from_secs(5),
+        }
+    }
+}
+
+/// Graceful-shutdown flag, set by SIGINT/SIGTERM (unix only).
+static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn on_shutdown_signal(_: libc::c_int) {
+    SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Install the SIGINT/SIGTERM → drain handler once per process.
+/// No-op on Windows (no `sigaction` there); the accept loop still polls.
+fn install_shutdown_hook() {
+    #[cfg(unix)]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            // SAFETY: zeroed `sigaction` + empty mask + async-signal-safe
+            // handler (a single relaxed atomic store). No ZZ state touched.
+            unsafe {
+                let mut sa: libc::sigaction = std::mem::zeroed();
+                sa.sa_sigaction = on_shutdown_signal as *const () as usize;
+                sa.sa_flags = 0;
+                libc::sigemptyset(&mut sa.sa_mask);
+                libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+                libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+            }
+        });
+    }
+}
+
+fn shutdown_requested() -> bool {
+    SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Blocking HTTP server loop. Dispatches accepted TCP connections to a
 /// bounded worker pool (not one OS thread per connection) so route handlers
 /// execute in parallel across cores without thread-spawn churn.
 ///
 /// Each worker reconstructs its own `Interp` + `HttpServer` from the
 /// pre-computed snapshot, avoiding lock contention on the hot path.
+///
+/// SIGINT/SIGTERM stops the accept loop; in-flight connections drain up to
+/// the shutdown timeout, then `listen` returns normally.
 pub(crate) fn http_listen(
     interp: &mut Interp,
     args: &mut Vec<Value>,
@@ -1569,11 +1843,93 @@ pub(crate) fn http_listen(
             ))
         }
     };
+    listen_inner(interp, server, port, ServerLimits::default(), span)
+}
 
+/// `http.listen_cfg(server, port, opts: {str: int}) -> unit`
+///
+/// `opts` keys (all optional): `read_ms` (per-read timeout, default 30000),
+/// `max_reqs_conn` (requests per keep-alive connection, default 1000),
+/// `max_body_bytes` (request body cap, default 52428800),
+/// `shutdown_ms` (SIGINT/SIGTERM drain budget, default 5000).
+/// Present keys must be positive ints; missing keys keep defaults.
+pub(crate) fn http_listen_cfg(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.listen_cfg";
+    let server = expect_server(args, 0, NAME)?;
+    let port = match args.get(1) {
+        Some(Value::Int(p)) => *p,
+        other => {
+            return Err(EvalError::new(
+                format!("`{NAME}`: expected an int port, found `{other:?}`"),
+                span,
+            ));
+        }
+    };
+    let mut limits = ServerLimits::default();
+    if let Some(opts) = args.get(2) {
+        let entries = match opts {
+            Value::Dict(entries) => entries.clone(),
+            other => {
+                return Err(EvalError::new(
+                    format!("`{NAME}`: expected an opts dict, found `{other}`"),
+                    span,
+                ));
+            }
+        };
+        for (k, v) in entries.iter() {
+            let (Value::Str(key), Value::Int(n)) = (k, v) else {
+                return Err(EvalError::new(
+                    format!("`{NAME}`: opts values must be positive ints, found `{v}` for `{k}`"),
+                    span,
+                ));
+            };
+            if *n <= 0 {
+                return Err(EvalError::new(
+                    format!("`{NAME}`: opts value for `{key}` must be positive, found `{n}`"),
+                    span,
+                ));
+            }
+            let n = *n as u64;
+            match key.as_str() {
+                "read_ms" => limits.read_timeout = std::time::Duration::from_millis(n),
+                "max_reqs_conn" => limits.max_reqs_per_conn = n as usize,
+                "max_body_bytes" => limits.max_body_bytes = n as usize,
+                "shutdown_ms" => limits.shutdown_timeout = std::time::Duration::from_millis(n),
+                other => {
+                    return Err(EvalError::new(
+                        format!(
+                            "`{NAME}`: unknown opts key `{other}` \
+                             (expected read_ms, max_reqs_conn, max_body_bytes or shutdown_ms)"
+                        ),
+                        span,
+                    ));
+                }
+            }
+        }
+    }
+    listen_inner(interp, server, port, limits, span)
+}
+
+fn listen_inner(
+    interp: &mut Interp,
+    server: HttpServer,
+    port: i64,
+    limits: ServerLimits,
+    span: Span,
+) -> Result<Value, EvalError> {
     // Snapshot the server + interp state before entering the accept loop.
     // This is sent to each connection thread so they can reconstruct
     // a fully independent server + interp without any cross-thread Rc.
     let snapshot = Arc::new(ServerSnapshot::from_server(&server, interp));
+
+    // Fresh shutdown state per `listen` (a previous drain must not poison
+    // a later server in the same process, e.g. sequential e2e servers).
+    SHUTDOWN.store(false, std::sync::atomic::Ordering::Relaxed);
+    install_shutdown_hook();
 
     let listener = std::net::TcpListener::bind(("0.0.0.0", port as u16)).map_err(|e| {
         eprintln!("[ERROR] std.http.listen: cannot bind port {port}: {e}");
@@ -1607,29 +1963,61 @@ pub(crate) fn http_listen(
     let (tx, rx) = std::sync::mpsc::sync_channel::<(std::net::TcpStream, Arc<ServerSnapshot>)>(
         POOL_QUEUE_DEPTH,
     );
-    spawn_pool(rx, span);
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
-        match tx.try_send((stream, Arc::clone(&snapshot))) {
-            Ok(()) => {}
-            Err(std::sync::mpsc::TrySendError::Full((mut stream, _))) => {
-                // Backpressure: pool saturated — fail fast with 503 instead
-                // of queueing unboundedly (slowloris-shaped traffic would
-                // otherwise pin memory per pending connection).
-                let busy = format_response_with_headers(
-                    503,
-                    &[
-                        ("Content-Type".into(), "text/plain; charset=utf-8".into()),
-                        ("Retry-After".into(), "1".into()),
-                    ],
-                    "server busy",
-                    false,
-                );
-                let _ = stream.write_all(busy.as_bytes());
-                let _ = stream.flush();
-            }
-            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+    // In-flight connections: incremented on accept, decremented when the
+    // connection thread finishes. The shutdown drain waits on this.
+    let inflight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    spawn_pool(rx, span, limits, Arc::clone(&inflight));
+    // Nonblocking accept so SIGINT/SIGTERM is noticed promptly (blocking
+    // `incoming()` would sleep through the signal until the next client).
+    if let Err(e) = listener.set_nonblocking(true) {
+        return Err(EvalError::new(
+            format!("std.http.listen: cannot set nonblocking: {e}"),
+            span,
+        ));
+    }
+    loop {
+        if shutdown_requested() {
+            break;
         }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                inflight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                match tx.try_send((stream, Arc::clone(&snapshot))) {
+                    Ok(()) => {}
+                    Err(std::sync::mpsc::TrySendError::Full((mut stream, _))) => {
+                        // Backpressure: pool saturated — fail fast with 503 instead
+                        // of queueing unboundedly (slowloris-shaped traffic would
+                        // otherwise pin memory per pending connection).
+                        let busy = format_response_with_headers(
+                            503,
+                            &[
+                                ("Content-Type".into(), "text/plain; charset=utf-8".into()),
+                                ("Retry-After".into(), "1".into()),
+                            ],
+                            b"server busy",
+                            false,
+                        );
+                        let _ = stream.write_all(&busy);
+                        let _ = stream.flush();
+                        inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                        inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => continue,
+        }
+    }
+    // Drain: in-flight connections finish (keep-alive sockets close via
+    // their read timeouts at the latest) or the budget expires.
+    let deadline = Instant::now() + limits.shutdown_timeout;
+    while inflight.load(std::sync::atomic::Ordering::Relaxed) > 0 && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
     Ok(Value::Unit)
 }
@@ -1655,16 +2043,20 @@ const POOL_QUEUE_DEPTH: usize = 1024;
 fn spawn_pool(
     rx: std::sync::mpsc::Receiver<(std::net::TcpStream, Arc<ServerSnapshot>)>,
     span: Span,
+    limits: ServerLimits,
+    inflight: Arc<std::sync::atomic::AtomicUsize>,
 ) {
     let rx = Arc::new(std::sync::Mutex::new(rx));
     for _ in 0..pool_size() {
         let rx = Arc::clone(&rx);
+        let inflight = Arc::clone(&inflight);
         std::thread::spawn(move || loop {
             let job = rx.lock().ok().and_then(|rx| rx.recv().ok());
             let Some((mut stream, snap)) = job else {
                 return;
             };
-            handle_connection_thread(&snap, &mut stream, span);
+            handle_connection_thread(&snap, &mut stream, span, limits);
+            inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         });
     }
 }
@@ -1672,24 +2064,25 @@ fn spawn_pool(
 /// Handle a single TCP connection on a dedicated thread.
 ///
 /// Reconstructs the HTTP server and interpreter from the snapshot once per
-/// connection, then serves up to [`MAX_REQS_PER_CONN`] requests on the same
-/// socket (HTTP/1.1 keep-alive). Each request parses the head (bounded),
-/// reads exactly `Content-Length` body bytes, dispatches through the
-/// route/middleware pipeline, and writes a framed response.
+/// connection, then serves up to the configured requests-per-connection on
+/// the same socket (HTTP/1.1 keep-alive). Each request parses the head
+/// (bounded), reads exactly `Content-Length` body bytes, dispatches through
+/// the route/middleware pipeline, and writes a framed response.
 fn handle_connection_thread(
     snapshot: &ServerSnapshot,
     stream: &mut std::net::TcpStream,
     span: Span,
+    limits: ServerLimits,
 ) {
-    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+    let _ = stream.set_read_timeout(Some(limits.read_timeout));
     // Reconstruct once per connection: every request on this socket shares
     // the same server + interp (sequential — no cross-request aliasing).
     let server = snapshot.reconstruct_server();
     let mut interp = snapshot.fresh_interp();
 
-    for _ in 0..MAX_REQS_PER_CONN {
+    for _ in 0..limits.max_reqs_per_conn {
         let start = Instant::now();
-        if !handle_one_request(&server, &mut interp, stream, span, start) {
+        if !handle_one_request(&server, &mut interp, stream, span, limits, start) {
             return;
         }
     }
@@ -1697,11 +2090,13 @@ fn handle_connection_thread(
 
 /// Serve one request on an already-open connection.
 /// Returns `true` to keep serving this socket, `false` to close it.
+#[allow(clippy::too_many_arguments)]
 fn handle_one_request(
     server: &HttpServer,
     interp: &mut Interp,
     stream: &mut std::net::TcpStream,
     span: Span,
+    limits: ServerLimits,
     start: Instant,
 ) -> bool {
     // ── Read the raw HTTP request ──
@@ -1719,7 +2114,7 @@ fn handle_one_request(
         }
         Ok(None) => {
             // Header block exceeded the cap (or client vanished).
-            let _ = stream.write_all(format_response(431, "headers too large").as_bytes());
+            let _ = stream.write_all(&format_response(431, "headers too large"));
             let _ = stream.flush();
             return false;
         }
@@ -1732,13 +2127,13 @@ fn handle_one_request(
     let text = String::from_utf8_lossy(&head_buf).to_string();
     let mut lines = text.lines();
     let Some(request_line) = lines.next() else {
-        let _ = stream.write_all(format_response(400, "bad request").as_bytes());
+        let _ = stream.write_all(&format_response(400, "bad request"));
         let _ = stream.flush();
         return false;
     };
     let mut parts = request_line.split_whitespace();
     let (Some(method), Some(raw_path)) = (parts.next(), parts.next()) else {
-        let _ = stream.write_all(format_response(400, "bad request").as_bytes());
+        let _ = stream.write_all(&format_response(400, "bad request"));
         let _ = stream.flush();
         return false;
     };
@@ -1779,8 +2174,8 @@ fn handle_one_request(
             keep_alive = true;
         }
     }
-    if content_length > MAX_BODY_BYTES {
-        let _ = stream.write_all(format_response(413, "payload too large").as_bytes());
+    if content_length > limits.max_body_bytes {
+        let _ = stream.write_all(&format_response(413, "payload too large"));
         let _ = stream.flush();
         return false;
     }
@@ -1795,14 +2190,15 @@ fn handle_one_request(
         .map(|idx| idx + 4)
         .unwrap_or(head_buf.len());
     let buffered: &[u8] = head_buf.get(head_end..).unwrap_or(&[]);
-    let body_bytes = match read_exact_capped(stream, buffered, content_length, MAX_BODY_BYTES) {
-        Ok(b) => b,
-        Err(_) => {
-            let _ = stream.write_all(format_response(400, "truncated body").as_bytes());
-            let _ = stream.flush();
-            return false;
-        }
-    };
+    let body_bytes =
+        match read_exact_capped(stream, buffered, content_length, limits.max_body_bytes) {
+            Ok(b) => b,
+            Err(_) => {
+                let _ = stream.write_all(&format_response(400, "truncated body"));
+                let _ = stream.flush();
+                return false;
+            }
+        };
     // Reuse the read buffer when it is valid UTF-8 (JSON always is):
     // `from_utf8_lossy().to_string()` copies the whole body again, which
     // triples peak memory on multi-MB publishes (buffer + String + dict).
@@ -1826,7 +2222,7 @@ fn handle_one_request(
 
     let (status, resp_body, resp_headers) = match result {
         Ok(r) => r,
-        Err(e) => (500, e.message, vec![]),
+        Err(e) => (500, e.message.into_bytes(), vec![]),
     };
 
     let elapsed = start.elapsed();
@@ -1853,7 +2249,7 @@ fn handle_one_request(
         // `resp_body` is the exact suffix, so truncating by its length is safe.
         response.truncate(response.len() - resp_body.len());
     }
-    if stream.write_all(response.as_bytes()).is_err() {
+    if stream.write_all(&response).is_err() {
         return false;
     }
     if stream.flush().is_err() {

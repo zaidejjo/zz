@@ -257,6 +257,12 @@ fn every_funcs_key_has_a_native() {
         "http.created",
         "http.not_found",
         "http.redirect",
+        "std.http.cors",
+        "http.cors",
+        "std.http.secure_headers",
+        "http.secure_headers",
+        "std.http.secure_header_dict",
+        "http.secure_header_dict",
         // math numeric constants (true Float values, see `stdlib_consts`;
         // no runtime function to implement)
         "std.math.PI",

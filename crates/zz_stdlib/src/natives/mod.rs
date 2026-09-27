@@ -1492,6 +1492,20 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: http::http_listen,
         },
     );
+    m.insert(
+        "std.http.listen_cfg".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_listen_cfg,
+        },
+    );
+    m.insert(
+        "http.listen_cfg".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_listen_cfg,
+        },
+    );
 
     // std.http — Phase 5B features
     m.insert(
@@ -1537,10 +1551,59 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "std.http.serve_dir_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_serve_dir_at,
+        },
+    );
+    m.insert(
+        "http.serve_dir_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_serve_dir_at,
+        },
+    );
+    m.insert(
+        "std.http.pipe_post".into(),
+        NativeEntry {
+            arity: 2,
+            f: http::http_pipe_post,
+        },
+    );
+    m.insert(
+        "http.pipe_post".into(),
+        NativeEntry {
+            arity: 2,
+            f: http::http_pipe_post,
+        },
+    );
+    m.insert(
+        "std.http.with_headers".into(),
+        NativeEntry {
+            arity: 2,
+            f: http::http_with_headers,
+        },
+    );
+    m.insert(
+        "http.with_headers".into(),
+        NativeEntry {
+            arity: 2,
+            f: http::http_with_headers,
+        },
+    );
+    m.insert(
         "std.http.test".into(),
         NativeEntry {
             arity: 4,
             f: http::http_test,
+        },
+    );
+    m.insert(
+        "std.http.test_req".into(),
+        NativeEntry {
+            arity: 5,
+            f: http::http_test_req,
         },
     );
     m.insert(
