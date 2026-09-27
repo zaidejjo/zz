@@ -2705,6 +2705,7 @@ void zz_safepoint(void) {
 #ifdef __linux__
 #include <sys/epoll.h>
 #include <sys/syscall.h>
+#include <sys/mman.h>
 #include <sched.h>
 #endif
 #include <fcntl.h>
@@ -3363,14 +3364,21 @@ zz_value zz_db_query(zz_value db, zz_value sql, zz_value binds, int *err) {
 }
 
 // =====================================================================
-//  Epoll HTTP Server — SO_REUSEPORT Multi-Core Event Loop
+//  Epoll HTTP Server — Threaded Single-Process Event Loop
 // =====================================================================
 //
-//  Architecture:
-//    - SO_REUSEPORT: multiple forked workers share the same port
-//    - Each worker: own epoll_create1() + epoll_wait() loop
-//    - Level-triggered EPOLLIN/EPOLLOUT (not edge-triggered)
-//    - Pre-allocated Connection array — no malloc per request
+//  Architecture (ultra-lean: the whole server must stay under ~3 MB RSS):
+//    - ONE process, N pthreads (N = online CPUs) sharing everything:
+//      route table, mappings and heap exist once, not once per worker.
+//    - Each thread runs its own epoll_create1() + epoll_wait() loop over
+//      the SHARED non-blocking listen fd (edge-triggered; every thread
+//      drains accepts until EAGAIN — duplicate wakeups are harmless).
+//    - Per-thread fixed Connection pool (no malloc per connection).
+//      Static buffers are deliberately small (1 KB head + 2 KB reply):
+//      real heads/replies are ~100 B; anything bigger overflows to the
+//      existing heap paths (head_dyn / wbuf), so only the common case
+//      stays malloc-free while big requests still work.
+//    - Pool overflow sheds load by closing the new fd (no queueing).
 //
 //  Connection state machine:
 //    CONN_READING → CONN_READING_BODY → dispatch → CONN_WRITING
@@ -3378,13 +3386,13 @@ zz_value zz_db_query(zz_value db, zz_value sql, zz_value binds, int *err) {
 //    Error replies (400/413/431/500) always close: framing past a failed
 //    request cannot be trusted.
 
-// 512 slots x (8K read + 16K write) ~= 12 MB per worker (was 24 MB at
-// 1024). 512 per worker (2048 total across 4 workers) still dwarfs the
-// wrk -c100 bench and any realistic single-box load; overflow gracefully
-// closes the new fd (no 503 body — socket servers shed load by refusing).
-#define MAX_CONNECTIONS 512
-#define READ_BUF_SIZE   8192
-#define WRITE_BUF_SIZE  16384
+// 32 slots x (256 B head + 512 B reply) = 24 KB per thread untouched.
+// 128 total slots still covers c100; bigger heads/replies overflow to
+// the heap paths (head_dyn / wbuf), so small statics only accelerate
+// the common case: wrk heads are ~150 B, our replies ~100 B.
+#define HTTP_WORKER_SLOTS 32
+#define READ_BUF_SIZE   256
+#define WRITE_BUF_SIZE  512
 #define MAX_EVENTS      128
 
 typedef enum {
@@ -3438,7 +3446,11 @@ typedef struct {
     size_t  req_tgt_len;
 } Connection;
 
-static Connection g_connections[MAX_CONNECTIONS];
+// Per-thread connection pool: calloc'd once per worker thread; the
+// main thread holds none (it only joins). Only touched slots fault,
+// so RSS tracks live connections, not capacity.
+static __thread Connection *t_conns = NULL;
+static __thread int t_nconns = 0;
 static int g_http_server_running = 0;
 
 
@@ -3446,8 +3458,8 @@ static int g_http_server_running = 0;
 // ---- Connection slot management (no malloc) ----
 
 static int find_free_slot(void) {
-    for (int i = 0; i < MAX_CONNECTIONS; i++) {
-        if (g_connections[i].fd == -1) return i;
+    for (int i = 0; i < t_nconns; i++) {
+        if (t_conns[i].fd == -1) return i;
     }
     return -1;
 }
@@ -3455,7 +3467,7 @@ static int find_free_slot(void) {
 static Connection* alloc_connection(int fd) {
     int idx = find_free_slot();
     if (idx < 0) return NULL;
-    Connection *c = &g_connections[idx];
+    Connection *c = &t_conns[idx];
     c->fd = fd;
     c->state = CONN_READING;  // Start in READING state
     c->read_pos = 0;
@@ -3509,13 +3521,13 @@ static void free_connection(Connection *c) {
 }
 
 static void init_connections(void) {
-    for (int i = 0; i < MAX_CONNECTIONS; i++) {
-        g_connections[i].fd = -1;
-        g_connections[i].state = CONN_CLOSED;
-        g_connections[i].read_pos = 0;
-        g_connections[i].write_pos = 0;
-        g_connections[i].response_len = 0;
-        g_connections[i].keep_alive = 0;
+    for (int i = 0; i < t_nconns; i++) {
+        t_conns[i].fd = -1;
+        t_conns[i].state = CONN_CLOSED;
+        t_conns[i].read_pos = 0;
+        t_conns[i].write_pos = 0;
+        t_conns[i].response_len = 0;
+        t_conns[i].keep_alive = 0;
     }
 }
 
@@ -3669,8 +3681,18 @@ static void process_connection(Connection *c) {
 // ---- Read from socket (state-aware) ----
 
 // Returns 1 while the connection is alive (more reads may follow),
-// 0 when it died and the caller should drop it.
+// 0 when it died and the caller should drop it. EOF closes the slot
+// immediately: the old code returned 0 without closing, so every
+// client-closed keep-alive connection leaked its pool slot forever
+// (a dead peer can never reuse it).
+//   - head EOF: nothing to answer (complete heads dispatch eagerly,
+//     so no pending request exists) → close.
+//   - body EOF with a COMPLETE body: still dispatch (covers TCP
+//     half-close, where the peer shut down writes but reads our reply).
+//   - body EOF with a partial body: it can never complete → close.
+// Closed fds leave epoll by themselves on Linux; callers also DEL.
 static int read_from_socket(Connection *c) {
+    if (c->fd < 0) return 0;
     if (c->state == CONN_READING_BODY) {
         // Append straight into the exact-size body buffer.
         size_t room = c->body_need - c->body_len;
@@ -3681,13 +3703,12 @@ static int read_from_socket(Connection *c) {
             return 1;
         }
         if (n == 0) {
-            // EOF before the full body: sticky 400 (but only if the
-            // body is actually incomplete — a pipelined close after a
-            // complete body still dispatches).
-            if (c->body_len < c->body_need) c->body_truncated = 1;
-            return 1;
+            if (c->body_len >= c->body_need) return 1; // half-close: dispatch
+            connection_to_closed(c);
+            return 0;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
+        connection_to_closed(c);
         return 0;
     }
     // Head phase: fill the static buffer, growing past it when needed.
@@ -3698,8 +3719,12 @@ static int read_from_socket(Connection *c) {
         if (rc < 0) return 1; // cap exceeded; process_connection replies 431
         return 1;
     }
-    if (n == 0) return 0; // client closed
+    if (n == 0) {
+        connection_to_closed(c); // client closed: free the slot now
+        return 0;
+    }
     if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
+    connection_to_closed(c);
     return 0;
 }
 
@@ -3738,6 +3763,34 @@ static int write_to_socket(Connection *c) {
     }
 }
 
+// Drop clean file-backed pages of cold dependencies (libcurl, TLS,
+// sqlite trees). Linked for fetch/sql features the hot serve path never
+// calls; their constructors fault ~1 MB of tables at load. DONTNEED on
+// private file mappings is transparent: any later use (e.g. a handler
+// calling fetch) re-faults from disk automatically.
+#ifdef __linux__
+static void http_cold_dep_trim(void) {
+    static const char *const cold[] = {
+        "libcurl.", "libssl.", "libcrypto.", "libsqlite3.",
+        "libnghttp", "libngtcp2", "libssh2.", "libidn2.",
+        "ld.so.cache", "locale-archive", "gconv/", NULL,
+    };
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) return;
+    char line[512];
+    while (fgets(line, sizeof line, maps)) {
+        unsigned long lo = 0, hi = 0;
+        if (sscanf(line, "%lx-%lx", &lo, &hi) != 2 || hi <= lo) continue;
+        int hit = 0;
+        for (int i = 0; cold[i] && !hit; i++) {
+            if (strstr(line, cold[i])) hit = 1;
+        }
+        if (hit) madvise((void *)lo, (size_t)(hi - lo), MADV_DONTNEED);
+    }
+    fclose(maps);
+}
+#endif
+
 // ---- Get CPU core count ----
 
 static int get_cpu_count(void) {
@@ -3745,16 +3798,34 @@ static int get_cpu_count(void) {
     return (n > 0) ? (int)n : 4;
 }
 
-// ---- Epoll worker loop (runs in each forked process) ----
-// Linux-only: epoll + fork exist nowhere else. Other targets (macOS, Windows)
-// get a clear runtime error instead of a compile wall — the AOT HTTP server
-// never supported them; plain `zz run` (VM) remains the portable path.
+// ---- Epoll worker loop (runs in each pthread) ----
+// Linux-only: epoll exists nowhere else. Other targets (macOS, Windows)
+// get a clear runtime error instead of a compile wall — the AOT HTTP
+// server never supported them; plain `zz run` (VM) remains the portable
+// path. Thread-safety: workers share the route table and interned
+// strings read-only (registration finishes before threads spawn); ARC
+// is atomic, the intern table is mutex'd, and all request scratch is
+// thread-local. No worker touches another's pool.
 #ifdef __linux__
-static void worker_loop(int listen_fd, int worker_id) {
+typedef struct { int listen_fd; int worker_id; } http_worker_arg;
+
+static void *worker_loop(void *arg) {
+    int listen_fd = ((http_worker_arg *)arg)->listen_fd;
+    int worker_id = ((http_worker_arg *)arg)->worker_id;
+    free(arg);
+    // Per-thread pool: one calloc, never grows. Untouched slots never
+    // fault, so RSS tracks live connections, not capacity.
+    t_conns = (Connection *)calloc((size_t)HTTP_WORKER_SLOTS, sizeof(Connection));
+    if (!t_conns) {
+        fprintf(stderr, "worker %d: connection pool calloc failed\n", worker_id);
+        return NULL;
+    }
+    t_nconns = HTTP_WORKER_SLOTS;
+    init_connections();
     int epfd = epoll_create1(EPOLL_CLOEXEC);
     if (epfd < 0) {
         fprintf(stderr, "worker %d: epoll_create1 failed: %s\n", worker_id, strerror(errno));
-        return;
+        return NULL;
     }
 
     // Add listen_fd to epoll. Clients carry their Connection* in
@@ -3765,13 +3836,15 @@ static void worker_loop(int listen_fd, int worker_id) {
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
         fprintf(stderr, "worker %d: epoll_ctl ADD listen_fd failed: %s\n", worker_id, strerror(errno));
         close(epfd);
-        return;
+        return NULL;
     }
 
     struct epoll_event events[MAX_EVENTS];
 
     while (g_http_server_running) {
-        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
+        // 500 ms timeout (not -1): lets a shutdown flag change drain
+        // promptly; the wakeup cost is one syscall per thread per 500 ms.
+        int nfds = epoll_wait(epfd, events, MAX_EVENTS, 500);
         if (nfds < 0) {
             if (errno == EINTR) continue;
             break;
@@ -3963,46 +4036,52 @@ static void worker_loop(int listen_fd, int worker_id) {
     }
 
     close(epfd);
+    return NULL;
 }
 
-// ---- Main server startup with SO_REUSEPORT + fork ----
+// ---- Main server startup: one process, one thread per CPU ----
 
 static int spawn_workers(int listen_fd, int port) {
+    (void)port;
     int workers = get_cpu_count();
-
+    pthread_t *threads = (pthread_t *)calloc((size_t)workers, sizeof(pthread_t));
+    if (!threads) return -1;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    // 256 KB stacks (default 8 MB wastes virtual space per thread and
+    // pressures overcommit accounting; workers use ~16 KB).
+    pthread_attr_setstacksize(&attr, 256 * 1024);
+    int launched = 0;
     for (int w = 0; w < workers; w++) {
-        pid_t pid = fork();
-        if (pid < 0) {
-            return -1;
+        http_worker_arg *a = (http_worker_arg *)malloc(sizeof(http_worker_arg));
+        if (!a) break;
+        a->listen_fd = listen_fd;
+        a->worker_id = w;
+        if (pthread_create(&threads[w], &attr, worker_loop, a) != 0) {
+            free(a);
+            break;
         }
-        if (pid == 0) {
-            // Child worker
-            worker_loop(listen_fd, w);
-            close(listen_fd);
-            exit(0);
-        }
-        // Parent continues forking
+        launched++;
     }
-
-    // Parent waits for children
-    while (g_http_server_running) {
-        sleep(1);
+    pthread_attr_destroy(&attr);
+    if (launched == 0) {
+        free(threads);
+        return -1;
     }
-
-    // Reap children
-    while (wait(NULL) > 0) {}
-
+    // Join (blocks until killed): workers run until the process dies.
+    for (int w = 0; w < launched; w++) pthread_join(threads[w], NULL);
+    free(threads);
     return 0;
 }
 #else
-// Non-Linux fallback: no fork/epoll here. Emits a clear error so a native
+// Non-Linux fallback: no epoll here. Emits a clear error so a native
 // binary fails loudly at `listen` time instead of not compiling at all.
 // Uses only stdio so it builds on every target (incl. Windows/MSVC).
 static int spawn_workers(int listen_fd, int port) {
     (void)listen_fd;
     (void)port;
     fprintf(stderr,
-        "zz_http_listen: the AOT HTTP server requires Linux (fork+epoll); "
+        "zz_http_listen: the AOT HTTP server requires Linux (epoll); "
         "use `zz run` (VM) on this platform\n");
     return -1;
 }
@@ -4756,6 +4835,17 @@ static const char *http_reason_phrase(long status) {
     }
 }
 
+// Append a decimal size_t to dst; returns bytes written. Replaces
+// snprintf for the hot response header (printf machinery is ~100 ns
+// per request we don't need to spend).
+static size_t http_put_u64(char *dst, size_t v) {
+    char tmp[20];
+    int n = 0;
+    do { tmp[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+    for (int i = 0; i < n; i++) dst[i] = tmp[n - 1 - i];
+    return (size_t)n;
+}
+
 // Trim ASCII spaces/tabs (plus the \r left by \n-splitting) in place.
 static void http_trim_span(const char **s, size_t *n) {
     while (*n > 0 && (**s == ' ' || **s == '\t' || **s == '\r')) { (*s)++; (*n)--; }
@@ -5083,15 +5173,22 @@ static void http_run_handler(Connection *c) {
             if (r.tag == ZZ_STR && r.s) {
                 // Byte-parity with the slow path: status + CL +
                 // Connection, then the text/plain Content-Type the
-                // wrapper would inject, then blank + body.
-                const char *reason = http_reason_phrase(200);
-                static const char ct[] = "Content-Type: text/plain; charset=utf-8\r\n";
-                char hs[256];
-                int hlen = snprintf(hs, sizeof hs,
-                    "HTTP/1.1 200 %s\r\nContent-Length: %zu\r\nConnection: %s\r\n%s\r\n",
-                    reason, r.s->len, keep_alive ? "keep-alive" : "close", ct);
-                if (hlen > 0 && (size_t)hlen < sizeof hs) {
-                    size_t total = (size_t)hlen + r.s->len;
+                // wrapper would inject, then blank + body. Assembled
+                // by hand (no snprintf on the hot path).
+                static const char h1[] = "HTTP/1.1 200 OK\r\nContent-Length: ";
+                static const char h2ka[] = "\r\nConnection: keep-alive\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
+                static const char h2cl[] = "\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
+                const char *h2 = keep_alive ? h2ka : h2cl;
+                size_t h2len = keep_alive ? sizeof h2ka - 1 : sizeof h2cl - 1;
+                char hs[128];
+                size_t hoff = sizeof h1 - 1;
+                memcpy(hs, h1, hoff);
+                hoff += http_put_u64(hs + hoff, r.s->len);
+                memcpy(hs + hoff, h2, h2len);
+                hoff += h2len;
+                {
+                    size_t hlen = hoff;
+                    size_t total = hlen + r.s->len;
                     if (total <= WRITE_BUF_SIZE) {
                         // Static per-connection buffer: zero malloc,
                         // zero free on reset (memory-efficient path).
@@ -5302,9 +5399,6 @@ zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
     // Ignore SIGPIPE to avoid crash on closed connections
     signal(SIGPIPE, SIG_IGN);
 
-    // Initialize connection pool
-    init_connections();
-
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
         fprintf(stderr, "zz_http_listen: socket() failed: %s\n", strerror(errno));
@@ -5330,19 +5424,16 @@ zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
             if (connect(probe, (struct sockaddr *)&paddr, sizeof(paddr)) == 0) {
                 fprintf(stderr,
                     "zz_http_listen: WARNING port %d already in use;"
-                    " SO_REUSEPORT will share it with the stale process"
-                    " (expect split traffic / stale responses;"
-                    " kill old workers or use a free port)\n", p);
+                    " kill the old server or use a free port\n", p);
                 fflush(stderr);
             }
             close(probe);
         }
     }
 
-    // SO_REUSEPORT for multi-core scaling
-    int reuseport = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &reuseport, sizeof(reuseport));
-
+    // No SO_REUSEPORT: one process shares one listen fd across its
+    // worker threads, so a stale server fails the bind loudly instead
+    // of silently splitting traffic.
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -5370,6 +5461,21 @@ zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
     fflush(stderr);
 
     g_http_server_running = 1;
+
+#if defined(__linux__) && defined(__GLIBC__)
+    // The fast path is malloc-free; the few overflow paths must not
+    // sprout dozens of idle glibc arenas (64 MB virtual each).
+    mallopt(M_ARENA_MAX, 2);
+    // Return freed heap promptly (fast path barely allocates, so the
+    // slightly eager threshold costs nothing on the hot path).
+    mallopt(M_TRIM_THRESHOLD, 8192);
+    // Return heap slop from one-time startup (route registration)
+    // before workers fault their steady state.
+    malloc_trim(0);
+#endif
+#ifdef __linux__
+    http_cold_dep_trim();
+#endif
 
     // Spawn workers and wait
     spawn_workers(listen_fd, p);
