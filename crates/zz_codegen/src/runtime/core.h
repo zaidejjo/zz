@@ -889,6 +889,12 @@ zz_value zz_http_route_post(zz_value server, zz_value path, zz_value handler, in
 zz_value zz_http_route_put(zz_value server, zz_value path, zz_value handler, int *err);
 zz_value zz_http_route_delete(zz_value server, zz_value path, zz_value handler, int *err);
 zz_value zz_http_route(zz_value server, zz_value method, zz_value path, zz_value handler, int *err);  // 4 args, validated
+// `_fast` twins: identical ABI, handler provably ignores its request arg.
+zz_value zz_http_route_get_fast(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route_post_fast(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route_put_fast(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route_delete_fast(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route_fast(zz_value server, zz_value method, zz_value path, zz_value handler, int *err);
 zz_value zz_http_pipe(zz_value server, zz_value middleware, int *err);  // 2 args
 zz_value zz_http_log(zz_value server, zz_value enabled, int *err);  // 2 args
 zz_value zz_http_listen(zz_value server, zz_value port, int *err);  // 2 args
