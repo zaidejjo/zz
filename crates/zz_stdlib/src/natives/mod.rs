@@ -1384,6 +1384,20 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "std.http.fetch_insecure".into(),
+        NativeEntry {
+            arity: 5,
+            f: http::http_fetch_insecure,
+        },
+    );
+    m.insert(
+        "http.fetch_insecure".into(),
+        NativeEntry {
+            arity: 5,
+            f: http::http_fetch_insecure,
+        },
+    );
+    m.insert(
         "std.http.post_json".into(),
         NativeEntry {
             arity: 3,
@@ -1506,6 +1520,34 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: http::http_listen_cfg,
         },
     );
+    m.insert(
+        "std.http.listen_tls".into(),
+        NativeEntry {
+            arity: 4,
+            f: http::http_listen_tls,
+        },
+    );
+    m.insert(
+        "http.listen_tls".into(),
+        NativeEntry {
+            arity: 4,
+            f: http::http_listen_tls,
+        },
+    );
+    m.insert(
+        "std.http.listen_tls_cfg".into(),
+        NativeEntry {
+            arity: 5,
+            f: http::http_listen_tls_cfg,
+        },
+    );
+    m.insert(
+        "http.listen_tls_cfg".into(),
+        NativeEntry {
+            arity: 5,
+            f: http::http_listen_tls_cfg,
+        },
+    );
 
     // std.http — Phase 5B features
     m.insert(
@@ -1579,6 +1621,34 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "std.http.hijack".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_hijack,
+        },
+    );
+    m.insert(
+        "http.hijack".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_hijack,
+        },
+    );
+    m.insert(
+        "std.http.rate_limit".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_rate_limit,
+        },
+    );
+    m.insert(
+        "http.rate_limit".into(),
+        NativeEntry {
+            arity: 3,
+            f: http::http_rate_limit,
+        },
+    );
+    m.insert(
         "std.http.with_headers".into(),
         NativeEntry {
             arity: 2,
@@ -1646,6 +1716,20 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: http::http_body_form,
+        },
+    );
+    m.insert(
+        "std.http.body_bytes".into(),
+        NativeEntry {
+            arity: 1,
+            f: http::http_body_bytes,
+        },
+    );
+    m.insert(
+        "http.body_bytes".into(),
+        NativeEntry {
+            arity: 1,
+            f: http::http_body_bytes,
         },
     );
 

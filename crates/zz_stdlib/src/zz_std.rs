@@ -414,6 +414,9 @@ mod tests {
             "http.cors",
             "http.secure_headers",
             "http.secure_header_dict",
+            "http.csrf_token",
+            "http.csrf_check",
+            "http.request_id",
         ] {
             assert!(
                 http_prog.funcs.contains_key(name),

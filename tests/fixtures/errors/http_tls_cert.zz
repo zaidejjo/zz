@@ -1,0 +1,10 @@
+// E2E: TLS with missing cert files is a loud runtime error (never silent cleartext)
+import std.http
+
+func main() -> Result<int, str> {
+    s := http.server()
+    s = s.route("GET", "/", |_req| "x")
+    http.listen_tls(s, 8145, "tests/fixtures/stdlib/data/p3_tls/nope.pem", "tests/fixtures/stdlib/data/p3_tls/nope-key.pem")
+    println("unreachable_ok")
+    .ok(0)
+}

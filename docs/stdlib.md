@@ -206,12 +206,21 @@ import std.http
 | `http.serve_dir_at` | `http.serve_dir_at(server, prefix, dir) -> http.server` | Serve static files under a URL prefix |
 | `http.test` | `http.test(server, method, path, body) -> http.response` | Dispatch in-process (no sockets) |
 | `http.test_req` | `http.test_req(server, method, path, headers, body) -> http.response` | Like `test`, with request headers |
+| `http.body_bytes` | `http.body_bytes(req) -> bytes` | Exact received body bytes (binary-safe; `req.body` is lossy text) |
 | `http.handle` | `http.handle(server, method, path, body) -> Result<str, str>` | Legacy dispatch (prefer `test`) |
 | `http.listen` | `http.listen(server, port) -> unit` | Start blocking server (keep-alive, graceful SIGINT/SIGTERM drain) |
 | `http.listen_cfg` | `http.listen_cfg(server, port, opts) -> unit` | `opts`: `read_ms`, `max_reqs_conn`, `max_body_bytes`, `shutdown_ms` (all optional ints) |
+| `http.listen_tls` | `http.listen_tls(server, port, cert_path, key_path) -> unit` | HTTPS listener (rustls, TLS 1.3+1.2, ALPN `http/1.1`); enables HSTS injection |
+| `http.listen_tls_cfg` | `http.listen_tls_cfg(server, port, cert_path, key_path, opts) -> unit` | TLS + `listen_cfg` limits |
+| `http.fetch_insecure` | `http.fetch_insecure(url, ...) -> Result<http.response, str>` | Like `fetch`, skips TLS verification (self-signed fixtures only) |
+| `http.hijack` | `http.hijack(server, path, handler(req, stream)) -> http.server` | WebSocket-upgrade routes; handler takes over the socket after `101` (cleartext only) |
 | `http.cors` | `http.cors(server, origins) -> http.server` | CORS: origin gate + preflight + `Allow-Origin` echo |
 | `http.secure_headers` | `http.secure_headers(server) -> http.server` | Inject CSP/nosniff/referrer/frame headers |
 | `http.secure_header_dict` | `http.secure_header_dict() -> {str: str}` | Raw secure-headers map for manual merges |
+| `http.rate_limit` | `http.rate_limit(server, max_requests, window_ms) -> http.server` | Token bucket per client IP; over-limit short-circuits `429 + Retry-After` |
+| `http.csrf_token` | `http.csrf_token() -> str` | 32-byte CSPRNG hex token |
+| `http.csrf_check` | `http.csrf_check(a, b) -> bool` | Constant-time token compare |
+| `http.request_id` | `http.request_id(server) -> http.server` | Per-response `X-Request-Id` (uuid v7) |
 | `http.respond` | `http.respond(status, body, headers = {}) -> http.response` | Explicit status/headers |
 | `http.ok` | `http.ok(body) -> http.response` | 200 response |
 | `http.created` | `http.created(body) -> http.response` | 201 response |
@@ -262,6 +271,24 @@ s = http.serve_dir_at(s, "/assets", "./dist") // prefix-scoped
 s = http.cors(s, ["https://app.example.com"])
 s = http.secure_headers(s)
 http.listen_cfg(s, 8080, {"max_body_bytes": 10000000})
+```
+
+HTTPS uses `listen_tls` with PEM cert/key files (rustls, no OpenSSL);
+responses gain `Strict-Transport-Security` automatically:
+
+```zz
+s = http.server()
+s = s.route("GET", "/", |_req| "secure")
+http.listen_tls(s, 8443, "cert.pem", "key.pem")
+```
+
+WebSocket upgrades via `hijack` — the handler receives the raw
+`tcp.stream` after the `101` handshake (framing stays userland):
+
+```zz
+s = http.hijack(s, "/chat/:room", |req, stream| {
+    println("upgraded {req.param("room").unwrap_or("?")}")
+})
 ```
 
 ### Request (`http.request`)

@@ -295,6 +295,9 @@ e2e_success_test!(
     "http_middleware_p2.zz"
 );
 e2e_success_test!(e2e_stdlib_http_limits_p2, "stdlib", "http_limits_p2.zz");
+e2e_success_test!(e2e_stdlib_http_bytes_p3, "stdlib", "http_bytes_p3.zz");
+e2e_success_test!(e2e_stdlib_http_tls_p3, "stdlib", "http_tls_p3.zz");
+e2e_success_test!(e2e_stdlib_http_hijack_p3, "stdlib", "http_hijack_p3.zz");
 e2e_success_test!(e2e_stdlib_ns_collision, "stdlib", "ns_collision.zz");
 e2e_success_test!(
     e2e_stdlib_bench_memory_arena,
@@ -453,6 +456,8 @@ e2e_error_test!(e2e_err_arity, "arity.zz");
 e2e_error_test!(e2e_err_http_route_dup, "http_route_dup.zz");
 e2e_error_test!(e2e_err_http_route_path, "http_route_path.zz");
 e2e_error_test!(e2e_err_http_route_method, "http_route_method.zz");
+e2e_error_test!(e2e_err_http_tls_cert, "http_tls_cert.zz");
+e2e_error_test!(e2e_err_http_hijack_arity, "http_hijack_arity.zz");
 e2e_error_test!(e2e_err_parse_error, "parse_error.zz");
 e2e_error_test!(e2e_err_div_by_zero, "div_by_zero.zz");
 e2e_error_test!(e2e_err_unknown_field, "unknown_field.zz");
