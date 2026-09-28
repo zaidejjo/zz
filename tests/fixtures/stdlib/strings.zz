@@ -48,4 +48,12 @@ println(len(mc4))
 mc5 := str.split("/a/b/c", "/a/b/")
 println(mc5)
 
+// string indexing (AOT parity: s[i] used to yield unit natively)
+idxs := "abcdef"
+println(idxs[0])
+println(idxs[2])
+println(idxs[-1])
+println(idxs[0] == "a")
+println(idxs[1] == "b")
+
 println("str_ok")

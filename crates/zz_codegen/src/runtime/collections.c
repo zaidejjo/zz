@@ -335,7 +335,8 @@ zz_value zz_dict_new_sized(size_t hint) {
 }
 
 // Index-expression dispatchers: `obj[idx]` read and `obj[idx] = v` write.
-// Arrays and dicts only; unsupported tags set *err = 1 and return unit.
+// Arrays, bytes, strings and dicts; unsupported tags set *err = 1 and
+// return unit.
 // (zz_index_get lives inline in collections.h; only the setter, which is
 // never loop-hot, stays out-of-line here.)
 

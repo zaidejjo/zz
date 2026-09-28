@@ -58,6 +58,28 @@ zz_value zz_binop_cat_str(zz_value a, zz_value b);   // str + Display(b)
 // In-place append: reuses *a->s buffer if refs==1 and capacity allows.
 // Returns void; *a is mutated. Generated for hot `s = s + literal` loops.
 void zz_str_append_str(zz_value *a, zz_value b);
+
+// Index a string by byte offset: `s[i]` → 1-char string, negative counts
+// from the end. Out of bounds (or non-int index) → unit + *err, mirroring
+// zz_bytes_get. Byte-based like zz_slice_value ("ASCII-compatible");
+// the VM counts Unicode chars instead — established engine difference
+// for non-ASCII, same as slicing.
+static inline zz_value zz_str_get(const zz_str *s, zz_value idx, int *err) {
+    *err = 0;
+    if (idx.tag != ZZ_INT || !s) {
+        *err = 1;
+        return zz_unit();
+    }
+    int64_t i = idx.i;
+    int64_t n = (int64_t)s->len;
+    if (i < 0)
+        i += n;
+    if (i < 0 || i >= n) {
+        *err = 1;
+        return zz_unit();
+    }
+    return zz_str_new(zz_str_cptr(s) + (size_t)i, 1);
+}
 void zz_str_append_lit(zz_value *a, const char *lit, size_t len);
 
 // ---- str natives -------------------------------------------------------
