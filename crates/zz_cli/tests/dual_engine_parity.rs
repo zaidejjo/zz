@@ -480,6 +480,11 @@ parity_strict!(parity_syntax_scalar_copy, "syntax", "scalar_copy.zz");
 parity_strict!(parity_syntax_elif_chain, "syntax", "elif_chain.zz");
 parity_strict!(parity_syntax_top_level_elif, "syntax", "top_level_elif.zz");
 parity_strict!(parity_syntax_chained_calls, "syntax", "chained_calls.zz");
+parity_strict!(
+    parity_syntax_range_var_bounds,
+    "syntax",
+    "range_var_bounds.zz"
+);
 
 // Types
 parity_strict!(parity_types_generics, "types", "generics.zz");

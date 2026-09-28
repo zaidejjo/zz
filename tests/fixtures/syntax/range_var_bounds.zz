@@ -1,0 +1,22 @@
+// E2E: for-loops with non-literal range bounds (AOT parity: variable
+// start bounds used to emit unboxed int64_t into zz_value slots).
+lo := 2
+hi := 5
+total := 0
+for i in lo..hi {
+    total = total + i
+}
+println(total)
+
+arr := [10, 20, 30, 40]
+pcount := 1
+for i in pcount..len(arr) {
+    println(arr[i])
+}
+
+for i in lo..len(arr) {
+    total = total + i
+}
+println(total)
+
+println("range_ok")

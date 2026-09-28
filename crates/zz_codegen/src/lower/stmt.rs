@@ -915,7 +915,24 @@ impl Lowerer {
                 out.push_str("    zz_safepoint();\n");
             } else {
                 // Slow path: both bounds are general expressions, use boxed loop
-                let sv_boxed = sv;
+                // (start must be boxed exactly like the end bound: a bare
+                // int64_t ident previously emitted `zz_value _s = v;` and
+                // broke C compilation for variable start bounds).
+                let start_key: Option<String> = match &start_expr {
+                    Expr::Ident { name, .. } => Some(name.clone()),
+                    Expr::Path { parts, .. } => Some(parts.join(".")),
+                    _ => None,
+                };
+                let start_ctype: Option<&str> = start_key
+                    .as_ref()
+                    .and_then(|n| names.lookup_type(n))
+                    .and_then(|t| match t {
+                        "int64_t" => Some("int64_t"),
+                        "double" => Some("double"),
+                        "bool" => Some("bool"),
+                        _ => None,
+                    });
+                let sv_boxed = auto_box(&sv, start_ctype);
                 let ev_boxed = auto_box(&ev, if end_is_scalar { Some("int64_t") } else { None });
                 if green {
                     // Green: the end bound is re-read every iteration,
