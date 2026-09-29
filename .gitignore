@@ -29,3 +29,7 @@ bench/performance_check/go/bench_go
 bench/performance_check/results.json
 bench/performance_check/RESULTS.md
 **/bin/
+
+# AUR render output (local only, CI regenerates per release)
+packaging/aur/out/
+packaging/aur/tmp/

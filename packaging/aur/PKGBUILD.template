@@ -1,0 +1,49 @@
+# Maintainer: zaidejjo
+# AUR package for the ZZ programming language toolchain.
+# This file is generated from PKGBUILD.template by
+# packaging/aur/render.sh (or .github/workflows/aur-publish.yml).
+# Do NOT edit pkgver/sha256sums by hand — CI rewrites them on every
+# GitHub Release. Edit the template instead.
+#
+# Both AUR packages (`zz` and `zz-lang`) install the SAME binaries:
+#   /usr/bin/zz      -> `zz run main.zz`, `zz check`, `zz build`, REPL
+#   /usr/bin/zz-lsp  -> language server
+# They conflict with each other so only one can be installed at a time.
+
+pkgname=@PKGNAME@
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc='ZZ programming language toolchain (binary: zz run main.zz, plus zz-lsp)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/zaidejjo/zz'
+license=('Apache')
+depends=('gcc-libs' 'curl' 'sqlite')
+makedepends=('rust' 'cargo' 'clang' 'git')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/zaidejjo/zz/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('@SHA256@')
+conflicts=('@CONFLICTS@')
+optdepends=('clang: native AOT backend (`zz build`, `zz run --native`)')
+
+build() {
+  cd "zz-$pkgver"
+  export CARGO_PROFILE_RELEASE_DEBUG=false
+  cargo build --release --locked -p zz_cli -p zz_lsp
+}
+
+check() {
+  cd "zz-$pkgver"
+  # Smoke-test the freshly built CLI; the full test suite already ran in
+  # CI before this PKGBUILD was published. zz-lsp is a stdio LSP server
+  # with no --version flag, so only assert it built and is executable
+  # (running it here would block on stdin).
+  ./target/release/zz --version
+  test -x ./target/release/zz-lsp
+}
+
+package() {
+  cd "zz-$pkgver"
+  install -Dm755 target/release/zz "$pkgdir/usr/bin/zz"
+  install -Dm755 target/release/zz-lsp "$pkgdir/usr/bin/zz-lsp"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
