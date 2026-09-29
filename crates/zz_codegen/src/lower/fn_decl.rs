@@ -32,10 +32,13 @@ impl Lowerer {
         };
         o.push_str(&signature);
         o.push_str("    (void)argc;\n");
-        // --- Arena allocator: init on function entry, reset on exit ---
-        o.push_str("    zz_arena _arena;\n");
-        o.push_str("    zz_arena_init(&_arena, 65536);\n"); // 64KB default
+        // No function arena: nothing lowers allocations into it (loop
+        // bodies use their own sub-arenas, everything else is heap). A
+        // per-call 64KB init here used to leak on every invocation.
         let mut names = NameCtx::new();
+        // Scope typed-AST lookups to this function: spans repeat across
+        // modules, so lookups must pair them with the enclosing item.
+        names.current_scope = fname.to_string();
         // Module-level globals are visible inside every function.
         // Locals (params + body decls) shadow them via the stack.
         self.seed_globals(&mut names);
@@ -139,8 +142,6 @@ impl Lowerer {
         if self.last_stmt_value(block, &mut names, &mut o).is_none() {
             o.push_str("    return zz_unit();\n");
         }
-        // --- Arena reset: O(1) cleanup of all non-escaping allocations ---
-        o.push_str("    zz_arena_reset_trim(&_arena);\n");
         o.push_str("}\n\n");
         o
     }
@@ -242,9 +243,12 @@ impl Lowerer {
                 m = mangle(name),
             ));
             out.push_str("    int _e = 0;\n");
+            // Bare display name (`user.User` → `User`), matching the VM:
+            // identity stays qualified, only printing shortens.
+            let display = name.rsplit('.').next().unwrap_or(name);
             out.push_str(&format!(
                 "    zz_value _r = zz_str_static(\"{name}{{\");\n",
-                name = Self::c_escape_debug(name),
+                name = Self::c_escape_debug(display),
             ));
             for (i, (fname, fty)) in sig.fields.iter().enumerate() {
                 if i > 0 {

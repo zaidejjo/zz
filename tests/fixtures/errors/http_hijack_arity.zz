@@ -1,0 +1,9 @@
+// E2E: hijack handlers take (request, socket) — arity 1 is a compile error
+import std.http
+
+func main() -> Result<int, str> {
+    s := http.server()
+    s = http.hijack(s, "/chat", |req| "wrong-arity")
+    println("unreachable_ok")
+    .ok(0)
+}

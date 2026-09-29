@@ -1,0 +1,10 @@
+// E2E: bad std.http route paths are compile errors
+import std.http
+
+func main() -> Result<int, str> {
+    s := http.server()
+    s = s.route("GET", "/users/:id", |_req| "ok")
+    s = s.route("GET", "/users/:id", |_req| "dup")
+    println("unreachable_ok")
+    .ok(0)
+}

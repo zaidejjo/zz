@@ -1,0 +1,37 @@
+// tests/fixtures/stdlib/http_fetch_test.zz — unified client + JSON client.
+// Network-free: refused loopback port exercises arg parsing, defaults,
+// timeout plumbing and error mapping on both engines (output asserts tags
+// only — curl/connect messages differ across platforms).
+import std.http
+
+func main() -> Result<int, str> {
+    // Defaults: fetch(url) == fetch(url, "GET", {}, "", 30000).
+    match http.fetch("http://127.0.0.1:9/nope") {
+        .ok(_r) => println("ERROR: should have failed"),
+        .err(_e) => println("fetch_default_err_ok"),
+    }
+    // Full options bag.
+    match http.fetch("http://127.0.0.1:9/nope", "POST", {}, "hi", 2000) {
+        .ok(_r) => println("ERROR: should have failed"),
+        .err(_e) => println("fetch_full_err_ok"),
+    }
+    // Explicit headers pass through.
+    match http.fetch("http://127.0.0.1:9/nope", "GET", {"X-A": "b"}, "", 2000) {
+        .ok(_r) => println("ERROR: should have failed"),
+        .err(_e) => println("fetch_headers_err_ok"),
+    }
+    // JSON client serializes + sets Content-Type (server side unreachable
+    // here — asserts plumbing, not delivery).
+    match http.post_json("http://127.0.0.1:9/api", {"name": "zz"}) {
+        .ok(_r) => println("ERROR: should have failed"),
+        .err(_e) => println("post_json_err_ok"),
+    }
+    // Validated routing still dispatches in-process.
+    s := http.server()
+    s = http.route(s, "GET", "/x", |_req| http.ok("hi"))
+    r := http.test(s, "GET", "/x", "")
+    println("fetch_route_ok: {r.status()}:{r.text()}")
+
+    println("http_fetch_test_ok")
+    .ok(0)
+}

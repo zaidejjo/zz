@@ -10,6 +10,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize},
     Arc, Condvar, Mutex,
 };
+use std::time::Instant;
 use zz_frontend::ast::{Expr, Param};
 
 use crate::env::EnvLink;
@@ -225,6 +226,16 @@ pub struct ObjectValue {
     pub fields: Vec<(String, Value)>,
 }
 
+impl ObjectValue {
+    /// Display name: bare struct name without the module namespace
+    /// (`user.User` → `User`). Only printing shortens — identity
+    /// (method dispatch, conversions, type equality) keeps the
+    /// qualified `name`.
+    pub fn display_name(&self) -> &str {
+        self.name.rsplit('.').next().unwrap_or(&self.name)
+    }
+}
+
 /// An opaque SQLite database handle. The concrete connection type lives
 /// in `zz_stdlib` (rusqlite) so this crate stays dependency-free; the
 /// handle is type-erased here as `Arc<dyn Any + Send + Sync>`.
@@ -305,6 +316,8 @@ pub enum Value {
     Opaque(Box<zz_native_rt::Handle>),
     /// An HTTP response (status + body + headers).
     Response(Box<Response>),
+    /// An HTTP request (method/path/body/headers/query/params).
+    HttpRequest(Box<HttpRequest>),
     /// A struct instance: its type name and insertion-ordered fields.
     Object(Box<ObjectValue>),
     /// `a..b` or `a..b..step` — an integer range (used by `for` loops).
@@ -870,9 +883,52 @@ impl BytesData {
 pub struct HttpServer {
     pub routes: Vec<(String, String, Value)>,
     pub middlewares: Vec<Value>,
+    /// Post-middleware: `fn(req, res) -> res`, applied to handler output
+    /// (response-header injection like CORS/secure-headers lives here).
+    pub post_middlewares: Vec<Value>,
     pub log_enabled: bool,
-    pub static_dir: Option<String>,
+    /// Static roots: `(url_prefix, dir)` in registration order.
+    /// `serve_dir` registers `("/", dir)`; first matching prefix wins.
+    pub static_dirs: Vec<(String, String)>,
+    /// Token-bucket rate limit shared across clones/workers (`Arc` state;
+    /// equality compares config only — buckets are runtime state).
+    pub rate_limit: Option<RateLimit>,
+    /// Append `Strict-Transport-Security` when absent. Set by `listen_tls*`
+    /// (never on cleartext); handler-set values always win.
+    pub hsts: bool,
+    /// WebSocket-upgrade routes: `(path_pattern, handler)` where the
+    /// handler is `fn(req, tcp_stream)`. Checked before normal dispatch
+    /// when the request carries `Upgrade: websocket` (+ key).
+    pub hijack_routes: Vec<(String, Value)>,
 }
+
+/// Shared token-bucket limiter: `max_requests` per `window_ms`, per client
+/// key (peer IP on sockets, `"http.test"` in-process). Buckets refill
+/// lazily; the map is capped (fail-open reset) so distinct-IP floods can't
+/// grow memory without bound.
+#[derive(Debug, Clone)]
+pub struct RateLimit {
+    pub max_requests: u64,
+    pub window_ms: u64,
+    pub state: Arc<Mutex<HashMap<String, RateBucket>>>,
+}
+
+impl PartialEq for RateLimit {
+    fn eq(&self, other: &Self) -> bool {
+        self.max_requests == other.max_requests && self.window_ms == other.window_ms
+    }
+}
+
+/// One client's bucket: fractional tokens + last refill instant.
+#[derive(Debug, Clone)]
+pub struct RateBucket {
+    pub tokens: f64,
+    pub last: Instant,
+}
+
+/// Max tracked client keys per limiter; overflow resets all buckets
+/// (fail-open: availability over precision under key floods).
+pub const RATE_LIMIT_MAX_KEYS: usize = 4096;
 
 /// An HTTP response: status code, body, and headers.
 #[derive(Debug, Clone, PartialEq)]
@@ -880,6 +936,24 @@ pub struct Response {
     pub status: u16,
     pub body: String,
     pub headers: Vec<(String, String)>,
+}
+
+/// An HTTP request passed to route handlers and middleware: method, path,
+/// body, headers, query pairs, and route params. Owned strings so requests
+/// are `Send` and snapshot-safe across connection threads.
+///
+/// `body` is the lossy-text view (back-compat for `req.body`, `body_json`,
+/// `body_form`); `body_raw` is the exact received bytes (`req.body_bytes()`),
+/// so binary uploads round-trip without UTF-8 mangling.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HttpRequest {
+    pub method: String,
+    pub path: String,
+    pub body: String,
+    pub body_raw: Option<BytesData>,
+    pub headers: Vec<(String, String)>,
+    pub query: Vec<(String, String)>,
+    pub params: Vec<(String, String)>,
 }
 
 /// A native function reference: name + arity. The implementation lives in
@@ -968,7 +1042,7 @@ impl Value {
                 out.push(')');
             }
             Value::Object(o) => {
-                out.push_str(&o.name);
+                out.push_str(o.display_name());
                 out.push('{');
                 for (i, (k, v)) in o.fields.iter().enumerate() {
                     if i > 0 {
@@ -1025,6 +1099,7 @@ impl Value {
             Value::Db(_) => "db".to_string(),
             Value::Opaque(h) => h.tag.clone(),
             Value::Response(_) => "http.response".to_string(),
+            Value::HttpRequest(_) => "http.request".to_string(),
             Value::Object(o) => o.name.clone(),
             Value::Range(_) => "range".to_string(),
             Value::Tuple(_) => "tuple".to_string(),
@@ -1048,6 +1123,7 @@ impl Value {
             Value::Bool(_) => Some("bool"),
             Value::TcpStream(_) => Some("net"),
             Value::TcpListener(_) => Some("net"),
+            Value::HttpServer(_) => Some("http"),
             Value::Db(_) => Some("sqlz"),
             // Opaque handles dispatch on their tag (e.g. a `"regex"` handle
             // resolves `regex.is_match`). Tags are dynamic, so the `&str`
@@ -1055,6 +1131,7 @@ impl Value {
             // namespaces below.
             Value::Opaque(h) => Some(Box::leak(h.tag.clone().into_boxed_str()) as &str),
             Value::Response(_) => Some("http"),
+            Value::HttpRequest(_) => Some("http"),
             Value::Chan(_) => Some("chan"),
             Value::TaskJoin(_) => None,
             Value::Object(o) => {
@@ -1128,8 +1205,9 @@ impl fmt::Display for Value {
             Value::TcpStream(_) => write!(f, "<tcp stream>"),
             Value::TcpListener(_) => write!(f, "<tcp listener>"),
             Value::Response(res) => write!(f, "<http response {}>", res.status),
+            Value::HttpRequest(req) => write!(f, "<http request {} {}>", req.method, req.path),
             Value::Object(o) => {
-                write!(f, "{}{{", o.name)?;
+                write!(f, "{}{{", o.display_name())?;
                 for (i, (k, v)) in o.fields.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
@@ -1179,6 +1257,7 @@ impl PartialEq for Value {
             (Value::Json(a), Value::Json(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Response(a), Value::Response(b)) => a == b,
+            (Value::HttpRequest(a), Value::HttpRequest(b)) => a == b,
             (Value::HttpServer(_), Value::HttpServer(_)) => std::ptr::eq(self, other),
             (Value::Object(a), Value::Object(b)) => a == b,
             // Opaque types: compare by Arc pointer (identity, not deep equality)

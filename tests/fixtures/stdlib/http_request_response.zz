@@ -10,7 +10,7 @@ func main() {
     r := http.respond(201, "{\"ok\": \"yes\"}", {"Content-Type": "application/json"})
     println(r.status())
     println(r.text())
-    println("ok:{json.as_str(json.get(r.json(), "ok") ?? json.null())}")
+    println("ok:{json.as_str(json.get(r.json() ?? json.null(), "ok") ?? json.null())}")
     println(r.headers()["Content-Type"])
 
     s := http.server()
@@ -23,7 +23,7 @@ func main() {
         .err(e) => "h-err:{e}",
     })
     s = http.route_post(s, "/echo", |q| q.body)
-    s = http.route_post(s, "/login", |q| "login:{json.as_str(json.get(http.body_json(q), "login") ?? json.null())}")
+    s = http.route_post(s, "/login", |q| "login:{json.as_str(json.get(http.body_json(q) ?? json.null(), "login") ?? json.null())}")
     s = http.route_post(s, "/form", |q| "a:{http.body_form(q)["a"]}")
     s = http.route_put(s, "/put", |q| http.respond(201, "made", {"X-A": "b"}))
     s = http.route_delete(s, "/del/:id", |q| http.respond(200, "gone-{http.param(q, "id") ?? "?"}", {"X-A": "b"}))

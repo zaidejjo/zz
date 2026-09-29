@@ -29,7 +29,8 @@ Available without imports:
 | `std.str` | String manipulation |
 | `std.vec` | Array operations |
 | `std.json` | JSON parsing/serialization |
-| `std.http` | HTTP server |
+| `std.http` | HTTP server + client |
+| `std.net` | TCP networking |
 | `std.fs` | Filesystem operations |
 | `std.env` | Environment variables, CLI args |
 | `std.math` | Math functions |
@@ -181,32 +182,190 @@ json.stringify(person)  // {"age":25,"name":"Bob"}
 
 ---
 
-## `std.http` -- HTTP Server
+## `std.http` -- HTTP Server + Client
 
 ```zz
 import std.http
 ```
 
+### Server
+
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `http.server` | `http.server() -> http.server` | Create server handle |
-| `http.get` | `http.get(server, path, handler) -> http.server` | Register GET route |
-| `http.post` | `http.post(server, path, handler) -> http.server` | Register POST route |
-| `http.handle` | `http.handle(server, method, path, body) -> str` | Dispatch a request |
-| `http.listen` | `http.listen(server, port) -> unit` | Start blocking server |
+| `http.route_get` | `http.route_get(server, path, handler) -> http.server` | Register GET route |
+| `http.route_post` | `http.route_post(server, path, handler) -> http.server` | Register POST route |
+| `http.route_put` | `http.route_put(server, path, handler) -> http.server` | Register PUT route |
+| `http.route_delete` | `http.route_delete(server, path, handler) -> http.server` | Register DELETE route |
+| `http.route` | `http.route(server, method, path, handler) -> http.server` | Single-entry routing (`GET`/`POST`/`PUT`/`DELETE`/`PATCH`/`HEAD`/`OPTIONS`; unknown methods are a loud error) |
+| `http.use` | `http.use(server, middleware) -> http.server` | Register middleware (`http.pipe` is a legacy alias) |
+| `http.pipe_post` | `http.pipe_post(server, post_fn) -> http.server` | Post-middleware `fn(req, res) -> res` (response headers) |
+| `http.with_headers` | `http.with_headers(res, extra) -> http.response` | Merge headers (`extra` wins) |
+| `http.log` | `http.log(server, enabled) -> http.server` | Toggle request logging |
+| `http.serve_dir` | `http.serve_dir(server, dir) -> http.server` | Serve static files (traversal-proof, ETag, Range) |
+| `http.serve_dir_at` | `http.serve_dir_at(server, prefix, dir) -> http.server` | Serve static files under a URL prefix |
+| `http.test` | `http.test(server, method, path, body) -> http.response` | Dispatch in-process (no sockets) |
+| `http.test_req` | `http.test_req(server, method, path, headers, body) -> http.response` | Like `test`, with request headers |
+| `http.body_bytes` | `http.body_bytes(req) -> bytes` | Exact received body bytes (binary-safe; `req.body` is lossy text) |
+| `http.handle` | `http.handle(server, method, path, body) -> Result<str, str>` | Legacy dispatch (prefer `test`) |
+| `http.listen` | `http.listen(server, port) -> unit` | Start blocking server (keep-alive, graceful SIGINT/SIGTERM drain) |
+| `http.listen_cfg` | `http.listen_cfg(server, port, opts) -> unit` | `opts`: `read_ms`, `max_reqs_conn`, `max_body_bytes`, `shutdown_ms` (all optional ints) |
+| `http.listen_tls` | `http.listen_tls(server, port, cert_path, key_path) -> unit` | HTTPS listener (rustls, TLS 1.3+1.2, ALPN `http/1.1`); enables HSTS injection |
+| `http.listen_tls_cfg` | `http.listen_tls_cfg(server, port, cert_path, key_path, opts) -> unit` | TLS + `listen_cfg` limits |
+| `http.fetch_insecure` | `http.fetch_insecure(url, ...) -> Result<http.response, str>` | Like `fetch`, skips TLS verification (self-signed fixtures only) |
+| `http.hijack` | `http.hijack(server, path, handler(req, stream)) -> http.server` | WebSocket-upgrade routes; handler takes over the socket after `101` (cleartext only) |
+| `http.cors` | `http.cors(server, origins) -> http.server` | CORS: origin gate + preflight + `Allow-Origin` echo |
+| `http.secure_headers` | `http.secure_headers(server) -> http.server` | Inject CSP/nosniff/referrer/frame headers |
+| `http.secure_header_dict` | `http.secure_header_dict() -> {str: str}` | Raw secure-headers map for manual merges |
+| `http.rate_limit` | `http.rate_limit(server, max_requests, window_ms) -> http.server` | Token bucket per client IP; over-limit short-circuits `429 + Retry-After` |
+| `http.csrf_token` | `http.csrf_token() -> str` | 32-byte CSPRNG hex token |
+| `http.csrf_check` | `http.csrf_check(a, b) -> bool` | Constant-time token compare |
+| `http.request_id` | `http.request_id(server) -> http.server` | Per-response `X-Request-Id` (uuid v7) |
+| `http.respond` | `http.respond(status, body, headers = {}) -> http.response` | Explicit status/headers |
+| `http.ok` | `http.ok(body) -> http.response` | 200 response |
+| `http.created` | `http.created(body) -> http.response` | 201 response |
+| `http.not_found` | `http.not_found() -> http.response` | 404 response |
+| `http.redirect` | `http.redirect(url) -> http.response` | 302 + `Location` header |
 
-Handler type: `func(str) -> str`
+Handlers take a typed `Request` and return `str` (200 text), a
+`Response` (explicit status/headers), or a dict/array (auto-JSON):
 
 ```zz
 import std.http
 
 server := http.server()
-    |> http.get(_, "/", |body: str| "Hello, World!")
-    |> http.get(_, "/greet", |body: str| "Welcome!")
-    |> http.post(_, "/echo", |body: str| body)
+    |> http.route("GET", "/", |_req: http.request| "Hello, World!")
+    |> http.route("GET", "/users/:id", |req| "user-{http.param(req, "id") ?? "?"}")
+    |> http.route("POST", "/echo", |req| req.body)
 
 println("Server running on :8080")
 http.listen(server, 8080)
+```
+
+Method syntax works on server handles (`http.*` methods dispatch on
+`http.server` receivers):
+
+```zz
+s := http.server()
+s = s.route("GET", "/hi", |req| http.ok("hi"))
+s = s.use(|req| .ok(req))
+s = s.log(true)
+```
+
+Routes use one syntax: `:id` captures a segment, `:rest...` captures the
+greedy tail (must be last), `*` is a catch-all. Exact routes beat params,
+params beat wildcards; a path matched only by other methods returns 405
+with `Allow`. The checker validates literal paths, methods, handler arity,
+duplicate routes, and `param("typo")` names at compile time.
+
+Static files are traversal-proof (`..`, `%2e%2e`, symlink escapes → 403),
+binary-safe, and support `ETag`/`If-None-Match` (304) plus single
+`Range` (206, unsatisfiable → 416). Directories need `index.html`.
+Static responses flow through post-middleware, so CORS and secure
+headers apply to file responses as well; longest matching prefix wins.
+
+```zz
+s := http.server()
+s = http.serve_dir(s, "./public")            // catch-all fallback
+s = http.serve_dir_at(s, "/assets", "./dist") // prefix-scoped
+s = http.cors(s, ["https://app.example.com"])
+s = http.secure_headers(s)
+http.listen_cfg(s, 8080, {"max_body_bytes": 10000000})
+```
+
+HTTPS uses `listen_tls` with PEM cert/key files (rustls, no OpenSSL);
+responses gain `Strict-Transport-Security` automatically:
+
+```zz
+s = http.server()
+s = s.route("GET", "/", |_req| "secure")
+http.listen_tls(s, 8443, "cert.pem", "key.pem")
+```
+
+WebSocket upgrades via `hijack` — the handler receives the raw
+`tcp.stream` after the `101` handshake (framing stays userland):
+
+```zz
+s = http.hijack(s, "/chat/:room", |req, stream| {
+    println("upgraded {req.param("room").unwrap_or("?")}")
+})
+```
+
+### Request (`http.request`)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `method` | `str` | `"GET"`, `"POST"`, … |
+| `path` | `str` | Path without query string |
+| `body` | `str` | Raw request body |
+| `headers` | `{str: str}` | Request headers (case-insensitive lookup via `http.header`) |
+| `query` | `{str: str}` | Parsed query string |
+| `params` | `{str: str}` | Route path params (`:id` segments) |
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `http.param` | `http.param(req, name) -> Result<str, str>` | Route param or `.err` |
+| `http.query` | `http.query(req) -> {str: str}` | Query dict |
+| `http.header` | `http.header(req, name) -> Result<str, str>` | Header (case-insensitive) or `.err` |
+| `http.body_json` | `http.body_json(req) -> Result<json, str>` | Parse body as JSON (`?`-able) |
+| `http.body_form` | `http.body_form(req) -> {str: str}` | Parse form-encoded body |
+
+Handler type: `func(http.request) -> str | http.response`
+
+### Response (`http.response`)
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `http.status` | `http.status(res) -> int` | Status code (method syntax: `res.status()`) |
+| `http.text` | `http.text(res) -> str` | Body text (`res.text()`) |
+| `http.json` | `http.json(res) -> Result<json, str>` | Parse body as JSON (`res.json()?`) |
+| `http.headers` | `http.headers(res) -> {str: str}` | Response headers (`res.headers()`) |
+
+### Client (`headers` optional, defaults to `{}`)
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `http.get` | `http.get(url, headers = {}) -> Result<http.response, str>` | GET request |
+| `http.post` | `http.post(url, body, headers = {}) -> Result<http.response, str>` | POST (`body`: `str` or `bytes`) |
+| `http.put` | `http.put(url, body, headers = {}) -> Result<http.response, str>` | PUT (`body`: `str` or `bytes`) |
+| `http.delete` | `http.delete(url, headers = {}) -> Result<http.response, str>` | DELETE request |
+| `http.fetch` | `http.fetch(url, method = "GET", headers = {}, body = "", timeout_ms = 30000) -> Result<http.response, str>` | Unified client, any verb (`GET`/`POST`/`PUT`/`DELETE`/`PATCH`), configurable timeout |
+| `http.post_json` | `http.post_json(url, body: T, headers = {}) -> Result<http.response, str>` | POST any value as JSON (sets `Content-Type` unless present) |
+
+```zz
+import std.http
+
+// One-liner with defaults.
+match http.get("https://api.example.com/users") {
+    .ok(res)  => println("users: {res.text()}"),
+    .err(e)   => println("request failed: {e}"),
+}
+
+// Full control: verb + headers + body + timeout.
+match http.fetch("https://api.example.com/users", "POST", {}, "{\"a\": 1}", 5000) {
+    .ok(res)  => println("created: {res.status()}"),
+    .err(e)   => println("request failed: {e}"),
+}
+
+// JSON ergonomics: any value serializes, Content-Type is automatic.
+match http.post_json("https://api.example.com/users", {"name": "zz"}) {
+    .ok(res)  => println("created: {res.status()}"),
+    .err(e)   => println("request failed: {e}"),
+}
+
+// `res.json()` is always a `Result` — `?` propagates parse failures:
+import std.json
+
+func main() -> Result<int, str> {
+    res := http.get("https://api.example.com/users")?
+    body := res.json()?
+    println(json.stringify(body) ?? "{}")
+    .ok(0)
+}
+```
+    .ok(res)  => println("users: {res.text()}"),
+    .err(e)   => println("request failed: {e}"),
+}
 ```
 
 ### Testing Handlers
@@ -215,10 +374,61 @@ http.listen(server, 8080)
 import std.http
 
 server := http.server()
-    |> http.get(_, "/", |body: str| "Hello!")
+    |> http.route("GET", "/", |_req| "Hello!")
 
 // Test without starting a server
-response := http.handle(server, "GET", "/", "")   // "Hello!"
+response := http.test(server, "GET", "/", "")
+println(response.status())   // 200
+println(response.text())     // "Hello!"
+```
+
+---
+
+## `std.net` -- TCP Networking
+
+```zz
+import std.net
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `net.tcp_listen` | `net.tcp_listen(addr) -> Result<tcp.listener, str>` | Bind listener (`"127.0.0.1:8080"`) |
+| `net.tcp_connect` | `net.tcp_connect(addr, timeout_ms) -> Result<tcp.stream, str>` | Connect with timeout |
+| `net.tcp_accept` | `net.tcp_accept(listener) -> Result<tcp.stream, str>` | Accept (method: `listener.accept()`) |
+| `net.tcp_write` | `net.tcp_write(stream, data: str) -> Result<int, str>` | Write UTF-8 text (method: `stream.write()`) |
+| `net.tcp_read` | `net.tcp_read(stream, max_bytes) -> Result<str, str>` | Read text — lossy on non-UTF8 (method: `stream.read()`) |
+| `net.tcp_readline` | `net.tcp_readline(stream) -> Result<str, str>` | Read a `\n`-terminated line (method: `stream.read_line()`) |
+| `net.tcp_read_bytes` | `net.tcp_read_bytes(stream, max_bytes) -> Result<bytes, str>` | Binary-safe read (method: `stream.read_bytes()`) |
+| `net.tcp_write_bytes` | `net.tcp_write_bytes(stream, data: bytes) -> Result<int, str>` | Binary-safe write (method: `stream.write_bytes()`) |
+| `net.tcp_shutdown` | `net.tcp_shutdown(stream) -> Result<unit, str>` | Real shutdown, both directions (methods: `stream.close()`, `stream.shutdown()`) |
+| `net.tcp_close` | `net.tcp_close(stream) -> Result<bool, str>` | Legacy no-op (returns true; prefer `close`) |
+| `net.peer_addr` | `net.peer_addr(stream) -> Result<str, str>` | Remote `"ip:port"` |
+| `net.local_addr` | `net.local_addr(stream) -> Result<str, str>` | Local `"ip:port"` |
+| `net.set_read_timeout` | `net.set_read_timeout(stream, ms) -> Result<bool, str>` | Read deadline |
+| `net.set_write_timeout` | `net.set_write_timeout(stream, ms) -> Result<bool, str>` | Write deadline |
+
+Short `net.*` aliases (`accept`, `read`, `write`, `read_line`,
+`read_bytes`, `write_bytes`, `close`, `shutdown`, `peer_addr`,
+`local_addr`, `set_read_timeout`, `set_write_timeout`) dispatch on
+`tcp.stream` / `tcp.listener` receivers, so method syntax works with or
+without `import std.net` namespace prefixing. `tcp_read` is
+text-oriented (lossy on arbitrary bytes by construction); use
+`read_bytes` for binary protocols.
+
+```zz
+import std.net
+
+func main() -> Result<int, str> {
+    listener := net.tcp_listen("127.0.0.1:8080")?
+    client := net.tcp_connect("127.0.0.1:8080", 5000)?
+    server := listener.accept()?
+    client.write("ping\n")?
+    line := server.read_line()?
+    println("got: {line}")
+    client.close()?
+    server.close()?
+    .ok(0)
+}
 ```
 
 ---

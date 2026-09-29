@@ -1635,9 +1635,32 @@ fn nested_func_rejected() {
 }
 
 #[test]
+fn http_request_fields_typecheck() {
+    // Typed request: method/path/body are str, headers/query/params dicts.
+    let r = check_src(
+        "func gb(req: http.request) -> str { return req.body }\nfunc gm(req: http.request) -> str { return req.method }\nfunc gq(req: http.request) -> {str: str} { return req.query }",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.funcs["gb"].ret, Type::Str);
+    assert_eq!(r.funcs["gm"].ret, Type::Str);
+    assert_eq!(
+        r.funcs["gq"].ret,
+        Type::Dict(Box::new(Type::Str), Box::new(Type::Str))
+    );
+}
+
+#[test]
+fn http_request_unknown_field_errors() {
+    errors_contain(
+        "func h(req: http.request) {\n  x := req.nope\n}",
+        "http.request has no field `nope`",
+    );
+}
+
+#[test]
 fn opaque_handle_types_resolve_in_annotations() {
     // Regression: opaque handle types (chan, task.join, http.server,
-    // tcp.stream, tcp.listener, http.response) were valid Types but had
+    // tcp.stream, tcp.listener, http.response, http.request) were valid Types but had
     // no name resolution — `func w(c: chan)` failed with "unknown type".
     // Same gap class as json/db, fixed alongside.
     for (ann, want) in [
@@ -1647,6 +1670,7 @@ fn opaque_handle_types_resolve_in_annotations() {
         ("tcp.stream", Type::TcpStream),
         ("tcp.listener", Type::TcpListener),
         ("http.response", Type::Response),
+        ("http.request", Type::HttpRequest),
     ] {
         let src = format!("func w(c: {ann}) {{ }}\n");
         let r = check_src(&src);

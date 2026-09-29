@@ -7,11 +7,12 @@
 //!
 //! The HIR is *additive*: the `Program` AST remains the source of truth for
 //! formatting/editing; `TypedProgram` adds the type lattice on top, keyed by
-//! expression span (spans are unique per AST node).
+//! scope-qualified expression key (spans repeat across modules since every
+//! file restarts offsets at 0 — see `zz_checker::SpanKey`).
 
 use std::collections::HashMap;
 
-pub use zz_checker::{check_program_typed, FuncSig, StructSig, Type};
+pub use zz_checker::{check_program_typed, FuncSig, SpanKey, StructSig, Type, TOP_SCOPE};
 pub use zz_frontend::ast::{Block, Expr, Program, Stmt};
 pub use zz_frontend::span::Span;
 
@@ -36,8 +37,8 @@ pub use escape::{analyze as escape_analyze, AllocClass, EscapeResult};
 #[derive(Debug, Clone)]
 pub struct TypedProgram {
     pub program: Program,
-    /// Resolved type keyed by expression span.
-    pub types: HashMap<Span, Type>,
+    /// Resolved type keyed by scope-qualified expression key.
+    pub types: HashMap<SpanKey, Type>,
     /// Top-level bindings (name → resolved type) produced by the checker.
     pub bindings: HashMap<String, Type>,
     /// Top-level function signatures.
@@ -91,10 +92,11 @@ pub fn build_program(
 }
 
 impl TypedProgram {
-    /// The resolved type of the expression at `span`, if the checker could
-    /// determine it.
-    pub fn type_at(&self, span: Span) -> Option<&Type> {
-        self.types.get(&span)
+    /// The resolved type of the expression at `span` within `func`
+    /// (top-level function name, `Type.method` for methods,
+    /// [`TOP_SCOPE`] otherwise), if the checker could determine it.
+    pub fn type_at(&self, func: &str, span: Span) -> Option<&Type> {
+        self.types.get(&SpanKey::new(func, span))
     }
 
     /// Iterate the top-level statements.
@@ -144,6 +146,7 @@ pub fn is_dynamic(ty: &Type) -> bool {
             | Type::TcpStream
             | Type::TcpListener
             | Type::Response
+            | Type::HttpRequest
             | Type::Opaque(_)
             | Type::Dict(_, _)
             | Type::Func(_, _)

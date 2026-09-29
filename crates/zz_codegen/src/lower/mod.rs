@@ -327,6 +327,33 @@ impl Lowerer {
             }
         }
 
+        // Selective-import bare aliases (`double` for
+        // `math_utils.double`): the callgraph edges the bare name while
+        // the body is emitted under the canonical — forward the bare
+        // symbol so the linker sees it. Skipped when the alias has its
+        // own body or the canonical is an impl method (different ABI).
+        let mut alias_pairs: Vec<(&String, &String)> = self.import_fn_aliases.iter().collect();
+        alias_pairs.sort();
+        for (alias, canonical) in alias_pairs {
+            if !self.reachable_funcs.contains(alias) {
+                continue;
+            }
+            if self.find_func_def(alias).is_some() {
+                continue;
+            }
+            if self.find_func_def(canonical).is_none() {
+                continue;
+            }
+            if self.is_impl_method(canonical) {
+                continue;
+            }
+            funcs.push_str(&format!(
+                "static zz_value zz_fn_{}(zz_value *args, size_t argc) {{ return zz_fn_{}(args, argc); }}\n",
+                mangle(alias),
+                mangle(canonical)
+            ));
+        }
+
         let main_decl = if self.reachable_funcs.contains(&self.entry_main) {
             // main exists: call its stub from zz_call_main.
             "zz_call_into_main();".to_string()
@@ -406,20 +433,36 @@ impl Lowerer {
         // FFI prelude: `extern` declarations for Rust-staticlib natives used
         // by this program. Empty when none, keeping generated C for existing
         // programs byte-identical.
-        let ffi_pre = crate::ffi::ffi_prelude(&self.reachable_natives);
+        //
+        // Selective-import bare names (`pid` from `import std.process(pid)`)
+        // are recorded under their bare spelling by the callgraph, but
+        // declarations and staticlib linkage are keyed by canonical name
+        // (`std.process.pid`). Expand the set through the import alias map
+        // so both spellings resolve; without this the call emits but its
+        // `extern` decl (and link gate below) silently go missing.
+        let expanded_natives: std::collections::HashSet<String> = {
+            let mut set = self.reachable_natives.clone();
+            for (alias, canonical) in &self.import_fn_aliases {
+                if set.contains(alias) {
+                    set.insert(canonical.clone());
+                }
+            }
+            set
+        };
+        let ffi_pre = crate::ffi::ffi_prelude(&expanded_natives);
         let ffi_section = if ffi_pre.is_empty() {
             String::new()
         } else {
             format!("\n// ---- native-runtime FFI ----\n{ffi_pre}\n")
         };
-        let needs_native_rt = crate::ffi::needs_native_rt(&self.reachable_natives);
+        let needs_native_rt = crate::ffi::needs_native_rt(&expanded_natives);
         let runtime_c = if self.precompiled {
             ""
         } else {
             crate::RUNTIME_C
         };
         let source = format!(
-            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals ----\n{globals_decl}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n    zz_arena _arena;\n    zz_arena_init(&_arena, 65536);\n{body}    zz_arena_reset_trim(&_arena);\n}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
+            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals ----\n{globals_decl}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n{body}}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
             runtime_h = crate::RUNTIME_H,
             runtime_c = runtime_c,
             struct_preamble = struct_preamble,
@@ -440,9 +483,27 @@ impl Lowerer {
         // not know the symbol; we emit a forward decl + call here).
         let with_main = if self.reachable_funcs.contains(&self.entry_main) {
             let m = format!("zz_fn_{}", mangle(&self.entry_main));
-            format!(
-                "\nstatic void zz_call_into_main(void);\nstatic void zz_call_into_main(void) {{ zz_value _r = {m}(NULL, 0); (void)_r; }}\n"
-            )
+            // `main` with exactly one param (e.g. `main(cli_args: [str])`)
+            // receives the process argv (argv[1..], mirroring the VM's
+            // cli_args and `env.args()` — the runtime already stashes
+            // argv in globals for `zz_env_args`, so reuse it). Anything
+            // else keeps the old (NULL, 0) call so generated C for
+            // existing programs stays byte-identical.
+            let takes_argv = self
+                .tp
+                .funcs
+                .get(&self.entry_main)
+                .map(|sig| sig.params.len() == 1)
+                .unwrap_or(false);
+            if takes_argv {
+                format!(
+                    "\nstatic void zz_call_into_main(void);\nstatic void zz_call_into_main(void) {{ int _e = 0; zz_value _cli = zz_env_args(zz_unit(), &_e); zz_value _r = {m}(&_cli, 1); (void)_r; }}\n"
+                )
+            } else {
+                format!(
+                    "\nstatic void zz_call_into_main(void);\nstatic void zz_call_into_main(void) {{ zz_value _r = {m}(NULL, 0); (void)_r; }}\n"
+                )
+            }
         } else {
             String::new()
         };
@@ -456,7 +517,7 @@ impl Lowerer {
         LoweredC {
             source,
             needs_native_rt,
-            needs_pg_link: crate::ffi::needs_pg_link(&self.reachable_natives),
+            needs_pg_link: crate::ffi::needs_pg_link(&expanded_natives),
         }
     }
 }
@@ -530,6 +591,7 @@ fn ty_to_ctype(ty: &zz_hir::Type) -> String {
         zz_hir::Type::TcpStream => "zz_value".to_string(), // TcpStream is heap-allocated
         zz_hir::Type::TcpListener => "zz_value".to_string(), // TcpListener is heap-allocated
         zz_hir::Type::Response => "zz_value".to_string(), // Response is heap-allocated
+        zz_hir::Type::HttpRequest => "zz_value".to_string(), // Request is heap-allocated
         _ => "zz_value".to_string(),                  // All other types are heap-allocated
     }
 }
@@ -541,6 +603,13 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "println" => Some("zz_io_println"),
         "print" => Some("zz_io_print"),
         "input" => Some("zz_io_input"),
+        // Test assertions — success returns unit, failure aborts with
+        // `error:` on stderr (mirrors the VM's EvalError).
+        "assert" | "std.test.assert" => Some("zz_assert"),
+        "assert_eq" | "std.test.assert_eq" => Some("zz_assert_eq"),
+        "assert_ne" | "std.test.assert_ne" => Some("zz_assert_ne"),
+        "assert_approx_eq" | "std.test.assert_approx_eq" => Some("zz_assert_approx_eq"),
+        "fail" | "panic" | "std.test.fail" | "std.test.panic" => Some("zz_fail"),
         // Debug print preserving Option wrappers; returns its argument.
         "dbg" => Some("zz_dbg"),
         "len" => Some("zz_len"),
@@ -745,6 +814,18 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "net.tcp_read" | "std.net.tcp_read" => Some("zz_tcp_read"),
         "net.tcp_readline" | "std.net.tcp_readline" => Some("zz_tcp_readline"),
         "net.tcp_close" | "std.net.tcp_close" => Some("zz_tcp_close"),
+        "net.tcp_read_bytes" | "std.net.tcp_read_bytes" => Some("zz_tcp_read_bytes"),
+        "net.tcp_write_bytes" | "std.net.tcp_write_bytes" => Some("zz_tcp_write_bytes"),
+        "net.tcp_shutdown" | "std.net.tcp_shutdown" => Some("zz_tcp_shutdown"),
+        // Ergonomic `net.*` method aliases (same C impls as the canonicals).
+        "net.accept" | "std.net.accept" => Some("zz_tcp_accept"),
+        "net.read" | "std.net.read" => Some("zz_tcp_read"),
+        "net.read_line" | "std.net.read_line" => Some("zz_tcp_readline"),
+        "net.read_bytes" | "std.net.read_bytes" => Some("zz_tcp_read_bytes"),
+        "net.write" | "std.net.write" => Some("zz_tcp_write"),
+        "net.write_bytes" | "std.net.write_bytes" => Some("zz_tcp_write_bytes"),
+        "net.close" | "std.net.close" => Some("zz_tcp_shutdown"),
+        "net.shutdown" | "std.net.shutdown" => Some("zz_tcp_shutdown"),
         "net.peer_addr" | "std.net.peer_addr" => Some("zz_tcp_peer_addr"),
         "net.local_addr" | "std.net.local_addr" => Some("zz_tcp_local_addr"),
         "net.set_read_timeout" | "std.net.set_read_timeout" => Some("zz_tcp_set_read_timeout"),
@@ -778,6 +859,7 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "http.route_post" | "std.http.route_post" => Some("zz_http_route_post"),
         "http.route_put" | "std.http.route_put" => Some("zz_http_route_put"),
         "http.route_delete" | "std.http.route_delete" => Some("zz_http_route_delete"),
+        "http.route" | "std.http.route" => Some("zz_http_route"),
         "http.log" | "std.http.log" => Some("zz_http_log"),
         "http.pipe" | "std.http.pipe" => Some("zz_http_pipe"),
         "http.listen" | "std.http.listen" => Some("zz_http_listen"),
@@ -797,6 +879,8 @@ fn native_impl(name: &str) -> Option<&'static str> {
         // http request functions
         "http.get" | "std.http.get" => Some("zz_http_get"),
         "http.post" | "std.http.post" => Some("zz_http_post"),
+        "http.fetch" | "std.http.fetch" => Some("zz_http_fetch"),
+        "http.post_json" | "std.http.post_json" => Some("zz_http_post_json"),
         _ => None,
     }
 }

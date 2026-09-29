@@ -8,8 +8,8 @@ use super::op::Op;
 use crate::env::{Env, EnvLink};
 use crate::eval::{EvalError, Interp};
 use crate::runtime::ops::{
-    eval_binary, eval_int_binary, eval_unary, get_index, object_field, set_index, set_object_field,
-    slice_value,
+    eval_binary, eval_int_binary, eval_unary, fill_default_headers, get_index, object_field,
+    set_index, set_object_field, slice_value,
 };
 use crate::runtime::Flow;
 use crate::value::{FuncValue, NativeFunc, RangeValue, Value};
@@ -1214,7 +1214,20 @@ impl Vm {
                     field_names,
                     span,
                 } => {
-                    let Some(registered) = interp.structs.get(name).cloned() else {
+                    // Selective-import alias (miss-only): bare `Product`
+                    // from `import m(Product)` resolves to `m.Product`.
+                    // Seed entries take precedence; this mirrors the
+                    // Ident fallback above.
+                    let resolved;
+                    let lookup = if interp.structs.contains_key(name) {
+                        name
+                    } else if let Some(qualified) = interp.import_aliases.get(name) {
+                        resolved = qualified.clone();
+                        &resolved
+                    } else {
+                        return Err(self.error(format!("unknown struct `{name}`"), *span));
+                    };
+                    let Some(registered) = interp.structs.get(lookup).cloned() else {
                         return Err(self.error(format!("unknown struct `{name}`"), *span));
                     };
                     let mut vals = Vec::with_capacity(field_names.len());
@@ -1228,7 +1241,7 @@ impl Vm {
                     // embedded sub-objects inside `build_struct_literal`.
                     let obj = crate::runtime::ops::build_struct_literal(
                         &interp.structs,
-                        name,
+                        lookup,
                         &registered,
                         &given,
                         *span,
@@ -1813,7 +1826,10 @@ impl Vm {
                             }
                         },
                     };
-                    if !is_db && args.len() != arity {
+                    if !is_db
+                        && args.len() != arity
+                        && !fill_default_headers(name, &mut args, arity)
+                    {
                         return_scratch_args(args);
                         return Err(self.error(
                             format!("expected {} arguments, found {}", arity, argc),

@@ -15,13 +15,28 @@ pub mod funcs;
 pub mod natives;
 pub mod zz_std;
 
-pub use funcs::stdlib_funcs;
-pub use natives::stdlib_natives;
+pub use funcs::{stdlib_funcs, stdlib_funcs_cached};
+pub use natives::{stdlib_natives, stdlib_natives_cached};
 pub use zz_std::{define_canonical_purezz_aliases, zz_stdlib_programs};
 
 /// Math constants registered as static float values (not zero-arg functions).
 /// Keys are fully-qualified names like `"std.math.PI"`.
+///
+/// Cached process-wide; [`stdlib_consts`] clones, hot paths borrow
+/// [`stdlib_consts_cached`] directly.
 pub fn stdlib_consts() -> std::collections::HashMap<String, f64> {
+    stdlib_consts_cached().clone()
+}
+
+/// Borrow the process-wide cached constants table.
+pub fn stdlib_consts_cached() -> &'static std::collections::HashMap<String, f64> {
+    static CACHED: std::sync::OnceLock<std::collections::HashMap<String, f64>> =
+        std::sync::OnceLock::new();
+    CACHED.get_or_init(build_stdlib_consts)
+}
+
+/// Uncached constructor (runs once via [`stdlib_consts_cached`]).
+fn build_stdlib_consts() -> std::collections::HashMap<String, f64> {
     let mut m = std::collections::HashMap::new();
     // std.math constants
     m.insert("std.math.PI".into(), std::f64::consts::PI);
@@ -113,28 +128,29 @@ pub fn register_module_namespace(
     }
     // `std.db` is a zero-overhead alias: importing it copies the canonical
     // `std.sqlz.*` entries (identical sigs + fn pointers, no extra layer).
+    // Borrow the process-wide cached tables: no per-import rebuild.
     let source = canonical_module(module);
     let prefix = format!("std.{source}.");
-    let std_funcs = stdlib_funcs();
-    let std_natives = stdlib_natives();
+    let std_funcs = crate::funcs::stdlib_funcs_cached();
+    let std_natives = crate::natives::stdlib_natives_cached();
     for (k, v) in std_funcs {
         // Direct members only: `import std.sqlz` must not leak the nested
         // `std.sqlz.postgres.*` keys (those belong to `sqlz.postgres`).
         if let Some(rest) = k.strip_prefix(&prefix) {
             if !rest.contains('.') {
-                funcs.insert(format!("{ns}.{rest}"), v);
+                funcs.insert(format!("{ns}.{rest}"), v.clone());
             }
         }
     }
     for (k, v) in std_natives {
         if let Some(rest) = k.strip_prefix(&prefix) {
             if !rest.contains('.') {
-                natives.insert(format!("{ns}.{rest}"), v);
+                natives.insert(format!("{ns}.{rest}"), *v);
             }
         }
     }
     // Also copy static constants.
-    let std_consts = stdlib_consts();
+    let std_consts = stdlib_consts_cached();
     for k in std_consts.keys() {
         if let Some(rest) = k.strip_prefix(&prefix) {
             funcs.insert(format!("{ns}.{rest}"), const_sig(zz_checker::Type::Float));
@@ -162,10 +178,11 @@ pub fn register_selective_namespace(
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
     // Alias: selective `import std.db(open)` resolves against `std.sqlz.*`.
+    // Borrow cached tables (no per-import rebuild); lookups only.
     let prefix = format!("std.{}.", canonical_module(module));
-    let std_funcs = stdlib_funcs();
-    let std_natives = stdlib_natives();
-    let std_consts = stdlib_consts();
+    let std_funcs = crate::funcs::stdlib_funcs_cached();
+    let std_natives = crate::natives::stdlib_natives_cached();
+    let std_consts = stdlib_consts_cached();
     let mut missing = Vec::new();
     for (name, alias) in items {
         let target = alias.as_ref().unwrap_or(name);
@@ -202,22 +219,23 @@ pub fn register_wildcard_namespace(
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
     // Alias: wildcard `import std.db(*)` resolves against `std.sqlz.*`.
+    // Borrow cached tables (no per-import rebuild).
     let prefix = format!("std.{}.", canonical_module(module));
-    let std_funcs = stdlib_funcs();
-    let std_natives = stdlib_natives();
-    let std_consts = stdlib_consts();
+    let std_funcs = crate::funcs::stdlib_funcs_cached();
+    let std_natives = crate::natives::stdlib_natives_cached();
+    let std_consts = stdlib_consts_cached();
     for (k, v) in std_funcs {
         // Direct members only (see `register_module_namespace`).
         if let Some(rest) = k.strip_prefix(&prefix) {
             if !rest.contains('.') {
-                funcs.insert(rest.to_string(), v);
+                funcs.insert(rest.to_string(), v.clone());
             }
         }
     }
     for (k, v) in std_natives {
         if let Some(rest) = k.strip_prefix(&prefix) {
             if !rest.contains('.') {
-                natives.insert(rest.to_string(), v);
+                natives.insert(rest.to_string(), *v);
             }
         }
     }

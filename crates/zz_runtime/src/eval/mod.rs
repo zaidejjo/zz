@@ -202,7 +202,7 @@ impl Interp {
     pub fn run_typed(
         &mut self,
         program: &Program,
-        types: Arc<HashMap<Span, zz_checker::Type>>,
+        types: Arc<HashMap<zz_checker::SpanKey, zz_checker::Type>>,
         structs: HashMap<String, zz_checker::StructSig>,
     ) -> Result<Value, EvalError> {
         let native_names: Arc<std::collections::HashSet<String>> =

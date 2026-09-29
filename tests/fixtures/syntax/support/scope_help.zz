@@ -1,0 +1,7 @@
+pub func hval() -> int { // hlpr
+    v :=  1234
+    v
+}
+
+// Supports scope_collision.zz: the `1234` initializer above shares its
+// span with `true` in that file but has another type.

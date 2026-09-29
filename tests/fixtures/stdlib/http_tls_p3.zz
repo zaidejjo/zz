@@ -1,0 +1,31 @@
+// tests/fixtures/stdlib/http_tls_p3.zz — Phase 3 TLS listener
+// Self-signed localhost cert: 200 over HTTPS + HSTS injection.
+import std.http
+import std.task
+import std.time
+
+func main() -> Result<int, str> {
+    s := http.server()
+    s = s.route("GET", "/hello", |_req| "tls-ok")
+    task.spawn(|_| {
+        http.listen_tls(s, 8144, "tests/fixtures/stdlib/data/p3_tls/cert.pem", "tests/fixtures/stdlib/data/p3_tls/key.pem")
+    })
+    tries := 0
+    r := http.fetch_insecure("https://127.0.0.1:8144/hello")
+    while tries < 50 {
+        match r {
+            .ok(_) => break
+            .err(_) => {
+                time.sleep_ms(100)
+                r = http.fetch_insecure("https://127.0.0.1:8144/hello")
+                tries = tries + 1
+            }
+        }
+    }
+    res := r?
+    assert(res.status() == 200)
+    assert(res.text() == "tls-ok")
+    println("hsts: {res.headers()["strict-transport-security"]}")
+    println("http_tls_p3_ok")
+    .ok(0)
+}

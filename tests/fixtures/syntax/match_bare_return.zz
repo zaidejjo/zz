@@ -1,0 +1,16 @@
+// E2E: bare `return` as a match arm body (parsed as a block arm).
+// NOTE: bare `return` inside *closures* type-checks and runs on the VM,
+// but AOT codegen drops closure returns today (same for the braced form
+// — pre-existing gap, not this syntax). Closure coverage stays VM-only;
+// only named-fn shapes assert here so native parity holds.
+func classify(n: int) -> str {
+    match n {
+        0 => return "zero",
+        _ => return "many",
+    }
+}
+
+println(classify(0))
+println(classify(5))
+
+println("match_bare_return_ok")

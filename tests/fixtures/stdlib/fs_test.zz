@@ -1,29 +1,35 @@
-// E2E: std.fs — read_to_string, write, exists, remove_file
+// E2E: std.fs — read_to_string, write, exists, remove_file.
+// Scratch path is per (process, sweep task) so parallel runners never
+// share it.
+import std.env
 import std.fs
+import std.process(pid)
 
 // write
-match fs.write("/tmp/zz_phase4a_test.txt", "hello phase4a") {
+tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+scratch := "/tmp/zz_phase4a_test_{pid()}_{tok}.txt"
+match fs.write(scratch, "hello phase4a") {
     .ok(_) => println("write_ok")
     .err(e) => println("write_err: {e}")
 }
 
 // read_to_string
-match fs.read_to_string("/tmp/zz_phase4a_test.txt") {
+match fs.read_to_string(scratch) {
     .ok(content) => println("read_ok: {content}")
     .err(e) => println("read_err: {e}")
 }
 
 // exists
-println(fs.exists("/tmp/zz_phase4a_test.txt"))
+println(fs.exists(scratch))
 println(fs.exists("/tmp/zz_phase4a_nonexist.txt"))
 
 // remove_file
-match fs.remove_file("/tmp/zz_phase4a_test.txt") {
+match fs.remove_file(scratch) {
     .ok(_) => println("remove_ok")
     .err(e) => println("remove_err: {e}")
 }
 
 // verify removed
-println(fs.exists("/tmp/zz_phase4a_test.txt"))
+println(fs.exists(scratch))
 
 println("fs_test_ok")

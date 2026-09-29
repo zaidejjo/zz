@@ -1,10 +1,176 @@
 //! Expression lowering: literals, binary ops, function calls, field access,
 //! collections, variants, closures, and match expressions.
 
-use zz_frontend::ast::{Block, Expr, FmtPart, MatchArm, Param, Pattern};
+use zz_frontend::ast::{Block, Decorator, Expr, FmtPart, MatchArm, Param, Pattern};
 
 use super::green::GreenCtx;
 use super::*;
+
+// ── Route-handler request-use analysis ───────────────────────────────────
+// True when a 1-param closure never references its parameter, letting the
+// socket fast path skip request-dict construction. Deliberately
+// over-approximate: ANY same-name Ident counts as a use (shadowing
+// ignored), non-literal handlers never qualify. Misses only lose the
+// optimization; a wrong `true` would miscompile, so every AST node type
+// is matched explicitly — no wildcards (new variants fail loudly here).
+fn closure_ignores_param(params: &[Param], body: &Expr) -> bool {
+    let [p] = params else { return false };
+    !mentions_ident(body, &p.name.name)
+}
+
+fn mentions_ident(e: &Expr, name: &str) -> bool {
+    match e {
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Str { .. }
+        | Expr::Bool { .. }
+        | Expr::Break { .. }
+        | Expr::Continue { .. } => false,
+        Expr::Ident { name: n, .. } => n == name,
+        // Dotted chains: any segment match counts (over-approx, safe).
+        Expr::Path { parts, .. } => parts.iter().any(|p| p == name),
+        Expr::Fmt { parts, .. } => parts.iter().any(|pt| match pt {
+            FmtPart::Text(_) => false,
+            FmtPart::Expr(inner, _) => mentions_ident(inner, name),
+        }),
+        Expr::Paren { expr, .. } => mentions_ident(expr, name),
+        Expr::Tuple { items, .. } => items.iter().any(|i| mentions_ident(i, name)),
+        Expr::Unary { expr, .. } => mentions_ident(expr, name),
+        Expr::Binary { left, right, .. } => {
+            mentions_ident(left, name) || mentions_ident(right, name)
+        }
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            mentions_ident(callee, name)
+                || args.iter().any(|a| mentions_ident(a, name))
+                || named.iter().any(|(_, v)| mentions_ident(v, name))
+        }
+        Expr::Closure { params, body, .. } => {
+            params.iter().any(|p| mentions_default(&p.default, name)) || mentions_ident(body, name)
+        }
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            mentions_ident(cond, name)
+                || mentions_block(then, name)
+                || els.as_ref().is_some_and(|b| mentions_ident(b, name))
+        }
+        Expr::While { cond, body, .. } => mentions_ident(cond, name) || mentions_block(body, name),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => mentions_ident(scrutinee, name) || arms.iter().any(|a| mentions_match_arm(a, name)),
+        Expr::IfLet {
+            pat,
+            value,
+            then,
+            els,
+            ..
+        } => {
+            mentions_pat(pat, name)
+                || mentions_ident(value, name)
+                || mentions_block(then, name)
+                || els.as_ref().is_some_and(|b| mentions_ident(b, name))
+        }
+        Expr::Try { expr, .. } => mentions_ident(expr, name),
+        Expr::Block(b) => mentions_block(b, name),
+        Expr::Variant { arg, .. } => arg.as_ref().is_some_and(|a| mentions_ident(a, name)),
+        Expr::Array { elems, .. } => elems.iter().any(|el| mentions_ident(el, name)),
+        Expr::Dict { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| mentions_ident(k, name) || mentions_ident(v, name)),
+        // Field name is a static member, never a variable use.
+        Expr::Field { obj, .. } => mentions_ident(obj, name),
+        Expr::Range { start, end, .. } => mentions_ident(start, name) || mentions_ident(end, name),
+        Expr::StructInit { fields, .. } => fields.iter().any(|(_, v)| mentions_ident(v, name)),
+        Expr::Index { obj, index, .. } => mentions_ident(obj, name) || mentions_ident(index, name),
+        Expr::Slice {
+            obj, start, end, ..
+        } => {
+            mentions_ident(obj, name)
+                || start.as_ref().is_some_and(|s| mentions_ident(s, name))
+                || end.as_ref().is_some_and(|e| mentions_ident(e, name))
+        }
+        Expr::ListComp {
+            body, iter, filter, ..
+        } => {
+            mentions_ident(body, name)
+                || mentions_ident(iter, name)
+                || filter.as_ref().is_some_and(|f| mentions_ident(f, name))
+        }
+    }
+}
+
+fn mentions_default(default: &Option<Box<Expr>>, name: &str) -> bool {
+    default.as_ref().is_some_and(|d| mentions_ident(d, name))
+}
+
+fn mentions_block(b: &Block, name: &str) -> bool {
+    b.stmts.iter().any(|s| mentions_stmt(s, name))
+}
+
+fn mentions_match_arm(a: &MatchArm, name: &str) -> bool {
+    mentions_pat(&a.pat, name)
+        || a.guard.as_ref().is_some_and(|g| mentions_ident(g, name))
+        || mentions_ident(&a.body, name)
+}
+
+// Pattern bindings declare names; references in guards/bodies are walked
+// separately (counting a binding as a use would only ever miss the opt).
+fn mentions_pat(p: &Pattern, _name: &str) -> bool {
+    // Bindings declare names; a use in a guard/body is walked separately.
+    // Always false here (over-approx would only ever miss the opt).
+    match p {
+        Pattern::Wildcard { .. } | Pattern::Binding { .. } | Pattern::Literal { .. } => false,
+        Pattern::Variant { arg, .. } => arg.as_ref().is_some_and(|a| mentions_pat(a, _name)),
+        Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
+            pats.iter().any(|q| mentions_pat(q, _name))
+        }
+    }
+}
+
+fn mentions_stmt(s: &Stmt, name: &str) -> bool {
+    match s {
+        Stmt::Decl { value, .. } => mentions_ident(value, name),
+        Stmt::Import { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Link { .. } => {
+            false
+        }
+        Stmt::Func {
+            params,
+            body,
+            decorators,
+            ..
+        } => {
+            params.iter().any(|p| mentions_default(&p.default, name))
+                || mentions_block(body, name)
+                || decorators.iter().any(|d| mentions_decorator(d, name))
+        }
+        Stmt::Return { value, .. } => value.as_ref().is_some_and(|v| mentions_ident(v, name)),
+        // Struct shapes carry types only.
+        Stmt::Struct { .. } => false,
+        Stmt::Impl { methods, .. } => methods.iter().any(|m| mentions_stmt(m, name)),
+        Stmt::For { iter, body, .. } => mentions_ident(iter, name) || mentions_block(body, name),
+        Stmt::Defer { expr, .. } => mentions_ident(expr, name),
+        Stmt::Assign { target, value, .. } => {
+            mentions_ident(target, name) || mentions_ident(value, name)
+        }
+        Stmt::Destructure { pat, value, .. } => {
+            mentions_pat(pat, name) || mentions_ident(value, name)
+        }
+        Stmt::ExternBlock { items, .. } => items
+            .iter()
+            .any(|f| f.params.iter().any(|p| mentions_default(&p.default, name))),
+        Stmt::Expr(e) => mentions_ident(e, name),
+    }
+}
+
+fn mentions_decorator(d: &Decorator, name: &str) -> bool {
+    d.args.iter().any(|a| mentions_ident(a, name))
+        || d.named.iter().any(|(_, v)| mentions_ident(v, name))
+}
 
 impl Lowerer {
     /// Emit a block in value position, returning a C expression string
@@ -37,11 +203,47 @@ impl Lowerer {
             if matches!(e, Expr::If { .. }) {
                 self.emit_expr(e, names, out)
             } else {
-                let v = self.emit_expr(e, names, out);
-                box_scalar_operand(e, names, &v)
+                self.emit_tail_value(e, names, out)
             }
+        } else if let Some(Stmt::Decl { name, .. }) = b.stmts.last() {
+            // Trailing `:=`: the declared value is the block's value
+            // (VM slot semantics). Return the local, boxed.
+            let n = name.name.clone();
+            self.decl_tail_value(&n, names, out)
+                .unwrap_or_else(|| "zz_unit()".to_string())
         } else {
             "zz_unit()".to_string()
+        }
+    }
+
+    /// Return expression for a trailing-`Decl` tail: the declared local,
+    /// boxed to a `zz_value` (scalars via constructors, refcounted via
+    /// clone, unboxed structs via the object boxer). `None` when the
+    /// local is unknown (caller falls back to unit).
+    pub(super) fn decl_tail_value(
+        &self,
+        name: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> Option<String> {
+        let cid = names.lookup(name)?.to_string();
+        let ctype = names.lookup_type(name).unwrap_or("zz_value").to_string();
+        match ctype.as_str() {
+            "int64_t" => Some(format!("zz_int({cid})")),
+            "double" => Some(format!("zz_float({cid})")),
+            "bool" => Some(format!("zz_bool({cid})")),
+            t if t.starts_with("zz_struct_") => {
+                let sname = match names.checker_types.get(name) {
+                    Some(zz_checker::Type::Struct(s)) => s.clone(),
+                    _ => return None,
+                };
+                let ident = Expr::Ident {
+                    name: name.to_string(),
+                    span: zz_frontend::span::Span::new(0, 0),
+                };
+                Some(self.emit_boxed_value(&sname, &ident, names, out))
+            }
+            _ => Some(format!("zz_clone({cid})")),
         }
     }
 
@@ -251,9 +453,17 @@ impl Lowerer {
             Expr::Unary { op, expr, .. } => {
                 let v = self.emit_expr(expr, names, out);
                 match op {
-                    zz_frontend::ast::UnOp::Neg => format!("zz_neg({v})"),
+                    // `zz_neg` / `zz_not` take `zz_value`: box raw scalars
+                    // (e.g. a `bool`/`int` local lowers to its C type).
+                    // `Pos` is identity — keep the raw form so scalar
+                    // arithmetic fast-paths still recognize it.
+                    zz_frontend::ast::UnOp::Neg => {
+                        format!("zz_neg({})", box_scalar_operand(expr, names, &v))
+                    }
                     zz_frontend::ast::UnOp::Pos => v,
-                    zz_frontend::ast::UnOp::Not => format!("zz_not({v})"),
+                    zz_frontend::ast::UnOp::Not => {
+                        format!("zz_not({})", box_scalar_operand(expr, names, &v))
+                    }
                 }
             }
             Expr::Binary {
@@ -291,15 +501,24 @@ impl Lowerer {
                 let r = self.emit_expr(right, names, out);
                 match op {
                     zz_frontend::ast::BinOp::And => {
+                        // `zz_truthy` takes `zz_value`: box raw-scalar
+                        // operands (e.g. `bool` locals lower to C `bool`).
+                        let l = box_scalar_operand(left, names, &l);
+                        let r = box_scalar_operand(right, names, &r);
                         format!("zz_bool(zz_truthy({l}) && zz_truthy({r}))")
                     }
                     zz_frontend::ast::BinOp::Or => {
+                        let l = box_scalar_operand(left, names, &l);
+                        let r = box_scalar_operand(right, names, &r);
                         format!("zz_bool(zz_truthy({l}) || zz_truthy({r}))")
                     }
                     zz_frontend::ast::BinOp::Elvis => {
                         // Evaluate the left side once and store in a temp to avoid
                         // double-evaluation (which would call side-effecting natives
-                        // like `input()` twice).
+                        // like `input()` twice). Box: the temp is `zz_value`
+                        // but a raw-scalar operand lowers to its C type.
+                        let l = box_scalar_operand(left, names, &l);
+                        let r = box_scalar_operand(right, names, &r);
                         let tmp = names.fresh("elvis");
                         out.push_str(&format!("    zz_value {tmp} = {l};\n"));
                         format!("zz_elvis({tmp}, {r})")
@@ -551,13 +770,21 @@ impl Lowerer {
             } => {
                 // `obj[a:b]` — array/string slicing. Missing bounds lower to
                 // unit (the C runtime interprets unit as "from 0" / "to end").
+                // Scalar bounds (int idents, raw arithmetic) must be boxed
+                // like index args, or C rejects int64_t as zz_value.
                 let o = self.emit_expr(obj, names, out);
                 let s = match start {
-                    Some(e) => self.emit_expr(e, names, out),
+                    Some(e) => {
+                        let emitted = self.emit_expr(e, names, out);
+                        self.box_index_arg(e, emitted, names)
+                    }
                     None => "zz_unit()".to_string(),
                 };
                 let e = match end {
-                    Some(e) => self.emit_expr(e, names, out),
+                    Some(e) => {
+                        let emitted = self.emit_expr(e, names, out);
+                        self.box_index_arg(e, emitted, names)
+                    }
                     None => "zz_unit()".to_string(),
                 };
                 format!("zz_call_native3(zz_slice_value, {o}, {s}, {e})")
@@ -583,7 +810,7 @@ impl Lowerer {
                         .lookup_type(obj_name)
                         .map(|t| t.starts_with("zz_struct_"))
                         .unwrap_or(false)
-                } else if let Some(zz_checker::Type::Struct(sname)) = self.tp.types.get(&obj.span())
+                } else if let Some(zz_checker::Type::Struct(sname)) = self.ty_at(names, obj.span())
                 {
                     self.is_unboxed_struct(sname)
                 } else {
@@ -593,7 +820,7 @@ impl Lowerer {
                     // Unboxed struct: direct C field access, then auto-box
                     // scalar fields so the result is always a zz_value.
                     // Derive the field C type from the parent object's struct type.
-                    let field_ctype = self.tp.types.get(&obj.span()).and_then(|ot| {
+                    let field_ctype = self.ty_at(names, obj.span()).and_then(|ot| {
                         if let zz_checker::Type::Struct(sname) = ot {
                             if let Some(sig) = self.tp.structs.get(sname) {
                                 if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == name) {
@@ -614,9 +841,7 @@ impl Lowerer {
                     // The raw access must follow the embedded chain when the
                     // field is promoted (`m().id` → `(tmp).Base.id`).
                     let raw = self
-                        .tp
-                        .types
-                        .get(&obj.span())
+                        .ty_at(names, obj.span())
                         .and_then(|ot| match ot {
                             zz_checker::Type::Struct(sname) => self
                                 .resolve_access_chain(sname, std::slice::from_ref(name))
@@ -1086,7 +1311,7 @@ impl Lowerer {
         body: &Expr,
         cid: usize,
         caps: &[(String, String, String, Option<zz_checker::Type>)],
-        _outer_names: &mut NameCtx,
+        outer_names: &mut NameCtx,
         _out: &mut String,
     ) -> String {
         // Green transform (B3): suspendable bodies lower every local to a
@@ -1102,7 +1327,8 @@ impl Lowerer {
         if green {
             *self.current_loop_arena.borrow_mut() = None;
         }
-        let mut o = self.emit_closure_inner(params, body, cid, caps, green);
+        let scope = outer_names.current_scope.clone();
+        let mut o = self.emit_closure_inner(params, body, cid, caps, green, &scope);
         if green {
             self.green_finish(&mut o);
             *self.current_loop_arena.borrow_mut() = saved_arena;
@@ -1117,8 +1343,12 @@ impl Lowerer {
         cid: usize,
         caps: &[(String, String, String, Option<zz_checker::Type>)],
         green: bool,
+        scope: &str,
     ) -> String {
         let mut names = NameCtx::new();
+        // Closure bodies check under the enclosing function: inherit its
+        // scope so typed lookups hit the right entries.
+        names.current_scope = scope.to_string();
         self.seed_globals(&mut names);
         for (i, (name, _, ctype, checker)) in caps.iter().enumerate() {
             let ptr = format!("env[{i}]");
@@ -1186,8 +1416,10 @@ impl Lowerer {
             o.push_str("        return zz_unit();\n");
             o.push_str("    }\n");
         } else {
-            o.push_str("    zz_arena _arena;\n");
-            o.push_str("    zz_arena_init(&_arena, 65536);\n");
+            // No function arena: nothing lowers allocations into it
+            // (loop bodies use their own sub-arenas, everything else is
+            // heap). A per-call 64KB init here used to leak on every
+            // closure invocation (epilogue unreachable past `return`).
         }
         o.push_str("    int __defers[32];\n");
         o.push_str("    int __defer_n = 0;\n");
@@ -1265,11 +1497,6 @@ impl Lowerer {
         } else {
             o.push_str(&format!("    return {val};\n"));
         }
-        // Green closures run heap-only (no function arena to reset); the
-        // frame owns every cell. Blocking closures keep arena discipline.
-        if !green {
-            o.push_str("    zz_arena_reset_trim(&_arena);\n");
-        }
         o.push_str("}\n");
         o
     }
@@ -1332,7 +1559,7 @@ impl Lowerer {
             }
         };
 
-        match self.tp.types.get(&inner.span()) {
+        match self.ty_at(names, inner.span()) {
             Some(zz_checker::Type::Option(_)) => {
                 out.push_str(&format!("    if ({tmp}.tag == ZZ_OPTION_NONE) {{\n"));
                 out.push_str("        return (zz_value){ZZ_OPTION_NONE, {0}};\n");
@@ -1400,154 +1627,162 @@ impl Lowerer {
                 (resolved, None)
             }
             Expr::Path { parts, span, .. } if parts.len() == 2 => {
-                let obj_name = &parts[0];
-                let method = &parts[1];
-                if names.lookup(obj_name).is_some() {
-                    // obj_name is a LOCAL variable — this is a method call.
-                    let first_ident_end = span.start + obj_name.len() as u32;
-                    let first_ident_span =
-                        zz_frontend::span::Span::new(span.start, first_ident_end);
-
-                    // Struct method dispatch: if the local's C type is a
-                    // struct (e.g. `zz_struct_mod__Rectangle`), look up
-                    // `<StructType>.<method>` in `reachable_funcs` (impl
-                    // methods are stored as `Type.method` using the
-                    // un-mangled struct name like `mod.Rectangle`). This
-                    // handles `rect.area()` regardless of whether `rect`
-                    // is bare or module-prefixed. Boxed structs (C type
-                    // `zz_value`, e.g. containing strings) resolve through
-                    // the checker's type map instead; embedded promotion
-                    // (`u.area()` → `Base.area`) applies to both shapes.
-                    let struct_dispatch: Option<(String, Expr)> = self
-                        .dispatch_struct_name(
-                            names,
-                            names.lookup_type(obj_name),
-                            obj_name,
-                            first_ident_span,
-                        )
-                        .and_then(|unmangled| {
-                            self.struct_method_target(&unmangled, method).map(
-                                |(impl_name, path)| {
-                                    let recv = if path.is_empty() {
-                                        Expr::Ident {
-                                            name: obj_name.clone(),
-                                            span: first_ident_span,
-                                        }
-                                    } else {
-                                        let mut parts = vec![obj_name.clone()];
-                                        parts.extend(path);
-                                        Expr::Path {
-                                            parts,
-                                            span: first_ident_span,
-                                        }
-                                    };
-                                    (impl_name, recv)
-                                },
-                            )
-                        });
-                    if let Some((c, r)) = struct_dispatch {
-                        (c, Some(r))
-                    } else {
-                        // Use the receiver's type from the type checker to
-                        // select the correct namespace. Without this, the
-                        // generic loop picks "vec" before "str" for methods
-                        // like `.contains()` that exist on multiple types.
-                        let mut found_ns = "";
-                        // Try type-based dispatch: check NameCtx's checker_types
-                        // (populated at Decl) for the receiver variable's resolved
-                        // type, then map to the matching namespace.
-                        let recv_type_ns =
-                            names.checker_types.get(obj_name).and_then(|ty| match ty {
-                                zz_checker::Type::Str => Some("str"),
-                                zz_checker::Type::Array(_) => Some("vec"),
-                                zz_checker::Type::Dict(_, _) => Some("dict"),
-                                zz_checker::Type::Option(_) => Some("option"),
-                                zz_checker::Type::Result(_, _) => Some("result"),
-                                zz_checker::Type::Db => Some("sqlz"),
-                                // Opaque handles dispatch on their module tag.
-                                // Tags are dynamic, so leak once per tag —
-                                // same pattern as struct namespaces in the VM.
-                                zz_checker::Type::Opaque(tag) => {
-                                    Some(Box::leak(tag.clone().into_boxed_str()) as &str)
+                // Module-namespace collision: the loader qualifies same-file
+                // calls (`greet_user` in `server.zz` -> `server.greet_user`),
+                // which collides with a local of the same name as the file
+                // stem (`server := http.server()`). An exact function match
+                // is a direct call, never a method on the local.
+                let joined = parts.join(".");
+                if self.reachable_funcs.contains(&joined) || self.tp.funcs.contains_key(&joined) {
+                    // Namespace-alias copies (`f.write` from
+                    // `import std.fs as f`) match here because the loader
+                    // registers them in funcs — but they have no native of
+                    // their own, so the call would lower to a bodyless
+                    // `zz_fn_f__write` stub (silent no-op). Resolve to the
+                    // canonical name (`std.fs.write`) when only it has a
+                    // native impl. User-function aliases are untouched
+                    // (neither spelling has a native), as are shadowed
+                    // locals (exact-match rule above still wins for them).
+                    let obj_name = &parts[0];
+                    let method = &parts[1];
+                    let cname = if names.lookup(obj_name).is_none() {
+                        match self.import_ns_aliases.get(obj_name) {
+                            Some(head) => {
+                                let resolved = format!("{head}.{method}");
+                                if !native_supported(&joined) && native_supported(&resolved) {
+                                    resolved
+                                } else {
+                                    joined
                                 }
-                                _ => None,
-                            });
-                        // Also check the type checker's span_types map
-                        // using the receiver's source span.
-                        let span_type_ns = if let Some(zzty) = self.tp.types.get(&first_ident_span)
-                        {
-                            match zzty {
-                                zz_checker::Type::Str => Some("str"),
-                                zz_checker::Type::Array(_) => Some("vec"),
-                                zz_checker::Type::Dict(_, _) => Some("dict"),
-                                zz_checker::Type::Option(_) => Some("option"),
-                                zz_checker::Type::Result(_, _) => Some("result"),
-                                zz_checker::Type::Db => Some("sqlz"),
-                                zz_checker::Type::Opaque(tag) => {
-                                    Some(Box::leak(tag.clone().into_boxed_str()) as &str)
-                                }
-                                _ => None,
                             }
-                        } else {
-                            None
-                        };
-                        let type_ns = recv_type_ns.or(span_type_ns).unwrap_or("");
-                        if !type_ns.is_empty() {
-                            let candidate = format!("{type_ns}.{method}");
-                            let std_candidate = format!("std.{type_ns}.{method}");
-                            if self.reachable_natives.contains(&candidate)
-                                || self.reachable_natives.contains(&std_candidate)
-                                || native_supported(&candidate)
-                            {
-                                found_ns = type_ns;
-                            }
+                            None => joined,
                         }
-                        // Fallback: generic namespace search (untyped
-                        // receivers, e.g. variables without type annotations).
-                        if found_ns.is_empty() {
-                            let namespaces = [
-                                "vec", "str", "dict", "option", "result", "http", "sqlz", "db",
-                                "file",
-                            ];
-                            for ns in &namespaces {
-                                let candidate = format!("{ns}.{method}");
-                                let std_candidate = format!("std.{ns}.{method}");
+                    } else {
+                        joined
+                    };
+                    (cname, None)
+                } else {
+                    let obj_name = &parts[0];
+                    let method = &parts[1];
+                    if names.lookup(obj_name).is_some() {
+                        // obj_name is a LOCAL variable — this is a method call.
+                        let first_ident_end = span.start + obj_name.len() as u32;
+                        let first_ident_span =
+                            zz_frontend::span::Span::new(span.start, first_ident_end);
+
+                        // Struct method dispatch: if the local's C type is a
+                        // struct (e.g. `zz_struct_mod__Rectangle`), look up
+                        // `<StructType>.<method>` in `reachable_funcs` (impl
+                        // methods are stored as `Type.method` using the
+                        // un-mangled struct name like `mod.Rectangle`). This
+                        // handles `rect.area()` regardless of whether `rect`
+                        // is bare or module-prefixed. Boxed structs (C type
+                        // `zz_value`, e.g. containing strings) resolve through
+                        // the checker's type map instead; embedded promotion
+                        // (`u.area()` → `Base.area`) applies to both shapes.
+                        let struct_dispatch: Option<(String, Expr)> = self
+                            .dispatch_struct_name(
+                                names,
+                                names.lookup_type(obj_name),
+                                obj_name,
+                                first_ident_span,
+                            )
+                            .and_then(|unmangled| {
+                                self.struct_method_target(&unmangled, method).map(
+                                    |(impl_name, path)| {
+                                        let recv = if path.is_empty() {
+                                            Expr::Ident {
+                                                name: obj_name.clone(),
+                                                span: first_ident_span,
+                                            }
+                                        } else {
+                                            let mut parts = vec![obj_name.clone()];
+                                            parts.extend(path);
+                                            Expr::Path {
+                                                parts,
+                                                span: first_ident_span,
+                                            }
+                                        };
+                                        (impl_name, recv)
+                                    },
+                                )
+                            });
+                        if let Some((c, r)) = struct_dispatch {
+                            (c, Some(r))
+                        } else {
+                            // Use the receiver's type from the type checker to
+                            // select the correct namespace. Without this, the
+                            // generic loop picks "vec" before "str" for methods
+                            // like `.contains()` that exist on multiple types.
+                            let mut found_ns = "";
+                            // Try type-based dispatch: check NameCtx's checker_types
+                            // (populated at Decl) for the receiver variable's resolved
+                            // type, then map to the matching namespace.
+                            let recv_type_ns =
+                                names.checker_types.get(obj_name).and_then(|ty| match ty {
+                                    zz_checker::Type::Str => Some("str"),
+                                    zz_checker::Type::Array(_) => Some("vec"),
+                                    zz_checker::Type::Dict(_, _) => Some("dict"),
+                                    zz_checker::Type::Option(_) => Some("option"),
+                                    zz_checker::Type::Result(_, _) => Some("result"),
+                                    zz_checker::Type::Db => Some("sqlz"),
+                                    zz_checker::Type::TcpStream | zz_checker::Type::TcpListener => {
+                                        Some("net")
+                                    }
+                                    zz_checker::Type::HttpServer
+                                    | zz_checker::Type::Response
+                                    | zz_checker::Type::HttpRequest => Some("http"),
+                                    zz_checker::Type::Json => Some("json"),
+                                    zz_checker::Type::Bytes => Some("bytes"),
+                                    zz_checker::Type::Chan => Some("chan"),
+                                    // Opaque handles dispatch on their module tag.
+                                    // Tags are dynamic, so leak once per tag —
+                                    // same pattern as struct namespaces in the VM.
+                                    zz_checker::Type::Opaque(tag) => {
+                                        Some(Box::leak(tag.clone().into_boxed_str()) as &str)
+                                    }
+                                    _ => None,
+                                });
+                            // Also check the type checker's span_types map
+                            // using the receiver's source span.
+                            let span_type_ns =
+                                if let Some(zzty) = self.ty_at(names, first_ident_span) {
+                                    match zzty {
+                                        zz_checker::Type::Str => Some("str"),
+                                        zz_checker::Type::Array(_) => Some("vec"),
+                                        zz_checker::Type::Dict(_, _) => Some("dict"),
+                                        zz_checker::Type::Option(_) => Some("option"),
+                                        zz_checker::Type::Result(_, _) => Some("result"),
+                                        zz_checker::Type::Db => Some("sqlz"),
+                                        zz_checker::Type::TcpStream
+                                        | zz_checker::Type::TcpListener => Some("net"),
+                                        zz_checker::Type::HttpServer
+                                        | zz_checker::Type::Response
+                                        | zz_checker::Type::HttpRequest => Some("http"),
+                                        zz_checker::Type::Json => Some("json"),
+                                        zz_checker::Type::Bytes => Some("bytes"),
+                                        zz_checker::Type::Chan => Some("chan"),
+                                        zz_checker::Type::Opaque(tag) => {
+                                            Some(Box::leak(tag.clone().into_boxed_str()) as &str)
+                                        }
+                                        _ => None,
+                                    }
+                                } else {
+                                    None
+                                };
+                            let type_ns = recv_type_ns.or(span_type_ns).unwrap_or("");
+                            if !type_ns.is_empty() {
+                                let candidate = format!("{type_ns}.{method}");
+                                let std_candidate = format!("std.{type_ns}.{method}");
                                 if self.reachable_natives.contains(&candidate)
                                     || self.reachable_natives.contains(&std_candidate)
+                                    || native_supported(&candidate)
                                 {
-                                    found_ns = ns;
-                                    break;
+                                    found_ns = type_ns;
                                 }
                             }
-                        }
-                        if found_ns.is_empty() {
-                            // Reachable-based dynamic scan FIRST (FFI-module
-                            // namespaces like regexp, uuid, file, … plus any
-                            // embedded namespace): any reachable
-                            // `<ns>.<method>` wins, sorted for determinism.
-                            // This must precede the `native_supported`
-                            // fallback below: global support without
-                            // reachability misroutes (e.g. `f.close()` on a
-                            // file handle would pick `sqlz.close`, which is
-                            // always "supported" but not reachable here).
-                            let suffix = format!(".{method}");
-                            let mut cands: Vec<&str> = self
-                                .reachable_natives
-                                .iter()
-                                .filter_map(|n| {
-                                    n.strip_suffix(suffix.as_str())
-                                        .map(|ns| ns.strip_prefix("std.").unwrap_or(ns))
-                                })
-                                .collect();
-                            cands.sort_unstable();
-                            cands.dedup();
-                            if let Some(ns) = cands.into_iter().next() {
-                                found_ns = ns;
-                            }
-                            // Last resort: match by native_impl — checks if
-                            // there's a C runtime function registered for
-                            // this method under any namespace, even when
-                            // reachability missed it.
+                            // Fallback: generic namespace search (untyped
+                            // receivers, e.g. variables without type annotations).
                             if found_ns.is_empty() {
                                 let namespaces = [
                                     "vec", "str", "dict", "option", "result", "http", "sqlz", "db",
@@ -1555,45 +1790,90 @@ impl Lowerer {
                                 ];
                                 for ns in &namespaces {
                                     let candidate = format!("{ns}.{method}");
-                                    if native_supported(&candidate) {
+                                    let std_candidate = format!("std.{ns}.{method}");
+                                    if self.reachable_natives.contains(&candidate)
+                                        || self.reachable_natives.contains(&std_candidate)
+                                    {
                                         found_ns = ns;
                                         break;
                                     }
                                 }
                             }
                             if found_ns.is_empty() {
-                                // No namespace resolved — the fallthrough
-                                // below emits a bare call and lets later
-                                // stages (checker/runtime) report it.
+                                // Reachable-based dynamic scan FIRST (FFI-module
+                                // namespaces like regexp, uuid, file, … plus any
+                                // embedded namespace): any reachable
+                                // `<ns>.<method>` wins, sorted for determinism.
+                                // This must precede the `native_supported`
+                                // fallback below: global support without
+                                // reachability misroutes (e.g. `f.close()` on a
+                                // file handle would pick `sqlz.close`, which is
+                                // always "supported" but not reachable here).
+                                let suffix = format!(".{method}");
+                                let mut cands: Vec<&str> = self
+                                    .reachable_natives
+                                    .iter()
+                                    .filter_map(|n| {
+                                        n.strip_suffix(suffix.as_str())
+                                            .map(|ns| ns.strip_prefix("std.").unwrap_or(ns))
+                                    })
+                                    .collect();
+                                cands.sort_unstable();
+                                cands.dedup();
+                                if let Some(ns) = cands.into_iter().next() {
+                                    found_ns = ns;
+                                }
+                                // Last resort: match by native_impl — checks if
+                                // there's a C runtime function registered for
+                                // this method under any namespace, even when
+                                // reachability missed it.
+                                if found_ns.is_empty() {
+                                    let namespaces = [
+                                        "vec", "str", "dict", "option", "result", "http", "sqlz",
+                                        "db", "file",
+                                    ];
+                                    for ns in &namespaces {
+                                        let candidate = format!("{ns}.{method}");
+                                        if native_supported(&candidate) {
+                                            found_ns = ns;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if found_ns.is_empty() {
+                                    // No namespace resolved — the fallthrough
+                                    // below emits a bare call and lets later
+                                    // stages (checker/runtime) report it.
+                                }
                             }
-                        }
-                        if found_ns.is_empty() {
-                            // Also check if the bare method name is a native
-                            // (e.g. `len`, `println`).
-                            if self.reachable_natives.contains(method) {
-                                // Bare builtin — no receiver injection needed.
-                                (method.clone(), None)
+                            if found_ns.is_empty() {
+                                // Also check if the bare method name is a native
+                                // (e.g. `len`, `println`).
+                                if self.reachable_natives.contains(method) {
+                                    // Bare builtin — no receiver injection needed.
+                                    (method.clone(), None)
+                                } else {
+                                    // Unknown — fall through
+                                    (method.clone(), None)
+                                }
                             } else {
-                                // Unknown — fall through
-                                (method.clone(), None)
+                                let receiver = Expr::Ident {
+                                    name: obj_name.clone(),
+                                    span: first_ident_span,
+                                };
+                                (format!("{found_ns}.{method}"), Some(receiver))
                             }
-                        } else {
-                            let receiver = Expr::Ident {
-                                name: obj_name.clone(),
-                                span: first_ident_span,
-                            };
-                            (format!("{found_ns}.{method}"), Some(receiver))
                         }
+                    } else {
+                        // obj_name is NOT a local — it's a namespace like `vec`, `io`,
+                        // or a module head alias (`f` from `import std.fs as f`).
+                        let head = self
+                            .import_ns_aliases
+                            .get(obj_name)
+                            .cloned()
+                            .unwrap_or_else(|| obj_name.clone());
+                        (format!("{head}.{method}"), None)
                     }
-                } else {
-                    // obj_name is NOT a local — it's a namespace like `vec`, `io`,
-                    // or a module head alias (`f` from `import std.fs as f`).
-                    let head = self
-                        .import_ns_aliases
-                        .get(obj_name)
-                        .cloned()
-                        .unwrap_or_else(|| obj_name.clone());
-                    (format!("{head}.{method}"), None)
                 }
             }
             Expr::Path { parts, .. } => {
@@ -1606,7 +1886,15 @@ impl Lowerer {
                 //     and uses its struct type to look up
                 //     `<StructType>.<method>` in funcs.
                 if parts.len() >= 2 {
-                    if let Some((recv_cname, recv_expr)) = self.resolve_path_receiver(parts, names)
+                    // Same collision rule as the 2-part arm above: an exact
+                    // user-function match is a direct call even when a local
+                    // shares the head segment.
+                    let joined = parts.join(".");
+                    if self.reachable_funcs.contains(&joined) || self.tp.funcs.contains_key(&joined)
+                    {
+                        (joined, None)
+                    } else if let Some((recv_cname, recv_expr)) =
+                        self.resolve_path_receiver(parts, names)
                     {
                         (recv_cname, Some(recv_expr))
                     } else {
@@ -1627,7 +1915,7 @@ impl Lowerer {
             } => {
                 // Expr::Field callee — rare since parser consumes ident chains as Path.
                 // Look up receiver type and dispatch.
-                if let Some(zzty) = self.tp.types.get(&obj.span()) {
+                if let Some(zzty) = self.ty_at(names, obj.span()) {
                     match zzty {
                         zz_checker::Type::Struct(sname) => {
                             // Keep the direct-form convention (no receiver);
@@ -2118,7 +2406,7 @@ impl Lowerer {
                 // Nested field access (e.g., r.origin.x) produces a raw C
                 // scalar that must be boxed for function calls.
                 // Derive field type from the parent object's struct type.
-                let ctype = self.tp.types.get(&obj.span()).and_then(|ot| {
+                let ctype = self.ty_at(names, obj.span()).and_then(|ot| {
                     if let zz_checker::Type::Struct(sname) = ot {
                         if let Some(sig) = self.tp.structs.get(sname) {
                             if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == name) {
@@ -2188,12 +2476,78 @@ impl Lowerer {
             } else {
                 impl_name
             };
+            // Route-handler fast path: a 1-param closure literal that
+            // never references its parameter registers under the `_fast`
+            // twin, letting the socket server skip request-dict
+            // construction. The handler is always the last user arg
+            // (receiver excluded) across all five spellings.
+            let effective_name: &str = match effective_name {
+                "zz_http_route_get"
+                | "zz_http_route_post"
+                | "zz_http_route_put"
+                | "zz_http_route_delete"
+                | "zz_http_route" => {
+                    let ignores = ordered_args.last().is_some_and(|h| match *h {
+                        Expr::Closure {
+                            ref params,
+                            ref body,
+                            ..
+                        } => closure_ignores_param(params, body),
+                        _ => false,
+                    });
+                    if ignores {
+                        match effective_name {
+                            "zz_http_route_get" => "zz_http_route_get_fast",
+                            "zz_http_route_post" => "zz_http_route_post_fast",
+                            "zz_http_route_put" => "zz_http_route_put_fast",
+                            "zz_http_route_delete" => "zz_http_route_delete_fast",
+                            _ => "zz_http_route_fast",
+                        }
+                    } else {
+                        effective_name
+                    }
+                }
+                _ => effective_name,
+            };
             // Arena-aware str_cast inside loops: allocate result on arena
             // to avoid heap malloc for intermediate string conversions.
             if effective_name == "zz_str_cast" {
                 if let Some(ref arena) = *self.current_loop_arena.borrow() {
                     let a = &arg_items[0];
                     return format!("zz_str_cast_arena({a}, &(int){{0}}, &{arena})");
+                }
+            }
+            // `http.get/post/put/delete/respond/post_json` accept an omitted
+            // trailing `headers` (checker `has_default`); `http.fetch`
+            // accepts up to four omitted trailing options
+            // (method/headers/body/timeout_ms). Pad like `range` above.
+            if matches!(
+                effective_name,
+                "zz_http_get"
+                    | "zz_http_post"
+                    | "zz_http_put"
+                    | "zz_http_delete"
+                    | "zz_http_respond"
+                    | "zz_http_post_json"
+            ) {
+                let full_arity = match effective_name {
+                    "zz_http_get" | "zz_http_delete" => 2,
+                    _ => 3,
+                };
+                if arg_items.len() + 1 == full_arity {
+                    arg_items.push("zz_dict_new()".to_string());
+                }
+            }
+            if effective_name == "zz_http_fetch" {
+                // Signature: (url, method, headers, body, timeout_ms).
+                while arg_items.len() < 5 {
+                    let pad = match 5 - arg_items.len() {
+                        4 => "zz_str_static(\"GET\")".to_string(),
+                        3 => "zz_dict_new()".to_string(),
+                        2 => "zz_str_static(\"\")".to_string(),
+                        _ => "zz_int(30000)".to_string(),
+                    };
+                    arg_items.push(pad);
                 }
             }
             return match arg_items.len() {
@@ -2253,18 +2607,63 @@ impl Lowerer {
                     let d = &arg_items[3];
                     format!("zz_call_native4({effective_name}, {a}, {b}, {c}, {d})")
                 }
+                5 => {
+                    let a = &arg_items[0];
+                    let b = &arg_items[1];
+                    let c = &arg_items[2];
+                    let d = &arg_items[3];
+                    let e = &arg_items[4];
+                    format!("zz_call_native5({effective_name}, {a}, {b}, {c}, {d}, {e})")
+                }
                 _ => "zz_unit()".to_string(),
             };
         }
 
-        // Reachable native without a C runtime impl (e.g. time.now_ms)
-        // lowers to Unit.
+        // Reachable native without a C runtime impl (VM-only surface,
+        // e.g. Phase 3 HTTP): abort loudly with the missing name. The old
+        // silent unit wedged programs — a retry loop matching on the
+        // result never fires when the value is unit (http_tls_p3 spun
+        // forever). The name is an internal dotted key (safe charset).
         if is_native {
-            let _ = (cname_for_native.is_empty(),);
-            return "zz_unit()".to_string();
+            return format!("zz_unimplemented_native(\"{cname_for_native}\")");
         }
 
-        if self.reachable_funcs.contains(&cname_for_native) {
+        // Bare-name fallback: the loader qualifies same-file calls, but a
+        // bare `greet_user` can still arrive here (generated code, REPL).
+        // A unique `*.name` reachable function is that same-file target.
+        let owned_fallback: Option<String>;
+        let cname_ref: &str = if !cname_for_native.contains('.')
+            && !self.reachable_funcs.contains(&cname_for_native)
+            && !self.tp.funcs.contains_key(&cname_for_native)
+        {
+            let suffix = format!(".{cname_for_native}");
+            let mut hits: Vec<&String> = self
+                .reachable_funcs
+                .iter()
+                .filter(|f| f.ends_with(suffix.as_str()))
+                .collect();
+            hits.sort_unstable();
+            hits.dedup();
+            if hits.len() == 1 {
+                owned_fallback = Some(hits[0].clone());
+                owned_fallback.as_deref().unwrap()
+            } else {
+                owned_fallback = None;
+                cname_for_native.as_str()
+            }
+        } else {
+            owned_fallback = None;
+            cname_for_native.as_str()
+        };
+        // Shadow `cname_for_native` with the resolved name for the rest of
+        // this function (avoids touching every use below).
+        let cname_for_native: String = cname_ref.to_string();
+        let _ = &owned_fallback;
+
+        if self.reachable_funcs.contains(&cname_for_native)
+            && (self.tp.funcs.contains_key(&cname_for_native)
+                || self.is_impl_method(&cname_for_native))
+        {
             let cf = format!("zz_fn_{}", mangle(&cname_for_native));
             // Impl methods: callee signature is
             // `zz_fn_X(<struct>* self, zz_value* args, size_t argc)`.
@@ -2349,6 +2748,13 @@ impl Lowerer {
                     let joined = parts.join(".");
                     if names.lookup(&joined).is_some() {
                         Indirect::Known
+                    } else if parts
+                        .last()
+                        .is_some_and(|last| names.lookup(last).is_some())
+                    {
+                        // Qualified closure var (`function_types.transform`):
+                        // globals are seeded bare, so accept the leaf.
+                        Indirect::Known
                     } else {
                         Indirect::No
                     }
@@ -2361,7 +2767,30 @@ impl Lowerer {
             };
             let closure_val: Option<String> = match kind {
                 Indirect::No => None,
-                Indirect::Known | Indirect::Other => Some(self.emit_expr(callee, names, out)),
+                Indirect::Other => Some(self.emit_expr(callee, names, out)),
+                Indirect::Known => {
+                    // Qualified closure var lowers via its bare global
+                    // (`function_types.transform` → `transform` global);
+                    // `emit_expr` on the qualified path would yield unit.
+                    if let Expr::Path { parts, .. } = callee {
+                        let joined = parts.join(".");
+                        let leaf_hit = names.lookup(&joined).is_none()
+                            && parts
+                                .last()
+                                .is_some_and(|last| names.lookup(last).is_some());
+                        if leaf_hit {
+                            let leaf = Expr::Ident {
+                                name: parts.last().cloned().unwrap_or_default(),
+                                span: callee.span(),
+                            };
+                            Some(self.emit_expr(&leaf, names, out))
+                        } else {
+                            Some(self.emit_expr(callee, names, out))
+                        }
+                    } else {
+                        Some(self.emit_expr(callee, names, out))
+                    }
+                }
             };
             if let Some(cv) = closure_val {
                 if arg_items.is_empty() {
@@ -2378,6 +2807,33 @@ impl Lowerer {
         "zz_unit()".to_string()
     }
 
+    /// Emit an expression in tail/return position as a `zz_value`.
+    ///
+    /// Every generated function returns `zz_value`, but unboxed structs
+    /// lower to raw C structs. A tail that is (or names) an unboxed
+    /// struct must be boxed into a runtime object first — otherwise C
+    /// rejects `return <raw struct>` / `tmp = <raw struct>`. Scalars
+    /// keep the existing `box_scalar_operand` path; anything already
+    /// boxed passes through unchanged.
+    pub(super) fn emit_tail_value(
+        &self,
+        e: &Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        // Check BEFORE emitting so side-effecting values emit exactly once.
+        if let Expr::StructInit { name, .. } = e {
+            if self.is_unboxed_struct(name) {
+                return self.emit_boxed_value(name, e, names, out);
+            }
+        }
+        if let Some(sname) = self.unboxed_struct_of_expr(e, names) {
+            return self.emit_boxed_value(&sname, e, names, out);
+        }
+        let v = self.emit_expr(e, names, out);
+        box_scalar_operand(e, names, &v)
+    }
+
     /// Lower a struct literal, distributing flattened (promoted) fields
     /// into embedded sub-objects (`User{id: 1, age: 2}` fills `Base.id`).
     /// Literals without flattened fields keep the historical emission
@@ -2389,6 +2845,22 @@ impl Lowerer {
         names: &mut NameCtx,
         out: &mut String,
     ) -> String {
+        // Canonicalize selective-import aliases (`Product` →
+        // `product.Product`) so the emitted C type matches the
+        // HIR-declared slot type (the checker canonicalizes the same
+        // way). Miss-only with a structs membership guard, so local
+        // structs and func-name collisions are unaffected.
+        let resolved;
+        let sname: &str = if let Some(q) = self.import_fn_aliases.get(sname) {
+            if self.tp.structs.contains_key(q) {
+                resolved = q.clone();
+                &resolved
+            } else {
+                sname
+            }
+        } else {
+            sname
+        };
         let all_direct = self.tp.structs.get(sname).is_some_and(|sig| {
             fields
                 .iter()
@@ -2481,10 +2953,13 @@ impl Lowerer {
                     continue;
                 }
                 let fval = self.emit_expr(fexpr, names, out);
-                // Box the field value if it's a scalar type
+                // Box the field value if it's a scalar type. The boxer
+                // sees the source expression (not just the emitted text)
+                // so already-boxed values (params, calls) pass through
+                // instead of being re-wrapped (C type error).
                 let boxed_fval =
                     if let Some((_, field_type)) = sig.fields.iter().find(|(n, _)| n == fname) {
-                        Self::box_struct_field_value(fval, field_type)
+                        Self::box_struct_field_expr(fexpr, fval, field_type, names)
                     } else {
                         fval
                     };
@@ -2501,7 +2976,7 @@ impl Lowerer {
     /// struct inside a struct holding strings). Literals lower
     /// field-by-field; any other expression is read member-wise through
     /// synthesized field accesses.
-    fn emit_boxed_value(
+    pub(super) fn emit_boxed_value(
         &self,
         sname: &str,
         value: &Expr,
@@ -2549,7 +3024,7 @@ impl Lowerer {
                 }
             }
             let fval = self.emit_expr(&access, names, out);
-            let boxed = Self::box_struct_field_value(fval, fty);
+            let boxed = Self::box_struct_field_expr(&access, fval, fty, names);
             out.push_str(&format!(
                 "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed});\n",
             ));
@@ -2640,7 +3115,7 @@ impl Lowerer {
                         }
                     }
                     let fval = self.emit_expr(fexpr, names, out);
-                    let boxed_fval = Self::box_struct_field_value(fval, fty);
+                    let boxed_fval = Self::box_struct_field_expr(fexpr, fval, fty, names);
                     out.push_str(&format!(
                         "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed_fval});\n",
                     ));
@@ -2662,35 +3137,23 @@ impl Lowerer {
         }
     }
 
-    /// Box a struct field value for `zz_object_set_field` given the field's
-    /// C type: scalars need `zz_int/float/bool(...)` unless the emitted
-    /// value is already boxed.
-    pub(super) fn box_struct_field_ctype(fval: String, ctype: &str) -> String {
-        if !matches!(ctype, "int64_t" | "double" | "bool") {
-            return fval;
-        }
-        let already_boxed = fval.starts_with("zz_int(")
-            || fval.starts_with("zz_float(")
-            || fval.starts_with("zz_bool(");
-        if already_boxed {
-            return fval;
-        }
-        match ctype {
-            "int64_t" => format!("zz_int({fval})"),
-            "double" => format!("zz_float({fval})"),
-            _ => format!("zz_bool({fval})"),
-        }
-    }
-
-    /// Box a struct field value for `zz_object_set_field`: scalar-typed
-    /// fields need `zz_int/float/bool(...)` unless the emitted value is
-    /// already boxed (int/float/bool literals and field reads emit
-    /// `zz_value`s directly — wrapping them again breaks C compilation).
-    fn box_struct_field_value(fval: String, fty: &zz_checker::Type) -> String {
+    /// Box a struct field value for `zz_object_set_field` given the field
+    /// expression, its emitted form, and its declared type. Scalar-typed
+    /// fields route through [`box_scalar_operand`], which boxes raw C
+    /// scalars (`zz_int/float/bool(...)`) but passes already-boxed values
+    /// (params, calls, boxed locals) through untouched. The old
+    /// string-sniffing boxer re-wrapped boxed values (`zz_bool(zz_clone(v))`
+    /// — a C type error) whenever the value wasn't literally prefixed.
+    fn box_struct_field_expr(
+        fexpr: &Expr,
+        fval: String,
+        fty: &zz_checker::Type,
+        names: &NameCtx,
+    ) -> String {
         match fty {
-            zz_checker::Type::Int => Self::box_struct_field_ctype(fval, "int64_t"),
-            zz_checker::Type::Float => Self::box_struct_field_ctype(fval, "double"),
-            zz_checker::Type::Bool => Self::box_struct_field_ctype(fval, "bool"),
+            zz_checker::Type::Int | zz_checker::Type::Float | zz_checker::Type::Bool => {
+                box_scalar_operand(fexpr, names, &fval)
+            }
             _ => fval,
         }
     }
@@ -2823,15 +3286,46 @@ impl Lowerer {
     }
 
     pub(super) fn emit_str_literal(&self, s: &str) -> String {
+        // NUL-containing literals cannot use `zz_str_static`: it measures
+        // with `strlen`, truncating at the first NUL (so `"\x00"` became
+        // `""` and `str.contains(x, "\x00")` was always true). Emit a
+        // length-aware `zz_str_new` instead, with 3-digit octal escapes
+        // (unambiguous in C no matter what follows) and the true length.
+        if s.contains('\0') {
+            let mut o = String::from("\"");
+            for c in s.chars() {
+                match c {
+                    '"' => o.push_str("\\\""),
+                    '\\' => o.push_str("\\\\"),
+                    '\n' => o.push_str("\\n"),
+                    '\r' => o.push_str("\\r"),
+                    '\t' => o.push_str("\\t"),
+                    c if (c as u32) < 32 => o.push_str(&format!("\\{:03o}", c as u32)),
+                    c => o.push(c),
+                }
+            }
+            o.push('"');
+            return format!("zz_str_new({o}, {})", s.len());
+        }
         let mut o = String::from("\"");
-        for c in s.chars() {
+        let mut it = s.chars().peekable();
+        while let Some(c) = it.next() {
             match c {
                 '"' => o.push_str("\\\""),
                 '\\' => o.push_str("\\\\"),
                 '\n' => o.push_str("\\n"),
                 '\r' => o.push_str("\\r"),
                 '\t' => o.push_str("\\t"),
-                c if (c as u32) < 32 => o.push_str(&format!("\\x{:02x}", c as u32)),
+                c if (c as u32) < 32 => {
+                    // C `\x` escapes consume ALL following hex digits, so
+                    // `\x1f` + `1` would compile as `\x1f1` (out of range).
+                    // Close + reopen the literal when a hex digit follows;
+                    // adjacent literals concatenate in C.
+                    o.push_str(&format!("\\x{:02x}", c as u32));
+                    if matches!(it.peek(), Some(n) if n.is_ascii_hexdigit()) {
+                        o.push_str("\" \"");
+                    }
+                }
                 c => o.push(c),
             }
         }
@@ -2843,14 +3337,21 @@ impl Lowerer {
     /// (without the `zz_str_static` wrapper).
     fn c_escape(s: &str) -> String {
         let mut o = String::new();
-        for c in s.chars() {
+        let mut it = s.chars().peekable();
+        while let Some(c) = it.next() {
             match c {
                 '"' => o.push_str("\\\""),
                 '\\' => o.push_str("\\\\"),
                 '\n' => o.push_str("\\n"),
                 '\r' => o.push_str("\\r"),
                 '\t' => o.push_str("\\t"),
-                c if (c as u32) < 32 => o.push_str(&format!("\\x{:02x}", c as u32)),
+                c if (c as u32) < 32 => {
+                    // Same greedy-`\x` split as emit_str_literal above.
+                    o.push_str(&format!("\\x{:02x}", c as u32));
+                    if matches!(it.peek(), Some(n) if n.is_ascii_hexdigit()) {
+                        o.push_str("\" \"");
+                    }
+                }
                 c => o.push(c),
             }
         }
@@ -3235,7 +3736,7 @@ impl Lowerer {
                         inner_open = self.emit_pattern_bind(arg_pat, &payload_tmp, names, out);
                     }
 
-                    let arm_val = self.emit_expr(&arm.body, names, out);
+                    let arm_val = self.emit_tail_value(&arm.body, names, out);
                     out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
                     // Close any nested pattern if-blocks.
                     for _ in 0..inner_open {
@@ -3272,7 +3773,7 @@ impl Lowerer {
                             out.push_str("    {\n");
                         }
                     }
-                    let arm_val = self.emit_expr(&arm.body, names, out);
+                    let arm_val = self.emit_tail_value(&arm.body, names, out);
                     out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
                     if arm_closes_block {
                         out.push_str("    }\n");
@@ -3293,7 +3794,7 @@ impl Lowerer {
                             out.push_str("    {\n");
                         }
                     }
-                    let arm_val = self.emit_expr(&arm.body, names, out);
+                    let arm_val = self.emit_tail_value(&arm.body, names, out);
                     out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
                     if arm_closes_block {
                         out.push_str("    }\n");
@@ -3327,7 +3828,7 @@ impl Lowerer {
                     } else {
                         out.push_str(&format!("    if ({full_cond}) {{\n"));
                     }
-                    let arm_val = self.emit_expr(&arm.body, names, out);
+                    let arm_val = self.emit_tail_value(&arm.body, names, out);
                     out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
                     if arm_closes_block {
                         out.push_str("    }\n");

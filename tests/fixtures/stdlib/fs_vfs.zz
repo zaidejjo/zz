@@ -1,8 +1,14 @@
 // E2E: `fs.FS` providers (Os / Mem / Tar / Embed) + binary-safe
 // `read_chunk_bytes`. Same output on VM and AOT.
+// OS scratch path is per (process, sweep task) so parallel runners
+// never share it.
+import std.env
 import std.fs
+import std.process(pid)
 
 func main() {
+    os_scratch_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+    os_path := "/tmp/zz_vfs_os_{pid()}_{os_scratch_tok}.txt"
     // memfs: write/read/append/predicates/listing.
     match fs.memfs() {
         .ok(m) => {
@@ -42,16 +48,16 @@ func main() {
     // osfs: same calls, real disk.
     match fs.osfs() {
         .ok(o) => {
-            match fs.write_at(o, "/tmp/zz_vfs_os.txt", "os-data") {
+            match fs.write_at(o, os_path, "os-data") {
                 .ok(_) => println("os_write_ok")
                 .err(e) => println("os_write_err: {e}")
             }
-            match fs.read_to_string_at(o, "/tmp/zz_vfs_os.txt") {
+            match fs.read_to_string_at(o, os_path) {
                 .ok(c) => println("os_content: {c}")
                 .err(e) => println("os_read_err: {e}")
             }
-            println(fs.exists_at(o, "/tmp/zz_vfs_os.txt"))
-            match fs.remove_file_at(o, "/tmp/zz_vfs_os.txt") {
+            println(fs.exists_at(o, os_path))
+            match fs.remove_file_at(o, os_path) {
                 .ok(_) => println("os_remove_ok")
                 .err(e) => println("os_remove_err: {e}")
             }

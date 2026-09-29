@@ -706,9 +706,11 @@ fn fp_expr(e: &Expr, out: &mut String) {
 /// Lex `source` and return the sequence of significant-token texts
 /// (whitespace, comments, and StmtEnd newlines stripped).
 ///
-/// String tokens (`Str`/`StrFmt`) compare by *decoded value*, not raw source
-/// slice: the same value can be written as `"..."` or `"""..."""` (with any
-/// indentation), so the emitter is free to pick the canonical form.
+/// String tokens (`Str`/`StrFmt`) compare by **raw source slice**, not
+/// decoded value: `"a\x0ab"` and `"a\nb"` decode identically but are
+/// different source spellings. The formatter is lossless and must preserve
+/// the exact spelling (escapes, `"` vs `"""`, interpolation layout), so
+/// verification enforces raw equality.
 fn significant_token_sequence(source: &str) -> Vec<String> {
     let lexed = lex(source);
     let mut seq = Vec::new();
@@ -717,8 +719,6 @@ fn significant_token_sequence(source: &str) -> Vec<String> {
             TokenKind::Eof => break,
             // StmtEnd newlines are pure trivia for verification purposes.
             TokenKind::StmtEnd => continue,
-            TokenKind::Str => seq.push(format!("Str({})", t.text)),
-            TokenKind::StrFmt => seq.push(format!("StrFmt({})", t.text)),
             _ => {
                 let s = t.span.start as usize;
                 let e = (t.span.end as usize).min(source.len());
@@ -883,6 +883,25 @@ fn split_imports(seq: &[String]) -> (Vec<String>, Vec<String>) {
                     j += 2;
                 }
             }
+            // optional selective/wildcard items: `(a, b as c, *)`.
+            // Consumed as balanced parens so reordered selective imports
+            // still compare as an order-insensitive set.
+            if seq.get(j).is_some_and(|t| t == "(") {
+                let mut depth = 0i32;
+                while j < seq.len() {
+                    if seq[j] == "(" {
+                        depth += 1;
+                    } else if seq[j] == ")" {
+                        depth -= 1;
+                        j += 1;
+                        if depth == 0 {
+                            break;
+                        }
+                        continue;
+                    }
+                    j += 1;
+                }
+            }
             // optional `as ident`
             if seq.get(j).is_some_and(|t| t == "as") {
                 j += 1;
@@ -902,40 +921,23 @@ fn split_imports(seq: &[String]) -> (Vec<String>, Vec<String>) {
     imports.sort();
     (imports, rest)
 }
-/// from `source`. Comments are returned in source order.
+/// Extract all comments from `source` in source order.
+///
+/// Uses the lexer's trivia classification (not a naive byte scan) so
+/// `//` or `/*` sequences *inside string literals* are never mistaken
+/// for comments. Returns the raw comment text byte-identical.
 fn extract_comments(source: &str) -> Vec<String> {
-    let bytes = source.as_bytes();
+    let lexed = lex(source);
     let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
-            // Line comment to end of line.
-            let start = i;
-            let mut j = i + 2;
-            while j < bytes.len() && bytes[j] != b'\n' {
-                j += 1;
-            }
-            out.push(source[start..j].to_string());
-            i = j;
-        } else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            let start = i;
-            let mut depth = 1u32;
-            let mut j = i + 2;
-            while j < bytes.len() && depth > 0 {
-                if j + 1 < bytes.len() && bytes[j] == b'/' && bytes[j + 1] == b'*' {
-                    depth += 1;
-                    j += 2;
-                } else if j + 1 < bytes.len() && bytes[j] == b'*' && bytes[j + 1] == b'/' {
-                    depth -= 1;
-                    j += 2;
-                } else {
-                    j += 1;
+    for t in &lexed.tokens {
+        for tr in &t.leading {
+            if tr.kind == zz_frontend::token::TriviaKind::Comment {
+                let s = tr.span.start as usize;
+                let e = (tr.span.end as usize).min(source.len());
+                if e > s {
+                    out.push(source[s..e].to_string());
                 }
             }
-            out.push(source[start..j].to_string());
-            i = j;
-        } else {
-            i += 1;
         }
     }
     out

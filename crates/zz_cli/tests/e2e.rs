@@ -171,9 +171,31 @@ e2e_success_test!(e2e_syntax_declarations, "syntax", "declarations.zz");
 e2e_success_test!(e2e_syntax_const, "syntax", "const.zz");
 e2e_success_test!(e2e_syntax_functions, "syntax", "functions.zz");
 e2e_success_test!(e2e_syntax_control_flow, "syntax", "control_flow.zz");
+e2e_success_test!(e2e_syntax_range_var_bounds, "syntax", "range_var_bounds.zz");
+e2e_success_test!(e2e_syntax_scope_collision, "syntax", "scope_collision.zz");
+e2e_success_test!(
+    e2e_syntax_for_annotated_decl,
+    "syntax",
+    "for_annotated_decl.zz"
+);
+e2e_success_test!(
+    e2e_syntax_struct_scalar_fields,
+    "syntax",
+    "struct_scalar_fields.zz"
+);
+e2e_success_test!(
+    e2e_syntax_hex_escape_bounds,
+    "syntax",
+    "hex_escape_bounds.zz"
+);
 e2e_success_test!(e2e_syntax_pipelines, "syntax", "pipelines.zz");
 e2e_success_test!(e2e_syntax_hof, "syntax", "hof.zz");
 e2e_success_test!(e2e_syntax_match, "syntax", "match.zz");
+e2e_success_test!(
+    e2e_syntax_match_bare_return,
+    "syntax",
+    "match_bare_return.zz"
+);
 e2e_success_test!(e2e_syntax_frame_slots, "syntax", "frame_slots.zz");
 e2e_success_test!(e2e_syntax_operators, "syntax", "operators.zz");
 e2e_success_test!(e2e_syntax_fstrings, "syntax", "fstrings.zz");
@@ -276,6 +298,24 @@ e2e_success_test!(
     "stdlib",
     "http_request_response.zz"
 );
+e2e_success_test!(e2e_stdlib_http_fetch_test, "stdlib", "http_fetch_test.zz");
+e2e_success_test!(e2e_stdlib_http_router_p1, "stdlib", "http_router_p1.zz");
+e2e_success_test!(
+    e2e_stdlib_http_keepalive_p1,
+    "stdlib",
+    "http_keepalive_p1.zz"
+);
+e2e_success_test!(e2e_stdlib_http_static_p2, "stdlib", "http_static_p2.zz");
+e2e_success_test!(
+    e2e_stdlib_http_middleware_p2,
+    "stdlib",
+    "http_middleware_p2.zz"
+);
+e2e_success_test!(e2e_stdlib_http_limits_p2, "stdlib", "http_limits_p2.zz");
+e2e_success_test!(e2e_stdlib_http_bytes_p3, "stdlib", "http_bytes_p3.zz");
+e2e_success_test!(e2e_stdlib_http_tls_p3, "stdlib", "http_tls_p3.zz");
+e2e_success_test!(e2e_stdlib_http_hijack_p3, "stdlib", "http_hijack_p3.zz");
+e2e_success_test!(e2e_stdlib_ns_collision, "stdlib", "ns_collision.zz");
 e2e_success_test!(
     e2e_stdlib_bench_memory_arena,
     "stdlib",
@@ -372,6 +412,11 @@ e2e_success_test!(
     "json_extended_test.zz"
 );
 e2e_success_test!(e2e_stdlib_selective_import, "stdlib", "selective_import.zz");
+e2e_success_test!(
+    e2e_stdlib_str_selective_methods,
+    "stdlib",
+    "str_selective_methods.zz"
+);
 e2e_success_test!(e2e_stdlib_wildcard_import, "stdlib", "wildcard_import.zz");
 e2e_success_test!(e2e_stdlib_symbol_alias, "stdlib", "symbol_alias.zz");
 e2e_success_test!(e2e_stdlib_multi_selective, "stdlib", "multi_selective.zz");
@@ -425,6 +470,11 @@ e2e_error_test!(e2e_err_const_reassign, "const_reassign.zz");
 e2e_error_test!(e2e_err_undefined_var, "undefined_var.zz");
 e2e_error_test!(e2e_err_missing_field, "missing_field.zz");
 e2e_error_test!(e2e_err_arity, "arity.zz");
+e2e_error_test!(e2e_err_http_route_dup, "http_route_dup.zz");
+e2e_error_test!(e2e_err_http_route_path, "http_route_path.zz");
+e2e_error_test!(e2e_err_http_route_method, "http_route_method.zz");
+e2e_error_test!(e2e_err_http_tls_cert, "http_tls_cert.zz");
+e2e_error_test!(e2e_err_http_hijack_arity, "http_hijack_arity.zz");
 e2e_error_test!(e2e_err_parse_error, "parse_error.zz");
 e2e_error_test!(e2e_err_div_by_zero, "div_by_zero.zz");
 e2e_error_test!(e2e_err_unknown_field, "unknown_field.zz");

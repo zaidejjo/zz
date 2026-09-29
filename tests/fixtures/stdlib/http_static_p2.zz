@@ -1,0 +1,44 @@
+// tests/fixtures/stdlib/http_static_p2.zz — Phase 2 hardened static files
+// 200 + MIME, 404, traversal 403, ETag 304, Range 206/416 via test_req.
+import std.http
+import std.fs
+import std.env
+
+func main() -> Result<int, str> {
+    root := "{env.temp_dir()}/zz_static_p2"
+    fs.mkdir_all(root)?
+    fs.write_file("{root}/hello.txt", "hello static")?
+    fs.write_file("{root}/app.js", "console.log(1)")?
+    fs.write_file("{root}/index.html", "<h1>hi</h1>")?
+    fs.write_file("{root}/data.bin", "0123456789")?
+
+    s := http.server()
+    s = http.serve_dir(s, root)
+
+    r1 := http.test(s, "GET", "/hello.txt", "")
+    println("static200: {r1.status()}:{r1.text()}")
+    println("mime: {r1.headers()["Content-Type"]}")
+    etag := r1.headers()["ETag"]
+    println("etag: {etag}")
+
+    r2 := http.test(s, "GET", "/missing.txt", "")
+    println("static404: {r2.status()}")
+
+    r3 := http.test(s, "GET", "/../hello.txt", "")
+    println("traversal: {r3.status()}")
+
+    r4 := http.test_req(s, "GET", "/hello.txt", {"If-None-Match": etag}, "")
+    println("cond304: {r4.status()}:{r4.text().len()}")
+
+    r5 := http.test_req(s, "GET", "/data.bin", {"Range": "bytes=2-5"}, "")
+    println("range206: {r5.status()}:{r5.text()}:{r5.headers()["Content-Range"]}")
+
+    r6 := http.test_req(s, "GET", "/data.bin", {"Range": "bytes=99-100"}, "")
+    println("range416: {r6.status()}")
+
+    r7 := http.test(s, "GET", "/", "")
+    println("index: {r7.status()}:{r7.text()}")
+
+    println("http_static_p2_ok")
+    .ok(0)
+}

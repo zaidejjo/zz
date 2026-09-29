@@ -6,8 +6,8 @@ use zz_frontend::span::Span;
 use crate::env::{Env, EnvLink};
 use crate::runtime::format::{format_value_with_spec, value_matches_lit};
 use crate::runtime::ops::{
-    eval_binary, eval_unary, get_index, is_embedded_value, object_field, set_index,
-    set_object_field, slice_value,
+    eval_binary, eval_unary, fill_default_headers, get_index, is_embedded_value, object_field,
+    set_index, set_object_field, slice_value,
 };
 use crate::runtime::{EvalError, Flow};
 use crate::value::NativeFunc;
@@ -477,7 +477,19 @@ impl Interp {
                 span,
             ));
         }
-        let Some(layout) = self.structs.get(sname).cloned() else {
+        // Selective-import alias (miss-only): bare `Product` from
+        // `import m(Product)` resolves to `m.Product`. Mirrors the
+        // Ident fallback in `eval`.
+        let resolved;
+        let lookup = if self.structs.contains_key(sname) {
+            sname
+        } else if let Some(qualified) = self.import_aliases.get(sname) {
+            resolved = qualified.clone();
+            resolved.as_str()
+        } else {
+            return Err(EvalError::new(format!("unknown struct `{sname}`"), span));
+        };
+        let Some(layout) = self.structs.get(lookup).cloned() else {
             return Err(EvalError::new(format!("unknown struct `{sname}`"), span));
         };
         // Leftovers: given fields that are not direct fields of this
@@ -1321,7 +1333,10 @@ impl Interp {
                         | "std.sqlz.mysql.query"
                         | "std.sqlz.mysql.exec"
                 );
-                if !is_db && args.len() != nf.arity {
+                if !is_db
+                    && args.len() != nf.arity
+                    && !fill_default_headers(&nf.name, &mut args, nf.arity)
+                {
                     return Err(EvalError::new(
                         format!("expected {} arguments, found {}", nf.arity, args.len()),
                         span,

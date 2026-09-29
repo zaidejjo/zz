@@ -178,7 +178,7 @@ fn dot_access_completions(
                 Type::Int => vec!["int"],
                 Type::Float => vec!["float"],
                 Type::Bool => vec!["bool"],
-                Type::Response | Type::HttpServer => vec!["http"],
+                Type::Response | Type::HttpServer | Type::HttpRequest => vec!["http"],
                 Type::TcpStream | Type::TcpListener => vec!["net"],
                 Type::Json => vec!["json"],
                 Type::Db => vec!["sqlz", "db"],

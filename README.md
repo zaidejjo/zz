@@ -70,4 +70,4 @@ zz_frontend ──> zz_checker ──> zz_stdlib ──> zz_cli
 
 ## License
 
-MIT
+Apache-2.0 — see [LICENSE](LICENSE).

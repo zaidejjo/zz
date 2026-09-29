@@ -8,14 +8,20 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::natives::{arg, expect_str};
+use router::{best_match, matches_other_method};
 use zz_runtime::json::{parse_json, to_json_string, JsonValue};
 use zz_runtime::value::{
     detach_cached_funcs, reachable_refs, snapshot_env, snapshot_env_filtered, snapshot_funcs,
-    FuncValue, HttpServer, Response,
+    FuncValue, HttpRequest, HttpServer, RateBucket, RateLimit, Response, RATE_LIMIT_MAX_KEYS,
 };
 use zz_runtime::{
     vm::Op, Chunk, Env, EnvLink, EvalError, Expr, Interp, NativeEntry, Param, Span, Value,
 };
+
+pub(crate) mod parse;
+pub(crate) mod router;
+pub(crate) mod static_files;
+pub(crate) mod tls;
 
 // ===========================================================================
 // Helpers
@@ -65,24 +71,6 @@ fn jsonify_value(v: &Value) -> JsonValue {
     }
 }
 
-fn guess_mime(path: &str) -> &'static str {
-    match path.rsplit('.').next() {
-        Some("html") | Some("htm") => "text/html; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("js") => "application/javascript; charset=utf-8",
-        Some("json") => "application/json",
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("svg") => "image/svg+xml",
-        Some("txt") => "text/plain; charset=utf-8",
-        Some("ico") => "image/x-icon",
-        Some("woff") => "font/woff",
-        Some("woff2") => "font/woff2",
-        _ => "application/octet-stream",
-    }
-}
-
 fn parse_query_string(qs: &str) -> Vec<(String, String)> {
     if qs.is_empty() {
         return Vec::new();
@@ -97,25 +85,13 @@ fn parse_query_string(qs: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-fn extract_headers(text: &str) -> Vec<(String, String)> {
-    let mut headers = Vec::new();
-    for line in text.lines() {
-        if line.is_empty() {
-            break;
-        }
-        if let Some((key, val)) = line.split_once(':') {
-            headers.push((key.trim().to_string(), val.trim().to_string()));
-        }
-    }
-    headers
-}
-
 fn http_reason(status: u16) -> &'static str {
     match status {
         100 => "Continue",
         200 => "OK",
         201 => "Created",
         204 => "No Content",
+        206 => "Partial Content",
         301 => "Moved Permanently",
         304 => "Not Modified",
         400 => "Bad Request",
@@ -124,8 +100,11 @@ fn http_reason(status: u16) -> &'static str {
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
+        416 => "Range Not Satisfiable",
+        429 => "Too Many Requests",
         431 => "Headers Too Large",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "Error",
     }
 }
@@ -133,26 +112,38 @@ fn http_reason(status: u16) -> &'static str {
 fn format_response_with_headers(
     status: u16,
     extra_headers: &[(String, String)],
-    body: &str,
-) -> String {
+    body: &[u8],
+    keep_alive: bool,
+) -> Vec<u8> {
     let reason = http_reason(status);
-    let mut hdrs = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close",
+    let conn = if keep_alive { "keep-alive" } else { "close" };
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: {conn}",
         body.len()
     );
     for (k, v) in extra_headers {
-        hdrs.push_str(&format!("\r\n{k}: {v}"));
+        head.push_str(&format!("\r\n{k}: {v}"));
     }
-    format!("{hdrs}\r\n\r\n{body}")
+    head.push_str("\r\n\r\n");
+    let mut out = head.into_bytes();
+    out.extend_from_slice(body);
+    out
 }
 
-fn format_response(status: u16, body: &str) -> String {
+fn format_response(status: u16, body: &str) -> Vec<u8> {
     format_response_with_headers(
         status,
         &[("Content-Type".into(), "text/plain; charset=utf-8".into())],
-        body,
+        body.as_bytes(),
+        false,
     )
 }
+
+/// Max requests served per keep-alive connection (anti-slowloris bound).
+const MAX_REQS_PER_CONN: usize = 1000;
+/// Per-read timeout: idle keep-alive connections die here instead of
+/// pinning a thread forever (the pool in 1.2 reclaims the slot sooner).
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Max buffered request body (50 MiB). Publish tarballs are ~1–10 MiB;
 /// anything larger is rejected with 413 before buffering.
@@ -228,63 +219,147 @@ fn read_exact_capped<R: std::io::Read>(
     Ok(out)
 }
 
-/// Build a Value::Dict request object from parsed HTTP request data.
+/// Build a `Value::HttpRequest` from parsed HTTP request data.
+/// Takes the raw body bytes: `body` is the lossy-text view, `body_raw` the
+/// exact bytes (moved, no copy — shared into the request by `Arc`).
 fn build_request_dict(
     method: &str,
     path: &str,
-    body: String,
+    body_bytes: Vec<u8>,
     headers: &[(String, String)],
     query_pairs: &[(String, String)],
     params: &[(String, String)],
 ) -> Value {
-    let method_val = Value::Str(method.to_string().into());
-    let path_val = Value::Str(path.to_string().into());
-    // Move (no copy): the caller-owned body buffer becomes the dict entry.
-    let body_val = Value::Str(body.into());
+    use zz_runtime::BytesData;
+    let body = String::from_utf8_lossy(&body_bytes).into_owned();
+    Value::HttpRequest(Box::new(HttpRequest {
+        method: method.to_string(),
+        path: path.to_string(),
+        body,
+        body_raw: Some(BytesData::from_vec(body_bytes)),
+        headers: headers.to_vec(),
+        query: query_pairs.to_vec(),
+        params: params.to_vec(),
+    }))
+}
 
-    let headers_dict: Vec<(Value, Value)> = headers
-        .iter()
-        .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
-        .collect();
+/// A borrowed view over a request — either the typed `HttpRequest` value
+/// or a legacy `Dict` (accepted during the Dict→`HttpRequest` migration so
+/// old snapshots and hand-built dicts keep working).
+struct RequestView<'a> {
+    body: &'a str,
+    headers: Vec<(&'a str, &'a str)>,
+    query: Vec<(&'a str, &'a str)>,
+    params: Vec<(&'a str, &'a str)>,
+}
 
-    let query_dict: Vec<(Value, Value)> = query_pairs
-        .iter()
-        .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
-        .collect();
-
-    let params_dict: Vec<(Value, Value)> = params
-        .iter()
-        .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
-        .collect();
-
-    Value::Dict(Box::new(vec![
-        (Value::Str("method".to_string().into()), method_val),
-        (Value::Str("path".to_string().into()), path_val),
-        (Value::Str("body".to_string().into()), body_val),
-        (
-            Value::Str("headers".to_string().into()),
-            Value::Dict(Box::new(headers_dict)),
-        ),
-        (
-            Value::Str("query".to_string().into()),
-            Value::Dict(Box::new(query_dict)),
-        ),
-        (
-            Value::Str("params".to_string().into()),
-            Value::Dict(Box::new(params_dict)),
-        ),
-    ]))
+fn view_request(v: &Value) -> Option<RequestView<'_>> {
+    match v {
+        Value::HttpRequest(r) => Some(RequestView {
+            body: &r.body,
+            headers: r
+                .headers
+                .iter()
+                .map(|(k, val)| (k.as_str(), val.as_str()))
+                .collect(),
+            query: r
+                .query
+                .iter()
+                .map(|(k, val)| (k.as_str(), val.as_str()))
+                .collect(),
+            params: r
+                .params
+                .iter()
+                .map(|(k, val)| (k.as_str(), val.as_str()))
+                .collect(),
+        }),
+        Value::Dict(entries) => {
+            let field = |name: &str| {
+                entries.iter().find_map(|(k, val)| match (k, val) {
+                    (Value::Str(k), Value::Str(v)) if k.as_str() == name => Some(v.as_str()),
+                    _ => None,
+                })
+            };
+            let sub = |name: &str| {
+                entries
+                    .iter()
+                    .find_map(|(k, val)| match (k, val) {
+                        (Value::Str(k), Value::Dict(inner)) if k.as_str() == name => {
+                            Some(inner.iter().filter_map(|(ik, iv)| match (ik, iv) {
+                                (Value::Str(k), Value::Str(v)) => Some((k.as_str(), v.as_str())),
+                                _ => None,
+                            }))
+                        }
+                        _ => None,
+                    })
+                    .map(|it| it.collect())
+                    .unwrap_or_default()
+            };
+            Some(RequestView {
+                body: field("body")?,
+                headers: sub("headers"),
+                query: sub("query"),
+                params: sub("params"),
+            })
+        }
+        _ => None,
+    }
 }
 
 // ===========================================================================
-// HTTP Client (reqwest blocking)
+// HTTP Client (reqwest blocking, shared pool)
 // ===========================================================================
 
-fn build_client() -> Result<reqwest::blocking::Client, EvalError> {
-    reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| EvalError::new(format!("failed to build HTTP client: {e}"), Span::new(0, 0)))
+/// Process-wide shared client: connection pooling, keep-alive, and session
+/// reuse across calls. Built once; per-request `.timeout()` overrides the
+/// 30s default (see `http_fetch`). Previously every call ran
+/// `Client::builder().build()` — new pool, new TLS session, no reuse.
+fn shared_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
+        std::sync::LazyLock::new(|| {
+            reqwest::blocking::Client::builder()
+                .pool_max_idle_per_host(32)
+                .pool_idle_timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(30))
+                .tcp_keepalive(std::time::Duration::from_secs(60))
+                .build()
+                .expect("failed to build shared HTTP client")
+        });
+    &CLIENT
+}
+
+/// Default per-request timeout for the fixed-timeout verbs (30s, matches the
+/// old per-call client). `http_fetch` passes its own `timeout_ms`.
+const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
+/// Test-only client: skips TLS verification (self-signed fixtures).
+/// Never the default — `fetch` verifies like any sane client.
+fn insecure_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
+        std::sync::LazyLock::new(|| {
+            reqwest::blocking::Client::builder()
+                .pool_max_idle_per_host(32)
+                .pool_idle_timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(30))
+                .tcp_keepalive(std::time::Duration::from_secs(60))
+                .danger_accept_invalid_certs(true)
+                .build()
+                .expect("failed to build insecure HTTP client")
+        });
+    &CLIENT
+}
+
+/// Map a `reqwest` send error to `.err(str)`: timeouts name the deadline so
+/// users know to raise it via `fetch` instead of guessing.
+fn client_err(verb: &str, e: reqwest::Error, timeout_ms: u64) -> Value {
+    let msg = if e.is_timeout() {
+        format!("HTTP {verb} timed out after {timeout_ms}ms")
+    } else {
+        format!("HTTP {verb} failed: {e}")
+    };
+    Value::Result(Box::new(Err(Value::Str(msg.into()))))
 }
 
 fn build_response_from_reqwest(resp: reqwest::blocking::Response) -> Value {
@@ -310,9 +385,11 @@ pub(crate) fn http_get(
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.get")?;
     let headers = args.get(1).cloned().unwrap_or(Value::Dict(Box::default()));
-    let client = build_client()?;
+    let client = shared_client();
     let hdrs = dict_to_headers(&headers);
-    let mut req = client.get(&url);
+    let mut req = client
+        .get(&url)
+        .timeout(std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS));
     for (k, v) in &hdrs {
         req = req.header(k, v);
     }
@@ -320,9 +397,7 @@ pub(crate) fn http_get(
         Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
-            format!("HTTP GET failed: {e}").into(),
-        ))))),
+        Err(e) => Ok(client_err("GET", e, DEFAULT_TIMEOUT_MS)),
     }
 }
 
@@ -352,7 +427,10 @@ pub(crate) fn http_respond(
         ));
     }
     let body = expect_str(args, 1, "std.http.respond")?;
-    let headers = match arg(args, 2, "std.http.respond")? {
+    // `headers` is optional (defaults to `{}` — the arity gate in
+    // `fill_default_headers` pads it, but direct `Interp::call` users and
+    // tests may also omit it).
+    let headers = match args.get(2).cloned().unwrap_or(Value::Dict(Box::default())) {
         Value::Dict(entries) => entries
             .iter()
             .filter_map(|(k, v)| match (k, v) {
@@ -401,9 +479,11 @@ pub(crate) fn http_post(
     let url = expect_str(args, 0, "std.http.post")?;
     let body = expect_body_bytes(args, 1, "std.http.post", span)?;
     let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::default()));
-    let client = build_client()?;
+    let client = shared_client();
     let hdrs = dict_to_headers(&headers);
-    let mut req = client.post(&url);
+    let mut req = client
+        .post(&url)
+        .timeout(std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS));
     for (k, v) in &hdrs {
         req = req.header(k, v);
     }
@@ -411,10 +491,152 @@ pub(crate) fn http_post(
         Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
-            format!("HTTP POST failed: {e}").into(),
-        ))))),
+        Err(e) => Ok(client_err("POST", e, DEFAULT_TIMEOUT_MS)),
     }
+}
+
+/// `http.fetch(url, method = "GET", headers = {}, body = "", timeout_ms = 30000)`
+///   -> `Result<Response, str>`
+///
+/// Unified client: one entry for every verb, with a configurable timeout.
+/// Unknown methods are a loud `EvalError` (programming error, not data).
+pub(crate) fn http_fetch(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    fetch_with_client(shared_client(), "std.http.fetch", interp, args, span)
+}
+
+/// `http.fetch_insecure(url, method?, headers?, body?, timeout_ms?)`
+/// — `fetch` without TLS verification. Test-only (self-signed fixtures);
+/// production code must use `fetch`.
+pub(crate) fn http_fetch_insecure(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    fetch_with_client(
+        insecure_client(),
+        "std.http.fetch_insecure",
+        interp,
+        args,
+        span,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_with_client(
+    client: &reqwest::blocking::Client,
+    name: &str,
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let url = expect_str(args, 0, name)?;
+    let method = args
+        .get(1)
+        .cloned()
+        .map(|v| match v {
+            Value::Str(s) => Ok(s.to_string()),
+            other => Err(EvalError::new(
+                format!("`{name}`: expected a str method, found `{other}`"),
+                span,
+            )),
+        })
+        .transpose()?
+        .unwrap_or_else(|| "GET".to_string());
+    let method = method.to_ascii_uppercase();
+    if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "PATCH") {
+        return Err(EvalError::new(
+            format!(
+                "`{name}`: unknown method `{method}` (expected GET, POST, PUT, DELETE or PATCH)"
+            ),
+            span,
+        ));
+    }
+    let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::default()));
+    let body: Vec<u8> = match args.get(3) {
+        None => Vec::new(),
+        Some(Value::Str(s)) => s.as_bytes().to_vec(),
+        Some(Value::Bytes(b)) => b.as_slice().to_vec(),
+        Some(other) => {
+            return Err(EvalError::new(
+                format!("`{name}`: expected a str or bytes body, found `{other:?}`"),
+                span,
+            ));
+        }
+    };
+    let timeout_ms = match args.get(4) {
+        None => 30000,
+        Some(Value::Int(n)) if *n > 0 => *n as u64,
+        Some(other) => {
+            return Err(EvalError::new(
+                format!("`{name}`: expected a positive int timeout_ms, found `{other}`"),
+                span,
+            ));
+        }
+    };
+    let hdrs = dict_to_headers(&headers);
+    let mut req = match method.as_str() {
+        "GET" => client.get(&url),
+        "POST" => client.post(&url),
+        "PUT" => client.put(&url),
+        "DELETE" => client.delete(&url),
+        _ => client.patch(&url),
+    }
+    .timeout(std::time::Duration::from_millis(timeout_ms));
+    for (k, v) in &hdrs {
+        req = req.header(k, v);
+    }
+    if matches!(method.as_str(), "POST" | "PUT" | "PATCH") {
+        req = req.body(body);
+    }
+    match req.send() {
+        Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
+            resp,
+        ))))),
+        Err(e) => Ok(client_err(&method, e, timeout_ms)),
+    }
+}
+
+/// `http.post_json(url, body: T, headers = {}) -> Result<Response, str>`
+///
+/// Serializes any value to JSON, sets `Content-Type: application/json`
+/// unless the caller already set one, and POSTs it.
+pub(crate) fn http_post_json(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.post_json";
+    let url = expect_str(args, 0, NAME)?;
+    let body_val = arg(args, 1, NAME)?.clone();
+    let text = to_json_string(&jsonify_value(&body_val));
+    let headers = match args.get(2).cloned().unwrap_or(Value::Dict(Box::default())) {
+        // Non-dict headers are ignored (mirrors the C client + `dict_to_headers`
+        // leniency); the checker guarantees `{str: str}` statically.
+        Value::Dict(entries) => {
+            let mut out: Vec<(Value, Value)> = (**entries).to_vec();
+            let has_ct = out.iter().any(|(k, _)| match k {
+                Value::Str(key) => key.to_lowercase() == "content-type",
+                _ => false,
+            });
+            if !has_ct {
+                out.push((
+                    Value::Str("Content-Type".to_string().into()),
+                    Value::Str("application/json".to_string().into()),
+                ));
+            }
+            Value::Dict(Box::new(out))
+        }
+        _ => Value::Dict(Box::new(vec![(
+            Value::Str("Content-Type".to_string().into()),
+            Value::Str("application/json".to_string().into()),
+        )])),
+    };
+    let mut sub = vec![Value::Str(url.into()), Value::Str(text.into()), headers];
+    http_post(interp, &mut sub, span)
 }
 
 /// `http.put(url: str, body: str, headers: {str: str}) -> Result<Response, str>`
@@ -426,9 +648,11 @@ pub(crate) fn http_put(
     let url = expect_str(args, 0, "std.http.put")?;
     let body = expect_body_bytes(args, 1, "std.http.put", span)?;
     let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::default()));
-    let client = build_client()?;
+    let client = shared_client();
     let hdrs = dict_to_headers(&headers);
-    let mut req = client.put(&url);
+    let mut req = client
+        .put(&url)
+        .timeout(std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS));
     for (k, v) in &hdrs {
         req = req.header(k, v);
     }
@@ -436,9 +660,7 @@ pub(crate) fn http_put(
         Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
-            format!("HTTP PUT failed: {e}").into(),
-        ))))),
+        Err(e) => Ok(client_err("PUT", e, DEFAULT_TIMEOUT_MS)),
     }
 }
 
@@ -450,9 +672,11 @@ pub(crate) fn http_delete(
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.delete")?;
     let headers = args.get(1).cloned().unwrap_or(Value::Dict(Box::default()));
-    let client = build_client()?;
+    let client = shared_client();
     let hdrs = dict_to_headers(&headers);
-    let mut req = client.delete(&url);
+    let mut req = client
+        .delete(&url)
+        .timeout(std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS));
     for (k, v) in &hdrs {
         req = req.header(k, v);
     }
@@ -460,9 +684,7 @@ pub(crate) fn http_delete(
         Ok(resp) => Ok(Value::Result(Box::new(Ok(build_response_from_reqwest(
             resp,
         ))))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
-            format!("HTTP DELETE failed: {e}").into(),
-        ))))),
+        Err(e) => Ok(client_err("DELETE", e, DEFAULT_TIMEOUT_MS)),
     }
 }
 
@@ -504,8 +726,10 @@ pub(crate) fn http_response_json(
     span: Span,
 ) -> Result<Value, EvalError> {
     match arg(args, 0, "std.http.json")? {
+        // Always a `Result`: `.ok(json)` on success so `res.json()?`
+        // propagates parse failures like every other fallible API.
         Value::Response(r) => match parse_json(&r.body) {
-            Ok(j) => Ok(Value::Json(Box::new(j))),
+            Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(j)))))),
             Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
                 format!("JSON parse error: {e}").into(),
             ))))),
@@ -550,8 +774,12 @@ pub(crate) fn http_server(
     Ok(Value::HttpServer(Box::new(HttpServer {
         routes: Vec::new(),
         middlewares: Vec::new(),
+        post_middlewares: Vec::new(),
         log_enabled: false,
-        static_dir: None,
+        static_dirs: Vec::new(),
+        rate_limit: None,
+        hsts: false,
+        hijack_routes: Vec::new(),
     })))
 }
 
@@ -587,6 +815,35 @@ pub(crate) fn http_route_delete(
     http_route(interp, args, "DELETE", span)
 }
 
+/// `http.route(server, method, path, handler) -> http.server`
+///
+/// Single-entry routing. Unknown methods are a loud error (not a silently
+/// dropped route): `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`.
+pub(crate) fn http_route_any(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.route";
+    let method = expect_str(args, 1, NAME)?.to_ascii_uppercase();
+    if !matches!(
+        method.as_str(),
+        "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS"
+    ) {
+        return Err(EvalError::new(
+            format!(
+                "`{NAME}`: unknown method `{method}` (expected GET, POST, PUT, DELETE, PATCH, HEAD or OPTIONS)"
+            ),
+            span,
+        ));
+    }
+    let server = arg(args, 0, NAME)?.clone();
+    let path = arg(args, 2, NAME)?.clone();
+    let handler = arg(args, 3, NAME)?.clone();
+    let mut sub = vec![server, path, handler];
+    http_route(interp, &mut sub, &method, span)
+}
+
 fn http_route(
     interp: &mut Interp,
     args: &mut Vec<Value>,
@@ -619,6 +876,95 @@ fn http_route(
     let mut server = server;
     server.routes.push((method.to_string(), path, handler));
     Ok(Value::HttpServer(Box::new(server)))
+}
+
+/// `http.hijack(server, path: str, handler: fn) -> Server`
+///
+/// WebSocket-upgrade routes: `handler(req, tcp_stream)` takes over the
+/// socket after the `101` handshake (framing stays userland via
+/// `std.net`). Path syntax is the same `:id` router as normal routes;
+/// the checker validates literals and requires a 2-arg handler.
+/// Cleartext only — upgrades over TLS fall through to normal dispatch.
+pub(crate) fn http_hijack(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.hijack";
+    let mut server = expect_server(args, 0, NAME)?;
+    let path = expect_str(args, 1, NAME)?;
+    let handler = args
+        .get(2)
+        .cloned()
+        .ok_or_else(|| EvalError::new(format!("`{NAME}`: missing handler function"), span))?;
+    if !matches!(handler, Value::Func(_)) {
+        return Err(EvalError::new(
+            format!("`{NAME}`: handler must be a function"),
+            span,
+        ));
+    }
+    // Same registration-time env snapshot as normal routes.
+    let handler = snapshot_func_scoped(&handler, interp)
+        .map(|fs| fs.reconstruct())
+        .unwrap_or(handler);
+    server.hijack_routes.push((path, handler));
+    Ok(Value::HttpServer(Box::new(server)))
+}
+
+/// RFC 6455 accept hash: `base64(sha1(key + GUID))`.
+/// GUID is `258EAFA5-E914-47DA-95CA-C5AB0DC85B11` (RFC 6455 §1.3).
+fn ws_accept_key(client_key: &str) -> String {
+    use sha1::{Digest, Sha1};
+    let mut h = Sha1::new();
+    h.update(client_key.as_bytes());
+    h.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, h.finalize())
+}
+
+/// A matched upgrade: handler + request value for its first arg.
+struct HijackReq {
+    handler: Value,
+    req: Value,
+    key: String,
+}
+
+/// Match a WebSocket upgrade against the hijack table. Returns `None`
+/// (fall through to normal dispatch) when: wrong method, no key, no
+/// `Upgrade: websocket`, or no pattern hit — so one path serves both
+/// plain GET and upgrade.
+fn match_hijack(
+    server: &HttpServer,
+    method: &str,
+    path: &str,
+    headers: &[(String, String)],
+    query_pairs: &[(String, String)],
+) -> Option<HijackReq> {
+    if method != "GET" || server.hijack_routes.is_empty() {
+        return None;
+    }
+    let mut upgrade = false;
+    let mut key: Option<&str> = None;
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("upgrade") && v.to_ascii_lowercase().contains("websocket") {
+            upgrade = true;
+        } else if k.eq_ignore_ascii_case("sec-websocket-key") && !v.trim().is_empty() {
+            key = Some(v.as_str());
+        }
+    }
+    let key = key.filter(|_| upgrade)?;
+    let pairs: Vec<(String, String)> = server
+        .hijack_routes
+        .iter()
+        .map(|(p, _)| ("GET".to_string(), p.clone()))
+        .collect();
+    let (idx, params) = best_match(&pairs, "GET", path)?;
+    let handler = server.hijack_routes[idx].1.clone();
+    let req = build_request_dict(method, path, Vec::new(), headers, query_pairs, &params);
+    Some(HijackReq {
+        handler,
+        req,
+        key: key.to_string(),
+    })
 }
 
 fn expect_server(args: &mut Vec<Value>, i: usize, name: &str) -> Result<HttpServer, EvalError> {
@@ -680,6 +1026,150 @@ pub(crate) fn http_pipe(
     Ok(Value::HttpServer(Box::new(server)))
 }
 
+/// Token-bucket take: refill lazily from `last`, consume one token.
+/// Returns `None` when admitted, else seconds until the next token
+/// (minimum 1 — a usable `Retry-After`).
+fn bucket_take(bucket: &mut RateBucket, max: u64, window_ms: u64, now: Instant) -> Option<u64> {
+    let elapsed_ms = now.duration_since(bucket.last).as_millis() as f64;
+    bucket.tokens = (bucket.tokens + elapsed_ms * max as f64 / window_ms as f64).min(max as f64);
+    bucket.last = now;
+    if bucket.tokens >= 1.0 {
+        bucket.tokens -= 1.0;
+        return None;
+    }
+    let wait_ms = ((1.0 - bucket.tokens) * window_ms as f64 / max as f64).ceil() as u64;
+    Some(wait_ms.div_ceil(1000).max(1))
+}
+
+/// Shared rate-limit check for one client key. `None` = admitted.
+fn check_rate_limit(limiter: &RateLimit, key: &str) -> Option<u64> {
+    let Ok(mut map) = limiter.state.lock() else {
+        return None; // poisoned lock: fail open, never 500 on limiter state
+    };
+    if map.len() >= RATE_LIMIT_MAX_KEYS && !map.contains_key(key) {
+        // Key flood: reset rather than grow without bound (fail-open).
+        map.clear();
+    }
+    let now = Instant::now();
+    let bucket = map.entry(key.to_string()).or_insert(RateBucket {
+        tokens: limiter.max_requests as f64,
+        last: now,
+    });
+    bucket_take(bucket, limiter.max_requests, limiter.window_ms, now)
+}
+
+/// `http.rate_limit(server, max_requests: int, window_ms: int) -> Server`
+///
+/// Token bucket per client IP (`max_requests` per rolling `window_ms`).
+/// Over-limit requests short-circuit with `429 + Retry-After` before any
+/// handler or middleware runs. State rides the server's `Arc`, so pool
+/// workers and `http.test` share one budget set.
+pub(crate) fn http_rate_limit(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.rate_limit";
+    let mut server = expect_server(args, 0, NAME)?;
+    let max_requests = match args.get(1) {
+        Some(Value::Int(n)) if *n > 0 => *n as u64,
+        other => {
+            return Err(EvalError::new(
+                format!("`{NAME}`: expected a positive int max_requests, found `{other:?}`"),
+                span,
+            ));
+        }
+    };
+    let window_ms = match args.get(2) {
+        Some(Value::Int(n)) if *n > 0 => *n as u64,
+        other => {
+            return Err(EvalError::new(
+                format!("`{NAME}`: expected a positive int window_ms, found `{other:?}`"),
+                span,
+            ));
+        }
+    };
+    server.rate_limit = Some(RateLimit {
+        max_requests,
+        window_ms,
+        state: Arc::new(std::sync::Mutex::new(HashMap::new())),
+    });
+    Ok(Value::HttpServer(Box::new(server)))
+}
+
+/// `http.pipe_post(server, post_fn) -> Server`
+///
+/// Post-middleware runs AFTER the handler: `post_fn(req, res) -> res`.
+/// This is where response-header injection lives (CORS `Allow-Origin`,
+/// secure-headers) — pre-middleware can only see requests. A post function
+/// returning anything but a `Response` is a loud dispatch error.
+pub(crate) fn http_pipe_post(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let mut server = expect_server(args, 0, "std.http.pipe_post")?;
+    let middleware = args.get(1).cloned().ok_or_else(|| {
+        EvalError::new("std.http.pipe_post: missing post-middleware function", span)
+    })?;
+    if !matches!(middleware, Value::Func(_)) {
+        return Err(EvalError::new(
+            "std.http.pipe_post: post-middleware must be a function",
+            span,
+        ));
+    }
+    server.post_middlewares.push(middleware);
+    Ok(Value::HttpServer(Box::new(server)))
+}
+
+/// `http.with_headers(res: Response, extra: {str: str}) -> Response`
+///
+/// Returns a copy of `res` with `extra` merged in (`extra` wins,
+/// case-insensitively). Workhorse for post-middleware and handlers that
+/// decorate a base response.
+pub(crate) fn http_with_headers(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let mut res = match arg(args, 0, "std.http.with_headers")? {
+        Value::Response(r) => (**r).clone(),
+        other => {
+            return Err(EvalError::new(
+                format!("std.http.with_headers: expected an http.response, found `{other}`"),
+                span,
+            ));
+        }
+    };
+    let extra = match args.get(1).cloned().unwrap_or(Value::Dict(Box::default())) {
+        Value::Dict(entries) => entries
+            .iter()
+            .filter_map(|(k, v)| match (k, v) {
+                (Value::Str(k), Value::Str(v)) => Some((k.to_string(), v.to_string())),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        other => {
+            return Err(EvalError::new(
+                format!("std.http.with_headers: expected a headers dict, found `{other}`"),
+                span,
+            ));
+        }
+    };
+    for (k, v) in extra {
+        if let Some(slot) = res
+            .headers
+            .iter_mut()
+            .find(|(ek, _)| ek.eq_ignore_ascii_case(&k))
+        {
+            slot.1 = v;
+        } else {
+            res.headers.push((k, v));
+        }
+    }
+    Ok(Value::Response(Box::new(res)))
+}
+
 // ===========================================================================
 // Feature 4: Static File Serving
 // ===========================================================================
@@ -692,7 +1182,59 @@ pub(crate) fn http_serve_dir(
 ) -> Result<Value, EvalError> {
     let mut server = expect_server(args, 0, "std.http.serve_dir")?;
     let dir = expect_str(args, 1, "std.http.serve_dir")?;
-    server.static_dir = Some(dir);
+    server.static_dirs.push(("/".to_string(), dir));
+    Ok(Value::HttpServer(Box::new(server)))
+}
+
+/// Normalize a static prefix: leading `/`, no trailing `/` (root stays `/`).
+fn normalize_static_prefix(prefix: &str) -> String {
+    let mut p = prefix.to_string();
+    if !p.starts_with('/') {
+        p.insert(0, '/');
+    }
+    while p.len() > 1 && p.ends_with('/') {
+        p.pop();
+    }
+    p
+}
+
+/// If `path` falls under `prefix`, return the sub-path to serve
+/// (always with a leading `/`). Root prefix `/` matches everything.
+fn strip_static_prefix(prefix: &str, path: &str) -> Option<String> {
+    if prefix == "/" {
+        return Some(path.to_string());
+    }
+    if path == prefix {
+        return Some("/".to_string());
+    }
+    path.strip_prefix(prefix)
+        .filter(|rest| rest.starts_with('/'))
+        .map(|rest| rest.to_string())
+}
+
+/// `http.serve_dir_at(server, prefix: str, dir_path: str) -> Server`
+///
+/// Scope a static root under a URL prefix: `serve_dir_at(s, "/assets", "./pub")`
+/// serves `./pub/logo.png` at `/assets/logo.png`. Longest matching prefix
+/// wins (registration order irrelevant); plain `serve_dir` is prefix `/`.
+pub(crate) fn http_serve_dir_at(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.serve_dir_at";
+    let mut server = expect_server(args, 0, NAME)?;
+    let prefix = expect_str(args, 1, NAME)?;
+    let dir = expect_str(args, 2, NAME)?;
+    if !prefix.starts_with('/') {
+        return Err(EvalError::new(
+            format!("`{NAME}`: prefix `{prefix}` must start with `/`"),
+            span,
+        ));
+    }
+    server
+        .static_dirs
+        .push((normalize_static_prefix(&prefix), dir));
     Ok(Value::HttpServer(Box::new(server)))
 }
 
@@ -710,25 +1252,76 @@ pub(crate) fn http_test(
     let method = expect_str(args, 1, "std.http.test")?;
     let path_with_query = expect_str(args, 2, "std.http.test")?;
     let body = expect_str(args, 3, "std.http.test")?;
+    test_dispatch(
+        interp,
+        span,
+        "std.http.test",
+        &server,
+        &method,
+        &path_with_query,
+        &[],
+        body,
+    )
+}
 
+/// `http.test_req(server, method, path, headers: {str: str}, body: str) -> Response`
+///
+/// Like `http.test` but injects request headers — conditionals
+/// (`If-None-Match`), ranges, and auth flows without a socket.
+pub(crate) fn http_test_req(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.test_req";
+    let server = expect_server(args, 0, NAME)?;
+    let method = expect_str(args, 1, NAME)?;
+    let path_with_query = expect_str(args, 2, NAME)?;
+    let headers_val = args.get(3).cloned().unwrap_or(Value::Dict(Box::default()));
+    let headers_map = dict_to_headers(&headers_val);
+    let headers: Vec<(String, String)> = headers_map.into_iter().collect();
+    let body = expect_str(args, 4, NAME)?;
+    test_dispatch(
+        interp,
+        span,
+        NAME,
+        &server,
+        &method,
+        &path_with_query,
+        &headers,
+        body,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn test_dispatch(
+    interp: &mut Interp,
+    span: Span,
+    _name: &str,
+    server: &HttpServer,
+    method: &str,
+    path_with_query: &str,
+    headers: &[(String, String)],
+    body: String,
+) -> Result<Value, EvalError> {
     // Split path and query
     let (path, query_pairs) = if let Some((p, q)) = path_with_query.split_once('?') {
         (p.to_string(), parse_query_string(q))
     } else {
-        (path_with_query.clone(), Vec::new())
+        (path_with_query.to_string(), Vec::new())
     };
 
-    let headers = Vec::new();
     let params = Vec::new();
 
     let result = dispatch_with_request(
-        &server,
-        &method,
+        server,
+        method,
         &path,
-        body.clone(),
-        &headers,
+        body.into_bytes(),
+        headers,
         &query_pairs,
         &params,
+        "http.test",
         interp,
         span,
     );
@@ -736,7 +1329,9 @@ pub(crate) fn http_test(
     match result {
         Ok((status, resp_body, resp_headers)) => Ok(Value::Response(Box::new(Response {
             status,
-            body: resp_body,
+            // `http.test` is a text-oriented helper: binary bodies arrive
+            // lossy here (the socket path writes raw bytes — see P2 static).
+            body: String::from_utf8_lossy(&resp_body).into_owned(),
             headers: resp_headers,
         }))),
         Err(e) => Ok(Value::Response(Box::new(Response {
@@ -751,55 +1346,73 @@ pub(crate) fn http_test(
 // Feature 3: Query & Form Data Parsing
 // ===========================================================================
 
-/// `http.query(req: dict) -> {str: str}`
+/// `http.query(req: Request) -> {str: str}`
 pub(crate) fn http_query(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    extract_dict_field(args, 0, "query", "std.http.query", span)
+    let req = match arg(args, 0, "std.http.query")? {
+        v @ (Value::HttpRequest(_) | Value::Dict(_)) => v.clone(),
+        other => {
+            return Err(EvalError::new(
+                format!("std.http.query: expected a request, found `{other}`"),
+                span,
+            ))
+        }
+    };
+    let Some(view) = view_request(&req) else {
+        return Ok(Value::Dict(Box::default()));
+    };
+    Ok(Value::Dict(Box::new(
+        view.query
+            .iter()
+            .map(|(k, v)| {
+                (
+                    Value::Str((*k).to_string().into()),
+                    Value::Str((*v).to_string().into()),
+                )
+            })
+            .collect(),
+    )))
 }
 
-/// `http.header(req: dict, name: str) -> Result<str, str>`
+/// `http.header(req: Request, name: str) -> Result<str, str>`
 ///
-/// Looks inside the request's `headers` sub-dict (as built by the server
-/// dispatcher); falls back to a top-level scan so a bare headers dict
-/// also works.
+/// Looks inside the request's `headers` (case-insensitive); falls back to a
+/// top-level scan so a bare headers dict also works.
 pub(crate) fn http_header(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
     let req = match arg(args, 0, "std.http.header")? {
-        Value::Dict(entries) => (**entries).clone(),
+        v @ (Value::HttpRequest(_) | Value::Dict(_)) => v.clone(),
         other => {
             return Err(EvalError::new(
-                format!("std.http.header: expected a dict, found `{other}`"),
+                format!("std.http.header: expected a request, found `{other}`"),
                 span,
             ))
         }
     };
     let name = expect_str(args, 1, "std.http.header")?;
-    // Prefer the nested `headers` dict when present (server request shape).
-    for (k, v) in &req {
-        if let (Value::Str(key), Value::Dict(inner)) = (k, v) {
-            if (**key).to_lowercase() == "headers" {
-                for (nk, nv) in &**inner {
-                    if let Value::Str(nkey) = nk {
-                        if (**nkey).to_lowercase() == name.to_lowercase() {
-                            return Ok(Value::Result(Box::new(Ok(nv.clone()))));
-                        }
-                    }
-                }
-                break;
+    // Typed request (or legacy request dict): scan the `headers` section.
+    if let Some(view) = view_request(&req) {
+        for (k, v) in &view.headers {
+            if k.to_lowercase() == name.to_lowercase() {
+                return Ok(Value::Result(Box::new(Ok(Value::Str(
+                    (*v).to_string().into(),
+                )))));
             }
         }
     }
     // Fall back to a top-level scan (bare headers dict).
-    for (k, v) in &req {
-        if let (Value::Str(key), val) = (k, v) {
-            if (**key).to_lowercase() == name.to_lowercase() {
-                return Ok(Value::Result(Box::new(Ok(val.clone()))));
+    if let Value::Dict(entries) = &req {
+        for (k, v) in &**entries {
+            if let (Value::Str(key), val) = (k, v) {
+                if (**key).to_lowercase() == name.to_lowercase() {
+                    return Ok(Value::Result(Box::new(Ok(val.clone()))));
+                }
             }
         }
     }
@@ -808,28 +1421,29 @@ pub(crate) fn http_header(
     )))))
 }
 
-/// `http.body_json(req: dict) -> json`
+/// `http.body_json(req: Request) -> Result<json, str>`
 pub(crate) fn http_body_json(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let body = extract_dict_field_str(args, 0, "body", "std.http.body_json", span)?;
+    let body = request_body(args, 0, "std.http.body_json", span)?;
     match parse_json(&body) {
-        Ok(j) => Ok(Value::Json(Box::new(j))),
+        // Always a `Result` (see `http_response_json`).
+        Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(j)))))),
         Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
             format!("JSON parse error: {e}").into(),
         ))))),
     }
 }
 
-/// `http.body_form(req: dict) -> {str: str}`
+/// `http.body_form(req: Request) -> {str: str}`
 pub(crate) fn http_body_form(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let body = extract_dict_field_str(args, 0, "body", "std.http.body_form", span)?;
+    let body = request_body(args, 0, "std.http.body_form", span)?;
     let pairs = parse_query_string(&body);
     let dict: Vec<(Value, Value)> = pairs
         .iter()
@@ -838,36 +1452,68 @@ pub(crate) fn http_body_form(
     Ok(Value::Dict(Box::new(dict)))
 }
 
+/// `http.body_bytes(req: Request) -> bytes`
+///
+/// Exact received body bytes — unlike `req.body` (lossy text),
+/// `body_form`, and `body_json`, binary uploads round-trip intact.
+pub(crate) fn http_body_bytes(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    use zz_runtime::BytesData;
+    const NAME: &str = "std.http.body_bytes";
+    match arg(args, 0, NAME)? {
+        Value::HttpRequest(r) => {
+            Ok(Value::Bytes(Box::new(r.body_raw.clone().unwrap_or_else(
+                || BytesData::from_vec(r.body.as_bytes().to_vec()),
+            ))))
+        }
+        Value::Dict(entries) => {
+            let body = entries
+                .iter()
+                .find_map(|(k, v)| match (k, v) {
+                    (Value::Str(k), Value::Str(v)) if k.as_str() == "body" => {
+                        Some(v.as_bytes().to_vec())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default();
+            Ok(Value::Bytes(Box::new(BytesData::from_vec(body))))
+        }
+        other => Err(EvalError::new(
+            format!("{NAME}: expected a request, found `{other}`"),
+            span,
+        )),
+    }
+}
+
 // ===========================================================================
 // Feature 1: Dynamic Routing — Path Parameters
 // ===========================================================================
 
-/// `http.param(req: dict, name: str) -> Result<str, str>`
+/// `http.param(req: Request, name: str) -> Result<str, str>`
 pub(crate) fn http_param(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
     let req = match arg(args, 0, "std.http.param")? {
-        Value::Dict(entries) => (**entries).clone(),
+        v @ (Value::HttpRequest(_) | Value::Dict(_)) => v.clone(),
         other => {
             return Err(EvalError::new(
-                format!("std.http.param: expected a dict, found `{other}`"),
+                format!("std.http.param: expected a request, found `{other}`"),
                 span,
             ))
         }
     };
     let name = expect_str(args, 1, "std.http.param")?;
-    for (k, v) in &req {
-        if let (Value::Str(key), Value::Dict(params)) = (k, v) {
-            if &**key == "params" {
-                for (pk, pv) in &**params {
-                    if let (Value::Str(pname), Value::Str(pval)) = (pk, pv) {
-                        if **pname == name.as_str() {
-                            return Ok(Value::Result(Box::new(Ok(Value::Str(pval.clone())))));
-                        }
-                    }
-                }
+    if let Some(view) = view_request(&req) {
+        for (k, v) in &view.params {
+            if *k == name.as_str() {
+                return Ok(Value::Result(Box::new(Ok(Value::Str(
+                    (*v).to_string().into(),
+                )))));
             }
         }
     }
@@ -877,97 +1523,94 @@ pub(crate) fn http_param(
 }
 
 // ===========================================================================
-// Request dict helpers (used by query, header, param, body_json, body_form)
+// Request helpers (used by query, header, param, body_json, body_form)
 // ===========================================================================
 
-fn extract_dict_field(
+/// Read the `body` of a request: typed `HttpRequest` or legacy request dict
+/// (empty string when absent, mirroring the old dict behavior).
+fn request_body(
     args: &mut Vec<Value>,
     i: usize,
-    field: &str,
     func_name: &str,
     span: Span,
-) -> Result<Value, EvalError> {
+) -> Result<String, EvalError> {
     let req = match arg(args, i, func_name)? {
-        Value::Dict(entries) => (**entries).clone(),
+        v @ (Value::HttpRequest(_) | Value::Dict(_)) => v.clone(),
         other => {
             return Err(EvalError::new(
-                format!("{func_name}: expected a dict, found `{other}`"),
+                format!("{func_name}: expected a request, found `{other}`"),
                 span,
             ))
         }
     };
-    for (k, v) in &req {
-        if let Value::Str(key) = k {
-            if **key == field {
-                return Ok(v.clone());
-            }
-        }
-    }
-    Ok(Value::Dict(Box::default()))
-}
-
-fn extract_dict_field_str(
-    args: &mut Vec<Value>,
-    i: usize,
-    field: &str,
-    func_name: &str,
-    span: Span,
-) -> Result<String, EvalError> {
-    let val = extract_dict_field(args, i, field, func_name, span)?;
-    match val {
-        Value::Str(s) => Ok((*s).clone()),
-        _ => Ok("".to_string()),
-    }
+    Ok(view_request(&req)
+        .map(|v| v.body.to_string())
+        .unwrap_or_default())
 }
 
 // ===========================================================================
 // Route pattern matching (Feature 1: Dynamic Routing)
 // ===========================================================================
 
-/// Match a route pattern like "/users/:id" against an actual path.
-/// Returns Some(params) if matched, None otherwise.
-fn match_route_pattern(pattern: &str, actual: &str) -> Option<Vec<(String, String)>> {
-    let pattern_segments: Vec<&str> = pattern.trim_matches('/').split('/').collect();
-    let actual_segments: Vec<&str> = actual.trim_matches('/').split('/').collect();
-
-    if pattern_segments.len() != actual_segments.len() {
-        return None;
-    }
-
-    let mut params = Vec::new();
-    for (pat, act) in pattern_segments.iter().zip(actual_segments.iter()) {
-        if let Some(param_name) = pat.strip_prefix(':') {
-            params.push((param_name.to_string(), act.to_string()));
-        } else if *pat != *act && *pat != "*" {
-            return None;
+/// Comma-joined methods whose routes match `path` (for 405 `Allow`).
+fn allowed_methods(routes: &[(String, String, Value)], path: &str) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for (m, p, _) in routes {
+        if seen.contains(&m.as_str()) {
+            continue;
+        }
+        let hit = p == path
+            || router::compile_pattern(p)
+                .and_then(|c| router::match_pattern(&c, path))
+                .is_some();
+        if hit {
+            seen.push(m.as_str());
         }
     }
-    Some(params)
+    seen.join(", ")
 }
 
 // ===========================================================================
 // Dispatch — Core request handling with middleware, params, auto-JSON
 // ===========================================================================
 
-/// Dispatch result: (status, body, headers)
-type DispatchResult = Result<(u16, String, Vec<(String, String)>), EvalError>;
+/// Dispatch result: (status, raw body bytes, headers). Bodies are bytes
+/// (not `String`) so static files serve binary-identical content; text
+/// handlers convert via `.into_bytes()` and the socket writes raw.
+type DispatchResult = Result<(u16, Vec<u8>, Vec<(String, String)>), EvalError>;
 
 #[allow(clippy::too_many_arguments)]
 fn dispatch_with_request(
     server: &HttpServer,
     method: &str,
     path: &str,
-    body: String,
+    body: Vec<u8>,
     headers: &[(String, String)],
     query_pairs: &[(String, String)],
     params: &[(String, String)],
+    peer: &str,
     interp: &mut Interp,
     span: Span,
 ) -> DispatchResult {
-    // Build the request dict
+    // Rate limit first: cheap shared check before any handler work.
+    // Short-circuits like pre-middleware `.err` (no post chain).
+    if let Some(limiter) = server.rate_limit.as_ref() {
+        if let Some(retry_after) = check_rate_limit(limiter, peer) {
+            return Ok((
+                429,
+                b"Too Many Requests".to_vec(),
+                vec![
+                    ("Content-Type".into(), "text/plain; charset=utf-8".into()),
+                    ("Retry-After".into(), retry_after.to_string()),
+                ],
+            ));
+        }
+    }
+
+    // Build the typed request value
     let req_dict = build_request_dict(method, path, body, headers, query_pairs, params);
 
-    // Run middleware chain. `current_req` moves (no clone): the dict is
+    // Run middleware chain. `current_req` moves (no clone): the request is
     // rebuilt per request and each stage takes ownership — cloning a
     // multi-MB body per middleware triples peak publish memory.
     let mut current_req = req_dict;
@@ -981,8 +1624,8 @@ fn dispatch_with_request(
         match interp.call(mw.clone(), vec![arg], span)? {
             Value::Result(r) => match &*r {
                 Ok(val) => {
-                    // Middleware passed — it may have modified the request dict
-                    if let Value::Dict(_) = val {
+                    // Middleware passed — it may have modified the request
+                    if let Value::HttpRequest(_) | Value::Dict(_) = val {
                         current_req = (*val).clone();
                     }
                 }
@@ -990,10 +1633,10 @@ fn dispatch_with_request(
                     // Middleware rejected — err_val should be a Response
                     match err_val {
                         Value::Response(r) => {
-                            return Ok((r.status, r.body.clone(), r.headers.clone()));
+                            return Ok((r.status, r.body.clone().into_bytes(), r.headers.clone()));
                         }
                         other => {
-                            return Ok((401, format!("{other}"), vec![]));
+                            return Ok((401, format!("{other}").into_bytes(), vec![]));
                         }
                     }
                 }
@@ -1007,39 +1650,40 @@ fn dispatch_with_request(
         }
     }
 
-    // Find matching route (exact match first, then pattern match, then wildcard)
-    let mut matched_params: Vec<(String, String)> = Vec::new();
-    let handler = server
+    // Radix-style match (exact > param > wildcard, see `router`).
+    // Project (method, pattern) pairs; handlers stay in `server.routes`
+    // (cloned only for the winning route — not per candidate).
+    let pairs: Vec<(String, String)> = server
         .routes
         .iter()
-        .find(|(m, p, _)| {
-            if m != method {
-                return false;
-            }
-            if p == path {
-                return true;
-            }
-            // Try pattern matching
-            if let Some(mut pm) = match_route_pattern(p, path) {
-                matched_params.append(&mut pm);
-                return true;
-            }
-            false
-        })
-        .or_else(|| {
-            server
-                .routes
-                .iter()
-                .find(|(m, p, _)| m == method && p == "*")
-        })
-        .map(|r| r.2.clone());
-
-    let handler = match handler {
-        Some(h) => h,
+        .map(|(m, p, _)| (m.clone(), p.clone()))
+        .collect();
+    let (matched_params, handler) = match best_match(&pairs, method, path) {
+        Some((idx, params)) => (params, server.routes[idx].2.clone()),
         None => {
-            // No route matched — try static file serving
-            if let Some(ref dir) = server.static_dir {
-                return serve_static_file(dir, path, span);
+            // Path exists under another method → 405 with `Allow`, not 404.
+            if matches_other_method(&pairs, method, path) {
+                let allow = allowed_methods(&server.routes, path);
+                return Ok((
+                    405,
+                    b"Method Not Allowed".to_vec(),
+                    vec![("Allow".into(), allow)],
+                ));
+            }
+            // No route matched — try static roots (longest prefix wins, so
+            // a catch-all `serve_dir` never shadows a scoped `serve_dir_at`).
+            let mut best: Option<(usize, &str, String)> = None; // (prefix len, dir, sub-path)
+            for (prefix, dir) in &server.static_dirs {
+                if let Some(sub) = strip_static_prefix(prefix, path) {
+                    let longer = best.as_ref().is_none_or(|(n, _, _)| prefix.len() > *n);
+                    if longer {
+                        best = Some((prefix.len(), dir.as_str(), sub));
+                    }
+                }
+            }
+            if let Some((_, dir, sub)) = best {
+                let (st, bd, hd) = static_files::serve_static_file(dir, &sub, headers)?;
+                return apply_post_middlewares(server, interp, current_req, st, bd, hd, span);
             }
             return Err(EvalError::new(
                 format!("std.http: no route for {method} {path}"),
@@ -1048,88 +1692,114 @@ fn dispatch_with_request(
         }
     };
 
-    // Build enriched request dict with params
+    // Build enriched request with route params
     let enriched_req = if matched_params.is_empty() {
         current_req
-    } else {
+    } else if let Value::HttpRequest(mut req) = current_req {
+        req.params = matched_params;
+        Value::HttpRequest(req)
+    } else if let Value::Dict(mut entries) = current_req {
+        // Legacy dict request (e.g. returned from old middleware): patch params.
         let params_dict: Vec<(Value, Value)> = matched_params
             .iter()
             .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
             .collect();
-        // Replace the "params" key in the request dict
-        if let Value::Dict(mut entries) = current_req {
-            entries.retain(|(k, _)| k != &Value::Str("params".to_string().into()));
-            entries.push((
-                Value::Str("params".to_string().into()),
-                Value::Dict(Box::new(params_dict)),
-            ));
-            Value::Dict(entries)
-        } else {
-            current_req
-        }
+        entries.retain(|(k, _)| k != &Value::Str("params".to_string().into()));
+        entries.push((
+            Value::Str("params".to_string().into()),
+            Value::Dict(Box::new(params_dict)),
+        ));
+        Value::Dict(entries)
+    } else {
+        current_req
     };
 
-    // Call handler
+    // Call handler. The request is cloned for the post-middleware chain
+    // only when one is registered (avoids a body copy per request).
+    let req_for_post = if server.post_middlewares.is_empty() {
+        None
+    } else {
+        Some(enriched_req.clone())
+    };
     let return_val = interp.call(handler, vec![enriched_req], span)?;
-    match return_val {
+    let (status, body, headers) = match return_val {
         // String response → 200 text/plain
-        Value::Str(s) => Ok((
+        Value::Str(s) => (
             200,
-            (*s).clone(),
+            s.as_bytes().to_vec(),
             vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
-        )),
+        ),
         // Response object → use its status/headers/body
-        Value::Response(r) => Ok((r.status, r.body, r.headers)),
+        Value::Response(r) => (r.status, r.body.into_bytes(), r.headers),
         // Dict/Array → auto-serialize to JSON
         ref val @ (Value::Dict(_) | Value::Array(_)) => {
             let json_val = jsonify_value(val);
             let body = to_json_string(&json_val);
-            Ok((
+            (
                 200,
-                body,
+                body.into_bytes(),
                 vec![(
                     "Content-Type".into(),
                     "application/json; charset=utf-8".into(),
                 )],
-            ))
+            )
         }
         // Other values → convert to string
         other => {
             // Other values → convert to string
-            Ok((
+            (
                 200,
-                format!("{other}"),
+                format!("{other}").into_bytes(),
                 vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
-            ))
+            )
         }
+    };
+
+    // Post-middleware: skipped entirely when unregistered (zero-cost:
+    // no request clone above, no Response round-trip here).
+    match req_for_post {
+        None => Ok((status, body, headers)),
+        Some(req) => apply_post_middlewares(server, interp, req, status, body, headers, span),
     }
 }
 
-/// Serve a static file from the given directory.
-fn serve_static_file(dir: &str, path: &str, _span: Span) -> DispatchResult {
-    let clean_path = if path.starts_with('/') {
-        path.strip_prefix('/').unwrap_or(path)
-    } else {
-        path
-    };
-
-    // Prevent directory traversal
-    if clean_path.contains("..") {
-        return Ok((403, "Forbidden".into(), vec![]));
-    }
-
-    let file_path = if clean_path.is_empty() {
-        format!("{dir}/index.html")
-    } else {
-        format!("{dir}/{clean_path}")
-    };
-
-    match std::fs::read_to_string(&file_path) {
-        Ok(contents) => {
-            let mime = guess_mime(&file_path);
-            Ok((200, contents, vec![("Content-Type".into(), mime.into())]))
+/// Run the post-middleware chain over a handler (or static-file) result.
+/// `post_fn(req, res) -> res` in registration order; anything but a
+/// `Response` out is a loud error. Static hits flow through here too so
+/// CORS/secure-headers apply to file responses as well.
+#[allow(clippy::too_many_arguments)]
+fn apply_post_middlewares(
+    server: &HttpServer,
+    interp: &mut Interp,
+    req: Value,
+    status: u16,
+    body: Vec<u8>,
+    headers: Vec<(String, String)>,
+    span: Span,
+) -> DispatchResult {
+    let mut res_val = Value::Response(Box::new(Response {
+        status,
+        body: String::from_utf8_lossy(&body).into_owned(),
+        headers,
+    }));
+    // Static bodies may be binary; post-middleware sees them lossy through
+    // `text()` (same contract as `http.test`). Binary + post-mw stays
+    // exact only for UTF-8 bodies.
+    for post in &server.post_middlewares {
+        let out = interp.call(post.clone(), vec![req.clone(), res_val], span)?;
+        match out {
+            Value::Response(r) => res_val = Value::Response(r),
+            other => {
+                return Err(EvalError::new(
+                    format!("std.http: post-middleware returned `{other}`, expected http.response"),
+                    span,
+                ));
+            }
         }
-        Err(_) => Ok((404, "Not Found".into(), vec![])),
+    }
+    match res_val {
+        Value::Response(r) => Ok((r.status, r.body.into_bytes(), r.headers)),
+        _ => unreachable!("post chain preserves Response"),
     }
 }
 
@@ -1142,8 +1812,19 @@ pub(crate) fn dispatch(
     interp: &mut Interp,
     span: Span,
 ) -> Result<String, EvalError> {
-    let result = dispatch_with_request(server, method, path, body, &[], &[], &[], interp, span)?;
-    Ok(result.1)
+    let result = dispatch_with_request(
+        server,
+        method,
+        path,
+        body.into_bytes(),
+        &[],
+        &[],
+        &[],
+        "http.test",
+        interp,
+        span,
+    )?;
+    Ok(String::from_utf8_lossy(&result.1).into_owned())
 }
 
 // ===========================================================================
@@ -1213,8 +1894,15 @@ impl FuncSnapshot {
 struct ServerSnapshot {
     routes: Vec<(String, String, FuncSnapshot)>,
     middleware: Vec<FuncSnapshot>,
+    post_middleware: Vec<FuncSnapshot>,
     log_enabled: bool,
-    static_dir: Option<String>,
+    static_dirs: Vec<(String, String)>,
+    hsts: bool,
+    /// Shared limiter: cloned `Arc` state keeps one bucket set per server
+    /// across all pool workers (same discipline as the funcs table).
+    rate_limit: Option<RateLimit>,
+    /// Upgrade routes: same snapshot discipline as middleware.
+    hijack: Vec<(String, FuncSnapshot)>,
     natives: Arc<HashMap<String, NativeEntry>>,
     structs: HashMap<String, Vec<String>>,
     funcs: Arc<std::sync::Mutex<HashMap<String, FuncValue>>>,
@@ -1296,11 +1984,27 @@ impl ServerSnapshot {
             .filter_map(|m| snapshot_func_scoped(m, interp))
             .collect();
 
+        let post_middleware = server
+            .post_middlewares
+            .iter()
+            .filter_map(|m| snapshot_func_scoped(m, interp))
+            .collect();
+
         ServerSnapshot {
             routes,
             middleware,
+            post_middleware,
             log_enabled: server.log_enabled,
-            static_dir: server.static_dir.clone(),
+            static_dirs: server.static_dirs.clone(),
+            rate_limit: server.rate_limit.clone(),
+            hsts: server.hsts,
+            hijack: server
+                .hijack_routes
+                .iter()
+                .filter_map(|(path, handler)| {
+                    Some((path.clone(), snapshot_func_scoped(handler, interp)?))
+                })
+                .collect(),
             natives: interp.natives.clone(),
             structs: (*interp.structs).clone(),
             funcs: Arc::new(std::sync::Mutex::new(snapshot_funcs(&interp.funcs))),
@@ -1316,8 +2020,20 @@ impl ServerSnapshot {
                 .map(|(method, path, fs)| (method.clone(), path.clone(), fs.reconstruct()))
                 .collect(),
             middlewares: self.middleware.iter().map(|fs| fs.reconstruct()).collect(),
+            post_middlewares: self
+                .post_middleware
+                .iter()
+                .map(|fs| fs.reconstruct())
+                .collect(),
             log_enabled: self.log_enabled,
-            static_dir: self.static_dir.clone(),
+            static_dirs: self.static_dirs.clone(),
+            rate_limit: self.rate_limit.clone(),
+            hsts: self.hsts,
+            hijack_routes: self
+                .hijack
+                .iter()
+                .map(|(path, fs)| (path.clone(), fs.reconstruct()))
+                .collect(),
         }
     }
 
@@ -1336,11 +2052,69 @@ impl ServerSnapshot {
     }
 }
 
-/// Blocking HTTP server loop.  Dispatches each incoming TCP connection to
-/// its own OS thread so route handlers execute in parallel across cores.
+/// Per-server socket limits (see `http.listen_cfg`). Defaults preserve the
+/// historic constants below so plain `http.listen` behaves identically.
+#[derive(Debug, Clone, Copy)]
+struct ServerLimits {
+    read_timeout: std::time::Duration,
+    max_reqs_per_conn: usize,
+    max_body_bytes: usize,
+    shutdown_timeout: std::time::Duration,
+}
+
+impl Default for ServerLimits {
+    fn default() -> Self {
+        ServerLimits {
+            read_timeout: READ_TIMEOUT,
+            max_reqs_per_conn: MAX_REQS_PER_CONN,
+            max_body_bytes: MAX_BODY_BYTES,
+            shutdown_timeout: std::time::Duration::from_secs(5),
+        }
+    }
+}
+
+/// Graceful-shutdown flag, set by SIGINT/SIGTERM (unix only).
+static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn on_shutdown_signal(_: libc::c_int) {
+    SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Install the SIGINT/SIGTERM → drain handler once per process.
+/// No-op on Windows (no `sigaction` there); the accept loop still polls.
+fn install_shutdown_hook() {
+    #[cfg(unix)]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            // SAFETY: zeroed `sigaction` + empty mask + async-signal-safe
+            // handler (a single relaxed atomic store). No ZZ state touched.
+            unsafe {
+                let mut sa: libc::sigaction = std::mem::zeroed();
+                sa.sa_sigaction = on_shutdown_signal as *const () as usize;
+                sa.sa_flags = 0;
+                libc::sigemptyset(&mut sa.sa_mask);
+                libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+                libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+            }
+        });
+    }
+}
+
+fn shutdown_requested() -> bool {
+    SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Blocking HTTP server loop. Dispatches accepted TCP connections to a
+/// bounded worker pool (not one OS thread per connection) so route handlers
+/// execute in parallel across cores without thread-spawn churn.
 ///
-/// Each connection thread receives its own fresh `Interp` and a reconstructed
-/// `HttpServer` from a pre-computed snapshot, avoiding lock contention.
+/// Each worker reconstructs its own `Interp` + `HttpServer` from the
+/// pre-computed snapshot, avoiding lock contention on the hot path.
+///
+/// SIGINT/SIGTERM stops the accept loop; in-flight connections drain up to
+/// the shutdown timeout, then `listen` returns normally.
 pub(crate) fn http_listen(
     interp: &mut Interp,
     args: &mut Vec<Value>,
@@ -1356,11 +2130,166 @@ pub(crate) fn http_listen(
             ))
         }
     };
+    listen_inner(interp, server, port, ServerLimits::default(), None, span)
+}
 
+/// `http.listen_cfg(server, port, opts: {str: int}) -> unit`
+///
+/// `opts` keys (all optional): `read_ms` (per-read timeout, default 30000),
+/// `max_reqs_conn` (requests per keep-alive connection, default 1000),
+/// `max_body_bytes` (request body cap, default 52428800),
+/// `shutdown_ms` (SIGINT/SIGTERM drain budget, default 5000).
+/// Present keys must be positive ints; missing keys keep defaults.
+pub(crate) fn http_listen_cfg(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.listen_cfg";
+    let server = expect_server(args, 0, NAME)?;
+    let port = match args.get(1) {
+        Some(Value::Int(p)) => *p,
+        other => {
+            return Err(EvalError::new(
+                format!("`{NAME}`: expected an int port, found `{other:?}`"),
+                span,
+            ));
+        }
+    };
+    let mut limits = ServerLimits::default();
+    if let Some(opts) = args.get(2) {
+        limits = parse_listen_opts(opts, NAME, span)?;
+    }
+    listen_inner(interp, server, port, limits, None, span)
+}
+
+/// Shared `listen_*_cfg` opts parsing: all keys optional positive ints.
+fn parse_listen_opts(opts: &Value, name: &str, span: Span) -> Result<ServerLimits, EvalError> {
+    let mut limits = ServerLimits::default();
+    let entries = match opts {
+        Value::Dict(entries) => entries.clone(),
+        other => {
+            return Err(EvalError::new(
+                format!("`{name}`: expected an opts dict, found `{other}`"),
+                span,
+            ));
+        }
+    };
+    for (k, v) in entries.iter() {
+        let (Value::Str(key), Value::Int(n)) = (k, v) else {
+            return Err(EvalError::new(
+                format!("`{name}`: opts values must be positive ints, found `{v}` for `{k}`"),
+                span,
+            ));
+        };
+        if *n <= 0 {
+            return Err(EvalError::new(
+                format!("`{name}`: opts value for `{key}` must be positive, found `{n}`"),
+                span,
+            ));
+        }
+        let n = *n as u64;
+        match key.as_str() {
+            "read_ms" => limits.read_timeout = std::time::Duration::from_millis(n),
+            "max_reqs_conn" => limits.max_reqs_per_conn = n as usize,
+            "max_body_bytes" => limits.max_body_bytes = n as usize,
+            "shutdown_ms" => limits.shutdown_timeout = std::time::Duration::from_millis(n),
+            other => {
+                return Err(EvalError::new(
+                    format!(
+                        "`{name}`: unknown opts key `{other}` \
+                         (expected read_ms, max_reqs_conn, max_body_bytes or shutdown_ms)"
+                    ),
+                    span,
+                ));
+            }
+        }
+    }
+    Ok(limits)
+}
+
+/// `http.listen_tls(server, port, cert_path, key_path) -> unit`
+///
+/// Same loop as `listen`, wrapped in rustls TLS (1.3 + 1.2, ALPN
+/// `http/1.1`). Enables HSTS injection on the server. Cert/key load
+/// failures are loud errors — never silent cleartext fallback.
+pub(crate) fn http_listen_tls(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.listen_tls";
+    let mut server = expect_server(args, 0, NAME)?;
+    let port = match args.get(1) {
+        Some(Value::Int(p)) => *p,
+        other => {
+            return Err(EvalError::new(
+                format!("`{NAME}`: expected an int port, found `{other:?}`"),
+                span,
+            ));
+        }
+    };
+    let cert = expect_str(args, 2, NAME)?;
+    let key = expect_str(args, 3, NAME)?;
+    let cfg = tls::load_server_config(&cert, &key, span)?;
+    server.hsts = true;
+    listen_inner(
+        interp,
+        server,
+        port,
+        ServerLimits::default(),
+        Some(cfg),
+        span,
+    )
+}
+
+/// `http.listen_tls_cfg(server, port, cert_path, key_path, opts) -> unit`
+///
+/// `listen_tls` + `listen_cfg` limits (same opts keys).
+pub(crate) fn http_listen_tls_cfg(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const NAME: &str = "std.http.listen_tls_cfg";
+    let mut server = expect_server(args, 0, NAME)?;
+    let port = match args.get(1) {
+        Some(Value::Int(p)) => *p,
+        other => {
+            return Err(EvalError::new(
+                format!("`{NAME}`: expected an int port, found `{other:?}`"),
+                span,
+            ));
+        }
+    };
+    let cert = expect_str(args, 2, NAME)?;
+    let key = expect_str(args, 3, NAME)?;
+    let limits = match args.get(4) {
+        None => ServerLimits::default(),
+        Some(opts) => parse_listen_opts(opts, NAME, span)?,
+    };
+    let cfg = tls::load_server_config(&cert, &key, span)?;
+    server.hsts = true;
+    listen_inner(interp, server, port, limits, Some(cfg), span)
+}
+
+fn listen_inner(
+    interp: &mut Interp,
+    server: HttpServer,
+    port: i64,
+    limits: ServerLimits,
+    tls: Option<Arc<rustls::ServerConfig>>,
+    span: Span,
+) -> Result<Value, EvalError> {
     // Snapshot the server + interp state before entering the accept loop.
     // This is sent to each connection thread so they can reconstruct
     // a fully independent server + interp without any cross-thread Rc.
     let snapshot = Arc::new(ServerSnapshot::from_server(&server, interp));
+
+    // Fresh shutdown state per `listen` (a previous drain must not poison
+    // a later server in the same process, e.g. sequential e2e servers).
+    SHUTDOWN.store(false, std::sync::atomic::Ordering::Relaxed);
+    install_shutdown_hook();
 
     let listener = std::net::TcpListener::bind(("0.0.0.0", port as u16)).map_err(|e| {
         eprintln!("[ERROR] std.http.listen: cannot bind port {port}: {e}");
@@ -1391,28 +2320,279 @@ pub(crate) fn http_listen(
     unsafe {
         libc::malloc_trim(0);
     }
-    for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
-        let snap = Arc::clone(&snapshot);
-        std::thread::spawn(move || {
-            handle_connection_thread(&snap, &mut stream, span);
-        });
+    let (tx, rx) = std::sync::mpsc::sync_channel::<PoolJob>(POOL_QUEUE_DEPTH);
+    // In-flight connections: incremented on accept, decremented when the
+    // connection thread finishes. The shutdown drain waits on this.
+    let inflight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    spawn_pool(rx, span, limits, Arc::clone(&inflight));
+    // Nonblocking accept so SIGINT/SIGTERM is noticed promptly (blocking
+    // `incoming()` would sleep through the signal until the next client).
+    if let Err(e) = listener.set_nonblocking(true) {
+        return Err(EvalError::new(
+            format!("std.http.listen: cannot set nonblocking: {e}"),
+            span,
+        ));
+    }
+    loop {
+        if shutdown_requested() {
+            break;
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                inflight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Read timeouts live on the socket, so TLS reads (which go
+                // through this same fd) inherit them after the handshake.
+                let _ = stream.set_read_timeout(Some(limits.read_timeout));
+                let job = PoolJob {
+                    stream,
+                    snapshot: Arc::clone(&snapshot),
+                    tls: tls.clone(),
+                };
+                match tx.try_send(job) {
+                    Ok(()) => {}
+                    Err(std::sync::mpsc::TrySendError::Full(mut job)) => {
+                        // Backpressure: pool saturated — fail fast with 503 instead
+                        // of queueing unboundedly (slowloris-shaped traffic would
+                        // otherwise pin memory per pending connection).
+                        // TLS handshakes haven't run yet here, so a plain
+                        // 503 is correct on both listeners.
+                        let busy = format_response_with_headers(
+                            503,
+                            &[
+                                ("Content-Type".into(), "text/plain; charset=utf-8".into()),
+                                ("Retry-After".into(), "1".into()),
+                            ],
+                            b"server busy",
+                            false,
+                        );
+                        let _ = job.stream.write_all(&busy);
+                        let _ = job.stream.flush();
+                        inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                        inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => continue,
+        }
+    }
+    // Drain: in-flight connections finish (keep-alive sockets close via
+    // their read timeouts at the latest) or the budget expires.
+    let deadline = Instant::now() + limits.shutdown_timeout;
+    while inflight.load(std::sync::atomic::Ordering::Relaxed) > 0 && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
     Ok(Value::Unit)
 }
 
+/// Bounded worker pool for accepted connections.
+///
+/// `available_parallelism * 2`, clamped to `[4, 64]`: enough to overlap
+/// handler compute with socket I/O, small enough that 10k idle keep-alive
+/// connections no longer mean 10k threads (previously one
+/// `thread::spawn` per connection).
+fn pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get() * 2)
+        .unwrap_or(8)
+        .clamp(4, 64)
+}
+
+/// Depth of the pending-connection queue (see backpressure above).
+const POOL_QUEUE_DEPTH: usize = 1024;
+
+/// One accepted connection: the socket, the server snapshot, and the
+/// optional TLS config (shared `Arc` — `None` is cleartext).
+struct PoolJob {
+    stream: std::net::TcpStream,
+    snapshot: Arc<ServerSnapshot>,
+    tls: Option<Arc<rustls::ServerConfig>>,
+}
+
+/// Spawn pool workers sharing one `mpsc::Receiver` behind a mutex.
+/// Workers exit when all senders disconnect (server shutdown).
+fn spawn_pool(
+    rx: std::sync::mpsc::Receiver<PoolJob>,
+    span: Span,
+    limits: ServerLimits,
+    inflight: Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let rx = Arc::new(std::sync::Mutex::new(rx));
+    for _ in 0..pool_size() {
+        let rx = Arc::clone(&rx);
+        let inflight = Arc::clone(&inflight);
+        std::thread::spawn(move || loop {
+            let job = rx.lock().ok().and_then(|rx| rx.recv().ok());
+            let Some(job) = job else {
+                return;
+            };
+            // Peer IP before a potential TLS wrap (the encrypted stream
+            // borrows the socket, so grab it while we own it).
+            let peer = job
+                .stream
+                .peer_addr()
+                .map(|a| a.ip().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+            let mut stream = job.stream;
+            if let Some(cfg) = job.tls {
+                let mut conn = match rustls::ServerConnection::new(cfg) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                };
+                // Blocking handshake, bounded by the accept-path read
+                // timeout on the socket. Probes and wrong-protocol
+                // clients fail here and just close.
+                let mut ok = true;
+                while conn.is_handshaking() {
+                    if conn.complete_io(&mut stream).is_err() {
+                        ok = false;
+                        break;
+                    }
+                }
+                if !ok {
+                    inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    continue;
+                }
+                let mut tls_stream = rustls::Stream::new(&mut conn, &mut stream);
+                // TLS has no raw socket to hand over: upgrades are disabled.
+                match handle_connection_thread(
+                    &job.snapshot,
+                    &mut tls_stream,
+                    &peer,
+                    span,
+                    limits,
+                    false,
+                ) {
+                    ConnEnd::Closed => {}
+                    ConnEnd::Hijacked { .. } => {
+                        // Unreachable: `allow_hijack` is false above.
+                    }
+                }
+            } else {
+                match handle_connection_thread(
+                    &job.snapshot,
+                    &mut stream,
+                    &peer,
+                    span,
+                    limits,
+                    true,
+                ) {
+                    ConnEnd::Closed => {}
+                    ConnEnd::Hijacked(boxed) => {
+                        // Borrow of `stream` ended with the call above:
+                        // move the socket into the upgrade handoff.
+                        hijack_serve(boxed.interp, stream, boxed.hijack, span);
+                    }
+                }
+            }
+            inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+}
+
+/// Per-request outcome on a connection: keep going, close, or hand the
+/// socket to a hijack handler (WebSocket upgrade).
+enum Loop {
+    Continue,
+    Close,
+    Hijack(HijackReq),
+}
+
+/// How a connection ended. `Hijacked` carries the server/interp back to
+/// the worker (same thread — no `Send` crossing) along with the upgrade.
+enum ConnEnd {
+    Closed,
+    Hijacked(Box<HijackedConn>),
+}
+
+/// Upgrade handoff: the connection interpreter plus the matched upgrade.
+/// Boxed — `ConnEnd` travels by value and `Interp` is hundreds of bytes.
+struct HijackedConn {
+    interp: Interp,
+    hijack: HijackReq,
+}
+
 /// Handle a single TCP connection on a dedicated thread.
 ///
-/// Reconstructs the HTTP server and interpreter from the snapshot, parses
-/// the HTTP request, dispatches it through the route/middleware pipeline,
-/// and writes the response.
-fn handle_connection_thread(
+/// Reconstructs the HTTP server and interpreter from the snapshot once per
+/// connection, then serves up to the configured requests-per-connection on
+/// the same socket (HTTP/1.1 keep-alive). Generic over the byte stream so
+/// cleartext (`TcpStream`) and TLS (`rustls::Stream`) share the loop;
+/// `allow_hijack` is false on TLS (no raw socket to hand over).
+fn handle_connection_thread<S: std::io::Read + std::io::Write>(
     snapshot: &ServerSnapshot,
-    stream: &mut std::net::TcpStream,
+    stream: &mut S,
+    peer: &str,
     span: Span,
-) {
-    let start = Instant::now();
+    limits: ServerLimits,
+    allow_hijack: bool,
+) -> ConnEnd {
+    // Reconstruct once per connection: every request on this socket shares
+    // the same server + interp (sequential — no cross-request aliasing).
+    let server = snapshot.reconstruct_server();
+    let mut interp = snapshot.fresh_interp();
 
+    for _ in 0..limits.max_reqs_per_conn {
+        let start = Instant::now();
+        match handle_one_request(
+            &server,
+            &mut interp,
+            stream,
+            peer,
+            span,
+            limits,
+            allow_hijack,
+            start,
+        ) {
+            Loop::Continue => {}
+            Loop::Close => return ConnEnd::Closed,
+            Loop::Hijack(hijack) => {
+                return ConnEnd::Hijacked(Box::new(HijackedConn { interp, hijack }));
+            }
+        }
+    }
+    ConnEnd::Closed
+}
+
+/// Answer a matched upgrade: write the `101`, wrap the socket, and run
+/// `handler(req, tcp.stream)`. The ZZ side owns the socket afterwards
+/// (usually by spawning its frame loop into a task); returning from the
+/// handler drops our handle and closes our end of the sharing.
+fn hijack_serve(mut interp: Interp, stream: std::net::TcpStream, hijack: HijackReq, span: Span) {
+    let accept = ws_accept_key(&hijack.key);
+    let resp = format!(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+    );
+    let mut stream = stream;
+    if stream.write_all(resp.as_bytes()).is_err() || stream.flush().is_err() {
+        return;
+    }
+    let sock = Value::TcpStream(Arc::new(std::sync::Mutex::new(stream)));
+    if let Err(e) = interp.call(hijack.handler, vec![hijack.req, sock], span) {
+        eprintln!("[ERROR] std.http.hijack handler failed: {}", e.message);
+    }
+}
+
+/// Serve one request on an already-open connection.
+#[allow(clippy::too_many_arguments)]
+fn handle_one_request<S: std::io::Read + std::io::Write>(
+    server: &HttpServer,
+    interp: &mut Interp,
+    stream: &mut S,
+    peer: &str,
+    span: Span,
+    limits: ServerLimits,
+    allow_hijack: bool,
+    start: Instant,
+) -> Loop {
     // ── Read the raw HTTP request ──
     //
     // G1 (Registry V2): the old code did a single 8 KB `read()`, so any
@@ -1420,32 +2600,42 @@ fn handle_connection_thread(
     // tarballs) was silently truncated. Read in a loop: headers until
     // `\r\n\r\n` (bounded), then exactly Content-Length body bytes.
     let head_buf = match read_until_delim(stream, b"\r\n\r\n", MAX_HEAD_BYTES) {
-        Ok(Some(buf)) => buf,
+        Ok(Some(buf)) => {
+            if buf.is_empty() {
+                return Loop::Close; // clean client close between requests
+            }
+            buf
+        }
         Ok(None) => {
             // Header block exceeded the cap (or client vanished).
-            let _ = stream.write_all(format_response(431, "headers too large").as_bytes());
+            let _ = stream.write_all(&format_response(431, "headers too large"));
             let _ = stream.flush();
-            return;
+            return Loop::Close;
         }
         Err(_) => {
-            let _ = stream.write_all(format_response(500, "internal error").as_bytes());
-            let _ = stream.flush();
-            return;
+            // Timeout (idle keep-alive expiry) or I/O error: close silently
+            // when no bytes are mid-flight, else a 500 with close.
+            return Loop::Close;
         }
     };
-    let text = String::from_utf8_lossy(&head_buf).to_string();
-    let mut lines = text.lines();
-    let Some(request_line) = lines.next() else {
-        let _ = stream.write_all(format_response(400, "bad request").as_bytes());
-        let _ = stream.flush();
-        return;
+    // Zero-copy head parse over the buffered bytes: method/path/headers
+    // are views (no whole-head `String`, no `lines()` split). Strict
+    // framing — garbage closes with 400, >128 headers with 431.
+    let head = match parse::parse_head(&head_buf) {
+        Ok(h) => h,
+        Err(parse::HeadError::TooManyHeaders) => {
+            let _ = stream.write_all(&format_response(431, "headers too large"));
+            let _ = stream.flush();
+            return Loop::Close;
+        }
+        Err(parse::HeadError::Malformed) => {
+            let _ = stream.write_all(&format_response(400, "bad request"));
+            let _ = stream.flush();
+            return Loop::Close;
+        }
     };
-    let mut parts = request_line.split_whitespace();
-    let (Some(method), Some(raw_path)) = (parts.next(), parts.next()) else {
-        let _ = stream.write_all(format_response(400, "bad request").as_bytes());
-        let _ = stream.flush();
-        return;
-    };
+    let method = head.method;
+    let raw_path = head.raw_path;
 
     let (path, query_pairs) = if let Some((p, q)) = raw_path.split_once('?') {
         (p.to_string(), parse_query_string(q))
@@ -1453,74 +2643,96 @@ fn handle_connection_thread(
         (raw_path.to_string(), Vec::new())
     };
 
-    let req_headers = extract_headers(&text);
+    // Materialize owned headers once (dispatch + middleware need `String`s).
+    let mut req_headers = Vec::with_capacity(head.headers.len());
+    for (k, v) in head.headers {
+        req_headers.push((k.to_string(), String::from_utf8_lossy(v).into_owned()));
+    }
 
-    let mut content_length = 0usize;
-    let mut expect_continue = false;
-    for line in lines {
-        if line.is_empty() {
-            break;
-        }
-        let lower = line.to_ascii_lowercase();
-        if let Some(v) = lower.strip_prefix("content-length:") {
-            content_length = v.trim().parse().unwrap_or(0);
-        } else if let Some(v) = lower.strip_prefix("expect:") {
-            expect_continue = v.trim() == "100-continue";
+    // WebSocket upgrade: hijack routes win before the body read.
+    // Anything unmatched here (wrong method, no key, no pattern hit)
+    // falls through to normal dispatch — one path serves both.
+    if allow_hijack {
+        if let Some(hijack) = match_hijack(server, method, &path, &req_headers, &query_pairs) {
+            if let Some(limiter) = server.rate_limit.as_ref() {
+                if let Some(retry_after) = check_rate_limit(limiter, peer) {
+                    let busy = format_response_with_headers(
+                        429,
+                        &[
+                            ("Content-Type".into(), "text/plain; charset=utf-8".into()),
+                            ("Retry-After".into(), retry_after.to_string()),
+                        ],
+                        b"Too Many Requests",
+                        false,
+                    );
+                    let _ = stream.write_all(&busy);
+                    let _ = stream.flush();
+                    return Loop::Close;
+                }
+            }
+            return Loop::Hijack(hijack);
         }
     }
-    if content_length > MAX_BODY_BYTES {
-        let _ = stream.write_all(format_response(413, "payload too large").as_bytes());
+
+    let content_length = head.content_length;
+    let expect_continue = head.expect_continue;
+    // HTTP/1.1 persists by default, HTTP/1.0 (or unknown) closes by
+    // default; an explicit `Connection:` header overrides either way.
+    let keep_alive = parse::fold_connection(head.version_1_1, head.connection);
+    if content_length > limits.max_body_bytes {
+        let _ = stream.write_all(&format_response(413, "payload too large"));
         let _ = stream.flush();
-        return;
+        return Loop::Close;
     }
     if expect_continue && content_length > 0 {
         // Large clients (curl, some SDKs) wait for this before sending.
         let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
         let _ = stream.flush();
     }
-    // Bytes already buffered past the header terminator belong to the body.
-    let head_end = text
-        .find("\r\n\r\n")
-        .map(|idx| idx + 4)
-        .unwrap_or(head_buf.len());
-    let buffered: &[u8] = head_buf.get(head_end..).unwrap_or(&[]);
-    let body_bytes = match read_exact_capped(stream, buffered, content_length, MAX_BODY_BYTES) {
-        Ok(b) => b,
-        Err(_) => {
-            let _ = stream.write_all(format_response(400, "truncated body").as_bytes());
-            let _ = stream.flush();
-            return;
-        }
-    };
-    // Reuse the read buffer when it is valid UTF-8 (JSON always is):
-    // `from_utf8_lossy().to_string()` copies the whole body again, which
-    // triples peak memory on multi-MB publishes (buffer + String + dict).
-    let body = match String::from_utf8(body_bytes) {
-        Ok(s) => s,
-        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
-    };
-
-    // ── Reconstruct server + interp from snapshot ──
-    let server = snapshot.reconstruct_server();
-    let mut interp = snapshot.fresh_interp();
-
+    // Bytes already buffered past the header terminator belong to the body
+    // (`head_len` comes from the parser — no re-scan for `\r\n\r\n`).
+    let buffered: &[u8] = head_buf.get(head.head_len..).unwrap_or(&[]);
+    let body_bytes =
+        match read_exact_capped(stream, buffered, content_length, limits.max_body_bytes) {
+            Ok(b) => b,
+            Err(_) => {
+                let _ = stream.write_all(&format_response(400, "truncated body"));
+                let _ = stream.flush();
+                return Loop::Close;
+            }
+        };
     // ── Dispatch ──
+    // `body_bytes` moves straight in: no UTF-8 copy on the hot path.
+    // Text views are derived once inside `build_request_dict`.
     let result = dispatch_with_request(
-        &server,
+        server,
         method,
         &path,
-        body,
+        body_bytes,
         &req_headers,
         &query_pairs,
         &[],
-        &mut interp,
+        peer,
+        interp,
         span,
     );
 
-    let (status, resp_body, resp_headers) = match result {
+    let (status, resp_body, mut resp_headers) = match result {
         Ok(r) => r,
-        Err(e) => (500, e.message, vec![]),
+        Err(e) => (500, e.message.into_bytes(), vec![]),
     };
+    // HSTS on TLS listeners only (never on cleartext — that would poison
+    // caches if TLS is later removed). Handler-set values win.
+    if server.hsts
+        && !resp_headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("strict-transport-security"))
+    {
+        resp_headers.push((
+            "Strict-Transport-Security".into(),
+            "max-age=31536000; includeSubDomains".into(),
+        ));
+    }
 
     let elapsed = start.elapsed();
 
@@ -1540,9 +2752,18 @@ fn handle_connection_thread(
         );
     }
 
-    let response = format_response_with_headers(status, &resp_headers, &resp_body);
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.flush();
+    let mut response = format_response_with_headers(status, &resp_headers, &resp_body, keep_alive);
+    if method == "HEAD" {
+        // HEAD: same headers (with the true Content-Length) but no body bytes.
+        // `resp_body` is the exact suffix, so truncating by its length is safe.
+        response.truncate(response.len() - resp_body.len());
+    }
+    if stream.write_all(&response).is_err() {
+        return Loop::Close;
+    }
+    if stream.flush().is_err() {
+        return Loop::Close;
+    }
     // Large bodies churn tens of MB through this thread's heap (body
     // buffer + request dict + JSON parse). Freed blocks above the live
     // set are never returned without help, so a few big publishes would
@@ -1555,6 +2776,11 @@ fn handle_connection_thread(
         unsafe {
             libc::malloc_trim(0);
         }
+    }
+    if keep_alive {
+        Loop::Continue
+    } else {
+        Loop::Close
     }
 }
 
@@ -1729,6 +2955,89 @@ mod tests {
         }
         let got = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         assert_eq!(got, raw, "binary body corrupted in transit");
+    }
+
+    fn test_limiter(max: u64, window_ms: u64) -> RateLimit {
+        RateLimit {
+            max_requests: max,
+            window_ms,
+            state: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    #[test]
+    fn bucket_admits_burst_then_rejects() {
+        let lim = test_limiter(3, 60_000);
+        assert_eq!(check_rate_limit(&lim, "c"), None);
+        assert_eq!(check_rate_limit(&lim, "c"), None);
+        assert_eq!(check_rate_limit(&lim, "c"), None);
+        let retry = check_rate_limit(&lim, "c").expect("4th must reject");
+        assert!(retry >= 1, "Retry-After must be usable");
+    }
+
+    #[test]
+    fn bucket_keys_are_isolated() {
+        let lim = test_limiter(1, 60_000);
+        assert_eq!(check_rate_limit(&lim, "a"), None);
+        assert!(check_rate_limit(&lim, "a").is_some());
+        assert_eq!(check_rate_limit(&lim, "b"), None);
+    }
+
+    #[test]
+    fn bucket_refills_after_window() {
+        let lim = test_limiter(1, 100);
+        assert_eq!(check_rate_limit(&lim, "c"), None);
+        assert!(check_rate_limit(&lim, "c").is_some());
+        // Age the bucket past the window instead of sleeping.
+        {
+            let mut map = lim.state.lock().unwrap();
+            let b = map.get_mut("c").unwrap();
+            b.last -= std::time::Duration::from_millis(200);
+        }
+        assert_eq!(check_rate_limit(&lim, "c"), None);
+    }
+
+    #[test]
+    fn bucket_map_capped_fail_open() {
+        let lim = test_limiter(1, 60_000);
+        for i in 0..RATE_LIMIT_MAX_KEYS {
+            assert_eq!(check_rate_limit(&lim, &format!("k{i}")), None);
+        }
+        // Overflow resets rather than growing: still admitted.
+        assert_eq!(check_rate_limit(&lim, "fresh"), None);
+        assert!(lim.state.lock().unwrap().len() <= RATE_LIMIT_MAX_KEYS);
+    }
+
+    #[test]
+    fn rate_limit_native_validates_args() {
+        let mut interp = Interp::new();
+        let srv = http_server(&mut interp, &mut Vec::new(), Span::new(0, 0)).unwrap();
+        for bad in [
+            vec![srv.clone(), Value::Int(0), Value::Int(1000)],
+            vec![srv.clone(), Value::Int(5), Value::Int(-1)],
+        ] {
+            let mut args = bad;
+            assert!(http_rate_limit(&mut interp, &mut args, Span::new(0, 0)).is_err());
+        }
+        let mut args = vec![srv, Value::Int(5), Value::Int(1000)];
+        match http_rate_limit(&mut interp, &mut args, Span::new(0, 0)).unwrap() {
+            Value::HttpServer(s) => {
+                let rl = s.rate_limit.as_ref().expect("limiter set");
+                assert_eq!(rl.max_requests, 5);
+                assert_eq!(rl.window_ms, 1000);
+            }
+            other => panic!("expected server, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ws_accept_matches_rfc_vector() {
+        // RFC 6455 §1.2: key `dGhlIHNhbXBsZSBub25jZQ==` must yield
+        // `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`.
+        assert_eq!(
+            ws_accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
     }
 }
 

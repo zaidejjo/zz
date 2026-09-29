@@ -64,19 +64,24 @@ fn clang_id(clang: &Clang) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// Assemble the 4-field cache key.
+/// Compile-flag generation for the cached runtime archive. Bump on ANY
+/// change to `build_compile_flags` (the key does not hash flags).
+const RT_CACHE_VERSION: &str = "rt2";
+
+/// Assemble the 5-field cache key.
 ///
-/// Format: `{target}-{mode}-{src_hash}-{clang_id}`
+/// Format: `{target}-{mode}-{src_hash}-{clang_id}-{rt_version}`
 pub fn cache_key(target: Option<&str>, optimize: bool, clang: &Clang) -> String {
     let fallback_triple = crate::compile::host_triple();
     let triple = target.unwrap_or(&fallback_triple);
     let mode = if optimize { "rel" } else { "dev" };
     format!(
-        "{}-{}-{}-{}",
+        "{}-{}-{}-{}-{}",
         triple,
         mode,
         runtime_src_hash(),
-        clang_id(clang)
+        clang_id(clang),
+        RT_CACHE_VERSION
     )
 }
 
@@ -232,8 +237,16 @@ fn compile_rt_a(
 ///
 /// These are a subset of `clang_flags()`: optimization + target flags only,
 /// no link flags (`-Wl,*`, `-l*`, `-static`, `-s`).
+///
+/// `-ffunction-sections -fdata-sections` are unconditional: the final
+/// link already passes `--gc-sections`, so per-function sections let it
+/// drop unreferenced runtime features (e.g. fetch/sql) wholesale.
+/// If you change this list, bump `RT_CACHE_VERSION` below or stale
+/// archives will poison the cache.
 fn build_compile_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String> {
     let mut flags: Vec<String> = Vec::new();
+    flags.push("-ffunction-sections".to_string());
+    flags.push("-fdata-sections".to_string());
     if opts.optimize {
         flags.push("-O3".to_string());
         flags.push("-flto=thin".to_string());

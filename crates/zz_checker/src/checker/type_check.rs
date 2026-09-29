@@ -70,6 +70,9 @@ impl Checker {
                     self.define_var_at(&name.name, fv, name.span, *is_const);
                 }
                 let vt = self.check_expr(value);
+                // Phase 2.2: inherit `std.http` route tables across server
+                // builder chains (`s2 := s.route_get(...)`, `s2 := s`).
+                self.propagate_http_routes(&name.name, value);
                 if let Some(ann) = ty {
                     let gens = self.current_generics.clone();
                     let at = self.ast_to_type(ann, &gens);
@@ -190,7 +193,11 @@ impl Checker {
                 if sig.is_extern {
                     return Type::Unit;
                 }
+                // Scope span recording to this function: spans repeat
+                // across modules, so the typed map keys (scope, span).
+                self.scope.push(fname);
                 self.check_func_body(stmt, &sig);
+                self.scope.pop();
                 Type::Unit
             }
             Stmt::ExternBlock { .. } => Type::Unit,
@@ -210,7 +217,9 @@ impl Checker {
                         let method_name = Self::func_name(method);
                         let full_name = format!("{}.{}", type_name, method_name);
                         let sig = self.funcs.get(&full_name).unwrap().clone();
+                        self.scope.push(full_name);
                         self.check_func_body(method, &sig);
+                        self.scope.pop();
                     }
                 }
                 Type::Unit
@@ -460,6 +469,13 @@ impl Checker {
                 let errors_before = self.errors.len();
                 let tt = self.check_assign_target(target);
                 let vt = self.check_expr(value);
+                // Phase 2.2: `s = s.route_get(...)` keeps the same root, but
+                // `t = s.route_get(...)` must inherit `s`'s table under `t`.
+                match target {
+                    Expr::Ident { name, .. } => self.propagate_http_routes(name, value),
+                    Expr::Path { parts, .. } => self.propagate_http_routes(&parts.join("."), value),
+                    _ => {}
+                }
                 if self.errors.len() == errors_before {
                     if let Err(e) = self.unifier.unify(&vt, &tt) {
                         self.report_mismatch(e, *span);
@@ -609,13 +625,15 @@ impl Checker {
 
     // --- expressions ------------------------------------------------------
 
-    /// Check an expression, recording its resolved type keyed by span so the
-    /// HIR could bindings can be built deterministically afterward.
+    /// Check an expression, recording its resolved type keyed by scoped key
+    /// so the HIR could bindings can be built deterministically afterward.
+    /// The key pairs the span with the enclosing top-level item: bare spans
+    /// repeat across modules (offsets restart at 0 per file).
     pub(crate) fn check_expr(&mut self, e: &Expr) -> Type {
         let ty = self.check_expr_impl(e);
         // Unresolved types stay as `Var`s during the walk; the typed map is
         // deep-resolved at the end (see `check_program_typed`).
-        self.span_types.insert(e.span(), ty.clone());
+        self.span_types.insert(self.scope_key(e.span()), ty.clone());
         ty
     }
 
@@ -688,6 +706,23 @@ impl Checker {
                         }
                         *v
                     }
+                    Type::HttpRequest => {
+                        // Typed request field access: `req.method/path/body`
+                        // are `str`; `req.headers/query/params` are `{str: str}`.
+                        match name.as_str() {
+                            "method" | "path" | "body" => Type::Str,
+                            "headers" | "query" | "params" => {
+                                Type::Dict(Box::new(Type::Str), Box::new(Type::Str))
+                            }
+                            _ => {
+                                self.errors.push(error_at(
+                                    format!("http.request has no field `{name}`"),
+                                    *span,
+                                ));
+                                Type::Unit
+                            }
+                        }
+                    }
                     Type::Var(_id) => {
                         // Inference variable — not yet resolved (e.g. untyped closure param).
                         // Return a fresh var; unification will catch real mismatches later.
@@ -746,7 +781,12 @@ impl Checker {
             }
             Expr::StructInit { name, fields, span } => {
                 self.used_names.insert(name.clone());
-                let Some(sig) = self.structs.get(name).cloned() else {
+                // Canonicalize selective imports (`Product` →
+                // `product.Product`) so the constructed type matches the
+                // qualified spelling everywhere (methods, identity).
+                // Messages keep the as-written name.
+                let cname = self.canonical_struct_name(name);
+                let Some(sig) = self.structs.get(&cname).cloned() else {
                     self.errors
                         .push(error_at(format!("unknown struct `{name}`"), *span));
                     return Type::Unit;
@@ -763,7 +803,8 @@ impl Checker {
                             self.report_mismatch(e, fval.span());
                         }
                         given_paths.push(vec![fname.clone()]);
-                    } else if let Some((prefix, pft)) = self.resolve_struct_field_path(name, fname)
+                    } else if let Some((prefix, pft)) =
+                        self.resolve_struct_field_path(&cname, fname)
                     {
                         if prefix.is_empty() {
                             // Unreachable: direct fields are handled above.
@@ -804,7 +845,7 @@ impl Checker {
                 }
                 // Verify all required fields are provided (flattened leaves
                 // count toward their embedded subtree).
-                if let Some(leaf) = self.first_uncovered_leaf(name, &[], &given_paths, 0) {
+                if let Some(leaf) = self.first_uncovered_leaf(&cname, &[], &given_paths, 0) {
                     self.errors.push(error_at(
                         format!(
                             "missing field `{}` in struct literal `{name}`",
@@ -813,7 +854,7 @@ impl Checker {
                         *span,
                     ));
                 }
-                Type::Struct(name.clone())
+                Type::Struct(cname)
             }
             Expr::Index { obj, index, span } => {
                 let ot = self.check_expr(obj);
@@ -1390,6 +1431,21 @@ impl Checker {
                 let recv_t = self.check_expr(obj);
                 let recv_t = self.unifier.resolve(&recv_t);
                 let method = name.clone();
+                // Phase 2.2: `std.http` route + param lint on typed receivers.
+                if matches!(self.unifier.resolve(&recv_t), Type::HttpServer)
+                    && crate::checker::http_lint::is_route_method(&method)
+                {
+                    let root = match obj.as_ref() {
+                        Expr::Ident { name, .. } => Some(name.clone()),
+                        _ => None,
+                    };
+                    self.lint_http_route_method(root, &method, args, span);
+                } else if method == "param"
+                    && matches!(self.unifier.resolve(&recv_t), Type::HttpRequest)
+                {
+                    // Field-call args exclude the receiver: `req.param(name)`.
+                    self.lint_http_param(args.first());
+                }
                 let mut sig = self.funcs.get(&method).cloned();
                 if sig.is_none() {
                     match &self.unifier.resolve(&recv_t) {
@@ -1408,6 +1464,9 @@ impl Checker {
                         Type::Float => sig = self.funcs.get(&format!("float.{method}")).cloned(),
                         Type::Bool => sig = self.funcs.get(&format!("bool.{method}")).cloned(),
                         Type::Response => sig = self.funcs.get(&format!("http.{method}")).cloned(),
+                        Type::HttpRequest => {
+                            sig = self.funcs.get(&format!("http.{method}")).cloned()
+                        }
                         Type::TcpStream => sig = self.funcs.get(&format!("net.{method}")).cloned(),
                         Type::TcpListener => {
                             sig = self.funcs.get(&format!("net.{method}")).cloned()
@@ -1591,6 +1650,20 @@ impl Checker {
                     }
                 }
             }
+            // Phase 2.2: `std.http` route + param lint for qualified calls.
+            // Runs before generic arg checking so the route's own params are
+            // registered before handler bodies are checked. `s.route(...)`
+            // arrives as a Path callee (receiver-implicit); `http.route...`
+            // as a module call — `lint_http_path_call` sorts out the form.
+            if let Expr::Path { parts, .. } = callee {
+                self.lint_http_path_call(parts, args, span);
+            }
+            // NOTE: bare-`Ident` callees are deliberately NOT linted here:
+            // genuine selective imports (`import std.http(route)`) are
+            // rewritten to qualified `Path` callees at the top of
+            // `check_call`, so a bare `route`/`param` reaching this point
+            // is user code (e.g. a `@route` decorator) — linting it would
+            // false-positive (see `syntax/decorators.zz`).
             if let Some(sig) = self.funcs.get(name).cloned() {
                 self.used_names.insert(name.clone());
                 let (ps, ret, subs) = self.instantiate(&sig);
@@ -1772,6 +1845,9 @@ impl Checker {
                             sig = self.funcs.get(&format!("bool.{method}")).cloned();
                         }
                         Type::Response => {
+                            sig = self.funcs.get(&format!("http.{method}")).cloned();
+                        }
+                        Type::HttpRequest => {
                             sig = self.funcs.get(&format!("http.{method}")).cloned();
                         }
                         Type::TcpStream => {

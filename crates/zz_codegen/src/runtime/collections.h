@@ -128,6 +128,8 @@ static inline zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
         return zz_array_get(obj.arr, idx, err);
     case ZZ_BYTES:
         return zz_bytes_get(obj.bytes, idx, err);
+    case ZZ_STR:
+        return zz_str_get(obj.s, idx, err);
     case ZZ_DICT:
         return zz_dict_get(obj.dict, idx, err);
     default:

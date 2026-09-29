@@ -1,6 +1,6 @@
 //! Expression parsing.
 
-use crate::ast::{BinOp, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, UnOp};
+use crate::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, UnOp};
 use crate::diag::error_at;
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
@@ -590,10 +590,19 @@ impl Parser {
                 // A `{` is treated as a struct literal when its contents look
                 // like fields (`ident : ...`). Adjacency alone is not enough
                 // because `if x == y{ ... }` would be misparsed as struct init.
+                // Nor is `{ Ident :` alone: a block opening with an annotated
+                // declaration (`for x in xs {\n r: int = ... }`, `if c {
+                // x: int = ... }`) looks identical through the colon (the
+                // newline after `{` is not a StmtEnd token). But `=` never
+                // continues an expression, so `{ Ident : Ident =` is always
+                // a block with a declaration, never a struct field.
                 if self.at(TokenKind::LBrace)
                     && self.peek_kind_at(1) == TokenKind::Ident
                     && (self.peek_kind_at(2) == TokenKind::Colon
                         || self.peek_kind_at(2) == TokenKind::LBrace)
+                    && !(self.peek_kind_at(2) == TokenKind::Colon
+                        && self.peek_kind_at(3) == TokenKind::Ident
+                        && self.peek_kind_at(4) == TokenKind::Assign)
                 {
                     return self.parse_struct_init(parts, tok.span.join(end));
                 }
@@ -914,6 +923,14 @@ impl Parser {
         }
         let value = self.parse_expr();
         entries.push((key, value));
+        // A dict entry must be followed by `,` or `}`. `=` / `:=` here
+        // means this is a block opening with a typed declaration
+        // (`name: Type = ...`), not a dict — backtrack so the caller
+        // falls through to `parse_block` (e.g. match-arm bodies like
+        // `_ => { xs: [T] = ... }`).
+        if self.at(TokenKind::Assign) || self.at(TokenKind::ColonEq) {
+            return None;
+        }
         while self.eat(TokenKind::Comma) {
             if self.at(TokenKind::RBrace) {
                 break; // trailing comma
@@ -1089,8 +1106,25 @@ impl Parser {
             if !self.eat(TokenKind::Arrow) {
                 self.error_here("expected `=>` after match pattern");
             }
-            let body = self.parse_expr();
+            // A bare `return` reads naturally as an arm body but is a
+            // statement, not an expression. Recover by wrapping the
+            // single statement in a block — identical AST to the braced
+            // form, so the checker and both runtimes need no changes.
+            // (`break`/`continue` are already expressions via
+            // `parse_primary`, with diverge handling in `check_match` —
+            // they must keep parsing as expressions, not blocks.)
+            // Anything else parses as an expression as before.
             let start_span = pat.span();
+            let body = if self.peek_kind() == TokenKind::Return {
+                let stmt = self.parse_stmt();
+                let span = start_span.join(stmt.span());
+                Expr::Block(Block {
+                    stmts: vec![stmt],
+                    span,
+                })
+            } else {
+                self.parse_expr()
+            };
             let end_span = body.span();
             let span = start_span.join(end_span);
             arms.push(MatchArm {

@@ -1,0 +1,79 @@
+// tests/fixtures/stdlib/http_middleware_p2.zz — Phase 2 middleware kits
+// CORS allow/deny/preflight, secure headers, serve_dir_at scoping,
+// with_headers merge.
+import std.http
+import std.fs
+import std.env
+
+func main() -> Result<int, str> {
+    root := "{env.temp_dir()}/zz_mw_p2"
+    fs.mkdir_all("{root}/assets")?
+    fs.write_file("{root}/assets/logo.txt", "logo-bytes")?
+    fs.write_file("{root}/top.txt", "top-level")?
+
+    s := http.server()
+    s = s.route("GET", "/api/hi", |_req| "hi")
+    s = http.serve_dir_at(s, "/assets", "{root}/assets")
+    s = http.cors(s, ["https://app.example.com"])
+    s = http.secure_headers(s)
+
+    // plain GET: secure headers + no ACAO (no Origin)
+    r1 := http.test(s, "GET", "/api/hi", "")
+    println("sec: {r1.headers()["Content-Security-Policy"]}")
+    println("frame: {r1.headers()["X-Frame-Options"]}")
+
+    // allowed origin: ACAO echoed
+    r2 := http.test_req(s, "GET", "/api/hi", {"Origin": "https://app.example.com"}, "")
+    println("acao: {r2.headers()["Access-Control-Allow-Origin"]}")
+
+    // denied origin: 403 short-circuit
+    r3 := http.test_req(s, "GET", "/api/hi", {"Origin": "https://evil.test"}, "")
+    println("deny: {r3.status()}:{r3.text()}")
+
+    // preflight
+    r4 := http.test_req(s, "OPTIONS", "/api/hi", {"Origin": "https://app.example.com"}, "")
+    println("preflight: {r4.status()}:{r4.headers()["Access-Control-Allow-Methods"]}")
+
+    // prefix-scoped static (post-middleware applies to files too)
+    r5 := http.test_req(s, "GET", "/assets/logo.txt", {"Origin": "https://app.example.com"}, "")
+    println("scoped: {r5.status()}:{r5.text()}")
+    println("scoped-acao: {r5.headers()["Access-Control-Allow-Origin"]}")
+    println("scoped-csp: {r5.headers()["Content-Security-Policy"]}")
+    r6 := http.test(s, "GET", "/top.txt", "")
+    println("unscoped: {r6.status()}")
+
+    // longest prefix wins regardless of registration order
+    pub2 := "{env.temp_dir()}/zz_mw_p2b"
+    fs.mkdir_all("{pub2}/assets")?
+    fs.write_file("{pub2}/assets/logo.txt", "wrong-root")?
+    s = http.serve_dir(s, pub2)
+    r7 := http.test(s, "GET", "/assets/logo.txt", "")
+    println("longest: {r7.text()}")
+
+    // with_headers merge (override wins)
+    base := http.respond(200, "b", {"X-Keep": "1", "X-Over": "old"})
+    m := http.with_headers(base, {"X-Over": "new", "X-Add": "2"})
+    println("merge: {m.headers()["X-Keep"]}:{m.headers()["X-Over"]}:{m.headers()["X-Add"]}")
+
+    // rate limit: 2 per minute, 3rd short-circuits with Retry-After
+    rl := http.server()
+    rl = rl.route("GET", "/x", |_req| "x")
+    rl = http.rate_limit(rl, 2, 60000)
+    q1 := http.test(rl, "GET", "/x", "")
+    q2 := http.test(rl, "GET", "/x", "")
+    q3 := http.test(rl, "GET", "/x", "")
+    println("rl: {q1.status()}:{q2.status()}:{q3.status()}:{q3.headers()["Retry-After"]}")
+
+    // CSRF token helpers + request IDs
+    t1 := http.csrf_token()
+    t2 := http.csrf_token()
+    println("csrf: {http.csrf_check(t1, t1)}:{http.csrf_check(t1, t2)}:{t1.len()}")
+    rid := http.server()
+    rid = rid.route("GET", "/y", |_req| "y")
+    rid = http.request_id(rid)
+    r8 := http.test(rid, "GET", "/y", "")
+    println("rid: {r8.headers()["X-Request-Id"].len()}")
+
+    println("http_middleware_p2_ok")
+    .ok(0)
+}
