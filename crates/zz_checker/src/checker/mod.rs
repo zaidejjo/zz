@@ -799,12 +799,8 @@ mod span_scope_tests {
             stmts,
             span: Span::new(0, 0),
         };
-        let (res, types) = check_program_typed(
-            &merged,
-            HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
-        );
+        let (res, types) =
+            check_program_typed(&merged, HashMap::new(), HashMap::new(), HashMap::new());
         assert!(res.errors.is_empty(), "check: {:?}", res.errors);
         let key = Span::new(28, 32);
         assert_eq!(types.get(&SpanKey::new("f", key)), Some(&Type::Int));

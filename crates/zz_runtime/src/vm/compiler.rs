@@ -501,9 +501,9 @@ impl Compiler {
     /// Returns `None` when type info is unavailable (no HIR, or expression
     /// was not resolved by the checker).
     fn type_of(&self, span: Span) -> Option<&zz_checker::Type> {
-        self.types.as_ref().and_then(|t| {
-            t.get(&zz_checker::SpanKey::new(&self.type_scope, span))
-        })
+        self.types
+            .as_ref()
+            .and_then(|t| t.get(&zz_checker::SpanKey::new(&self.type_scope, span)))
     }
 
     /// Match `x = x + y` / `x = y + x` where `x` and `y` both resolve to
