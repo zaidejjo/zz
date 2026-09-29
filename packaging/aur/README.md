@@ -1,6 +1,11 @@
 # AUR packaging for `zz-lang` (`zz` follows after adoption)
 
-The AUR package installs:
+`yay -S zz-lang` installs a **prebuilt binary** — no compilation.
+Each GitHub Release carries two zips built by CI:
+`zz-<ver>-linux-x86_64.zip` + `zz-<ver>-linux-aarch64.zip`
+(each with `zz`, `zz-lsp`, `LICENSE`, `README.md`).
+The AUR package downloads the right zip and installs:
+
 - `/usr/bin/zz` — compiler / REPL / runner (`zz run main.zz`, `zz check`, `zz build`)
 - `/usr/bin/zz-lsp` — language server
 
@@ -11,21 +16,24 @@ accepted, adoption click still pending. Template already renders both.)
 ## Files
 
 - `PKGBUILD.template` — single source of truth. `@PKGNAME@`, `@PKGVER@`,
-  `@SHA256@`, `@CONFLICTS@` are substituted by `render.sh` / CI.
+  `@SHA_X64@`, `@SHA_ARM@`, `@CONFLICTS@` are substituted by `render.sh` / CI.
 - `render.sh` — renders `zz/PKGBUILD` + `zz-lang/PKGBUILD` for a version.
 - `out/` (gitignored) — local render output, never committed.
 
 ## Local test
 
 ```bash
-# 1. Render (fake sha for syntax check)
-./packaging/aur/render.sh 0.1.0 \
+# 1. Render (fake shas for syntax check)
+./packaging/aur/render.sh 0.1.2 \
   0000000000000000000000000000000000000000000000000000000000000000 \
+  1111111111111111111111111111111111111111111111111111111111111111 \
   ./packaging/aur/out
 
-# 2. Real sha for the release tag
-curl -fsSL https://github.com/zaidejjo/zz/archive/refs/tags/v0.1.0.tar.gz \
-  | sha256sum
+# 2. Real shas for a published release
+for a in x86_64 aarch64; do
+  curl -fsSL https://github.com/zaidejjo/zz/releases/download/v0.1.2/zz-0.1.2-linux-$a.zip \
+    | sha256sum
+done
 
 # 3. Full Arch check (needs Arch or docker):
 docker run --rm -v "$PWD:/src:ro" -w /src archlinux:base-devel bash -c "
