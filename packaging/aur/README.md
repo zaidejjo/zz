@@ -1,31 +1,39 @@
-# AUR packaging for `zz` and `zz-lang`
+# AUR packaging for `zz-lang` (`zz` follows after adoption)
 
-Both AUR packages install the **same** binaries so `zz run main.zz` works
-whichever name the user installed:
+`yay -S zz-lang` installs a **prebuilt binary** — no compilation.
+Each GitHub Release carries two zips built by CI:
+`zz-<ver>-linux-x86_64.zip` + `zz-<ver>-linux-aarch64.zip`
+(each with `zz`, `zz-lsp`, `LICENSE`, `README.md`).
+The AUR package downloads the right zip and installs:
 
-- `/usr/bin/zz` — compiler / REPL / runner (`zz run`, `zz check`, `zz build`)
+- `/usr/bin/zz` — compiler / REPL / runner (`zz run main.zz`, `zz check`, `zz build`)
 - `/usr/bin/zz-lsp` — language server
 
-They `conflicts=()` each other; pacman allows only one at a time.
+It `conflicts=('zz')` so only one of the two names is installed at a time.
+(`zz` pushes are paused until the AUR package is adopted — orphan request
+accepted, adoption click still pending. Template already renders both.)
 
 ## Files
 
 - `PKGBUILD.template` — single source of truth. `@PKGNAME@`, `@PKGVER@`,
-  `@SHA256@`, `@CONFLICTS@` are substituted by `render.sh` / CI.
+  `@SHA_X64@`, `@SHA_ARM@`, `@CONFLICTS@` are substituted by `render.sh` / CI.
 - `render.sh` — renders `zz/PKGBUILD` + `zz-lang/PKGBUILD` for a version.
 - `out/` (gitignored) — local render output, never committed.
 
 ## Local test
 
 ```bash
-# 1. Render (fake sha for syntax check)
-./packaging/aur/render.sh 0.1.0 \
+# 1. Render (fake shas for syntax check)
+./packaging/aur/render.sh 0.1.2 \
   0000000000000000000000000000000000000000000000000000000000000000 \
+  1111111111111111111111111111111111111111111111111111111111111111 \
   ./packaging/aur/out
 
-# 2. Real sha for the release tag
-curl -fsSL https://github.com/zaidejjo/zz/archive/refs/tags/v0.1.0.tar.gz \
-  | sha256sum
+# 2. Real shas for a published release
+for a in x86_64 aarch64; do
+  curl -fsSL https://github.com/zaidejjo/zz/releases/download/v0.1.2/zz-0.1.2-linux-$a.zip \
+    | sha256sum
+done
 
 # 3. Full Arch check (needs Arch or docker):
 docker run --rm -v "$PWD:/src:ro" -w /src archlinux:base-devel bash -c "
@@ -42,7 +50,8 @@ changes: it reads `[workspace.package] version`, and if tag `vX.Y.Z` does
 not exist yet, creates the tag + GitHub Release with auto-generated notes.
 So cutting a release is just: bump the version, merge to `main`.
 
-`.github/workflows/aur-publish.yml` then runs on **Release published**:
+`.github/workflows/aur-publish.yml` then runs on **Release published** (pushes
+`zz-lang` only for now):
 
 1. Tag `vX.Y.Z` must equal `[workspace.package] version` in `Cargo.toml`.
 2. CI downloads the tag tarball, computes sha256, renders both PKGBUILDs,

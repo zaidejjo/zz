@@ -1,30 +1,33 @@
 #!/usr/bin/env bash
-# Render production PKGBUILDs for both AUR packages (`zz`, `zz-lang`)
-# from PKGBUILD.template. Used locally and by .github/workflows/aur-publish.yml.
+# Render production PKGBUILDs for the AUR packages (`zz-lang`, plus `zz`
+# once adopted) from PKGBUILD.template. Used locally and by
+# .github/workflows/aur-publish.yml.
 #
 # Usage:
-#   ./packaging/aur/render.sh <pkgver> <sha256> [outdir]
-#   ./packaging/aur/render.sh 0.1.0 abc123... /tmp/aur-out
+#   ./packaging/aur/render.sh <pkgver> <sha_x64> <sha_arm> [outdir]
+#   ./packaging/aur/render.sh 0.1.2 <x86_64 sha> <aarch64 sha> /tmp/aur-out
 #
 # Output:
 #   <outdir>/zz/PKGBUILD
 #   <outdir>/zz-lang/PKGBUILD
 #
-# pkgver: upstream version WITHOUT leading `v` (e.g. 0.1.0, from tag v0.1.0).
-# sha256: sha256 of https://github.com/zaidejjo/zz/archive/refs/tags/v<pkgver>.tar.gz
+# pkgver: upstream version WITHOUT leading `v` (e.g. 0.1.2, from tag v0.1.2).
+# sha_x64/sha_arm: sha256 of the release zips
+#   https://github.com/zaidejjo/zz/releases/download/v<pkgver>/zz-<pkgver>-linux-{x86_64,aarch64}.zip
 set -euo pipefail
 
 TEMPLATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="$TEMPLATE_DIR/PKGBUILD.template"
 
-if [[ $# -lt 2 ]]; then
-	echo "usage: render.sh <pkgver> <sha256> [outdir]" >&2
+if [[ $# -lt 3 ]]; then
+	echo "usage: render.sh <pkgver> <sha_x64> <sha_arm> [outdir]" >&2
 	exit 2
 fi
 
 PKGVER="$1"
-SHA256="$2"
-OUTDIR="${3:-$TEMPLATE_DIR/out}"
+SHA_X64="$2"
+SHA_ARM="$3"
+OUTDIR="${4:-$TEMPLATE_DIR/out}"
 
 if [[ ! -f "$TEMPLATE" ]]; then
 	echo "render.sh: template not found: $TEMPLATE" >&2
@@ -41,10 +44,12 @@ if [[ "$PKGVER" == *"-"* ]]; then
 	echo "render.sh: pkgver must not contain '-': $PKGVER" >&2
 	exit 1
 fi
-if [[ ! "$SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
-	echo "render.sh: sha256 must be 64 hex chars" >&2
-	exit 1
-fi
+for sha in "$SHA_X64" "$SHA_ARM"; do
+	if [[ ! "$sha" =~ ^[0-9a-fA-F]{64}$ ]]; then
+		echo "render.sh: sha256 must be 64 hex chars: $sha" >&2
+		exit 1
+	fi
+done
 
 render_one() {
 	local pkgname="$1"
@@ -53,7 +58,8 @@ render_one() {
 	mkdir -p "$(dirname "$dest")"
 	sed -e "s/@PKGNAME@/$pkgname/g" \
 		-e "s/@PKGVER@/$PKGVER/g" \
-		-e "s/@SHA256@/$SHA256/g" \
+		-e "s/@SHA_X64@/$SHA_X64/g" \
+		-e "s/@SHA_ARM@/$SHA_ARM/g" \
 		-e "s/@CONFLICTS@/$conflicts/g" \
 		"$TEMPLATE" >"$dest"
 	echo "wrote $dest"
