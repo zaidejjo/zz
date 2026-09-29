@@ -3128,14 +3128,24 @@ impl Lowerer {
 
     pub(super) fn emit_str_literal(&self, s: &str) -> String {
         let mut o = String::from("\"");
-        for c in s.chars() {
+        let mut it = s.chars().peekable();
+        while let Some(c) = it.next() {
             match c {
                 '"' => o.push_str("\\\""),
                 '\\' => o.push_str("\\\\"),
                 '\n' => o.push_str("\\n"),
                 '\r' => o.push_str("\\r"),
                 '\t' => o.push_str("\\t"),
-                c if (c as u32) < 32 => o.push_str(&format!("\\x{:02x}", c as u32)),
+                c if (c as u32) < 32 => {
+                    // C `\x` escapes consume ALL following hex digits, so
+                    // `\x1f` + `1` would compile as `\x1f1` (out of range).
+                    // Close + reopen the literal when a hex digit follows;
+                    // adjacent literals concatenate in C.
+                    o.push_str(&format!("\\x{:02x}", c as u32));
+                    if matches!(it.peek(), Some(n) if n.is_ascii_hexdigit()) {
+                        o.push_str("\" \"");
+                    }
+                }
                 c => o.push(c),
             }
         }
@@ -3147,14 +3157,21 @@ impl Lowerer {
     /// (without the `zz_str_static` wrapper).
     fn c_escape(s: &str) -> String {
         let mut o = String::new();
-        for c in s.chars() {
+        let mut it = s.chars().peekable();
+        while let Some(c) = it.next() {
             match c {
                 '"' => o.push_str("\\\""),
                 '\\' => o.push_str("\\\\"),
                 '\n' => o.push_str("\\n"),
                 '\r' => o.push_str("\\r"),
                 '\t' => o.push_str("\\t"),
-                c if (c as u32) < 32 => o.push_str(&format!("\\x{:02x}", c as u32)),
+                c if (c as u32) < 32 => {
+                    // Same greedy-`\x` split as emit_str_literal above.
+                    o.push_str(&format!("\\x{:02x}", c as u32));
+                    if matches!(it.peek(), Some(n) if n.is_ascii_hexdigit()) {
+                        o.push_str("\" \"");
+                    }
+                }
                 c => o.push(c),
             }
         }

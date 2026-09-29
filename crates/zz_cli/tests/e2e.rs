@@ -172,6 +172,11 @@ e2e_success_test!(e2e_syntax_const, "syntax", "const.zz");
 e2e_success_test!(e2e_syntax_functions, "syntax", "functions.zz");
 e2e_success_test!(e2e_syntax_control_flow, "syntax", "control_flow.zz");
 e2e_success_test!(e2e_syntax_range_var_bounds, "syntax", "range_var_bounds.zz");
+e2e_success_test!(
+    e2e_syntax_hex_escape_bounds,
+    "syntax",
+    "hex_escape_bounds.zz"
+);
 e2e_success_test!(e2e_syntax_pipelines, "syntax", "pipelines.zz");
 e2e_success_test!(e2e_syntax_hof, "syntax", "hof.zz");
 e2e_success_test!(e2e_syntax_match, "syntax", "match.zz");

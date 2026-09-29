@@ -485,6 +485,11 @@ parity_strict!(
     "syntax",
     "range_var_bounds.zz"
 );
+parity_strict!(
+    parity_syntax_hex_escape_bounds,
+    "syntax",
+    "hex_escape_bounds.zz"
+);
 
 // Types
 parity_strict!(parity_types_generics, "types", "generics.zz");
