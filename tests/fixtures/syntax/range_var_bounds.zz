@@ -19,4 +19,14 @@ for i in lo..len(arr) {
 }
 println(total)
 
+// slices with variable bounds (AOT parity: unboxed bounds broke C compile)
+arr2 := [10, 20, 30, 40]
+lo2 := 1
+hi2 := 3
+println(arr2[lo2:hi2])
+println(arr2[lo2:])
+println(arr2[:hi2])
+s := "abcdef"
+println(s[lo2:hi2])
+
 println("range_ok")
