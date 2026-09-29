@@ -1,0 +1,155 @@
+name: aur-publish
+
+# Publishes the ZZ toolchain to both AUR packages (`zz` and `zz-lang`)
+# when a GitHub Release is published. Both packages install the SAME
+# binaries (`/usr/bin/zz` so `zz run main.zz` works, plus `/usr/bin/zz-lsp`)
+# and conflict with each other so only one is installed at a time.
+#
+# One-time setup (already done for zaidejjo — kept here for the record):
+#   1. Own both AUR repos (orphan/adoption requests accepted).
+#   2. Add the AUR account's SSH public key at https://aur.archlinux.org/account.
+#   3. Add the matching private key as repo secret `AUR_SSH_PRIVATE_KEY`.
+#
+# Flow: resolve tag -> verify Cargo.toml version -> tarball sha256 ->
+# render both PKGBUILDs from packaging/aur/PKGBUILD.template ->
+# makepkg --printsrcinfo (.SRCINFO) -> push zz.git + zz-lang.git.
+# Re-running the same Release is a no-op (skips push when AUR is current).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.1.0)"
+        required: true
+        type: string
+      pkgrel:
+        description: "Arch pkgrel (bump to republish same version)"
+        required: false
+        default: "1"
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: aur-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish zz + zz-lang to AUR
+    runs-on: ubuntu-latest
+    # makepkg --printsrcinfo is canonical for .SRCINFO; it only exists on Arch.
+    container:
+      image: archlinux:base-devel
+    permissions:
+      contents: read
+    steps:
+      - name: install git/ssh tooling
+        run: |
+          pacman -Syu --noconfirm git openssh curl sudo namcap >/dev/null 2>&1
+          useradd -m builder 2>/dev/null || true
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          git config --global --add safe.directory '*'
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: resolve version + tarball sha256
+        id: ver
+        run: |
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          echo "tag=$TAG"
+          case "$TAG" in
+            v*) PKGVER="${TAG#v}" ;;
+            *) echo "error: tag must look like vX.Y.Z, got '$TAG'" >&2; exit 1 ;;
+          esac
+          case "$PKGVER" in
+            *"-"*) echo "error: pkgver must not contain '-': $PKGVER" >&2; exit 1 ;;
+          esac
+          CARGO_VER="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          echo "cargo version: $CARGO_VER / tag version: $PKGVER"
+          if [ "$CARGO_VER" != "$PKGVER" ]; then
+            echo "error: Cargo.toml version ($CARGO_VER) != tag version ($PKGVER)." >&2
+            echo "Bump [workspace.package] version first, then re-cut the Release." >&2
+            exit 1
+          fi
+          PKGREL="${{ inputs.pkgrel || '1' }}"
+          TARBALL_URL="https://github.com/zaidejjo/zz/archive/refs/tags/$TAG.tar.gz"
+          echo "downloading $TARBALL_URL"
+          curl -fsSL "$TARBALL_URL" -o /tmp/upstream.tar.gz
+          SHA256="$(sha256sum /tmp/upstream.tar.gz | cut -d' ' -f1)"
+          echo "sha256=$SHA256"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "pkgver=$PKGVER" >> "$GITHUB_OUTPUT"
+          echo "pkgrel=$PKGREL" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: render both PKGBUILDs
+        run: |
+          ./packaging/aur/render.sh "${{ steps.ver.outputs.pkgver }}" "${{ steps.ver.outputs.sha256 }}" /tmp/aur-out
+          PKGREL="${{ steps.ver.outputs.pkgrel }}"
+          if [ "$PKGREL" != "1" ]; then
+            sed -i "s/^pkgrel=1$/pkgrel=$PKGREL/" /tmp/aur-out/zz/PKGBUILD /tmp/aur-out/zz-lang/PKGBUILD
+          fi
+          echo "--- zz/PKGBUILD ---"
+          cat /tmp/aur-out/zz/PKGBUILD
+          echo "--- zz-lang/PKGBUILD (diff vs zz) ---"
+          diff -u /tmp/aur-out/zz/PKGBUILD /tmp/aur-out/zz-lang/PKGBUILD || true
+
+      - name: generate .SRCINFO + namcap lint
+        run: |
+          for pkg in zz zz-lang; do
+            rm -rf "/tmp/build-$pkg"
+            mkdir -p "/tmp/build-$pkg"
+            cp "/tmp/aur-out/$pkg/PKGBUILD" "/tmp/build-$pkg/PKGBUILD"
+            chown -R builder:builder "/tmp/build-$pkg"
+            su builder -c "cd /tmp/build-$pkg && makepkg --printsrcinfo > .SRCINFO"
+            cp "/tmp/build-$pkg/.SRCINFO" "/tmp/aur-out/$pkg/.SRCINFO"
+            echo "--- $pkg/.SRCINFO ---"
+            cat "/tmp/aur-out/$pkg/.SRCINFO"
+            echo "--- namcap $pkg/PKGBUILD ---"
+            su builder -c "cd /tmp/build-$pkg && namcap PKGBUILD" || true
+          done
+
+      - name: setup AUR ssh
+        run: |
+          if [ -z "${AUR_SSH_PRIVATE_KEY:-}" ]; then
+            echo "error: secret AUR_SSH_PRIVATE_KEY is not set." >&2
+            echo "Add the AUR account SSH private key as a repo secret first." >&2
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519,rsa aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          printf 'Host aur.archlinux.org\n  User aur\n  IdentityFile ~/.ssh/aur\n  IdentitiesOnly yes\n' > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+
+      - name: push zz + zz-lang to AUR
+        run: |
+          PKGVER="${{ steps.ver.outputs.pkgver }}"
+          PKGREL="${{ steps.ver.outputs.pkgrel }}"
+          for pkg in zz zz-lang; do
+            echo "=== $pkg ==="
+            rm -rf "/tmp/aur-$pkg"
+            git clone "ssh://aur@aur.archlinux.org/$pkg.git" "/tmp/aur-$pkg"
+            cp "/tmp/aur-out/$pkg/PKGBUILD" "/tmp/aur-$pkg/PKGBUILD"
+            cp "/tmp/aur-out/$pkg/.SRCINFO" "/tmp/aur-$pkg/.SRCINFO"
+            cd "/tmp/aur-$pkg"
+            git add PKGBUILD .SRCINFO
+            if git diff --cached --quiet; then
+              echo "$pkg already at $PKGVER-$PKGREL, skipping push"
+              continue
+            fi
+            git commit -m "upgpkg: $pkg $PKGVER-$PKGREL"
+            git push origin HEAD:master
+            echo "pushed $pkg $PKGVER-$PKGREL"
+          done
