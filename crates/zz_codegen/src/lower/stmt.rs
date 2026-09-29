@@ -16,7 +16,7 @@ impl Lowerer {
         match stmt {
             Stmt::Decl { name, value, .. } => {
                 // Look up the type of the initializer expression
-                let (ctype, checker_ty) = if let Some(ty) = self.tp.types.get(&value.span()) {
+                let (ctype, checker_ty) = if let Some(ty) = self.ty_at(names, value.span()) {
                     (ty_to_ctype(ty), Some(ty.clone()))
                 } else {
                     ("zz_value".to_string(), None) // fallback

@@ -486,6 +486,11 @@ parity_strict!(
     "range_var_bounds.zz"
 );
 parity_strict!(
+    parity_syntax_scope_collision,
+    "syntax",
+    "scope_collision.zz"
+);
+parity_strict!(
     parity_syntax_hex_escape_bounds,
     "syntax",
     "hex_escape_bounds.zz"

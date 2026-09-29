@@ -36,6 +36,9 @@ impl Lowerer {
         // bodies use their own sub-arenas, everything else is heap). A
         // per-call 64KB init here used to leak on every invocation.
         let mut names = NameCtx::new();
+        // Scope typed-AST lookups to this function: spans repeat across
+        // modules, so lookups must pair them with the enclosing item.
+        names.current_scope = fname.to_string();
         // Module-level globals are visible inside every function.
         // Locals (params + body decls) shadow them via the stack.
         self.seed_globals(&mut names);

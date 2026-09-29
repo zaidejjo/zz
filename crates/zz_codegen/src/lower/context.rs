@@ -81,6 +81,10 @@ pub struct NameCtx {
     /// dispatch to select the correct namespace (e.g., `"str"` for strings
     /// vs `"vec"` for arrays) when multiple natives share a method name.
     pub(crate) checker_types: HashMap<String, zz_checker::Type>,
+    /// Enclosing top-level item whose body is being lowered (function name,
+    /// `Type.method`, or `<top>`): scopes typed-AST lookups so same-span
+    /// nodes in different functions never share types.
+    pub(crate) current_scope: String,
 }
 
 impl NameCtx {
@@ -96,6 +100,7 @@ impl NameCtx {
             scope_markers: Vec::new(),
             array_lens: HashMap::new(),
             checker_types: HashMap::new(),
+            current_scope: zz_checker::TOP_SCOPE.to_string(),
         }
     }
 
@@ -955,7 +960,7 @@ impl Lowerer {
             return Some(s.clone());
         }
         if let Some(span) = obj_span {
-            if let Some(zz_checker::Type::Struct(s)) = self.tp.types.get(&span) {
+            if let Some(zz_checker::Type::Struct(s)) = self.ty_at(names, span) {
                 return Some(s.clone());
             }
         }
@@ -1012,6 +1017,19 @@ impl Lowerer {
         None
     }
 
+    /// Typed-AST lookup scoped to the function currently being lowered.
+    /// Expression spans repeat across modules (offsets restart at 0 per
+    /// file), so every lookup pairs the span with the enclosing item.
+    /// Unknown entries (unresolved inference) yield `None`: callers fall
+    /// back to the dynamic/boxed path, which is always correct.
+    pub(super) fn ty_at(
+        &self,
+        names: &NameCtx,
+        span: zz_frontend::span::Span,
+    ) -> Option<&zz_checker::Type> {
+        self.tp.type_at(&names.current_scope, span)
+    }
+
     /// Un-mangled name of the unboxed struct an expression evaluates to,
     /// for display dispatch (`println`, f-strings, `str()`). Only
     /// Ident/Path/Field shapes lower unboxed structs to raw C values;
@@ -1022,7 +1040,7 @@ impl Lowerer {
             Expr::Ident { name, .. } => names
                 .lookup_type(name)
                 .and_then(|ct| self.unmangled_struct_name(ct)),
-            Expr::Path { .. } | Expr::Field { .. } => match self.tp.types.get(&e.span()) {
+            Expr::Path { .. } | Expr::Field { .. } => match self.ty_at(names, e.span()) {
                 Some(zz_checker::Type::Struct(s)) if self.is_unboxed_struct(s) => Some(s.clone()),
                 _ => None,
             },

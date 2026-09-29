@@ -749,7 +749,7 @@ impl Lowerer {
                         .lookup_type(obj_name)
                         .map(|t| t.starts_with("zz_struct_"))
                         .unwrap_or(false)
-                } else if let Some(zz_checker::Type::Struct(sname)) = self.tp.types.get(&obj.span())
+                } else if let Some(zz_checker::Type::Struct(sname)) = self.ty_at(names, obj.span())
                 {
                     self.is_unboxed_struct(sname)
                 } else {
@@ -759,7 +759,7 @@ impl Lowerer {
                     // Unboxed struct: direct C field access, then auto-box
                     // scalar fields so the result is always a zz_value.
                     // Derive the field C type from the parent object's struct type.
-                    let field_ctype = self.tp.types.get(&obj.span()).and_then(|ot| {
+                    let field_ctype = self.ty_at(names, obj.span()).and_then(|ot| {
                         if let zz_checker::Type::Struct(sname) = ot {
                             if let Some(sig) = self.tp.structs.get(sname) {
                                 if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == name) {
@@ -780,9 +780,7 @@ impl Lowerer {
                     // The raw access must follow the embedded chain when the
                     // field is promoted (`m().id` → `(tmp).Base.id`).
                     let raw = self
-                        .tp
-                        .types
-                        .get(&obj.span())
+                        .ty_at(names, obj.span())
                         .and_then(|ot| match ot {
                             zz_checker::Type::Struct(sname) => self
                                 .resolve_access_chain(sname, std::slice::from_ref(name))
@@ -1252,7 +1250,7 @@ impl Lowerer {
         body: &Expr,
         cid: usize,
         caps: &[(String, String, String, Option<zz_checker::Type>)],
-        _outer_names: &mut NameCtx,
+        outer_names: &mut NameCtx,
         _out: &mut String,
     ) -> String {
         // Green transform (B3): suspendable bodies lower every local to a
@@ -1268,7 +1266,8 @@ impl Lowerer {
         if green {
             *self.current_loop_arena.borrow_mut() = None;
         }
-        let mut o = self.emit_closure_inner(params, body, cid, caps, green);
+        let scope = outer_names.current_scope.clone();
+        let mut o = self.emit_closure_inner(params, body, cid, caps, green, &scope);
         if green {
             self.green_finish(&mut o);
             *self.current_loop_arena.borrow_mut() = saved_arena;
@@ -1283,8 +1282,12 @@ impl Lowerer {
         cid: usize,
         caps: &[(String, String, String, Option<zz_checker::Type>)],
         green: bool,
+        scope: &str,
     ) -> String {
         let mut names = NameCtx::new();
+        // Closure bodies check under the enclosing function: inherit its
+        // scope so typed lookups hit the right entries.
+        names.current_scope = scope.to_string();
         self.seed_globals(&mut names);
         for (i, (name, _, ctype, checker)) in caps.iter().enumerate() {
             let ptr = format!("env[{i}]");
@@ -1495,7 +1498,7 @@ impl Lowerer {
             }
         };
 
-        match self.tp.types.get(&inner.span()) {
+        match self.ty_at(names, inner.span()) {
             Some(zz_checker::Type::Option(_)) => {
                 out.push_str(&format!("    if ({tmp}.tag == ZZ_OPTION_NONE) {{\n"));
                 out.push_str("        return (zz_value){ZZ_OPTION_NONE, {0}};\n");
@@ -1656,7 +1659,7 @@ impl Lowerer {
                             // Also check the type checker's span_types map
                             // using the receiver's source span.
                             let span_type_ns =
-                                if let Some(zzty) = self.tp.types.get(&first_ident_span) {
+                                if let Some(zzty) = self.ty_at(names, first_ident_span) {
                                     match zzty {
                                         zz_checker::Type::Str => Some("str"),
                                         zz_checker::Type::Array(_) => Some("vec"),
@@ -1825,7 +1828,7 @@ impl Lowerer {
             } => {
                 // Expr::Field callee — rare since parser consumes ident chains as Path.
                 // Look up receiver type and dispatch.
-                if let Some(zzty) = self.tp.types.get(&obj.span()) {
+                if let Some(zzty) = self.ty_at(names, obj.span()) {
                     match zzty {
                         zz_checker::Type::Struct(sname) => {
                             // Keep the direct-form convention (no receiver);
@@ -2316,7 +2319,7 @@ impl Lowerer {
                 // Nested field access (e.g., r.origin.x) produces a raw C
                 // scalar that must be boxed for function calls.
                 // Derive field type from the parent object's struct type.
-                let ctype = self.tp.types.get(&obj.span()).and_then(|ot| {
+                let ctype = self.ty_at(names, obj.span()).and_then(|ot| {
                     if let zz_checker::Type::Struct(sname) = ot {
                         if let Some(sig) = self.tp.structs.get(sname) {
                             if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == name) {

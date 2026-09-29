@@ -70,10 +70,13 @@ pub struct Compiler {
     promoted_slots: std::collections::HashMap<String, usize>,
     /// Known function signatures for named-arg reordering.
     func_info: std::collections::HashMap<String, FuncInfo>,
-    /// Resolved type per expression span, shared from the HIR.
+    /// Resolved type per scoped expression key, shared from the HIR.
     /// When present, the compiler can make type-driven decisions (e.g.
     /// integer-specific bytecode, direct field access).
-    types: Option<Arc<HashMap<Span, zz_checker::Type>>>,
+    types: Option<Arc<HashMap<zz_checker::SpanKey, zz_checker::Type>>>,
+    /// Enclosing item for typed lookups (function name, `Type.method`,
+    /// or `<top>`): spans repeat across modules.
+    type_scope: String,
     /// Struct definitions from the HIR, keyed by fully-qualified name.
     /// Enables type-driven field access indexing and other struct optimizations.
     structs: Option<HashMap<String, zz_checker::StructSig>>,
@@ -126,6 +129,7 @@ impl Compiler {
             structs: None,
             native_names: None,
             in_db_query: false,
+            type_scope: zz_checker::TOP_SCOPE.to_string(),
         }
     }
 
@@ -255,7 +259,7 @@ impl Compiler {
     /// optimizations in future phases.
     pub fn compile_program_typed(
         program: &Program,
-        types: Arc<HashMap<Span, zz_checker::Type>>,
+        types: Arc<HashMap<zz_checker::SpanKey, zz_checker::Type>>,
         structs: HashMap<String, zz_checker::StructSig>,
         native_names: Arc<std::collections::HashSet<String>>,
     ) -> Chunk {
@@ -493,11 +497,13 @@ impl Compiler {
         Resolved::Env
     }
 
-    /// Look up the resolved type for an expression by its span.
+    /// Look up the resolved type for an expression by its scoped key.
     /// Returns `None` when type info is unavailable (no HIR, or expression
     /// was not resolved by the checker).
     fn type_of(&self, span: Span) -> Option<&zz_checker::Type> {
-        self.types.as_ref().and_then(|t| t.get(&span))
+        self.types.as_ref().and_then(|t| {
+            t.get(&zz_checker::SpanKey::new(&self.type_scope, span))
+        })
     }
 
     /// Match `x = x + y` / `x = y + x` where `x` and `y` both resolve to
@@ -998,9 +1004,10 @@ impl Compiler {
             Stmt::Func {
                 name, params, body, ..
             } => {
-                let chunk = self.compile_func_body(body, params);
+                let fname = name.join(".");
+                let chunk = self.compile_func_body(&fname, body, params);
                 self.emit(Op::MakeFunc {
-                    name: name.join("."),
+                    name: fname,
                     params: params.clone(),
                     chunk,
                 });
@@ -1034,7 +1041,7 @@ impl Compiler {
                     } = method
                     {
                         let full_name = format!("{}.{}", type_name, mname.join("."));
-                        let chunk = self.compile_func_body(body, params);
+                        let chunk = self.compile_func_body(&full_name, body, params);
                         self.emit(Op::MakeFunc {
                             name: full_name,
                             params: params.clone(),
@@ -1124,7 +1131,8 @@ impl Compiler {
                     stmts: vec![Stmt::Expr(expr.as_ref().clone())],
                     span: expr.span(),
                 };
-                let chunk = self.compile_func_body(&body, &[]);
+                let scope = self.type_scope.clone();
+                let chunk = self.compile_func_body(&scope, &body, &[]);
                 self.emit(Op::MakeClosure {
                     params: vec![],
                     chunk,
@@ -1398,8 +1406,9 @@ impl Compiler {
         need_result_unit
     }
 
-    fn compile_func_body(&mut self, block: &Block, params: &[Param]) -> Arc<Chunk> {
+    fn compile_func_body(&mut self, scope: &str, block: &Block, params: &[Param]) -> Arc<Chunk> {
         let mut sub = Compiler::new();
+        sub.type_scope = scope.to_string();
         sub.types = self.types.clone();
         sub.structs = self.structs.clone();
         sub.native_names = self.native_names.clone();
@@ -1618,6 +1627,7 @@ impl Compiler {
 
     fn compile_closure_body(&mut self, body: &Expr, params: &[Param]) -> Arc<Chunk> {
         let mut sub = Compiler::new();
+        sub.type_scope = self.type_scope.clone();
         sub.types = self.types.clone();
         sub.structs = self.structs.clone();
         sub.native_names = self.native_names.clone();

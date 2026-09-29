@@ -23,8 +23,8 @@ pub const TOP: &str = "<top>";
 /// namespace. When unknown (an unresolved inference variable), conservatively
 /// emits an edge to every known `*.{method}` function so DCE never drops a
 /// potential target.
-fn resolve_methods(tp: &TypedProgram, recv: &Expr, method: &str) -> Vec<String> {
-    match tp.type_at(recv.span()) {
+fn resolve_methods(tp: &TypedProgram, caller: &str, recv: &Expr, method: &str) -> Vec<String> {
+    match tp.type_at(caller, recv.span()) {
         Some(Type::Str) => vec![format!("str.{method}")],
         Some(Type::Array(_)) => vec![format!("vec.{method}")],
         Some(Type::Bytes) => vec![format!("bytes.{method}")],
@@ -278,7 +278,7 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
                     }
                 }
                 Expr::Field { obj, name, .. } => {
-                    for m in resolve_methods(tp, obj, name) {
+                    for m in resolve_methods(tp, caller, obj, name) {
                         cg.edge(caller, &m);
                     }
                     // Also descend into the object expression (it may hold

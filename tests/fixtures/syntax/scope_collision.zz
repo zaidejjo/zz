@@ -1,0 +1,9 @@
+import support.scope_help as hxx
+    v :=  true
+println(hxx.hval())
+println(v)
+println("scope_collision_ok")
+
+// The `true` initializer above shares its span with `1234` in
+// support/scope_help.zz but has another type: both engines must keep
+// them apart (scoped span keys).
