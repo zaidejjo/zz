@@ -37,7 +37,12 @@ docker run --rm -v "$PWD:/src:ro" -w /src archlinux:base-devel bash -c "
 
 ## Release flow (CI)
 
-`.github/workflows/aur-publish.yml` runs on **Release published**:
+`.github/workflows/release.yml` runs on push to `main` when `Cargo.toml`
+changes: it reads `[workspace.package] version`, and if tag `vX.Y.Z` does
+not exist yet, creates the tag + GitHub Release with auto-generated notes.
+So cutting a release is just: bump the version, merge to `main`.
+
+`.github/workflows/aur-publish.yml` then runs on **Release published**:
 
 1. Tag `vX.Y.Z` must equal `[workspace.package] version` in `Cargo.toml`.
 2. CI downloads the tag tarball, computes sha256, renders both PKGBUILDs,

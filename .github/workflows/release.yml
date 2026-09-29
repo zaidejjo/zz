@@ -1,0 +1,77 @@
+name: release
+
+# Auto-cuts a GitHub Release from the workspace version in Cargo.toml.
+# You only bump `[workspace.package] version`, merge to main, and this
+# creates tag `vX.Y.Z` + Release (auto-generated notes). Downstream
+# publishers (docker-publish, aur-publish) trigger off that Release —
+# nobody hand-creates tags anymore.
+#
+# Idempotent: if tag `vX.Y.Z` or its Release already exists, no-op.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Resolve version and report without creating anything"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  cut:
+    name: cut release from Cargo.toml
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: resolve version
+        id: ver
+        run: |
+          PKGVER="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ -z "$PKGVER" ]; then
+            echo "error: could not read [workspace.package] version from Cargo.toml" >&2
+            exit 1
+          fi
+          case "$PKGVER" in
+            *"-"*|*" "*) echo "error: invalid version '$PKGVER'" >&2; exit 1 ;;
+          esac
+          TAG="v$PKGVER"
+          echo "pkgver=$PKGVER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml version: $PKGVER -> tag $TAG"
+
+      - name: create tag + release (if missing)
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "tag $TAG already exists, nothing to do"
+            exit 0
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists, nothing to do"
+            exit 0
+          fi
+          if [ "${{ inputs.dry-run || 'false' }}" = "true" ]; then
+            echo "dry-run: would create release $TAG from ${{ github.sha }}"
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --target "${{ github.sha }}" \
+            --title "$TAG" \
+            --generate-notes
+          echo "created release $TAG"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
