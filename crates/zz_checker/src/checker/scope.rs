@@ -442,4 +442,19 @@ impl Checker {
         }
         ty
     }
+
+    /// Canonical struct name: a selectively-imported bare name resolves to
+    /// its qualified form (`Product` → `product.Product`), exactly as if
+    /// written qualified — methods, conversions and type identity all key
+    /// off the qualified form. Miss-only: locals and seed entries (which
+    /// have no alias mapping) keep their name. Display still prints the
+    /// bare form; only types canonicalize.
+    pub(crate) fn canonical_struct_name(&self, name: &str) -> String {
+        if let Some(qualified) = self.import_aliases.get(name) {
+            if self.structs.contains_key(qualified) {
+                return qualified.clone();
+            }
+        }
+        name.to_string()
+    }
 }

@@ -1214,7 +1214,20 @@ impl Vm {
                     field_names,
                     span,
                 } => {
-                    let Some(registered) = interp.structs.get(name).cloned() else {
+                    // Selective-import alias (miss-only): bare `Product`
+                    // from `import m(Product)` resolves to `m.Product`.
+                    // Seed entries take precedence; this mirrors the
+                    // Ident fallback above.
+                    let resolved;
+                    let lookup = if interp.structs.contains_key(name) {
+                        name
+                    } else if let Some(qualified) = interp.import_aliases.get(name) {
+                        resolved = qualified.clone();
+                        &resolved
+                    } else {
+                        return Err(self.error(format!("unknown struct `{name}`"), *span));
+                    };
+                    let Some(registered) = interp.structs.get(lookup).cloned() else {
                         return Err(self.error(format!("unknown struct `{name}`"), *span));
                     };
                     let mut vals = Vec::with_capacity(field_names.len());
@@ -1228,7 +1241,7 @@ impl Vm {
                     // embedded sub-objects inside `build_struct_literal`.
                     let obj = crate::runtime::ops::build_struct_literal(
                         &interp.structs,
-                        name,
+                        lookup,
                         &registered,
                         &given,
                         *span,

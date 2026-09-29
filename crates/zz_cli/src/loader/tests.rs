@@ -263,6 +263,43 @@ fn full_program_runs_with_imports() {
 }
 
 #[test]
+fn selective_struct_import_resolves_bare() {
+    use zz_runtime::{Interp, Value};
+
+    // `import models.product(Product)` must bind bare `Product`: structs
+    // are types, not values, so no synthetic `Product := product.Product`
+    // Decl is emitted (that forced a value lookup of a type name:
+    // "undefined variable `product.Product`"). The bare name resolves
+    // through the structs seed (checker) with an import-alias fallback
+    // at runtime (VM + tree-walker).
+    let dir = temp_project(&[
+        (
+            "main.zz",
+            "import models.product(Product)\np := Product{id: 7}\np.id + p.get_id()",
+        ),
+        (
+            "models/product.zz",
+            "pub struct Product{\n    id: int,\n}\nimpl Product {\n    pub func get_id(self) -> int {\n        self.id\n    }\n}",
+        ),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert!(result.structs.contains_key("Product"));
+    assert!(result.structs.contains_key("product.Product"));
+
+    let mut interp = Interp::with_natives(result.natives.clone());
+    // Wire selective-import aliases exactly like `zz run` does: the VM
+    // compiler emits no code for imports, so bare names only resolve
+    // through this map at runtime.
+    interp.import_aliases = result.import_aliases.clone();
+    let mut last = Value::Unit;
+    for p in &result.programs {
+        last = interp.run(p).unwrap();
+    }
+    assert_eq!(last, Value::Int(14));
+}
+
+#[test]
 fn stdlib_import_needs_no_file() {
     let dir = temp_project(&[("main.zz", "import std.str\n1")]);
     let result = load_program(&dir.join("main.zz")).unwrap();

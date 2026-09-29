@@ -4,6 +4,16 @@
 // shims, formatting, and the str.* natives.
 #include "runtime.h"
 
+// Display name for a boxed struct: bare type without the module
+// namespace (`user.User` → `User`), matching the VM's Display.
+// Identity (dispatch, conversions) keeps the qualified name;
+// only printing shortens.
+static const char *zz_object_display_name(const zz_object *o) {
+    const char *t = (o && o->type_name) ? o->type_name : "<struct>";
+    const char *dot = strrchr(t, '.');
+    return dot ? dot + 1 : t;
+}
+
 
 // =====================================================================
 //  String interning
@@ -466,7 +476,7 @@ static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
             break;
         }
         const zz_object *o = v->obj;
-        fputs(o->type_name ? o->type_name : "<struct>", out);
+        fputs(zz_object_display_name(o), out);
         fputc('{', out);
         for (size_t i = 0; i < o->len; i++) {
             if (i > 0) fputs(", ", out);
@@ -616,7 +626,7 @@ static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth
             break;
         }
         const zz_object *o = v->obj;
-        fputs(o->type_name ? o->type_name : "<struct>", out);
+        fputs(zz_object_display_name(o), out);
         fputc('{', out);
         for (size_t i = 0; i < o->len; i++) {
             if (i > 0) fputs(", ", out);
@@ -837,7 +847,7 @@ static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth) {
             break;
         }
         const zz_object *o = v->obj;
-        sb_append_str(sb, o->type_name ? o->type_name : "<struct>");
+        sb_append_str(sb, zz_object_display_name(o));
         sb_append_c(sb, '{');
         for (size_t i = 0; i < o->len; i++) {
             if (i > 0) sb_append_str(sb, ", ");
@@ -1011,7 +1021,7 @@ static void zz_value_to_display_strbuf_depth(strbuf *sb, const zz_value *v, int 
             break;
         }
         const zz_object *o = v->obj;
-        sb_append_str(sb, o->type_name ? o->type_name : "<struct>");
+        sb_append_str(sb, zz_object_display_name(o));
         sb_append_c(sb, '{');
         for (size_t i = 0; i < o->len; i++) {
             if (i > 0) sb_append_str(sb, ", ");
