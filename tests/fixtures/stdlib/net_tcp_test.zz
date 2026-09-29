@@ -4,11 +4,18 @@
 import std.env
 import std.net
 import std.fs
+import std.str
 import std.process(pid)
 
 func main() -> Result<int, str> {
+    // Per (process, sweep task) so parallel runners (per-file parity
+    // tests, the discover sweep, e2e) never share ports. The sweep
+    // token looks like "t{n}" ("0" outside the sweep), so strip the
+    // prefix before parsing — bare int(token) never parses and
+    // silently mixes 0.
     sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
-    base_port := 20000 + pid() % 20000 + (int(sweep_tok) ?? 0) % 20000
+    tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
+    base_port := 20000 + pid() % 20000 + tok_num % 20000
     listen_addr := "127.0.0.1:{base_port}"
     refused_addr := "127.0.0.1:{base_port + 1}"
     // Test tcp_listen
