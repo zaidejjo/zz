@@ -491,6 +491,11 @@ parity_strict!(
     "scope_collision.zz"
 );
 parity_strict!(
+    parity_syntax_struct_scalar_fields,
+    "syntax",
+    "struct_scalar_fields.zz"
+);
+parity_strict!(
     parity_syntax_hex_escape_bounds,
     "syntax",
     "hex_escape_bounds.zz"

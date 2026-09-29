@@ -2788,10 +2788,13 @@ impl Lowerer {
                     continue;
                 }
                 let fval = self.emit_expr(fexpr, names, out);
-                // Box the field value if it's a scalar type
+                // Box the field value if it's a scalar type. The boxer
+                // sees the source expression (not just the emitted text)
+                // so already-boxed values (params, calls) pass through
+                // instead of being re-wrapped (C type error).
                 let boxed_fval =
                     if let Some((_, field_type)) = sig.fields.iter().find(|(n, _)| n == fname) {
-                        Self::box_struct_field_value(fval, field_type)
+                        Self::box_struct_field_expr(fexpr, fval, field_type, names)
                     } else {
                         fval
                     };
@@ -2856,7 +2859,7 @@ impl Lowerer {
                 }
             }
             let fval = self.emit_expr(&access, names, out);
-            let boxed = Self::box_struct_field_value(fval, fty);
+            let boxed = Self::box_struct_field_expr(&access, fval, fty, names);
             out.push_str(&format!(
                 "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed});\n",
             ));
@@ -2947,7 +2950,7 @@ impl Lowerer {
                         }
                     }
                     let fval = self.emit_expr(fexpr, names, out);
-                    let boxed_fval = Self::box_struct_field_value(fval, fty);
+                    let boxed_fval = Self::box_struct_field_expr(fexpr, fval, fty, names);
                     out.push_str(&format!(
                         "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed_fval});\n",
                     ));
@@ -2969,35 +2972,23 @@ impl Lowerer {
         }
     }
 
-    /// Box a struct field value for `zz_object_set_field` given the field's
-    /// C type: scalars need `zz_int/float/bool(...)` unless the emitted
-    /// value is already boxed.
-    pub(super) fn box_struct_field_ctype(fval: String, ctype: &str) -> String {
-        if !matches!(ctype, "int64_t" | "double" | "bool") {
-            return fval;
-        }
-        let already_boxed = fval.starts_with("zz_int(")
-            || fval.starts_with("zz_float(")
-            || fval.starts_with("zz_bool(");
-        if already_boxed {
-            return fval;
-        }
-        match ctype {
-            "int64_t" => format!("zz_int({fval})"),
-            "double" => format!("zz_float({fval})"),
-            _ => format!("zz_bool({fval})"),
-        }
-    }
-
-    /// Box a struct field value for `zz_object_set_field`: scalar-typed
-    /// fields need `zz_int/float/bool(...)` unless the emitted value is
-    /// already boxed (int/float/bool literals and field reads emit
-    /// `zz_value`s directly — wrapping them again breaks C compilation).
-    fn box_struct_field_value(fval: String, fty: &zz_checker::Type) -> String {
+    /// Box a struct field value for `zz_object_set_field` given the field
+    /// expression, its emitted form, and its declared type. Scalar-typed
+    /// fields route through [`box_scalar_operand`], which boxes raw C
+    /// scalars (`zz_int/float/bool(...)`) but passes already-boxed values
+    /// (params, calls, boxed locals) through untouched. The old
+    /// string-sniffing boxer re-wrapped boxed values (`zz_bool(zz_clone(v))`
+    /// — a C type error) whenever the value wasn't literally prefixed.
+    fn box_struct_field_expr(
+        fexpr: &Expr,
+        fval: String,
+        fty: &zz_checker::Type,
+        names: &NameCtx,
+    ) -> String {
         match fty {
-            zz_checker::Type::Int => Self::box_struct_field_ctype(fval, "int64_t"),
-            zz_checker::Type::Float => Self::box_struct_field_ctype(fval, "double"),
-            zz_checker::Type::Bool => Self::box_struct_field_ctype(fval, "bool"),
+            zz_checker::Type::Int | zz_checker::Type::Float | zz_checker::Type::Bool => {
+                box_scalar_operand(fexpr, names, &fval)
+            }
             _ => fval,
         }
     }
