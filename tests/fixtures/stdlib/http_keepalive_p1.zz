@@ -4,24 +4,30 @@ import std.http
 import std.net
 import std.task
 import std.time
+import std.process(pid)
 
 func main() -> Result<int, str> {
     s := http.server()
     s = s.route("GET", "/ping", |_req| "pong")
     s = s.route("GET", "/users/:id", |req| "user-{http.param(req, "id").expect("id")}")
+    // Pid-derived port in a disjoint range (net_tcp_test uses
+    // 20000+): sequential sweep legs share the task token, so only the
+    // pid separates runs here.
+    port := 10000 + pid() % 5000
+    addr := "127.0.0.1:{port}"
     task.spawn(|_| {
-        http.listen(s, 8137)
+        http.listen(s, port)
     })
 
     // wait for bind (retry: spawn scheduling is async)
     tries := 0
-    stream := net.tcp_connect("127.0.0.1:8137", 200)
+    stream := net.tcp_connect(addr, 200)
     while tries < 50 {
         match stream {
             .ok(_) => break
             .err(_) => {
                 time.sleep_ms(100)
-                stream = net.tcp_connect("127.0.0.1:8137", 200)
+                stream = net.tcp_connect(addr, 200)
                 tries = tries + 1
             }
         }

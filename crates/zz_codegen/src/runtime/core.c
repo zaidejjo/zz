@@ -639,6 +639,88 @@ zz_value zz_dbg(zz_value v, int *err) {
     return zz_clone(v);
 }
 
+// ---- test assertions (bare + std.test.* spellings) -----------------------
+// VM parity: success returns unit; failure aborts with `error:` on
+// stderr + exit 1 (the VM raises EvalError, which the CLI renders the
+// same way). Messages intentionally contain `error` so error-fixture
+// parity checks (`stderr contains "error"`) hold on both engines.
+zz_value zz_assert(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_BOOL && v.b) return zz_unit();
+    if (v.tag != ZZ_BOOL) {
+        char *got = zz_value_to_string(&v);
+        fprintf(stderr, "error: `assert` expects `bool`, found `%s`\n", got);
+        free(got);
+    } else {
+        fprintf(stderr, "error: Assertion failed: expected true\n");
+    }
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_eq(zz_value a, zz_value b, int *err) {
+    (void)err;
+    zz_value eq = zz_binop(ZZOP_EQ, zz_clone(a), zz_clone(b));
+    int ok = zz_truthy(eq);
+    zz_release(&eq);
+    if (ok) return zz_unit();
+    char *ls = zz_value_to_string(&a);
+    char *rs = zz_value_to_string(&b);
+    fprintf(stderr, "error: Assertion Failed: Expected equality\n- Left:  %s\n+ Right: %s\n", ls, rs);
+    free(ls);
+    free(rs);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_ne(zz_value a, zz_value b, int *err) {
+    (void)err;
+    zz_value eq = zz_binop(ZZOP_EQ, zz_clone(a), zz_clone(b));
+    int ok = !zz_truthy(eq);
+    zz_release(&eq);
+    if (ok) return zz_unit();
+    char *ls = zz_value_to_string(&a);
+    fprintf(stderr, "error: Assertion Failed: Expected inequality but both were equal\n  Value: %s\n", ls);
+    free(ls);
+    fflush(stderr);
+    exit(1);
+}
+
+static double zz_assert_num(zz_value v, int *bad) {
+    if (v.tag == ZZ_INT) return (double)v.i;
+    if (v.tag == ZZ_FLOAT) return v.f;
+    *bad = 1;
+    return 0.0;
+}
+
+zz_value zz_assert_approx_eq(zz_value a, zz_value b, zz_value eps, int *err) {
+    (void)err;
+    int bad = 0;
+    double x = zz_assert_num(a, &bad);
+    double y = zz_assert_num(b, &bad);
+    double e = zz_assert_num(eps, &bad);
+    if (bad || e < 0.0) {
+        fprintf(stderr, "error: `assert_approx_eq` expects numeric (left, right, epsilon >= 0)\n");
+        fflush(stderr);
+        exit(1);
+    }
+    double d = x - y;
+    if (d < 0) d = -d;
+    if (d <= e) return zz_unit();
+    fprintf(stderr, "error: Assertion Failed: Expected approx equality within epsilon %g\n- Left:  %g\n+ Right: %g\n", e, x, y);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_fail(zz_value v, int *err) {
+    (void)err;
+    char *s = zz_value_to_string(&v);
+    fprintf(stderr, "error: fail: %s\n", s);
+    free(s);
+    fflush(stderr);
+    exit(1);
+}
+
 zz_value zz_io_print(zz_value v, int *err) {
     (void)err;
     for (;;) {
@@ -4169,10 +4251,13 @@ zz_value zz_http_route(zz_value server, zz_value method, zz_value path, zz_value
         else if (mlen == 4 && memcmp(up, "POST", 4) == 0) known = "POST";
         else if (mlen == 3 && memcmp(up, "PUT", 3) == 0) known = "PUT";
         else if (mlen == 6 && memcmp(up, "DELETE", 6) == 0) known = "DELETE";
+        else if (mlen == 5 && memcmp(up, "PATCH", 5) == 0) known = "PATCH";
+        else if (mlen == 4 && memcmp(up, "HEAD", 4) == 0) known = "HEAD";
+        else if (mlen == 7 && memcmp(up, "OPTIONS", 7) == 0) known = "OPTIONS";
     }
     if (!known) {
         *err = 1;
-        return zz_variant_err(zz_str_static("std.http.route: unknown method (expected GET, POST, PUT or DELETE)"));
+        return zz_variant_err(zz_str_static("std.http.route: unknown method (expected GET, POST, PUT, DELETE, PATCH, HEAD or OPTIONS)"));
     }
     return http_route_add(known, path, handler, 1, err);
 }
@@ -4198,10 +4283,13 @@ zz_value zz_http_route_fast(zz_value server, zz_value method, zz_value path, zz_
         else if (mlen == 4 && memcmp(up, "POST", 4) == 0) known = "POST";
         else if (mlen == 3 && memcmp(up, "PUT", 3) == 0) known = "PUT";
         else if (mlen == 6 && memcmp(up, "DELETE", 6) == 0) known = "DELETE";
+        else if (mlen == 5 && memcmp(up, "PATCH", 5) == 0) known = "PATCH";
+        else if (mlen == 4 && memcmp(up, "HEAD", 4) == 0) known = "HEAD";
+        else if (mlen == 7 && memcmp(up, "OPTIONS", 7) == 0) known = "OPTIONS";
     }
     if (!known) {
         *err = 1;
-        return zz_variant_err(zz_str_static("std.http.route: unknown method (expected GET, POST, PUT or DELETE)"));
+        return zz_variant_err(zz_str_static("std.http.route: unknown method (expected GET, POST, PUT, DELETE, PATCH, HEAD or OPTIONS)"));
     }
     return http_route_add(known, path, handler, 0, err);
 }
@@ -4349,8 +4437,11 @@ static zz_value http_parse_query(const char *qs, size_t len) {
 }
 
 // Match "/users/:id" against "/users/42" (length-aware, no copying).
-// Returns 1 + fills params dict, or 0. Mirrors the VM's match_route_pattern
-// (trim '/', equal segment counts, ':x' captures, '*' matches one segment).
+// Mirrors the VM's match_pattern: `:x` captures one segment, `:x...`
+// (last segment only) captures the greedy tail joined by `/` (possibly
+// empty, so `/files` matches `/files/:path...` with `path=""`), `*`
+// matches one segment. Whole-pattern `*` is handled by the caller's
+// catch-all loop; arity must otherwise match exactly.
 static int http_match_pattern(const char *pat, size_t patlen, const char *path, size_t pathlen,
                               zz_value params) {
     while (patlen > 0 && pat[0] == '/') { pat++; patlen--; }
@@ -4361,6 +4452,80 @@ static int http_match_pattern(const char *pat, size_t patlen, const char *path, 
     size_t pn = 1, an = 1;
     for (size_t i = 0; i < patlen; i++) if (pat[i] == '/') pn++;
     for (size_t i = 0; i < pathlen; i++) if (path[i] == '/') an++;
+    // Empty pattern ("/") matches only empty path.
+    if (patlen == 0) return pathlen == 0;
+    // Detect a greedy `:name...` tail (last pattern segment only).
+    size_t last_slash = 0;
+    int has_slash = 0;
+    for (size_t i = 0; i < patlen; i++) if (pat[i] == '/') { last_slash = i; has_slash = 1; }
+    const char *last_seg = has_slash ? pat + last_slash + 1 : pat;
+    size_t last_len = has_slash ? patlen - last_slash - 1 : patlen;
+    int is_wild = (last_len > 4 && last_seg[0] == ':' &&
+                   last_len - 1 >= 3 &&
+                   memcmp(last_seg + last_len - 3, "...", 3) == 0 &&
+                   last_len - 4 >= 1);
+    size_t prefix_segs = has_slash ? pn - 1 : 0;
+    if (is_wild) {
+        // Malformed tails (`:`, `:...`, bad name) never match (VM: None).
+        size_t nm_len = last_len - 4;
+        if (nm_len == 0) return 0;
+        char fc = last_seg[1];
+        if (!((fc >= 'A' && fc <= 'Z') || (fc >= 'a' && fc <= 'z') || fc == '_')) return 0;
+        for (size_t i = 1; i < 1 + nm_len; i++) {
+            char c = last_seg[i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9') || c == '_')) return 0;
+        }
+        if (an < prefix_segs) return 0;
+        // Match the literal/param prefix, then capture the tail.
+        size_t pi = 0, ai = 0;
+        for (size_t s = 0; s < prefix_segs; s++) {
+            size_t pj = pi, aj = ai;
+            while (pj < patlen && pat[pj] != '/') pj++;
+            while (aj < pathlen && path[aj] != '/') aj++;
+            size_t plen = pj - pi, alen = aj - ai;
+            if (plen > 0 && pat[pi] == ':') {
+                zz_str *k = str_alloc(plen - 1);
+                memcpy(zz_str_ptr(k), pat + pi + 1, plen - 1);
+                zz_str_ptr(k)[plen - 1] = '\0';
+                k->len = plen - 1;
+                zz_str *v = str_alloc(alen);
+                memcpy(zz_str_ptr(v), path + ai, alen);
+                zz_str_ptr(v)[alen] = '\0';
+                v->len = alen;
+                zz_dict_set(params.dict, (zz_value){ZZ_STR, {.s = k}}, (zz_value){ZZ_STR, {.s = v}});
+            } else if (!((plen == alen && memcmp(pat + pi, path + ai, plen) == 0)
+                         || (plen == 1 && pat[pi] == '*'))) {
+                return 0;
+            }
+            pi = pj + 1;
+            ai = aj + 1;
+        }
+        // Tail = remainder of the path (possibly empty).
+        const char *tstart;
+        size_t tlen;
+        if (ai >= pathlen) {
+            // Path == prefix exactly (`/files`): empty tail.
+            tstart = path + pathlen;
+            tlen = 0;
+        } else if (path[ai] == '/') {
+            tstart = path + ai + 1;
+            tlen = pathlen - ai - 1;
+        } else {
+            tstart = path + ai;
+            tlen = pathlen - ai;
+        }
+        zz_str *k = str_alloc(nm_len);
+        memcpy(zz_str_ptr(k), last_seg + 1, nm_len);
+        zz_str_ptr(k)[nm_len] = '\0';
+        k->len = nm_len;
+        zz_str *v = str_alloc(tlen);
+        if (tlen) memcpy(zz_str_ptr(v), tstart, tlen);
+        zz_str_ptr(v)[tlen] = '\0';
+        v->len = tlen;
+        zz_dict_set(params.dict, (zz_value){ZZ_STR, {.s = k}}, (zz_value){ZZ_STR, {.s = v}});
+        return 1;
+    }
     if (pn != an) return 0;
     size_t pi = 0, ai = 0;
     for (size_t s = 0; s < pn; s++) {
@@ -4568,32 +4733,90 @@ zz_value zz_http_body_form(zz_value req, int *err) {
 
 // ---- in-process dispatch (http.test / http.handle) ----
 
-// Find the first route for (method, path): exact match, then :param
-// patterns, then per-method "*". Mirrors the VM's find order. Fills
-// params (possibly empty). Returns handler or unit when none matched.
+// Find the best route for (method, path): exact string equality
+// short-circuits (VM `best_match`), otherwise the highest
+// `(literals, params, -wildcards)` score wins, first-registered breaking
+// ties; whole-pattern `"*"` is the last-resort catch-all. Mirrors the VM's
+// find order. Fills params (possibly empty). Returns handler or unit when
+// none matched.
 // Pattern attempts fill a scratch dict merged only on success — a failed
 // attempt must not leak partial captures into a later route's params
 // (the VM discards its per-route vec the same way).
 static http_route_entry *http_match_entry(const char *method, const char *path, size_t pathlen,
                                           zz_value params) {
+    // Pass 1: exact string equality short-circuits scoring entirely.
+    for (int i = 0; i < g_http_route_count; i++) {
+        http_route_entry *e = &g_http_route_table[i];
+        if (strcmp(e->method, method) != 0) continue;
+        if (strcmp(e->pattern, "*") == 0) continue;
+        if (e->plen == pathlen && memcmp(e->pattern, path, pathlen) == 0) return e;
+    }
+    // Pass 2: scored patterns (skip exact hits above and "*" catch-alls).
+    http_route_entry *best = NULL;
+    long best_lit = -1, best_param = -1, best_wild = 1;
+    zz_value best_params = zz_dict_new();
     for (int i = 0; i < g_http_route_count; i++) {
         http_route_entry *e = &g_http_route_table[i];
         if (strcmp(e->method, method) != 0) continue;
         size_t plen = e->plen;
-        if (plen == pathlen && memcmp(e->pattern, path, pathlen) == 0) return e;
+        if (strcmp(e->pattern, "*") == 0) continue;
+        if (plen == pathlen && memcmp(e->pattern, path, pathlen) == 0) continue;
         zz_value scratch = zz_dict_new();
         int hit = http_match_pattern(e->pattern, plen, path, pathlen, scratch);
         if (hit) {
-            for (size_t k = 0; k < scratch.dict->len; k++) {
-                zz_str *ek = scratch.dict->entries[k].key;
-                zz_value ev = scratch.dict->entries[k].val;
-                zz_dict_set(params.dict, (zz_value){ZZ_STR, {.s = ek}}, zz_clone(ev));
+            // Score from the pattern text: literals > params > wildcards.
+            long lit = 0, par = 0, wild = 0;
+            const char *p = e->pattern;
+            size_t n = plen;
+            while (n > 0 && *p == '/') { p++; n--; }
+            while (n > 0 && p[n - 1] == '/') n--;
+            size_t seg = 0, segs = 1;
+            for (size_t k = 0; k < n; k++) if (p[k] == '/') segs++;
+            for (size_t s = 0; s < segs; s++) {
+                size_t j = seg;
+                while (j < n && p[j] != '/') j++;
+                size_t sl = j - seg;
+                if (sl > 0 && p[seg] == ':') {
+                    if (sl >= 4 && memcmp(p + j - 3, "...", 3) == 0) wild++;
+                    else par++;
+                } else if (!(sl == 1 && p[seg] == '*')) {
+                    lit++;
+                } else {
+                    wild++;
+                }
+                seg = j + 1;
             }
+            // Higher literals, then higher params, then fewer wildcards;
+            // first-registered wins ties (strict > keeps the incumbent).
+            int better = 0;
+            if (!best) better = 1;
+            else if (lit != best_lit) better = (lit > best_lit);
+            else if (par != best_param) better = (par > best_param);
+            else if (wild != best_wild) better = (wild < best_wild);
+            if (better) {
+                best = e;
+                best_lit = lit;
+                best_param = par;
+                best_wild = wild;
+                zz_release(&best_params);
+                best_params = scratch;
+            } else {
+                zz_release(&scratch);
+            }
+        } else {
             zz_release(&scratch);
-            return e;
         }
-        zz_release(&scratch);
     }
+    if (best) {
+        for (size_t k = 0; k < best_params.dict->len; k++) {
+            zz_str *ek = best_params.dict->entries[k].key;
+            zz_value ev = best_params.dict->entries[k].val;
+            zz_dict_set(params.dict, (zz_value){ZZ_STR, {.s = ek}}, zz_clone(ev));
+        }
+        zz_release(&best_params);
+        return best;
+    }
+    zz_release(&best_params);
     for (int i = 0; i < g_http_route_count; i++) {
         http_route_entry *e = &g_http_route_table[i];
         if (strcmp(e->method, method) == 0 && strcmp(e->pattern, "*") == 0) return e;
@@ -4711,6 +4934,86 @@ static zz_value http_wrap_result(zz_value r) {
     return http_500(msg, strlen(msg));
 }
 
+// True when `path` matches a route registered for a different method
+// (whole-pattern `*` never counts — it matches everything by design,
+// so counting it would turn every miss into a 405). Mirrors the VM's
+// `matches_other_method`.
+static int http_matches_other_method(const char *method, const char *path, size_t pathlen) {
+    for (int i = 0; i < g_http_route_count; i++) {
+        http_route_entry *e = &g_http_route_table[i];
+        if (strcmp(e->method, method) == 0) continue;
+        if (strcmp(e->pattern, "*") == 0) continue;
+        if (e->plen == pathlen && memcmp(e->pattern, path, pathlen) == 0) return 1;
+        zz_value scratch = zz_dict_new();
+        int hit = http_match_pattern(e->pattern, e->plen, path, pathlen, scratch);
+        zz_release(&scratch);
+        if (hit) return 1;
+    }
+    return 0;
+}
+
+// Comma-joined methods whose routes match `path` (for 405 `Allow`),
+// registration order, deduped. Mirrors the VM's `allowed_methods`
+// (whole-pattern `*` counts here — it does match the path).
+static void http_allowed_methods(const char *path, size_t pathlen, char *out, size_t cap) {
+    out[0] = '\0';
+    size_t len = 0;
+    const char *seen[16];
+    size_t nseen = 0;
+    for (int i = 0; i < g_http_route_count; i++) {
+        http_route_entry *e = &g_http_route_table[i];
+        int dup = 0;
+        for (size_t k = 0; k < nseen; k++) {
+            if (strcmp(seen[k], e->method) == 0) { dup = 1; break; }
+        }
+        if (dup) continue;
+        int hit;
+        if (strcmp(e->pattern, "*") == 0) {
+            hit = 1;
+        } else if (e->plen == pathlen && memcmp(e->pattern, path, pathlen) == 0) {
+            hit = 1;
+        } else {
+            zz_value scratch = zz_dict_new();
+            hit = http_match_pattern(e->pattern, e->plen, path, pathlen, scratch);
+            zz_release(&scratch);
+        }
+        if (hit && nseen < 16) {
+            seen[nseen++] = e->method;
+            size_t ml = strlen(e->method);
+            if (len + (len ? 2 : 0) + ml + 1 <= cap) {
+                if (len) { out[len++] = ','; out[len++] = ' '; }
+                memcpy(out + len, e->method, ml);
+                len += ml;
+                out[len] = '\0';
+            }
+        }
+    }
+}
+
+// 405 response object with an `Allow` header (path exists under another
+// method — a normal response like the VM's, NOT a dispatch failure).
+static zz_value http_405(const char *allow) {
+    static const char body[] = "Method Not Allowed";
+    zz_str *b = str_alloc(sizeof(body) - 1);
+    memcpy(zz_str_ptr(b), body, sizeof(body) - 1);
+    zz_str_ptr(b)[sizeof(body) - 1] = '\0';
+    b->len = sizeof(body) - 1;
+    zz_value hdrs = zz_dict_new();
+    if (allow && *allow) {
+        size_t al = strlen(allow);
+        zz_str *av = str_alloc(al);
+        memcpy(zz_str_ptr(av), allow, al);
+        zz_str_ptr(av)[al] = '\0';
+        av->len = al;
+        zz_dict_set(hdrs.dict, zz_str_static("Allow"), (zz_value){ZZ_STR, {.s = av}});
+    }
+    zz_value r = http_response_new(405, b, hdrs);
+    zz_release(&hdrs);
+    zz_value owned = {ZZ_STR, {.s = b}};
+    zz_release(&owned);
+    return r;
+}
+
 // Shared dispatch core: match, middleware chain, handler call. Returns an
 // http.response object in all cases (VM http.test semantics). Sets
 // *failed when the 500 came from the dispatcher itself (no route,
@@ -4728,6 +5031,15 @@ static zz_value http_dispatch(const char *method, const char *path, size_t pathl
     zz_value params = zz_dict_new();
     zz_value handler = http_match_route(method, path, plen, params);
     if (handler.tag == ZZ_UNIT) {
+        // Path exists under another method → 405 with `Allow` (a normal
+        // response, like the VM), not a dispatch failure.
+        if (http_matches_other_method(method, path, plen)) {
+            char allow[128];
+            http_allowed_methods(path, plen, allow, sizeof allow);
+            zz_release(&query);
+            zz_release(&params);
+            return http_405(allow);
+        }
         char msg[256];
         snprintf(msg, sizeof msg, "std.http: no route for %s %.*s", method, (int)plen, path);
         zz_release(&query);
@@ -5505,6 +5817,16 @@ int main(int argc, char **argv) {
     return zz_run();
 }
 // ---- codegen shims ------------------------------------------------------
+// Trap for reachable stdlib natives with no AOT implementation (VM-only
+// Phase 3 HTTP surface, etc.). Aborts loudly with the missing name:
+// the old silent-unit fallback wedged programs (a retry loop matching
+// on the result never fires when the value is unit — http_tls_p3 spun
+// at 100% CPU forever). Declared to return zz_value so call sites fit
+// expression positions; it never returns.
+zz_value zz_unimplemented_native(const char *name) {
+    fprintf(stderr, "zz: native `%s` is not implemented in AOT builds\n", name);
+    exit(1);
+}
 zz_value zz_call_native1(zz_value (*f)(zz_value, int *), zz_value a) {
     int err = 0;
     zz_value r = f(a, &err);

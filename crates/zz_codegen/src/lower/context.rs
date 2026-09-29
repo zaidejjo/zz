@@ -474,8 +474,19 @@ impl Lowerer {
                     }
                     ImportItem::Named { name, alias, .. } => {
                         let target = alias.as_ref().unwrap_or(name);
-                        fns.entry(target.clone())
-                            .or_insert_with(|| format!("{head}.{name}"));
+                        // Canonical mirrors the loader: `std.*` imports use
+                        // the full head (`std.fs.read`), local-file imports
+                        // use the last segment (`math_utils.double` for
+                        // `helpers.math_utils`). Register the loader form so
+                        // bare calls resolve to the real body.
+                        let canonical = if head.starts_with("std.") || head == "std" {
+                            format!("{head}.{name}")
+                        } else if let Some(last) = path.last() {
+                            format!("{last}.{name}")
+                        } else {
+                            format!("{head}.{name}")
+                        };
+                        fns.entry(target.clone()).or_insert(canonical);
                     }
                 }
             }
@@ -525,8 +536,11 @@ impl Lowerer {
     ///   2. Inside a loop body whose sub-arena is reset every iteration,
     ///      non-escaping allocations go to that sub-arena so the buffer is
     ///      reused across iterations with zero heap growth.
-    ///   3. A span classified `NonEscaping` goes on the function arena,
-    ///      freed in bulk at function exit.
+    ///
+    /// Anything else uses the heap. (There is no function-level arena:
+    /// `emit_function` deliberately declares none, so returning a
+    /// function-arena name here would emit `&_arena` with no binding —
+    /// an undeclared-identifier C error.)
     ///
     /// Returns the C arena identifier (without `&`) or None for heap.
     pub(super) fn arena_for(&self, span: zz_frontend::span::Span) -> Option<String> {
@@ -540,9 +554,6 @@ impl Lowerer {
         }
         if let Some(arena_name) = self.loop_arenas.borrow().last() {
             return Some(arena_name.clone());
-        }
-        if self.is_non_escaping(span) {
-            return Some("_arena".to_string());
         }
         None
     }

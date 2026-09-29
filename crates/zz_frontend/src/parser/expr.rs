@@ -923,6 +923,14 @@ impl Parser {
         }
         let value = self.parse_expr();
         entries.push((key, value));
+        // A dict entry must be followed by `,` or `}`. `=` / `:=` here
+        // means this is a block opening with a typed declaration
+        // (`name: Type = ...`), not a dict — backtrack so the caller
+        // falls through to `parse_block` (e.g. match-arm bodies like
+        // `_ => { xs: [T] = ... }`).
+        if self.at(TokenKind::Assign) || self.at(TokenKind::ColonEq) {
+            return None;
+        }
         while self.eat(TokenKind::Comma) {
             if self.at(TokenKind::RBrace) {
                 break; // trailing comma

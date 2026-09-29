@@ -427,3 +427,36 @@ fn triple_format_spec_parses() {
         other => panic!("expected expr with format spec, got {other:?}"),
     }
 }
+
+#[test]
+fn match_arm_block_opening_with_typed_decl_is_block_not_dict() {
+    // `_ => { xs: [int] = ... }` must parse the braces as a block whose
+    // first statement is a typed declaration — not a dict literal.
+    let p = parse_ok(
+        "match r {\n    .none => 0\n    .some(id) => {\n        xs: [int] = [id]\n        len(xs)\n    }\n}",
+    );
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Match { arms, .. }) => {
+            assert_eq!(arms.len(), 2);
+            match &arms[1].body {
+                E::Block(b) => {
+                    assert_eq!(b.stmts.len(), 2);
+                    assert!(matches!(b.stmts[0], zz_frontend::ast::Stmt::Decl { .. }));
+                }
+                other => panic!("expected block arm body, got {other:?}"),
+            }
+        }
+        other => panic!("expected match, got {other:?}"),
+    }
+}
+
+#[test]
+fn dict_literal_still_parses() {
+    let p = parse_ok("d := {a: 1, b: 2}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { value, .. } => {
+            assert!(matches!(value, E::Dict { .. }));
+        }
+        other => panic!("expected decl, got {other:?}"),
+    }
+}

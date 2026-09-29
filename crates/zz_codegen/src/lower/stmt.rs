@@ -58,6 +58,22 @@ impl Lowerer {
                     }
                 }
 
+                // `b := a` where `a` is a struct-typed value: the new
+                // binding is a `zz_value`, so box (copy) the source into
+                // a runtime object — a raw C struct is not a `zz_value`.
+                // Calls already return owned objects and struct literals
+                // are handled above, so only plain value paths copy here
+                // (this also gives VM-matching value semantics).
+                let struct_copy: Option<String> = match value {
+                    Expr::Ident { .. } | Expr::Field { .. } | Expr::Path { .. } => {
+                        match self.ty_at(names, value.span()) {
+                            Some(zz_checker::Type::Struct(s)) => Some(s.clone()),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+
                 // Emit the RHS expression FIRST, while the variable name still
                 // resolves to the PREVIOUS scope entry (if any). This is critical
                 // for redeclarations like `total := total + item` inside loop
@@ -69,7 +85,10 @@ impl Lowerer {
                 if self.green_active() {
                     self.stmt_direct.set(true);
                 }
-                let val = self.emit_expr(value, names, out);
+                let val = match struct_copy {
+                    Some(ref sname) => self.emit_boxed_value(sname, value, names, out),
+                    None => self.emit_expr(value, names, out),
+                };
 
                 // NOW enter the new scope entry with the correct C type.
                 // For scalars, use enter_with_type so that any subsequent code
@@ -458,18 +477,24 @@ impl Lowerer {
                         // `zz_object_set_field`, which promotes through
                         // embedded structs in C. Only fires for checker-known
                         // structs so dict/dot targets keep their old path.
+                        // A `zz_value` local with struct type holds a
+                        // runtime object (e.g. from a struct-returning
+                        // call); raw unboxed locals (`zz_struct_X` C type)
+                        // were already handled by the direct paths above.
                         if parts.len() >= 2 {
                             if let Some(base_cid) = names.lookup(&parts[0]).map(str::to_string) {
                                 if let Some(zz_checker::Type::Struct(sname)) =
                                     names.checker_types.get(&parts[0]).cloned()
                                 {
-                                    if self.type_to_c(&zz_checker::Type::Struct(sname.clone()))
-                                        == "zz_value"
-                                    {
-                                        if let Some((chain, leaf)) =
+                                    let base_is_raw = names
+                                        .lookup_type(&parts[0])
+                                        .map(|t| t.starts_with("zz_struct_"))
+                                        .unwrap_or(false);
+                                    if !base_is_raw {
+                                        if let Some((chain, _leaf)) =
                                             self.resolve_access_chain(&sname, &parts[1..])
                                         {
-                                            let boxed = Self::box_struct_field_ctype(val, &leaf);
+                                            let boxed = box_scalar_operand(value, names, &val);
                                             if chain.len() == 1 {
                                                 out.push_str(&format!(
                                                     "    zz_object_set_field(&{base_cid}, \"{}\", {boxed});\n",
@@ -1290,12 +1315,34 @@ impl Lowerer {
                 return Some(());
             }
             // Pure leaf tail: emit directly (rarely reached).
-            let val = self.emit_expr(e, names, out);
-            let val = box_scalar_operand(e, names, &val);
+            let val = self.emit_tail_value(e, names, out);
             out.push_str(&format!("    return {val};\n"));
             return Some(());
         }
+        // Trailing `:=`: the declared value is the function value.
+        if let Some(Stmt::Decl { name, .. }) = block.stmts.last() {
+            let n = name.name.clone();
+            if let Some(val) = self.decl_tail_value(&n, names, out) {
+                out.push_str(&format!("    return {val};\n"));
+                return Some(());
+            }
+        }
         None
+    }
+
+    /// Emit a tail-position block: every statement but the last runs for
+    /// side effects; the last yields the branch's `return` value.
+    /// (`last_stmt_value` alone only looks at the final statement, so
+    /// without this the leading statements of a multi-statement tail
+    /// branch would be silently dropped from the generated C.)
+    pub(super) fn emit_tail_branch(&self, b: &Block, names: &mut NameCtx, out: &mut String) {
+        let n = b.stmts.len();
+        for stmt in &b.stmts[..n.saturating_sub(1)] {
+            self.emit_stmt(stmt, names, out, false);
+        }
+        if self.last_stmt_value(b, names, out).is_none() {
+            out.push_str("        return zz_unit();\n");
+        }
     }
 
     /// Emit an expression in return position, emitting `return <val>;`.
@@ -1308,16 +1355,12 @@ impl Lowerer {
                 let c = self.emit_expr(cond, names, out);
                 let c = box_scalar_operand(cond, names, &c);
                 out.push_str(&format!("    if (zz_truthy({c})) {{\n"));
-                if self.last_stmt_value(then, names, out).is_none() {
-                    out.push_str("        return zz_unit();\n");
-                }
+                self.emit_tail_branch(then, names, out);
                 out.push_str("    } else {\n");
                 if let Some(el) = els {
                     match el.as_ref() {
                         Expr::Block(b) => {
-                            if self.last_stmt_value(b, names, out).is_none() {
-                                out.push_str("        return zz_unit();\n");
-                            }
+                            self.emit_tail_branch(b, names, out);
                         }
                         other => self.emit_tail_expr(other, names, out),
                     }
@@ -1327,7 +1370,7 @@ impl Lowerer {
                 out.push_str("    }\n");
             }
             _ => {
-                let val = self.emit_expr(e, names, out);
+                let val = self.emit_tail_value(e, names, out);
                 out.push_str(&format!("    return {val};\n"));
             }
         }

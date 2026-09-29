@@ -6,11 +6,14 @@
 // write_chunk, seek, flush, close), unified error diagnostics, and FS I/O
 // inside green-thread tasks (yield to the I/O pool, never block the
 // scheduler).
+import std.env
 import std.fs
+import std.process(pid)
 import std.task
 
 func main() {
-    base := "/tmp/zz_fs_comprehensive"
+    sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+    base := "/tmp/zz_fs_comprehensive_{pid()}_{sweep_tok}"
     // Clean slate (missing dir is a tolerated .err).
     fs.remove_dir_all(base)
     match fs.mkdir_all("{base}/sub/nested") {
@@ -152,13 +155,13 @@ func main() {
     // Green-thread I/O: FS inside spawned tasks yields to the I/O pool
     // instead of blocking the scheduler.
     h1 := task.spawn(|_| {
-        match fs.read_to_string("/tmp/zz_fs_comprehensive/a.txt") {
+        match fs.read_to_string("{base}/a.txt") {
             .ok(c) => "t1: {c}"
             .err(e) => "t1_err: {e}"
         }
     })
     h2 := task.spawn(|_| {
-        match fs.write("/tmp/zz_fs_comprehensive/from_task.txt", "task-write") {
+        match fs.write("{base}/from_task.txt", "task-write") {
             .ok(_) => "t2_write_ok"
             .err(e) => "t2_err: {e}"
         }

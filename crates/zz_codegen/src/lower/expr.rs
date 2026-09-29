@@ -203,11 +203,47 @@ impl Lowerer {
             if matches!(e, Expr::If { .. }) {
                 self.emit_expr(e, names, out)
             } else {
-                let v = self.emit_expr(e, names, out);
-                box_scalar_operand(e, names, &v)
+                self.emit_tail_value(e, names, out)
             }
+        } else if let Some(Stmt::Decl { name, .. }) = b.stmts.last() {
+            // Trailing `:=`: the declared value is the block's value
+            // (VM slot semantics). Return the local, boxed.
+            let n = name.name.clone();
+            self.decl_tail_value(&n, names, out)
+                .unwrap_or_else(|| "zz_unit()".to_string())
         } else {
             "zz_unit()".to_string()
+        }
+    }
+
+    /// Return expression for a trailing-`Decl` tail: the declared local,
+    /// boxed to a `zz_value` (scalars via constructors, refcounted via
+    /// clone, unboxed structs via the object boxer). `None` when the
+    /// local is unknown (caller falls back to unit).
+    pub(super) fn decl_tail_value(
+        &self,
+        name: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> Option<String> {
+        let cid = names.lookup(name)?.to_string();
+        let ctype = names.lookup_type(name).unwrap_or("zz_value").to_string();
+        match ctype.as_str() {
+            "int64_t" => Some(format!("zz_int({cid})")),
+            "double" => Some(format!("zz_float({cid})")),
+            "bool" => Some(format!("zz_bool({cid})")),
+            t if t.starts_with("zz_struct_") => {
+                let sname = match names.checker_types.get(name) {
+                    Some(zz_checker::Type::Struct(s)) => s.clone(),
+                    _ => return None,
+                };
+                let ident = Expr::Ident {
+                    name: name.to_string(),
+                    span: zz_frontend::span::Span::new(0, 0),
+                };
+                Some(self.emit_boxed_value(&sname, &ident, names, out))
+            }
+            _ => Some(format!("zz_clone({cid})")),
         }
     }
 
@@ -417,9 +453,17 @@ impl Lowerer {
             Expr::Unary { op, expr, .. } => {
                 let v = self.emit_expr(expr, names, out);
                 match op {
-                    zz_frontend::ast::UnOp::Neg => format!("zz_neg({v})"),
+                    // `zz_neg` / `zz_not` take `zz_value`: box raw scalars
+                    // (e.g. a `bool`/`int` local lowers to its C type).
+                    // `Pos` is identity — keep the raw form so scalar
+                    // arithmetic fast-paths still recognize it.
+                    zz_frontend::ast::UnOp::Neg => {
+                        format!("zz_neg({})", box_scalar_operand(expr, names, &v))
+                    }
                     zz_frontend::ast::UnOp::Pos => v,
-                    zz_frontend::ast::UnOp::Not => format!("zz_not({v})"),
+                    zz_frontend::ast::UnOp::Not => {
+                        format!("zz_not({})", box_scalar_operand(expr, names, &v))
+                    }
                 }
             }
             Expr::Binary {
@@ -457,15 +501,24 @@ impl Lowerer {
                 let r = self.emit_expr(right, names, out);
                 match op {
                     zz_frontend::ast::BinOp::And => {
+                        // `zz_truthy` takes `zz_value`: box raw-scalar
+                        // operands (e.g. `bool` locals lower to C `bool`).
+                        let l = box_scalar_operand(left, names, &l);
+                        let r = box_scalar_operand(right, names, &r);
                         format!("zz_bool(zz_truthy({l}) && zz_truthy({r}))")
                     }
                     zz_frontend::ast::BinOp::Or => {
+                        let l = box_scalar_operand(left, names, &l);
+                        let r = box_scalar_operand(right, names, &r);
                         format!("zz_bool(zz_truthy({l}) || zz_truthy({r}))")
                     }
                     zz_frontend::ast::BinOp::Elvis => {
                         // Evaluate the left side once and store in a temp to avoid
                         // double-evaluation (which would call side-effecting natives
-                        // like `input()` twice).
+                        // like `input()` twice). Box: the temp is `zz_value`
+                        // but a raw-scalar operand lowers to its C type.
+                        let l = box_scalar_operand(left, names, &l);
+                        let r = box_scalar_operand(right, names, &r);
                         let tmp = names.fresh("elvis");
                         out.push_str(&format!("    zz_value {tmp} = {l};\n"));
                         format!("zz_elvis({tmp}, {r})")
@@ -717,13 +770,21 @@ impl Lowerer {
             } => {
                 // `obj[a:b]` — array/string slicing. Missing bounds lower to
                 // unit (the C runtime interprets unit as "from 0" / "to end").
+                // Scalar bounds (int idents, raw arithmetic) must be boxed
+                // like index args, or C rejects int64_t as zz_value.
                 let o = self.emit_expr(obj, names, out);
                 let s = match start {
-                    Some(e) => self.emit_expr(e, names, out),
+                    Some(e) => {
+                        let emitted = self.emit_expr(e, names, out);
+                        self.box_index_arg(e, emitted, names)
+                    }
                     None => "zz_unit()".to_string(),
                 };
                 let e = match end {
-                    Some(e) => self.emit_expr(e, names, out),
+                    Some(e) => {
+                        let emitted = self.emit_expr(e, names, out);
+                        self.box_index_arg(e, emitted, names)
+                    }
                     None => "zz_unit()".to_string(),
                 };
                 format!("zz_call_native3(zz_slice_value, {o}, {s}, {e})")
@@ -1573,7 +1634,33 @@ impl Lowerer {
                 // is a direct call, never a method on the local.
                 let joined = parts.join(".");
                 if self.reachable_funcs.contains(&joined) || self.tp.funcs.contains_key(&joined) {
-                    (joined, None)
+                    // Namespace-alias copies (`f.write` from
+                    // `import std.fs as f`) match here because the loader
+                    // registers them in funcs — but they have no native of
+                    // their own, so the call would lower to a bodyless
+                    // `zz_fn_f__write` stub (silent no-op). Resolve to the
+                    // canonical name (`std.fs.write`) when only it has a
+                    // native impl. User-function aliases are untouched
+                    // (neither spelling has a native), as are shadowed
+                    // locals (exact-match rule above still wins for them).
+                    let obj_name = &parts[0];
+                    let method = &parts[1];
+                    let cname = if names.lookup(obj_name).is_none() {
+                        match self.import_ns_aliases.get(obj_name) {
+                            Some(head) => {
+                                let resolved = format!("{head}.{method}");
+                                if !native_supported(&joined) && native_supported(&resolved) {
+                                    resolved
+                                } else {
+                                    joined
+                                }
+                            }
+                            None => joined,
+                        }
+                    } else {
+                        joined
+                    };
+                    (cname, None)
                 } else {
                     let obj_name = &parts[0];
                     let method = &parts[1];
@@ -2532,11 +2619,13 @@ impl Lowerer {
             };
         }
 
-        // Reachable native without a C runtime impl (e.g. time.now_ms)
-        // lowers to Unit.
+        // Reachable native without a C runtime impl (VM-only surface,
+        // e.g. Phase 3 HTTP): abort loudly with the missing name. The old
+        // silent unit wedged programs — a retry loop matching on the
+        // result never fires when the value is unit (http_tls_p3 spun
+        // forever). The name is an internal dotted key (safe charset).
         if is_native {
-            let _ = (cname_for_native.is_empty(),);
-            return "zz_unit()".to_string();
+            return format!("zz_unimplemented_native(\"{cname_for_native}\")");
         }
 
         // Bare-name fallback: the loader qualifies same-file calls, but a
@@ -2571,7 +2660,10 @@ impl Lowerer {
         let cname_for_native: String = cname_ref.to_string();
         let _ = &owned_fallback;
 
-        if self.reachable_funcs.contains(&cname_for_native) {
+        if self.reachable_funcs.contains(&cname_for_native)
+            && (self.tp.funcs.contains_key(&cname_for_native)
+                || self.is_impl_method(&cname_for_native))
+        {
             let cf = format!("zz_fn_{}", mangle(&cname_for_native));
             // Impl methods: callee signature is
             // `zz_fn_X(<struct>* self, zz_value* args, size_t argc)`.
@@ -2656,6 +2748,13 @@ impl Lowerer {
                     let joined = parts.join(".");
                     if names.lookup(&joined).is_some() {
                         Indirect::Known
+                    } else if parts
+                        .last()
+                        .is_some_and(|last| names.lookup(last).is_some())
+                    {
+                        // Qualified closure var (`function_types.transform`):
+                        // globals are seeded bare, so accept the leaf.
+                        Indirect::Known
                     } else {
                         Indirect::No
                     }
@@ -2668,7 +2767,30 @@ impl Lowerer {
             };
             let closure_val: Option<String> = match kind {
                 Indirect::No => None,
-                Indirect::Known | Indirect::Other => Some(self.emit_expr(callee, names, out)),
+                Indirect::Other => Some(self.emit_expr(callee, names, out)),
+                Indirect::Known => {
+                    // Qualified closure var lowers via its bare global
+                    // (`function_types.transform` → `transform` global);
+                    // `emit_expr` on the qualified path would yield unit.
+                    if let Expr::Path { parts, .. } = callee {
+                        let joined = parts.join(".");
+                        let leaf_hit = names.lookup(&joined).is_none()
+                            && parts
+                                .last()
+                                .is_some_and(|last| names.lookup(last).is_some());
+                        if leaf_hit {
+                            let leaf = Expr::Ident {
+                                name: parts.last().cloned().unwrap_or_default(),
+                                span: callee.span(),
+                            };
+                            Some(self.emit_expr(&leaf, names, out))
+                        } else {
+                            Some(self.emit_expr(callee, names, out))
+                        }
+                    } else {
+                        Some(self.emit_expr(callee, names, out))
+                    }
+                }
             };
             if let Some(cv) = closure_val {
                 if arg_items.is_empty() {
@@ -2683,6 +2805,33 @@ impl Lowerer {
         }
 
         "zz_unit()".to_string()
+    }
+
+    /// Emit an expression in tail/return position as a `zz_value`.
+    ///
+    /// Every generated function returns `zz_value`, but unboxed structs
+    /// lower to raw C structs. A tail that is (or names) an unboxed
+    /// struct must be boxed into a runtime object first — otherwise C
+    /// rejects `return <raw struct>` / `tmp = <raw struct>`. Scalars
+    /// keep the existing `box_scalar_operand` path; anything already
+    /// boxed passes through unchanged.
+    pub(super) fn emit_tail_value(
+        &self,
+        e: &Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        // Check BEFORE emitting so side-effecting values emit exactly once.
+        if let Expr::StructInit { name, .. } = e {
+            if self.is_unboxed_struct(name) {
+                return self.emit_boxed_value(name, e, names, out);
+            }
+        }
+        if let Some(sname) = self.unboxed_struct_of_expr(e, names) {
+            return self.emit_boxed_value(&sname, e, names, out);
+        }
+        let v = self.emit_expr(e, names, out);
+        box_scalar_operand(e, names, &v)
     }
 
     /// Lower a struct literal, distributing flattened (promoted) fields
@@ -2811,7 +2960,7 @@ impl Lowerer {
     /// struct inside a struct holding strings). Literals lower
     /// field-by-field; any other expression is read member-wise through
     /// synthesized field accesses.
-    fn emit_boxed_value(
+    pub(super) fn emit_boxed_value(
         &self,
         sname: &str,
         value: &Expr,
@@ -3121,6 +3270,27 @@ impl Lowerer {
     }
 
     pub(super) fn emit_str_literal(&self, s: &str) -> String {
+        // NUL-containing literals cannot use `zz_str_static`: it measures
+        // with `strlen`, truncating at the first NUL (so `"\x00"` became
+        // `""` and `str.contains(x, "\x00")` was always true). Emit a
+        // length-aware `zz_str_new` instead, with 3-digit octal escapes
+        // (unambiguous in C no matter what follows) and the true length.
+        if s.contains('\0') {
+            let mut o = String::from("\"");
+            for c in s.chars() {
+                match c {
+                    '"' => o.push_str("\\\""),
+                    '\\' => o.push_str("\\\\"),
+                    '\n' => o.push_str("\\n"),
+                    '\r' => o.push_str("\\r"),
+                    '\t' => o.push_str("\\t"),
+                    c if (c as u32) < 32 => o.push_str(&format!("\\{:03o}", c as u32)),
+                    c => o.push(c),
+                }
+            }
+            o.push('"');
+            return format!("zz_str_new({o}, {})", s.len());
+        }
         let mut o = String::from("\"");
         let mut it = s.chars().peekable();
         while let Some(c) = it.next() {
@@ -3550,7 +3720,7 @@ impl Lowerer {
                         inner_open = self.emit_pattern_bind(arg_pat, &payload_tmp, names, out);
                     }
 
-                    let arm_val = self.emit_expr(&arm.body, names, out);
+                    let arm_val = self.emit_tail_value(&arm.body, names, out);
                     out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
                     // Close any nested pattern if-blocks.
                     for _ in 0..inner_open {
@@ -3587,7 +3757,7 @@ impl Lowerer {
                             out.push_str("    {\n");
                         }
                     }
-                    let arm_val = self.emit_expr(&arm.body, names, out);
+                    let arm_val = self.emit_tail_value(&arm.body, names, out);
                     out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
                     if arm_closes_block {
                         out.push_str("    }\n");
@@ -3608,7 +3778,7 @@ impl Lowerer {
                             out.push_str("    {\n");
                         }
                     }
-                    let arm_val = self.emit_expr(&arm.body, names, out);
+                    let arm_val = self.emit_tail_value(&arm.body, names, out);
                     out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
                     if arm_closes_block {
                         out.push_str("    }\n");
@@ -3642,7 +3812,7 @@ impl Lowerer {
                     } else {
                         out.push_str(&format!("    if ({full_cond}) {{\n"));
                     }
-                    let arm_val = self.emit_expr(&arm.body, names, out);
+                    let arm_val = self.emit_tail_value(&arm.body, names, out);
                     out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
                     if arm_closes_block {
                         out.push_str("    }\n");

@@ -1,13 +1,21 @@
-// tests/fixtures/stdlib/net_tcp_test.zz — TCP operations on loopback
+// tests/fixtures/stdlib/net_tcp_test.zz — TCP operations on loopback.
+// Bind ports derive from (pid, sweep task) so parallel runners
+// (per-file parity tests, the discover sweep, e2e) never share them.
+import std.env
 import std.net
 import std.fs
+import std.process(pid)
 
 func main() -> Result<int, str> {
+    sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+    base_port := 20000 + pid() % 20000 + (int(sweep_tok) ?? 0) % 20000
+    listen_addr := "127.0.0.1:{base_port}"
+    refused_addr := "127.0.0.1:{base_port + 1}"
     // Test tcp_listen
-    l := net.tcp_listen("127.0.0.1:19876")?
+    l := net.tcp_listen(listen_addr)?
     println("listen_ok")
     // Test tcp_connect to our listener
-    c := net.tcp_connect("127.0.0.1:19876", 5000)?
+    c := net.tcp_connect(listen_addr, 5000)?
     ss := l.accept()?
     // Test peer_addr
     p := c.peer_addr()?
@@ -41,7 +49,7 @@ func main() -> Result<int, str> {
     println("close_ok")
 
     // Test connection refused
-    match net.tcp_connect("127.0.0.1:19877", 1000) {
+    match net.tcp_connect(refused_addr, 1000) {
         .ok(_) => println("ERROR: should have failed")
         .err(_e) => println("connect_refused_ok")
     }

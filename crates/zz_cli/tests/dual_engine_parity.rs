@@ -40,16 +40,53 @@ fn stdin_for(file: &Path) -> Vec<u8> {
 /// Write errors are ignored: fixtures that exit early (e.g. error
 /// fixtures that never read stdin) close the pipe first (EPIPE).
 fn run_zz_with_input(args: &[&str], file: &Path, input: &[u8]) -> (i32, String, String) {
+    run_zz_with_input_env(args, file, input, None)
+}
+
+/// `run_zz_with_input` plus an optional `ZZ_SWEEP_TOKEN` env value.
+/// The sweep assigns a unique token per fixture task; fixtures that
+/// touch shared mutable resources (/tmp scratch files, bind ports)
+/// mix it into their paths/ports so parallel runners (macro tests,
+/// sweep tasks, e2e) can never share them.
+/// Bound on any single `zz` child (compile + run). A fixture that
+/// spins forever (e.g. a retry loop over a native lowered to unit —
+/// see `known_native_failure`) must fail the task, never the whole
+/// sweep: `wait_with_output` below used to block indefinitely, wedging
+/// the worker pool (`thread::scope` never joins) with zero output.
+/// Generous on purpose: the `--native` leg pays a cold clang `-O3`
+/// compile per fixture. Matches GNU `timeout`'s 124 convention.
+const ZZ_CHILD_TIMEOUT_SECS: u64 = 300;
+/// Sentinel exit for a timed-out child (GNU `timeout` convention).
+const ZZ_CHILD_TIMEOUT_EXIT: i32 = 124;
+
+fn run_zz_with_input_env(
+    args: &[&str],
+    file: &Path,
+    input: &[u8],
+    token: Option<&str>,
+) -> (i32, String, String) {
     use std::io::Write as _;
     use std::process::Stdio;
     let zz_bin = env!("CARGO_BIN_EXE_zz");
-    let mut child = Command::new(zz_bin)
-        .args(args)
+    let mut cmd = Command::new(zz_bin);
+    cmd.args(args)
         .arg(file)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    if let Some(t) = token {
+        cmd.env("ZZ_SWEEP_TOKEN", t);
+        // Sweep fast paths (test-only, never production):
+        // - `ZZ_CRYPTO_FAST=1`: minimal Argon2/bcrypt costs so the KDF
+        //   fixtures take milliseconds, not tens of seconds. Same code
+        //   on both engines → parity still proves the behavior.
+        // - `ZZ_NATIVE_DEV=1`: `-O0 -g` clang per fixture (~4x faster
+        //   than `-O3 -flto=thin`); separate cache entries, same C.
+        cmd.env("ZZ_CRYPTO_FAST", "1");
+        cmd.env("ZZ_NATIVE_DEV", "1");
+    }
+    let mut child = cmd
         .spawn()
         .unwrap_or_else(|e| panic!("failed to exec `zz {args:?} {file:?}`: {e}"));
     if !input.is_empty() {
@@ -61,6 +98,41 @@ fn run_zz_with_input(args: &[&str], file: &Path, input: &[u8]) -> (i32, String, 
     // forever on a held-open stdin (fixtures without a `.stdin` file
     // read empty input, deterministically, on both engines).
     drop(child.stdin.take());
+    // Bounded wait: poll, then kill. Same pattern as
+    // `concurrency_audit_regression::run_timeout` and the
+    // `build_e2e` network-guard (poll + `child.kill()`), so a hung
+    // fixture can never wedge the sweep's worker pool.
+    // NOTE: killing `zz run --native` may orphan its already-spawned
+    // fixture binary (kill only reaches `zz`); that only happens on
+    // timeout, i.e. for fixtures already failing as Unexpected/hangs.
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(ZZ_CHILD_TIMEOUT_SECS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let output = child
+                        .wait_with_output()
+                        .unwrap_or_else(|e| panic!("failed to reap `zz {args:?} {file:?}`: {e}"));
+                    let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                    stderr = format!(
+                        "{stderr}\nPARITY TIMEOUT: `zz {args:?} {}` exceeded \
+                         {ZZ_CHILD_TIMEOUT_SECS}s and was killed",
+                        file.display()
+                    );
+                    return (
+                        ZZ_CHILD_TIMEOUT_EXIT,
+                        String::from_utf8_lossy(&output.stdout).to_string(),
+                        stderr,
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => panic!("failed to wait `zz {args:?} {file:?}`: {e}"),
+        }
+    }
     let output = child
         .wait_with_output()
         .unwrap_or_else(|e| panic!("failed to wait `zz {args:?} {file:?}`: {e}"));
@@ -81,6 +153,18 @@ fn run_zz_vm(file: &Path) -> (i32, String, String) {
 fn run_zz_native(file: &Path) -> (i32, String, String) {
     let input = stdin_for(file);
     run_zz_with_input(&["run", "--native"], file, &input)
+}
+
+/// Sweep variants carrying the task's `ZZ_SWEEP_TOKEN`.
+fn run_zz_vm_token(file: &Path, token: &str) -> (i32, String, String) {
+    let input = stdin_for(file);
+    run_zz_with_input_env(&["run"], file, &input, Some(token))
+}
+
+/// Sweep variants carrying the task's `ZZ_SWEEP_TOKEN`.
+fn run_zz_native_token(file: &Path, token: &str) -> (i32, String, String) {
+    let input = stdin_for(file);
+    run_zz_with_input_env(&["run", "--native"], file, &input, Some(token))
 }
 
 /// Strip lines that are purely numeric (timestamps, memory addresses).
@@ -186,9 +270,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
     match stem {
         // --- C codegen compile errors (scalar boxing class) ---
         "frame_slots" => Some("C codegen: raw zz_value in scalar comparison `(v0 > 0)`"),
-        "question_operator_newline" => {
-            Some("C codegen: raw int64_t global assigned into zz_value temp")
-        }
         "struct_impl" => {
             Some("C codegen: unboxed struct returned/fielded as zz_value and vice versa")
         }
@@ -200,7 +281,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "concurrency_panic_test" => Some("native: panic/fail inside task closures lowers to unit (no err plumbing through zz_call_closure); VM yields .err"),
         "encoding_test" => Some("native: different error message format for bad base64/hex/url"),
         "math_extended_test" => Some("native: float precision + error message differences"),
-        "closure_annotations" => Some("native: top-level closure-call results print empty"),
         "decorators" => Some("native: only the final marker prints; decorator wrapper output missing"),
         "destructuring" => Some("native: top-level tuple-destructured values print empty"),
         "extension_methods" => {
@@ -215,8 +295,29 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
 
         // --- Error fixtures where native leniency exits 0 ---
         "main_result_err" => Some("native: main returning .err exits 0 (no propagation)"),
-        "pg_connect_refused" | "mysql_connect_refused" => {
+        "pg_connect_refused" => {
             Some("native: refused connect yields a null handle and exits 0 (AOT leniency, documented)")
+        }
+        // NOTE: `http_tls_cert` used to be listed here (native exited 0
+        // via silent-unit leniency); since unimplemented natives abort,
+        // native errors like the VM and it passes as a strict error
+        // fixture.
+
+        // --- Phase 2/3 HTTP: VM-only natives abort loudly on AOT ---
+        // `listen_tls`, `listen_cfg`, `fetch_insecure`, `body_bytes`,
+        // `hijack` et al have no C impl yet (tracked in
+        // zz_codegen/tests.rs KNOWN_CODEGEN_GAPS as "P3 AOT"). Native
+        // legs abort at first use via `zz_unimplemented_native` (exit 1
+        // with `not implemented in AOT builds`) instead of the old
+        // silent unit, which wedged retry loops forever.
+        "http_tls_p3" => Some(
+            "P3 AOT: listen_tls + fetch_insecure are VM-only; native aborts",
+        ),
+        "http_hijack_p3" | "http_bytes_p3" => {
+            Some("P3 AOT: hijack / body_bytes are VM-only; native aborts")
+        }
+        "http_limits_p2" | "http_middleware_p2" | "http_static_p2" => {
+            Some("P3 AOT: listen_cfg / serve_dir_at are VM-only; native aborts")
         }
         _ => None,
     }
@@ -227,11 +328,65 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
 // ---------------------------------------------------------------------------
 
 /// Normalize an output stream for cross-engine comparison: ephemeral
-/// `ip:port` pairs collapse and purely numeric lines (timestamps,
-/// addresses) drop. Single choke point so the macros and the sweep
-/// below can never disagree on what "equal" means.
+/// `ip:port` pairs collapse, per-run scratch path segments (`/tmp/zz_*`)
+/// mask out, and purely numeric lines (timestamps, addresses) drop.
+/// Single choke point so the macros and the sweep below can never
+/// disagree on what "equal" means.
 fn norm_stream(s: &str) -> String {
-    strip_numeric_lines(&normalize_addrs(s))
+    strip_numeric_lines(&mask_scratch_paths(&normalize_addrs(s)))
+}
+
+/// Mask per-run scratch segments in `/tmp/zz_*` paths: fixtures isolate
+/// parallel runners with `..._<pid>_<token>` suffixes, and VM vs native
+/// legs are always different processes, so these segments can never
+/// match byte-for-byte. Only the trailing `_digits_digits` run is
+/// masked; real output numbers elsewhere are untouched.
+fn mask_scratch_paths(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Byte-slice prefix check (never `s[i..]`: `i` may sit inside a
+        // multibyte char while scanning).
+        if bytes[i..].starts_with(b"/tmp/zz_") {
+            // Consume the stem: [A-Za-z0-9_]+, then strip up to two
+            // trailing _<alnum-with-digit> groups (pid, sweep token),
+            // which become _<run>. The digit requirement keeps real
+            // name parts (`_test`, `_nonexist`) intact.
+            let mut j = i + "/tmp/zz_".len();
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                j += 1;
+            }
+            let mut k = j;
+            for _ in 0..2 {
+                let mut d = k;
+                while d > i && bytes[d - 1].is_ascii_alphanumeric() {
+                    d -= 1;
+                }
+                let run = &bytes[d..k];
+                if !run.is_empty()
+                    && d > i
+                    && bytes[d - 1] == b'_'
+                    && run.iter().any(|b| b.is_ascii_digit())
+                {
+                    k = d - 1;
+                } else {
+                    break;
+                }
+            }
+            if k < j {
+                out.extend_from_slice(&bytes[i..k]);
+                out.extend_from_slice(b"_<run>");
+            } else {
+                out.extend_from_slice(&bytes[i..j]);
+            }
+            i = j;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
 /// True when two runs match byte-for-byte after normalization:
@@ -486,6 +641,11 @@ parity_strict!(
     "range_var_bounds.zz"
 );
 parity_strict!(
+    parity_syntax_hex_escape_bounds,
+    "syntax",
+    "hex_escape_bounds.zz"
+);
+parity_strict!(
     parity_syntax_scope_collision,
     "syntax",
     "scope_collision.zz"
@@ -499,11 +659,6 @@ parity_strict!(
     parity_syntax_for_annotated_decl,
     "syntax",
     "for_annotated_decl.zz"
-);
-parity_strict!(
-    parity_syntax_hex_escape_bounds,
-    "syntax",
-    "hex_escape_bounds.zz"
 );
 
 // Types
@@ -675,61 +830,119 @@ parity_strict_error!(parity_err_missing_field, "missing_field.zz");
 
 #[test]
 fn parity_discover_all_fixtures() {
-    let fixtures = fixtures_dir();
-    let success_dirs = ["syntax", "types", "stdlib"];
-    let mut strict_pass = 0u32;
-    let mut known_failures = 0u32;
-    let mut skipped = 0u32;
-    let mut unexpected = Vec::new();
-
-    for dir_name in &success_dirs {
-        let dir = fixtures.join(dir_name);
-        if !dir.is_dir() {
-            continue;
-        }
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .unwrap_or_else(|e| panic!("cannot read dir {dir:?}: {e}"))
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("zz"))
-            .collect();
-        files.sort();
-
-        for file in &files {
-            if native_skip_reason(file).is_some() {
-                skipped += 1;
-                continue;
-            }
-
-            let vm = run_zz_vm(file);
-            if vm.0 != 0 {
-                unexpected.push(format!("VM FAIL {}: {}", file.display(), vm.2));
-                continue;
+    // One task per fixture file. Tasks run on a bounded worker pool
+    // (each spawns its own `zz` child processes, so they are fully
+    // independent) with a unique ZZ_SWEEP_TOKEN each — fixtures that
+    // touch shared mutable resources mix it into their scratch
+    // paths/ports and can never collide across threads or processes.
+    struct SweepTask {
+        file: PathBuf,
+        errors_bucket: bool,
+        token: String,
+    }
+    enum SweepOutcome {
+        StrictPass,
+        KnownFailure,
+        Skipped,
+        ErrorStrict,
+        ErrorKnown,
+        Unexpected(String),
+    }
+    fn run_task(task: &SweepTask) -> SweepOutcome {
+        // Legs run sequentially (VM, then native): concurrent legs were
+        // tried and reverted (8 procs on 4 cores thrashed clang to ~140s
+        // wall and a native fixture died by signal under the load).
+        let file = &task.file;
+        if task.errors_bucket {
+            if let Some(bug) = known_native_failure(file) {
+                if vm_only() {
+                    return SweepOutcome::ErrorKnown;
+                }
+                let native = run_zz_native_token(file, &task.token);
+                if native.0 != 0 {
+                    return SweepOutcome::Unexpected(format!(
+                        "FIXED! {} — native errors again; remove from known_native_failures() (was: {bug})",
+                        file.display()
+                    ));
+                }
+                return SweepOutcome::ErrorKnown;
             }
             if vm_only() {
-                strict_pass += 1;
-                continue;
+                let vm = run_zz_vm_token(file, &task.token);
+                if vm.0 == 0 {
+                    return SweepOutcome::Unexpected(format!(
+                        "ERROR FIXTURE {} exits 0 on VM (should fail)",
+                        file.display()
+                    ));
+                }
+                return SweepOutcome::ErrorStrict;
             }
-            let native = run_zz_native(file);
-
-            if let Some(bug) = known_native_failure(file) {
-                known_failures += 1;
+            let vm = run_zz_vm_token(file, &task.token);
+            let native = run_zz_native_token(file, &task.token);
+            if vm.0 == 0 {
+                return SweepOutcome::Unexpected(format!(
+                    "ERROR FIXTURE {} exits 0 on VM (should fail)",
+                    file.display()
+                ));
+            }
+            if native.0 != 0 {
+                SweepOutcome::ErrorStrict
+            } else {
+                SweepOutcome::Unexpected(format!(
+                    "ERROR PARITY {}: vm_exit={} native_exit={}",
+                    file.display(),
+                    vm.0,
+                    native.0
+                ))
+            }
+        } else {
+            if native_skip_reason(file).is_some() {
+                return SweepOutcome::Skipped;
+            }
+            if vm_only() {
+                let vm = run_zz_vm_token(file, &task.token);
+                if vm.0 != 0 {
+                    return SweepOutcome::Unexpected(format!(
+                        "VM FAIL {}: {}",
+                        file.display(),
+                        vm.2
+                    ));
+                }
+                return SweepOutcome::StrictPass;
+            }
+            if known_native_failure(file).is_some() {
+                let vm = run_zz_vm_token(file, &task.token);
+                if vm.0 != 0 {
+                    return SweepOutcome::Unexpected(format!(
+                        "VM FAIL {}: {}",
+                        file.display(),
+                        vm.2
+                    ));
+                }
+                let native = run_zz_native_token(file, &task.token);
+                let bug = known_native_failure(file).unwrap_or("tracked native bug");
                 if parity_match(&vm, &native) {
-                    unexpected.push(format!(
+                    return SweepOutcome::Unexpected(format!(
                         "FIXED! {} — remove from known_native_failures() (was: {bug})",
                         file.display()
                     ));
                 }
-                continue;
+                return SweepOutcome::KnownFailure;
             }
-
-            // Strict parity check (exit + stdout + stderr).
+            let vm = run_zz_vm_token(file, &task.token);
+            let native = run_zz_native_token(file, &task.token);
+            if vm.0 != 0 {
+                return SweepOutcome::Unexpected(format!("VM FAIL {}: {}", file.display(), vm.2));
+            }
             if native.0 != 0 {
-                unexpected.push(format!("NATIVE FAIL {}: {}", file.display(), native.2));
-                continue;
+                return SweepOutcome::Unexpected(format!(
+                    "NATIVE FAIL {}: {}",
+                    file.display(),
+                    native.2
+                ));
             }
             if !parity_match(&vm, &native) {
-                unexpected.push(format!(
+                return SweepOutcome::Unexpected(format!(
                     "PARITY BUG {}\n--- exits vm={} native={} ---\n--- VM stdout ---\n{}\n--- NATIVE stdout ---\n{}\n--- VM stderr ---\n{}\n--- NATIVE stderr ---\n{}",
                     file.display(),
                     vm.0,
@@ -739,68 +952,112 @@ fn parity_discover_all_fixtures() {
                     vm.2,
                     native.2
                 ));
-                continue;
             }
-            strict_pass += 1;
+            SweepOutcome::StrictPass
         }
     }
 
-    // Error fixtures.
-    let err_dir = fixtures.join("errors");
-    let mut err_known = 0u32;
-    let mut err_strict = 0u32;
-    if err_dir.is_dir() {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&err_dir)
-            .unwrap_or_else(|e| panic!("cannot read dir {err_dir:?}: {e}"))
+    fn zz_files_sorted(dir: &Path) -> Vec<PathBuf> {
+        if !dir.is_dir() {
+            return Vec::new();
+        }
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("cannot read dir {dir:?}: {e}"))
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("zz"))
             .collect();
         files.sort();
+        files
+    }
 
-        for file in &files {
-            if let Some(bug) = known_native_failure(file) {
-                err_known += 1;
-                // A "fixed" error fixture fails on native again: surface
-                // it instead of silently counting.
-                let native = if vm_only() {
-                    continue;
-                } else {
-                    run_zz_native(file)
-                };
-                if native.0 != 0 {
-                    unexpected.push(format!(
-                        "FIXED! {} — native errors again; remove from known_native_failures() (was: {bug})",
-                        file.display()
-                    ));
-                }
-                continue;
-            }
-            let vm = run_zz_vm(file);
-            if vm.0 == 0 {
-                unexpected.push(format!(
-                    "ERROR FIXTURE {} exits 0 on VM (should fail)",
-                    file.display()
-                ));
-                continue;
-            }
-            if vm_only() {
-                err_strict += 1;
-                continue;
-            }
-            let native = run_zz_native(file);
-            if native.0 != 0 {
-                err_strict += 1;
-            } else {
-                unexpected.push(format!(
-                    "ERROR PARITY {}: vm_exit={} native_exit={}",
-                    file.display(),
-                    vm.0,
-                    native.0
-                ));
-            }
+    let fixtures = fixtures_dir();
+    let mut tasks: Vec<SweepTask> = Vec::new();
+    for dir_name in ["syntax", "types", "stdlib"] {
+        for file in zz_files_sorted(&fixtures.join(dir_name)) {
+            let token = format!("t{}", tasks.len());
+            tasks.push(SweepTask {
+                file,
+                errors_bucket: false,
+                token,
+            });
         }
     }
+    for file in zz_files_sorted(&fixtures.join("errors")) {
+        let token = format!("t{}", tasks.len());
+        tasks.push(SweepTask {
+            file,
+            errors_bucket: true,
+            token,
+        });
+    }
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(tasks.len().max(1));
+    let total = tasks.len();
+    let done = std::sync::atomic::AtomicU32::new(0);
+    let c_strict = std::sync::atomic::AtomicU32::new(0);
+    let c_known = std::sync::atomic::AtomicU32::new(0);
+    let c_skipped = std::sync::atomic::AtomicU32::new(0);
+    let c_unexpected = std::sync::atomic::AtomicU32::new(0);
+    eprintln!("[parity-sweep] 0/{total} (strict=0 known=0 skipped=0 unexpected=0)");
+    let queue = std::sync::Mutex::new(std::collections::VecDeque::from(tasks));
+    let outcomes = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| loop {
+                let task = queue.lock().unwrap().pop_front();
+                let Some(task) = task else { break };
+                let outcome = run_task(&task);
+                match &outcome {
+                    SweepOutcome::StrictPass | SweepOutcome::ErrorStrict => {
+                        c_strict.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    SweepOutcome::KnownFailure | SweepOutcome::ErrorKnown => {
+                        c_known.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    SweepOutcome::Skipped => {
+                        c_skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    SweepOutcome::Unexpected(_) => {
+                        c_unexpected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                outcomes.lock().unwrap().push(outcome);
+                let d = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if d.is_multiple_of(10) || d as usize == total {
+                    eprintln!(
+                        "[parity-sweep] {d}/{total} (strict={} known={} skipped={} unexpected={})",
+                        c_strict.load(std::sync::atomic::Ordering::Relaxed),
+                        c_known.load(std::sync::atomic::Ordering::Relaxed),
+                        c_skipped.load(std::sync::atomic::Ordering::Relaxed),
+                        c_unexpected.load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                }
+            });
+        }
+    });
+    let outcomes = outcomes.into_inner().unwrap();
+
+    let mut strict_pass = 0u32;
+    let mut known_failures = 0u32;
+    let mut skipped = 0u32;
+    let mut err_known = 0u32;
+    let mut err_strict = 0u32;
+    let mut unexpected = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            SweepOutcome::StrictPass => strict_pass += 1,
+            SweepOutcome::KnownFailure => known_failures += 1,
+            SweepOutcome::Skipped => skipped += 1,
+            SweepOutcome::ErrorStrict => err_strict += 1,
+            SweepOutcome::ErrorKnown => err_known += 1,
+            SweepOutcome::Unexpected(u) => unexpected.push(u),
+        }
+    }
+    unexpected.sort();
 
     println!("\n=== Dual-Engine Parity Summary ===");
     println!("Strict parity pass: {strict_pass}");
@@ -818,4 +1075,32 @@ fn parity_discover_all_fixtures() {
             unexpected.len()
         );
     }
+}
+
+#[test]
+fn mask_scratch_paths_masks_pid_token_suffixes() {
+    assert_eq!(
+        mask_scratch_paths("err: /tmp/zz_fs_comprehensive_12345_3/missing.txt"),
+        "err: /tmp/zz_fs_comprehensive_<run>/missing.txt"
+    );
+    // Multibyte content around the path must survive byte-wise scanning.
+    assert_eq!(
+        mask_scratch_paths("───\n/tmp/zz_x_1_0/a\n───"),
+        "───\n/tmp/zz_x_<run>/a\n───"
+    );
+    // Letter-prefixed token (the sweep uses `t{n}`).
+    assert_eq!(
+        mask_scratch_paths("notfound: /tmp/zz_fs_comprehensive_322462_t74/missing.txt"),
+        "notfound: /tmp/zz_fs_comprehensive_<run>/missing.txt"
+    );
+    // No suffix: untouched.
+    assert_eq!(
+        mask_scratch_paths("see /tmp/zz_phase4a_nonexist.txt"),
+        "see /tmp/zz_phase4a_nonexist.txt"
+    );
+    // Unrelated numbers untouched.
+    assert_eq!(
+        mask_scratch_paths("files=6 lines=1893"),
+        "files=6 lines=1893"
+    );
 }

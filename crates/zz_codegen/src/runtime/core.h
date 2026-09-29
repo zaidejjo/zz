@@ -632,6 +632,7 @@ static inline zz_value zz_clone(zz_value v) {
 #define ZZOP_GE 12
 
 zz_value zz_binop(int op, zz_value a, zz_value b);
+zz_value zz_unimplemented_native(const char *name);
 zz_value zz_neg(zz_value a);
 zz_value zz_not(zz_value a);
 bool zz_truthy(zz_value v);
@@ -705,6 +706,11 @@ zz_value zz_io_println(zz_value v, int *err);
 zz_value zz_io_print(zz_value v, int *err);
 zz_value zz_io_input(zz_value prompt, int *err);
 zz_value zz_dbg(zz_value v, int *err);
+zz_value zz_assert(zz_value v, int *err);
+zz_value zz_assert_eq(zz_value a, zz_value b, int *err);
+zz_value zz_assert_ne(zz_value a, zz_value b, int *err);
+zz_value zz_assert_approx_eq(zz_value a, zz_value b, zz_value eps, int *err);
+zz_value zz_fail(zz_value v, int *err);
 zz_value zz_math_abs(zz_value v, int *err);
 zz_value zz_math_sqrt(zz_value v, int *err);
 zz_value zz_math_pow(zz_value a, zz_value b, int *err);

@@ -792,7 +792,7 @@ pub fn compile_and_run_for_target(
     target: Option<&str>,
     args: &[&str],
 ) -> Result<(i32, String), BuildError> {
-    let tmpdir = std::env::temp_dir().join(format!("zz-run-{}", std::process::id()));
+    let tmpdir = transient_dir("zz-run");
     std::fs::create_dir_all(&tmpdir)?;
     let bin = tmpdir.join("zz_tmp_bin");
     build(source, &bin, opts, target)?;
@@ -802,10 +802,21 @@ pub fn compile_and_run_for_target(
     r
 }
 
+/// Unique temp dir for one transient build/run execution.
+/// The counter (not just the pid) keeps parallel tests in the same
+/// process from sharing a dir — they would otherwise overwrite and
+/// delete each other's binaries mid-run.
+fn transient_dir(prefix: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
+    std::env::temp_dir().join(format!("{prefix}-{}-{uniq}", std::process::id()))
+}
+
 /// Returns the temp binary path without deleting it (for `zz build`).
 /// Native host build (no cross target).
 pub fn build_to_temp(source: &str, opts: BuildOptions) -> Result<(PathBuf, Clang), BuildError> {
-    let tmpdir = std::env::temp_dir().join(format!("zz-build-out-{}", std::process::id()));
+    let tmpdir = transient_dir("zz-build-out");
     std::fs::create_dir_all(&tmpdir)?;
     let bin = tmpdir.join(if cfg!(windows) {
         "zz_out.exe"
@@ -944,7 +955,7 @@ mod tests {
 
     #[test]
     fn emit_script_drops_march_native() {
-        let dir = std::env::temp_dir().join(format!("zz-emit-test-{}", std::process::id()));
+        let dir = transient_dir("zz-emit-test");
         let opts = release_opts();
         let (_c, sh, _bat) =
             emit_c_plus_script("int main(){return 0;}", &dir, None, &opts).expect("emit");
