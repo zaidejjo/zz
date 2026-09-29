@@ -42,6 +42,12 @@ pub struct CacheKey {
     pub target: String,
     /// Sum of runtime/compiler file mtimes for invalidation.
     pub runtime_mtime: Option<u64>,
+    /// Content hash of every `.zz` source in the project directory
+    /// (sorted relpath + bytes). Sibling modules feed the same lowering
+    /// as the entry file, so editing them must bust the cache: without
+    /// this, `zz build` re-serves stale binaries (only the entry file
+    /// was hashed). Build output/hidden dirs are skipped.
+    pub sources_hash: String,
     /// Content hash of linked plugin binaries (loose `.o` plus original
     /// `.a` archives — see [`artifact_sig`]). Content, not mtime: build
     /// hooks re-copy artifacts on every run, so mtimes churn even when
@@ -99,11 +105,13 @@ impl CacheKey {
             project_dir = start_dir.to_path_buf();
         }
         let dep_hashes = compute_dep_hashes(&project_dir)?;
+        let sources_hash = hash_zz_sources(&project_dir);
 
         Ok(Self {
             source_hash,
             source_path: source_path_str,
             dep_hashes,
+            sources_hash,
             build_fingerprint,
             target: target.unwrap_or("host").to_string(),
             runtime_mtime,
@@ -171,10 +179,11 @@ impl CacheKey {
         };
 
         format!(
-            "{}-{}-{}-{}-{}-{}-{}-{}",
+            "{}-{}-{}-{}-{}-{}-{}-{}-{}",
             &self.source_hash[..16.min(self.source_hash.len())],
             path_slug,
             deps_slug,
+            &self.sources_hash[..16.min(self.sources_hash.len())],
             &build_hex[..16.min(build_hex.len())],
             self.target,
             rt_slug,
@@ -188,6 +197,50 @@ impl CacheKey {
 ///
 /// Looks for `zz.toml` in `project_dir`, parses it, and hashes each
 /// path dependency from live disk content.
+/// Hash every `.zz` source under `project_dir` (sorted relpath + bytes).
+/// Skips hidden dirs, `target/`, `bin/`, and `node_modules/` (build output
+/// and vendored trees must not churn the key). Missing/unreadable dirs
+/// hash as empty (same as today: single-file projects just work).
+fn hash_zz_sources(project_dir: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    const SKIP_DIRS: &[&str] = &["target", "bin", "node_modules"];
+    fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, Vec<u8>)>, depth: usize) {
+        if depth > 32 {
+            return;
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
+                    continue;
+                }
+                walk(&path, base, out, depth + 1);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("zz") {
+                if let Ok(rel) = path.strip_prefix(base) {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        out.push((rel.to_string_lossy().into_owned(), bytes));
+                    }
+                }
+            }
+        }
+    }
+    walk(project_dir, project_dir, &mut files, 0);
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    files.len().hash(&mut h);
+    for (rel, bytes) in &files {
+        rel.hash(&mut h);
+        bytes.hash(&mut h);
+    }
+    format!("{:016x}", h.finish())
+}
+
 fn compute_dep_hashes(project_dir: &Path) -> Result<HashMap<String, String>, String> {
     let toml_path = project_dir.join("zz.toml");
     if !toml_path.exists() {
@@ -685,5 +738,34 @@ dep_a = { path = "dep_a" }
         assert_ne!(ka.source_path, kb.source_path);
         assert_ne!(ka.to_slug(), kb.to_slug());
         let _ = fs::remove_dir_all(&d);
+    }
+
+    fn key_for(dir: &Path, entry: &str, content: &str) -> String {
+        CacheKey::compute(&dir.join(entry), content, 0, None, None)
+            .expect("key computes")
+            .to_slug()
+    }
+
+    #[test]
+    fn sibling_zz_edit_busts_key() {
+        let d = tmp();
+        fs::write(d.join("main.zz"), "func main() {}\n").unwrap();
+        fs::write(d.join("lib.zz"), "pub func a() -> int { 1 }\n").unwrap();
+        let before = key_for(&d, "main.zz", "func main() {}\n");
+        fs::write(d.join("lib.zz"), "pub func a() -> int { 2 }\n").unwrap();
+        let after = key_for(&d, "main.zz", "func main() {}\n");
+        assert_ne!(before, after, "sibling module edit must invalidate");
+    }
+
+    #[test]
+    fn nested_zz_edit_busts_key() {
+        let d = tmp();
+        fs::create_dir_all(d.join("src")).unwrap();
+        fs::write(d.join("src").join("main.zz"), "func main() {}\n").unwrap();
+        fs::write(d.join("src").join("util.zz"), "pub func u() {}\n").unwrap();
+        let before = key_for(&d.join("src"), "main.zz", "func main() {}\n");
+        fs::write(d.join("src").join("util.zz"), "pub func u() -> int { 1 }\n").unwrap();
+        let after = key_for(&d.join("src"), "main.zz", "func main() {}\n");
+        assert_ne!(before, after, "nested sibling edit must invalidate");
     }
 }
