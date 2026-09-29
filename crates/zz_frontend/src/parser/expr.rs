@@ -590,10 +590,19 @@ impl Parser {
                 // A `{` is treated as a struct literal when its contents look
                 // like fields (`ident : ...`). Adjacency alone is not enough
                 // because `if x == y{ ... }` would be misparsed as struct init.
+                // Nor is `{ Ident :` alone: a block opening with an annotated
+                // declaration (`for x in xs {\n r: int = ... }`, `if c {
+                // x: int = ... }`) looks identical through the colon (the
+                // newline after `{` is not a StmtEnd token). But `=` never
+                // continues an expression, so `{ Ident : Ident =` is always
+                // a block with a declaration, never a struct field.
                 if self.at(TokenKind::LBrace)
                     && self.peek_kind_at(1) == TokenKind::Ident
                     && (self.peek_kind_at(2) == TokenKind::Colon
                         || self.peek_kind_at(2) == TokenKind::LBrace)
+                    && !(self.peek_kind_at(2) == TokenKind::Colon
+                        && self.peek_kind_at(3) == TokenKind::Ident
+                        && self.peek_kind_at(4) == TokenKind::Assign)
                 {
                     return self.parse_struct_init(parts, tok.span.join(end));
                 }

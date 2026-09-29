@@ -496,6 +496,11 @@ parity_strict!(
     "struct_scalar_fields.zz"
 );
 parity_strict!(
+    parity_syntax_for_annotated_decl,
+    "syntax",
+    "for_annotated_decl.zz"
+);
+parity_strict!(
     parity_syntax_hex_escape_bounds,
     "syntax",
     "hex_escape_bounds.zz"

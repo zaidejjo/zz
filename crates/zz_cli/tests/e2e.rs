@@ -179,6 +179,11 @@ e2e_success_test!(
     "struct_scalar_fields.zz"
 );
 e2e_success_test!(
+    e2e_syntax_for_annotated_decl,
+    "syntax",
+    "for_annotated_decl.zz"
+);
+e2e_success_test!(
     e2e_syntax_hex_escape_bounds,
     "syntax",
     "hex_escape_bounds.zz"
