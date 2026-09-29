@@ -1228,7 +1228,26 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.space();
                     self.text("=>");
                     self.space();
-                    self.emit_expr(&arm.body);
+                    // A bare `return` arm parses into a single-statement
+                    // Block (identical AST to the braced form, by parser
+                    // design). Re-emit it bare when the source had no
+                    // braces, so formatting stays idempotent — same
+                    // source-sniffing trick as `try` below. The sniff
+                    // reads only the body's first byte: braced blocks
+                    // start at `{`; the bare form's span starts at the
+                    // pattern, and no pattern form opens with `{`.
+                    match &arm.body {
+                        Expr::Block(b)
+                            if b.stmts.len() == 1
+                                && !self
+                                    .source
+                                    .get(b.span.start as usize..)
+                                    .is_some_and(|s| s.starts_with('{')) =>
+                        {
+                            self.emit_stmt(&b.stmts[0])
+                        }
+                        body => self.emit_expr(body),
+                    };
                     let scratch = std::mem::replace(&mut self.out, saved);
                     let arm_doc = Doc::Indent {
                         contents: Box::new(Doc::Concat(vec![

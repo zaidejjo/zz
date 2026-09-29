@@ -880,7 +880,42 @@ pub fn exec_binary(bin: &Path, script_args: &[String]) -> Result<i32, String> {
         .stdin(Stdio::inherit())
         .status()
         .map_err(|e| format!("cannot run binary: {e}"))?;
-    Ok(status.code().unwrap_or(-1))
+    if let Some(code) = status.code() {
+        return Ok(code);
+    }
+    // Killed by signal (Unix): name it. The old bare `-1` hid segfaults
+    // (e.g. every `http.listen` native binary died in _dl_fini with no
+    // message and surfaced only as "code -1").
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return Err(format!(
+                "native program killed by signal {sig} ({})",
+                signal_name(sig)
+            ));
+        }
+    }
+    Ok(-1)
+}
+
+/// Short name for a Unix signal number (common cases; else "unknown").
+#[cfg(unix)]
+fn signal_name(sig: i32) -> &'static str {
+    match sig {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => "unknown signal",
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,9 @@
 // tests/fixtures/stdlib/http_keepalive_p1.zz — live socket Phase 1 checks
 // keep-alive reuse on one connection, 405 + Allow, close semantics.
+import std.env
 import std.http
 import std.net
+import std.str
 import std.task
 import std.time
 import std.process(pid)
@@ -10,10 +12,13 @@ func main() -> Result<int, str> {
     s := http.server()
     s = s.route("GET", "/ping", |_req| "pong")
     s = s.route("GET", "/users/:id", |req| "user-{http.param(req, "id").expect("id")}")
-    // Pid-derived port in a disjoint range (net_tcp_test uses
-    // 20000+): sequential sweep legs share the task token, so only the
-    // pid separates runs here.
-    port := 10000 + pid() % 5000
+    // Per (process, sweep task) so parallel runners never share the
+    // port (net_tcp_test uses 20000+). The sweep token looks like
+    // "t{n}" ("0" outside the sweep), so strip the prefix before
+    // parsing — bare int(token) never parses and silently mixes 0.
+    sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+    tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
+    port := 10000 + pid() % 5000 + tok_num % 5000
     addr := "127.0.0.1:{port}"
     task.spawn(|_| {
         http.listen(s, port)

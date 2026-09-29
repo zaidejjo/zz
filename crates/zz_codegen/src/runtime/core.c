@@ -3845,11 +3845,20 @@ static int write_to_socket(Connection *c) {
     }
 }
 
-// Drop clean file-backed pages of cold dependencies (libcurl, TLS,
+// Drop clean file-backed TEXT pages of cold dependencies (libcurl, TLS,
 // sqlite trees). Linked for fetch/sql features the hot serve path never
 // calls; their constructors fault ~1 MB of tables at load. DONTNEED on
-// private file mappings is transparent: any later use (e.g. a handler
-// calling fetch) re-faults from disk automatically.
+// clean pages is transparent: any later use (e.g. a handler calling
+// fetch) re-faults from disk automatically.
+//
+// TEXT ONLY (`r-xp`). Read-only is not enough: RELRO segments (`.fini_array`,
+// `.data.rel.ro`, GOT) are mapped `r--p` but carry load-time relocations,
+// i.e. they are private DIRTY pages. Discarding one reverts it to link-time
+// bytes on next fault — that zeroed libcurl's relocated `.fini_array` back
+// to `0xd0e0` and segfaulted every `http.listen` program at exit (in
+// `_dl_fini`). Writable mappings are discarded content, same reason.
+// Anonymous mappings ([heap], [stack], [vdso], ...) have no '/' pathname
+// and are skipped the same way.
 #ifdef __linux__
 static void http_cold_dep_trim(void) {
     static const char *const cold[] = {
@@ -3862,7 +3871,12 @@ static void http_cold_dep_trim(void) {
     char line[512];
     while (fgets(line, sizeof line, maps)) {
         unsigned long lo = 0, hi = 0;
-        if (sscanf(line, "%lx-%lx", &lo, &hi) != 2 || hi <= lo) continue;
+        char perms[8] = "";
+        if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3 || hi <= lo) continue;
+        // Executable text, never relocation-dirtied (perms[1] == 'w'
+        // covers rw-p/rw-s/rwxp), file-backed (space-slash pathname).
+        if (perms[0] != 'r' || perms[1] == 'w' || perms[2] != 'x') continue;
+        if (!strstr(line, " /")) continue;
         int hit = 0;
         for (int i = 0; cold[i] && !hit; i++) {
             if (strstr(line, cold[i])) hit = 1;
