@@ -1,0 +1,9 @@
+// Control char directly followed by hex digits: the AOT C emitter must
+// not fold `\x1f` + `1` into the single C escape `\x1f1` (out of range).
+s := "A\x1f1\x1fB"
+println(len(s))
+println(s == "A\x1f1\x1fB")
+t := "\x01" + "0" + "\x02e\x0aF"
+println(len(t))
+println(t == "\x010\x02e\x0aF")
+println("hex_escape_bounds_ok")

@@ -1,0 +1,21 @@
+// Struct scalar fields from params, locals, and literals: already-boxed
+// values must pass through, raw scalars get wrapped once. (Used to emit
+// `zz_bool(boxed)` — a C type error — for bool params.)
+pub struct Flags { verbose: bool, count: int, ratio: float, name: str }
+
+pub func make(v: bool, n: int) -> Flags {
+    Flags{ verbose: v, count: n, ratio: 1.5, name: "x" }
+}
+
+func main() {
+    f := make(true, 3)
+    println(f.verbose)
+    println(f.count)
+    println(f.ratio)
+    println(f.name)
+    local := false
+    g := Flags{ verbose: local, count: 0, ratio: 0.0, name: "y" }
+    println(g.verbose)
+    println(g.count)
+    println("struct_scalar_fields_ok")
+}

@@ -183,6 +183,7 @@ mod tests {
             source_hash: crate::hash::hash_bytes(src.as_bytes()),
             source_path: String::new(),
             dep_hashes: std::collections::HashMap::new(),
+            sources_hash: String::new(),
             build_fingerprint: 42,
             target: "host".to_string(),
             runtime_mtime: None,

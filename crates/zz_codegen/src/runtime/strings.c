@@ -1448,16 +1448,26 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
         return arr;
     }
     size_t pos = 0;
-    while (pos <= len) {
+    for (;;) {
         size_t next = pos;
+        int found = 0;
         while (next + slen <= len) {
-            if (memcmp(d + next, sd, slen) == 0) break;
+            if (memcmp(d + next, sd, slen) == 0) { found = 1; break; }
             next++;
+        }
+        if (!found) {
+            // No more separators: remainder runs to end of string.
+            // (Previously emitted d[pos..next] where next stalls at
+            // len-slen+1, silently dropping up to slen-1 tail chars —
+            // invisible for single-char seps where next always reaches len.)
+            zz_value item = zz_str_new(d + pos, len - pos);
+            int sub_err = 0;
+            zz_vec_append(arr, item, &sub_err);
+            break;
         }
         zz_value item = zz_str_new(d + pos, next - pos);
         int sub_err = 0;
         zz_vec_append(arr, item, &sub_err);
-        if (next + slen > len) break;
         pos = next + slen;
     }
     return arr;

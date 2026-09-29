@@ -23,8 +23,8 @@ pub const TOP: &str = "<top>";
 /// namespace. When unknown (an unresolved inference variable), conservatively
 /// emits an edge to every known `*.{method}` function so DCE never drops a
 /// potential target.
-fn resolve_methods(tp: &TypedProgram, recv: &Expr, method: &str) -> Vec<String> {
-    match tp.type_at(recv.span()) {
+fn resolve_methods(tp: &TypedProgram, caller: &str, recv: &Expr, method: &str) -> Vec<String> {
+    match tp.type_at(caller, recv.span()) {
         Some(Type::Str) => vec![format!("str.{method}")],
         Some(Type::Array(_)) => vec![format!("vec.{method}")],
         Some(Type::Bytes) => vec![format!("bytes.{method}")],
@@ -278,7 +278,7 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
                     }
                 }
                 Expr::Field { obj, name, .. } => {
-                    for m in resolve_methods(tp, obj, name) {
+                    for m in resolve_methods(tp, caller, obj, name) {
                         cg.edge(caller, &m);
                     }
                     // Also descend into the object expression (it may hold
@@ -445,7 +445,7 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
 /// `roots` are function names (or [`TOP`]) that are always executed. The
 /// engine follows call edges, method dispatches, function-as-value uses, and
 /// struct instantiations, transitively.
-pub fn reachable_from(_tp: &TypedProgram, cg: &CallGraph, roots: &[&str]) -> ReachableSet {
+pub fn reachable_from(tp: &TypedProgram, cg: &CallGraph, roots: &[&str]) -> ReachableSet {
     let mut reach = ReachableSet::default();
     let mut queue: VecDeque<String> = VecDeque::new();
 
@@ -456,11 +456,26 @@ pub fn reachable_from(_tp: &TypedProgram, cg: &CallGraph, roots: &[&str]) -> Rea
         }
     }
 
+    // Selective-import bare aliases (`double` for `math_utils.double`)
+    // edge only the bare name; the canonical body would otherwise be
+    // pruned while the bare alias is misclassified as a native below.
+    // Resolve bare names to their program-defined canonicals here so
+    // both stay reachable.
+    let mut alias_extra: Vec<String> = Vec::new();
     while let Some(caller) = queue.pop_front() {
         if let Some(callees) = cg.edges.get(&caller) {
             for c in callees {
                 if reach.funcs.insert(c.clone()) {
                     queue.push_back(c.clone());
+                }
+                // Bare alias → queue canonical program-defined targets.
+                if !c.contains('.') && !cg.program_defined.contains(c) {
+                    let suffix = format!(".{c}");
+                    for pd in &cg.program_defined {
+                        if pd.ends_with(suffix.as_str()) && !reach.funcs.contains(pd) {
+                            alias_extra.push(pd.clone());
+                        }
+                    }
                 }
             }
         }
@@ -477,14 +492,53 @@ pub fn reachable_from(_tp: &TypedProgram, cg: &CallGraph, roots: &[&str]) -> Rea
             }
         }
     }
+    // Drain alias canonicals + their transitive callees.
+    let mut extra_q: VecDeque<String> = alias_extra.into_iter().collect();
+    while let Some(c) = extra_q.pop_front() {
+        if !reach.funcs.insert(c.clone()) {
+            continue;
+        }
+        if let Some(callees) = cg.edges.get(&c) {
+            for n in callees {
+                if !reach.funcs.contains(n) {
+                    extra_q.push_back(n.clone());
+                }
+            }
+        }
+        if let Some(vals) = cg.value_uses.get(&c) {
+            for v in vals {
+                if !reach.funcs.contains(v) {
+                    extra_q.push_back(v.clone());
+                }
+            }
+        }
+    }
 
     // stdlib natives = reachable funcs that were seeded (not defined by the
-    // program). Everything in reach.funcs that isn't defined in the AST is
-    // an external/native dependency.
+    // program). Binding-only values (top-level closure vars like
+    // `function_types.transform`, in `tp.bindings` but not `tp.funcs`)
+    // are values, not natives — they lower via `zz_call_closure`.
+    // Bare selective aliases resolved above are likewise not natives.
     for f in &reach.funcs {
-        if !cg.program_defined.contains(f) {
-            reach.natives.insert(f.clone());
+        if cg.program_defined.contains(f) {
+            continue;
         }
+        // Binding-only: never a native.
+        if tp.bindings.contains_key(f) && !tp.funcs.contains_key(f) {
+            continue;
+        }
+        // Bare alias of a program-defined canonical: not a native.
+        if !f.contains('.') {
+            let suffix = format!(".{f}");
+            if cg
+                .program_defined
+                .iter()
+                .any(|pd| pd.ends_with(suffix.as_str()))
+            {
+                continue;
+            }
+        }
+        reach.natives.insert(f.clone());
     }
 
     reach
@@ -564,8 +618,16 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
                 // Selective/wildcard imports (`import std.fs(read_to_string
                 // as rts)`) are always kept: they carry alias info the AOT
                 // backend needs to resolve bare names to canonical natives.
+                // Namespace aliases (`import std.fs as f`) are likewise
+                // always kept: reachability is computed on canonical names
+                // (`fs.walk_dir`), which never match the alias prefix
+                // (`f.`), so the prefix check below would wrongly drop
+                // them and every `f.*` call would lower to unit.
                 // They emit no code (the lowerer ignores Import statements).
-                if !items.is_empty() || reach.funcs.iter().any(|f| f.starts_with(&prefix)) {
+                if !items.is_empty()
+                    || alias.is_some()
+                    || reach.funcs.iter().any(|f| f.starts_with(&prefix))
+                {
                     stmts.push(stmt.clone());
                 }
             }

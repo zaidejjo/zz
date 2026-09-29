@@ -77,7 +77,7 @@ pub fn analyze(tp: &TypedProgram) -> EscapeResult {
                 };
                 analyze_block_impl(body, tp, &mut ctx, &mut result, true);
                 // Propagate escaping to initializer expressions of escaped variables.
-                propagate_escaped(body, &ctx.escaped_names, tp, &mut result);
+                propagate_escaped(body, &ctx.escaped_names, tp, ctx.func_name, &mut result);
             }
             other => {
                 let mut ctx = FuncCtx {
@@ -100,16 +100,17 @@ fn propagate_escaped(
     block: &crate::Block,
     escaped_names: &HashSet<String>,
     tp: &TypedProgram,
+    scope: &str,
     result: &mut EscapeResult,
 ) {
     for stmt in &block.stmts {
         match stmt {
             Stmt::Decl { name, value, .. } => {
                 if escaped_names.contains(&name.name) {
-                    mark_escaping_recursive(value, tp, result);
+                    mark_escaping_recursive(value, tp, scope, result);
                 }
             }
-            Stmt::For { body, .. } => propagate_escaped(body, escaped_names, tp, result),
+            Stmt::For { body, .. } => propagate_escaped(body, escaped_names, tp, scope, result),
             _ => {}
         }
     }
@@ -140,7 +141,7 @@ fn analyze_block_impl(
         if is_tail {
             if let Stmt::Expr(e) = stmt {
                 // Tail expression = implicit return.
-                mark_escaping_recursive(e, tp, result);
+                mark_escaping_recursive(e, tp, ctx.func_name, result);
                 match e {
                     Expr::Ident { name, .. } => {
                         ctx.escaped_names.insert(name.clone());
@@ -186,7 +187,7 @@ fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &
             if let Expr::Ident { name, .. } = target {
                 if ctx.global_names.contains(name) || ctx.param_names.contains(name) {
                     // Assigning to a param or global: the RHS escapes.
-                    mark_escaping_recursive(value, tp, result);
+                    mark_escaping_recursive(value, tp, ctx.func_name, result);
                 } else {
                     let cls = classify_expr(value, tp, ctx);
                     result.classes.insert(value.span(), cls);
@@ -194,7 +195,7 @@ fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &
                 }
             } else {
                 // Assignment to a path (struct field, etc.) — conservative.
-                mark_escaping_recursive(value, tp, result);
+                mark_escaping_recursive(value, tp, ctx.func_name, result);
             }
         }
         Stmt::Expr(e) => {
@@ -202,7 +203,7 @@ fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &
         }
         Stmt::Return { value: Some(v), .. } => {
             // Returned values always escape.
-            mark_escaping_recursive(v, tp, result);
+            mark_escaping_recursive(v, tp, ctx.func_name, result);
             // Track the variable name if it's an identifier.
             match v {
                 Expr::Ident { name, .. } => {
@@ -233,7 +234,7 @@ fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &
             analyze_block(body, tp, ctx, result);
             // If the loop body has any non-scalar allocation, record the
             // loop span so codegen can inject a per-iteration arena reset.
-            if has_non_scalar_alloc(body, tp) {
+            if has_non_scalar_alloc(body, tp, ctx.func_name) {
                 result.loop_spans.insert(*span);
             }
         }
@@ -259,7 +260,7 @@ fn analyze_expr(e: &Expr, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &mut
             analyze_block(body, tp, ctx, result);
             // If the loop body has any non-scalar allocation, record the
             // loop span so codegen can inject a per-iteration arena reset.
-            if has_non_scalar_alloc(body, tp) {
+            if has_non_scalar_alloc(body, tp, ctx.func_name) {
                 result.loop_spans.insert(*span);
             }
         }
@@ -293,7 +294,7 @@ fn analyze_expr(e: &Expr, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &mut
                 }
             } else {
                 for a in args {
-                    mark_escaping_recursive(a, tp, result);
+                    mark_escaping_recursive(a, tp, ctx.func_name, result);
                     // Track variable name if arg is an identifier.
                     if let Expr::Ident { name, .. } = a {
                         ctx.escaped_names.insert(name.clone());
@@ -341,7 +342,7 @@ fn analyze_expr(e: &Expr, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &mut
 /// Classify a single expression's allocation behavior.
 fn classify_expr(e: &Expr, tp: &TypedProgram, ctx: &FuncCtx<'_>) -> AllocClass {
     // Scalar types never allocate.
-    if let Some(ty) = tp.type_at(e.span()) {
+    if let Some(ty) = tp.type_at(ctx.func_name, e.span()) {
         if is_scalar_type(ty) {
             return AllocClass::NonEscaping;
         }
@@ -427,8 +428,8 @@ fn classify_block_terminal(
 }
 
 /// Mark all heap-allocating sub-expressions as escaping.
-fn mark_escaping_recursive(e: &Expr, tp: &TypedProgram, result: &mut EscapeResult) {
-    if let Some(ty) = tp.type_at(e.span()) {
+fn mark_escaping_recursive(e: &Expr, tp: &TypedProgram, scope: &str, result: &mut EscapeResult) {
+    if let Some(ty) = tp.type_at(scope, e.span()) {
         if !is_scalar_type(ty) {
             result.classes.insert(e.span(), AllocClass::Escaping);
         }
@@ -444,48 +445,48 @@ fn mark_escaping_recursive(e: &Expr, tp: &TypedProgram, result: &mut EscapeResul
         Expr::Block(b) => {
             for stmt in &b.stmts {
                 if let Stmt::Expr(inner) = stmt {
-                    mark_escaping_recursive(inner, tp, result);
+                    mark_escaping_recursive(inner, tp, scope, result);
                 }
             }
         }
         Expr::While { cond, body, .. } => {
-            mark_escaping_recursive(cond, tp, result);
+            mark_escaping_recursive(cond, tp, scope, result);
             for stmt in &body.stmts {
                 if let Stmt::Expr(inner) = stmt {
-                    mark_escaping_recursive(inner, tp, result);
+                    mark_escaping_recursive(inner, tp, scope, result);
                 }
             }
         }
         Expr::If { then, els, .. } => {
             for stmt in &then.stmts {
                 if let Stmt::Expr(inner) = stmt {
-                    mark_escaping_recursive(inner, tp, result);
+                    mark_escaping_recursive(inner, tp, scope, result);
                 }
             }
             if let Some(el) = els {
-                mark_escaping_recursive(el, tp, result);
+                mark_escaping_recursive(el, tp, scope, result);
             }
         }
         Expr::Binary { left, right, .. } => {
-            mark_escaping_recursive(left, tp, result);
-            mark_escaping_recursive(right, tp, result);
+            mark_escaping_recursive(left, tp, scope, result);
+            mark_escaping_recursive(right, tp, scope, result);
         }
-        Expr::Unary { expr, .. } => mark_escaping_recursive(expr, tp, result),
-        Expr::Paren { expr, .. } => mark_escaping_recursive(expr, tp, result),
+        Expr::Unary { expr, .. } => mark_escaping_recursive(expr, tp, scope, result),
+        Expr::Paren { expr, .. } => mark_escaping_recursive(expr, tp, scope, result),
         Expr::Array { elems, .. } => {
             for elem in elems {
-                mark_escaping_recursive(elem, tp, result);
+                mark_escaping_recursive(elem, tp, scope, result);
             }
         }
         Expr::StructInit { fields, .. } => {
             for (_, f) in fields {
-                mark_escaping_recursive(f, tp, result);
+                mark_escaping_recursive(f, tp, scope, result);
             }
         }
         Expr::Fmt { parts, .. } => {
             for part in parts {
                 if let zz_frontend::ast::FmtPart::Expr(inner, _) = part {
-                    mark_escaping_recursive(inner, tp, result);
+                    mark_escaping_recursive(inner, tp, scope, result);
                 }
             }
         }
@@ -495,55 +496,61 @@ fn mark_escaping_recursive(e: &Expr, tp: &TypedProgram, result: &mut EscapeResul
 
 /// Check if a block contains any non-scalar allocation (array, dict, struct).
 /// Used to decide whether to inject a per-iteration arena reset in a loop.
-fn has_non_scalar_alloc(block: &crate::Block, tp: &TypedProgram) -> bool {
+fn has_non_scalar_alloc(block: &crate::Block, tp: &TypedProgram, scope: &str) -> bool {
     for stmt in &block.stmts {
-        if stmt_has_non_scalar_alloc(stmt, tp) {
+        if stmt_has_non_scalar_alloc(stmt, tp, scope) {
             return true;
         }
     }
     false
 }
 
-fn stmt_has_non_scalar_alloc(stmt: &Stmt, tp: &TypedProgram) -> bool {
+fn stmt_has_non_scalar_alloc(stmt: &Stmt, tp: &TypedProgram, scope: &str) -> bool {
     match stmt {
-        Stmt::Decl { value, .. } => expr_has_non_scalar_alloc(value, tp),
-        Stmt::Expr(e) => expr_has_non_scalar_alloc(e, tp),
-        Stmt::For { body, .. } => has_non_scalar_alloc(body, tp),
+        Stmt::Decl { value, .. } => expr_has_non_scalar_alloc(value, tp, scope),
+        Stmt::Expr(e) => expr_has_non_scalar_alloc(e, tp, scope),
+        Stmt::For { body, .. } => has_non_scalar_alloc(body, tp, scope),
         _ => false,
     }
 }
 
-fn expr_has_non_scalar_alloc(e: &Expr, tp: &TypedProgram) -> bool {
-    if let Some(ty) = tp.type_at(e.span()) {
+fn expr_has_non_scalar_alloc(e: &Expr, tp: &TypedProgram, scope: &str) -> bool {
+    if let Some(ty) = tp.type_at(scope, e.span()) {
         if !is_scalar_type(ty) {
             return true;
         }
     }
     match e {
-        Expr::Array { elems, .. } => elems.iter().any(|x| expr_has_non_scalar_alloc(x, tp)),
-        Expr::Dict { entries, .. } => entries
+        Expr::Array { elems, .. } => elems
             .iter()
-            .any(|(k, v)| expr_has_non_scalar_alloc(k, tp) || expr_has_non_scalar_alloc(v, tp)),
-        Expr::StructInit { fields, .. } => {
-            fields.iter().any(|(_, f)| expr_has_non_scalar_alloc(f, tp))
-        }
-        Expr::Call { args, .. } => args.iter().any(|a| expr_has_non_scalar_alloc(a, tp)),
+            .any(|x| expr_has_non_scalar_alloc(x, tp, scope)),
+        Expr::Dict { entries, .. } => entries.iter().any(|(k, v)| {
+            expr_has_non_scalar_alloc(k, tp, scope) || expr_has_non_scalar_alloc(v, tp, scope)
+        }),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, f)| expr_has_non_scalar_alloc(f, tp, scope)),
+        Expr::Call { args, .. } => args.iter().any(|a| expr_has_non_scalar_alloc(a, tp, scope)),
         Expr::Binary { left, right, .. } => {
-            expr_has_non_scalar_alloc(left, tp) || expr_has_non_scalar_alloc(right, tp)
+            expr_has_non_scalar_alloc(left, tp, scope)
+                || expr_has_non_scalar_alloc(right, tp, scope)
         }
         Expr::If {
             cond, then, els, ..
         } => {
-            expr_has_non_scalar_alloc(cond, tp)
-                || has_non_scalar_alloc(then, tp)
+            expr_has_non_scalar_alloc(cond, tp, scope)
+                || has_non_scalar_alloc(then, tp, scope)
                 || els
                     .as_ref()
-                    .is_some_and(|e| expr_has_non_scalar_alloc(e, tp))
+                    .is_some_and(|e| expr_has_non_scalar_alloc(e, tp, scope))
         }
         Expr::While { cond, body, .. } => {
-            expr_has_non_scalar_alloc(cond, tp) || has_non_scalar_alloc(body, tp)
+            expr_has_non_scalar_alloc(cond, tp, scope) || has_non_scalar_alloc(body, tp, scope)
         }
-        Expr::Block(b) => b.stmts.iter().any(|s| stmt_has_non_scalar_alloc(s, tp)),
+        Expr::Block(b) => b
+            .stmts
+            .iter()
+            .any(|s| stmt_has_non_scalar_alloc(s, tp, scope)),
         _ => false,
     }
 }

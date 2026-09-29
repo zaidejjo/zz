@@ -821,12 +821,19 @@ fn run_native(
             .to_string()
     })?;
     let p = std::path::Path::new(path);
-    // Use release mode for native runs to get -O3 optimization (true native speed).
+    // Release mode for true native speed — unless `ZZ_NATIVE_DEV=1`
+    // (parity sweeps: `-O0 -g`, no LTO, ~4x faster clang per fixture;
+    // same generated C, separate cache entries via the fingerprint).
+    let mode = if std::env::var("ZZ_NATIVE_DEV").is_ok() {
+        build::BuildMode::Dev
+    } else {
+        build::BuildMode::Release
+    };
     let rel = build::ReleaseOptions {
         embed,
         ..Default::default()
     };
-    let cached = build::build_release(p, build::BuildMode::Release, &rel)?;
+    let cached = build::build_release(p, mode, &rel)?;
     let code = build::exec_binary(&cached, script_args)?;
     if code != 0 {
         return Err(format!(

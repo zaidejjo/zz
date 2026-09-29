@@ -5,7 +5,7 @@
 //! [`TypedProgram::types`]). Used by the call-graph analyzer (Phase 2) and
 //! the C lowering pass (Phase 3) without duplicating the AST-shape logic.
 
-use crate::{Expr, Stmt, TypedProgram};
+use crate::{Expr, Stmt, TypedProgram, TOP_SCOPE};
 
 /// A typed expression visited during traversal: the node plus its resolved
 /// type (when available).
@@ -32,63 +32,100 @@ pub fn walk_exprs<'a>(tp: &'a TypedProgram, f: &mut impl FnMut(&TypedExpr<'a>) -
     }
 }
 
-/// Visit a single statement's expressions.
+/// Visit a single statement's expressions (scope-aware entry).
+pub fn walk_stmt_scoped<'a>(
+    tp: &'a TypedProgram,
+    scope: &str,
+    stmt: &'a Stmt,
+    f: &mut impl FnMut(&TypedExpr<'a>) -> bool,
+) {
+    walk_stmt_in(tp, scope, stmt, f);
+}
+
+/// Visit a single statement's expressions (top scope; prefer
+/// [`walk_stmt_scoped`] when the enclosing item is known).
 pub fn walk_stmt<'a>(
     tp: &'a TypedProgram,
     stmt: &'a Stmt,
     f: &mut impl FnMut(&TypedExpr<'a>) -> bool,
 ) {
+    walk_stmt_in(tp, TOP_SCOPE, stmt, f);
+}
+
+fn walk_stmt_in<'a>(
+    tp: &'a TypedProgram,
+    scope: &str,
+    stmt: &'a Stmt,
+    f: &mut impl FnMut(&TypedExpr<'a>) -> bool,
+) {
     match stmt {
         Stmt::Decl { value, .. } => {
-            walk_expr(tp, value, f);
+            walk_expr_in(tp, scope, value, f);
         }
         Stmt::Return { value, .. } => {
             if let Some(v) = value {
-                walk_expr(tp, v, f);
+                walk_expr_in(tp, scope, v, f);
             }
         }
-        Stmt::Func { body, .. } => {
+        Stmt::Func { name, body, .. } => {
+            let fname = name.join(".");
             for s in &body.stmts {
-                walk_stmt(tp, s, f);
+                walk_stmt_in(tp, &fname, s, f);
             }
         }
         Stmt::Struct { .. } | Stmt::Import { .. } => {}
         Stmt::ExternBlock { .. } | Stmt::Link { .. } => {}
-        Stmt::Impl { methods, .. } => {
+        Stmt::Impl { name, methods, .. } => {
+            let tname = name.join(".");
             for m in methods {
-                walk_stmt(tp, m, f);
+                if let Stmt::Func { name: mname, .. } = m {
+                    let fname = format!("{tname}.{}", mname.join("."));
+                    walk_stmt_in(tp, &fname, m, f);
+                } else {
+                    walk_stmt_in(tp, scope, m, f);
+                }
             }
         }
         Stmt::For { iter, body, .. } => {
-            walk_expr(tp, iter, f);
+            walk_expr_in(tp, scope, iter, f);
             for s in &body.stmts {
-                walk_stmt(tp, s, f);
+                walk_stmt_in(tp, scope, s, f);
             }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
         Stmt::Defer { expr, .. } => {
-            walk_expr(tp, expr, f);
+            walk_expr_in(tp, scope, expr, f);
         }
         Stmt::Assign { target, value, .. } => {
-            walk_expr(tp, target, f);
-            walk_expr(tp, value, f);
+            walk_expr_in(tp, scope, target, f);
+            walk_expr_in(tp, scope, value, f);
         }
         Stmt::Destructure { value, .. } => {
-            walk_expr(tp, value, f);
+            walk_expr_in(tp, scope, value, f);
         }
-        Stmt::Expr(e) => walk_expr(tp, e, f),
+        Stmt::Expr(e) => walk_expr_in(tp, scope, e, f),
     }
 }
 
-/// Visit one expression subtree.
+/// Visit one expression subtree (top scope; inline the `_in` variant when
+/// the enclosing item is known).
 pub fn walk_expr<'a>(
     tp: &'a TypedProgram,
     e: &'a Expr,
     f: &mut impl FnMut(&TypedExpr<'a>) -> bool,
 ) {
+    walk_expr_in(tp, TOP_SCOPE, e, f);
+}
+
+fn walk_expr_in<'a>(
+    tp: &'a TypedProgram,
+    scope: &str,
+    e: &'a Expr,
+    f: &mut impl FnMut(&TypedExpr<'a>) -> bool,
+) {
     let te = TypedExpr {
         expr: e,
-        ty: tp.type_at(e.span()),
+        ty: tp.type_at(scope, e.span()),
     };
     if !f(&te) {
         return;
@@ -105,20 +142,20 @@ pub fn walk_expr<'a>(
         Expr::Fmt { parts, .. } => {
             for p in parts {
                 if let zz_frontend::ast::FmtPart::Expr(inner, _) = p {
-                    walk_expr(tp, inner, f);
+                    walk_expr_in(tp, scope, inner, f);
                 }
             }
         }
-        Expr::Paren { expr, .. } => walk_expr(tp, expr, f),
+        Expr::Paren { expr, .. } => walk_expr_in(tp, scope, expr, f),
         Expr::Tuple { items, .. } => {
             for it in items {
-                walk_expr(tp, it, f);
+                walk_expr_in(tp, scope, it, f);
             }
         }
-        Expr::Unary { expr, .. } => walk_expr(tp, expr, f),
+        Expr::Unary { expr, .. } => walk_expr_in(tp, scope, expr, f),
         Expr::Binary { left, right, .. } => {
-            walk_expr(tp, left, f);
-            walk_expr(tp, right, f);
+            walk_expr_in(tp, scope, left, f);
+            walk_expr_in(tp, scope, right, f);
         }
         Expr::Call {
             callee,
@@ -126,39 +163,39 @@ pub fn walk_expr<'a>(
             named,
             ..
         } => {
-            walk_expr(tp, callee, f);
+            walk_expr_in(tp, scope, callee, f);
             for a in args {
-                walk_expr(tp, a, f);
+                walk_expr_in(tp, scope, a, f);
             }
             for (_, a) in named {
-                walk_expr(tp, a, f);
+                walk_expr_in(tp, scope, a, f);
             }
         }
-        Expr::Closure { body, .. } => walk_expr(tp, body, f),
+        Expr::Closure { body, .. } => walk_expr_in(tp, scope, body, f),
         Expr::If {
             cond, then, els, ..
         } => {
-            walk_expr(tp, cond, f);
+            walk_expr_in(tp, scope, cond, f);
             for s in &then.stmts {
-                walk_stmt(tp, s, f);
+                walk_stmt_in(tp, scope, s, f);
             }
             if let Some(el) = els {
-                walk_expr(tp, el, f);
+                walk_expr_in(tp, scope, el, f);
             }
         }
         Expr::While { cond, body, .. } => {
-            walk_expr(tp, cond, f);
+            walk_expr_in(tp, scope, cond, f);
             for s in &body.stmts {
-                walk_stmt(tp, s, f);
+                walk_stmt_in(tp, scope, s, f);
             }
         }
         Expr::Match {
             scrutinee, arms, ..
         } => {
-            walk_expr(tp, scrutinee, f);
+            walk_expr_in(tp, scope, scrutinee, f);
             for arm in arms {
                 if let Some(g) = &arm.guard {
-                    walk_expr(tp, g, f);
+                    walk_expr_in(tp, scope, g, f);
                 }
                 walk_expr(tp, &arm.body, f);
             }
@@ -166,69 +203,69 @@ pub fn walk_expr<'a>(
         Expr::IfLet {
             value, then, els, ..
         } => {
-            walk_expr(tp, value, f);
+            walk_expr_in(tp, scope, value, f);
             for s in &then.stmts {
-                walk_stmt(tp, s, f);
+                walk_stmt_in(tp, scope, s, f);
             }
             if let Some(el) = els {
-                walk_expr(tp, el, f);
+                walk_expr_in(tp, scope, el, f);
             }
         }
-        Expr::Try { expr, .. } => walk_expr(tp, expr, f),
+        Expr::Try { expr, .. } => walk_expr_in(tp, scope, expr, f),
         Expr::Block(b) => {
             for s in &b.stmts {
-                walk_stmt(tp, s, f);
+                walk_stmt_in(tp, scope, s, f);
             }
         }
         Expr::Variant { arg, .. } => {
             if let Some(a) = arg {
-                walk_expr(tp, a, f);
+                walk_expr_in(tp, scope, a, f);
             }
         }
         Expr::Array { elems, .. } => {
             for el in elems {
-                walk_expr(tp, el, f);
+                walk_expr_in(tp, scope, el, f);
             }
         }
         Expr::Dict { entries, .. } => {
             for (k, v) in entries {
-                walk_expr(tp, k, f);
-                walk_expr(tp, v, f);
+                walk_expr_in(tp, scope, k, f);
+                walk_expr_in(tp, scope, v, f);
             }
         }
-        Expr::Field { obj, .. } => walk_expr(tp, obj, f),
+        Expr::Field { obj, .. } => walk_expr_in(tp, scope, obj, f),
         Expr::Range { start, end, .. } => {
-            walk_expr(tp, start, f);
-            walk_expr(tp, end, f);
+            walk_expr_in(tp, scope, start, f);
+            walk_expr_in(tp, scope, end, f);
         }
         Expr::StructInit { fields, .. } => {
             for (_, v) in fields {
-                walk_expr(tp, v, f);
+                walk_expr_in(tp, scope, v, f);
             }
         }
         Expr::Index { obj, index, .. } => {
-            walk_expr(tp, obj, f);
-            walk_expr(tp, index, f);
+            walk_expr_in(tp, scope, obj, f);
+            walk_expr_in(tp, scope, index, f);
         }
         Expr::Slice {
             obj, start, end, ..
         } => {
-            walk_expr(tp, obj, f);
+            walk_expr_in(tp, scope, obj, f);
             if let Some(s) = start {
-                walk_expr(tp, s, f);
+                walk_expr_in(tp, scope, s, f);
             }
             if let Some(e) = end {
-                walk_expr(tp, e, f);
+                walk_expr_in(tp, scope, e, f);
             }
         }
         Expr::ListComp {
             body, iter, filter, ..
         } => {
-            walk_expr(tp, iter, f);
+            walk_expr_in(tp, scope, iter, f);
             if let Some(flt) = filter {
-                walk_expr(tp, flt, f);
+                walk_expr_in(tp, scope, flt, f);
             }
-            walk_expr(tp, body, f);
+            walk_expr_in(tp, scope, body, f);
         }
     }
 }

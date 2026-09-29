@@ -18,12 +18,29 @@ use argon2::Argon2;
 
 use crate::cabi::{cvalue_str, cvalue_to_string, CValue};
 
+/// Test-fast mode (`ZZ_CRYPTO_FAST=1`): minimal KDF params so parity
+/// sweeps don't burn ~40s on OWASP-strength hashes. Only the *cost*
+/// changes — roundtrip/salt-uniqueness/wrong-password semantics are
+/// identical, and both engines share this code, so parity still proves
+/// the same behavior. Never set in production: hashes created here
+/// MUST NOT be stored.
+fn fast_mode() -> bool {
+    std::env::var("ZZ_CRYPTO_FAST").is_ok()
+}
+
 /// Argon2id hash of `password` as a PHC string (`$argon2id$v=19$…`).
 /// Random salt per call. Errors only on OS RNG failure (effectively
 /// unreachable); invalid input cannot occur (`&[u8]` always hashes).
 pub fn argon2_hash(password: &[u8]) -> Result<String, String> {
     let salt = SaltString::generate(&mut rand_core::OsRng);
-    Argon2::default()
+    let argon2 = if fast_mode() {
+        let params = argon2::Params::new(8, 1, 1, None)
+            .map_err(|e| format!("crypto.argon2_hash failed: {e}"))?;
+        Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+    } else {
+        Argon2::default()
+    };
+    argon2
         .hash_password(password, &salt)
         .map(|h| h.to_string())
         .map_err(|e| format!("crypto.argon2_hash failed: {e}"))
@@ -38,14 +55,16 @@ pub fn argon2_verify(hash: &str, password: &[u8]) -> bool {
     Argon2::default().verify_password(password, &parsed).is_ok()
 }
 
-/// Bcrypt hash of `password` (`$2b$12$…`). Random salt per call.
+/// Bcrypt hash of `password` (`$2b$12$…`, `$2b$04$…` in fast-test mode).
+/// Random salt per call.
 pub fn bcrypt_hash(password: &[u8]) -> Result<String, String> {
     // bcrypt speaks UTF-8 passwords; reject non-UTF-8 rather than
     // lossy-converting a secret.
     let Ok(pw) = std::str::from_utf8(password) else {
         return Err("crypto.bcrypt_hash: password must be valid UTF-8".to_string());
     };
-    bcrypt::hash(pw, bcrypt::DEFAULT_COST).map_err(|e| format!("crypto.bcrypt_hash failed: {e}"))
+    let cost = if fast_mode() { 4 } else { bcrypt::DEFAULT_COST };
+    bcrypt::hash(pw, cost).map_err(|e| format!("crypto.bcrypt_hash failed: {e}"))
 }
 
 /// True when `password` matches bcrypt `hash`; `false` otherwise

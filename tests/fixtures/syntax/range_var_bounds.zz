@@ -1,0 +1,32 @@
+// E2E: for-loops with non-literal range bounds (AOT parity: variable
+// start bounds used to emit unboxed int64_t into zz_value slots).
+lo := 2
+hi := 5
+total := 0
+for i in lo..hi {
+    total = total + i
+}
+println(total)
+
+arr := [10, 20, 30, 40]
+pcount := 1
+for i in pcount..len(arr) {
+    println(arr[i])
+}
+
+for i in lo..len(arr) {
+    total = total + i
+}
+println(total)
+
+// slices with variable bounds (AOT parity: unboxed bounds broke C compile)
+arr2 := [10, 20, 30, 40]
+lo2 := 1
+hi2 := 3
+println(arr2[lo2:hi2])
+println(arr2[lo2:])
+println(arr2[:hi2])
+s := "abcdef"
+println(s[lo2:hi2])
+
+println("range_ok")

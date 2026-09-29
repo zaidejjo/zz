@@ -193,7 +193,11 @@ impl Checker {
                 if sig.is_extern {
                     return Type::Unit;
                 }
+                // Scope span recording to this function: spans repeat
+                // across modules, so the typed map keys (scope, span).
+                self.scope.push(fname);
                 self.check_func_body(stmt, &sig);
+                self.scope.pop();
                 Type::Unit
             }
             Stmt::ExternBlock { .. } => Type::Unit,
@@ -213,7 +217,9 @@ impl Checker {
                         let method_name = Self::func_name(method);
                         let full_name = format!("{}.{}", type_name, method_name);
                         let sig = self.funcs.get(&full_name).unwrap().clone();
+                        self.scope.push(full_name);
                         self.check_func_body(method, &sig);
+                        self.scope.pop();
                     }
                 }
                 Type::Unit
@@ -619,13 +625,15 @@ impl Checker {
 
     // --- expressions ------------------------------------------------------
 
-    /// Check an expression, recording its resolved type keyed by span so the
-    /// HIR could bindings can be built deterministically afterward.
+    /// Check an expression, recording its resolved type keyed by scoped key
+    /// so the HIR could bindings can be built deterministically afterward.
+    /// The key pairs the span with the enclosing top-level item: bare spans
+    /// repeat across modules (offsets restart at 0 per file).
     pub(crate) fn check_expr(&mut self, e: &Expr) -> Type {
         let ty = self.check_expr_impl(e);
         // Unresolved types stay as `Var`s during the walk; the typed map is
         // deep-resolved at the end (see `check_program_typed`).
-        self.span_types.insert(e.span(), ty.clone());
+        self.span_types.insert(self.scope_key(e.span()), ty.clone());
         ty
     }
 

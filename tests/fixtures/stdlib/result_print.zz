@@ -3,13 +3,19 @@
 // engines. Bare `.none` prints `none`. A bare printed `.err` throws a
 // readable, hinted error instead (see below), so error cases stay in
 // `match` arms here.
+// Scratch path is per (process, sweep task) so parallel runners never
+// share it.
+import std.env
 import std.fs
+import std.process(pid)
 
 func main() {
-    fs.write("/tmp/zz_result_print.txt", "hello clean")
+    tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+    scratch := "/tmp/zz_result_print_{pid()}_{tok}.txt"
+    fs.write(scratch, "hello clean")
     // Bare Ok straight to stdout unwraps.
-    println(fs.read_to_string("/tmp/zz_result_print.txt"))
-    print(fs.read_to_string("/tmp/zz_result_print.txt"))
+    println(fs.read_to_string(scratch))
+    print(fs.read_to_string(scratch))
     println("")
     // Bare Some unwraps; bare None prints `none`.
     println(.some("unwrapped"))
@@ -20,6 +26,6 @@ func main() {
         .ok(c) => println("unexpected: {c}")
         .err(e) => println("caught: {e}")
     }
-    fs.remove_file("/tmp/zz_result_print.txt")
+    fs.remove_file(scratch)
     println("result_print_ok")
 }

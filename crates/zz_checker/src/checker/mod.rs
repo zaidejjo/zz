@@ -16,6 +16,34 @@ use zz_frontend::span::Span;
 
 use crate::type_::Type;
 
+/// Pseudo-scope owning all top-level (non-function) statements. Mirrors
+/// `zz_hir::callgraph::TOP`: expression spans are only unique *within* one
+/// function body (every module restarts offsets at 0), so span-keyed maps
+/// must always pair the span with its enclosing scope.
+pub const TOP_SCOPE: &str = "<top>";
+
+/// Scope-qualified expression key for the typed AST view. Plain `Span`
+/// keys collide across modules (and across stdlib files): two different
+/// nodes at the same offsets would overwrite each other in
+/// `span_types`, and native codegen would lower one with the other's
+/// type (e.g. a string accumulator lowered as `bool`, printing "false").
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SpanKey {
+    /// Enclosing top-level function (`Type.method` for methods,
+    /// [`TOP_SCOPE`] otherwise).
+    pub func: String,
+    pub span: Span,
+}
+
+impl SpanKey {
+    pub fn new(func: impl Into<String>, span: Span) -> Self {
+        SpanKey {
+            func: func.into(),
+            span,
+        }
+    }
+}
+
 /// A registered function signature.
 #[derive(Debug, Clone)]
 pub struct FuncSig {
@@ -131,14 +159,14 @@ pub fn check_program_with_consts(
 }
 
 /// Like [`check_program`], but also returns a deep-resolved type annotation
-/// map keyed by expression span. The map is the typed view of the AST used
+/// map keyed by scoped expression key. The map is the typed view of the AST used
 /// by the HIR builder for native codegen.
 pub fn check_program_typed(
     program: &Program,
     initial_bindings: HashMap<String, Type>,
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
-) -> (CheckResult, std::collections::HashMap<Span, Type>) {
+) -> (CheckResult, std::collections::HashMap<SpanKey, Type>) {
     let out = check_program_impl(
         program,
         initial_bindings,
@@ -420,7 +448,9 @@ fn check_program_impl(
         // `@link` is collected in Pass 2 (check_stmt) to preserve order/dedup.
     }
 
-    // Pass 2: check top-level statements in order.
+    // Pass 2: check top-level statements in order. Non-function items
+    // record expression types under TOP_SCOPE (function bodies scope
+    // themselves in check_stmt).
     for stmt in &program.stmts {
         // Track pub on Decl before checking.
         if let Stmt::Decl { name, pub_, .. } = stmt {
@@ -428,7 +458,14 @@ fn check_program_impl(
                 pub_bindings_set.insert(name.name.clone());
             }
         }
+        let scoped = !matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. });
+        if scoped {
+            checker.scope.push(TOP_SCOPE.to_string());
+        }
         checker.check_stmt(stmt);
+        if scoped {
+            checker.scope.pop();
+        }
     }
 
     // Finalize: bindings that still contain inference variables were already
@@ -475,11 +512,11 @@ fn check_program_impl(
     // Deep-resolve the recorded span types now that all unification is done.
     // Skip any that still contain inference variables (unresolvable at
     // compile time — the node lowers dynamically).
-    let mut span_types: std::collections::HashMap<Span, Type> = std::collections::HashMap::new();
-    for (span, ty) in &checker.span_types {
+    let mut span_types: std::collections::HashMap<SpanKey, Type> = std::collections::HashMap::new();
+    for (key, ty) in &checker.span_types {
         let rt = checker.unifier.resolve_deep(ty);
         if !inference::contains_var(&rt) {
-            span_types.insert(*span, rt);
+            span_types.insert(key.clone(), rt);
         }
     }
 
@@ -537,7 +574,7 @@ fn check_program_impl(
 /// view (span → resolved type) for codegen.
 struct CheckerOutcome {
     result: CheckResult,
-    span_types: std::collections::HashMap<Span, Type>,
+    span_types: std::collections::HashMap<SpanKey, Type>,
 }
 
 pub(crate) struct Checker {
@@ -589,16 +626,33 @@ pub(crate) struct Checker {
     /// functions resolve — generics have no value type, so no binding
     /// is ever created for them.
     pub(crate) import_aliases: HashMap<String, String>,
-    /// Resolved type per expression span, recorded during the type walk.
+    /// Resolved type per scoped expression key, recorded during the type walk.
     /// Used by the HIR builder to attach a resolved `Type` to every AST node.
-    pub(crate) span_types: std::collections::HashMap<zz_frontend::span::Span, Type>,
+    /// Keyed by [`SpanKey`] (function + span): bare spans collide across
+    /// modules since every file restarts offsets at 0.
+    pub(crate) span_types: std::collections::HashMap<SpanKey, Type>,
     /// Native libraries requested via `@link`, in source order, deduped.
     pub(crate) link_libs: Vec<String>,
     /// `std.http` route registrations per server-var root (Phase 2.2 lint).
     pub(crate) http_lint: http_lint::HttpLintState,
+    /// Enclosing-item scope stack for [`SpanKey`] recording. Holds the
+    /// top-level function (or `Type.method`) whose body is being checked;
+    /// empty at top level (keys then use [`TOP_SCOPE`]).
+    pub(crate) scope: Vec<String>,
 }
 
 impl Checker {
+    /// Scope-qualified key for an expression span under the item currently
+    /// being checked.
+    pub(crate) fn scope_key(&self, span: Span) -> SpanKey {
+        SpanKey::new(
+            self.scope
+                .last()
+                .cloned()
+                .unwrap_or_else(|| TOP_SCOPE.to_string()),
+            span,
+        )
+    }
     pub(crate) fn new(
         initial_bindings: HashMap<String, Type>,
         funcs: HashMap<String, FuncSig>,
@@ -628,6 +682,7 @@ impl Checker {
             imports: Vec::new(),
             import_aliases: HashMap::new(),
             span_types: std::collections::HashMap::new(),
+            scope: Vec::new(),
             link_libs: Vec::new(),
             http_lint: http_lint::HttpLintState::default(),
         }
@@ -719,5 +774,40 @@ impl Checker {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod span_scope_tests {
+    use super::*;
+
+    // Two separately-parsed "modules" (offsets restart at 0, exactly like
+    // the loader merging multi-file programs): the `1234` and `true`
+    // initializers share span (28, 32) but have different types. A bare
+    // span-keyed map collapses them and native codegen lowers one with
+    // the other's type; scoped keys keep both.
+    #[test]
+    fn same_span_different_functions_keep_types() {
+        let a = zz_frontend::parse("func f() -> int {\n    v :=  1234\n    v\n}\n");
+        let b = zz_frontend::parse("func g() -> bool {\n    v := true\n    v\n}\n");
+        assert!(a.errors.is_empty(), "parse a: {:?}", a.errors);
+        assert!(b.errors.is_empty(), "parse b: {:?}", b.errors);
+        let mut stmts = Vec::new();
+        stmts.extend(a.program.stmts.iter().cloned());
+        stmts.extend(b.program.stmts.iter().cloned());
+        let merged = Program {
+            stmts,
+            span: Span::new(0, 0),
+        };
+        let (res, types) = check_program_typed(
+            &merged,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        assert!(res.errors.is_empty(), "check: {:?}", res.errors);
+        let key = Span::new(28, 32);
+        assert_eq!(types.get(&SpanKey::new("f", key)), Some(&Type::Int));
+        assert_eq!(types.get(&SpanKey::new("g", key)), Some(&Type::Bool));
     }
 }
