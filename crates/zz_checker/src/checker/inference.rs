@@ -163,7 +163,9 @@ impl Checker {
                             ty.span,
                         ));
                     }
-                    Type::Struct(name.clone())
+                    // Canonicalize selective imports, mirroring
+                    // StructInit: `Product` → `product.Product`.
+                    Type::Struct(self.canonical_struct_name(name))
                 } else if name == "json" {
                     Type::Json
                 } else if name == "bytes" {

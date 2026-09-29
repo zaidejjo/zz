@@ -226,6 +226,16 @@ pub struct ObjectValue {
     pub fields: Vec<(String, Value)>,
 }
 
+impl ObjectValue {
+    /// Display name: bare struct name without the module namespace
+    /// (`user.User` → `User`). Only printing shortens — identity
+    /// (method dispatch, conversions, type equality) keeps the
+    /// qualified `name`.
+    pub fn display_name(&self) -> &str {
+        self.name.rsplit('.').next().unwrap_or(&self.name)
+    }
+}
+
 /// An opaque SQLite database handle. The concrete connection type lives
 /// in `zz_stdlib` (rusqlite) so this crate stays dependency-free; the
 /// handle is type-erased here as `Arc<dyn Any + Send + Sync>`.
@@ -1032,7 +1042,7 @@ impl Value {
                 out.push(')');
             }
             Value::Object(o) => {
-                out.push_str(&o.name);
+                out.push_str(o.display_name());
                 out.push('{');
                 for (i, (k, v)) in o.fields.iter().enumerate() {
                     if i > 0 {
@@ -1197,7 +1207,7 @@ impl fmt::Display for Value {
             Value::Response(res) => write!(f, "<http response {}>", res.status),
             Value::HttpRequest(req) => write!(f, "<http request {} {}>", req.method, req.path),
             Value::Object(o) => {
-                write!(f, "{}{{", o.name)?;
+                write!(f, "{}{{", o.display_name())?;
                 for (i, (k, v)) in o.fields.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;

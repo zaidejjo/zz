@@ -781,7 +781,12 @@ impl Checker {
             }
             Expr::StructInit { name, fields, span } => {
                 self.used_names.insert(name.clone());
-                let Some(sig) = self.structs.get(name).cloned() else {
+                // Canonicalize selective imports (`Product` →
+                // `product.Product`) so the constructed type matches the
+                // qualified spelling everywhere (methods, identity).
+                // Messages keep the as-written name.
+                let cname = self.canonical_struct_name(name);
+                let Some(sig) = self.structs.get(&cname).cloned() else {
                     self.errors
                         .push(error_at(format!("unknown struct `{name}`"), *span));
                     return Type::Unit;
@@ -798,7 +803,8 @@ impl Checker {
                             self.report_mismatch(e, fval.span());
                         }
                         given_paths.push(vec![fname.clone()]);
-                    } else if let Some((prefix, pft)) = self.resolve_struct_field_path(name, fname)
+                    } else if let Some((prefix, pft)) =
+                        self.resolve_struct_field_path(&cname, fname)
                     {
                         if prefix.is_empty() {
                             // Unreachable: direct fields are handled above.
@@ -839,7 +845,7 @@ impl Checker {
                 }
                 // Verify all required fields are provided (flattened leaves
                 // count toward their embedded subtree).
-                if let Some(leaf) = self.first_uncovered_leaf(name, &[], &given_paths, 0) {
+                if let Some(leaf) = self.first_uncovered_leaf(&cname, &[], &given_paths, 0) {
                     self.errors.push(error_at(
                         format!(
                             "missing field `{}` in struct literal `{name}`",
@@ -848,7 +854,7 @@ impl Checker {
                         *span,
                     ));
                 }
-                Type::Struct(name.clone())
+                Type::Struct(cname)
             }
             Expr::Index { obj, index, span } => {
                 let ot = self.check_expr(obj);

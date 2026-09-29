@@ -243,9 +243,12 @@ impl Lowerer {
                 m = mangle(name),
             ));
             out.push_str("    int _e = 0;\n");
+            // Bare display name (`user.User` → `User`), matching the VM:
+            // identity stays qualified, only printing shortens.
+            let display = name.rsplit('.').next().unwrap_or(name);
             out.push_str(&format!(
                 "    zz_value _r = zz_str_static(\"{name}{{\");\n",
-                name = Self::c_escape_debug(name),
+                name = Self::c_escape_debug(display),
             ));
             for (i, (fname, fty)) in sig.fields.iter().enumerate() {
                 if i > 0 {

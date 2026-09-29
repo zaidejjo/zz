@@ -275,9 +275,12 @@ fn selective_struct_import_resolves_bare() {
     let dir = temp_project(&[
         (
             "main.zz",
-            "import models.product(Product)\np := Product{id: 7}\np.id",
+            "import models.product(Product)\np := Product{id: 7}\np.id + p.get_id()",
         ),
-        ("models/product.zz", "pub struct Product{\n    id: int,\n}"),
+        (
+            "models/product.zz",
+            "pub struct Product{\n    id: int,\n}\nimpl Product {\n    pub func get_id(self) -> int {\n        self.id\n    }\n}",
+        ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -293,7 +296,7 @@ fn selective_struct_import_resolves_bare() {
     for p in &result.programs {
         last = interp.run(p).unwrap();
     }
-    assert_eq!(last, Value::Int(7));
+    assert_eq!(last, Value::Int(14));
 }
 
 #[test]

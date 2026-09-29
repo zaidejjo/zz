@@ -2845,6 +2845,22 @@ impl Lowerer {
         names: &mut NameCtx,
         out: &mut String,
     ) -> String {
+        // Canonicalize selective-import aliases (`Product` →
+        // `product.Product`) so the emitted C type matches the
+        // HIR-declared slot type (the checker canonicalizes the same
+        // way). Miss-only with a structs membership guard, so local
+        // structs and func-name collisions are unaffected.
+        let resolved;
+        let sname: &str = if let Some(q) = self.import_fn_aliases.get(sname) {
+            if self.tp.structs.contains_key(q) {
+                resolved = q.clone();
+                &resolved
+            } else {
+                sname
+            }
+        } else {
+            sname
+        };
         let all_direct = self.tp.structs.get(sname).is_some_and(|sig| {
             fields
                 .iter()
