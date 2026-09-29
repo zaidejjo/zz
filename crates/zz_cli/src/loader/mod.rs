@@ -1012,6 +1012,28 @@ impl Loader {
                                         if is_generic {
                                             continue;
                                         }
+                                        // Structs are types, not values: the
+                                        // bare name already resolves through
+                                        // the structs seed (checker +
+                                        // runtimes), and a `Name := ns.Name`
+                                        // Decl would force a value lookup of
+                                        // a type name ("undefined variable
+                                        // `ns.Name`"). Skip the Decl unless
+                                        // the name is also a value (func /
+                                        // native / binding) that needs a
+                                        // runtime binding.
+                                        let qualified = format!("{prefix}{sym_name}");
+                                        let is_struct = self.structs.contains_key(&qualified);
+                                        let is_value = self
+                                            .funcs
+                                            .get(&qualified)
+                                            .map(|s| s.generics.is_empty())
+                                            .unwrap_or(false)
+                                            || self.natives.contains_key(&qualified)
+                                            || self.bindings.contains_key(&qualified);
+                                        if is_struct && !is_value {
+                                            continue;
+                                        }
                                         let parts = vec![ns.to_string(), sym_name.clone()];
                                         new_stmts.push(Stmt::Decl {
                                             ty: None,

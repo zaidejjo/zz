@@ -477,7 +477,19 @@ impl Interp {
                 span,
             ));
         }
-        let Some(layout) = self.structs.get(sname).cloned() else {
+        // Selective-import alias (miss-only): bare `Product` from
+        // `import m(Product)` resolves to `m.Product`. Mirrors the
+        // Ident fallback in `eval`.
+        let resolved;
+        let lookup = if self.structs.contains_key(sname) {
+            sname
+        } else if let Some(qualified) = self.import_aliases.get(sname) {
+            resolved = qualified.clone();
+            resolved.as_str()
+        } else {
+            return Err(EvalError::new(format!("unknown struct `{sname}`"), span));
+        };
+        let Some(layout) = self.structs.get(lookup).cloned() else {
             return Err(EvalError::new(format!("unknown struct `{sname}`"), span));
         };
         // Leftovers: given fields that are not direct fields of this
