@@ -64,7 +64,7 @@ jobs:
             echo "release $TAG already exists, nothing to do"
             exit 0
           fi
-          if [ "${{ inputs.dry-run || 'false' }}" = "true" ]; then
+          if [ "${{ inputs['dry-run'] || 'false' }}" = "true" ]; then
             echo "dry-run: would create release $TAG from ${{ github.sha }}"
             exit 0
           fi
