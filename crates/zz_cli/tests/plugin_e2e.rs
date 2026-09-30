@@ -262,7 +262,7 @@ fn toy_plugin_aot_and_vm_agree() {
     assert_eq!(code, 0, "install failed: {stderr}");
 
     // AOT path.
-    let (code, _, stderr) = run_zz(&consumer, &["build", "src/main.zz"]);
+    let (code, _, stderr) = run_zz(&consumer, &["build", "--allow-hooks", "src/main.zz"]);
     assert_eq!(code, 0, "build failed: {stderr}");
     let bin = consumer.join("src/bin/main");
     let out = Command::new(&bin).output().expect("binary should run");
