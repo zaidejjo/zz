@@ -1789,3 +1789,27 @@ fn trailing_if_in_else_accepted() {
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
+
+#[test]
+fn unused_warnings_emit_in_source_order() {
+    // Unused-variable warnings must be source-ordered, not HashMap
+    // order: the dual-engine parity harness diffs stderr across two
+    // separate `zz` processes (different hash seeds). Names are chosen
+    // so alphabetical order disagrees with source order.
+    let r = check_src("func f() {\n    zzz := 1\n    aaa := 2\n}");
+    let warns: Vec<&str> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.as_str())
+        .collect();
+    assert_eq!(warns.len(), 2, "warnings: {:?}", r.errors);
+    assert!(
+        warns[0].contains("zzz"),
+        "first warning should name `zzz`: {warns:?}"
+    );
+    assert!(
+        warns[1].contains("aaa"),
+        "second warning should name `aaa`: {warns:?}"
+    );
+}

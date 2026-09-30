@@ -50,7 +50,13 @@ impl Checker {
     pub(crate) fn pop_scope(&mut self) {
         // Warn about unused variables in this scope (skip the global scope).
         if let Some(defined) = self.defined_names.pop() {
-            for (name, span) in &defined {
+            // Sort by (span, name): HashMap iteration order is
+            // per-process random, and diagnostics must be byte-identical
+            // across runs (the dual-engine parity harness diffs stderr
+            // between two separate `zz` processes).
+            let mut entries: Vec<(&String, &Span)> = defined.iter().collect();
+            entries.sort_by(|a, b| (a.1.start, a.1.end, a.0).cmp(&(b.1.start, b.1.end, b.0)));
+            for (name, span) in entries {
                 let display = Self::display_name(name);
                 if !self.used_names.contains(name)
                     && !self.pub_names.contains(name)
@@ -129,9 +135,12 @@ impl Checker {
     pub(crate) fn emit_global_unused_warnings(&mut self) {
         // --- Unused variables ---
         if let Some(defined) = self.defined_names.first() {
-            // Snapshot defined names to avoid borrow issues.
-            let entries: Vec<(String, Span)> =
+            // Snapshot defined names to avoid borrow issues, sorted by
+            // (span, name): HashMap iteration order is per-process random
+            // (see pop_scope).
+            let mut entries: Vec<(String, Span)> =
                 defined.iter().map(|(k, &v)| (k.clone(), v)).collect();
+            entries.sort_by(|a, b| (a.1.start, a.1.end, &a.0).cmp(&(b.1.start, b.1.end, &b.0)));
             for (name, span) in &entries {
                 let display = Self::display_name(name);
                 if !self.used_names.contains(name)
