@@ -254,6 +254,8 @@ jobs:
           # not later at clone time. Anything but a host-key error is fine —
           # even "Permission denied" proves verification passed.
           echo "--- ssh handshake smoke test ---"
+          ls -la ~/.ssh
+          cat ~/.ssh/config
           SSH_OUT="$(ssh -o BatchMode=yes -o ConnectTimeout=15 -T aur@aur.archlinux.org 2>&1)" || true
           echo "$SSH_OUT"
           case "$SSH_OUT" in
@@ -262,6 +264,8 @@ jobs:
               echo "The server may have rotated keys — compare the logged" >&2
               echo "fingerprints with a fresh 'ssh-keyscan aur.archlinux.org'" >&2
               echo "and update packaging/aur/aur_known_hosts if legitimate." >&2
+              echo "--- DEBUG: verbose handshake ---" >&2
+              ssh -vv -o BatchMode=yes -o ConnectTimeout=15 -T aur@aur.archlinux.org 2>&1 | grep -iE "known_hosts|host key|found key|verify|authenticat|offer|read.*key|bad owner|permission" | head -30 >&2 || true
               echo "--- DEBUG: what this runner actually sees ---" >&2
               ssh -V >&2 || true
               getent ahosts aur.archlinux.org >&2 || echo "(no getent result)" >&2
