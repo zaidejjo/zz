@@ -416,6 +416,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
             source: "path".to_string(),
             hash: hash.clone(),
             commit: None,
+            native: None,
         });
     }
 
@@ -808,6 +809,7 @@ pub fn update(args: &[String]) -> Result<(), String> {
                         source: format!("git+{}#{}", git_dep.git, git_dep.rev),
                         hash: String::new(),
                         commit: Some(commit.clone()),
+                        native: None,
                     });
                     changed = true;
                     println!("    → {}", &commit[..8.min(commit.len())]);
@@ -847,6 +849,7 @@ pub fn update(args: &[String]) -> Result<(), String> {
                                     source: format!("registry+{base}/{name}#{picked}"),
                                     hash: expected,
                                     commit: None,
+                                    native: None,
                                 });
                                 changed = true;
                                 println!("    {name}: {current} → {picked}");

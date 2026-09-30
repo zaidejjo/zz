@@ -166,7 +166,71 @@ fn cache_key(
     let (artifact_hash, artifact_flags) = zz_pm::cache_key::artifact_sig(&opts.plugin_artifacts);
     key.artifact_hash = artifact_hash;
     key.artifact_flags = artifact_flags;
+    key.native_build_sig = native_build_sig_for(source_path);
     Ok(key.to_slug())
+}
+
+/// Native audit signature for the cache key: one [`native_sig`] per
+/// `[native]` dependency (tag + compiler + manifest shape + resolved
+/// pkg-config from `zz.lock`), sorted and hashed. A compiler upgrade, a
+/// flag edit, or a pkg-config drift busts entries linked against older
+/// plugin artifacts. Empty when no native deps exist (stable slug).
+fn native_build_sig_for(source_path: &Path) -> String {
+    // Walk up from the entry file to the project root holding zz.lock.
+    let mut dir = source_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let root = loop {
+        if dir.join("zz.lock").exists() {
+            break dir;
+        }
+        if !dir.pop() {
+            return String::new();
+        }
+    };
+    let lock = match zz_pm::lock::Lockfile::load(&root.join("zz.lock")) {
+        Ok(l) => l,
+        Err(_) => return String::new(),
+    };
+    let manifest = zz_pm::manifest::Manifest::load(&root.join("zz.toml")).ok();
+    let host_tag = zz_pm::native_build::host_tag().unwrap_or_default();
+    let mut per_dep: Vec<String> = Vec::new();
+    for dep in &lock.deps {
+        let Some(pkg_dir) = resolve_pkg_dir(&root, dep, manifest.as_ref()) else {
+            continue;
+        };
+        let native_toml = if pkg_dir.join("zz.toml").exists() {
+            zz_pm::manifest::Manifest::load(&pkg_dir.join("zz.toml"))
+                .ok()
+                .and_then(|m| m.native)
+                .and_then(|n| toml::to_string(&n).ok())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if native_toml.is_empty() {
+            continue;
+        }
+        let rec = dep.native.as_ref();
+        let tag = rec.map(|r| r.tag.as_str()).unwrap_or(host_tag.as_str());
+        let compiler = rec.map(|r| r.compiler.as_str()).unwrap_or("");
+        let pkg = rec.map(|r| r.pkg_config_resolved.as_str()).unwrap_or("");
+        let mut entry = dep.name.clone();
+        entry.push('\0');
+        entry.push_str(&zz_pm::cache_key::CacheKey::native_sig(
+            tag,
+            compiler,
+            &native_toml,
+            pkg,
+        ));
+        per_dep.push(entry);
+    }
+    if per_dep.is_empty() {
+        return String::new();
+    }
+    per_dep.sort();
+    zz_pm::hash::hash_bytes(per_dep.join("\0").as_bytes())
 }
 
 /// Get modification time of every input that affects native output, for
