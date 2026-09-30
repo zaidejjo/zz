@@ -138,8 +138,14 @@ pub fn suggest_all<'a>(name: &str, candidates: &[&'a str]) -> Vec<(&'a str, u32)
         results.push((cand, dist, effective));
     }
 
-    // Sort by effective distance, then by length descending.
-    results.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| b.0.len().cmp(&a.0.len())));
+    // Sort by effective distance, then by length descending, then by
+    // name: candidate order inherits HashMap iteration (per-process
+    // random), so ties need a total order for deterministic diagnostics.
+    results.sort_by(|a, b| {
+        a.2.cmp(&b.2)
+            .then_with(|| b.0.len().cmp(&a.0.len()))
+            .then_with(|| a.0.cmp(b.0))
+    });
     results
         .into_iter()
         .map(|(cand, dist, _)| (cand, dist))
@@ -191,7 +197,13 @@ pub fn suggest_dotted<'a>(name: &str, candidates: &[&'a str]) -> Option<&'a str>
             continue;
         }
         let total = head_dist + tail_dist;
-        if best.map(|(_, d)| total < d).unwrap_or(true) {
+        // Strictly better wins; ties break by name so the result does
+        // not depend on candidate (HashMap iteration) order.
+        let better = match best {
+            None => true,
+            Some((bcand, d)) => total < d || (total == d && cand < bcand),
+        };
+        if better {
             best = Some((cand, total));
         }
     }
