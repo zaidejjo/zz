@@ -2672,6 +2672,14 @@ impl Checker {
             Pattern::Wildcard { .. } => {}
             Pattern::Binding { name } => {
                 self.define(&name.name, ty.clone());
+                // Top-level destructured names are module globals (like
+                // top-level `Decl`): record them for `tp.bindings` so
+                // downstream passes (native globals collection) can type
+                // them. Nested positions have env.len() > 1 (blocks push
+                // scopes) and are excluded, mirroring `Stmt::Decl`.
+                if self.env.len() == 1 {
+                    self.new_bindings.insert(name.name.clone(), ty.clone());
+                }
             }
             Pattern::Literal { value, span } => {
                 let lit_t = match value {
