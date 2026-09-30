@@ -17,6 +17,9 @@ accepted, adoption click still pending. Template already renders both.)
 
 - `PKGBUILD.template` — single source of truth. `@PKGNAME@`, `@PKGVER@`,
   `@SHA_X64@`, `@SHA_ARM@`, `@CONFLICTS@` are substituted by `render.sh` / CI.
+- `aur_known_hosts` — pinned AUR SSH host keys (public keys, safe to commit).
+  CI copies this to `known_hosts`; no runtime keyscan. If AUR rotates keys,
+  refresh from `ssh-keyscan aur.archlinux.org` (CI fails loudly on mismatch).
 - `render.sh` — renders `zz/PKGBUILD` + `zz-lang/PKGBUILD` for a version.
 - `out/` (gitignored) — local render output, never committed.
 

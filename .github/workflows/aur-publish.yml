@@ -2,9 +2,20 @@ name: aur-publish
 
 # Publishes the ZZ toolchain to the `zz-lang` AUR package when a GitHub
 # Release is published. `yay -S zz-lang` installs a PREBUILT binary
-# (no compilation): this workflow first builds the release zips
-# (`zz-<ver>-linux-{x86_64,aarch64}.zip` with `zz`, `zz-lsp`, LICENSE,
-# README), uploads them to the Release, then points the PKGBUILD at them.
+# (no compilation).
+#
+# Three jobs, strict order:
+#   build-assets — compile `zz`+`zz-lsp` per arch, zip, upload to Release.
+#   publish      — Arch container: point the PKGBUILD at the zips, generate
+#                  .SRCINFO with makepkg, upload both as a workflow artifact.
+#   push-aur     — plain ubuntu-latest: clone the AUR repo over SSH and push.
+#                  (SSH lives here, not in the Arch container — stock Ubuntu
+#                  OpenSSH is the ecosystem standard for AUR publishing.)
+#
+# SSH trust: host keys are PINNED in packaging/aur/aur_known_hosts (public
+# keys — safe to commit). No runtime keyscan, nothing to flake. If AUR ever
+# rotates keys the smoke test fails loudly with both fingerprints logged.
+#
 # Installs `/usr/bin/zz` (so `zz run main.zz` works) plus `/usr/bin/zz-lsp`.
 #
 # NOTE: the sibling `zz` package is intentionally NOT pushed yet — its AUR
@@ -66,7 +77,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: install native deps
-        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev zip
+        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev zip unzip
       - name: build + zip
         run: |
           TAG="${{ github.event.release.tag_name || inputs.tag }}"
@@ -106,6 +117,9 @@ jobs:
       image: archlinux:base-devel
     permissions:
       contents: read
+    outputs:
+      pkgver: ${{ steps.ver.outputs.pkgver }}
+      pkgrel: ${{ steps.ver.outputs.pkgrel }}
     steps:
       - name: install git/ssh tooling
         run: |
@@ -180,6 +194,31 @@ jobs:
           echo "--- namcap $pkg/PKGBUILD ---"
           su builder -c "cd /tmp/build-$pkg && namcap PKGBUILD" || true
 
+      - name: upload AUR files
+        uses: actions/upload-artifact@v4
+        with:
+          name: aur-zz-lang
+          path: /tmp/aur-out/zz-lang/
+          if-no-files-found: error
+
+  push-aur:
+    name: push zz-lang to AUR
+    # SSH pushes run on plain ubuntu-latest (not the Arch container):
+    # stock OpenSSH there is the ecosystem standard for AUR publishing.
+    needs: [build-assets, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Only the pinned host keys file is needed from the repo.
+          sparse-checkout: packaging/aur/aur_known_hosts
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: aur-zz-lang
+          path: /tmp/aur-pkg/
       - name: setup AUR ssh
         run: |
           echo "whoami=$(whoami) HOME=$HOME"
@@ -192,21 +231,12 @@ jobs:
           chmod 700 ~/.ssh
           printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
-          # Populate known_hosts with ALL host key types the server offers.
-          # NOTE: grep is NOT a valid check here — keyscan prints `# banner`
-          # comment lines containing the hostname even when zero keys were
-          # captured. Validate with ssh-keygen -F (real entries only).
-          rm -f ~/.ssh/known_hosts
-          for _try in 1 2 3; do
-            if ssh-keyscan aur.archlinux.org > ~/.ssh/known_hosts 2>/dev/null \
-              && ssh-keygen -F aur.archlinux.org -f ~/.ssh/known_hosts >/dev/null; then
-              break
-            fi
-            echo "keyscan attempt $_try yielded no usable host key, retrying..." >&2
-            sleep 5
-          done
+          # Host keys are pinned in-repo (packaging/aur/aur_known_hosts) —
+          # no runtime keyscan, nothing to flake. ssh-keygen -F validates
+          # real entries (a grep would match `#` comment lines).
+          cp packaging/aur/aur_known_hosts ~/.ssh/known_hosts
           if ! ssh-keygen -F aur.archlinux.org -f ~/.ssh/known_hosts >/dev/null 2>&1; then
-            echo "error: no usable aur.archlinux.org host key after 3 tries." >&2
+            echo "error: pinned known_hosts has no aur.archlinux.org entry." >&2
             exit 1
           fi
           chmod 600 ~/.ssh/known_hosts
@@ -214,32 +244,38 @@ jobs:
           ssh-keygen -lf ~/.ssh/known_hosts
           printf 'Host aur.archlinux.org\n  User aur\n  IdentityFile ~/.ssh/aur\n  IdentitiesOnly yes\n' > ~/.ssh/config
           chmod 600 ~/.ssh/config
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # Layer check: host-key problems must surface HERE with context,
-          # not later at clone time. A "Permission denied" below is fine —
-          # it proves host verification passed and only key auth remains.
+          # not later at clone time. Anything but a host-key error is fine —
+          # even "Permission denied" proves verification passed.
           echo "--- ssh handshake smoke test ---"
           SSH_OUT="$(ssh -o BatchMode=yes -o ConnectTimeout=15 -T aur@aur.archlinux.org 2>&1)" || true
           echo "$SSH_OUT"
           case "$SSH_OUT" in
             *"Host key verification failed"*)
-              echo "error: AUR host key verification failed despite pinned keys." >&2
+              echo "error: AUR host key verification failed against pinned keys." >&2
+              echo "The server may have rotated keys — compare the logged" >&2
+              echo "fingerprints with a fresh 'ssh-keyscan aur.archlinux.org'" >&2
+              echo "and update packaging/aur/aur_known_hosts if legitimate." >&2
               exit 1
               ;;
           esac
           ls -la ~/.ssh
+          echo "--- AUR package files ---"
+          ls -la /tmp/aur-pkg/
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
 
       - name: push zz-lang to AUR
         run: |
-          PKGVER="${{ steps.ver.outputs.pkgver }}"
-          PKGREL="${{ steps.ver.outputs.pkgrel }}"
+          PKGVER="${{ needs.publish.outputs.pkgver }}"
+          PKGREL="${{ needs.publish.outputs.pkgrel }}"
           pkg=zz-lang
-          echo "=== $pkg ==="
+          echo "=== $pkg ($PKGVER-$PKGREL) ==="
           rm -rf "/tmp/aur-$pkg"
           git clone "ssh://aur@aur.archlinux.org/$pkg.git" "/tmp/aur-$pkg"
-          cp "/tmp/aur-out/$pkg/PKGBUILD" "/tmp/aur-$pkg/PKGBUILD"
-          cp "/tmp/aur-out/$pkg/.SRCINFO" "/tmp/aur-$pkg/.SRCINFO"
+          cp /tmp/aur-pkg/PKGBUILD /tmp/aur-pkg/.SRCINFO "/tmp/aur-$pkg/"
           cd "/tmp/aur-$pkg"
           git add PKGBUILD .SRCINFO
           if git diff --cached --quiet; then
