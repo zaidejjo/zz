@@ -26,6 +26,9 @@
 //!
 //! Remote registry modules:
 //! - `remote` — HTTP client for the hosted registry (search/info/download/publish)
+//!
+//! Native build modules:
+//! - `native_build` — declarative C plugin builds (no shell, no network)
 
 pub mod auth;
 pub mod build_cache;
@@ -37,6 +40,7 @@ pub mod hash;
 pub mod link;
 pub mod lock;
 pub mod manifest;
+pub mod native_build;
 pub mod paths;
 pub mod publish;
 pub mod registry;

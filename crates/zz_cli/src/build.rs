@@ -320,38 +320,43 @@ pub(crate) fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_
     plugin_funcs
 }
 
-/// Run native build hooks for every dependency and discard the artifacts.
+/// Run native builds for every dependency and discard the artifacts.
 ///
 /// `zz install` calls this post-link so `zz run` (VM dlopen) works without
-/// a prior `zz build`: registry consumers never see hook outputs otherwise
-/// (tarballs exclude `build/`). Hook failures warn per-dependency inside
-/// [`discover_native_artifacts`] and never fail the caller.
+/// a prior `zz build`. Failures surface as errors (see
+/// [`discover_native_artifacts`]).
 pub(crate) fn ensure_native_hooks(project_root: &Path) {
     // Discover_native_artifacts walks up from its argument's parent
     // looking for zz.lock — anchor inside the canonical root.
     let project_root =
         std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
     let anchor = project_root.join("zz.toml");
-    let _ = discover_native_artifacts(&anchor);
+    if let Err(e) = discover_native_artifacts(&anchor) {
+        eprintln!("warning: native build failed: {e}");
+    }
 }
 ///
-/// Discover and invoke build hooks for plugin packages with native code.
+/// Discover and build native code for plugin packages.
 ///
 /// Reads `zz.lock` and `zz.toml`, finds dependencies that have a `plugin.zzi`
-/// and a `zz.toml` with a `[native]` section, invokes their build hooks, and
-/// returns the paths to compiled artifacts (`.o` / `.a` files) plus the raw
+/// and a `zz.toml` with a `[native]` section, builds them via the declared
+/// backend, and returns compiled artifacts (`.o` / `.a` files) plus raw
 /// linker flags from each package's `build/ldflags.txt` (e.g. `-lvips ...`).
-fn discover_native_artifacts(project_path: &Path) -> (Vec<PathBuf>, Vec<String>) {
+///
+/// Declarative (`cc`) failures are hard errors (fail closed — a half-built
+/// plugin must never silently link nothing). Legacy hook failures keep the
+/// historical warn-and-continue behavior during the deprecation window.
+fn discover_native_artifacts(project_path: &Path) -> Result<(Vec<PathBuf>, Vec<String>), String> {
     let mut artifacts = Vec::new();
     let mut link_args: Vec<String> = Vec::new();
 
     let Some(project_root) = canonical_project_root(project_path) else {
-        return (artifacts, link_args);
+        return Ok((artifacts, link_args));
     };
 
     let lock = match zz_pm::lock::Lockfile::load(&project_root.join("zz.lock")) {
         Ok(l) => l,
-        Err(_) => return (artifacts, link_args),
+        Err(_) => return Ok((artifacts, link_args)),
     };
 
     // Load manifest to check for path deps
@@ -380,13 +385,14 @@ fn discover_native_artifacts(project_path: &Path) -> (Vec<PathBuf>, Vec<String>)
             None => continue,
         };
 
-        // Legacy hook path (deprecated): declarative `cc` dispatch lands
-        // in the next slice. New-shape packages warn here until wired.
-        if native.build_cc.is_some() {
-            eprintln!(
-                "warning: plugin `{}` uses [native.build-cc], not yet wired; skipping native build",
-                dep.name
-            );
+        // Declarative backend: validated C build owned by zz itself.
+        if let Some(cc_spec) = native.build_cc.as_ref() {
+            eprintln!("zz: building plugin `{}` (declarative cc)...", dep.name);
+            let out = zz_pm::native_build::ensure_cc(&pkg_dir, &dep.name, cc_spec, None)
+                .map_err(|e| format!("plugin `{}` declarative build failed: {e}", dep.name))?;
+            artifacts.extend(out.objects);
+            artifacts.push(out.archive);
+            collect_link_args(&out.ldflags_path, &mut link_args);
             continue;
         }
         let Some(hook_rel) = native.build.as_deref() else {
@@ -442,15 +448,7 @@ fn discover_native_artifacts(project_path: &Path) -> (Vec<PathBuf>, Vec<String>)
                     }
                 }
             }
-            // Raw linker flags emitted by the build hook (e.g. `-lvips ...`).
-            let ldflags_path = build_dir.join("ldflags.txt");
-            if let Ok(flags) = std::fs::read_to_string(&ldflags_path) {
-                for flag in flags.split_whitespace() {
-                    if !link_args.iter().any(|f| f == flag) {
-                        link_args.push(flag.to_string());
-                    }
-                }
-            }
+            collect_link_args(&build_dir.join("ldflags.txt"), &mut link_args);
         }
     }
 
@@ -463,7 +461,19 @@ fn discover_native_artifacts(project_path: &Path) -> (Vec<PathBuf>, Vec<String>)
     // run, while archives may be cargo-cached and stale).
     thin_shadowed_archive_members(&mut artifacts);
 
-    (artifacts, link_args)
+    Ok((artifacts, link_args))
+}
+
+/// Merge whitespace-split flags from an `ldflags.txt` into `link_args`,
+/// deduplicated (both backends share this collection step).
+fn collect_link_args(ldflags_path: &Path, link_args: &mut Vec<String>) {
+    if let Ok(flags) = std::fs::read_to_string(ldflags_path) {
+        for flag in flags.split_whitespace() {
+            if !link_args.iter().any(|f| f == flag) {
+                link_args.push(flag.to_string());
+            }
+        }
+    }
 }
 
 /// Copy archives that duplicate loose `.o` files and delete the shadowed
@@ -697,7 +707,7 @@ pub fn build_release(
 
     // Discover and build plugin native artifacts (compiled .o / .a files
     // plus dependency link flags from each package's ldflags.txt).
-    let (plugin_artifacts, plugin_link_args) = discover_native_artifacts(path);
+    let (plugin_artifacts, plugin_link_args) = discover_native_artifacts(path)?;
     opts.plugin_artifacts = plugin_artifacts;
     opts.plugin_link_args = plugin_link_args;
 
