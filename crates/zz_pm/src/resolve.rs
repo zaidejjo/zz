@@ -234,6 +234,7 @@ fn resolve_git_dep(
         source: format!("git+{}#{}", git_dep.git, git_dep.rev),
         hash: String::new(), // Will be populated when CAS is fetched (M2 actual fetch)
         commit: Some(commit),
+        native: None,
     })
 }
 
@@ -300,6 +301,7 @@ fn resolve_registry_dep(
         source: format!("registry+{base}/{name}#{picked}"),
         hash: actual_sha,
         commit: None,
+        native: None,
     })
 }
 
@@ -546,6 +548,7 @@ mod tests {
             source: "path".to_string(),
             hash: hash_before,
             commit: None,
+            native: None,
         });
 
         // Content unchanged → not stale
@@ -585,6 +588,7 @@ mod tests {
             source: "registry+http://127.0.0.1:9/foo#1.2.0".to_string(),
             hash: "abc123".to_string(),
             commit: None,
+            native: None,
         });
         let opts = ResolveOptions::remote("http://127.0.0.1:9");
         let resolved = resolve_with(&manifest, Some(&lock), &d, &opts).unwrap();

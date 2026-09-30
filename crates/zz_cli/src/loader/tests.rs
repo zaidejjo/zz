@@ -1228,6 +1228,7 @@ fn plugin_import_merges_dotted_names() {
         source: "path".to_string(),
         hash: "test".to_string(),
         commit: None,
+        native: None,
     });
     lock.save(&dir.join("zz.lock")).unwrap();
     let result = load_program(&dir.join("src/main.zz")).unwrap();
@@ -1257,6 +1258,7 @@ fn plugin_import_alias_copies_namespace() {
         source: "path".to_string(),
         hash: "test".to_string(),
         commit: None,
+        native: None,
     });
     lock.save(&dir.join("zz.lock")).unwrap();
     let result = load_program(&dir.join("src/main.zz")).unwrap();

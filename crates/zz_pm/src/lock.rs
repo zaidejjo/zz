@@ -53,6 +53,37 @@ pub struct LockedDep {
     /// Exact commit SHA (for git deps only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// Native build audit record (for `[native]` deps only). Records how
+    /// the plugin was built so flag/compiler drift busts the cache and
+    /// stays auditable. Absent for pure-ZZ deps and pre-lockfile entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<LockedNative>,
+}
+
+/// How a native dependency was built (audit + cache-bust record).
+///
+/// Written by `zz install`/`zz build` after a successful declarative
+/// build or prebuilt unpack; read by the cache key and by auditors.
+/// All fields are plain strings so old lockfiles (field absent) keep
+/// parsing — absence just means "built before audit records".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LockedNative {
+    /// Backend used: `"cc"` or `"hook"` (legacy) or `"prebuilt"`.
+    pub backend: String,
+    /// Platform tag the artifacts were built/unpacked for
+    /// (e.g. `linux-x86_64-gnu-glibc2.44`).
+    pub tag: String,
+    /// Compiler version string (`cc --version`, first line). Empty for
+    /// prebuilt artifacts (no local compile).
+    #[serde(default)]
+    pub compiler: String,
+    /// sha256 of the prebuilt tarball bytes. Empty for source builds.
+    #[serde(default)]
+    pub artifact_sha256: String,
+    /// Resolved `pkg-config` module versions (`name=version,...`,
+    /// sorted). Empty when no `pkg_config` declared.
+    #[serde(default)]
+    pub pkg_config_resolved: String,
 }
 
 impl Default for Lockfile {
@@ -214,6 +245,7 @@ mod tests {
             source: "registry".into(),
             hash: "abc123".into(),
             commit: None,
+            native: None,
         });
         lock.upsert(LockedDep {
             name: "bar".into(),
@@ -221,6 +253,7 @@ mod tests {
             source: "git+https://github.com/user/repo#def456".into(),
             hash: "789".into(),
             commit: Some("def456".into()),
+            native: None,
         });
 
         let d = tmp_dir("round_trip");
@@ -249,6 +282,7 @@ mod tests {
             source: "registry".into(),
             hash: "abc".into(),
             commit: None,
+            native: None,
         });
 
         let d = tmp_dir("checksum");
@@ -275,6 +309,7 @@ mod tests {
             source: "registry".into(),
             hash: "abc".into(),
             commit: None,
+            native: None,
         });
 
         // Create manifest with same deps
@@ -320,6 +355,7 @@ mod tests {
             source: "registry".into(),
             hash: "abc".into(),
             commit: None,
+            native: None,
         });
 
         assert!(lock.find("foo").is_some());
@@ -335,6 +371,7 @@ mod tests {
             source: "registry".into(),
             hash: "abc".into(),
             commit: None,
+            native: None,
         });
         lock.upsert(LockedDep {
             name: "foo".into(),
@@ -342,6 +379,7 @@ mod tests {
             source: "registry".into(),
             hash: "def".into(),
             commit: None,
+            native: None,
         });
 
         assert_eq!(lock.deps.len(), 1);
@@ -357,6 +395,7 @@ mod tests {
             source: "registry".into(),
             hash: "abc".into(),
             commit: None,
+            native: None,
         });
 
         assert!(lock.remove("foo"));
@@ -373,5 +412,45 @@ mod tests {
         let loaded = Lockfile::load(&path).unwrap();
         assert_eq!(loaded.deps.len(), 0);
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn native_record_round_trip() {
+        let mut lock = Lockfile::new();
+        lock.upsert(LockedDep {
+            name: "zimg".into(),
+            version: "0.3.0".into(),
+            source: "registry".into(),
+            hash: "abc".into(),
+            commit: None,
+            native: Some(LockedNative {
+                backend: "cc".into(),
+                tag: "linux-x86_64-gnu-glibc2.44".into(),
+                compiler: "cc (GCC) 16.2.1".into(),
+                artifact_sha256: String::new(),
+                pkg_config_resolved: "vips=8.18.7".into(),
+            }),
+        });
+        let d = tmp_dir("native_rt");
+        let path = d.join("zz.lock");
+        lock.save(&path).unwrap();
+        let loaded = Lockfile::load(&path).unwrap();
+        assert_eq!(lock.deps, loaded.deps);
+        let rec = loaded.find("zimg").unwrap().native.as_ref().unwrap();
+        assert_eq!(rec.backend, "cc");
+        assert_eq!(rec.pkg_config_resolved, "vips=8.18.7");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn legacy_lock_without_native_parses() {
+        // Lockfiles written before audit records have no `native` key.
+        let body = "version = 1\n\n[[deps]]\nname = \"foo\"\nversion = \"1.0.0\"\nsource = \"registry\"\nhash = \"abc\"\n";
+        let checksum = crate::hash::hash_bytes(body.trim().as_bytes());
+        let content = format!(
+            "# This file is auto-generated by `zz`. DO NOT EDIT.\n# Checksum: {checksum}\n{body}"
+        );
+        let lock = Lockfile::parse(&content).unwrap();
+        assert!(lock.find("foo").unwrap().native.is_none());
     }
 }
