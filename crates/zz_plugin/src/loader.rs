@@ -5,6 +5,7 @@
 //! entrypoint to populate the VM's native function dispatch table.
 
 use std::collections::HashMap;
+use std::ffi::c_char;
 use std::path::Path;
 
 use zz_runtime::{NativeEntry, NativeFn};
@@ -18,7 +19,7 @@ use zz_runtime::{NativeEntry, NativeFn};
 /// This works in practice because `NativeFn` uses the C calling convention
 /// for its actual function body. The warning is suppressed at the call site.
 #[allow(improper_ctypes_definitions)]
-pub type RegisterCallback = extern "C" fn(name: *const i8, arity: usize, f: NativeFn);
+pub type RegisterCallback = extern "C" fn(name: *const c_char, arity: usize, f: NativeFn);
 
 /// Well-known symbol name for the plugin registration entrypoint.
 const REGISTER_SYMBOL: &[u8] = b"zz_plugin_register\0";
@@ -181,7 +182,7 @@ thread_local! {
 
 /// C-compatible callback invoked by the plugin for each native function.
 #[allow(improper_ctypes_definitions)]
-extern "C" fn register_callback(name: *const i8, arity: usize, f: NativeFn) {
+extern "C" fn register_callback(name: *const c_char, arity: usize, f: NativeFn) {
     let name = unsafe {
         std::ffi::CStr::from_ptr(name)
             .to_str()
