@@ -1,0 +1,17 @@
+// Fuzz smoke (fixed seed): differential VM-vs-native program.
+// Regenerate with tests/fuzz/gen.py; screen with tests/fuzz/run.sh.
+v1 := -11
+v2 := 70
+func f3(p4: int) -> int {
+    if p4 < 0 {
+        return 94
+    }
+    p4
+}
+acc5 := 0
+for i6 in 0..11 {
+    acc5 = acc5 + (v1 - v2)
+}
+println(acc5)
+println(f3(3))
+println("DONE")

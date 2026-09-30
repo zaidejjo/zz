@@ -710,6 +710,66 @@ parity_strict!(
 );
 
 // Types
+parity_strict!(
+    parity_regression_fuzz_smoke_00,
+    "regression",
+    "fuzz_smoke_00.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_01,
+    "regression",
+    "fuzz_smoke_01.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_02,
+    "regression",
+    "fuzz_smoke_02.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_03,
+    "regression",
+    "fuzz_smoke_03.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_04,
+    "regression",
+    "fuzz_smoke_04.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_05,
+    "regression",
+    "fuzz_smoke_05.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_06,
+    "regression",
+    "fuzz_smoke_06.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_07,
+    "regression",
+    "fuzz_smoke_07.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_08,
+    "regression",
+    "fuzz_smoke_08.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_09,
+    "regression",
+    "fuzz_smoke_09.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_10,
+    "regression",
+    "fuzz_smoke_10.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_11,
+    "regression",
+    "fuzz_smoke_11.zz"
+);
 parity_strict!(parity_types_generics, "types", "generics.zz");
 parity_strict!(parity_types_type_inference, "types", "type_inference.zz");
 

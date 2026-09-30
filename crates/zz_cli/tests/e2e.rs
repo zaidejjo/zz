@@ -262,6 +262,66 @@ e2e_success_test!(
     "regression",
     "neg_after_loop.zz"
 );
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_00,
+    "regression",
+    "fuzz_smoke_00.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_01,
+    "regression",
+    "fuzz_smoke_01.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_02,
+    "regression",
+    "fuzz_smoke_02.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_03,
+    "regression",
+    "fuzz_smoke_03.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_04,
+    "regression",
+    "fuzz_smoke_04.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_05,
+    "regression",
+    "fuzz_smoke_05.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_06,
+    "regression",
+    "fuzz_smoke_06.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_07,
+    "regression",
+    "fuzz_smoke_07.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_08,
+    "regression",
+    "fuzz_smoke_08.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_09,
+    "regression",
+    "fuzz_smoke_09.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_10,
+    "regression",
+    "fuzz_smoke_10.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_11,
+    "regression",
+    "fuzz_smoke_11.zz"
+);
 e2e_success_test!(e2e_syntax_main_entrypoint, "syntax", "main_entrypoint.zz");
 e2e_success_test!(e2e_syntax_match_guards, "syntax", "match_guards.zz");
 e2e_success_test!(
