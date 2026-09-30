@@ -3555,14 +3555,14 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zz_checker"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "zz_frontend",
 ]
 
 [[package]]
 name = "zz_cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.22.1",
  "codespan-reporting",
@@ -3584,7 +3584,7 @@ dependencies = [
 
 [[package]]
 name = "zz_codegen"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "zz_checker",
  "zz_frontend",
@@ -3596,7 +3596,7 @@ dependencies = [
 
 [[package]]
 name = "zz_fmt"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ignore",
  "rayon",
@@ -3608,7 +3608,7 @@ dependencies = [
 
 [[package]]
 name = "zz_frontend"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "codespan-reporting",
  "colored",
@@ -3617,7 +3617,7 @@ dependencies = [
 
 [[package]]
 name = "zz_hir"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "zz_checker",
  "zz_frontend",
@@ -3625,7 +3625,7 @@ dependencies = [
 
 [[package]]
 name = "zz_lsp"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "dashmap 6.2.1",
  "env_logger",
@@ -3641,7 +3641,7 @@ dependencies = [
 
 [[package]]
 name = "zz_native_rt"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -3678,7 +3678,7 @@ dependencies = [
 
 [[package]]
 name = "zz_pm"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.22.1",
  "dirs",
@@ -3697,7 +3697,7 @@ dependencies = [
 
 [[package]]
 name = "zz_runtime"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "codespan-reporting",
  "loom",
@@ -3708,7 +3708,7 @@ dependencies = [
 
 [[package]]
 name = "zz_stdlib"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-deque",
