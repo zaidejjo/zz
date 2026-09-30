@@ -182,33 +182,51 @@ jobs:
 
       - name: setup AUR ssh
         run: |
+          echo "whoami=$(whoami) HOME=$HOME"
           if [ -z "${AUR_SSH_PRIVATE_KEY:-}" ]; then
             echo "error: secret AUR_SSH_PRIVATE_KEY is not set." >&2
             echo "Add the AUR account SSH private key as a repo secret first." >&2
             exit 1
           fi
           mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
           printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
-          # keyscan must yield a real host key: an empty known_hosts fails
-          # later at clone time with a confusing "Host key verification
-          # failed", so retry then fail fast with a clear message.
+          # Populate known_hosts with ALL host key types the server offers.
+          # NOTE: grep is NOT a valid check here — keyscan prints `# banner`
+          # comment lines containing the hostname even when zero keys were
+          # captured. Validate with ssh-keygen -F (real entries only).
           rm -f ~/.ssh/known_hosts
           for _try in 1 2 3; do
-            if ssh-keyscan -t ed25519,rsa aur.archlinux.org > ~/.ssh/known_hosts 2>/dev/null \
-              && grep -q "aur.archlinux.org" ~/.ssh/known_hosts; then
+            if ssh-keyscan aur.archlinux.org > ~/.ssh/known_hosts 2>/dev/null \
+              && ssh-keygen -F aur.archlinux.org -f ~/.ssh/known_hosts >/dev/null; then
               break
             fi
-            echo "keyscan attempt $_try failed, retrying..." >&2
+            echo "keyscan attempt $_try yielded no usable host key, retrying..." >&2
             sleep 5
           done
-          if ! grep -q "aur.archlinux.org" ~/.ssh/known_hosts 2>/dev/null; then
-            echo "error: ssh-keyscan aur.archlinux.org returned no host keys after 3 tries." >&2
+          if ! ssh-keygen -F aur.archlinux.org -f ~/.ssh/known_hosts >/dev/null 2>&1; then
+            echo "error: no usable aur.archlinux.org host key after 3 tries." >&2
             exit 1
           fi
           chmod 600 ~/.ssh/known_hosts
+          echo "--- pinned AUR host key fingerprints ---"
+          ssh-keygen -lf ~/.ssh/known_hosts
           printf 'Host aur.archlinux.org\n  User aur\n  IdentityFile ~/.ssh/aur\n  IdentitiesOnly yes\n' > ~/.ssh/config
           chmod 600 ~/.ssh/config
+          # Layer check: host-key problems must surface HERE with context,
+          # not later at clone time. A "Permission denied" below is fine —
+          # it proves host verification passed and only key auth remains.
+          echo "--- ssh handshake smoke test ---"
+          SSH_OUT="$(ssh -o BatchMode=yes -o ConnectTimeout=15 -T aur@aur.archlinux.org 2>&1)" || true
+          echo "$SSH_OUT"
+          case "$SSH_OUT" in
+            *"Host key verification failed"*)
+              echo "error: AUR host key verification failed despite pinned keys." >&2
+              exit 1
+              ;;
+          esac
+          ls -la ~/.ssh
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
 
