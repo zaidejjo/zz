@@ -77,29 +77,41 @@ Only C-ABI-safe types are permitted in plugin functions:
 ```
 my-plugin/
 ├── plugin.zzi          Interface declarations
-├── zz.toml             Package manifest
+├── zz.toml             Package manifest ([native] backend = "cc")
+├── csrc/
+│   └── wrapper.c       C implementation (compiled by zz)
 └── src/
     └── main.zz         ZZ code (optional)
 ```
 
-### Full Plugin (with native crate)
+### Full Plugin (with system dependency)
 
 ```
 my-plugin/
 ├── plugin.zzi          Interface declarations
-├── zz.toml             Package manifest with [native] section
-├── build.sh            Build hook (optional)
+├── zz.toml             Package manifest with [native.build-cc]
 ├── my.zz               Ergonomic entry (optional; or src/my.zz) — loaded
 │                       as a module on `import my`, so `my.resize(...)`
 │                       resolves alongside the manifest signatures
+├── csrc/
+│   ├── wrapper.h       C wrapper API (optional)
+│   └── wrapper.c       C wrapper implementation
+└── src/
+    └── main.zz         ZZ ergonomic layer
+```
+
+### Legacy Plugin (Rust crate, hook path — deprecated, see §4)
+
+```
+my-plugin/
+├── plugin.zzi          Interface declarations
+├── zz.toml             Package manifest with [native] build = "build.sh"
+├── build.sh            Build hook (deprecated, --allow-hooks only)
 ├── native/             Rust crate producing .so/.a
 │   ├── Cargo.toml
 │   ├── build.rs        Build script (optional)
 │   └── src/
 │       └── lib.rs      Native implementations
-├── csrc/
-│   ├── wrapper.h       C wrapper API (optional)
-│   └── wrapper.c       C wrapper implementation (optional)
 └── src/
     └── main.zz         ZZ ergonomic layer
 ```
@@ -108,106 +120,163 @@ my-plugin/
 
 ## 3. `zz.toml` Configuration
 
-Add the `[native]` section to declare build hooks and system dependencies:
+Two backends. New plugins use the declarative C backend — no scripts:
 
 ```toml
 [package]
 name = "my-plugin"
 version = "0.1.0"
-rust-version = "1.85.0"
 
 [native]
-build = "build.sh"                      # build hook script
-manifest = "plugin.zzi"                 # optional, default: plugin.zzi
-pkg-config = "libfoo >= 1.0"           # optional: system dependency
+backend = "cc"                 # declarative C build by zz itself
+manifest = "plugin.zzi"        # optional, default: plugin.zzi
+
+[native.build-cc]
+sources = ["csrc/wrapper.c"]   # explicit list, no globs
+include_dirs = ["csrc"]        # the ONLY way to add -I paths
+defines = ["NDEBUG"]           # -D flags without the prefix
+cflags = ["-O2", "-Wall", "-Wextra", "-fPIC"]  # explicit allowlist (§4)
+libs = []                      # direct -l names; prefer pkg_config
+pkg_config = ["vips"]          # optional; resolved by zz, recorded in zz.lock
+targets = ["linux-x86_64-gnu-glibc2.28", "macos-arm64-min11.0"]
+
+# Per-platform prebuilt (optional; https: only in v1):
+[native.prebuilt.target."linux-x86_64-gnu-glibc2.28"]
+url = "https://github.com/<org>/<repo>/releases/download/v0.1.0/my-plugin-0.1.0-linux-x86_64-gnu-glibc2.28.tgz"
+sha256 = "9f2c…"
 ```
 
-### Fields
+Tags contain dots (`glibc2.28`), so quote them. Bare triples
+(`x86_64-unknown-linux-gnu`) are rejected — the tag carries the
+libc/ABI floor (see §3.1).
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `build` | string | no | Path to build hook script, relative to package root |
+| `backend` | string | no | `cc` (declarative) or `hook` (legacy); inferred from shape when absent, must agree when set |
 | `manifest` | string | no | Path to interface file, default: `plugin.zzi` |
-| `pkg-config` | string | no | pkg-config query for system dependencies |
+| `build` | string | no | Legacy hook script (deprecated; mutually exclusive with `build-cc`) |
+| `pkg_config` | string | no | Legacy system query (deprecated; use the `build-cc` list form) |
+
+### 3.1 Platform tags
+
+Format `<os>-<arch>-<abi>-<floor>`:
+
+| Tag | Meaning |
+|---|---|
+| `linux-x86_64-gnu-glibc2.28` | glibc ≥ 2.28 |
+| `linux-aarch64-gnu-glibc2.28` | glibc ≥ 2.28 |
+| `linux-x86_64-musl` | musl (no floor) |
+| `macos-arm64-min11.0` | macOS ≥ 11.0 |
+| `macos-x86_64-min12.0` | macOS ≥ 12.0 |
+| `windows-x86_64-msvc` | AOT-only (VM dlopen deferred) |
+
+Matching: exact tag preferred, else same os+arch+ABI with
+`artifact_floor <= host_floor`. An artifact floored above the host is
+rejected (`prebuilt requires glibc 2.28, host has 2.17`). glibc and
+musl never interchange. Missing entry means "no prebuilt, source
+fallback" (gated: transitive source builds need
+`--allow-source-builds`).
+
+### 3.2 Prebuilt artifacts (`zz publish --artifact-dir`)
+
+Each per-tag `.tgz` (`<name>-<version>-<tag>.tgz`) contains the FULL
+`build/` layout (`*.o`, `*.a`, shared lib, `ldflags.txt`/`cflags.txt`).
+Partial tarballs are rejected at publish and at install: a static-only
+upload would fix AOT while silently breaking `zz run`.
+
+Ship them from GitHub releases; `zz publish --artifact-dir <dir>`
+verifies each tarball (layout + both-engine symbol check) and prints
+the `[native.prebuilt]` stanza to paste into `zz.toml`. The sha256 in
+the manifest is verified before unpack — a compromised mirror serving
+different bytes fails closed. Rotation is a new package version. The
+`registry:` URL scheme is deferred to v2.
 
 ---
 
-## 4. Build Hook (`build.sh`)
+## 4. Declarative C build (`[native.build-cc]`)
 
-The build hook is invoked by `zz build` before compilation. It must:
+`zz` compiles the plugin itself — the only processes ever spawned are
+`cc`/`ar`/`pkg-config` with structured arguments under a hermetic
+environment (cleared env: `PATH`, `CC`, isolated `TMPDIR`,
+`SOURCE_DATE_EPOCH=0`). No shell, no script, no network during the
+build. Per source: `cc -c` → `build/<stem>.o`; then
+`ar rcs build/lib<name>.a` (AOT input) and
+`cc -shared` → `build/lib<name>.so|.dylib|.dll` (VM input); then
+`build/cflags.txt` + `build/ldflags.txt`.
 
-1. **Compile** the C wrapper + Rust native crate
-2. **Output** artifacts to `build/` directory
-
-### Required Outputs
+### Required outputs (produced by `zz`, not you)
 
 | File | Description |
 |------|-------------|
-| `build/*.o` | Compiled C wrapper object files |
-| `build/lib*.a` | Static library (for AOT linking) |
-| `build/lib*.so` | Shared library (for VM dlopen, Linux) |
-| `build/lib*.dylib` | Shared library (for VM dlopen, macOS) |
-| `build/ldflags.txt` | Linker flags (one line, space-separated) |
-| `build/cflags.txt` | Compiler flags (one line, space-separated) |
+| `build/*.o` | Compiled wrapper objects (AOT link) |
+| `build/lib*.a` | Static library (AOT link) |
+| `build/lib*.so` | Shared library (VM dlopen, Linux) |
+| `build/lib*.dylib` | Shared library (VM dlopen, macOS) |
+| `build/lib*.dll` | Shared library (Windows; AOT-only, VM deferred) |
+| `build/ldflags.txt` | Linker flags (from `libs` + `pkg_config`) |
+| `build/cflags.txt` | Compiler flags (cache-key input) |
 
-### Example `build.sh`
+### Allowed `cflags` (explicit allowlist)
 
-```bash
-#!/bin/sh
-set -e
+`-O0 -O1 -O2 -O3 -Os -Oz`, `-g`, `-fPIC -fpic -fPIE`,
+`-Wall -Wextra -Werror -Wno-*`, `-std=c11 -std=c17`, `-pthread`,
+`-march=x86-64 -march=armv8-a`. Everything else is a manifest error.
+Rejected classes (each fail closed): any flag containing `,`
+(blocks `-Wl,`/`-Wp,` smuggling), `@file` indirection, `-Wl,*`,
+`-Wp,*`, `-Xlinker`, `-Xpreprocessor`, bare `-I` (use
+`include_dirs`), bare `-L`/`-l` (use `libs`), `--target=` (the
+toolchain sets it from the platform tag).
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/build"
+The same validator gates `pkg-config` output tokens before use
+(`-I`/`-L`/`-l` allowed from that source only — the manifest form
+still bans them so only the resolver can add them).
 
-mkdir -p "$BUILD_DIR"
+### Verification (both engines, required)
 
-# Compile C wrapper
-CFLAGS=$(pkg-config --cflags vips)
-LIBS=$(pkg-config --libs vips)
+Before the result is accepted, `zz` checks every `plugin.zzi`
+symbol resolves in the archive (`nm` check, AOT) AND in the shared
+lib (VM), plus exactly one ABI stamp (`ZZ_C_PLUGIN_ABI_VERSION` or
+`ZZ_PLUGIN_ABI_VERSION`) in the shared lib. Missing either artifact
+class is a hard error (except Windows, AOT-only with a loud note).
 
-cc -c csrc/wrapper.c \
-    -o build/wrapper.o \
-    $CFLAGS -Wall -Wextra -Werror -fPIC
+### Threat model (read this)
 
-# Compile Rust native crate (see "cdylib link discipline" below)
-cd native
-cargo rustc --release --lib --crate-type cdylib -- \
-	-C link-args=-Wl,--exclude-libs,ALL \
-	-C link-args=-Wl,-z,lazy
-cp target/release/deps/libmy_plugin.so build/  # or .dylib on macOS
-cargo build --release  # staticlib for AOT (plain flags)
-cp target/release/libmy_plugin.a build/
+The declarative build removes **arbitrary build-time code**: no
+`build.sh`, no `curl` at build, no `cargo build` scripts. Manifests
+are auditable, flags are allowlisted, the compiler and resolved
+`pkg-config` versions land in `zz.lock`, and drift busts the cache.
 
-# Save flags
-echo "$CFLAGS" > build/cflags.txt
-echo "$LIBS" > build/ldflags.txt
-```
+It does NOT make plugins safe. A native dependency still executes
+compiled C inside your process — `dlopen`'d by `zz run`, linked into
+your binary by `zz build`. A malicious maintainer gets code execution
+regardless of how it was built. sha256 gives **integrity** (bytes
+match what the manifest pins), not **authenticity** (who published
+them). Signing (Sigstore) is a v2 track.
 
-### Build Hook Contract
+Docs promise "no arbitrary build scripts" — never "secure plugins".
+Treat every `[native]` dependency as code execution with C
+privileges: pin versions, review the sources, keep native deps few.
 
-- The hook runs from the package root directory
-- It must exit 0 on success, non-zero on failure
-- stderr output is shown to the user on failure
-- stdout output is captured (not displayed)
-- `build/` directory is created by the hook (or by `zz build` if it doesn't exist)
-- If both `build/<x>.o` and an archive containing `<x>.o` exist, `zz build`
-  thins the archive (loose objects win — hooks recompile them every run,
-  archives may be cargo-cached and stale)
+### Legacy build hook (`build = "build.sh"`, deprecated)
 
-### cdylib Link Discipline (VM plugins, required)
+One-release deprecation window only. Direct-dependency hooks run
+behind `zz install/build --allow-hooks` with a warning on every use;
+transitive hooks always error. Then the `bash` path is deleted.
+Rust-crate plugins (`native/` + cargo) stay on the hook until a v2
+`cargo vendor` design lands — or vendor a C shim and go declarative
+today (arbitrary `cargo build` is the same script problem in a
+trench coat).
 
-The cdylib is `dlopen`'d by `zz run`, whose host process never provides C
-runtime symbols. Two flags are mandatory on the cdylib link (scoped via
-`cargo rustc --lib` so build scripts are unaffected):
+<details>
+<summary>Legacy <code>build.sh</code> contract (appendix)</summary>
 
-- `--exclude-libs,ALL` — localizes whole-archived rlib members. Only the
-  crate's own objects stay exported, so dead `zz_native_rt` items
-  (referencing the AOT-only C runtime, e.g. `zz_str_new`) are
-  garbage-collected instead of dangling at load.
-- `-z,lazy` — Rust links cdylibs `-z now`; plugins must bind lazily.
-
-Real missing dependencies still fail loudly: `DT_NEEDED` libraries resolve
-eagerly regardless of these flags.
+The hook ran from the package root, exited 0 on success, and wrote
+`build/*.o`, `build/lib*.a`, `build/lib*.so|.dylib`,
+`build/ldflags.txt`, `build/cflags.txt`. Failures warned and the
+build continued with whatever artifacts existed. If both
+`build/<x>.o` and an archive containing `<x>.o` existed, `zz build`
+thinned the archive (loose objects won).
+</details>
 
 ### Single Result Slot Pattern (recommended)
 
@@ -221,7 +290,13 @@ implementation.
 
 ---
 
-## 5. Rust Native Crate
+## 5. Rust Native Crate (legacy hook path — v2 will vendor it)
+
+Pure-C plugins (§4) are the v1 path. Rust-crate plugins stay on the
+deprecated hook until the v2 `cargo vendor` design lands: arbitrary
+`cargo build` at install time is the same script problem in a trench
+coat, so it keeps the `build = "build.sh"` shape behind
+`--allow-hooks` (direct deps only).
 
 ### Cargo.toml
 
@@ -557,11 +632,13 @@ handles are never released once loaded.
 
 ## 15. Example: Complete Plugin
 
-See the `zimg` package for a complete working example:
+See the `zimg` package for a complete working example (declarative v1):
 
-- **Repository:** `github.com/user/zimg`
-- **Interface:** `plugin.zzi` (11 functions)
-- **Native crate:** `native/src/lib.rs` (Rust implementations)
+- **Repository:** `github.com/zz-language/zimg`
+- **Interface:** `plugin.zzi` (C-ABI)
 - **C wrapper:** `csrc/zimg_wrapper.c` (libvips bridge)
-- **Build hook:** `build.sh` (compiles everything)
+- **Manifest:** `[native.build-cc]` with `pkg_config = ["vips"]`
+- **Prebuilt:** per-tag `.tgz` on GitHub releases (`https:` + sha256)
 - **ZZ wrapper:** `src/zimg.zz` (ergonomic ZZ layer)
+
+No `build.sh`: `zz` compiles `csrc/` itself and verifies both engines.

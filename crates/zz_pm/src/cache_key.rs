@@ -58,6 +58,12 @@ pub struct CacheKey {
     /// Hashed by content, not mtime, for the same unconditional-rewrite
     /// reason. Empty when no plugin flags exist.
     pub artifact_flags: String,
+    /// Native-build audit signature: `{tag, compiler version,
+    /// SOURCE_DATE_EPOCH, build-cc manifest hash, pkg-config resolved}`
+    /// hashed together. A compiler upgrade, a flag edit, or a target
+    /// change busts entries linked against older plugin artifacts.
+    /// Empty for plugin-free projects (stable slug).
+    pub native_build_sig: String,
 }
 
 impl CacheKey {
@@ -117,6 +123,7 @@ impl CacheKey {
             runtime_mtime,
             artifact_hash: String::new(),
             artifact_flags: String::new(),
+            native_build_sig: String::new(),
         })
     }
 
@@ -177,9 +184,14 @@ impl CacheKey {
         } else {
             self.artifact_flags[..8.min(self.artifact_flags.len())].to_string()
         };
+        let native_slug = if self.native_build_sig.is_empty() {
+            "none".to_string()
+        } else {
+            self.native_build_sig[..16.min(self.native_build_sig.len())].to_string()
+        };
 
         format!(
-            "{}-{}-{}-{}-{}-{}-{}-{}-{}",
+            "{}-{}-{}-{}-{}-{}-{}-{}-{}-{}",
             &self.source_hash[..16.min(self.source_hash.len())],
             path_slug,
             deps_slug,
@@ -189,7 +201,31 @@ impl CacheKey {
             rt_slug,
             art_slug,
             flags_slug,
+            native_slug,
         )
+    }
+
+    /// Hash one dependency's native audit inputs into the build signature:
+    /// platform tag, compiler version, manifest `[native]` shape, and
+    /// resolved pkg-config versions. Sorted-joined by the caller across
+    /// deps; empty inputs hash to empty (plugin-free slug stability).
+    pub fn native_sig(tag: &str, compiler: &str, native_toml: &str, pkg_resolved: &str) -> String {
+        if tag.is_empty()
+            && compiler.is_empty()
+            && native_toml.is_empty()
+            && pkg_resolved.is_empty()
+        {
+            return String::new();
+        }
+        let mut combined = String::new();
+        combined.push_str(tag);
+        combined.push('\0');
+        combined.push_str(compiler);
+        combined.push('\0');
+        combined.push_str(native_toml);
+        combined.push('\0');
+        combined.push_str(pkg_resolved);
+        hash::hash_bytes(combined.as_bytes())
     }
 }
 
@@ -767,5 +803,44 @@ dep_a = { path = "dep_a" }
         fs::write(d.join("src").join("util.zz"), "pub func u() -> int { 1 }\n").unwrap();
         let after = key_for(&d.join("src"), "main.zz", "func main() {}\n");
         assert_ne!(before, after, "nested sibling edit must invalidate");
+    }
+
+    #[test]
+    fn native_sig_empty_when_no_plugins() {
+        assert!(CacheKey::native_sig("", "", "", "").is_empty());
+    }
+
+    #[test]
+    fn native_sig_busts_on_compiler_change() {
+        let a = CacheKey::native_sig("linux-x86_64-gnu-glibc2.44", "cc 1", "n", "vips=1");
+        let b = CacheKey::native_sig("linux-x86_64-gnu-glibc2.44", "cc 2", "n", "vips=1");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn native_sig_busts_on_manifest_and_pkg_change() {
+        let base = CacheKey::native_sig("tag", "cc", "shape-a", "vips=1");
+        assert_ne!(
+            base,
+            CacheKey::native_sig("tag", "cc", "shape-b", "vips=1"),
+            "flag edit must invalidate"
+        );
+        assert_ne!(
+            base,
+            CacheKey::native_sig("tag", "cc", "shape-a", "vips=2"),
+            "pkg-config drift must invalidate"
+        );
+    }
+
+    #[test]
+    fn slug_carries_native_segment() {
+        let d = tmp();
+        let src = d.join("main.zz");
+        fs::write(&src, "func main() { }").unwrap();
+        let content = fs::read_to_string(&src).unwrap();
+        let mut k = CacheKey::compute(&src, &content, 42, None, None).unwrap();
+        let plain = k.to_slug();
+        k.native_build_sig = CacheKey::native_sig("tag", "cc", "shape", "");
+        assert_ne!(plain, k.to_slug());
     }
 }

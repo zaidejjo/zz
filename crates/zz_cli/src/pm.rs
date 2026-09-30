@@ -416,6 +416,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
             source: "path".to_string(),
             hash: hash.clone(),
             commit: None,
+            native: None,
         });
     }
 
@@ -482,9 +483,24 @@ pub fn install(args: &[String]) -> Result<(), String> {
     if linked_count > 0 {
         println!("linked {linked_count} dependencies into vendor/");
     }
-    // Native plugins: run build hooks now so `zz run` works without a
-    // prior `zz build` (registry tarballs exclude hook outputs).
-    crate::build::ensure_native_hooks(&dir);
+    // Native plugins: build now so `zz run` works without a prior
+    // `zz build` (registry tarballs exclude build outputs). Declarative
+    // failures and gate violations fail the install; allowed legacy
+    // hooks warn per-dependency inside the builder.
+    let build_opts = crate::build::NativeBuildOpts {
+        allow_source_builds: args.iter().any(|a| a == "--allow-source-builds"),
+        allow_hooks: args.iter().any(|a| a == "--allow-hooks"),
+    };
+    let built = crate::build::build_native_deps(&dir.join("zz.toml"), build_opts)?;
+    if !built.audits.is_empty() {
+        for (name, rec) in built.audits {
+            if let Some(dep) = lock.deps.iter_mut().find(|d| d.name == name) {
+                dep.native = Some(rec);
+            }
+        }
+        lock.save(&lock_path)?;
+        println!("native audit recorded in zz.lock");
+    }
     println!("hint: run `zz build` to compile");
     Ok(())
 }
@@ -637,6 +653,39 @@ pub fn publish(args: &[String]) -> Result<(), String> {
     zz_pm::publish::validate(&manifest).map_err(|e| e.to_string())?;
     for warning in zz_pm::publish::warnings(&manifest) {
         eprintln!("warning: {warning}");
+    }
+
+    // `--artifact-dir <dir>`: verify each `<name>-<version>-<tag>.tgz`
+    // (full build/ layout + both-engine symbol check) and print the
+    // `[native.prebuilt]` stanza to paste into zz.toml. Missing dir
+    // entries mean a source-only release (allowed, warns).
+    if let Some(artifact_dir_str) = parse_flag_value(args, "--artifact-dir") {
+        let artifact_dir = std::path::PathBuf::from(&artifact_dir_str);
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&artifact_dir)
+            .map_err(|e| format!("cannot read --artifact-dir {artifact_dir_str}: {e}"))?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("tgz"))
+            .collect();
+        entries.sort();
+        if entries.is_empty() {
+            eprintln!("warning: --artifact-dir has no .tgz files; source-only release");
+        }
+        for tgz in &entries {
+            match zz_pm::native_build::verify_artifact_file(tgz, &dir, &manifest.package.name) {
+                Ok((tag, sha256)) => {
+                    println!("artifact ok: {} ({})", tgz.display(), tag);
+                    println!("  [target.{tag}]");
+                    println!(
+                        "  url = \"https://github.com/<org>/<repo>/releases/download/v{}/{}\"",
+                        manifest.package.version,
+                        tgz.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                    println!("  sha256 = \"{sha256}\"");
+                }
+                Err(e) => return Err(format!("artifact rejected: {e}")),
+            }
+        }
     }
 
     // Run tests (skippable for native packages whose suites live
@@ -808,6 +857,7 @@ pub fn update(args: &[String]) -> Result<(), String> {
                         source: format!("git+{}#{}", git_dep.git, git_dep.rev),
                         hash: String::new(),
                         commit: Some(commit.clone()),
+                        native: None,
                     });
                     changed = true;
                     println!("    → {}", &commit[..8.min(commit.len())]);
@@ -847,6 +897,7 @@ pub fn update(args: &[String]) -> Result<(), String> {
                                     source: format!("registry+{base}/{name}#{picked}"),
                                     hash: expected,
                                     commit: None,
+                                    native: None,
                                 });
                                 changed = true;
                                 println!("    {name}: {current} → {picked}");

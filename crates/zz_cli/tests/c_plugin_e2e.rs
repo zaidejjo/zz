@@ -158,11 +158,11 @@ fn c_plugin_vm_and_aot_agree() {
     scaffold(&dir);
     let consumer = dir.join("use");
 
-    let (code, _, stderr) = run_zz(&consumer, &["install"]);
+    let (code, _, stderr) = run_zz(&consumer, &["install", "--allow-hooks"]);
     assert_eq!(code, 0, "install failed: {stderr}");
 
     // AOT path.
-    let (code, _, stderr) = run_zz(&consumer, &["build", "src/main.zz"]);
+    let (code, _, stderr) = run_zz(&consumer, &["build", "--allow-hooks", "src/main.zz"]);
     assert_eq!(code, 0, "build failed: {stderr}");
     let bin = consumer.join("src/bin/main");
     let out = Command::new(&bin).output().expect("binary should run");

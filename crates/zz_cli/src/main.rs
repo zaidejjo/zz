@@ -42,6 +42,9 @@ PACKAGE MANAGER:
     zz new <name> [--template T]  create a new project directory
     zz add <pkg>[@ver]            add a dependency to zz.toml
     zz install, zz i              resolve deps, fetch into CAS, link
+    zz install --allow-source-builds
+                                permit transitive native source builds
+    zz install --allow-hooks    permit legacy [native] build hooks (direct only)
     zz remove <pkg>               remove a dependency
     zz update [pkg]               re-resolve floating versions
     zz search <query>             search the package registry
@@ -73,6 +76,11 @@ FLAGS:
     --pgo              with build, profile-guided optimization build (native host only)
     --target <triple>  with build, cross-compile via clang --target= (same flags as without -p, minus -march=native)
     --cc <clang|zig>   with build, select the Clang provider
+    --allow-source-builds
+                        with build/install, compile transitive native deps
+                        from source when no prebuilt covers the host tag
+    --allow-hooks       with build/install, run legacy [native] build hooks
+                        (direct deps only; transitive hooks always error)
     --verbose          with build, print the exact clang command line
     --template <T>     with init/new, template: cli (default), lib, or web
     --git <url>        with add, git URL for dependency
@@ -82,6 +90,9 @@ FLAGS:
                        registry base URL (default: ZZ_REGISTRY or the public registry)
     --limit <n>        with search, max results (default 20)
     --dry-run          with publish, validate + pack without uploading
+    --artifact-dir <dir>
+                        with publish, verify per-tag prebuilt tarballs and
+                        print the [native.prebuilt] stanza
     --skip-tests       with publish, skip the `zz test` gate (native pkgs)
     --browser          with login, print the OAuth URL before prompting
     --author <name>    with init/new, package author (repeatable, comma-split)
@@ -864,6 +875,8 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     let is_static = args.iter().any(|a| a == "--static");
     let is_pgo = args.iter().any(|a| a == "--pgo");
     let verbose = args.iter().any(|a| a == "--verbose");
+    let allow_source_builds = args.iter().any(|a| a == "--allow-source-builds");
+    let allow_hooks = args.iter().any(|a| a == "--allow-hooks");
     let target = parse_flag_value(args, "--target");
     let cc = parse_flag_value(args, "--cc");
     let embed = parse_flag_value(args, "--embed").map(std::path::PathBuf::from);
@@ -917,6 +930,8 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         provider,
         verbose,
         embed,
+        allow_source_builds,
+        allow_hooks,
     };
     let dest = build::build_release(p, mode, &rel)?;
     let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);

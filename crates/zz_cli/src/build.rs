@@ -48,6 +48,12 @@ pub struct ReleaseOptions {
     pub provider: ClangProvider,
     /// `--verbose`: print the exact clang command line.
     pub verbose: bool,
+    /// `--allow-source-builds`: permit compiling transitive `[native]`
+    /// deps from source when no prebuilt covers the host tag.
+    pub allow_source_builds: bool,
+    /// `--allow-hooks`: permit legacy `build = "..."` hooks (direct
+    /// deps only; transitive hooks always error).
+    pub allow_hooks: bool,
 }
 
 impl ReleaseOptions {
@@ -166,7 +172,71 @@ fn cache_key(
     let (artifact_hash, artifact_flags) = zz_pm::cache_key::artifact_sig(&opts.plugin_artifacts);
     key.artifact_hash = artifact_hash;
     key.artifact_flags = artifact_flags;
+    key.native_build_sig = native_build_sig_for(source_path);
     Ok(key.to_slug())
+}
+
+/// Native audit signature for the cache key: one [`native_sig`] per
+/// `[native]` dependency (tag + compiler + manifest shape + resolved
+/// pkg-config from `zz.lock`), sorted and hashed. A compiler upgrade, a
+/// flag edit, or a pkg-config drift busts entries linked against older
+/// plugin artifacts. Empty when no native deps exist (stable slug).
+fn native_build_sig_for(source_path: &Path) -> String {
+    // Walk up from the entry file to the project root holding zz.lock.
+    let mut dir = source_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let root = loop {
+        if dir.join("zz.lock").exists() {
+            break dir;
+        }
+        if !dir.pop() {
+            return String::new();
+        }
+    };
+    let lock = match zz_pm::lock::Lockfile::load(&root.join("zz.lock")) {
+        Ok(l) => l,
+        Err(_) => return String::new(),
+    };
+    let manifest = zz_pm::manifest::Manifest::load(&root.join("zz.toml")).ok();
+    let host_tag = zz_pm::native_build::host_tag().unwrap_or_default();
+    let mut per_dep: Vec<String> = Vec::new();
+    for dep in &lock.deps {
+        let Some(pkg_dir) = resolve_pkg_dir(&root, dep, manifest.as_ref()) else {
+            continue;
+        };
+        let native_toml = if pkg_dir.join("zz.toml").exists() {
+            zz_pm::manifest::Manifest::load(&pkg_dir.join("zz.toml"))
+                .ok()
+                .and_then(|m| m.native)
+                .and_then(|n| toml::to_string(&n).ok())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if native_toml.is_empty() {
+            continue;
+        }
+        let rec = dep.native.as_ref();
+        let tag = rec.map(|r| r.tag.as_str()).unwrap_or(host_tag.as_str());
+        let compiler = rec.map(|r| r.compiler.as_str()).unwrap_or("");
+        let pkg = rec.map(|r| r.pkg_config_resolved.as_str()).unwrap_or("");
+        let mut entry = dep.name.clone();
+        entry.push('\0');
+        entry.push_str(&zz_pm::cache_key::CacheKey::native_sig(
+            tag,
+            compiler,
+            &native_toml,
+            pkg,
+        ));
+        per_dep.push(entry);
+    }
+    if per_dep.is_empty() {
+        return String::new();
+    }
+    per_dep.sort();
+    zz_pm::hash::hash_bytes(per_dep.join("\0").as_bytes())
 }
 
 /// Get modification time of every input that affects native output, for
@@ -320,45 +390,97 @@ pub(crate) fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_
     plugin_funcs
 }
 
-/// Run native build hooks for every dependency and discard the artifacts.
+/// Gates for native builds (CLI flags).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NativeBuildOpts {
+    /// `--allow-source-builds`: compile transitive `[native]` deps from
+    /// source when no prebuilt covers the host tag.
+    pub allow_source_builds: bool,
+    /// `--allow-hooks`: run legacy `build = "..."` hooks (direct deps
+    /// only; transitive hooks always error).
+    pub allow_hooks: bool,
+}
+
+impl NativeBuildOpts {
+    /// Dev-loop behavior for `zz run` (via [`ensure_native_hooks`]):
+    /// build what is needed, warn loudly, never fail the run.
+    pub(crate) fn permissive() -> Self {
+        Self {
+            allow_source_builds: true,
+            allow_hooks: true,
+        }
+    }
+}
+
+/// Output of [`build_native_deps`]: link inputs plus per-dep audit
+/// records for `zz.lock`.
+pub(crate) struct NativeBuild {
+    pub artifacts: Vec<PathBuf>,
+    pub link_args: Vec<String>,
+    pub audits: Vec<(String, zz_pm::lock::LockedNative)>,
+}
+
+/// Run native builds for every dependency and discard the artifacts.
 ///
-/// `zz install` calls this post-link so `zz run` (VM dlopen) works without
-/// a prior `zz build`: registry consumers never see hook outputs otherwise
-/// (tarballs exclude `build/`). Hook failures warn per-dependency inside
-/// [`discover_native_artifacts`] and never fail the caller.
+/// `zz run` calls this post-link (permissive: warn-only) so VM dlopen
+/// works without a prior `zz build`.
 pub(crate) fn ensure_native_hooks(project_root: &Path) {
-    // Discover_native_artifacts walks up from its argument's parent
-    // looking for zz.lock — anchor inside the canonical root.
+    // Build_native_deps walks up from its argument's parent looking for
+    // zz.lock — anchor inside the canonical root.
     let project_root =
         std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
     let anchor = project_root.join("zz.toml");
-    let _ = discover_native_artifacts(&anchor);
+    if let Err(e) = build_native_deps(&anchor, NativeBuildOpts::permissive()) {
+        eprintln!("warning: native build failed: {e}");
+    }
 }
 ///
-/// Discover and invoke build hooks for plugin packages with native code.
+/// Build native code for plugin packages under the given gates.
 ///
 /// Reads `zz.lock` and `zz.toml`, finds dependencies that have a `plugin.zzi`
-/// and a `zz.toml` with a `[native]` section, invokes their build hooks, and
-/// returns the paths to compiled artifacts (`.o` / `.a` files) plus the raw
-/// linker flags from each package's `build/ldflags.txt` (e.g. `-lvips ...`).
-fn discover_native_artifacts(project_path: &Path) -> (Vec<PathBuf>, Vec<String>) {
+/// and a `zz.toml` with a `[native]` section, builds them via the declared
+/// backend, and returns compiled artifacts (`.o` / `.a` files), raw linker
+/// flags from each package's `build/ldflags.txt`, and audit records.
+///
+/// Gate behavior:
+/// - `cc` without a compatible prebuilt entry: transitive deps error
+///   unless `allow_source_builds`; direct deps warn and build.
+/// - `cc` failures are hard errors (fail closed — a half-built plugin
+///   must never silently link nothing).
+/// - `hook` on transitive deps always errors. On direct deps it errors
+///   unless `allow_hooks`, and warns on every allowed use. Allowed hook
+///   failures keep the historical warn-and-continue behavior.
+pub(crate) fn build_native_deps(
+    project_path: &Path,
+    opts: NativeBuildOpts,
+) -> Result<NativeBuild, String> {
     let mut artifacts = Vec::new();
     let mut link_args: Vec<String> = Vec::new();
+    let mut audits: Vec<(String, zz_pm::lock::LockedNative)> = Vec::new();
 
+    let empty = NativeBuild {
+        artifacts: Vec::new(),
+        link_args: Vec::new(),
+        audits: Vec::new(),
+    };
     let Some(project_root) = canonical_project_root(project_path) else {
-        return (artifacts, link_args);
+        return Ok(empty);
     };
 
     let lock = match zz_pm::lock::Lockfile::load(&project_root.join("zz.lock")) {
         Ok(l) => l,
-        Err(_) => return (artifacts, link_args),
+        Err(_) => return Ok(empty),
     };
 
-    // Load manifest to check for path deps
+    // Load manifest to check for path deps. Direct deps are the manifest's
+    // declared dependencies; anything else locked is transitive.
     let manifest_path = project_root.join("zz.toml");
     let manifest = zz_pm::manifest::Manifest::load(&manifest_path).ok();
 
     for dep in &lock.deps {
+        let direct = manifest
+            .as_ref()
+            .is_some_and(|m| m.dependencies.contains_key(&dep.name));
         let Some(pkg_dir) = resolve_pkg_dir(&project_root, dep, manifest.as_ref()) else {
             continue;
         };
@@ -380,8 +502,111 @@ fn discover_native_artifacts(project_path: &Path) -> (Vec<PathBuf>, Vec<String>)
             None => continue,
         };
 
+        // Declarative backend: validated C build owned by zz itself.
+        if let Some(cc_spec) = native.build_cc.as_ref() {
+            let host = zz_pm::native_build::host_tag().unwrap_or_default();
+            let compatible = |t: &String| {
+                zz_pm::native_build::tags_compatible(t, &host)
+                    || zz_pm::native_build::tags_compatible(&host, t)
+                    || *t == host
+            };
+            let prebuilt_hit = native.prebuilt.as_ref().and_then(|p| {
+                p.target
+                    .iter()
+                    .find(|(t, _)| compatible(t))
+                    .map(|(t, a)| (t.clone(), a.clone()))
+            });
+            let had_entry = prebuilt_hit.is_some();
+            // Prebuilt path: verified bytes, no compiler needed.
+            if let Some((tag, artifact)) = prebuilt_hit {
+                eprintln!("zz: fetching prebuilt plugin `{}` for {tag}...", dep.name);
+                match zz_pm::native_build::fetch_prebuilt(&pkg_dir, &dep.name, &tag, &artifact) {
+                    Ok(out) => {
+                        artifacts.extend(out.objects);
+                        artifacts.push(out.archive);
+                        collect_link_args(&out.ldflags_path, &mut link_args);
+                        audits.push((
+                            dep.name.clone(),
+                            zz_pm::lock::LockedNative {
+                                backend: "prebuilt".to_string(),
+                                tag: out.tag,
+                                compiler: String::new(),
+                                artifact_sha256: artifact.sha256.clone(),
+                                pkg_config_resolved: String::new(),
+                            },
+                        ));
+                        continue;
+                    }
+                    Err(e) if e.contains("cannot download") => {
+                        eprintln!("warning: prebuilt unavailable: {e}");
+                        // Fall through to source build (gates apply below).
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "plugin `{}` prebuilt for {tag} failed verification: {e}",
+                            dep.name
+                        ));
+                    }
+                }
+            }
+            if !had_entry {
+                if !direct && !opts.allow_source_builds {
+                    return Err(format!(
+                        "plugin `{}` has no prebuilt for `{host}`; ask the maintainer or re-run with --allow-source-builds",
+                        dep.name
+                    ));
+                }
+                if direct {
+                    eprintln!(
+                        "warning: plugin `{}` source-builds (no prebuilt for `{host}`)",
+                        dep.name
+                    );
+                }
+            }
+            eprintln!("zz: building plugin `{}` (declarative cc)...", dep.name);
+            let out = zz_pm::native_build::ensure_cc(&pkg_dir, &dep.name, cc_spec, None)
+                .map_err(|e| format!("plugin `{}` declarative build failed: {e}", dep.name))?;
+            artifacts.extend(out.objects);
+            artifacts.push(out.archive);
+            collect_link_args(&out.ldflags_path, &mut link_args);
+            audits.push((
+                dep.name.clone(),
+                zz_pm::lock::LockedNative {
+                    backend: "cc".to_string(),
+                    tag: out.tag,
+                    compiler: out.compiler,
+                    artifact_sha256: String::new(),
+                    pkg_config_resolved: zz_pm::native_build::pkg_config_versions(
+                        &cc_spec.pkg_config,
+                    ),
+                },
+            ));
+            continue;
+        }
+        let Some(hook_rel) = native.build.as_deref() else {
+            continue;
+        };
+
+        if !direct {
+            return Err(format!(
+                "plugin `{}` uses legacy [native] build hook, which is forbidden for transitive dependencies\n\
+                 hint: ask the maintainer to migrate to [native.build-cc] (see docs/plugin-author-guide.md §4)",
+                dep.name
+            ));
+        }
+        if !opts.allow_hooks {
+            return Err(format!(
+                "plugin `{}` uses legacy [native] build = \"{hook_rel}\" (deprecated)\n\
+                 hint: re-run with --allow-hooks, or ask the maintainer to migrate to [native.build-cc]",
+                dep.name
+            ));
+        }
+
         // Invoke the build hook
-        let build_script = pkg_dir.join(&native.build);
+        eprintln!(
+            "warning: [native] build = \"{hook_rel}\" is deprecated; migrate to [native.build-cc] (see docs/plugin-author-guide.md §4)"
+        );
+        let build_script = pkg_dir.join(hook_rel);
         if !build_script.exists() {
             eprintln!(
                 "warning: plugin `{}` build script not found: {}",
@@ -391,7 +616,7 @@ fn discover_native_artifacts(project_path: &Path) -> (Vec<PathBuf>, Vec<String>)
             continue;
         }
 
-        eprintln!("zz: building plugin `{}` via {}...", dep.name, native.build);
+        eprintln!("zz: building plugin `{}` via {hook_rel}...", dep.name);
         let output = std::process::Command::new("bash")
             .arg(&build_script)
             .current_dir(&pkg_dir)
@@ -426,15 +651,7 @@ fn discover_native_artifacts(project_path: &Path) -> (Vec<PathBuf>, Vec<String>)
                     }
                 }
             }
-            // Raw linker flags emitted by the build hook (e.g. `-lvips ...`).
-            let ldflags_path = build_dir.join("ldflags.txt");
-            if let Ok(flags) = std::fs::read_to_string(&ldflags_path) {
-                for flag in flags.split_whitespace() {
-                    if !link_args.iter().any(|f| f == flag) {
-                        link_args.push(flag.to_string());
-                    }
-                }
-            }
+            collect_link_args(&build_dir.join("ldflags.txt"), &mut link_args);
         }
     }
 
@@ -447,7 +664,33 @@ fn discover_native_artifacts(project_path: &Path) -> (Vec<PathBuf>, Vec<String>)
     // run, while archives may be cargo-cached and stale).
     thin_shadowed_archive_members(&mut artifacts);
 
-    (artifacts, link_args)
+    Ok(NativeBuild {
+        artifacts,
+        link_args,
+        audits,
+    })
+}
+
+/// Discover hook/cc artifacts for the AOT link under explicit gates.
+/// Thin wrapper over [`build_native_deps`] returning the link inputs.
+fn discover_native_artifacts(
+    project_path: &Path,
+    opts: NativeBuildOpts,
+) -> Result<(Vec<PathBuf>, Vec<String>), String> {
+    let built = build_native_deps(project_path, opts)?;
+    Ok((built.artifacts, built.link_args))
+}
+
+/// Merge whitespace-split flags from an `ldflags.txt` into `link_args`,
+/// deduplicated (both backends share this collection step).
+fn collect_link_args(ldflags_path: &Path, link_args: &mut Vec<String>) {
+    if let Ok(flags) = std::fs::read_to_string(ldflags_path) {
+        for flag in flags.split_whitespace() {
+            if !link_args.iter().any(|f| f == flag) {
+                link_args.push(flag.to_string());
+            }
+        }
+    }
 }
 
 /// Copy archives that duplicate loose `.o` files and delete the shadowed
@@ -681,7 +924,13 @@ pub fn build_release(
 
     // Discover and build plugin native artifacts (compiled .o / .a files
     // plus dependency link flags from each package's ldflags.txt).
-    let (plugin_artifacts, plugin_link_args) = discover_native_artifacts(path);
+    let (plugin_artifacts, plugin_link_args) = discover_native_artifacts(
+        path,
+        NativeBuildOpts {
+            allow_source_builds: rel.allow_source_builds,
+            allow_hooks: rel.allow_hooks,
+        },
+    )?;
     opts.plugin_artifacts = plugin_artifacts;
     opts.plugin_link_args = plugin_link_args;
 

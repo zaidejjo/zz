@@ -413,6 +413,7 @@ mod tests {
             source: "git+https://example.com/repo.git#main".to_string(),
             hash: "abc123".to_string(),
             commit: Some("abc123".to_string()),
+            native: None,
         });
 
         let linked = link_project(&project, &manifest, &lock, LinkStrategy::Symlink).unwrap();
@@ -446,6 +447,7 @@ mod tests {
             source: "git+https://example.com/repo.git#main".to_string(),
             hash: "abc123".to_string(),
             commit: Some("abc123".to_string()),
+            native: None,
         });
 
         // First link
