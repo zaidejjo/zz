@@ -1,0 +1,9 @@
+// Regression: shadowing re-destructuring inside a block must resolve
+// to the outer binding afterwards, on both engines.
+(a, b) := (1, 2)
+if true {
+    (a, c) := (10, 20)
+    println(a)
+}
+println(a)
+println("shadow_destructure_ok")

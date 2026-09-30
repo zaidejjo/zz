@@ -1,0 +1,13 @@
+// E2E: match version — a value arm must match the return type even
+// though the other arm diverges via `return`.
+func f(x: int) -> int {
+    match x {
+        0 => {
+            return 10
+        },
+        _ => {
+            "negative"
+        },
+    }
+}
+println(f(5))

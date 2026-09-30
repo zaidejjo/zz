@@ -276,6 +276,9 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "local_wildcard" => {
             Some("C codegen: imported scalar global unboxed twice (`(zz_global_PI).i` on int64_t)")
         }
+        "scalar_global_copy" => {
+            Some("C codegen: top-level int global copied into another global unboxed twice (`(zz_global_v1).i` on int64_t)")
+        }
 
         // --- Output differences (native runs but output differs) ---
         "concurrency_panic_test" => Some("native: panic/fail inside task closures lowers to unit (no err plumbing through zz_call_closure); VM yields .err"),
@@ -660,8 +663,113 @@ parity_strict!(
     "syntax",
     "for_annotated_decl.zz"
 );
+parity_known_failure!(
+    parity_regression_scalar_global_copy,
+    "regression",
+    "scalar_global_copy.zz"
+);
+parity_strict!(
+    parity_regression_shadow_destructure_fn,
+    "regression",
+    "shadow_destructure_fn.zz"
+);
+parity_strict!(
+    parity_regression_shadow_destructure,
+    "regression",
+    "shadow_destructure.zz"
+);
+parity_strict!(
+    parity_regression_func_capture_destructure,
+    "regression",
+    "func_capture_destructure.zz"
+);
+parity_strict!(
+    parity_regression_closure_capture_destructure,
+    "regression",
+    "closure_capture_destructure.zz"
+);
+parity_strict!(
+    parity_regression_trailing_if_in_else,
+    "regression",
+    "trailing_if_in_else.zz"
+);
+parity_strict!(
+    parity_regression_match_return_in_if,
+    "regression",
+    "match_return_in_if.zz"
+);
+parity_strict!(
+    parity_regression_tuple_destructure,
+    "regression",
+    "tuple_destructure.zz"
+);
+parity_strict!(
+    parity_regression_neg_after_loop,
+    "regression",
+    "neg_after_loop.zz"
+);
 
 // Types
+parity_strict!(
+    parity_regression_fuzz_smoke_00,
+    "regression",
+    "fuzz_smoke_00.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_01,
+    "regression",
+    "fuzz_smoke_01.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_02,
+    "regression",
+    "fuzz_smoke_02.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_03,
+    "regression",
+    "fuzz_smoke_03.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_04,
+    "regression",
+    "fuzz_smoke_04.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_05,
+    "regression",
+    "fuzz_smoke_05.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_06,
+    "regression",
+    "fuzz_smoke_06.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_07,
+    "regression",
+    "fuzz_smoke_07.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_08,
+    "regression",
+    "fuzz_smoke_08.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_09,
+    "regression",
+    "fuzz_smoke_09.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_10,
+    "regression",
+    "fuzz_smoke_10.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_11,
+    "regression",
+    "fuzz_smoke_11.zz"
+);
 parity_strict!(parity_types_generics, "types", "generics.zz");
 parity_strict!(parity_types_type_inference, "types", "type_inference.zz");
 

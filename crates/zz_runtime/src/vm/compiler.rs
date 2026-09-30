@@ -633,9 +633,17 @@ impl Compiler {
                 });
             }
         }
-        // N op y
+        // N op y — the fused op always evaluates `slot op imm`, so it is
+        // only valid when op is commutative. Fusing e.g. `0 - x` would
+        // silently flip it to `x - 0`. Non-commutative cases fall back
+        // to the generic path.
         if let (Some(d), Some(imm), Some(b)) = (target_slot, lhs_imm, rhs) {
-            if imm != 1 || *binop != zz_frontend::ast::BinOp::Add {
+            if (imm != 1 || *binop != zz_frontend::ast::BinOp::Add)
+                && matches!(
+                    binop,
+                    zz_frontend::ast::BinOp::Add | zz_frontend::ast::BinOp::Mul
+                )
+            {
                 return Some(Op::SlotBinaryIntImm {
                     dst: d,
                     lhs: b,
@@ -827,6 +835,10 @@ impl Compiler {
     fn scope_declares_captured(&self, block: &Block) -> bool {
         block.stmts.iter().any(|s| match s {
             Stmt::Decl { name, .. } => self.captured.contains(&name.name),
+            // Destructured bindings always live in the environment (see
+            // `compile_destructure`): the block needs its own scope so they
+            // don't leak into — or clobber — the enclosing environment.
+            Stmt::Destructure { pat, .. } => pattern_binds(pat),
             _ => false,
         })
     }
@@ -927,26 +939,32 @@ impl Compiler {
     }
 
     /// Compile a destructuring pattern. Expects the value to be on the stack.
+    ///
+    /// Every arm consumes exactly its own value, so elements are bound in
+    /// order with the next element always on top (this also holds across
+    /// nesting). All bindings go through the environment (`DefineVar` +
+    /// `Pop`, the same sequence used for captured declarations): recording
+    /// frame slots here is unsound because successive bindings would alias
+    /// the same stack slot, assigning the first element to every variable.
     fn compile_destructure(&mut self, pat: &Pattern) {
         match pat {
             Pattern::Wildcard { .. } => {
                 self.emit(Op::Pop);
             }
             Pattern::Binding { name } => {
-                if self.declare_local(&name.name) {
-                    // Local already declared, value stays on stack
-                } else {
-                    self.emit(Op::Pop);
-                }
+                self.emit(Op::DefineVar(name.name.clone()));
+                self.emit(Op::Pop);
+                self.locals.push(Local {
+                    name: name.name.clone(),
+                    slot: 0,
+                    in_env: true,
+                });
             }
             Pattern::Tuple { pats, .. } => {
-                // Value is on stack. We need to unpack it.
-                // Emit UnpackTuple to split into individual elements.
+                // Value is on stack. Unpack so the first element is on top,
+                // then bind each element in order (each binding consumes
+                // exactly its own element, net -1 per leaf).
                 self.emit(Op::UnpackTuple(pats.len() as u8));
-                // After UnpackTuple, elements are in reverse order on stack:
-                // [last, ..., second, first] where first is on top.
-                // Declare locals in forward order so first name gets the
-                // slot for the top-of-stack element.
                 for pat in pats {
                     self.compile_destructure(pat);
                 }

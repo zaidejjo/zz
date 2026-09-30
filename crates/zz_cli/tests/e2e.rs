@@ -222,6 +222,106 @@ e2e_success_test!(
     "closure_annotations.zz"
 );
 e2e_success_test!(e2e_syntax_destructuring, "syntax", "destructuring.zz");
+e2e_success_test!(
+    e2e_regression_shadow_destructure_fn,
+    "regression",
+    "shadow_destructure_fn.zz"
+);
+e2e_success_test!(
+    e2e_regression_shadow_destructure,
+    "regression",
+    "shadow_destructure.zz"
+);
+e2e_success_test!(
+    e2e_regression_func_capture_destructure,
+    "regression",
+    "func_capture_destructure.zz"
+);
+e2e_success_test!(
+    e2e_regression_closure_capture_destructure,
+    "regression",
+    "closure_capture_destructure.zz"
+);
+e2e_success_test!(
+    e2e_regression_trailing_if_in_else,
+    "regression",
+    "trailing_if_in_else.zz"
+);
+e2e_success_test!(
+    e2e_regression_match_return_in_if,
+    "regression",
+    "match_return_in_if.zz"
+);
+e2e_success_test!(
+    e2e_regression_tuple_destructure,
+    "regression",
+    "tuple_destructure.zz"
+);
+e2e_success_test!(
+    e2e_regression_neg_after_loop,
+    "regression",
+    "neg_after_loop.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_00,
+    "regression",
+    "fuzz_smoke_00.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_01,
+    "regression",
+    "fuzz_smoke_01.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_02,
+    "regression",
+    "fuzz_smoke_02.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_03,
+    "regression",
+    "fuzz_smoke_03.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_04,
+    "regression",
+    "fuzz_smoke_04.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_05,
+    "regression",
+    "fuzz_smoke_05.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_06,
+    "regression",
+    "fuzz_smoke_06.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_07,
+    "regression",
+    "fuzz_smoke_07.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_08,
+    "regression",
+    "fuzz_smoke_08.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_09,
+    "regression",
+    "fuzz_smoke_09.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_10,
+    "regression",
+    "fuzz_smoke_10.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_11,
+    "regression",
+    "fuzz_smoke_11.zz"
+);
 e2e_success_test!(e2e_syntax_main_entrypoint, "syntax", "main_entrypoint.zz");
 e2e_success_test!(e2e_syntax_match_guards, "syntax", "match_guards.zz");
 e2e_success_test!(
@@ -466,6 +566,19 @@ macro_rules! e2e_error_test {
 }
 
 e2e_error_test!(e2e_err_type_mismatch, "type_mismatch.zz");
+e2e_error_test!(
+    e2e_err_return_fallthrough_mismatch,
+    "return_fallthrough_mismatch.zz"
+);
+e2e_error_test!(e2e_err_return_missing_else, "return_missing_else.zz");
+e2e_error_test!(
+    e2e_err_return_match_fallthrough_mismatch,
+    "return_match_fallthrough_mismatch.zz"
+);
+e2e_error_test!(
+    e2e_err_return_annotated_join_mismatch,
+    "return_annotated_join_mismatch.zz"
+);
 e2e_error_test!(e2e_err_const_reassign, "const_reassign.zz");
 e2e_error_test!(e2e_err_undefined_var, "undefined_var.zz");
 e2e_error_test!(e2e_err_missing_field, "missing_field.zz");

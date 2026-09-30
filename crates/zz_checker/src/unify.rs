@@ -115,7 +115,9 @@ impl Unifier {
             | (Type::Chan, Type::Chan)
             | (Type::TaskJoin, Type::TaskJoin)
             | (Type::Error, _)
-            | (_, Type::Error) => true,
+            | (_, Type::Error)
+            | (Type::Never, _)
+            | (_, Type::Never) => true,
             (Type::Named(x), Type::Named(y)) => x == y,
             (Type::Struct(x), Type::Struct(y)) => x == y,
             (Type::Opaque(x), Type::Opaque(y)) => x == y,
@@ -307,6 +309,12 @@ impl Unifier {
             // Error is an absorbing type: unify with anything without binding,
             // suppressing cascading type errors from earlier undefined symbols.
             (Type::Error, _) | (_, Type::Error) => Ok(()),
+            // Never is the bottom type for diverging control flow: it
+            // unifies with anything without binding (so a divergent arm
+            // never constrains its siblings), but it never *becomes* the
+            // join result — join sites (if/match) explicitly pick the
+            // surviving arm instead (join(Never, T) = T).
+            (Type::Never, _) | (_, Type::Never) => Ok(()),
             (Type::Named(a), Type::Named(b)) if a == b => Ok(()),
             (Type::Struct(a), Type::Struct(b)) if a == b => Ok(()),
             // Opaque handles unify only within the same module tag.

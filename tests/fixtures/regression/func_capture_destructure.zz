@@ -1,0 +1,8 @@
+// Regression: top-level destructured names must be visible to
+// functions on both engines (native module globals, not main-locals).
+(a, b) := (10, 20)
+func g(x: int) -> int {
+    a + x
+}
+println(g(1))
+println("func_capture_destructure_ok")
