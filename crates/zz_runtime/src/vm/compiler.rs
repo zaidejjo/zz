@@ -633,9 +633,17 @@ impl Compiler {
                 });
             }
         }
-        // N op y
+        // N op y — the fused op always evaluates `slot op imm`, so it is
+        // only valid when op is commutative. Fusing e.g. `0 - x` would
+        // silently flip it to `x - 0`. Non-commutative cases fall back
+        // to the generic path.
         if let (Some(d), Some(imm), Some(b)) = (target_slot, lhs_imm, rhs) {
-            if imm != 1 || *binop != zz_frontend::ast::BinOp::Add {
+            if (imm != 1 || *binop != zz_frontend::ast::BinOp::Add)
+                && matches!(
+                    binop,
+                    zz_frontend::ast::BinOp::Add | zz_frontend::ast::BinOp::Mul
+                )
+            {
                 return Some(Op::SlotBinaryIntImm {
                     dst: d,
                     lhs: b,

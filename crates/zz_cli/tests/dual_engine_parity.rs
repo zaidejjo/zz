@@ -660,6 +660,11 @@ parity_strict!(
     "syntax",
     "for_annotated_decl.zz"
 );
+parity_strict!(
+    parity_regression_neg_after_loop,
+    "regression",
+    "neg_after_loop.zz"
+);
 
 // Types
 parity_strict!(parity_types_generics, "types", "generics.zz");

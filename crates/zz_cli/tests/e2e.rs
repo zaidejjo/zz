@@ -222,6 +222,11 @@ e2e_success_test!(
     "closure_annotations.zz"
 );
 e2e_success_test!(e2e_syntax_destructuring, "syntax", "destructuring.zz");
+e2e_success_test!(
+    e2e_regression_neg_after_loop,
+    "regression",
+    "neg_after_loop.zz"
+);
 e2e_success_test!(e2e_syntax_main_entrypoint, "syntax", "main_entrypoint.zz");
 e2e_success_test!(e2e_syntax_match_guards, "syntax", "match_guards.zz");
 e2e_success_test!(

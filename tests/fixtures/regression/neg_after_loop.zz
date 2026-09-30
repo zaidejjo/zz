@@ -1,0 +1,11 @@
+// Regression: 0 - x must negate even when x was mutated in a loop.
+func f() -> int {
+    out := 0
+    for _i in 0..2 {
+        out = out * 10 + 1
+    }
+    out = 0 - out
+    out
+}
+println(f())
+println("neg_after_loop_ok")
