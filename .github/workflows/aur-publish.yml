@@ -189,6 +189,10 @@ jobs:
           chown -R builder:builder "/tmp/build-$pkg"
           su builder -c "cd /tmp/build-$pkg && makepkg --printsrcinfo > .SRCINFO"
           cp "/tmp/build-$pkg/.SRCINFO" "/tmp/aur-out/$pkg/.SRCINFO"
+          # Artifact upload skips dotfiles: also stage it under a plain
+          # name. The push job renames it back to `.SRCINFO` (AUR requires
+          # the dot name in-repo).
+          cp "/tmp/build-$pkg/.SRCINFO" "/tmp/aur-out/$pkg/SRCINFO"
           echo "--- $pkg/.SRCINFO ---"
           cat "/tmp/aur-out/$pkg/.SRCINFO"
           echo "--- namcap $pkg/PKGBUILD ---"
@@ -275,7 +279,8 @@ jobs:
           echo "=== $pkg ($PKGVER-$PKGREL) ==="
           rm -rf "/tmp/aur-$pkg"
           git clone "ssh://aur@aur.archlinux.org/$pkg.git" "/tmp/aur-$pkg"
-          cp /tmp/aur-pkg/PKGBUILD /tmp/aur-pkg/.SRCINFO "/tmp/aur-$pkg/"
+          cp /tmp/aur-pkg/PKGBUILD "/tmp/aur-$pkg/PKGBUILD"
+          cp /tmp/aur-pkg/SRCINFO "/tmp/aur-$pkg/.SRCINFO"
           cd "/tmp/aur-$pkg"
           git add PKGBUILD .SRCINFO
           if git diff --cached --quiet; then
