@@ -661,6 +661,16 @@ parity_strict!(
     "for_annotated_decl.zz"
 );
 parity_strict!(
+    parity_regression_trailing_if_in_else,
+    "regression",
+    "trailing_if_in_else.zz"
+);
+parity_strict!(
+    parity_regression_match_return_in_if,
+    "regression",
+    "match_return_in_if.zz"
+);
+parity_strict!(
     parity_regression_tuple_destructure,
     "regression",
     "tuple_destructure.zz"

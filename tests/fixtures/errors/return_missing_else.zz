@@ -1,0 +1,8 @@
+// E2E: a missing `else` means the fall-through path yields unit,
+// which a non-unit function must reject.
+func f(c: bool) -> int {
+    if c {
+        return 1
+    }
+}
+println(f(true))

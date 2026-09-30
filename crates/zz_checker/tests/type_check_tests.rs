@@ -1683,3 +1683,109 @@ fn opaque_handle_types_resolve_in_annotations() {
         assert_eq!(sig.params[0].1, want, "{ann}: param type");
     }
 }
+
+// --- `return` divergence (`Type::Never`) -----------------------------------
+// A `return` with a value diverges: it types as `Never`, which vanishes
+// from if/match joins without constraining sibling arms — while the
+// function's fall-through type is still verified against its signature.
+// These tests pin both sides: wrong-typed value paths are rejected even
+// when a sibling arm returns, and valid early-return shapes keep working.
+
+#[test]
+fn return_diverges_if_fallthrough_mismatch_rejected() {
+    // n1: the `else` value path must match the return type even though
+    // the `then` arm diverges via `return`.
+    errors_contain(
+        "func f(c: bool) -> int {\n    if c {\n        return 1\n    } else {\n        \"hi\"\n    }\n}",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn return_diverges_missing_else_rejected() {
+    // n2: no `else` means the fall-through path yields unit, which a
+    // non-unit function must reject (also closes the pre-existing hole
+    // where any `return` anywhere skipped the body check entirely).
+    errors_contain(
+        "func f(c: bool) -> int {\n    if c {\n        return 1\n    }\n}",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn return_diverges_match_fallthrough_mismatch_rejected() {
+    // n7: match version of n1 — the value arm must match the return type
+    // even though the other arm diverges.
+    errors_contain(
+        "func f(x: int) -> int {\n    match x {\n        0 => {\n            return 10\n        },\n        _ => {\n            \"negative\"\n        },\n    }\n}",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn return_diverges_annotated_let_rejected() {
+    // n8: even an explicit annotation on the join must be enforced —
+    // `Never` must not absorb the declared type.
+    errors_contain(
+        "func f(c: bool) -> int {\n    x: int = if c { return 1 } else { \"hi\" }\n    x\n}",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn return_value_still_checked() {
+    // The returned value itself is validated against the signature.
+    errors_contain(
+        "func f(c: bool) -> str {\n    if c {\n        return 1\n    } else {\n        \"hi\"\n    }\n}",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn return_in_match_arm_value_still_checked() {
+    // n4: errors inside the returned expression are still reported.
+    errors_contain(
+        "struct E { msg: str }\nfunc f_inner(x: int) -> Result<int, E> {\n    .ok(x)\n}\nfunc f(x: int) -> Result<int, E> {\n    r := f_inner(x)\n    match r {\n        .ok(v) => {\n            return .ok(\"not an int\")\n        },\n        .err(e) => {\n            return .err(e)\n        },\n    }\n}",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn all_paths_diverge_accepted() {
+    // n6: every path returns — the body types as `Never`, which checks
+    // against any signature.
+    let r = check_src(
+        "func f(c: bool) -> int {\n    if c {\n        return 1\n    } else {\n        return 2\n    }\n}",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn divergent_arms_do_not_constrain_siblings() {
+    // Sibling value arms still constrain each other (n9 shape): the
+    // divergent `then` arm must not mask the "mid"/3 mismatch.
+    errors_contain(
+        "func f(c: bool, d: bool) -> int {\n    if c {\n        return 1\n    } else if d {\n        \"mid\"\n    } else {\n        3\n    }\n}",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn match_return_in_if_accepted() {
+    // Original bug 2 shape: match with returns nested in `if`, falling
+    // through to a tail value of the right type.
+    let r = check_src(
+        "struct E { msg: str }\nfunc inner(x: int) -> Result<int, E> {\n    if x < 0 {\n        return .err(E{msg: \"neg\"})\n    }\n    .ok(x)\n}\nfunc outer(x: int) -> Result<int, E> {\n    if x > 100 {\n        r := inner(x)\n        match r {\n            .ok(v) => {\n                return .ok(v + 1)\n            },\n            .err(e) => {\n                return .err(e)\n            },\n        }\n    }\n    .ok(x)\n}",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn trailing_if_in_else_accepted() {
+    // Original bug 4 shape: trailing guard-`if` with returns as an else
+    // tail, falling through to a tail value of the right type.
+    let r = check_src(
+        "struct E { msg: str }\nfunc f(k: str, n: int) -> Result<int, E> {\n    cur := 0\n    if k == \"table\" {\n        cur = 1\n    } else {\n        if k != \"array\" {\n            return .err(E{msg: \"bad\"})\n        }\n        cur = n\n        if cur > 10 {\n            return .err(E{msg: \"big\"})\n        }\n    }\n    .ok(cur)\n}",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}

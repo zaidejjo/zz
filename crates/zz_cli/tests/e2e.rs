@@ -223,6 +223,16 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_syntax_destructuring, "syntax", "destructuring.zz");
 e2e_success_test!(
+    e2e_regression_trailing_if_in_else,
+    "regression",
+    "trailing_if_in_else.zz"
+);
+e2e_success_test!(
+    e2e_regression_match_return_in_if,
+    "regression",
+    "match_return_in_if.zz"
+);
+e2e_success_test!(
     e2e_regression_tuple_destructure,
     "regression",
     "tuple_destructure.zz"
@@ -476,6 +486,19 @@ macro_rules! e2e_error_test {
 }
 
 e2e_error_test!(e2e_err_type_mismatch, "type_mismatch.zz");
+e2e_error_test!(
+    e2e_err_return_fallthrough_mismatch,
+    "return_fallthrough_mismatch.zz"
+);
+e2e_error_test!(e2e_err_return_missing_else, "return_missing_else.zz");
+e2e_error_test!(
+    e2e_err_return_match_fallthrough_mismatch,
+    "return_match_fallthrough_mismatch.zz"
+);
+e2e_error_test!(
+    e2e_err_return_annotated_join_mismatch,
+    "return_annotated_join_mismatch.zz"
+);
 e2e_error_test!(e2e_err_const_reassign, "const_reassign.zz");
 e2e_error_test!(e2e_err_undefined_var, "undefined_var.zz");
 e2e_error_test!(e2e_err_missing_field, "missing_field.zz");

@@ -1,0 +1,7 @@
+// E2E: even an explicit annotation on the join must be enforced —
+// `Never` must not absorb the declared type.
+func f(c: bool) -> int {
+    x: int = if c { return 1 } else { "hi" }
+    x
+}
+println(f(false))

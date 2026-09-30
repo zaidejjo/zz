@@ -171,14 +171,17 @@ impl Checker {
         self.current_bounds = prev_bounds;
         self.pop_scope();
         let _ = name;
-        // If the body contains any `return` statement, the body's "natural"
-        // type (Unit for loops, etc.) doesn't reflect the actual return path.
-        // The `return` statements are already validated against current_ret,
-        // so we only check the body type when there are no early returns.
-        if !Self::block_has_return(body) {
-            if let Err(e) = self.unifier.unify(&body_t, &sig.ret) {
-                self.report_mismatch(e, body.span);
-            }
+        // The body's fall-through type must match the declared return
+        // type. Divergent arms contribute `Never`, which vanishes from
+        // joins, so a body that always returns/diverges checks against
+        // anything — while any value path must produce `sig.ret`. There
+        // is deliberately no `block_has_return` bypass here: skipping the
+        // check whenever a `return` exists masked genuine mismatches
+        // (e.g. an `else { "hi" }` fall-through in a `-> int` function)
+        // and missing-return paths (`if c { return 1 }` with no else,
+        // which falls through with unit).
+        if let Err(e) = self.unifier.unify(&body_t, &sig.ret) {
+            self.report_mismatch(e, body.span);
         }
     }
 

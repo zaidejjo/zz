@@ -1,0 +1,28 @@
+// Regression: match with returns inside if must typecheck like top-level match.
+struct E { msg: str }
+func inner(x: int) -> Result<int, E> {
+    if x < 0 {
+        return .err(E{msg: "neg"})
+    }
+    .ok(x)
+}
+func outer(x: int) -> Result<int, E> {
+    if x > 100 {
+        r := inner(x)
+        match r {
+            .ok(v) => {
+                return .ok(v + 1)
+            },
+            .err(e) => {
+                return .err(e)
+            },
+        }
+    }
+    .ok(x)
+}
+r := outer(200)
+match r {
+    .ok(v) => println(v),
+    .err(e) => println("err {e.msg}"),
+}
+println("match_return_in_if_ok")
