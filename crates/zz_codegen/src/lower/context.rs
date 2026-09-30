@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use zz_frontend::ast::{Expr, ImportItem, Stmt};
+use zz_frontend::ast::{Expr, ImportItem, Pattern, Stmt};
 
 use super::mangle;
 
@@ -690,19 +690,46 @@ impl Lowerer {
         out.push_str(&format!("    *{ptr} = {init};\n"));
     }
 
-    /// Collect module-level globals from top-level `Decl` statements.
+    /// Collect module-level globals from top-level `Decl` statements
+    /// and top-level destructuring declarations.
     /// Returns sorted (zz_name, C id, C type, checker type) tuples.
     /// Types come from `tp.bindings` (checker-resolved); fallback zz_value.
     pub(super) fn collect_globals(
         &self,
     ) -> Vec<(String, String, String, Option<zz_checker::Type>)> {
         use zz_frontend::ast::Stmt;
+        fn destructure_names(pat: &Pattern, into: &mut Vec<String>) {
+            match pat {
+                Pattern::Binding { name } => {
+                    if !into.contains(&name.name) {
+                        into.push(name.name.clone());
+                    }
+                }
+                Pattern::Tuple { pats, .. } => {
+                    for p in pats {
+                        destructure_names(p, into);
+                    }
+                }
+                _ => {}
+            }
+        }
         let mut names: Vec<String> = Vec::new();
         for stmt in self.tp.stmts() {
-            if let Stmt::Decl { name, .. } = stmt {
-                if !names.contains(&name.name) {
-                    names.push(name.name.clone());
+            match stmt {
+                Stmt::Decl { name, .. } => {
+                    if !names.contains(&name.name) {
+                        names.push(name.name.clone());
+                    }
                 }
+                // Top-level `(a, b) := rhs` bindings are module globals
+                // exactly like top-level `Decl` (the checker records
+                // them in `tp.bindings`; nested positions are excluded
+                // there). Without this, closures/functions compiled
+                // with a fresh scope cannot see destructured names.
+                Stmt::Destructure { pat, .. } => {
+                    destructure_names(pat, &mut names);
+                }
+                _ => {}
             }
         }
         names.sort();

@@ -1,0 +1,12 @@
+// Regression: shadowing re-destructuring inside a function block
+// must resolve to the outer binding afterwards, on both engines.
+func f() -> int {
+    (a, b) := (1, 2)
+    if true {
+        (a, c) := (10, 20)
+        println(a)
+    }
+    a
+}
+println(f())
+println("shadow_destructure_fn_ok")

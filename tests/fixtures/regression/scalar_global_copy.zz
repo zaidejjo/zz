@@ -1,0 +1,7 @@
+// Known native limitation: copying one top-level int global into
+// another emits a second `.i` extraction on the already-unboxed global
+// (see tests/fuzz/known_failures.txt, class 2). VM prints 13.
+v1 := 13
+v2 := v1
+println(v2)
+println("scalar_global_copy_vm_ok")

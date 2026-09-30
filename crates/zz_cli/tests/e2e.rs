@@ -223,6 +223,26 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_syntax_destructuring, "syntax", "destructuring.zz");
 e2e_success_test!(
+    e2e_regression_shadow_destructure_fn,
+    "regression",
+    "shadow_destructure_fn.zz"
+);
+e2e_success_test!(
+    e2e_regression_shadow_destructure,
+    "regression",
+    "shadow_destructure.zz"
+);
+e2e_success_test!(
+    e2e_regression_func_capture_destructure,
+    "regression",
+    "func_capture_destructure.zz"
+);
+e2e_success_test!(
+    e2e_regression_closure_capture_destructure,
+    "regression",
+    "closure_capture_destructure.zz"
+);
+e2e_success_test!(
     e2e_regression_trailing_if_in_else,
     "regression",
     "trailing_if_in_else.zz"
