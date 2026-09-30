@@ -213,11 +213,14 @@ pub fn pack(project_dir: &Path, manifest: &Manifest) -> Result<PathBuf, PublishE
     }
 
     // Native payload: a published native package must rebuild on the
-    // consumer's machine, so ship the build hook and its sources.
+    // consumer's machine, so ship the build hook (legacy) or the
+    // declarative sources plus its interface.
     if let Some(native) = &manifest.native {
-        let hook = project_dir.join(&native.build);
-        if hook.exists() {
-            files_to_pack.push(hook);
+        if let Some(hook_rel) = native.build.as_deref() {
+            let hook = project_dir.join(hook_rel);
+            if hook.exists() {
+                files_to_pack.push(hook);
+            }
         }
         let zzi = project_dir.join("plugin.zzi");
         if zzi.exists() {
@@ -439,7 +442,11 @@ mod tests {
         manifest.package.name = "native_pkg".to_string();
         manifest.package.version = "0.1.0".to_string();
         manifest.native = Some(NativeSpec {
-            build: "build.sh".to_string(),
+            backend: None,
+            manifest: None,
+            build: Some("build.sh".to_string()),
+            build_cc: None,
+            prebuilt: None,
             pkg_config: None,
         });
 

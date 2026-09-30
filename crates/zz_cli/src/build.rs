@@ -380,8 +380,24 @@ fn discover_native_artifacts(project_path: &Path) -> (Vec<PathBuf>, Vec<String>)
             None => continue,
         };
 
+        // Legacy hook path (deprecated): declarative `cc` dispatch lands
+        // in the next slice. New-shape packages warn here until wired.
+        if native.build_cc.is_some() {
+            eprintln!(
+                "warning: plugin `{}` uses [native.build-cc], not yet wired; skipping native build",
+                dep.name
+            );
+            continue;
+        }
+        let Some(hook_rel) = native.build.as_deref() else {
+            continue;
+        };
+
         // Invoke the build hook
-        let build_script = pkg_dir.join(&native.build);
+        eprintln!(
+            "warning: [native] build = \"{hook_rel}\" is deprecated; migrate to [native.build-cc] (see docs/plugin-author-guide.md §4)"
+        );
+        let build_script = pkg_dir.join(hook_rel);
         if !build_script.exists() {
             eprintln!(
                 "warning: plugin `{}` build script not found: {}",
@@ -391,7 +407,7 @@ fn discover_native_artifacts(project_path: &Path) -> (Vec<PathBuf>, Vec<String>)
             continue;
         }
 
-        eprintln!("zz: building plugin `{}` via {}...", dep.name, native.build);
+        eprintln!("zz: building plugin `{}` via {hook_rel}...", dep.name);
         let output = std::process::Command::new("bash")
             .arg(&build_script)
             .current_dir(&pkg_dir)

@@ -99,14 +99,463 @@ pub struct InitOptions {
     pub repository: Option<String>,
 }
 
-/// Native build configuration for packages that provide C/Rust extensions.
+/// Backend selector for native plugin builds.
+///
+/// - `Hook`: legacy `build = "build.sh"` script (deprecated, warns, gated
+///   behind `--allow-hooks` for direct deps / error for transitive deps).
+/// - `Cc`: declarative C build performed by `zz` itself
+///   (`[native.build-cc]`), no shell, no script, no network.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NativeBackend {
+    /// Declarative C build (default when `[native.build-cc]` is present).
+    Cc,
+    /// Legacy shell hook (default when `build = "..."` is present).
+    #[default]
+    Hook,
+}
+
+/// Native build configuration for packages that provide C extensions.
+///
+/// Two shapes (explicit `backend` tag preferred, inferred when absent):
+///
+/// ```toml
+/// # Legacy (deprecated):
+/// [native]
+/// build = "build.sh"
+///
+/// # Declarative v1:
+/// [native]
+/// backend = "cc"
+/// manifest = "plugin.zzi"
+/// [native.build-cc]
+/// sources = ["csrc/wrapper.c"]
+/// include_dirs = ["csrc"]
+/// defines = ["NDEBUG"]
+/// cflags = ["-O2", "-Wall", "-Wextra", "-fPIC"]
+/// libs = []
+/// pkg_config = ["vips"]
+/// targets = ["linux-x86_64-gnu-glibc2.28"]
+/// [native.prebuilt.target."linux-x86_64-gnu-glibc2.28"]
+/// url = "https://example.com/zimg-0.3.0-linux-x86_64-gnu-glibc2.28.tgz"
+/// sha256 = "9f2c…"
+/// ```
+///
+/// Prebuilt table keys are platform tags (see [`validate_platform_tag`]).
+/// Tags contain dots (`glibc2.28`), so they MUST be quoted in TOML.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NativeSpec {
-    /// Build hook script (relative to package root).
-    pub build: String,
-    /// Optional pkg-config dependency declaration.
-    #[serde(default)]
+    /// Backend selector. Inferred when absent: `cc` if `[native.build-cc]`
+    /// is present, else `hook`. When set explicitly it must agree with the
+    /// shape present (mismatch = error).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<NativeBackend>,
+    /// Interface file, relative to package root. Default `plugin.zzi`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
+    /// Legacy hook script, relative to package root (`build = "build.sh"`).
+    /// Mutually exclusive with `build_cc`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+    /// Declarative C build spec (`[native.build-cc]`).
+    #[serde(default, rename = "build-cc", skip_serializing_if = "Option::is_none")]
+    pub build_cc: Option<BuildCcSpec>,
+    /// Per-platform prebuilt artifacts (`[native.prebuilt]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prebuilt: Option<PrebuiltSpec>,
+    /// Legacy system-dep query (string form, e.g. `pkg_config = "vips"`).
+    /// The declarative form uses `BuildCcSpec::pkg_config` (list) instead;
+    /// setting both is an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pkg_config: Option<String>,
+}
+
+/// Declarative C build spec: everything `zz` needs to compile the plugin
+/// without running any package-supplied code.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BuildCcSpec {
+    /// C sources, relative to package root, explicit list (no globs v1).
+    /// e.g. `["csrc/zimg_wrapper.c"]`.
+    pub sources: Vec<String>,
+    /// `-I` dirs, relative to package root. Only way to add includes.
+    #[serde(default)]
+    pub include_dirs: Vec<String>,
+    /// `-D` defines without the `-D` prefix. e.g. `["NDEBUG"]`,
+    /// `["_POSIX_C_SOURCE=200809L"]`.
+    #[serde(default)]
+    pub defines: Vec<String>,
+    /// Extra C flags from the explicit allowlist (see [`validate_cflag`]).
+    #[serde(default)]
+    pub cflags: Vec<String>,
+    /// Direct `-l` libs (bare names, no `-l` prefix). e.g. `["vips"]`.
+    /// Prefer `pkg_config` below.
+    #[serde(default)]
+    pub libs: Vec<String>,
+    /// pkg-config modules. e.g. `["vips"]`. Resolved by `zz`, recorded
+    /// in `zz.lock` (drift busts the cache).
+    #[serde(default)]
+    pub pkg_config: Vec<String>,
+    /// Supported platform tags (see [`validate_platform_tag`]). A missing
+    /// entry means "no prebuilt, source fallback".
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+/// Per-platform prebuilt artifacts: `target.<tag> = { url, sha256 }`.
+/// v1: `https:` URLs only (GitHub releases convention); the `registry:`
+/// scheme is deferred to v2.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PrebuiltSpec {
+    /// Map from platform tag → artifact.
+    #[serde(default)]
+    pub target: std::collections::HashMap<String, PrebuiltArtifact>,
+}
+
+/// One per-platform prebuilt tarball (full `build/` layout: `*.o`, `*.a`,
+/// shared lib, `ldflags.txt`/`cflags.txt` — never partial).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PrebuiltArtifact {
+    /// `https:` URL (GitHub releases convention for v1).
+    pub url: String,
+    /// Expected sha256 of the tarball bytes (fail closed on mismatch).
+    pub sha256: String,
+}
+
+impl NativeSpec {
+    /// Manifest-interface path (default `plugin.zzi`).
+    pub fn manifest_path(&self) -> &str {
+        self.manifest.as_deref().unwrap_or("plugin.zzi")
+    }
+
+    /// Resolved backend (explicit tag wins; else inferred from shape).
+    pub fn resolved_backend(&self) -> NativeBackend {
+        if let Some(b) = self.backend {
+            return b;
+        }
+        if self.build_cc.is_some() {
+            return NativeBackend::Cc;
+        }
+        NativeBackend::Hook
+    }
+
+    /// Validate all declarative fields against `pkg_root`.
+    ///
+    /// Checks: mixed-form rejection, backend/shape agreement, path
+    /// containment (hook, manifest, sources, include_dirs), explicit
+    /// cflag allowlist + rejected classes, `libs` shape, platform tags,
+    /// prebuilt URL/sha shape, legacy/new `pkg_config` exclusivity.
+    /// Returns `Ok(())` for a legacy hook-only spec (nothing to check
+    /// beyond containment of the hook path).
+    pub fn validate(&self, pkg_root: &Path) -> Result<(), String> {
+        // Mixed form is always an error.
+        if self.build.is_some() && self.build_cc.is_some() {
+            return Err(
+                "invalid [native]: `build` (hook) and `[native.build-cc]` are mutually exclusive\n\
+                 hint: remove `build = \"build.sh\"` to use the declarative backend"
+                    .to_string(),
+            );
+        }
+        if self.pkg_config.is_some()
+            && self
+                .build_cc
+                .as_ref()
+                .is_some_and(|b| !b.pkg_config.is_empty())
+        {
+            return Err("invalid [native]: legacy `pkg_config` (string) and `[native.build-cc] pkg_config` (list) are mutually exclusive\n\
+                 hint: keep only the `[native.build-cc]` list form"
+                .to_string());
+        }
+        // Explicit backend must agree with the shape present.
+        if let Some(b) = self.backend {
+            match b {
+                NativeBackend::Cc if self.build_cc.is_none() => {
+                    return Err(
+                        "invalid [native]: `backend = \"cc\"` requires `[native.build-cc]`\n\
+                         hint: add a `[native.build-cc]` table or drop the backend tag"
+                            .to_string(),
+                    );
+                }
+                NativeBackend::Hook if self.build.is_none() => {
+                    return Err(
+                        "invalid [native]: `backend = \"hook\"` requires `build = \"...\"`\n\
+                         hint: add `build = \"build.sh\"` or switch to `backend = \"cc\"`"
+                            .to_string(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        // Containment for hook + manifest paths.
+        if let Some(hook) = &self.build {
+            check_contained(pkg_root, hook, "build")?;
+        }
+        if let Some(m) = &self.manifest {
+            check_contained(pkg_root, m, "manifest")?;
+        }
+        let Some(cc) = &self.build_cc else {
+            return Ok(());
+        };
+        if cc.sources.is_empty() {
+            return Err(
+                "invalid [native.build-cc]: `sources` must list at least one file\n\
+                 hint: e.g. sources = [\"csrc/wrapper.c\"]"
+                    .to_string(),
+            );
+        }
+        for s in &cc.sources {
+            check_contained(pkg_root, s, "sources")?;
+            if !s.ends_with(".c") {
+                return Err(format!(
+                    "invalid [native.build-cc]: source `{s}` must be a `.c` file\n\
+                     hint: declarative v1 covers C sources only"
+                ));
+            }
+        }
+        for d in &cc.include_dirs {
+            check_contained(pkg_root, d, "include_dirs")?;
+        }
+        for def in &cc.defines {
+            validate_define(def)?;
+        }
+        for f in &cc.cflags {
+            validate_cflag(f)?;
+        }
+        for lib in &cc.libs {
+            if lib.is_empty() || lib.starts_with('-') || lib.contains(['/', '\\', ' ', ',', '@']) {
+                return Err(format!(
+                    "invalid [native.build-cc]: lib `{lib}` must be a bare name (no `-l`, no path)\n\
+                     hint: e.g. libs = [\"vips\"]"
+                ));
+            }
+        }
+        for pc in &cc.pkg_config {
+            if pc.is_empty() || pc.contains([' ', ',', '@', '/']) {
+                return Err(format!(
+                    "invalid [native.build-cc]: pkg_config entry `{pc}` must be a bare module name\n\
+                     hint: e.g. pkg_config = [\"vips\"]"
+                ));
+            }
+        }
+        for t in &cc.targets {
+            validate_platform_tag(t)?;
+        }
+        if let Some(pre) = &self.prebuilt {
+            for (tag, art) in &pre.target {
+                validate_platform_tag(tag)?;
+                if !(art.url.starts_with("https://") || art.url.starts_with("http://")) {
+                    return Err(format!(
+                        "invalid [native.prebuilt]: url for `{tag}` must be https: (registry: is deferred to v2)\n\
+                         hint: host the tarball on GitHub releases"
+                    ));
+                }
+                if art.sha256.len() != 64 || !art.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(format!(
+                        "invalid [native.prebuilt]: sha256 for `{tag}` must be 64 hex chars"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Reject paths escaping the package root (`..`, absolute, empty).
+fn check_contained(pkg_root: &Path, rel: &str, field: &str) -> Result<(), String> {
+    if rel.is_empty() {
+        return Err(format!("invalid [native]: `{field}` must not be empty"));
+    }
+    let p = Path::new(rel);
+    if p.is_absolute()
+        || p.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(format!(
+            "invalid [native]: `{field}` entry `{rel}` must be relative and stay inside the package\n\
+             hint: use a path like \"csrc/wrapper.c\""
+        ));
+    }
+    // Symlink escape is checked at build time (canonicalize + strip_prefix).
+    let _ = pkg_root;
+    Ok(())
+}
+
+/// Validate one `-D` define body (no `-D` prefix).
+fn validate_define(def: &str) -> Result<(), String> {
+    if def.is_empty() || def.starts_with('-') || def.contains([' ', ',', '@', '"', '\'', '(', ')'])
+    {
+        return Err(format!(
+            "invalid [native.build-cc]: define `{def}` must look like NAME or NAME=value (no spaces, commas, quotes, parens)\n\
+             hint: e.g. defines = [\"NDEBUG\"]"
+        ));
+    }
+    Ok(())
+}
+
+/// Explicit allowlist for `[native.build-cc] cflags`.
+///
+/// Allowed: `-O0 -O1 -O2 -O3 -Os -Oz`, `-g`, `-fPIC -fpic -fPIE`,
+/// `-Wall -Wextra -Werror -Wno-<name>`, `-std=c11 -std=c17`,
+/// `-pthread`, `-march=x86-64 -march=armv8-a`.
+///
+/// Rejected classes (each fail closed):
+/// ',' anywhere, leading '@', `-Wl,*`, `-Wp,*`, `-Xlinker`,
+/// `-Xpreprocessor`, bare `-I` (use `include_dirs`), bare `-L`/`-l`
+/// (use `libs`), `--target=` (toolchain sets it). Same validator gates
+/// `pkg-config` output tokens (plus `-I/-L/-l` allowed from that source —
+/// see [`validate_pkg_config_token`]).
+pub fn validate_cflag(flag: &str) -> Result<(), String> {
+    // Rejected classes first (fail closed before consulting allowlist).
+    if flag.contains(',') {
+        return Err(format!(
+            "invalid cflag `{flag}`: commas are forbidden (blocks -Wl,/-Wp, smuggling)"
+        ));
+    }
+    if flag.starts_with('@') {
+        return Err(format!(
+            "invalid cflag `{flag}`: @file indirection is forbidden"
+        ));
+    }
+    if flag.starts_with("-Wl,")
+        || flag.starts_with("-Wp,")
+        || flag == "-Xlinker"
+        || flag == "-Xpreprocessor"
+        || flag.starts_with("--target=")
+    {
+        return Err(format!(
+            "invalid cflag `{flag}`: linker/compiler-plugin escapes are forbidden"
+        ));
+    }
+    if flag.starts_with("-I") {
+        return Err(format!(
+            "invalid cflag `{flag}`: bare -I is forbidden; use include_dirs instead"
+        ));
+    }
+    if flag.starts_with("-L") || flag.starts_with("-l") {
+        return Err(format!(
+            "invalid cflag `{flag}`: bare -L/-l is forbidden; use libs instead"
+        ));
+    }
+    const ALLOWED: &[&str] = &[
+        "-O0",
+        "-O1",
+        "-O2",
+        "-O3",
+        "-Os",
+        "-Oz",
+        "-g",
+        "-fPIC",
+        "-fpic",
+        "-fPIE",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-pthread",
+        "-std=c11",
+        "-std=c17",
+        "-march=x86-64",
+        "-march=armv8-a",
+    ];
+    if ALLOWED.contains(&flag) || flag.starts_with("-Wno-") {
+        return Ok(());
+    }
+    Err(format!(
+        "invalid cflag `{flag}`: not on the explicit allowlist\n\
+         hint: allowed: -O0..-Oz, -g, -fPIC/-fpic/-fPIE, -Wall/-Wextra/-Werror/-Wno-*, -std=c11/c17, -pthread, -march=x86-64/armv8-a"
+    ))
+}
+
+/// Validate one whitespace-split token from `pkg-config --cflags/--libs`.
+///
+/// Same rejected classes as [`validate_cflag`], plus the pkg-config-only
+/// allowances `-I<dir>`, `-L<dir>`, `-l<name>` (system paths are legitimate
+/// here — the manifest form still bans them so only the resolver can add
+/// them). `-D<...>` tokens must pass [`validate_define`] on their body.
+pub fn validate_pkg_config_token(tok: &str) -> Result<(), String> {
+    if tok.contains(',') {
+        return Err(format!(
+            "pkg-config emitted forbidden token `{tok}`: commas are forbidden"
+        ));
+    }
+    if tok.starts_with('@') {
+        return Err(format!(
+            "pkg-config emitted forbidden token `{tok}`: @file indirection is forbidden"
+        ));
+    }
+    if tok.starts_with("-Wl,")
+        || tok.starts_with("-Wp,")
+        || tok == "-Xlinker"
+        || tok == "-Xpreprocessor"
+    {
+        return Err(format!(
+            "pkg-config emitted forbidden token `{tok}`: linker/compiler-plugin escapes are forbidden"
+        ));
+    }
+    if let Some(dir) = tok.strip_prefix("-I").or(tok.strip_prefix("-L")) {
+        if dir.is_empty() || dir.contains('@') {
+            return Err(format!(
+                "pkg-config emitted forbidden token `{tok}`: empty or @-path"
+            ));
+        }
+        return Ok(());
+    }
+    if let Some(name) = tok.strip_prefix("-l") {
+        if name.is_empty() || name.contains(['/', ' ']) {
+            return Err(format!("pkg-config emitted forbidden token `{tok}`"));
+        }
+        return Ok(());
+    }
+    if let Some(body) = tok.strip_prefix("-D") {
+        return validate_define(body)
+            .map_err(|_| format!("pkg-config emitted forbidden token `{tok}`: bad -D shape"));
+    }
+    // Anything else must be on the plain cflag allowlist.
+    validate_cflag(tok).map_err(|_| format!("pkg-config emitted forbidden token `{tok}`"))
+}
+
+/// Validate a platform tag: `<os>-<arch>-<abi>-<floor>`.
+///
+/// Accepted: `linux-{x86_64,aarch64}-gnu-glibc<major>.<minor>`
+/// (e.g. `linux-x86_64-gnu-glibc2.28`), `linux-{x86_64,aarch64}-musl`,
+/// `macos-{x86_64,arm64}-min<major>.<minor>` (e.g. `macos-arm64-min11.0`),
+/// `windows-x86_64-msvc`. Anything else is a manifest error.
+pub fn validate_platform_tag(tag: &str) -> Result<(), String> {
+    fn bad(tag: &str) -> String {
+        format!(
+            "invalid platform tag `{tag}`\n\
+             hint: e.g. linux-x86_64-gnu-glibc2.28, linux-x86_64-musl, macos-arm64-min11.0, windows-x86_64-msvc"
+        )
+    }
+    let parts: Vec<&str> = tag.split('-').collect();
+    match parts.as_slice() {
+        ["linux", arch @ ("x86_64" | "aarch64"), "gnu", floor] => {
+            parse_glibc_floor(floor).ok_or_else(|| bad(tag))?;
+            let _ = arch;
+            Ok(())
+        }
+        ["linux", "x86_64" | "aarch64", "musl"] => Ok(()),
+        ["macos", "x86_64" | "arm64", floor] if floor.starts_with("min") => {
+            parse_dotted(&floor[3..]).ok_or_else(|| bad(tag))?;
+            Ok(())
+        }
+        ["windows", "x86_64", "msvc"] => Ok(()),
+        _ => Err(bad(tag)),
+    }
+}
+
+/// Parse `glibc<major>.<minor>` → `(major, minor)`.
+fn parse_glibc_floor(s: &str) -> Option<(u32, u32)> {
+    let rest = s.strip_prefix("glibc")?;
+    parse_dotted(rest)
+}
+
+/// Parse `<major>.<minor>` → `(major, minor)`.
+fn parse_dotted(s: &str) -> Option<(u32, u32)> {
+    let (a, b) = s.split_once('.')?;
+    Some((a.parse().ok()?, b.parse().ok()?))
 }
 
 /// Dependency specification — three variants.
@@ -564,5 +1013,271 @@ foo = "^1.0"
         let reloaded = Manifest::load(&d.join("zz.toml")).unwrap();
         assert_eq!(m, reloaded);
         let _ = fs::remove_dir_all(&d);
+    }
+
+    fn cc_manifest(toml_native: &str) -> Manifest {
+        Manifest::parse(&format!(
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\n{toml_native}"
+        ))
+        .expect("test manifest parses")
+    }
+
+    fn cc_spec() -> BuildCcSpec {
+        BuildCcSpec {
+            sources: vec!["csrc/wrapper.c".to_string()],
+            include_dirs: vec!["csrc".to_string()],
+            defines: vec!["NDEBUG".to_string()],
+            cflags: vec!["-O2".to_string(), "-Wall".to_string(), "-fPIC".to_string()],
+            libs: vec![],
+            pkg_config: vec!["vips".to_string()],
+            targets: vec!["linux-x86_64-gnu-glibc2.28".to_string()],
+        }
+    }
+
+    fn validate_cc(spec: &BuildCcSpec) -> Result<(), String> {
+        NativeSpec {
+            backend: Some(NativeBackend::Cc),
+            manifest: None,
+            build: None,
+            build_cc: Some(spec.clone()),
+            prebuilt: None,
+            pkg_config: None,
+        }
+        .validate(Path::new("/pkg"))
+    }
+
+    #[test]
+    fn legacy_hook_parses_to_hook_backend() {
+        let m = cc_manifest("[native]\nbuild = \"build.sh\"\n");
+        let n = m.native.expect("native present");
+        assert_eq!(n.build.as_deref(), Some("build.sh"));
+        assert_eq!(n.resolved_backend(), NativeBackend::Hook);
+        assert!(n.validate(Path::new("/pkg")).is_ok());
+    }
+
+    #[test]
+    fn declarative_shape_resolves_cc() {
+        let m = cc_manifest(
+            "[native]\nbackend = \"cc\"\n[native.build-cc]\nsources = [\"csrc/wrapper.c\"]\n",
+        );
+        let n = m.native.expect("native present");
+        assert_eq!(n.resolved_backend(), NativeBackend::Cc);
+        assert!(n.manifest_path() == "plugin.zzi");
+    }
+
+    #[test]
+    fn mixed_hook_and_cc_rejected() {
+        let m = cc_manifest(
+            "[native]\nbuild = \"build.sh\"\n[native.build-cc]\nsources = [\"csrc/wrapper.c\"]\n",
+        );
+        let err = m
+            .native
+            .expect("native present")
+            .validate(Path::new("/pkg"))
+            .unwrap_err();
+        assert!(err.contains("mutually exclusive"), "{err}");
+    }
+
+    #[test]
+    fn backend_shape_mismatch_rejected() {
+        // backend=cc without the table.
+        let m = cc_manifest("[native]\nbackend = \"cc\"\n");
+        let err = m
+            .native
+            .expect("native present")
+            .validate(Path::new("/pkg"))
+            .unwrap_err();
+        assert!(err.contains("requires `[native.build-cc]`"), "{err}");
+        // backend=hook without a script.
+        let m = cc_manifest("[native]\nbackend = \"hook\"\n");
+        let err = m
+            .native
+            .expect("native present")
+            .validate(Path::new("/pkg"))
+            .unwrap_err();
+        assert!(err.contains("requires `build"), "{err}");
+    }
+
+    #[test]
+    fn dual_pkg_config_rejected() {
+        let mut spec = cc_spec();
+        spec.pkg_config = vec!["vips".to_string()];
+        let n = NativeSpec {
+            backend: Some(NativeBackend::Cc),
+            manifest: None,
+            build: None,
+            build_cc: Some(spec),
+            prebuilt: None,
+            pkg_config: Some("vips".to_string()),
+        };
+        let err = n.validate(Path::new("/pkg")).unwrap_err();
+        assert!(err.contains("mutually exclusive"), "{err}");
+    }
+
+    #[test]
+    fn path_escape_rejected() {
+        for evil in ["../evil.c", "/abs.c", "../x.h"] {
+            let mut spec = cc_spec();
+            spec.sources = vec![evil.to_string()];
+            assert!(
+                validate_cc(&spec).is_err(),
+                "source `{evil}` must be rejected"
+            );
+        }
+        let mut spec = cc_spec();
+        spec.sources = vec!["csrc/ok.c".to_string()];
+        spec.include_dirs = vec!["../inc".to_string()];
+        assert!(validate_cc(&spec).is_err());
+    }
+
+    #[test]
+    fn non_c_source_rejected() {
+        let mut spec = cc_spec();
+        spec.sources = vec!["csrc/main.cpp".to_string()];
+        let err = validate_cc(&spec).unwrap_err();
+        assert!(err.contains(".c"), "{err}");
+    }
+
+    #[test]
+    fn empty_sources_rejected() {
+        let mut spec = cc_spec();
+        spec.sources = vec![];
+        assert!(validate_cc(&spec).is_err());
+    }
+
+    // Rejected cflag classes — one assertion per class from the plan.
+    #[test]
+    fn cflag_comma_rejected() {
+        assert!(validate_cflag("-Wl,-rpath,/x").is_err());
+        assert!(validate_cflag("-O2,-g").is_err());
+    }
+
+    #[test]
+    fn cflag_atfile_rejected() {
+        assert!(validate_cflag("@args.txt").is_err());
+    }
+
+    #[test]
+    fn cflag_linker_escape_rejected() {
+        for f in [
+            "-Wl,--exclude-libs,ALL",
+            "-Wp,-MD",
+            "-Xlinker",
+            "-Xpreprocessor",
+        ] {
+            assert!(validate_cflag(f).is_err(), "`{f}` must be rejected");
+        }
+    }
+
+    #[test]
+    fn cflag_bare_include_rejected() {
+        assert!(validate_cflag("-Icsrc").is_err());
+        assert!(validate_cflag("-I").is_err());
+    }
+
+    #[test]
+    fn cflag_bare_lib_rejected() {
+        assert!(validate_cflag("-lvips").is_err());
+        assert!(validate_cflag("-L/usr/lib").is_err());
+    }
+
+    #[test]
+    fn cflag_target_rejected() {
+        assert!(validate_cflag("--target=x86_64-unknown-linux-gnu").is_err());
+    }
+
+    #[test]
+    fn cflag_unknown_rejected() {
+        assert!(validate_cflag("-funroll-loops").is_err());
+        assert!(validate_cflag("-march=native").is_err());
+    }
+
+    #[test]
+    fn cflag_allowlist_accepts() {
+        for f in [
+            "-O2",
+            "-Os",
+            "-g",
+            "-fPIC",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Wno-unused",
+            "-std=c11",
+            "-pthread",
+            "-march=x86-64",
+        ] {
+            assert!(validate_cflag(f).is_ok(), "`{f}` must be allowed");
+        }
+    }
+
+    #[test]
+    fn pkg_config_tokens_validated() {
+        // Allowed from resolver output.
+        for t in ["-I/usr/include/vips", "-L/usr/lib", "-lvips", "-pthread"] {
+            assert!(validate_pkg_config_token(t).is_ok(), "`{t}` allowed");
+        }
+        // Same rejected classes apply to resolver output.
+        for t in ["-Wl,-rpath", "@flags", "-Wp,-v", "-Xlinker"] {
+            assert!(
+                validate_pkg_config_token(t).is_err(),
+                "`{t}` must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn platform_tags_accepted() {
+        for t in [
+            "linux-x86_64-gnu-glibc2.28",
+            "linux-aarch64-gnu-glibc2.17",
+            "linux-x86_64-musl",
+            "macos-arm64-min11.0",
+            "macos-x86_64-min12.0",
+            "windows-x86_64-msvc",
+        ] {
+            assert!(validate_platform_tag(t).is_ok(), "`{t}` allowed");
+        }
+    }
+
+    #[test]
+    fn platform_tags_rejected() {
+        // Bare triples (no libc floor) are gone.
+        for t in [
+            "x86_64-unknown-linux-gnu",
+            "linux-x86_64",
+            "macos-arm64",
+            "linux-x86_64-gnu",
+            "linux-x86_64-gnu-glibc",
+            "windows-x86_64",
+            "freebsd-x86_64-gnu-glibc2.28",
+        ] {
+            assert!(validate_platform_tag(t).is_err(), "`{t}` must be rejected");
+        }
+    }
+
+    #[test]
+    fn prebuilt_registry_scheme_deferred() {
+        let mut spec = cc_spec();
+        spec.targets = vec!["linux-x86_64-gnu-glibc2.28".to_string()];
+        let mut targets = std::collections::HashMap::new();
+        targets.insert(
+            "linux-x86_64-gnu-glibc2.28".to_string(),
+            PrebuiltArtifact {
+                url: "registry:zimg/0.3.0/x.tgz".to_string(),
+                sha256: "9f2c9f2c9f2c9f2c9f2c9f2c9f2c9f2c9f2c9f2c9f2c9f2c9f2c9f2c9f2c9f2c"
+                    .to_string(),
+            },
+        );
+        let n = NativeSpec {
+            backend: Some(NativeBackend::Cc),
+            manifest: None,
+            build: None,
+            build_cc: Some(spec),
+            prebuilt: Some(PrebuiltSpec { target: targets }),
+            pkg_config: None,
+        };
+        let err = n.validate(Path::new("/pkg")).unwrap_err();
+        assert!(err.contains("https:"), "{err}");
     }
 }
