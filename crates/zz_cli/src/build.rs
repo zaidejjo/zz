@@ -505,14 +505,51 @@ pub(crate) fn build_native_deps(
         // Declarative backend: validated C build owned by zz itself.
         if let Some(cc_spec) = native.build_cc.as_ref() {
             let host = zz_pm::native_build::host_tag().unwrap_or_default();
-            let has_prebuilt = native.prebuilt.as_ref().is_some_and(|p| {
-                p.target.keys().any(|t| {
-                    zz_pm::native_build::tags_compatible(t, &host)
-                        || zz_pm::native_build::tags_compatible(&host, t)
-                        || *t == host
-                })
+            let compatible = |t: &String| {
+                zz_pm::native_build::tags_compatible(t, &host)
+                    || zz_pm::native_build::tags_compatible(&host, t)
+                    || *t == host
+            };
+            let prebuilt_hit = native.prebuilt.as_ref().and_then(|p| {
+                p.target
+                    .iter()
+                    .find(|(t, _)| compatible(t))
+                    .map(|(t, a)| (t.clone(), a.clone()))
             });
-            if !has_prebuilt {
+            let had_entry = prebuilt_hit.is_some();
+            // Prebuilt path: verified bytes, no compiler needed.
+            if let Some((tag, artifact)) = prebuilt_hit {
+                eprintln!("zz: fetching prebuilt plugin `{}` for {tag}...", dep.name);
+                match zz_pm::native_build::fetch_prebuilt(&pkg_dir, &dep.name, &tag, &artifact) {
+                    Ok(out) => {
+                        artifacts.extend(out.objects);
+                        artifacts.push(out.archive);
+                        collect_link_args(&out.ldflags_path, &mut link_args);
+                        audits.push((
+                            dep.name.clone(),
+                            zz_pm::lock::LockedNative {
+                                backend: "prebuilt".to_string(),
+                                tag: out.tag,
+                                compiler: String::new(),
+                                artifact_sha256: artifact.sha256.clone(),
+                                pkg_config_resolved: String::new(),
+                            },
+                        ));
+                        continue;
+                    }
+                    Err(e) if e.contains("cannot download") => {
+                        eprintln!("warning: prebuilt unavailable: {e}");
+                        // Fall through to source build (gates apply below).
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "plugin `{}` prebuilt for {tag} failed verification: {e}",
+                            dep.name
+                        ));
+                    }
+                }
+            }
+            if !had_entry {
                 if !direct && !opts.allow_source_builds {
                     return Err(format!(
                         "plugin `{}` has no prebuilt for `{host}`; ask the maintainer or re-run with --allow-source-builds",

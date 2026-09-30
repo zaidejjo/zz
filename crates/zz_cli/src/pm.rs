@@ -655,6 +655,39 @@ pub fn publish(args: &[String]) -> Result<(), String> {
         eprintln!("warning: {warning}");
     }
 
+    // `--artifact-dir <dir>`: verify each `<name>-<version>-<tag>.tgz`
+    // (full build/ layout + both-engine symbol check) and print the
+    // `[native.prebuilt]` stanza to paste into zz.toml. Missing dir
+    // entries mean a source-only release (allowed, warns).
+    if let Some(artifact_dir_str) = parse_flag_value(args, "--artifact-dir") {
+        let artifact_dir = std::path::PathBuf::from(&artifact_dir_str);
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&artifact_dir)
+            .map_err(|e| format!("cannot read --artifact-dir {artifact_dir_str}: {e}"))?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("tgz"))
+            .collect();
+        entries.sort();
+        if entries.is_empty() {
+            eprintln!("warning: --artifact-dir has no .tgz files; source-only release");
+        }
+        for tgz in &entries {
+            match zz_pm::native_build::verify_artifact_file(tgz, &dir, &manifest.package.name) {
+                Ok((tag, sha256)) => {
+                    println!("artifact ok: {} ({})", tgz.display(), tag);
+                    println!("  [target.{tag}]");
+                    println!(
+                        "  url = \"https://github.com/<org>/<repo>/releases/download/v{}/{}\"",
+                        manifest.package.version,
+                        tgz.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                    println!("  sha256 = \"{sha256}\"");
+                }
+                Err(e) => return Err(format!("artifact rejected: {e}")),
+            }
+        }
+    }
+
     // Run tests (skippable for native packages whose suites live
     // outside `zz test`, e.g. `zz run`-based e2e harnesses — the runner
     // never dlopens the package's own build/*.so).

@@ -90,6 +90,9 @@ FLAGS:
                        registry base URL (default: ZZ_REGISTRY or the public registry)
     --limit <n>        with search, max results (default 20)
     --dry-run          with publish, validate + pack without uploading
+    --artifact-dir <dir>
+                        with publish, verify per-tag prebuilt tarballs and
+                        print the [native.prebuilt] stanza
     --skip-tests       with publish, skip the `zz test` gate (native pkgs)
     --browser          with login, print the OAuth URL before prompting
     --author <name>    with init/new, package author (repeatable, comma-split)

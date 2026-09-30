@@ -569,41 +569,14 @@ pub fn ensure_cc(
     // Engine-parity verification (hard requirement): every .zzi symbol
     // resolves in BOTH the archive and the shared lib.
     let zzi_path = pkg_dir.join("plugin.zzi");
-    let expected = expected_c_symbols(&zzi_path)?;
-    let arch_syms = defined_symbols(&archive, &build_dir)
-        .map_err(|e| format!("static verification failed for `{pkg_name}`: {e}"))?;
-    for s in &expected {
-        if !arch_syms.contains(s) {
-            return Err(format!(
-                "static verification failed for `{pkg_name}`: symbol `{s}` missing from {}\n\
-                 hint: the C sources do not implement every plugin.zzi function",
-                archive.display()
-            ));
-        }
-    }
-    let windows_aot_only = tag.starts_with("windows-");
-    if !windows_aot_only {
-        let shared_syms = defined_symbols(&shared, &build_dir)
-            .map_err(|e| format!("shared verification failed for `{pkg_name}`: {e}"))?;
-        for s in &expected {
-            if !shared_syms.contains(s) {
-                return Err(format!(
-                    "shared verification failed for `{pkg_name}`: symbol `{s}` missing from {}\n\
-                     hint: the shared lib must export every plugin.zzi function for `zz run`",
-                    shared.display()
-                ));
-            }
-        }
-        if !(shared_syms.contains(C_ABI_STAMP) || shared_syms.contains(RUST_ABI_STAMP)) {
-            return Err(format!(
-                "shared verification failed for `{pkg_name}`: neither {C_ABI_STAMP} nor {RUST_ABI_STAMP} in {}\n\
-                 hint: export the ABI version stamp (see docs/plugin-author-guide.md §11)",
-                shared.display()
-            ));
-        }
-    } else {
-        eprintln!("note: `{pkg_name}` on windows is AOT-only (VM dlopen deferred)");
-    }
+    verify_engine_parity(
+        pkg_name,
+        std::slice::from_ref(&archive),
+        &shared,
+        &zzi_path,
+        &tag,
+        &build_dir,
+    )?;
 
     Ok(CcBuildOutput {
         objects,
@@ -614,6 +587,398 @@ pub fn ensure_cc(
         tag,
         compiler: cc.version,
     })
+}
+
+/// Verify AOT/VM parity for built OR unpacked artifacts: every
+/// `plugin.zzi` symbol resolves in the archive set (AOT) and in the
+/// shared lib (VM), with exactly one ABI stamp in the shared lib.
+/// Windows tags waive the shared check with a loud note (AOT-only).
+fn verify_engine_parity(
+    pkg_name: &str,
+    archives: &[PathBuf],
+    shared: &Path,
+    zzi_path: &Path,
+    tag: &str,
+    probe_tmp: &Path,
+) -> Result<(), String> {
+    let expected = expected_c_symbols(zzi_path)?;
+    let mut arch_syms = HashSet::new();
+    for archive in archives {
+        let set = defined_symbols(archive, probe_tmp)
+            .map_err(|e| format!("static verification failed for `{pkg_name}`: {e}"))?;
+        arch_syms.extend(set);
+    }
+    for s in &expected {
+        if !arch_syms.contains(s) {
+            return Err(format!(
+                "static verification failed for `{pkg_name}`: symbol `{s}` missing from archives\n\
+                 hint: the C sources do not implement every plugin.zzi function"
+            ));
+        }
+    }
+    if tag.starts_with("windows-") {
+        eprintln!("note: `{pkg_name}` on windows is AOT-only (VM dlopen deferred)");
+        return Ok(());
+    }
+    let shared_syms = defined_symbols(shared, probe_tmp)
+        .map_err(|e| format!("shared verification failed for `{pkg_name}`: {e}"))?;
+    for s in &expected {
+        if !shared_syms.contains(s) {
+            return Err(format!(
+                "shared verification failed for `{pkg_name}`: symbol `{s}` missing from {}\n\
+                 hint: the shared lib must export every plugin.zzi function for `zz run`",
+                shared.display()
+            ));
+        }
+    }
+    if !(shared_syms.contains(C_ABI_STAMP) || shared_syms.contains(RUST_ABI_STAMP)) {
+        return Err(format!(
+            "shared verification failed for `{pkg_name}`: neither {C_ABI_STAMP} nor {RUST_ABI_STAMP} in {}\n\
+             hint: export the ABI version stamp (see docs/plugin-author-guide.md §11)",
+            shared.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Download a prebuilt artifact tarball (`https:` only), verify its sha256
+/// (fail closed), and install it via [`install_prebuilt_bytes`].
+///
+/// CAS fast path: `cas_entry(sha256)` reuse keeps installs offline-safe
+/// when warm. Network failure returns a retriable error (the caller
+/// falls back to source); sha mismatch is fatal.
+pub fn fetch_prebuilt(
+    pkg_dir: &Path,
+    pkg_name: &str,
+    tag: &str,
+    artifact: &crate::manifest::PrebuiltArtifact,
+) -> Result<CcBuildOutput, String> {
+    if !(artifact.url.starts_with("https://") || artifact.url.starts_with("http://")) {
+        return Err(format!(
+            "prebuilt url for `{tag}` must be https: (registry: is deferred to v2)"
+        ));
+    }
+    if artifact.sha256.len() != 64 {
+        return Err(format!("prebuilt sha256 for `{tag}` must be 64 hex chars"));
+    }
+    // CAS fast path (verified bytes are content-addressed).
+    let cas_dir = crate::paths::cas_entry(&artifact.sha256);
+    if cas_dir.exists() {
+        return install_prebuilt_dir(&cas_dir, pkg_dir, pkg_name, tag, &artifact.sha256);
+    }
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(std::time::Duration::from_secs(60)))
+            .user_agent(format!("zzpm/{}", env!("CARGO_PKG_VERSION")))
+            .build(),
+    );
+    let mut resp = agent.get(&artifact.url).call().map_err(|e| {
+        format!(
+            "cannot download prebuilt for `{tag}`: {e}\n\
+             hint: check network, or re-run with --allow-source-builds"
+        )
+    })?;
+    let bytes = resp.body_mut().read_to_vec().map_err(|e| {
+        format!(
+            "cannot download prebuilt for `{tag}`: {e}\n\
+             hint: check network, or re-run with --allow-source-builds"
+        )
+    })?;
+    let actual = crate::hash::hash_bytes(&bytes);
+    if actual != artifact.sha256 {
+        return Err(format!(
+            "prebuilt sha256 mismatch for `{tag}`: manifest says {}, download is {actual}\n\
+             hint: the mirror may be compromised or stale; refusing",
+            artifact.sha256
+        ));
+    }
+    // Stage into CAS via scratch sibling (same pattern as package fetch:
+    // a crashed unpack never leaves a half-populated entry behind).
+    if let Some(parent) = cas_dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create CAS parent: {e}"))?;
+    }
+    let tmp = crate::cas::scratch_sibling(&cas_dir, &format!("{pkg_name}-{tag}"));
+    if let Some(parent) = tmp.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create CAS parent: {e}"))?;
+    }
+    extract_validated_prebuilt(&bytes, &tmp, pkg_name, tag)?;
+    crate::cas::stage_dir(&tmp, &cas_dir).map_err(|e| format!("cannot stage CAS entry: {e}"))?;
+    install_prebuilt_dir(&cas_dir, pkg_dir, pkg_name, tag, &artifact.sha256)
+}
+
+/// Install prebuilt tarball bytes after verifying sha + layout.
+/// Test seam: unit tests craft tarballs in-memory without network.
+pub fn install_prebuilt_bytes(
+    bytes: &[u8],
+    pkg_dir: &Path,
+    pkg_name: &str,
+    tag: &str,
+    expected_sha256: &str,
+) -> Result<CcBuildOutput, String> {
+    let actual = crate::hash::hash_bytes(bytes);
+    if actual != expected_sha256 {
+        return Err(format!(
+            "prebuilt sha256 mismatch for `{tag}`: expected {expected_sha256}, got {actual}"
+        ));
+    }
+    let staging = pkg_dir.join(".zz-prebuilt-tmp");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| format!("cannot create staging dir: {e}"))?;
+    let result = (|| {
+        extract_validated_prebuilt(bytes, &staging, pkg_name, tag)?;
+        install_prebuilt_dir(&staging, pkg_dir, pkg_name, tag, expected_sha256)
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    result
+}
+
+/// Unpack + validate a prebuilt tarball into `dest` (full-set rule:
+/// at least one `.o`/`.a`, the platform shared lib, and `ldflags.txt`).
+/// Leading `build/` prefixes are stripped; traversal attacks are refused
+/// by the shared extractor.
+fn extract_validated_prebuilt(
+    bytes: &[u8],
+    dest: &Path,
+    pkg_name: &str,
+    tag: &str,
+) -> Result<(), String> {
+    crate::remote::extract_tarball(bytes, dest)
+        .map_err(|e| format!("cannot unpack prebuilt for `{pkg_name}` ({tag}): {e}"))?;
+    validate_prebuilt_layout(dest, pkg_name, tag)
+}
+
+/// Full-set rule: each per-tag tarball carries the complete `build/`
+/// layout. A static-only upload would fix AOT while silently breaking VM.
+fn validate_prebuilt_layout(dir: &Path, pkg_name: &str, tag: &str) -> Result<(), String> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_files(dir, &mut files);
+    let has_object = files
+        .iter()
+        .any(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("o" | "a")));
+    let suffix = shared_suffix_for_tag(tag);
+    let has_shared = files.iter().any(|p| {
+        p.extension().and_then(|e| e.to_str()) == Some(suffix)
+            && p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("lib"))
+    });
+    let has_ldflags = files
+        .iter()
+        .any(|p| p.file_name().and_then(|n| n.to_str()) == Some("ldflags.txt"));
+    if has_object && has_shared && has_ldflags {
+        return Ok(());
+    }
+    let mut parts = Vec::new();
+    if !has_object {
+        parts.push("*.o/*.a (AOT static input)".to_string());
+    }
+    if !has_shared {
+        parts.push(format!("lib*.{suffix} (VM shared input)"));
+    }
+    if !has_ldflags {
+        parts.push("ldflags.txt".to_string());
+    }
+    Err(format!(
+        "prebuilt for `{pkg_name}` ({tag}) is partial: missing {}\n\
+         hint: ship the full build/ layout — static-only tarballs silently break `zz run`",
+        parts.join(", ")
+    ))
+}
+
+/// Recursively collect files under `dir`.
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, out);
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
+}
+
+/// Copy a validated prebuilt tree into `<pkg>/build/` (hardlink-or-copy
+/// from CAS) and run engine-parity verification. Returns the same shape
+/// as [`ensure_cc`] with an empty compiler string (no local compile).
+fn install_prebuilt_dir(
+    src_dir: &Path,
+    pkg_dir: &Path,
+    pkg_name: &str,
+    tag: &str,
+    _sha256: &str,
+) -> Result<CcBuildOutput, String> {
+    let build_dir = pkg_dir.join("build");
+    std::fs::create_dir_all(&build_dir)
+        .map_err(|e| format!("cannot create {}: {e}", build_dir.display()))?;
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_files(src_dir, &mut files);
+    files.sort();
+    let mut objects = Vec::new();
+    let mut archives = Vec::new();
+    let mut shared: Option<PathBuf> = None;
+    let mut cflags_path = build_dir.join("cflags.txt");
+    let mut ldflags_path = build_dir.join("ldflags.txt");
+    let suffix = shared_suffix_for_tag(tag);
+    for src in &files {
+        // Flatten: strip any leading build/ prefix, keep the file name.
+        let name = src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("bad prebuilt entry: {}", src.display()))?;
+        if name.starts_with('.') || name.ends_with(".tmp") {
+            continue;
+        }
+        let dest = build_dir.join(name);
+        let _ = std::fs::remove_file(&dest);
+        if std::fs::hard_link(src, &dest).is_err() {
+            std::fs::copy(src, &dest)
+                .map_err(|e| format!("cannot install {}: {e}", dest.display()))?;
+        }
+        match dest.extension().and_then(|e| e.to_str()) {
+            Some("o") => objects.push(dest.clone()),
+            Some("a") => archives.push(dest.clone()),
+            Some(ext) if ext == suffix => {
+                shared.get_or_insert(dest.clone());
+            }
+            _ => {}
+        }
+        if name == "cflags.txt" {
+            cflags_path = dest.clone();
+        }
+        if name == "ldflags.txt" {
+            ldflags_path = dest;
+        }
+    }
+    let Some(shared) = shared else {
+        return Err(format!(
+            "prebuilt for `{pkg_name}` ({tag}) has no lib*.{suffix}"
+        ));
+    };
+    if archives.is_empty() && objects.is_empty() {
+        return Err(format!("prebuilt for `{pkg_name}` ({tag}) has no *.o/*.a"));
+    }
+    let first_archive = archives
+        .first()
+        .or(objects.first())
+        .cloned()
+        .unwrap_or_else(|| shared.clone());
+    let zzi_path = pkg_dir.join("plugin.zzi");
+    verify_engine_parity(
+        pkg_name,
+        if archives.is_empty() {
+            &objects
+        } else {
+            &archives
+        },
+        &shared,
+        &zzi_path,
+        tag,
+        &build_dir,
+    )?;
+    Ok(CcBuildOutput {
+        objects,
+        archive: first_archive,
+        shared,
+        cflags_path,
+        ldflags_path,
+        tag: tag.to_string(),
+        compiler: String::new(),
+    })
+}
+
+/// Verify one `<name>-<version>-<tag>.tgz` from `--artifact-dir`: tag
+/// grammar, full build/ layout, and every `plugin.zzi` symbol resolvable
+/// in both engines. Returns `(tag, sha256)` for the publish stanza.
+pub fn verify_artifact_file(
+    tgz_path: &Path,
+    pkg_dir: &Path,
+    pkg_name: &str,
+) -> Result<(String, String), String> {
+    let file_name = tgz_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("bad artifact name: {}", tgz_path.display()))?;
+    let stem = file_name.strip_suffix(".tgz").ok_or_else(|| {
+        format!(
+            "artifact `{file_name}` must end in .tgz\n\
+             hint: tar the build/ dir per platform tag"
+        )
+    })?;
+    // `<name>-<version>-<tag>`: the tag itself contains dashes, so find
+    // it by trying every split point from the left.
+    let parts = stem.split('-').collect::<Vec<_>>();
+    if parts.len() < 4 {
+        return Err(format!(
+            "artifact `{file_name}` must be named <name>-<version>-<tag>.tgz"
+        ));
+    }
+    let mut tag: Option<String> = None;
+    for i in 2..parts.len() {
+        let candidate = parts[i..].join("-");
+        if crate::manifest::validate_platform_tag(&candidate).is_ok() {
+            tag = Some(candidate);
+            break;
+        }
+    }
+    let Some(tag) = tag else {
+        return Err(format!(
+            "artifact `{file_name}` embeds no valid platform tag\n\
+             hint: e.g. {pkg_name}-0.3.0-linux-x86_64-gnu-glibc2.28.tgz"
+        ));
+    };
+    let bytes =
+        std::fs::read(tgz_path).map_err(|e| format!("cannot read {}: {e}", tgz_path.display()))?;
+    let sha256 = crate::hash::hash_bytes(&bytes);
+    let staging = pkg_dir.join(".zz-artifact-check");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| format!("cannot create staging dir: {e}"))?;
+    let result = (|| {
+        extract_validated_prebuilt(&bytes, &staging, pkg_name, &tag)?;
+        // Symbol check against this package's own plugin.zzi.
+        let mut files: Vec<PathBuf> = Vec::new();
+        collect_files(&staging, &mut files);
+        let archives: Vec<PathBuf> = files
+            .iter()
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("a"))
+            .cloned()
+            .collect();
+        let suffix = shared_suffix_for_tag(&tag);
+        let shared = files
+            .iter()
+            .find(|p| {
+                p.extension().and_then(|e| e.to_str()) == Some(suffix)
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("lib"))
+            })
+            .cloned()
+            .ok_or_else(|| format!("no lib*.{suffix} in `{file_name}`"))?;
+        let zzi_path = pkg_dir.join("plugin.zzi");
+        let objects: Vec<PathBuf> = files
+            .iter()
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("o"))
+            .cloned()
+            .collect();
+        verify_engine_parity(
+            pkg_name,
+            if archives.is_empty() {
+                &objects
+            } else {
+                &archives
+            },
+            &shared,
+            &zzi_path,
+            &tag,
+            &staging,
+        )?;
+        Ok((tag, sha256))
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    result
 }
 
 /// True on musl hosts (`ldd --version` mentions musl).
@@ -872,6 +1237,123 @@ mod tests {
         );
         let err = ensure_cc(&d, "my", &scratch_spec(), None).unwrap_err();
         assert!(err.contains("my_version"), "{err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Pack `(name, bytes)` pairs into `.tar.gz` bytes (test helper).
+    fn tar_gz(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(enc);
+        for (name, data) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, name, *data).unwrap();
+        }
+        let enc = tar.into_inner().unwrap();
+        enc.finish().unwrap()
+    }
+
+    fn prebuilt_scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "zz_nb_pb_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        scratch_plugin(&d, GOOD_C);
+        d
+    }
+
+    #[test]
+    fn prebuilt_round_trip_installs_and_verifies() {
+        if probe_cc().is_err() {
+            eprintln!("skipping: no C compiler");
+            return;
+        }
+        // Build real artifacts once, tar the build/ tree, install the
+        // bytes into a fresh package dir (no compiler needed there —
+        // install path never spawns cc).
+        let src = prebuilt_scratch("src");
+        let tag = host_tag().expect("host tag");
+        let built = ensure_cc(&src, "my", &scratch_spec(), None).expect("source build");
+        let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+        for f in [
+            &built.archive,
+            &built.shared,
+            &built.cflags_path,
+            &built.ldflags_path,
+        ]
+        .into_iter()
+        .chain(built.objects.iter())
+        {
+            let name = f.file_name().unwrap().to_string_lossy().into_owned();
+            entries.push((name, std::fs::read(f).unwrap()));
+        }
+        let refs: Vec<(&str, &[u8])> = entries
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_slice()))
+            .collect();
+        let bytes = tar_gz(&refs);
+        let sha = crate::hash::hash_bytes(&bytes);
+
+        let dest = prebuilt_scratch("dest");
+        let out =
+            install_prebuilt_bytes(&bytes, &dest, "my", &tag, &sha).expect("prebuilt install");
+        assert_eq!(out.tag, tag);
+        assert!(out.compiler.is_empty(), "no local compile");
+        assert!(out.archive.exists() && out.shared.exists());
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn prebuilt_partial_rejected() {
+        // Static-only tarball: no shared lib → must fail closed.
+        let bytes = tar_gz(&[
+            ("libmy.a", b"fake-archive" as &[u8]),
+            ("ldflags.txt", b"-lvips" as &[u8]),
+        ]);
+        let sha = crate::hash::hash_bytes(&bytes);
+        let dest = prebuilt_scratch("partial");
+        let err = install_prebuilt_bytes(&bytes, &dest, "my", "linux-x86_64-gnu-glibc2.28", &sha)
+            .unwrap_err();
+        assert!(err.contains("partial"), "{err}");
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn prebuilt_sha_mismatch_fails_closed() {
+        let bytes = tar_gz(&[("libmy.a", b"x" as &[u8])]);
+        let dest = prebuilt_scratch("shamismatch");
+        let err = install_prebuilt_bytes(
+            &bytes,
+            &dest,
+            "my",
+            "linux-x86_64-gnu-glibc2.28",
+            &"0".repeat(64),
+        )
+        .unwrap_err();
+        assert!(err.contains("mismatch"), "{err}");
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn artifact_filename_parsing() {
+        let d = prebuilt_scratch("names");
+        // Wrong suffix.
+        let bad = d.join("my-0.1.0-linux-x86_64-gnu-glibc2.28.zip");
+        std::fs::write(&bad, b"x").unwrap();
+        assert!(verify_artifact_file(&bad, &d, "my").is_err());
+        // No valid tag inside.
+        let bad2 = d.join("my-0.1.0-notaplatform.tgz");
+        std::fs::write(&bad2, b"x").unwrap();
+        assert!(verify_artifact_file(&bad2, &d, "my").is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
 }
