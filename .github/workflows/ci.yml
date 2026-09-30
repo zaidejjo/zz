@@ -38,3 +38,21 @@ jobs:
         run: cargo test --all
         env:
           ZZ_SKIP_NATIVE: 1
+
+  check-arm:
+    name: check (aarch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install native deps
+        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev
+      - name: check workspace for aarch64
+        # Native ARM runner (real gcc, no cross toolchain needed).
+        # Type-checks every crate for the arch AUR ships — catches
+        # arch-dependent breakage (e.g. c_char signedness) x86_64 can
+        # never see. No linking, no tests: pure type gate, stays fast.
+        run: cargo check --workspace --all-targets

@@ -23,7 +23,7 @@
 //! actionable error (extend the shape table below when a plugin needs them).
 
 use std::collections::HashMap;
-use std::ffi::{c_void, CString};
+use std::ffi::{c_char, c_void, CString};
 use std::sync::{OnceLock, RwLock};
 
 use crate::runtime::EvalError;
@@ -112,7 +112,7 @@ macro_rules! adapters_i {
     };
     (@ctype I) => { i64 };
     (@ctype F) => { f64 };
-    (@ctype S) => { *const i8 };
+    (@ctype S) => { *const c_char };
     (@extract $args:ident $span:ident $fname:ident $idx:tt I $held:ident) => {{
         match &$args[$idx] {
             Value::Int(i) => *i,
@@ -181,7 +181,7 @@ macro_rules! adapters_v {
     };
     (@ctype I) => { i64 };
     (@ctype F) => { f64 };
-    (@ctype S) => { *const i8 };
+    (@ctype S) => { *const c_char };
     (@extract $args:ident $span:ident $fname:ident $idx:tt I $held:ident) => {{
         match &$args[$idx] {
             Value::Int(i) => *i,
@@ -269,7 +269,7 @@ macro_rules! adapters_f {
     };
     (@ctype I) => { i64 };
     (@ctype F) => { f64 };
-    (@ctype S) => { *const i8 };
+    (@ctype S) => { *const c_char };
     (@extract $args:ident $span:ident $fname:ident $idx:tt I $held:ident) => {{
         match &$args[$idx] {
             Value::Int(i) => *i,
@@ -429,7 +429,7 @@ mod tests {
     extern "C" fn t_half(x: i64) -> f64 {
         x as f64 / 2.0
     }
-    extern "C" fn t_greet(name: *const i8) -> i64 {
+    extern "C" fn t_greet(name: *const c_char) -> i64 {
         if name.is_null() {
             return -1;
         }
@@ -445,7 +445,7 @@ mod tests {
     extern "C" fn t_sink(h: i64) {
         let _ = h;
     }
-    extern "C" fn t_save(h: i64, path: *const i8, q: i64) -> i64 {
+    extern "C" fn t_save(h: i64, path: *const c_char, q: i64) -> i64 {
         if path.is_null() {
             return -1;
         }

@@ -47,7 +47,10 @@ jobs:
     name: build release zip (${{ matrix.ziparch }})
     runs-on: ${{ matrix.runner }}
     strategy:
-      fail-fast: true
+      # One arch failing must not cancel the other: we want both logs and
+      # the surviving zip still uploaded (publish still correctly refuses
+      # to push with a zip missing).
+      fail-fast: false
       matrix:
         include:
           - ziparch: x86_64
