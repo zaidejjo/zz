@@ -48,6 +48,12 @@ pub struct ReleaseOptions {
     pub provider: ClangProvider,
     /// `--verbose`: print the exact clang command line.
     pub verbose: bool,
+    /// `--allow-source-builds`: permit compiling transitive `[native]`
+    /// deps from source when no prebuilt covers the host tag.
+    pub allow_source_builds: bool,
+    /// `--allow-hooks`: permit legacy `build = "..."` hooks (direct
+    /// deps only; transitive hooks always error).
+    pub allow_hooks: bool,
 }
 
 impl ReleaseOptions {
@@ -384,50 +390,97 @@ pub(crate) fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_
     plugin_funcs
 }
 
+/// Gates for native builds (CLI flags).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NativeBuildOpts {
+    /// `--allow-source-builds`: compile transitive `[native]` deps from
+    /// source when no prebuilt covers the host tag.
+    pub allow_source_builds: bool,
+    /// `--allow-hooks`: run legacy `build = "..."` hooks (direct deps
+    /// only; transitive hooks always error).
+    pub allow_hooks: bool,
+}
+
+impl NativeBuildOpts {
+    /// Dev-loop behavior for `zz run` (via [`ensure_native_hooks`]):
+    /// build what is needed, warn loudly, never fail the run.
+    pub(crate) fn permissive() -> Self {
+        Self {
+            allow_source_builds: true,
+            allow_hooks: true,
+        }
+    }
+}
+
+/// Output of [`build_native_deps`]: link inputs plus per-dep audit
+/// records for `zz.lock`.
+pub(crate) struct NativeBuild {
+    pub artifacts: Vec<PathBuf>,
+    pub link_args: Vec<String>,
+    pub audits: Vec<(String, zz_pm::lock::LockedNative)>,
+}
+
 /// Run native builds for every dependency and discard the artifacts.
 ///
-/// `zz install` calls this post-link so `zz run` (VM dlopen) works without
-/// a prior `zz build`. Failures surface as errors (see
-/// [`discover_native_artifacts`]).
+/// `zz run` calls this post-link (permissive: warn-only) so VM dlopen
+/// works without a prior `zz build`.
 pub(crate) fn ensure_native_hooks(project_root: &Path) {
-    // Discover_native_artifacts walks up from its argument's parent
-    // looking for zz.lock — anchor inside the canonical root.
+    // Build_native_deps walks up from its argument's parent looking for
+    // zz.lock — anchor inside the canonical root.
     let project_root =
         std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
     let anchor = project_root.join("zz.toml");
-    if let Err(e) = discover_native_artifacts(&anchor) {
+    if let Err(e) = build_native_deps(&anchor, NativeBuildOpts::permissive()) {
         eprintln!("warning: native build failed: {e}");
     }
 }
 ///
-/// Discover and build native code for plugin packages.
+/// Build native code for plugin packages under the given gates.
 ///
 /// Reads `zz.lock` and `zz.toml`, finds dependencies that have a `plugin.zzi`
 /// and a `zz.toml` with a `[native]` section, builds them via the declared
-/// backend, and returns compiled artifacts (`.o` / `.a` files) plus raw
-/// linker flags from each package's `build/ldflags.txt` (e.g. `-lvips ...`).
+/// backend, and returns compiled artifacts (`.o` / `.a` files), raw linker
+/// flags from each package's `build/ldflags.txt`, and audit records.
 ///
-/// Declarative (`cc`) failures are hard errors (fail closed — a half-built
-/// plugin must never silently link nothing). Legacy hook failures keep the
-/// historical warn-and-continue behavior during the deprecation window.
-fn discover_native_artifacts(project_path: &Path) -> Result<(Vec<PathBuf>, Vec<String>), String> {
+/// Gate behavior:
+/// - `cc` without a compatible prebuilt entry: transitive deps error
+///   unless `allow_source_builds`; direct deps warn and build.
+/// - `cc` failures are hard errors (fail closed — a half-built plugin
+///   must never silently link nothing).
+/// - `hook` on transitive deps always errors. On direct deps it errors
+///   unless `allow_hooks`, and warns on every allowed use. Allowed hook
+///   failures keep the historical warn-and-continue behavior.
+pub(crate) fn build_native_deps(
+    project_path: &Path,
+    opts: NativeBuildOpts,
+) -> Result<NativeBuild, String> {
     let mut artifacts = Vec::new();
     let mut link_args: Vec<String> = Vec::new();
+    let mut audits: Vec<(String, zz_pm::lock::LockedNative)> = Vec::new();
 
+    let empty = NativeBuild {
+        artifacts: Vec::new(),
+        link_args: Vec::new(),
+        audits: Vec::new(),
+    };
     let Some(project_root) = canonical_project_root(project_path) else {
-        return Ok((artifacts, link_args));
+        return Ok(empty);
     };
 
     let lock = match zz_pm::lock::Lockfile::load(&project_root.join("zz.lock")) {
         Ok(l) => l,
-        Err(_) => return Ok((artifacts, link_args)),
+        Err(_) => return Ok(empty),
     };
 
-    // Load manifest to check for path deps
+    // Load manifest to check for path deps. Direct deps are the manifest's
+    // declared dependencies; anything else locked is transitive.
     let manifest_path = project_root.join("zz.toml");
     let manifest = zz_pm::manifest::Manifest::load(&manifest_path).ok();
 
     for dep in &lock.deps {
+        let direct = manifest
+            .as_ref()
+            .is_some_and(|m| m.dependencies.contains_key(&dep.name));
         let Some(pkg_dir) = resolve_pkg_dir(&project_root, dep, manifest.as_ref()) else {
             continue;
         };
@@ -451,17 +504,66 @@ fn discover_native_artifacts(project_path: &Path) -> Result<(Vec<PathBuf>, Vec<S
 
         // Declarative backend: validated C build owned by zz itself.
         if let Some(cc_spec) = native.build_cc.as_ref() {
+            let host = zz_pm::native_build::host_tag().unwrap_or_default();
+            let has_prebuilt = native.prebuilt.as_ref().is_some_and(|p| {
+                p.target.keys().any(|t| {
+                    zz_pm::native_build::tags_compatible(t, &host)
+                        || zz_pm::native_build::tags_compatible(&host, t)
+                        || *t == host
+                })
+            });
+            if !has_prebuilt {
+                if !direct && !opts.allow_source_builds {
+                    return Err(format!(
+                        "plugin `{}` has no prebuilt for `{host}`; ask the maintainer or re-run with --allow-source-builds",
+                        dep.name
+                    ));
+                }
+                if direct {
+                    eprintln!(
+                        "warning: plugin `{}` source-builds (no prebuilt for `{host}`)",
+                        dep.name
+                    );
+                }
+            }
             eprintln!("zz: building plugin `{}` (declarative cc)...", dep.name);
             let out = zz_pm::native_build::ensure_cc(&pkg_dir, &dep.name, cc_spec, None)
                 .map_err(|e| format!("plugin `{}` declarative build failed: {e}", dep.name))?;
             artifacts.extend(out.objects);
             artifacts.push(out.archive);
             collect_link_args(&out.ldflags_path, &mut link_args);
+            audits.push((
+                dep.name.clone(),
+                zz_pm::lock::LockedNative {
+                    backend: "cc".to_string(),
+                    tag: out.tag,
+                    compiler: out.compiler,
+                    artifact_sha256: String::new(),
+                    pkg_config_resolved: zz_pm::native_build::pkg_config_versions(
+                        &cc_spec.pkg_config,
+                    ),
+                },
+            ));
             continue;
         }
         let Some(hook_rel) = native.build.as_deref() else {
             continue;
         };
+
+        if !direct {
+            return Err(format!(
+                "plugin `{}` uses legacy [native] build hook, which is forbidden for transitive dependencies\n\
+                 hint: ask the maintainer to migrate to [native.build-cc] (see docs/plugin-author-guide.md §4)",
+                dep.name
+            ));
+        }
+        if !opts.allow_hooks {
+            return Err(format!(
+                "plugin `{}` uses legacy [native] build = \"{hook_rel}\" (deprecated)\n\
+                 hint: re-run with --allow-hooks, or ask the maintainer to migrate to [native.build-cc]",
+                dep.name
+            ));
+        }
 
         // Invoke the build hook
         eprintln!(
@@ -525,7 +627,21 @@ fn discover_native_artifacts(project_path: &Path) -> Result<(Vec<PathBuf>, Vec<S
     // run, while archives may be cargo-cached and stale).
     thin_shadowed_archive_members(&mut artifacts);
 
-    Ok((artifacts, link_args))
+    Ok(NativeBuild {
+        artifacts,
+        link_args,
+        audits,
+    })
+}
+
+/// Discover hook/cc artifacts for the AOT link under explicit gates.
+/// Thin wrapper over [`build_native_deps`] returning the link inputs.
+fn discover_native_artifacts(
+    project_path: &Path,
+    opts: NativeBuildOpts,
+) -> Result<(Vec<PathBuf>, Vec<String>), String> {
+    let built = build_native_deps(project_path, opts)?;
+    Ok((built.artifacts, built.link_args))
 }
 
 /// Merge whitespace-split flags from an `ldflags.txt` into `link_args`,
@@ -771,7 +887,13 @@ pub fn build_release(
 
     // Discover and build plugin native artifacts (compiled .o / .a files
     // plus dependency link flags from each package's ldflags.txt).
-    let (plugin_artifacts, plugin_link_args) = discover_native_artifacts(path)?;
+    let (plugin_artifacts, plugin_link_args) = discover_native_artifacts(
+        path,
+        NativeBuildOpts {
+            allow_source_builds: rel.allow_source_builds,
+            allow_hooks: rel.allow_hooks,
+        },
+    )?;
     opts.plugin_artifacts = plugin_artifacts;
     opts.plugin_link_args = plugin_link_args;
 

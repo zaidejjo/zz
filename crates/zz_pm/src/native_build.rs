@@ -254,6 +254,32 @@ pub fn pkg_config_flags(modules: &[String]) -> Result<(Vec<String>, Vec<String>)
     Ok((cflags, libs))
 }
 
+/// Resolved `pkg-config` module versions for the lock audit record:
+/// `name=version,...` sorted by name. Unresolvable modules record `?`
+/// with a warning (audit-only; the build already validated the flags).
+pub fn pkg_config_versions(modules: &[String]) -> String {
+    let mut pairs: Vec<String> = Vec::new();
+    for m in modules {
+        let ver = Command::new("pkg-config")
+            .arg("--modversion")
+            .arg(m)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|v| !v.is_empty());
+        match ver {
+            Some(v) => pairs.push(format!("{m}={v}")),
+            None => {
+                eprintln!("warning: cannot resolve pkg-config version for `{m}`");
+                pairs.push(format!("{m}=?"));
+            }
+        }
+    }
+    pairs.sort();
+    pairs.join(",")
+}
+
 /// Hermetic environment for `cc`/`ar`/`nm`: cleared, then only `PATH`
 /// (inherited so the driver finds `as`/`ld`), `CC`, an isolated `TMPDIR`
 /// under the build dir (`HOME` deliberately unset), and the fixed

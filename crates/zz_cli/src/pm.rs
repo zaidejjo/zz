@@ -483,9 +483,24 @@ pub fn install(args: &[String]) -> Result<(), String> {
     if linked_count > 0 {
         println!("linked {linked_count} dependencies into vendor/");
     }
-    // Native plugins: run build hooks now so `zz run` works without a
-    // prior `zz build` (registry tarballs exclude hook outputs).
-    crate::build::ensure_native_hooks(&dir);
+    // Native plugins: build now so `zz run` works without a prior
+    // `zz build` (registry tarballs exclude build outputs). Declarative
+    // failures and gate violations fail the install; allowed legacy
+    // hooks warn per-dependency inside the builder.
+    let build_opts = crate::build::NativeBuildOpts {
+        allow_source_builds: args.iter().any(|a| a == "--allow-source-builds"),
+        allow_hooks: args.iter().any(|a| a == "--allow-hooks"),
+    };
+    let built = crate::build::build_native_deps(&dir.join("zz.toml"), build_opts)?;
+    if !built.audits.is_empty() {
+        for (name, rec) in built.audits {
+            if let Some(dep) = lock.deps.iter_mut().find(|d| d.name == name) {
+                dep.native = Some(rec);
+            }
+        }
+        lock.save(&lock_path)?;
+        println!("native audit recorded in zz.lock");
+    }
     println!("hint: run `zz build` to compile");
     Ok(())
 }
