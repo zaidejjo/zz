@@ -225,6 +225,10 @@ jobs:
           path: /tmp/aur-pkg/
       - name: setup AUR ssh
         run: |
+          # Same HOME/getpwuid split as in containers generally: pin HOME to
+          # the passwd home so shell (~) and ssh (getpwuid) use one location.
+          # Harmless on ubuntu runners (already identical), vital in containers.
+          export HOME=/root
           echo "whoami=$(whoami) HOME=$HOME"
           if [ -z "${AUR_SSH_PRIVATE_KEY:-}" ]; then
             echo "error: secret AUR_SSH_PRIVATE_KEY is not set." >&2
@@ -277,6 +281,7 @@ jobs:
 
       - name: push zz-lang to AUR
         run: |
+          export HOME=/root
           PKGVER="${{ needs.publish.outputs.pkgver }}"
           PKGREL="${{ needs.publish.outputs.pkgrel }}"
           pkg=zz-lang
