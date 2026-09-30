@@ -661,6 +661,11 @@ parity_strict!(
     "for_annotated_decl.zz"
 );
 parity_strict!(
+    parity_regression_tuple_destructure,
+    "regression",
+    "tuple_destructure.zz"
+);
+parity_strict!(
     parity_regression_neg_after_loop,
     "regression",
     "neg_after_loop.zz"

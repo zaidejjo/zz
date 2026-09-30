@@ -1,0 +1,8 @@
+// Regression: tuple destructuring must bind each element positionally.
+(a, b) := (10, 20)
+println(a)
+println(b)
+(x, y) := (1, "hi")
+println(x)
+println(y)
+println("tuple_destructure_ok")

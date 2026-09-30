@@ -223,6 +223,11 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_syntax_destructuring, "syntax", "destructuring.zz");
 e2e_success_test!(
+    e2e_regression_tuple_destructure,
+    "regression",
+    "tuple_destructure.zz"
+);
+e2e_success_test!(
     e2e_regression_neg_after_loop,
     "regression",
     "neg_after_loop.zz"
