@@ -186,10 +186,16 @@ impl<'a> Lexer<'a> {
                     self.emit_significant(TokenKind::Ne, self.pos, self.pos + 2)
                 }
                 '!' => self.emit_significant(TokenKind::Bang, self.pos, self.pos + 1),
+                '<' if self.peek_char_at(1) == Some('<') => {
+                    self.emit_significant(TokenKind::Shl, self.pos, self.pos + 2)
+                }
                 '<' if self.peek_char_at(1) == Some('=') => {
                     self.emit_significant(TokenKind::Le, self.pos, self.pos + 2)
                 }
                 '<' => self.emit_significant(TokenKind::Lt, self.pos, self.pos + 1),
+                '>' if self.peek_char_at(1) == Some('>') => {
+                    self.emit_significant(TokenKind::Shr, self.pos, self.pos + 2)
+                }
                 '>' if self.peek_char_at(1) == Some('=') => {
                     self.emit_significant(TokenKind::Ge, self.pos, self.pos + 2)
                 }
@@ -197,6 +203,9 @@ impl<'a> Lexer<'a> {
                 '&' if self.peek_char_at(1) == Some('&') => {
                     self.emit_significant(TokenKind::AndAnd, self.pos, self.pos + 2)
                 }
+                '&' => self.emit_significant(TokenKind::Amp, self.pos, self.pos + 1),
+                '^' => self.emit_significant(TokenKind::Caret, self.pos, self.pos + 1),
+                '~' => self.emit_significant(TokenKind::Tilde, self.pos, self.pos + 1),
                 '|' if self.peek_char_at(1) == Some('|') => {
                     self.emit_significant(TokenKind::OrOr, self.pos, self.pos + 2)
                 }
@@ -338,6 +347,11 @@ impl<'a> Lexer<'a> {
                     | TokenKind::AndAnd
                     | TokenKind::OrOr
                     | TokenKind::Bang
+                    | TokenKind::Amp
+                    | TokenKind::Caret
+                    | TokenKind::Tilde
+                    | TokenKind::Shl
+                    | TokenKind::Shr
                     | TokenKind::QuestionQuestion
                     | TokenKind::Colon
                     | TokenKind::Comma

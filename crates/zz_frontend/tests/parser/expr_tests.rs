@@ -498,3 +498,119 @@ fn dict_literal_still_parses() {
         other => panic!("expected decl, got {other:?}"),
     }
 }
+
+#[test]
+fn bitwise_and_binds_tighter_than_xor_and_or() {
+    // `a | b ^ c & d` => `a | (b ^ (c & d))`
+    let p = parse_ok("a | b ^ c & d");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Binary {
+            op: BinOp::BitOr,
+            left,
+            right,
+            ..
+        }) => {
+            assert!(matches!(**left, E::Ident { .. }));
+            match right.as_ref() {
+                E::Binary {
+                    op: BinOp::BitXor,
+                    right: xor_right,
+                    ..
+                } => {
+                    assert!(matches!(
+                        **xor_right,
+                        E::Binary {
+                            op: BinOp::BitAnd,
+                            ..
+                        }
+                    ));
+                }
+                other => panic!("expected BitXor, got {other:?}"),
+            }
+        }
+        other => panic!("expected BitOr, got {other:?}"),
+    }
+}
+
+#[test]
+fn shift_binds_tighter_than_bitand_but_looser_than_add() {
+    // `a & b << c + d` => `a & (b << (c + d))`
+    let p = parse_ok("a & b << c + d");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Binary {
+            op: BinOp::BitAnd,
+            right,
+            ..
+        }) => match right.as_ref() {
+            E::Binary {
+                op: BinOp::Shl,
+                right: shl_right,
+                ..
+            } => {
+                assert!(matches!(**shl_right, E::Binary { op: BinOp::Add, .. }));
+            }
+            other => panic!("expected Shl, got {other:?}"),
+        },
+        other => panic!("expected BitAnd, got {other:?}"),
+    }
+}
+
+#[test]
+fn bitwise_binds_tighter_than_comparison() {
+    // `x & mask == expected` => `(x & mask) == expected`
+    let p = parse_ok("x & mask == expected");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Binary {
+            op: BinOp::Eq,
+            left,
+            ..
+        }) => {
+            assert!(matches!(
+                **left,
+                E::Binary {
+                    op: BinOp::BitAnd,
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected Eq, got {other:?}"),
+    }
+}
+
+#[test]
+fn shr_parses_as_shift() {
+    let p = parse_ok("a >> b");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Binary { op: BinOp::Shr, .. }) => {}
+        other => panic!("expected Shr, got {other:?}"),
+    }
+}
+
+#[test]
+fn bitnot_parses_as_unary() {
+    let p = parse_ok("~a");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Unary {
+            op: UnOp::BitNot, ..
+        }) => {}
+        other => panic!("expected BitNot, got {other:?}"),
+    }
+}
+
+#[test]
+fn single_pipe_still_parses_closure() {
+    // The `|` token doubles as BitOr — leading `|` must stay a closure.
+    let p = parse_ok("|x| x | 1");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Closure { body, .. }) => {
+            assert!(matches!(
+                **body,
+                E::Binary {
+                    op: BinOp::BitOr,
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected closure, got {other:?}"),
+    }
+}

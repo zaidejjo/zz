@@ -74,6 +74,7 @@ pub fn parse(source: &str) -> Parsed {
         pos: 0,
         errors: lexed.errors,
         delim_stack: Vec::new(),
+        pending_gt: 0,
     };
     let program = parser.parse_program();
     Parsed {
@@ -95,6 +96,10 @@ struct Parser {
     errors: Vec<RawDiag>,
     /// Stack of open delimiters for mismatched-delimiter diagnostics.
     delim_stack: Vec<DelimEntry>,
+    /// Owed `>` closes from split `>>` tokens. Nested generic type args
+    /// (`Option<Option<int>>`) lex the adjacent closes as one `Shr`;
+    /// each split banks one `>` for the enclosing argument list.
+    pending_gt: u32,
 }
 
 impl Parser {

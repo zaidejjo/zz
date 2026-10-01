@@ -42,6 +42,7 @@ pub enum UnOp {
     Neg,
     Pos,
     Not,
+    BitNot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +62,11 @@ pub enum BinOp {
     And,
     Or,
     Elvis,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 impl BinOp {
@@ -81,6 +87,11 @@ impl BinOp {
             BinOp::And => "&&",
             BinOp::Or => "||",
             BinOp::Elvis => "??",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
         }
     }
 }
@@ -91,6 +102,7 @@ impl UnOp {
             UnOp::Neg => "-",
             UnOp::Pos => "+",
             UnOp::Not => "!",
+            UnOp::BitNot => "~",
         }
     }
 }

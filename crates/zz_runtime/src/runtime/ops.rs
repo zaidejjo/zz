@@ -499,6 +499,36 @@ pub(crate) fn eval_int_binary(op: BinOp, a: i64, b: i64, span: Span) -> Result<V
                 }
             }
         }
+        // Bitwise ops never overflow — wrapping in all build modes
+        // (unlike `+`/`-`/`*` which trap in debug). Shifts mask to
+        // `b & 63` (x86 / Rust `wrapping_shl` semantics) so large
+        // counts can't UB; negative counts are a runtime error.
+        BinOp::BitAnd => Ok(Value::Int(a & b)),
+        BinOp::BitOr => Ok(Value::Int(a | b)),
+        BinOp::BitXor => Ok(Value::Int(a ^ b)),
+        BinOp::Shl => {
+            if b < 0 {
+                Err(EvalError::new(
+                    format!("negative shift count {b} for `<<`"),
+                    span,
+                ))
+            } else {
+                Ok(Value::Int(
+                    ((a as u64).wrapping_shl((b as u64 & 63) as u32)) as i64,
+                ))
+            }
+        }
+        BinOp::Shr => {
+            if b < 0 {
+                Err(EvalError::new(
+                    format!("negative shift count {b} for `>>`"),
+                    span,
+                ))
+            } else {
+                // Arithmetic (sign-extending) right shift.
+                Ok(Value::Int(a.wrapping_shr((b & 63) as u32)))
+            }
+        }
         BinOp::Eq => Ok(Value::Bool(a == b)),
         BinOp::Ne => Ok(Value::Bool(a != b)),
         BinOp::Lt => Ok(Value::Bool(a < b)),
@@ -621,6 +651,13 @@ pub(crate) fn eval_unary(op: UnOp, v: Value, span: Span) -> Result<Value, EvalEr
             Value::Bool(b) => Ok(Value::Bool(!b)),
             other => Err(EvalError::new(
                 format!("cannot apply `!` to `{other}`"),
+                span,
+            )),
+        },
+        UnOp::BitNot => match v {
+            Value::Int(i) => Ok(Value::Int(!i)),
+            other => Err(EvalError::new(
+                format!("cannot apply `~` to `{other}`: bitwise NOT requires `int`"),
                 span,
             )),
         },

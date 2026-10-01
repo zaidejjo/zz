@@ -641,11 +641,17 @@ static inline zz_value zz_clone(zz_value v) {
 #define ZZOP_GT 10
 #define ZZOP_LE 11
 #define ZZOP_GE 12
+#define ZZOP_AND 13
+#define ZZOP_OR 14
+#define ZZOP_XOR 15
+#define ZZOP_SHL 16
+#define ZZOP_SHR 17
 
 zz_value zz_binop(int op, zz_value a, zz_value b);
 zz_value zz_unimplemented_native(const char *name);
 zz_value zz_neg(zz_value a);
 zz_value zz_not(zz_value a);
+zz_value zz_bitnot(zz_value a);
 bool zz_truthy(zz_value v);
 
 // ---- calls --------------------------------------------------------------// Closure entry point: args, argc, then the captured environment (array of

@@ -93,6 +93,26 @@ impl Parser {
         }
     }
 
+    /// Consume a `>` closing a `<...>` type-argument list, splitting a
+    /// `>>` (`Shr`) token when nested generics close together:
+    /// `Option<Option<int>>` lexes the end as one `Shr`, which closes
+    /// the inner list and banks one owed `>` (via `pending_gt`) for the
+    /// outer list. Arbitrary depth works: each split banks one close.
+    pub(crate) fn eat_gt_close(&mut self) -> bool {
+        if self.pending_gt > 0 {
+            self.pending_gt -= 1;
+            return true;
+        }
+        if self.eat(TokenKind::Gt) {
+            return true;
+        }
+        if self.eat(TokenKind::Shr) {
+            self.pending_gt += 1;
+            return true;
+        }
+        false
+    }
+
     /// Consume a closing delimiter, skipping statement terminators first so
     /// multi-line calls/expressions like `f(\n  a\n)` parse.
     pub(crate) fn eat_close(&mut self, kind: TokenKind) -> bool {

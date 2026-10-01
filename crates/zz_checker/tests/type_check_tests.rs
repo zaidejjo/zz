@@ -1813,3 +1813,41 @@ fn unused_warnings_emit_in_source_order() {
         "second warning should name `aaa`: {warns:?}"
     );
 }
+
+#[test]
+fn bitwise_ops_require_int_operands() {
+    for src in [
+        "x := 6 & 3",
+        "x := 6 | 3",
+        "x := 6 ^ 3",
+        "x := 1 << 4",
+        "x := 16 >> 2",
+        "x := ~6",
+    ] {
+        let r = check_src(src);
+        assert!(!has_errors(&r), "{src} errors: {:?}", r.errors);
+        assert_eq!(r.bindings["x"], Type::Int, "{src}");
+    }
+}
+
+#[test]
+fn bitwise_float_operand_errors() {
+    errors_contain("x := 1.5 & 2", "bitwise `&` requires `int` operands");
+    errors_contain("x := 1 | 2.5", "bitwise `|` requires `int` operands");
+    errors_contain("x := 1.0 ^ 2.0", "bitwise `^` requires `int` operands");
+    errors_contain("x := 1.5 << 2", "bitwise `<<` requires `int` operands");
+}
+
+#[test]
+fn bitwise_bool_operand_errors() {
+    errors_contain("x := true & false", "bitwise `&` requires `int` operands");
+    errors_contain("x := true | false", "bitwise `|` requires `int` operands");
+    errors_contain("x := ~true", "bitwise `~` requires an `int` operand");
+}
+
+#[test]
+fn bitwise_result_flows_into_int_context() {
+    let r = check_src("x := (6 & 3) + (1 << 4)\ny: int = x");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Int);
+}

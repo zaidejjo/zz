@@ -1195,6 +1195,23 @@ impl Checker {
                     Type::Bool
                 }
             },
+            UnOp::BitNot => match t {
+                Type::Int => Type::Int,
+                Type::Var(id) => {
+                    self.unifier.bind(id, Type::Int);
+                    Type::Int
+                }
+                other => {
+                    self.errors.push(error_at(
+                        format!(
+                            "bitwise `~` requires an `int` operand, found `{other}`\n\
+                             hint: use `!` for boolean negation"
+                        ),
+                        span,
+                    ));
+                    Type::Error
+                }
+            },
             UnOp::Pos | UnOp::Neg => match t {
                 Type::Int => Type::Int,
                 Type::Float => Type::Float,
@@ -1344,6 +1361,62 @@ impl Checker {
             }
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow => {
                 self.check_arith(op, left, right, span)
+            }
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                self.check_bitwise(op, left, right, span)
+            }
+        }
+    }
+
+    /// Bitwise operators are strictly `(int, int) -> int`. Unlike
+    /// [`Self::check_arith`] there is no float promotion, no string
+    /// overload, and no generic `Num` path — a float bit-pattern op is
+    /// almost always a bug, so it is a hard error with a cast hint.
+    pub(crate) fn check_bitwise(
+        &mut self,
+        op: BinOp,
+        left: &Expr,
+        right: &Expr,
+        span: Span,
+    ) -> Type {
+        let lt = self.check_expr(left);
+        let lt = self.unifier.resolve(&lt);
+        let rt = self.check_expr(right);
+        let rt = self.unifier.resolve(&rt);
+        match (&lt, &rt) {
+            (Type::Int, Type::Int) => Type::Int,
+            // Inference variables default to int (bitwise pins them).
+            (Type::Var(_), Type::Int) => {
+                self.unifier.bind_var(&lt, Type::Int);
+                Type::Int
+            }
+            (Type::Int, Type::Var(_)) => {
+                self.unifier.bind_var(&rt, Type::Int);
+                Type::Int
+            }
+            (Type::Var(_), Type::Var(_)) => {
+                self.unifier.bind_var(&lt, Type::Int);
+                self.unifier.bind_var(&rt, Type::Int);
+                Type::Int
+            }
+            _ => {
+                // `Error` (earlier failure) and `Never` (divergent,
+                // unreachable operand) suppress cascading errors —
+                // same convention as `check_arith`.
+                if !matches!(
+                    (&lt, &rt),
+                    (Type::Error, _) | (_, Type::Error) | (Type::Never, _) | (_, Type::Never)
+                ) {
+                    self.errors.push(error_at(
+                        format!(
+                            "bitwise `{}` requires `int` operands, found `{lt}` and `{rt}`\n\
+                             hint: use `int(x)` to cast, `&&`/`||` for boolean logic",
+                            op.symbol()
+                        ),
+                        span,
+                    ));
+                }
+                Type::Error
             }
         }
     }

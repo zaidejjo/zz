@@ -805,6 +805,7 @@ fn unop_str(op: UnOp) -> &'static str {
         UnOp::Neg => "-",
         UnOp::Pos => "+",
         UnOp::Not => "!",
+        UnOp::BitNot => "~",
     }
 }
 
@@ -825,6 +826,11 @@ fn binop_str(op: BinOp) -> &'static str {
         BinOp::And => "&&",
         BinOp::Or => "||",
         BinOp::Elvis => "?:",
+        BinOp::BitAnd => "&",
+        BinOp::BitOr => "|",
+        BinOp::BitXor => "^",
+        BinOp::Shl => "<<",
+        BinOp::Shr => ">>",
     }
 }
 
@@ -847,6 +853,16 @@ mod tests {
         assert!(out.contains("func add("));
         assert!(out.contains("-> int"));
         assert!(out.contains("return a + b"));
+    }
+
+    #[test]
+    fn format_bitwise_ops() {
+        let src = "x:=a&b|c^d<<e>>f";
+        let out = fmt(src);
+        assert!(out.contains("a & b | c ^ d << e >> f"), "got: {out}");
+        let src = "y:=~a";
+        let out = fmt(src);
+        assert!(out.contains("~a"), "got: {out}");
     }
 
     #[test]

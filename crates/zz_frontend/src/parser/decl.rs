@@ -106,7 +106,7 @@ impl Parser {
                     while self.eat(TokenKind::Comma) {
                         ts.push(self.parse_type());
                     }
-                    if !self.eat(TokenKind::Gt) {
+                    if !self.eat_gt_close() {
                         self.error_here("expected `>` to close type arguments");
                     }
                     ts
@@ -344,6 +344,9 @@ impl Parser {
             i += 2;
         }
         // Skip a single `<...>` generic argument list, if present.
+        // `Shr` counts as two `>` closes (nested `A<B<int>>` lexes the
+        // end as one token); each half decrements independently so the
+        // depth accounting matches `eat_gt_close`.
         if self.peek_kind_at(i) == TokenKind::Lt {
             let mut depth = 0usize;
             loop {
@@ -356,6 +359,22 @@ impl Parser {
                     TokenKind::Gt => {
                         depth -= 1;
                         i += 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    TokenKind::Shr => {
+                        // First half-close.
+                        depth = depth.saturating_sub(1);
+                        i += 1;
+                        if depth == 0 {
+                            break;
+                        }
+                        // Second half-close banks one owed `>` for the
+                        // enclosing list — mirror `pending_gt`.
+                        // (Lookahead only: record nothing, just stop if
+                        // it also closes the outer level.)
+                        depth = depth.saturating_sub(1);
                         if depth == 0 {
                             break;
                         }

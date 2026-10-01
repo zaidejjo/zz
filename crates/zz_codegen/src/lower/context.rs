@@ -1287,6 +1287,14 @@ impl Lowerer {
                         let inner_b = self.emit_scalar_bool_init(expr, names)?;
                         Some(format!("{{.tag=ZZ_BOOL, {{.b=!({inner_b})}}}}"))
                     }
+                    zz_frontend::ast::UnOp::BitNot => {
+                        let inner = self.emit_scalar_init(expr, names, _out)?;
+                        let stripped = inner
+                            .strip_prefix("{.tag=ZZ_INT, {.i=")
+                            .or_else(|| inner.strip_prefix("{.tag=ZZ_FLOAT, {.f="))?;
+                        let stripped = stripped.strip_suffix("}}").unwrap_or(stripped);
+                        Some(format!("{{.tag=ZZ_INT, {{.i=~({stripped})}}}}"))
+                    }
                 }
             }
             Expr::Paren { expr, .. } => self.emit_scalar_init(expr, names, _out),
@@ -1461,6 +1469,15 @@ pub(crate) fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static 
                 zz_frontend::ast::UnOp::Neg => Some(inner),
                 zz_frontend::ast::UnOp::Pos => Some(inner),
                 zz_frontend::ast::UnOp::Not => Some("bool"),
+                // `~x` on a raw int64 lowers to C `~x` (well-defined
+                // two's complement); anything else goes boxed.
+                zz_frontend::ast::UnOp::BitNot => {
+                    if inner == "int64_t" {
+                        Some("int64_t")
+                    } else {
+                        None
+                    }
+                }
             }
         }
         Expr::Paren { expr, .. } => scalar_operand_type(expr, names),
@@ -1472,9 +1489,11 @@ pub(crate) fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static 
             // the same numeric scalar type. Div is excluded (division
             // keeps boxed runtime error semantics); Rem with a literal
             // zero divisor is excluded (boxed div-by-zero guard).
-            use zz_frontend::ast::BinOp::{Add, Mul, Rem, Sub};
+            // `&`/`|`/`^` fold the same way (pure int64, no UB);
+            // shifts never fold (they need the masked boxed path).
+            use zz_frontend::ast::BinOp::{Add, BitAnd, BitOr, BitXor, Mul, Rem, Sub};
             match op {
-                Add | Sub | Mul | Rem => {
+                Add | Sub | Mul | Rem | BitAnd | BitOr | BitXor => {
                     if matches!(op, Rem) && matches!(right.as_ref(), Expr::Int { value: 0, .. }) {
                         return None;
                     }
@@ -1686,6 +1705,11 @@ pub(crate) fn emit_guard_expr(
                 zz_frontend::ast::BinOp::Ne => "!=",
                 zz_frontend::ast::BinOp::And => "&&",
                 zz_frontend::ast::BinOp::Or => "||",
+                zz_frontend::ast::BinOp::BitAnd => "&",
+                zz_frontend::ast::BinOp::BitOr => "|",
+                zz_frontend::ast::BinOp::BitXor => "^",
+                zz_frontend::ast::BinOp::Shl => "<<",
+                zz_frontend::ast::BinOp::Shr => ">>",
                 _ => "??",
             };
             format!("({l} {op_str} {r})")
@@ -1696,6 +1720,7 @@ pub(crate) fn emit_guard_expr(
                 zz_frontend::ast::UnOp::Neg => format!("(-{inner})"),
                 zz_frontend::ast::UnOp::Pos => format!("(+{inner})"),
                 zz_frontend::ast::UnOp::Not => format!("(!{inner})"),
+                zz_frontend::ast::UnOp::BitNot => format!("(~{inner})"),
             }
         }
         Expr::Paren { expr, .. } => {
@@ -1733,6 +1758,7 @@ pub(crate) fn scalar_operand_c(e: &Expr, names: &NameCtx) -> Option<String> {
             match op {
                 zz_frontend::ast::UnOp::Neg => Some(format!("(-{inner})")),
                 zz_frontend::ast::UnOp::Pos => Some(inner),
+                zz_frontend::ast::UnOp::BitNot => Some(format!("(~{inner})")),
                 zz_frontend::ast::UnOp::Not => {
                     if scalar_operand_type(expr, names) == Some("bool") {
                         Some(format!("(!{inner})"))
@@ -1757,6 +1783,9 @@ pub(crate) fn scalar_operand_c(e: &Expr, names: &NameCtx) -> Option<String> {
                 zz_frontend::ast::BinOp::Sub => "-",
                 zz_frontend::ast::BinOp::Mul => "*",
                 zz_frontend::ast::BinOp::Rem => "%",
+                zz_frontend::ast::BinOp::BitAnd => "&",
+                zz_frontend::ast::BinOp::BitOr => "|",
+                zz_frontend::ast::BinOp::BitXor => "^",
                 _ => return None,
             };
             Some(format!("({l} {c_op} {r})"))
