@@ -59,7 +59,13 @@ fn dev_default_builds_native_binary() {
         code, 0,
         "dev build must pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    assert!(stdout.contains("(dev,"), "dev marker missing:\n{stdout}");
+    // Build chatter (including the `(dev, …)` mode marker) goes to
+    // stderr by design — see `ui.rs` ("progress/chatter goes to
+    // stderr") — so assert on stderr, not stdout.
+    assert!(
+        stderr.contains("(dev,"),
+        "dev marker missing.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     let bin = dir.join("bin/hello");
     assert!(bin.is_file(), "bin/hello missing");
     let out = Command::new(&bin).output().expect("run binary");
