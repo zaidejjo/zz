@@ -288,6 +288,11 @@ e2e_success_test!(
     "string_store_across_iter.zz"
 );
 e2e_success_test!(
+    e2e_regression_string_index_set_binop,
+    "regression",
+    "string_index_set_binop.zz"
+);
+e2e_success_test!(
     e2e_regression_fuzz_smoke_00,
     "regression",
     "fuzz_smoke_00.zz"

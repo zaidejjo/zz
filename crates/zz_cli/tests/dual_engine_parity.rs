@@ -733,6 +733,11 @@ parity_strict!(
     "regression",
     "string_store_across_iter.zz"
 );
+parity_strict!(
+    parity_regression_string_index_set_binop,
+    "regression",
+    "string_index_set_binop.zz"
+);
 
 // Types
 parity_strict!(

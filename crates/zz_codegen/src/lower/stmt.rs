@@ -582,8 +582,15 @@ impl Lowerer {
                                 format!("zz_float({val})")
                             } else if val.starts_with("(bool)(") {
                                 format!("zz_bool({val})")
-                            } else {
+                            } else if val_is_actually_scalar {
+                                // Genuinely raw scalar (int ident/arithmetic):
+                                // box it. (String concats over string idents
+                                // trip the AST-only check above but lower to
+                                // a zz_value — wrapping one in zz_int is a C
+                                // type error.)
                                 format!("zz_int({val})")
+                            } else {
+                                val.clone()
                             }
                         } else {
                             val.clone()
