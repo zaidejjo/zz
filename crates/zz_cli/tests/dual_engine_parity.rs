@@ -631,6 +631,7 @@ parity_strict!(parity_syntax_declarations, "syntax", "declarations.zz");
 parity_strict!(parity_syntax_pipelines, "syntax", "pipelines.zz");
 parity_strict!(parity_syntax_operators, "syntax", "operators.zz");
 parity_strict!(parity_syntax_bitwise_ops, "syntax", "bitwise_ops.zz");
+parity_strict!(parity_syntax_tuple_ops, "syntax", "tuple_ops.zz");
 parity_strict!(parity_syntax_fstrings, "syntax", "fstrings.zz");
 parity_strict!(parity_syntax_dicts, "syntax", "dicts.zz");
 parity_strict!(parity_syntax_string_blocks, "syntax", "string_blocks.zz");

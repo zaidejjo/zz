@@ -1851,3 +1851,48 @@ fn bitwise_result_flows_into_int_context() {
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["x"], Type::Int);
 }
+
+#[test]
+fn tuple_index_reads_element_types() {
+    let r = check_src("t := (1, \"two\", 3.5)\na := t[0]\nb := t[1]\nc := t[2]");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Int);
+    assert_eq!(r.bindings["b"], Type::Str);
+    assert_eq!(r.bindings["c"], Type::Float);
+}
+
+#[test]
+fn tuple_negative_index_counts_from_end() {
+    let r = check_src("t := (1, \"two\")\na := t[-1]");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Str);
+}
+
+#[test]
+fn tuple_index_out_of_bounds_errors() {
+    errors_contain("t := (1, 2)\nx := t[5]", "out of bounds");
+    errors_contain("t := (1, 2)\nx := t[-3]", "out of bounds");
+}
+
+#[test]
+fn tuple_dynamic_index_errors_with_hint() {
+    errors_contain(
+        "t := (1, 2)\ni := 0\nx := t[i]",
+        "must be an integer literal",
+    );
+}
+
+#[test]
+fn tuple_index_write_checks_element_type() {
+    let r = check_src("t := (1, \"two\")\nt[0] = 99");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    errors_contain("t := (1, \"two\")\nt[0] = \"s\"", "type mismatch");
+}
+
+#[test]
+fn bare_destructure_binds_names() {
+    let r = check_src("a, b := (1, \"two\")");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Int);
+    assert_eq!(r.bindings["b"], Type::Str);
+}

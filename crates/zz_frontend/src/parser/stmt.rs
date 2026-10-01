@@ -119,6 +119,9 @@ impl Parser {
             TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {
                 self.parse_short_decl(false, false)
             }
+            // `a, b := expr` — bare tuple destructuring declaration
+            // (no parens). Same AST as `(a, b) := expr`.
+            TokenKind::Ident if self.at_bare_destructure() => self.parse_bare_destructure_decl(),
             // `const x = expr` / `const x: type = expr` — immutable binding.
             TokenKind::Const => self.parse_const_decl(false),
             // `(a, b) := expr` — tuple destructuring declaration.
@@ -687,6 +690,56 @@ impl Parser {
             pat: Pattern::Tuple {
                 pats,
                 span: lparen.span.join(rparen),
+            },
+            value,
+            span,
+        }
+    }
+
+    /// True when the upcoming tokens form a bare destructuring head:
+    /// `Ident (, Ident)+ :=`. (`_` lexes as `Ident`, so wildcards are
+    /// included.) Anything else starting with `Ident` is a short decl,
+    /// call, or expression — never a bare destructure.
+    pub(crate) fn at_bare_destructure(&self) -> bool {
+        if self.peek_kind_at(0) != TokenKind::Ident {
+            return false;
+        }
+        let mut i = 1usize;
+        // Require at least one `, Ident` pair (a lone `x := ...` is a
+        // short declaration, handled elsewhere).
+        let mut pairs = 0u32;
+        while self.peek_kind_at(i) == TokenKind::Comma
+            && self.peek_kind_at(i + 1) == TokenKind::Ident
+        {
+            pairs += 1;
+            i += 2;
+        }
+        pairs > 0 && self.peek_kind_at(i) == TokenKind::ColonEq
+    }
+
+    /// Parse `a, b := expr` — bare tuple destructuring declaration.
+    /// Same AST as `(a, b) := expr`: elements parse as full patterns
+    /// (bindings and `_` wildcards), checked and evaluated by the
+    /// shared `Stmt::Destructure` paths on all engines.
+    pub(crate) fn parse_bare_destructure_decl(&mut self) -> Stmt {
+        let start = self.peek().span;
+        let mut pats = Vec::new();
+        loop {
+            pats.push(self.parse_pattern());
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        let pat_end = self.previous().span;
+        if !self.eat(TokenKind::ColonEq) {
+            self.error_here("expected `:=` after destructuring pattern");
+        }
+        let value = self.parse_expr();
+        let span = start.join(value.span());
+        Stmt::Destructure {
+            pat: Pattern::Tuple {
+                pats,
+                span: start.join(pat_end),
             },
             value,
             span,

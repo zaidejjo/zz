@@ -312,6 +312,10 @@ pub(crate) fn get_index(obj: &Value, index: &Value, span: Span) -> Result<Value,
             let idx = normalize_index(*i, items.len(), span)?;
             Ok(items[idx].clone())
         }
+        (Value::Tuple(items), Value::Int(i)) => {
+            let idx = normalize_index(*i, items.len(), span)?;
+            Ok(items[idx].clone())
+        }
         (Value::Bytes(b), Value::Int(i)) => {
             let idx = normalize_index(*i, b.len(), span)?;
             Ok(Value::Int(b.as_slice()[idx] as i64))
@@ -343,6 +347,12 @@ pub(crate) fn set_index(
 ) -> Result<(), EvalError> {
     match (obj, index) {
         (Value::Array(items), Value::Int(i)) => {
+            let idx = normalize_index(*i, items.len(), span)?;
+            items[idx] = value;
+            Ok(())
+        }
+        (Value::Tuple(items), Value::Int(i)) => {
+            // Tuples share the array representation at runtime.
             let idx = normalize_index(*i, items.len(), span)?;
             items[idx] = value;
             Ok(())

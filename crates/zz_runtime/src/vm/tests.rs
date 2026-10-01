@@ -503,3 +503,21 @@ fn vm_bitwise_matches_tree_walker() {
     assert_eq!(run_src("1 << 63").unwrap(), Value::Int(i64::MIN));
     assert_eq!(run_src("~6").unwrap(), Value::Int(-7));
 }
+
+#[test]
+fn vm_tuple_ops_match_tree_walker() {
+    for src in [
+        "t := (10, \"twenty\", 30)\nt[0]",
+        "t := (10, \"twenty\", 30)\nt[1]",
+        "t := (10, \"twenty\", 30)\nt[-1]",
+        // NOTE: `len` needs stdlib natives (absent in unit interps) —
+        // covered by the e2e fixture on both engines instead.
+        "t := (10, \"twenty\", 30)\nt[0] = 99\nt[0]",
+        "t := (1, 2)\nt[7]",
+        "a, b := (7, 9)\na + b",
+        "_, b := (7, 9)\nb",
+        "a, b, c := (1, 2, 3)\na + b + c",
+    ] {
+        assert_same(src);
+    }
+}
