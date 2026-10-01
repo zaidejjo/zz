@@ -358,7 +358,13 @@ pub fn registry(args: &[String]) -> Result<(), String> {
 ///
 /// Registry (`Version`) deps resolve against `--registry` / `ZZ_REGISTRY` /
 /// the default registry; git + path deps stay offline.
+///
+/// `zz install --path <dir>` is a separate mode (cargo-like): it builds the
+/// project at `<dir>` in release and installs the binary into `~/.zz/bin`.
 pub fn install(args: &[String]) -> Result<(), String> {
+    if let Some(path) = parse_flag_value(args, "--path") {
+        return install_path(&path);
+    }
     let dir = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
     let toml_path = dir.join("zz.toml");
 
@@ -395,7 +401,11 @@ pub fn install(args: &[String]) -> Result<(), String> {
         }
     }
 
-    println!("resolving {} dependencies...", manifest.dependencies.len());
+    crate::ui::header(&format!(
+        "resolving {} dependencies",
+        manifest.dependencies.len()
+    ));
+    crate::ui::step(1, 4, "Resolving versions");
 
     // Use the resolver to resolve all dependencies (registry-aware).
     let opts = zz_pm::resolve::ResolveOptions::remote(&registry_base_from(args));
@@ -424,14 +434,20 @@ pub fn install(args: &[String]) -> Result<(), String> {
     lock.save(&lock_path)?;
 
     // Fetch git deps into CAS
-    for dep in &resolved.locked {
+    crate::ui::step(2, 4, "Fetching packages");
+    let fetch_total = resolved.locked.len().max(1);
+    for (i, dep) in resolved.locked.iter().enumerate() {
         if dep.source.starts_with("git+") {
             // Extract commit from locked dep
             if let Some(commit) = &dep.commit {
-                println!(
-                    "  fetching {} @ {}...",
-                    dep.name,
-                    &commit[..8.min(commit.len())]
+                crate::ui::progress(
+                    i + 1,
+                    fetch_total,
+                    &format!(
+                        "fetching {} @ {}…",
+                        dep.name,
+                        &commit[..8.min(commit.len())]
+                    ),
                 );
                 zz_pm::git::fetch_to_cas(
                     dep.source
@@ -460,7 +476,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
             if !dep.hash.is_empty() && zz_pm::paths::cas_entry(&dep.hash).exists() {
                 continue;
             }
-            println!("  fetching {name} @ {version}...");
+            crate::ui::progress(i + 1, fetch_total, &format!("fetching {name} @ {version}…"));
             zz_pm::remote::RegistryClient::new(&base)
                 .fetch_to_cas(&name, &version, &dep.hash)
                 .map_err(|e| format!("failed to fetch {}: {e}", dep.name))?;
@@ -468,6 +484,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
     }
 
     // Link into project
+    crate::ui::step(3, 4, "Linking into vendor/");
     let linked =
         zz_pm::link::link_project(&dir, &manifest, &lock, zz_pm::link::LinkStrategy::Symlink)
             .map_err(|e| format!("link failed: {e}"))?;
@@ -487,6 +504,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
     // `zz build` (registry tarballs exclude build outputs). Declarative
     // failures and gate violations fail the install; allowed legacy
     // hooks warn per-dependency inside the builder.
+    crate::ui::step(4, 4, "Building native extensions");
     let build_opts = crate::build::NativeBuildOpts {
         allow_source_builds: args.iter().any(|a| a == "--allow-source-builds"),
         allow_hooks: args.iter().any(|a| a == "--allow-hooks"),
@@ -502,6 +520,110 @@ pub fn install(args: &[String]) -> Result<(), String> {
         println!("native audit recorded in zz.lock");
     }
     println!("hint: run `zz build` to compile");
+    Ok(())
+}
+
+/// `zz install --path <dir|file>`: build a project from source (release)
+/// and install its binary into `~/.zz/bin` — the cargo-install equivalent.
+///
+/// - `<dir>` must contain `zz.toml`; the entry is `src/main.zz`, then
+///   `main.zz`. The binary is named after `[package] name`.
+/// - A direct `.zz` file is also accepted; the binary takes the file stem.
+/// - Re-running overwrites the installed binary (with a warning).
+fn install_path(path_arg: &str) -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
+    let target = if path_arg == "." {
+        cwd.clone()
+    } else {
+        cwd.join(path_arg)
+    };
+    let (project_dir, entry, bin_name) = if target.is_file() {
+        if target.extension().and_then(|e| e.to_str()) != Some("zz") {
+            return Err(format!(
+                "`{}` is not a .zz file\n\
+                  hint: usage: zz install --path <dir|file.zz>",
+                target.display()
+            ));
+        }
+        let stem = target
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("cannot derive a binary name from `{}`", target.display()))?;
+        let project_dir = target
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| cwd.clone());
+        (project_dir, target, stem)
+    } else if target.is_dir() {
+        let manifest = zz_pm::manifest::Manifest::load(&target.join("zz.toml")).map_err(|_| {
+            format!(
+                "no zz.toml in `{}`\n\
+                      hint: run `zz init` there first, or point --path at a .zz file",
+                target.display()
+            )
+        })?;
+        let name = manifest.package.name.clone();
+        if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err(format!("invalid package name `{name}` in zz.toml"));
+        }
+        let entry = ["src/main.zz", "main.zz"]
+            .iter()
+            .map(|c| target.join(c))
+            .find(|p| p.is_file())
+            .ok_or_else(|| {
+                format!(
+                    "no entry file in `{}`\n\
+                      hint: expected src/main.zz or main.zz",
+                    target.display()
+                )
+            })?;
+        (target, entry, name)
+    } else {
+        return Err(format!(
+            "no such file or directory: `{path_arg}`\n\
+              hint: usage: zz install --path <dir|file.zz> (try --path .)"
+        ));
+    };
+
+    crate::ui::header(&format!(
+        "installing {bin_name} from {}",
+        project_dir.display()
+    ));
+    crate::ui::step(1, 3, &format!("Building {} (release)", entry.display()));
+    let built = crate::build::build_release(
+        &entry,
+        crate::build::BuildMode::Release,
+        &crate::build::ReleaseOptions::default(),
+    )?;
+    let size = std::fs::metadata(&built).map(|m| m.len()).unwrap_or(0);
+    crate::ui::progress(2, 3, &format!("built {}", crate::ui::human_bytes(size)));
+
+    crate::ui::step(3, 3, "Installing into ~/.zz/bin");
+    let bin_dir = zz_pm::paths::bin_dir();
+    std::fs::create_dir_all(&bin_dir)
+        .map_err(|e| format!("cannot create {}: {e}", bin_dir.display()))?;
+    let dest = bin_dir.join(&bin_name);
+    if dest.exists() {
+        crate::ui::warn(&format!("overwriting existing {}", dest.display()));
+    }
+    std::fs::copy(&built, &dest)
+        .map_err(|e| format!("cannot install to {}: {e}", dest.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&dest)
+            .map_err(|e| format!("cannot stat {}: {e}", dest.display()))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&dest, perms)
+            .map_err(|e| format!("cannot chmod {}: {e}", dest.display()))?;
+    }
+    crate::ui::ok(&format!("installed {bin_name} to {}", dest.display()));
+    if !crate::setup::bin_on_path(&bin_dir) {
+        crate::ui::warn("~/.zz/bin is not on PATH — run `zz setup`, then restart your shell.");
+    }
+    println!("installed {bin_name} ({})", dest.display());
     Ok(())
 }
 
