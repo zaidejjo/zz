@@ -67,10 +67,21 @@ fn asset_url(tag: &str, asset: &str) -> String {
     format!("https://github.com/{REPO}/releases/download/{tag}/{asset}")
 }
 
+/// HTTP agent with an explicit global timeout (bare `ureq::get` has none —
+/// a blackhole network would hang the command forever).
+fn agent(timeout_secs: u64) -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
+            .user_agent(format!("zz-upgrade/{}", env!("CARGO_PKG_VERSION")))
+            .build(),
+    )
+}
+
 /// Resolve the latest release tag via the GitHub API.
 fn resolve_latest() -> Result<String, String> {
-    let mut resp = ureq::get(API_LATEST)
-        .header("User-Agent", "zz-upgrade")
+    let mut resp = agent(30)
+        .get(API_LATEST)
         .header("Accept", "application/vnd.github+json")
         .call()
         .map_err(|e| format!("cannot reach api.github.com: {e}"))?;
@@ -159,7 +170,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let asset = asset_name(ver, os, arch);
     let url = asset_url(&tag, &asset);
     let spinner = ui::Spinner::start(&format!("Fetching {asset}"));
-    let bytes = match ureq::get(&url).header("User-Agent", "zz-upgrade").call() {
+    let bytes = match agent(300).get(&url).call() {
         Ok(mut resp) => match resp.body_mut().read_to_vec() {
             Ok(b) => {
                 spinner.finish(&format!("downloaded {}", ui::human_bytes(b.len() as u64)));
@@ -253,7 +264,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
         Ok(())
     };
-    if let Err(e) = swap("zz", Some(staged_zz)).and_then(|_| swap("zz-lsp", staged_lsp)) {
+    if let Err(e) = swap("zz", Some(staged_zz)) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    // The pair must never mix versions: a failed zz-lsp swap restores zz.
+    if let Err(e) = swap("zz-lsp", staged_lsp) {
+        let _ = std::fs::rename(dir.join("zz.bak"), dir.join("zz"));
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(e);
     }
@@ -265,7 +282,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .unwrap_or_default();
-    if !got.contains(ver) {
+    let reported = got
+        .split_whitespace()
+        .find_map(|tok| parse_version(tok).ok());
+    if reported != Some(want) {
         // Roll back both binaries.
         for name in ["zz", "zz-lsp"] {
             let live = dir.join(name);

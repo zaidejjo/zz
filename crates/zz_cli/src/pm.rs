@@ -94,6 +94,9 @@ pub fn new(args: &[String]) -> Result<(), String> {
         GitInit::Done => println!("  git: initialized (branch main)"),
         GitInit::AlreadyRepo => println!("  git: already a repository"),
         GitInit::NoGit => eprintln!("warning: git not found — skipping `git init`"),
+        GitInit::Failed(detail) => {
+            eprintln!("warning: `git init` failed ({detail}) — continuing without a repo")
+        }
     }
     Ok(())
 }
@@ -111,6 +114,7 @@ enum GitInit {
     Done,
     AlreadyRepo,
     NoGit,
+    Failed(String),
 }
 
 /// `git init -b main` (fallback: plain `init` on old git). Never commits.
@@ -118,14 +122,22 @@ fn git_init_main(dir: &Path) -> GitInit {
     if dir.join(".git").exists() {
         return GitInit::AlreadyRepo;
     }
-    let status = std::process::Command::new("git")
+    // Probe once so a missing binary and a failed init report distinctly.
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return GitInit::NoGit;
+    }
+    let main_init = std::process::Command::new("git")
         .arg("init")
         .arg("-b")
         .arg("main")
         .arg("--quiet")
         .current_dir(dir)
         .status();
-    match status {
+    match main_init {
         Ok(s) if s.success() => GitInit::Done,
         Ok(_) => {
             // git < 2.28 has no `-b`: plain init, then rename the branch.
@@ -135,17 +147,18 @@ fn git_init_main(dir: &Path) -> GitInit {
                 .current_dir(dir)
                 .status();
             match plain {
-                Ok(s) if s.success() => {
+                Ok(p) if p.success() => {
                     let _ = std::process::Command::new("git")
                         .args(["symbolic-ref", "HEAD", "refs/heads/main"])
                         .current_dir(dir)
                         .status();
                     GitInit::Done
                 }
-                _ => GitInit::NoGit,
+                Ok(p) => GitInit::Failed(format!("exit {}", p.code().unwrap_or(-1))),
+                Err(e) => GitInit::Failed(format!("cannot run git: {e}")),
             }
         }
-        Err(_) => GitInit::NoGit,
+        Err(e) => GitInit::Failed(format!("cannot run git: {e}")),
     }
 }
 
@@ -158,7 +171,7 @@ fn new_from_template(
     force: bool,
 ) -> Result<(), String> {
     // Resolve the template root (owned tempdir when fetched).
-    let (_hold, root) = fetch_template_root(spec, args)?;
+    let (hold, root) = fetch_template_root(spec, args)?;
     let src = {
         let nested = root.join("template");
         if nested.is_dir() {
@@ -182,7 +195,12 @@ fn new_from_template(
     let opts = init_options(args);
     zz_pm::manifest::Manifest::create_init_opts(&project_dir, name, &opts)?;
     let mut skipped_toml = false;
-    overlay_template(&src, &project_dir, name, force, &mut skipped_toml)?;
+    let overlay = overlay_template(&src, &project_dir, name, force, &mut skipped_toml);
+    // Fetched templates live in temp: remove regardless of overlay outcome.
+    if let Some(tmp) = hold {
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    overlay?;
     if skipped_toml {
         println!("  template zz.toml ignored (use `zz add` for dependencies)");
     }
@@ -1663,7 +1681,9 @@ pub fn outdated(args: &[String]) -> Result<(), String> {
         let wanted_ver = zz_pm::remote::pick_version(&info.metadata.versions, req)
             .map(|v| v.to_string())
             .unwrap_or_else(|_| "∅".to_string());
-        let status = if locked == latest {
+        let status = if wanted_ver == "∅" {
+            "no match"
+        } else if locked == latest {
             "up to date"
         } else if locked == wanted_ver {
             "update available"
@@ -1679,7 +1699,9 @@ pub fn outdated(args: &[String]) -> Result<(), String> {
         ));
     }
     print!("{}", format_outdated_table(&rows));
-    if rows
+    if rows.iter().any(|r| r.4 == "no match") {
+        println!("hint: `zz info <pkg>` lists the available versions");
+    } else if rows
         .iter()
         .any(|r| r.4 == "update available" || r.4 == "behind requirement")
     {
@@ -1735,21 +1757,25 @@ fn format_outdated_table(rows: &[(String, String, String, String, String)]) -> S
 }
 
 /// Handle `zz deps tree [--depth N]` / `zz deps why <pkg>`.
+/// Flags without a subcommand (`zz deps --depth 2`) default to `tree`.
 pub fn deps(args: &[String]) -> Result<(), String> {
-    let sub = args.first().map(String::as_str).unwrap_or("tree");
+    let (sub, rest) = match args.first().map(String::as_str) {
+        Some(s) if !s.starts_with('-') => (s, &args[1..]),
+        _ => ("tree", args),
+    };
     match sub {
         "tree" => {
-            let depth = args
+            let depth = rest
                 .iter()
                 .position(|a| a == "--depth")
-                .and_then(|i| args.get(i + 1))
+                .and_then(|i| rest.get(i + 1))
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(usize::MAX);
             deps_tree(depth)
         }
         "why" => {
-            let target = args
-                .get(1)
+            let target = rest
+                .first()
                 .ok_or("missing package name\n\nhint: usage: zz deps why <pkg>")?;
             deps_why(target)
         }
@@ -1852,6 +1878,11 @@ fn deps_why(target: &str) -> Result<(), String> {
         println!("{target} is a direct dependency (zz.toml)");
         return Ok(());
     }
+    let lock = lock.as_ref().ok_or_else(|| {
+        "no zz.lock found\n\
+          hint: run `zz install` first"
+            .to_string()
+    })?;
     // Reverse edges: child -> parents, from every readable manifest.
     let mut parents: HashMap<String, Vec<String>> = HashMap::new();
     let mut queue: Vec<String> = manifest.dependencies.keys().cloned().collect();
@@ -1860,7 +1891,7 @@ fn deps_why(target: &str) -> Result<(), String> {
         if !visited.insert(pkg.clone()) {
             continue;
         }
-        let locked = lock.as_ref().and_then(|l| l.find(&pkg));
+        let locked = lock.find(&pkg);
         let Some(dep) = locked else { continue };
         let Some(child_manifest) = locked_dep_manifest(&dir, &manifest, dep) else {
             continue;
