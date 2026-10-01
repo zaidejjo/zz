@@ -708,6 +708,16 @@ parity_strict!(
     "regression",
     "neg_after_loop.zz"
 );
+parity_strict!(
+    parity_regression_branch_call_returns,
+    "regression",
+    "branch_call_returns.zz"
+);
+parity_strict!(
+    parity_regression_branch_call_tails,
+    "regression",
+    "branch_call_tails.zz"
+);
 
 // Types
 parity_strict!(

@@ -1407,8 +1407,40 @@ impl Lowerer {
         for stmt in &b.stmts[..n.saturating_sub(1)] {
             self.emit_stmt(stmt, names, out, false);
         }
-        if self.last_stmt_value(b, names, out).is_none() {
-            out.push_str("        return zz_unit();\n");
+        // NOTE: the tail statement is lowered here directly, NOT via
+        // `last_stmt_value`: that helper serves callers that already
+        // emitted the whole block (function/closure bodies, where a tail
+        // call was captured into `__tail`). In a branch the last
+        // statement was deliberately skipped above, so `__tail` lookup
+        // would read a stale outer entry — and trailing `return` was
+        // never handled at all (branches fell through to
+        // `return zz_unit()`, silently dropping call results).
+        match b.stmts.last() {
+            Some(Stmt::Expr(e)) if matches!(e, Expr::If { .. }) => {
+                self.emit_tail_expr(e, names, out);
+            }
+            Some(Stmt::Expr(e)) => {
+                let val = self.emit_tail_value(e, names, out);
+                out.push_str(&format!("        return {val};\n"));
+            }
+            Some(Stmt::Return { value, .. }) => match value {
+                Some(v) => {
+                    let val = self.emit_expr(v, names, out);
+                    let val = box_scalar_operand(v, names, &val);
+                    out.push_str(&format!("        return {val};\n"));
+                }
+                None => out.push_str("        return zz_unit();\n"),
+            },
+            Some(Stmt::Decl { name, .. }) => {
+                if let Some(val) = self.decl_tail_value(&name.name, names, out) {
+                    out.push_str(&format!("        return {val};\n"));
+                } else {
+                    out.push_str("        return zz_unit();\n");
+                }
+            }
+            _ => {
+                out.push_str("        return zz_unit();\n");
+            }
         }
         names.pop_scope();
     }

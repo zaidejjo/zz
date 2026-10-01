@@ -1,0 +1,18 @@
+// Regression: trailing call tails in if/else branches must yield
+// the call values on both engines (sibling of branch_call_returns).
+func g(x: int) -> int {
+    x + 1
+}
+func h(x: int) -> int {
+    x + 2
+}
+func f(c: bool, x: int) -> int {
+    if c {
+        g(x)
+    } else {
+        h(x)
+    }
+}
+println(f(true, 5))
+println(f(false, 5))
+println("branch_call_tails_ok")
