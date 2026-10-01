@@ -22,7 +22,7 @@ name: release
 # explicit warning.
 #
 # Flow: resolve version -> skip if released -> sync Cargo.lock ->
-# build zips (x86_64 + aarch64, in parallel) -> create Release WITH
+# build zips (linux + macos + windows, in parallel) -> create Release WITH
 # the zips attached (single shot, so `release: published` consumers
 # never see a half-ready Release).
 #
@@ -157,22 +157,33 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-assets:
-    name: build release zip (${{ matrix.ziparch }})
+    name: build release zip (${{ matrix.os }}-${{ matrix.arch }})
     needs: [cut]
     # Same CI gate as `cut` (a skipped `cut` leaves `skip` empty, which
     # `!= 'true'` would wrongly pass — belt and suspenders).
     if: ${{ (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && needs.cut.outputs.skip != 'true' }}
     runs-on: ${{ matrix.runner }}
     strategy:
-      # One arch failing must not cancel the other: we want both logs.
+      # One target failing must not cancel the others: we want all logs.
       # The publish step refuses to cut the Release with a zip missing.
       fail-fast: false
       matrix:
         include:
-          - ziparch: x86_64
+          - os: linux
+            arch: x86_64
             runner: ubuntu-latest
-          - ziparch: aarch64
+          - os: linux
+            arch: aarch64
             runner: ubuntu-24.04-arm
+          - os: macos
+            arch: aarch64
+            runner: macos-14
+          - os: macos
+            arch: x86_64
+            runner: macos-13
+          - os: windows
+            arch: x86_64
+            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -181,9 +192,14 @@ jobs:
           ref: main
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: install native deps
+      - name: install native deps (linux)
+        if: matrix.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev zip unzip
-      - name: build + zip
+      - name: install native deps (macos)
+        if: matrix.os == 'macos'
+        run: brew install zip unzip
+      - name: build + zip (unix)
+        if: matrix.os != 'windows'
         run: |
           PKGVER="${{ needs.cut.outputs.pkgver }}"
           TAG="${{ needs.cut.outputs.tag }}"
@@ -196,17 +212,38 @@ jobs:
           cargo build --release --locked -p zz_cli -p zz_lsp
           ./target/release/zz --version
           test -x ./target/release/zz-lsp
-          strip target/release/zz target/release/zz-lsp
-          ZIP="zz-$PKGVER-linux-${{ matrix.ziparch }}.zip"
+          if [ "${{ matrix.os }}" = "macos" ]; then
+            strip -x target/release/zz target/release/zz-lsp
+          else
+            strip target/release/zz target/release/zz-lsp
+          fi
+          ZIP="zz-$PKGVER-${{ matrix.os }}-${{ matrix.arch }}.zip"
           rm -rf dist "$ZIP"
           mkdir -p dist
           cp target/release/zz target/release/zz-lsp LICENSE README.md dist/
           (cd dist && zip -9 "../$ZIP" zz zz-lsp LICENSE README.md)
           unzip -l "$ZIP"
+      - name: build + zip (windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $PkgVer = "${{ needs.cut.outputs.pkgver }}"
+          $CargoVer = (Select-String -Path Cargo.toml -Pattern '^version = "' | Select-Object -First 1).Line.Split('"')[1]
+          if ($CargoVer -ne $PkgVer) { throw "Cargo.toml version ($CargoVer) != tag version ($PkgVer)" }
+          $env:CARGO_PROFILE_RELEASE_DEBUG = "false"
+          cargo build --release --locked -p zz_cli -p zz_lsp
+          .\target\release\zz.exe --version
+          if (-not (Test-Path .\target\release\zz-lsp.exe)) { throw "zz-lsp.exe missing" }
+          $Zip = "zz-$PkgVer-windows-${{ matrix.arch }}.zip"
+          Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+          Remove-Item -Force $Zip -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item target\release\zz.exe, target\release\zz-lsp.exe, LICENSE, README.md dist\
+          Compress-Archive -Path dist\zz.exe, dist\zz-lsp.exe, dist\LICENSE, dist\README.md -DestinationPath $Zip -CompressionLevel Optimal
       - name: upload zip artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-zip-${{ matrix.ziparch }}
+          name: release-zip-${{ matrix.os }}-${{ matrix.arch }}
           path: zz-*.zip
           if-no-files-found: error
 
@@ -249,9 +286,15 @@ jobs:
           fi
           ls -la zz-*.zip
           test -f "zz-${{ needs.cut.outputs.pkgver }}-linux-x86_64.zip" \
-            || { echo "error: x86_64 zip missing, refusing half-ready release." >&2; exit 1; }
+            || { echo "error: linux x86_64 zip missing, refusing half-ready release." >&2; exit 1; }
           test -f "zz-${{ needs.cut.outputs.pkgver }}-linux-aarch64.zip" \
-            || { echo "error: aarch64 zip missing, refusing half-ready release." >&2; exit 1; }
+            || { echo "error: linux aarch64 zip missing, refusing half-ready release." >&2; exit 1; }
+          test -f "zz-${{ needs.cut.outputs.pkgver }}-macos-aarch64.zip" \
+            || { echo "error: macos aarch64 zip missing, refusing half-ready release." >&2; exit 1; }
+          test -f "zz-${{ needs.cut.outputs.pkgver }}-macos-x86_64.zip" \
+            || { echo "error: macos x86_64 zip missing, refusing half-ready release." >&2; exit 1; }
+          test -f "zz-${{ needs.cut.outputs.pkgver }}-windows-x86_64.zip" \
+            || { echo "error: windows x86_64 zip missing, refusing half-ready release." >&2; exit 1; }
           gh release create "$TAG" \
             --target "main" \
             --title "$TAG" \
