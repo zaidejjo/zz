@@ -183,6 +183,9 @@ jobs:
           if [ "$REAL_HOME" != "$HOME" ]; then
             echo "HOME skew detected (whoami=$(whoami) HOME=$HOME resolved=$REAL_HOME), exporting fixed HOME"
             export HOME="$REAL_HOME"
+            # `export` dies with this step's shell: persist for the rest
+            # of the job (the push step below expands the same `~` paths).
+            echo "HOME=$REAL_HOME" >> "$GITHUB_ENV"
           fi
           if [ ! -w "$HOME" ]; then
             echo "error: HOME=$HOME is not writable for user $(whoami); cannot set up SSH." >&2
