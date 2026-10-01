@@ -277,11 +277,22 @@ pub fn ensure_block_before(
     Ok(true)
 }
 
-/// Byte offset of the start of the first line containing `anchor`.
+/// True for a non-comment line that invokes `compinit` (comments merely
+/// mentioning it must not count — otherwise the block lands in the wrong
+/// place and the bootstrap is skipped).
+fn line_runs_compinit(line: &str) -> bool {
+    let t = line.trim_start();
+    !t.starts_with('#') && t.contains("compinit")
+}
+
+/// Byte offset of the start of the first line running `anchor`.
 fn first_anchor_line(content: &str, anchor: &str) -> Option<usize> {
     let mut offset = 0usize;
     for line in content.split_inclusive('\n') {
-        if line.contains(anchor) {
+        if anchor == "compinit" && line_runs_compinit(line) {
+            return Some(offset);
+        }
+        if anchor != "compinit" && line.contains(anchor) {
             return Some(offset);
         }
         offset += line.len();
@@ -471,6 +482,28 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     }
 
+    // zsh bootstrapping: without any `compinit` call our `fpath` entry
+    // never loads (frameworks usually provide it, minimal setups don't).
+    // A second `compinit` is harmless — it reuses the dump.
+    let home = home_dir();
+    if !zsh_has_compinit(&home) {
+        let zshrc = home.join(".zshrc");
+        let current = std::fs::read_to_string(&zshrc).unwrap_or_default();
+        if !current.contains("autoload -Uz compinit") {
+            match top_up_block(&zshrc, &current, &["autoload -Uz compinit && compinit"]) {
+                Ok(true) => ui::ok("zsh: added compinit bootstrap"),
+                Ok(false) => {}
+                Err(e) => ui::warn(&format!("zsh: compinit bootstrap skipped ({e})")),
+            }
+        }
+    }
+    // Force a compinit rescan next shell: a cached ~/.zcompdump from before
+    // the install would otherwise keep serving completions without `_zz`.
+    // (Fish/bash have no such cache.)
+    if clear_zsh_compdump() {
+        ui::ok("zsh: cleared completion cache (~/.zcompdump*)");
+    }
+
     clear_hint_stamp_if_live(&bin);
     let shell = detect_shell();
     println!("setup complete for {shell} — reload your shell, then try: zz <TAB>");
@@ -569,6 +602,7 @@ pub fn status() -> SetupStatus {
 /// Exits 1 with a fix hint when anything is missing.
 pub fn check() -> Result<(), String> {
     let st = status();
+    let home = home_dir();
     ui::header("zz setup --check");
     let mut missing = 0u32;
     if st.bin_exists {
@@ -605,8 +639,22 @@ pub fn check() -> Result<(), String> {
             missing += 1;
         }
     }
+    // Runtime proof for zsh: files can be perfect while the live shell
+    // still serves a cached set, and a broken script would pass every
+    // check above. Skipped silently when zsh is not installed.
+    if home.join(".zfunc").join("_zz").is_file() {
+        match zsh_loads_zz(&home.join(".zfunc")) {
+            Some(true) => ui::ok("zsh: completion script loads"),
+            Some(false) => {
+                ui::warn("zsh: completion script fails to load — reinstall via `zz setup`");
+                missing += 1;
+            }
+            None => {}
+        }
+    }
     if missing == 0 {
         println!("shell integration OK — restart your shell if TAB still fails");
+        println!("  zsh still bare? run: rm -f ~/.zcompdump* && exec zsh -l");
         Ok(())
     } else {
         Err(format!(
@@ -614,6 +662,56 @@ pub fn check() -> Result<(), String> {
               hint: run `zz setup`, then restart your shell"
         ))
     }
+}
+/// True when any zsh startup file already runs `compinit`.
+fn zsh_has_compinit(home: &Path) -> bool {
+    [".zshrc", ".zprofile", ".zshenv"].iter().any(|f| {
+        std::fs::read_to_string(home.join(f))
+            .map(|c| c.lines().any(line_runs_compinit))
+            .unwrap_or(false)
+    })
+}
+
+/// Remove user `~/.zcompdump*` caches so the next shell rescans `fpath`.
+/// Returns `true` when anything was removed.
+fn clear_zsh_compdump() -> bool {
+    let home = home_dir();
+    let mut removed = false;
+    if let Ok(entries) = std::fs::read_dir(&home) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".zcompdump") && std::fs::remove_file(entry.path()).is_ok() {
+                removed = true;
+            }
+        }
+    }
+    removed
+}
+
+/// Verify `~/.zfunc/_zz` actually loads under a clean zsh+compinit.
+///
+/// Runs `zsh` (when present) with a throwaway dump file so the user's real
+/// config is untouched. Returns `None` when zsh is unavailable — the check
+/// is skipped, not failed.
+fn zsh_loads_zz(zfunc_dir: &Path) -> Option<bool> {
+    let dump = std::env::temp_dir().join(format!("zz_check_dump_{}", std::process::id()));
+    let out = std::process::Command::new("zsh")
+        .env("ZZ_ZFUNC_DIR", zfunc_dir)
+        .env("ZZ_CHECK_DUMP", &dump)
+        .arg("-c")
+        .arg(
+            "fpath=($ZZ_ZFUNC_DIR $fpath)\n\
+             autoload -Uz compinit\n\
+             compinit -u -d $ZZ_CHECK_DUMP\n\
+             if (( $+functions[_zz] )); then print LOADED; else print MISSING; fi",
+        )
+        .output()
+        .ok()?;
+    let _ = std::fs::remove_file(&dump);
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).contains("LOADED"))
 }
 /// Stamp file remembering the one-time PATH hint was shown.
 fn hint_stamp_path() -> PathBuf {
@@ -751,6 +849,21 @@ mod tests {
             block_pos < compinit_pos,
             "marker block must precede compinit"
         );
+        // A comment merely mentioning compinit must not attract the block.
+        let dir2 = isolated_home("compinit-comment");
+        let file2 = dir2.join(".zshrc");
+        std::fs::write(&file2, "# no completion init here\nexport FOO=1\n").unwrap();
+        ensure_block_before(&file2, &["fpath=(~/.zfunc $fpath)"], Some("compinit")).unwrap();
+        let content2 = std::fs::read_to_string(&file2).unwrap();
+        assert!(
+            content2.find(MARK_BEGIN).unwrap() > content2.find("export FOO").unwrap(),
+            "block must append when only a comment mentions compinit"
+        );
+        assert!(
+            !zsh_has_compinit(&dir2),
+            "comment must not count as compinit"
+        );
+        let _ = std::fs::remove_dir_all(&dir2);
         // Second run is a no-op even though the anchor still matches.
         let changed2 =
             ensure_block_before(&file, &["fpath=(~/.zfunc $fpath)"], Some("compinit")).unwrap();
@@ -811,14 +924,17 @@ mod tests {
                     .collect(),
             )
         };
-
-        let got = complete("zz b", 1).expect("bash must exist for this test");
+        let Some(first) = complete("zz b", 1) else {
+            eprintln!("skipping: bash not available");
+            return;
+        };
+        let got = first;
         assert!(got.contains(&"build".to_string()), "got: {got:?}");
 
-        let got = complete("zz run m", 2).expect("bash must exist for this test");
+        let got = complete("zz run m", 2).expect("bash broke mid-test");
         assert_eq!(got, vec!["main.zz".to_string()], "got: {got:?}");
 
-        let got = complete("zz build --", 2).expect("bash must exist for this test");
+        let got = complete("zz build --", 2).expect("bash broke mid-test");
         assert!(
             got.iter().any(|c| c == "--release"),
             "flags expected, got: {got:?}"
@@ -828,6 +944,23 @@ mod tests {
             "no files expected, got: {got:?}"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The staged `_zz` file must load under a clean zsh+compinit.
+    /// Skipped where zsh is not installed.
+    #[test]
+    #[cfg(unix)]
+    fn zsh_completion_loads() {
+        let _g = TEST_LOCK.lock().unwrap();
+        let dir = isolated_home("zshload");
+        let zfunc = dir.join(".zfunc");
+        std::fs::create_dir_all(&zfunc).unwrap();
+        std::fs::write(zfunc.join("_zz"), ZSH_COMPLETION).unwrap();
+        match zsh_loads_zz(&zfunc) {
+            Some(loaded) => assert!(loaded, "_zz must load under compinit"),
+            None => eprintln!("skipping: zsh not available"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
