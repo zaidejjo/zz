@@ -1,9 +1,11 @@
 name: docker-publish
 
-# Publishes the pre-built `zz` toolchain image to GHCR. Image name follows
-# the repo owner automatically (`github.repository_owner`), so moving
-# zaidejjo/zz -> zz-language/zz needs zero workflow changes — the tags
-# below resolve the owner at runtime.
+# Publishes the pre-built `zz` toolchain image to GHCR **and** Docker Hub.
+# Image names follow the repo owner automatically
+# (`github.repository_owner`), so moving zaidejjo/zz -> zz-language/zz
+# needs zero workflow changes — the tags below resolve the owner at
+# runtime. The Docker Hub namespace comes from the `DOCKERHUB_USERNAME`
+# repo secret instead (it may differ from the GitHub owner).
 #
 # Triggers: a published GitHub Release, or manual dispatch. The image
 # installs the Release's prebuilt zips — nothing here compiles (the
@@ -51,12 +53,25 @@ jobs:
           REST="${VER#*.}"
           MIN="${REST%%.*}"
           SHA="$(git rev-parse --short HEAD)"
-          REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          GHCR="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          TAGS="$GHCR:latest,$GHCR:$VER,$GHCR:$MAJ.$MIN,$GHCR:$MAJ,$GHCR:v$VER,$GHCR:sha-$SHA"
+          echo "image tags: latest, $VER, $MAJ.$MIN, $MAJ, v$VER, sha-$SHA"
+          # Docker Hub mirror (same tags, docker.io namespace). Guarded on
+          # the secret so forks without it still publish GHCR-only instead
+          # of failing at login/push.
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
+            DHUB="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/zz"
+            TAGS="$TAGS,$DHUB:latest,$DHUB:$VER,$DHUB:$MAJ.$MIN,$DHUB:$MAJ,$DHUB:v$VER,$DHUB:sha-$SHA"
+            echo "dockerhub=true" >> "$GITHUB_OUTPUT"
+            echo "docker hub tags: latest, $VER, $MAJ.$MIN, $MAJ, v$VER, sha-$SHA"
+          else
+            echo "dockerhub=false" >> "$GITHUB_OUTPUT"
+            echo "DOCKERHUB_USERNAME not set, skipping Docker Hub mirror"
+          fi
           {
             echo "version=$VER"
-            echo "tags=$REPO:latest,$REPO:$VER,$REPO:$MAJ.$MIN,$REPO:$MAJ,$REPO:v$VER,$REPO:sha-$SHA"
+            echo "tags=$TAGS"
           } >> "$GITHUB_OUTPUT"
-          echo "image tags: latest, $VER, $MAJ.$MIN, $MAJ, v$VER, sha-$SHA"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -70,6 +85,13 @@ jobs:
           # No long-lived secret needed. For a PRIVATE package, consumers
           # (e.g. Render) need a classic PAT with read:packages instead.
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: steps.ver.outputs.dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push
         uses: docker/build-push-action@v6

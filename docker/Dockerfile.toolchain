@@ -1,8 +1,10 @@
 # Pre-built `zz` toolchain image: release binaries on slim Debian.
 #
-# Published to GHCR by .github/workflows/docker-publish.yml as
+# Published to GHCR (and mirrored to Docker Hub) by
+# .github/workflows/docker-publish.yml as
 #   ghcr.io/<owner>/zz:latest    (latest Release)
 #   ghcr.io/<owner>/zz:1.2.3     (release tags + major/minor shorthands)
+#   <dockerhub-user>/zz:latest, :1.2.3, … (same tags on Docker Hub)
 # `<owner>` follows the repo automatically (`zaidejjo` today,
 # `zz-language` after the move) — no hardcoded owner anywhere.
 #
