@@ -19,6 +19,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to package without leading v (default: Cargo.toml; needed to rebuild an older tag's image)"
+        required: false
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -41,6 +46,8 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "release" ]; then
             TAG="${{ github.event.release.tag_name }}"
+          elif [ -n "${{ inputs.version }}" ]; then
+            TAG="v${{ inputs.version }}"
           else
             # Manual dispatch: version comes from the tree (normally main).
             TAG="v$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
