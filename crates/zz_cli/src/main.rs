@@ -146,9 +146,11 @@ EXAMPLES:
 
 fn main() -> ExitCode {
     // Self-heal ~/.zz/bin + PATH hint on every run (cheap, silent when piped).
-    setup::auto_heal();
-
+    // No hint when already running setup/completion — that *is* the fix.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let early_cmd = args.first().map(String::as_str);
+    let self_managing = matches!(early_cmd, Some("setup") | Some("completion"));
+    setup::auto_heal(self_managing);
 
     // Separate the subcommand from flags and path.
     let cmd = args.first().map(String::as_str);

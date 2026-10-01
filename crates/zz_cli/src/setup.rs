@@ -471,7 +471,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     }
 
-    clear_hint_stamp();
+    clear_hint_stamp_if_live(&bin);
     let shell = detect_shell();
     println!("setup complete for {shell} — reload your shell, then try: zz <TAB>");
     match shell {
@@ -579,6 +579,10 @@ pub fn check() -> Result<(), String> {
     }
     if st.on_path {
         ui::ok("~/.zz/bin is on PATH");
+    } else if st.shells.iter().all(|s| s.rc_wired) {
+        // Wired everywhere, just not live in *this* session: activation —
+        // not setup — is pending, so this is not a failure.
+        ui::ok("~/.zz/bin wired in shell rcs (restart your shell to activate)");
     } else {
         ui::warn("~/.zz/bin is not on PATH");
         missing += 1;
@@ -628,13 +632,25 @@ fn clear_hint_stamp() {
     let _ = std::fs::remove_file(hint_stamp_path());
 }
 
+/// Drop the one-time hint stamp only when the bin dir is actually live on
+/// `PATH`. `zz setup` cannot fix the *current* session's PATH (that needs
+/// a shell restart), so clearing unconditionally would re-nag on the very
+/// next command.
+fn clear_hint_stamp_if_live(bin: &Path) {
+    if bin_on_path(bin) {
+        clear_hint_stamp();
+    }
+}
+
 /// Runs on every `zz` invocation before command dispatch.
 ///
 /// - Creates a missing bin dir silently (cheap, idempotent).
 /// - Nudges interactive users toward `zz setup` **once** when the bin dir
-///   is not on `PATH` (a stamp file suppresses repeats; `zz setup`
-///   clears it). Piped/non-TTY runs stay silent.
-pub fn auto_heal() {
+///   is not on `PATH` (a stamp file suppresses repeats; it clears once the
+///   dir is live on `PATH`). Piped/non-TTY runs stay silent.
+/// - `suppress_hint` skips the nudge (used when already running `setup` or
+///   `completion` — the hint would recommend the running command).
+pub fn auto_heal(suppress_hint: bool) {
     let bin = zz_pm::paths::bin_dir();
     if !bin.exists() {
         let _ = std::fs::create_dir_all(&bin);
@@ -643,7 +659,7 @@ pub fn auto_heal() {
         clear_hint_stamp();
         return;
     }
-    if hint_already_shown() {
+    if suppress_hint || hint_already_shown() {
         return;
     }
     if std::io::stderr().is_terminal() {
@@ -864,6 +880,73 @@ mod tests {
             std::env::set_var("ZZ_HOME", z);
         } else {
             std::env::remove_var("ZZ_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setup_check_passes_when_wired_pending_restart() {
+        let _g = TEST_LOCK.lock().unwrap();
+        let dir = isolated_home("check-ok");
+        let old_home = std::env::var_os("HOME");
+        let old_zz = std::env::var_os("ZZ_HOME");
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("HOME", &dir);
+        std::env::set_var("ZZ_HOME", dir.join(".zz"));
+        std::env::set_var("PATH", "/usr/bin:/bin");
+
+        // Bin dir exists, every rc wired, every completion exact — but the
+        // session PATH lacks the bin dir: activation pending, not failure.
+        std::fs::create_dir_all(dir.join(".zz").join("bin")).unwrap();
+        ensure_block_before(
+            &dir.join(".bashrc"),
+            &["export PATH=\"$HOME/.zz/bin:$PATH\""],
+            None,
+        )
+        .unwrap();
+        ensure_block_before(
+            &dir.join(".zshrc"),
+            &["fpath=(~/.zfunc $fpath)"],
+            Some("compinit"),
+        )
+        .unwrap();
+        ensure_block_before(
+            &dir.join(".config").join("fish").join("config.fish"),
+            &["set -gx PATH $HOME/.zz/bin $PATH"],
+            None,
+        )
+        .unwrap();
+        let bash_comp = dir
+            .join(".local")
+            .join("share")
+            .join("bash-completion")
+            .join("completions");
+        std::fs::create_dir_all(&bash_comp).unwrap();
+        std::fs::write(bash_comp.join("zz"), BASH_COMPLETION).unwrap();
+        let zfunc = dir.join(".zfunc");
+        std::fs::create_dir_all(&zfunc).unwrap();
+        std::fs::write(zfunc.join("_zz"), ZSH_COMPLETION).unwrap();
+        let fish_comp = dir.join(".config").join("fish").join("completions");
+        std::fs::create_dir_all(&fish_comp).unwrap();
+        std::fs::write(fish_comp.join("zz.fish"), FISH_COMPLETION).unwrap();
+
+        let st = status();
+        assert!(st.bin_exists);
+        assert!(!st.on_path, "sandbox PATH must not contain the bin dir");
+        assert!(check().is_ok());
+
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(z) = old_zz {
+            std::env::set_var("ZZ_HOME", z);
+        } else {
+            std::env::remove_var("ZZ_HOME");
+        }
+        if let Some(p) = old_path {
+            std::env::set_var("PATH", p);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
