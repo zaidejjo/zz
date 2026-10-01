@@ -927,15 +927,22 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.text(")");
                 }
             }
-            Pattern::Tuple { pats, .. } => {
-                self.text("(");
+            Pattern::Tuple { pats, span } => {
+                // Same form-preservation rule as the legacy formatter:
+                // bare `a, b := ...` must not gain parens.
+                let paren = self.source.as_bytes().get(span.start as usize) == Some(&b'(');
+                if paren {
+                    self.text("(");
+                }
                 for (i, p) in pats.iter().enumerate() {
                     if i > 0 {
                         self.text(", ");
                     }
                     self.emit_pattern(p);
                 }
-                self.text(")");
+                if paren {
+                    self.text(")");
+                }
             }
             Pattern::Or { pats, .. } => {
                 for (i, p) in pats.iter().enumerate() {

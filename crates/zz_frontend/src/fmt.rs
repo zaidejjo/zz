@@ -778,15 +778,24 @@ impl<'a> FmtCtx<'a> {
                     self.write_str(")");
                 }
             }
-            Pattern::Tuple { pats, .. } => {
-                self.write_str("(");
+            Pattern::Tuple { pats, span } => {
+                // Bare destructuring (`a, b := ...`) has no parens in
+                // source; adding them would change the significant-token
+                // stream, which formatting must preserve. The span covers
+                // the parens exactly when they were written.
+                let paren = source.as_bytes().get(span.start as usize) == Some(&b'(');
+                if paren {
+                    self.write_str("(");
+                }
                 for (i, p) in pats.iter().enumerate() {
                     if i > 0 {
                         self.write_str(", ");
                     }
                     self.fmt_pattern(p, source);
                 }
-                self.write_str(")");
+                if paren {
+                    self.write_str(")");
+                }
             }
             Pattern::Or { pats, .. } => {
                 for (i, p) in pats.iter().enumerate() {
