@@ -8,11 +8,24 @@ use zz_frontend::span::Span;
 
 impl Checker {
     /// Merge element types into a single type: identical types collapse to
-    /// one; differing types form a union.
+    /// one; differing types form a union. Divergent (`Never`) elements
+    /// vanish from the join — an array whose every element diverges is
+    /// itself `Never`.
     pub(crate) fn merge_types(&mut self, types: Vec<Type>) -> Type {
         if types.is_empty() {
             return self.unifier.fresh_var();
         }
+        // Filter divergent elements first (resolve to see through vars).
+        let mut live: Vec<Type> = Vec::with_capacity(types.len());
+        for t in types {
+            if !matches!(self.unifier.resolve(&t), Type::Never) {
+                live.push(t);
+            }
+        }
+        if live.is_empty() {
+            return Type::Never;
+        }
+        let types = live;
         let mut distinct: Vec<Type> = Vec::new();
         for t in types {
             // Clone-free comparison through var chains (the old
@@ -46,7 +59,7 @@ impl Checker {
         use zz_frontend::ast::TraitBound as B;
         match ty {
             Type::Union(ms) => ms.iter().all(|m| self.satisfies_bound(m, bound)),
-            Type::Var(_) | Type::Named(_) | Type::Error => false,
+            Type::Var(_) | Type::Named(_) | Type::Error | Type::Never => false,
             Type::Func(..) => false,
             Type::Unit | Type::Void => false,
             _ => match bound {

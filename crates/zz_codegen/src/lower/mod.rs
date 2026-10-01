@@ -17,7 +17,7 @@ mod fn_decl;
 mod green;
 mod stmt;
 
-use zz_frontend::ast::{Expr, Stmt};
+use zz_frontend::ast::{Expr, Pattern, Stmt};
 
 pub use context::{Lowerer, NameCtx};
 
@@ -319,6 +319,21 @@ impl Lowerer {
                     }
                     body.push_str(&out);
                 }
+                Stmt::Destructure { pat, value, .. } => {
+                    // Top-level `(a, b) := rhs` binds module globals
+                    // (see `collect_globals`): assign each element into
+                    // its `zz_global_*` so functions and closures
+                    // compiled with a fresh scope can see the names.
+                    let mut out = String::new();
+                    self.emit_destructure_global(
+                        pat,
+                        value,
+                        &mut names,
+                        &mut out,
+                        &mut global_init_done,
+                    );
+                    body.push_str(&out);
+                }
                 other => {
                     let mut out = String::new();
                     self.emit_stmt(other, &mut names, &mut out, false);
@@ -326,7 +341,6 @@ impl Lowerer {
                 }
             }
         }
-
         // Selective-import bare aliases (`double` for
         // `math_utils.double`): the callgraph edges the bare name while
         // the body is emitted under the canonical — forward the bare
@@ -518,6 +532,150 @@ impl Lowerer {
             source,
             needs_native_rt,
             needs_pg_link: crate::ffi::needs_pg_link(&expanded_natives),
+        }
+    }
+
+    /// Lower a top-level `(a, b) := rhs` destructuring declaration.
+    /// Each bound name is a module global (see `collect_globals`):
+    /// evaluate the RHS once into a temp, then assign each element
+    /// into its `zz_global_*` — mirroring top-level `Decl` assignment
+    /// (scalar extraction, `zz_assign` for refcounted values, init
+    /// tracking). Called only for direct children of the program block;
+    /// nested/function-body destructuring goes through `emit_stmt` and
+    /// binds scope-locally instead.
+    pub(super) fn emit_destructure_global(
+        &self,
+        pat: &zz_frontend::ast::Pattern,
+        value: &Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+        global_init_done: &mut std::collections::HashSet<String>,
+    ) {
+        let rhs = self.emit_expr(value, names, out);
+        let tmp = names.fresh("__dtup");
+        out.push_str(&format!("    zz_value {tmp} = {rhs};\n"));
+        // Record checker types for method dispatch (mirrors Decl).
+        for (name, ty) in self.destructure_binding_types(pat) {
+            names.checker_types.insert(name, ty);
+        }
+        self.emit_destructure_global_pat(pat, &tmp, names, out, global_init_done);
+    }
+
+    /// Checker types of a destructuring pattern's bindings, from
+    /// `tp.bindings` (populated by the checker for top-level names).
+    fn destructure_binding_types(
+        &self,
+        pat: &zz_frontend::ast::Pattern,
+    ) -> Vec<(String, zz_checker::Type)> {
+        fn leaf(out: &mut Vec<(String, zz_checker::Type)>, lowerer: &Lowerer, p: &Pattern) {
+            if let Pattern::Binding { name } = p {
+                if let Some(ty) = lowerer.tp.bindings.get(&name.name) {
+                    out.push((name.name.clone(), ty.clone()));
+                }
+            }
+        }
+        let mut types = Vec::new();
+        match pat {
+            Pattern::Tuple { pats, .. } => {
+                for p in pats {
+                    if matches!(p, Pattern::Tuple { .. }) {
+                        types.extend(self.destructure_binding_types(p));
+                    } else {
+                        leaf(&mut types, self, p);
+                    }
+                }
+            }
+            _ => leaf(&mut types, self, pat),
+        }
+        types
+    }
+
+    /// Bind a destructuring pattern's leaves into module globals.
+    /// `src` names a `zz_value` temp holding the tuple value; element
+    /// `i` is `zz_index_get(src, zz_int(i))` (tuples are runtime arrays).
+    /// Wildcards and match-only patterns bind nothing (mirroring the VM,
+    /// which pops them). A binding with no tracked global falls back to
+    /// a scope-local bind (defensive; unreachable when the checker
+    /// recorded every top-level name).
+    fn emit_destructure_global_pat(
+        &self,
+        pat: &zz_frontend::ast::Pattern,
+        src: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+        global_init_done: &mut std::collections::HashSet<String>,
+    ) {
+        match pat {
+            Pattern::Tuple { pats, .. } => {
+                for (i, p) in pats.iter().enumerate() {
+                    match p {
+                        Pattern::Wildcard { .. } => {}
+                        Pattern::Tuple { .. } => {
+                            let e = names.fresh("__de");
+                            let err = names.fresh("_dee");
+                            out.push_str(&format!("    int {err} = 0;\n"));
+                            out.push_str(&format!(
+                                "    zz_value {e} = zz_index_get({src}, zz_int({i}), &{err});\n"
+                            ));
+                            self.emit_destructure_global_pat(p, &e, names, out, global_init_done);
+                        }
+                        Pattern::Binding { name } => {
+                            let e = names.fresh("__de");
+                            let err = names.fresh("_dee");
+                            out.push_str(&format!("    int {err} = 0;\n"));
+                            out.push_str(&format!(
+                                "    zz_value {e} = zz_index_get({src}, zz_int({i}), &{err});\n"
+                            ));
+                            if let Some((gid, gtype)) = names
+                                .globals
+                                .get(&name.name)
+                                .map(|(a, b)| (a.clone(), b.clone()))
+                            {
+                                // Mirror top-level Decl assignment.
+                                let final_val = match gtype.as_str() {
+                                    "int64_t" => format!("({e}).i"),
+                                    "double" => format!("({e}).f"),
+                                    "bool" => format!("({e}).b"),
+                                    _ => e.clone(),
+                                };
+                                let first_init = !global_init_done.contains(&name.name);
+                                if first_init {
+                                    out.push_str(&format!("    {gid} = {final_val};\n"));
+                                    global_init_done.insert(name.name.clone());
+                                } else if matches!(gtype.as_str(), "int64_t" | "double" | "bool") {
+                                    out.push_str(&format!("    {gid} = {final_val};\n"));
+                                } else {
+                                    out.push_str(&format!("    zz_assign(&{gid}, {final_val});\n"));
+                                }
+                            } else {
+                                self.emit_pattern_bind(p, &e, names, out);
+                            }
+                        }
+                        // Literal/variant/or cannot appear here from the
+                        // parser (only flat bindings/wildcards); skip
+                        // without binding, matching the VM's Pop behavior.
+                        _ => {}
+                    }
+                }
+            }
+            // Non-tuple root (unreachable from the parser): bind directly.
+            Pattern::Binding { name } => {
+                if let Some((gid, gtype)) = names
+                    .globals
+                    .get(&name.name)
+                    .map(|(a, b)| (a.clone(), b.clone()))
+                {
+                    let final_val = match gtype.as_str() {
+                        "int64_t" => format!("({src}).i"),
+                        "double" => format!("({src}).f"),
+                        "bool" => format!("({src}).b"),
+                        _ => src.to_string(),
+                    };
+                    out.push_str(&format!("    {gid} = {final_val};\n"));
+                    global_init_done.insert(name.name.clone());
+                }
+            }
+            _ => {}
         }
     }
 }

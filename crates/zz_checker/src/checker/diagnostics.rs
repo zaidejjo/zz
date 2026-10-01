@@ -30,6 +30,8 @@ impl Checker {
             Type::Var(id) => {
                 self.unifier.bind(id, Type::Bool);
             }
+            // Divergent condition: unreachable, vacuously fine.
+            Type::Never => {}
             other => {
                 self.errors
                     .push(error_at(format!("expected `bool`, found `{other}`"), span));
@@ -43,6 +45,8 @@ impl Checker {
             Type::Var(id) => {
                 self.unifier.bind(id, Type::Int);
             }
+            // Divergent index: unreachable, vacuously fine.
+            Type::Never => {}
             other => {
                 self.errors.push(error_at(
                     format!("index must be `int`, found `{other}`"),

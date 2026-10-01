@@ -239,7 +239,14 @@ impl Checker {
                         if let Err(e) = self.unifier.unify(&vt, &ret) {
                             self.report_mismatch(e, v.span());
                         }
-                        vt
+                        // A `return` diverges: it never yields a value to the
+                        // enclosing block. Its statement type is `Never`
+                        // (bottom): it vanishes from if/match joins without
+                        // constraining sibling arms, while the function's
+                        // fall-through type is still verified against its
+                        // signature in `check_func_body` — so divergent
+                        // arms can never mask a wrong-typed value path.
+                        Type::Never
                     }
                     None => {
                         if let Err(e) = self.unifier.unify(&Type::Unit, &ret) {
@@ -967,22 +974,40 @@ impl Checker {
                 match els {
                     Some(e) => {
                         let et = self.check_expr(e);
-                        if let Err(err) = self.unifier.unify(&et, &tt) {
-                            self.report_mismatch(err, e.span());
+                        // Join: a divergent arm vanishes (join(Never, T)
+                        // = T) — only arms that can yield values constrain
+                        // each other.
+                        let tt_r = self.unifier.resolve(&tt);
+                        let et_r = self.unifier.resolve(&et);
+                        match (tt_r, et_r) {
+                            (Type::Never, Type::Never) => Type::Never,
+                            (Type::Never, _) => et,
+                            (_, Type::Never) => tt,
+                            _ => {
+                                if let Err(err) = self.unifier.unify(&et, &tt) {
+                                    self.report_mismatch(err, e.span());
+                                }
+                                tt
+                            }
                         }
                     }
                     None => {
                         // If the then-block contains a `return`, its type
-                        // may not be Unit (e.g. `if x { return 5 }`), but
-                        // that's fine — the return short-circuits.
+                        // may be `Never` (e.g. `if x { return 5 }`), but
+                        // that's fine — the return short-circuits. Either
+                        // way the expression yields unit when the branch
+                        // is not taken, so the if-expression types as
+                        // unit (this rejects a trailing no-else
+                        // if-with-return in a non-unit function, since
+                        // the fall-through path yields unit).
                         if !Self::block_has_return(then) {
                             if let Err(err) = self.unifier.unify(&Type::Unit, &tt) {
                                 self.report_mismatch(err, *span);
                             }
                         }
+                        Type::Unit
                     }
                 }
-                tt
             }
             Expr::While { cond, body, .. } => {
                 let ct = self.check_expr(cond);
@@ -1012,17 +1037,30 @@ impl Checker {
                 match els {
                     Some(e) => {
                         let et = self.check_expr(e);
-                        if let Err(err) = self.unifier.unify(&et, &tt) {
-                            self.report_mismatch(err, e.span());
+                        // Join: a divergent arm vanishes (join(Never, T)
+                        // = T) — only arms that can yield values constrain
+                        // each other.
+                        let tt_r = self.unifier.resolve(&tt);
+                        let et_r = self.unifier.resolve(&et);
+                        match (tt_r, et_r) {
+                            (Type::Never, Type::Never) => Type::Never,
+                            (Type::Never, _) => et,
+                            (_, Type::Never) => tt,
+                            _ => {
+                                if let Err(err) = self.unifier.unify(&et, &tt) {
+                                    self.report_mismatch(err, e.span());
+                                }
+                                tt
+                            }
                         }
                     }
                     None => {
                         if let Err(err) = self.unifier.unify(&Type::Unit, &tt) {
                             self.report_mismatch(err, *span);
                         }
+                        Type::Unit
                     }
                 }
-                tt
             }
             Expr::Try { expr, span } => self.check_try(expr, *span),
             Expr::Block(b) => self.check_block(b),
@@ -1378,7 +1416,12 @@ impl Checker {
                 t.clone()
             }
             (a, b) => {
-                if !matches!((&a, &b), (Type::Error, _) | (_, Type::Error)) {
+                // `Error` (earlier failure) and `Never` (divergent,
+                // unreachable operand) both suppress cascading errors.
+                if !matches!(
+                    (&a, &b),
+                    (Type::Error, _) | (_, Type::Error) | (Type::Never, _) | (_, Type::Never)
+                ) {
                     self.errors.push(error_at(
                         format!("cannot apply `{}` to `{}` and `{}`", op.symbol(), a, b),
                         span,
@@ -2314,7 +2357,9 @@ impl Checker {
         let st = self.unifier.resolve(&st);
         self.check_exhaustive(&st, arms, span);
         let mut result: Option<Type> = None;
+        let mut saw_arm = false;
         for arm in arms {
+            saw_arm = true;
             self.push_scope();
             self.bind_pattern(&arm.pat, &st);
             // Check match guard: must resolve to bool
@@ -2327,8 +2372,14 @@ impl Checker {
             let bt = self.check_expr(&arm.body);
             self.pop_scope();
             // `break`/`continue` arms diverge (never produce a value),
-            // so they don't constrain the match's result type.
+            // so they don't constrain the match's result type. Arms that
+            // diverge via `return` (`Never`) vanish from the join the
+            // same way: only arms that can yield values constrain each
+            // other (join(Never, T) = T).
             if matches!(arm.body, Expr::Break { .. } | Expr::Continue { .. }) {
+                continue;
+            }
+            if matches!(self.unifier.resolve(&bt), Type::Never) {
                 continue;
             }
             match &result {
@@ -2340,7 +2391,12 @@ impl Checker {
                 None => result = Some(bt),
             }
         }
-        result.unwrap_or(Type::Unit)
+        // No arms (rejected by exhaustiveness above, but be total):
+        // keep the old unit type. Arms that all diverge yield Never.
+        if !saw_arm {
+            return Type::Unit;
+        }
+        result.unwrap_or(Type::Never)
     }
 
     pub(crate) fn check_try(&mut self, expr: &Expr, span: Span) -> Type {
@@ -2616,6 +2672,14 @@ impl Checker {
             Pattern::Wildcard { .. } => {}
             Pattern::Binding { name } => {
                 self.define(&name.name, ty.clone());
+                // Top-level destructured names are module globals (like
+                // top-level `Decl`): record them for `tp.bindings` so
+                // downstream passes (native globals collection) can type
+                // them. Nested positions have env.len() > 1 (blocks push
+                // scopes) and are excluded, mirroring `Stmt::Decl`.
+                if self.env.len() == 1 {
+                    self.new_bindings.insert(name.name.clone(), ty.clone());
+                }
             }
             Pattern::Literal { value, span } => {
                 let lit_t = match value {

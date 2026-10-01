@@ -1,0 +1,50 @@
+# Known native (AOT) failure classes for the differential fuzzer.
+#
+# These are PRE-EXISTING native-backend limitations, unrelated to the
+# tuple-destructuring fixes. The fuzzer's big-run mode (`run.sh`) buckets
+# `NATFAIL` cases against these signatures; anything unmatched is a NEW
+# bug and must be investigated. Do not add new entries silently — each
+# entry needs a minimal reproducer below and, where applicable, a
+# `parity_known_failure!` entry in `crates/zz_cli/tests/dual_engine_parity.rs`.
+#
+# Format per class: signature (substring of the C compiler diagnostic),
+# minimal reproducer, status.
+
+## CLASS 1: tuple-literal boxing
+# Signature: passing 'int64_t' (aka 'long') to parameter of incompatible
+#   type 'zz_value' (aka 'struct zz_value') ... zz_vec_append
+# Tuple literals with computed (unboxed int) elements are appended raw.
+# Reproducer (VM prints 5, 56; native fails C compile):
+#   (a, b) := (2 + 3, 7 * 8)
+#   println(a)
+#   println(b)
+# Status: pre-existing; covered by the `destructuring` known-failure entry
+# in dual_engine_parity.rs.
+
+## CLASS 2: scalar-global copy double-unbox
+# Signature: member reference base type 'int64_t' (aka 'long') is not a
+#   structure or union ... (zz_global_<file>__<var>).i
+# Copying one top-level int global into another emits a second `.i`
+# extraction on the already-unboxed global.
+# Reproducer (VM prints 1; native fails C compile):
+#   v1 := 13
+#   v2 := v1
+#   println(v2)
+# Status: pre-existing; covered by the `scalar_global_copy`
+# known-failure entry in dual_engine_parity.rs.
+
+## CLASS 3 (FIXED — must stay empty): block-scoped rebinding
+# Was: use of undeclared identifier 'vN' — a shadowing re-declaration
+# inside a block left a stale NameCtx entry past the braces.
+# Fixed by push_scope/pop_scope discipline at every branch site.
+# Reproducer (now passes on both engines):
+#   tests/fixtures/regression/shadow_destructure.zz
+
+## CLASS 4 (FIXED — must stay empty): top-level destructure visibility
+# Was: closures/functions reading top-level destructured names got empty
+# output on native (names were main()-locals, not module globals).
+# Fixed by registering top-level destructured names in collect_globals
+# and assigning into `zz_global_*` in the top-level lowering.
+# Reproducers (now pass on both engines):
+#   tests/fixtures/regression/closure_capture_destructure.zz
+#   tests/fixtures/regression/func_capture_destructure.zz

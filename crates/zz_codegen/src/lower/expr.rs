@@ -185,6 +185,12 @@ impl Lowerer {
         out: &mut String,
     ) -> String {
         names.clear_array_lens();
+        // Lexical scope: declarations inside the block (including
+        // shadowing re-declarations) must not leak into the enclosing
+        // NameCtx — the C declarations live inside braces, so a stale
+        // entry would resolve to an out-of-scope identifier (or a shadowed
+        // one). Mirrors the for-loop body's push/pop_scope discipline.
+        names.push_scope();
         let tail_saved = names.stack.get("__tail").map(|v| v.len()).unwrap_or(0);
         let n = b.stmts.len();
         for (i, stmt) in b.stmts.iter().enumerate() {
@@ -197,7 +203,7 @@ impl Lowerer {
                 None
             }
         });
-        if let Some(tmp) = tail_tmp {
+        let result = if let Some(tmp) = tail_tmp {
             tmp
         } else if let Some(Stmt::Expr(e)) = b.stmts.last() {
             if matches!(e, Expr::If { .. }) {
@@ -213,7 +219,9 @@ impl Lowerer {
                 .unwrap_or_else(|| "zz_unit()".to_string())
         } else {
             "zz_unit()".to_string()
-        }
+        };
+        names.pop_scope();
+        result
     }
 
     /// Return expression for a trailing-`Decl` tail: the declared local,
@@ -686,10 +694,15 @@ impl Lowerer {
                 let c = self.emit_expr(cond, names, out);
                 let c = box_scalar_operand(cond, names, &c);
                 out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
+                // Lexical scope for the body (same push/pop_scope
+                // discipline as for-loop bodies and value blocks):
+                // shadowing declarations must not leak past the braces.
+                names.push_scope();
                 // Loop body is never a function tail.
                 for bstmt in &body.stmts {
                     self.emit_stmt(bstmt, names, out, false);
                 }
+                names.pop_scope();
                 if let Some(ref name) = loop_arena {
                     self.loop_arenas.borrow_mut().pop();
                     *self.current_loop_arena.borrow_mut() =
@@ -1154,6 +1167,9 @@ impl Lowerer {
                     out.push_str(&format!(
                         "    for (int64_t __ci = ({a}).i; __ci < ({b}).i; __ci++) {{\n"
                     ));
+                    // Lexical scope for the comprehension variable
+                    // (shadowing must not leak past the braces).
+                    names.push_scope();
                     let xcid = names.enter(&var.name);
                     out.push_str(&format!("        zz_value {xcid} = zz_int(__ci);\n"));
                     let mut body_scratch = String::new();
@@ -1177,6 +1193,7 @@ impl Lowerer {
                         ));
                     }
                     out.push_str("    }\n");
+                    names.pop_scope();
                 } else {
                     out.push_str("    // unsupported comprehension iterable\n");
                 }
@@ -3689,6 +3706,9 @@ impl Lowerer {
 
             match &arm.pat {
                 Pattern::Variant { name, arg, .. } => {
+                    // Lexical scope for arm bindings (same push/pop_scope
+                    // discipline as value blocks).
+                    names.push_scope();
                     let tag_check = match name.as_str() {
                         "ok" => "ZZ_RESULT_OK",
                         "err" => "ZZ_RESULT_ERR",
@@ -3742,11 +3762,15 @@ impl Lowerer {
                     for _ in 0..inner_open {
                         out.push_str("        }\n");
                     }
+                    names.pop_scope();
                     if arm_closes_block {
                         out.push_str("    }\n");
                     }
                 }
                 Pattern::Binding { name } => {
+                    // Lexical scope for the arm binding (same
+                    // push/pop_scope discipline as value blocks).
+                    names.push_scope();
                     // Green: the binding outlives a suspend in the arm body
                     // (resume jumps over this declaration) — frame cell,
                     // mirroring `emit_pattern_bind`.
@@ -3775,11 +3799,14 @@ impl Lowerer {
                     }
                     let arm_val = self.emit_tail_value(&arm.body, names, out);
                     out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
+                    names.pop_scope();
                     if arm_closes_block {
                         out.push_str("    }\n");
                     }
                 }
                 Pattern::Wildcard { .. } => {
+                    // Lexical scope for declarations in the arm body.
+                    names.push_scope();
                     if let Some(guard_expr) = &arm.guard {
                         let guard_c = emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
                         if arm_needs_else_prefix {
@@ -3796,11 +3823,14 @@ impl Lowerer {
                     }
                     let arm_val = self.emit_tail_value(&arm.body, names, out);
                     out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
+                    names.pop_scope();
                     if arm_closes_block {
                         out.push_str("    }\n");
                     }
                 }
                 Pattern::Literal { value, .. } => {
+                    // Lexical scope for declarations in the arm body.
+                    names.push_scope();
                     let lit_c = match value {
                         zz_frontend::ast::Lit::Int(v) => format!("zz_int({v})"),
                         zz_frontend::ast::Lit::Float(v) => {
@@ -3830,6 +3860,7 @@ impl Lowerer {
                     }
                     let arm_val = self.emit_tail_value(&arm.body, names, out);
                     out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
+                    names.pop_scope();
                     if arm_closes_block {
                         out.push_str("    }\n");
                     }

@@ -1,0 +1,23 @@
+// Regression: trailing if-with-returns as else tail must typecheck.
+struct E { msg: str }
+func f(k: str, n: int) -> Result<int, E> {
+    cur := 0
+    if k == "table" {
+        cur = 1
+    } else {
+        if k != "array" {
+            return .err(E{msg: "bad"})
+        }
+        cur = n
+        if cur > 10 {
+            return .err(E{msg: "big"})
+        }
+    }
+    .ok(cur)
+}
+r := f("array", 5)
+match r {
+    .ok(v) => println(v),
+    .err(e) => println("err {e.msg}"),
+}
+println("trailing_if_in_else_ok")

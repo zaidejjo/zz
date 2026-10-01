@@ -1,0 +1,21 @@
+// Fuzz smoke (fixed seed): differential VM-vs-native program.
+// Regenerate with tests/fuzz/gen.py; screen with tests/fuzz/run.sh.
+v1 := ((2 % (((82) % 29) + 30)) / (((8) % 29) + 30))
+func f2(p3: int) -> int {
+    if p3 < 0 {
+        return 57
+    }
+    m4 := p3 % 3
+    match m4 {
+        0 => { return (42 + 82) },
+        _ => { q5 := 36 },
+    }
+    84
+}
+acc6 := 0
+for i7 in 1..6 {
+    acc6 = acc6 + 58
+}
+println(acc6)
+println(f2(3))
+println("DONE")

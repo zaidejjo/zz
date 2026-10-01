@@ -69,6 +69,14 @@ pub enum Type {
     /// Sentinel type for undefined / erroneous expressions.
     /// Suppresses cascading errors (e.g. "cannot apply `+` to error and int").
     Error,
+    /// Bottom type for diverging control flow (`return` with a value,
+    /// if/match arms that never fall through). `Never` vanishes from
+    /// joins (`join(Never, T) = T`) and unifies with anything *without
+    /// binding* — but unlike `Error` it is a legitimate type, not
+    /// failure suppression: the function's fall-through type is still
+    /// verified against its signature, so divergent arms can never mask
+    /// a wrong-typed value path.
+    Never,
 }
 
 impl Type {
@@ -143,6 +151,7 @@ impl fmt::Display for Type {
             Type::Var(_) => write!(f, "_"),
             Type::Named(n) => write!(f, "{n}"),
             Type::Error => write!(f, "<error>"),
+            Type::Never => write!(f, "!"),
         }
     }
 }

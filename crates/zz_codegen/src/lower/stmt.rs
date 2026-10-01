@@ -1,7 +1,7 @@
 //! Statement lowering: let bindings, assignments, if/else, match, loops,
 //! returns, and defer.
 
-use zz_frontend::ast::{Block, Expr, Stmt};
+use zz_frontend::ast::{Block, Expr, Pattern, Stmt};
 
 use super::*;
 
@@ -695,12 +695,75 @@ impl Lowerer {
                 drop(slots);
                 out.push_str(&format!("    __defers[__defer_n++] = {idx};\n"));
             }
-            Stmt::Destructure { .. } => {
-                out.push_str("    // unsupported statement skipped\n");
+            Stmt::Destructure { pat, value, .. } => {
+                // Tuples are runtime arrays: evaluate the RHS once into a
+                // temp, then extract each element by index and bind it with
+                // the shared pattern binder (green-aware, like match arms).
+                // Previously this statement was skipped entirely, so
+                // destructured values printed empty on native.
+                let rhs = self.emit_expr(value, names, out);
+                let tmp = names.fresh("__dtup");
+                out.push_str(&format!("    zz_value {tmp} = {rhs};\n"));
+                self.emit_destructure_pat(pat, &tmp, names, out);
             }
             Stmt::Func { .. } | Stmt::Struct { .. } | Stmt::Impl { .. } | Stmt::Import { .. } => {}
             // Top-level only: emitted in the preamble by `Lowerer::lower`.
             Stmt::ExternBlock { .. } | Stmt::Link { .. } => {}
+        }
+    }
+
+    /// Bind a destructuring pattern to a temp holding the tuple value.
+    /// Tuples are runtime arrays, so element `i` is `zz_index_get(src,
+    /// zz_int(i))`. Bindings reuse the shared pattern binder (green-aware);
+    /// wildcards bind nothing. Literal/variant/or patterns cannot appear
+    /// here from the parser (only flat bindings/wildcards); anything else
+    /// is skipped without binding, matching the VM's Pop behavior.
+    pub(super) fn emit_destructure_pat(
+        &self,
+        pat: &Pattern,
+        src: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) {
+        match pat {
+            Pattern::Tuple { pats, .. } => {
+                for (i, p) in pats.iter().enumerate() {
+                    match p {
+                        Pattern::Wildcard { .. } => {}
+                        Pattern::Tuple { .. } => {
+                            let e = names.fresh("__de");
+                            let err = names.fresh("_dee");
+                            out.push_str(&format!("    int {err} = 0;\n"));
+                            out.push_str(&format!(
+                                "    zz_value {e} = zz_index_get({src}, zz_int({i}), &{err});\n"
+                            ));
+                            self.emit_destructure_pat(p, &e, names, out);
+                        }
+                        Pattern::Binding { .. } => {
+                            let e = names.fresh("__de");
+                            let err = names.fresh("_dee");
+                            out.push_str(&format!("    int {err} = 0;\n"));
+                            out.push_str(&format!(
+                                "    zz_value {e} = zz_index_get({src}, zz_int({i}), &{err});\n"
+                            ));
+                            self.emit_pattern_bind(p, &e, names, out);
+                        }
+                        // Literal/variant/or cannot appear here from the
+                        // parser (only flat bindings/wildcards); skip
+                        // without binding, matching the VM's Pop behavior.
+                        // NOTE: emit_pattern_bind must NOT be used for
+                        // variants here — it opens an if-block that only
+                        // match-arm lowering closes.
+                        _ => {}
+                    }
+                }
+            }
+            // Non-tuple root (unreachable from the parser, which always
+            // wraps destructuring patterns in a tuple): bind directly.
+            Pattern::Binding { .. } => {
+                self.emit_pattern_bind(pat, src, names, out);
+            }
+            _ => {}
         }
     }
 
@@ -1336,6 +1399,10 @@ impl Lowerer {
     /// without this the leading statements of a multi-statement tail
     /// branch would be silently dropped from the generated C.)
     pub(super) fn emit_tail_branch(&self, b: &Block, names: &mut NameCtx, out: &mut String) {
+        // Lexical scope for the branch (same push/pop_scope discipline
+        // as value blocks): shadowing declarations must not leak past
+        // the branch braces.
+        names.push_scope();
         let n = b.stmts.len();
         for stmt in &b.stmts[..n.saturating_sub(1)] {
             self.emit_stmt(stmt, names, out, false);
@@ -1343,6 +1410,7 @@ impl Lowerer {
         if self.last_stmt_value(b, names, out).is_none() {
             out.push_str("        return zz_unit();\n");
         }
+        names.pop_scope();
     }
 
     /// Emit an expression in return position, emitting `return <val>;`.
