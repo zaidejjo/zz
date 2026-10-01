@@ -34,6 +34,9 @@ pub enum BuildMode {
     Release,
     Static,
     Pgo,
+    /// PGO phase 2: optimize with collected profile data (`zz profile`).
+    /// Same flags as the instrumented build, plus `-fprofile-use`.
+    PgoUse,
 }
 
 /// Release-build knobs: cross target, provider selection, verbosity.
@@ -298,6 +301,7 @@ fn opts_for(mode: BuildMode) -> BuildOptions {
         BuildMode::Release => BuildOptions::release(),
         BuildMode::Static => BuildOptions::static_lto(),
         BuildMode::Pgo => BuildOptions::pgo_generate(),
+        BuildMode::PgoUse => BuildOptions::pgo_use(),
     }
 }
 

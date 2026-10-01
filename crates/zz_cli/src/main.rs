@@ -10,6 +10,7 @@
 use std::process::ExitCode;
 
 mod build;
+mod doctor;
 mod loader;
 mod pm;
 mod repl;
@@ -17,6 +18,7 @@ mod session;
 mod setup;
 mod test_runner;
 mod ui;
+mod upgrade;
 
 use zz_frontend::diag::{error_at, render_to_string, Files};
 use zz_frontend::span::Span;
@@ -41,7 +43,9 @@ USAGE:
 
 PACKAGE MANAGER:
     zz init [--template T]        initialize zz.toml + src/main.zz in cwd
-    zz new <name> [--template T]  create a new project directory
+    zz new <name> [--template T]  create a new project (git init -b main)
+                                  template: cli|lib|web, pkg:NAME, git URL, or PATH
+                                  flags: --force (non-empty dir), --no-git
     zz add <pkg>[@ver]            add a dependency to zz.toml
     zz install, zz i              resolve deps, fetch into CAS, link
     zz install --path <dir|file|pkg>
@@ -53,6 +57,11 @@ PACKAGE MANAGER:
     zz install --allow-hooks    permit legacy [native] build hooks (direct only)
     zz remove <pkg>               remove a dependency
     zz update [pkg]               re-resolve floating versions
+    zz outdated                   locked vs wanted vs latest per dep
+    zz deps tree [--depth N]      print the dependency tree
+    zz deps why <pkg>             show why a package is depended on
+    zz audit                      verify pins (published? hash? licensed?)
+    zz clean [--deps]             remove build outputs (plus vendor/ + lock)
     zz search <query>             search the package registry
     zz info <pkg>                 show package metadata and versions
     zz login [--browser]          authenticate for publishing
@@ -62,12 +71,16 @@ PACKAGE MANAGER:
     zz setup [--yes]              create ~/.zz/bin, wire PATH + completions
     zz setup --check              verify shell integration (no changes)
     zz completion [shell]         print shell completion (bash|zsh|fish|powershell)
+    zz upgrade [--check]           self-update from GitHub releases
+    zz doctor [--fix]              audit the toolchain (binary, clang, shell, git, registry)
 
 BUILD MODES (single Clang backend, always a native binary):
      zz build <file.zz>           debug build (-O0 -g, fast, dynamic) — the default
      zz build -p <file.zz>        release build (-O3 -flto=thin, dynamic, stripped)
      zz build --static <file.zz>  static build (ThinLTO, DCE, self-contained; not on macOS)
      zz build --pgo <file.zz>     PGO build (profile-guided, native host only)
+     zz profile <file.zz> [-- args]
+                                  PGO end to end: instrument → train → optimize
      zz build --target <triple> <file.zz>
                                   cross build via clang --target= (drops -march=native)
 
@@ -210,6 +223,13 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("profile") => match profile_cmd(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
         Some("check") => {
             let (path, flags) = parse_path_and_flags(rest);
             let has_fix = flags.contains(&"--fix".to_string());
@@ -307,6 +327,34 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("outdated") => match pm::outdated(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("deps") => match pm::deps(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("audit") => match pm::audit(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("clean") => match pm::clean(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
         Some("search") => match pm::search(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
@@ -350,6 +398,20 @@ fn main() -> ExitCode {
             }
         },
         Some("setup") => match setup::run(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("upgrade") => match upgrade::run(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("doctor") => match doctor::run(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("zz: {msg}");
@@ -966,7 +1028,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         build::BuildMode::Dev => "dev",
         build::BuildMode::Release => "release",
         build::BuildMode::Static => "static",
-        build::BuildMode::Pgo => "pgo",
+        build::BuildMode::Pgo | build::BuildMode::PgoUse => "pgo",
     };
     crate::ui::header(&format!("building {path} ({mode_str})"));
     // The clang link step can run for minutes with no output — spin with
@@ -988,6 +1050,149 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
             return Err(msg);
         }
     };
+    println!("built {}", dest.display());
+    Ok(())
+}
+
+/// `zz profile <file.zz> [-- args]`: PGO end to end.
+///
+/// Phase 1 instruments (`-fprofile-generate`), the training run executes
+/// with the given args, `llvm-profdata` merges coverage, and phase 2
+/// rebuilds optimized (`-fprofile-use`). Profile files are cleaned up on
+/// success; on failure they are left in place with a hint.
+/// Split `profile` args at `--`: `(flag side, training args)`.
+fn split_train_args(args: &[String]) -> (&[String], Vec<String>) {
+    match args.iter().position(|a| a == "--") {
+        Some(i) => (&args[..i], args.get(i + 1..).unwrap_or(&[]).to_vec()),
+        None => (args, Vec::new()),
+    }
+}
+
+/// `zz profile <file.zz> [-- args]`: PGO end to end.
+///
+/// Phase 1 instruments (`-fprofile-generate`), the training run executes
+/// with the given args, `llvm-profdata` merges coverage, and phase 2
+/// rebuilds optimized (`-fprofile-use`). Profile files are cleaned up on
+/// success; on failure they are left in place with a hint.
+fn profile_cmd(args: &[String]) -> Result<(), String> {
+    let (left, train_args) = split_train_args(args);
+    let path = left.iter().find(|a| !a.starts_with('-')).ok_or_else(|| {
+        "missing file argument\n\n\
+              usage: zz profile <file.zz> [-- args]\n\
+              hint: args after `--` run the training workload"
+            .to_string()
+    })?;
+    if left.iter().any(|a| a.starts_with('-')) {
+        return Err("zz profile takes no build flags\n\
+            hint: instrument + optimize modes are fixed; use `zz build` for custom flags"
+            .to_string());
+    }
+    // Fail fast: merging needs llvm-profdata, and there is no point
+    // spending a full instrumented build without it.
+    if std::process::Command::new("llvm-profdata")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        return Err("llvm-profdata not found\n\
+            hint: install LLVM tools (apt: llvm, brew: llvm) to use `zz profile`"
+            .to_string());
+    }
+    let p = std::path::Path::new(path);
+    let rel = build::ReleaseOptions::default();
+
+    crate::ui::header(&format!("profiling {path}"));
+    crate::ui::step(1, 4, "Instrumented build");
+    let spinner = crate::ui::Spinner::start("Compiling (instrumented)");
+    let instrumented = match build::build_release(p, build::BuildMode::Pgo, &rel) {
+        Ok(bin) => {
+            spinner.finish("instrumented build done");
+            bin
+        }
+        Err(e) => {
+            drop(spinner);
+            return Err(e);
+        }
+    };
+
+    crate::ui::step(2, 4, "Training run");
+    let prof_dir = std::env::temp_dir().join(format!("zz-profile-{}", std::process::id()));
+    if prof_dir.exists() {
+        let _ = std::fs::remove_dir_all(&prof_dir);
+    }
+    std::fs::create_dir_all(&prof_dir).map_err(|e| format!("cannot create profile dir: {e}"))?;
+    let profraw = prof_dir.join("zz.profraw");
+    let status = std::process::Command::new(&instrumented)
+        .args(&train_args)
+        .env("LLVM_PROFILE_FILE", &profraw)
+        .status()
+        .map_err(|e| format!("cannot run training binary: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(&prof_dir);
+        return Err(format!(
+            "training run failed (exit {})\n\
+              hint: the workload must succeed for profile data to be valid",
+            status.code().unwrap_or(-1)
+        ));
+    }
+
+    crate::ui::step(3, 4, "Merging profile");
+    let mut raw_files: Vec<std::path::PathBuf> = std::fs::read_dir(&prof_dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("profraw"))
+                .collect()
+        })
+        .unwrap_or_default();
+    raw_files.sort();
+    if raw_files.is_empty() {
+        let _ = std::fs::remove_dir_all(&prof_dir);
+        return Err("no profile data collected\n\
+            hint: the training run must execute instrumented code (check its args)"
+            .to_string());
+    }
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
+    let profdata = cwd.join("default.profdata");
+    let merge = std::process::Command::new("llvm-profdata")
+        .arg("merge")
+        .arg("-o")
+        .arg(&profdata)
+        .args(&raw_files)
+        .output()
+        .map_err(|e| format!("cannot run llvm-profdata: {e}"))?;
+    let _ = std::fs::remove_dir_all(&prof_dir);
+    if !merge.status.success() {
+        return Err(format!(
+            "llvm-profdata merge failed: {}\n\
+              hint: inspect {} and retry",
+            String::from_utf8_lossy(&merge.stderr).trim(),
+            profdata.display()
+        ));
+    }
+
+    crate::ui::step(4, 4, "Optimized build");
+    let spinner = crate::ui::Spinner::start("Compiling (optimized)");
+    let dest = match build::build_release(p, build::BuildMode::PgoUse, &rel) {
+        Ok(dest) => {
+            let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+            spinner.finish(&format!(
+                "built {} (pgo, {})",
+                dest.display(),
+                crate::ui::human_bytes(meta)
+            ));
+            dest
+        }
+        Err(e) => {
+            drop(spinner);
+            return Err(format!(
+                "{e}\nhint: {} left in place — fix and re-run to retry phase 2",
+                profdata.display()
+            ));
+        }
+    };
+    let _ = std::fs::remove_file(&profdata);
     println!("built {}", dest.display());
     Ok(())
 }
@@ -1471,5 +1676,38 @@ mod tests {
             }
             _ => {} // either Ok or type-check errors — both prove scanning worked.
         }
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::split_train_args;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn splits_training_args() {
+        let a = args(&["app.zz", "--", "input.txt", "--fast"]);
+        let (left, train) = split_train_args(&a);
+        assert_eq!(left, &["app.zz".to_string()]);
+        assert_eq!(train, vec!["input.txt".to_string(), "--fast".to_string()]);
+    }
+
+    #[test]
+    fn no_separator_means_no_training_args() {
+        let a = args(&["app.zz"]);
+        let (left, train) = split_train_args(&a);
+        assert_eq!(left, &["app.zz".to_string()]);
+        assert!(train.is_empty());
+    }
+
+    #[test]
+    fn trailing_separator_is_empty() {
+        let a = args(&["app.zz", "--"]);
+        let (left, train) = split_train_args(&a);
+        assert_eq!(left, &["app.zz".to_string()]);
+        assert!(train.is_empty());
     }
 }

@@ -68,6 +68,13 @@ Install a project as a tool (`~/.zz/bin`):
 zz install --path .
 ```
 
+Keep the toolchain healthy:
+
+```bash
+zz upgrade   # self-update to the latest release
+zz doctor    # audit binary, clang, shell, git, registry (add --fix)
+```
+
 ## Documentation
 
 - [Getting started](https://zz-lang.pages.dev/getting-started)

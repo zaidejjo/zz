@@ -30,7 +30,7 @@ _zz_complete() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     cword=$COMP_CWORD
-    cmds="run build test check fix fmt eval init new add install i remove update search info registry login publish cache setup completion help"
+    cmds="run build test check fix fmt eval init new add install i remove update search info registry login publish cache setup completion upgrade doctor outdated deps profile clean help"
     file_cmds=" run build test check fix fmt "
     flags="--help --version -p --release --static --pgo --target --cc --verbose --embed --native --registry --path --git --rev --limit --dry-run --yes --allow-source-builds --allow-hooks --template --author --description --license --repo --browser --skip-tests --check --fix --hard --interactive --stdin"
     case "$prev" in
@@ -77,7 +77,7 @@ pub const ZSH_COMPLETION: &str = r#"#compdef zz
 # zz shell completion (zsh) — managed by `zz setup`. Do not edit.
 _zz() {
     local -a cmds flags
-    cmds=(run build test check fix fmt eval init new add install i remove update search info registry login publish cache setup completion help)
+    cmds=(run build test check fix fmt eval init new add install i remove update search info registry login publish cache setup completion upgrade doctor outdated deps profile clean help)
     flags=(--help --version -p --release --static --pgo --target --cc --verbose --embed --native --registry --path --git --rev --limit --dry-run --yes --allow-source-builds --allow-hooks --template --author --description --license --repo --browser --skip-tests --check --fix --hard --interactive --stdin)
     if (( CURRENT == 2 )); then
         _describe 'zz command' cmds
@@ -116,7 +116,7 @@ function __fish_complete_zz_files --description 'ZZ source files and directories
     end
     __fish_complete_directories
 end
-set -l zz_cmds run build test check fix fmt eval init new add install i remove update search info registry login publish cache setup completion help
+set -l zz_cmds run build test check fix fmt eval init new add install i remove update search info registry login publish cache setup completion upgrade doctor outdated deps profile clean help
 complete -c zz -f -n '__fish_use_subcommand' -a "$zz_cmds"
 complete -c zz -f -n '__fish_seen_subcommand_from run build test check fix fmt' -a '(__fish_complete_zz_files)' -d 'ZZ source file'
 complete -c zz -n '__fish_seen_subcommand_from completion' -f -a 'bash zsh fish powershell' -d 'Shell'
@@ -137,7 +137,7 @@ complete -c zz -l native -d 'Use the native AOT compiler'
 pub const POWERSHELL_COMPLETION: &str = r#"# zz shell completion (powershell) — managed by `zz setup`. Do not edit.
 Register-ArgumentCompleter -Native -CommandName @('zz') -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
-    $commands = @('run','build','test','check','fix','fmt','eval','init','new','add','install','i','remove','update','search','info','registry','login','publish','cache','setup','completion','help')
+    $commands = @('run','build','test','check','fix','fmt','eval','init','new','add','install','i','remove','update','search','info','registry','login','publish','cache','setup','completion','upgrade','doctor','outdated','deps','profile','clean','help')
     $fileCmds = @('run','build','test','check','fix','fmt')
     $elements = $commandAst.CommandElements
     if ($elements.Count -ge 2 -and $fileCmds -contains $elements[1]) {
@@ -795,7 +795,19 @@ mod tests {
         assert!(POWERSHELL_COMPLETION.contains("*.zz"));
         // Every script lists the real subcommands.
         for script in [BASH_COMPLETION, ZSH_COMPLETION, FISH_COMPLETION] {
-            for cmd in ["run", "build", "setup", "completion", "install"] {
+            for cmd in [
+                "run",
+                "build",
+                "setup",
+                "completion",
+                "install",
+                "upgrade",
+                "doctor",
+                "outdated",
+                "deps",
+                "profile",
+                "clean",
+            ] {
                 assert!(script.contains(cmd), "script missing `{cmd}`");
             }
         }
