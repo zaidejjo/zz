@@ -1,9 +1,19 @@
 name: CI
 
+# Single place where the suite runs. Everything downstream (release,
+# docker, AUR publishers) triggers off CI success or Release events and
+# never re-runs tests.
+#
+# Triggers:
+#   push to dev or main (merge commits included — the merge itself is
+#     tested, so main is always green),
+#   PRs targeting dev or main (feature branches get checked before merge).
+
 on:
   push:
-    branches: [main]
+    branches: [dev, main]
   pull_request:
+    branches: [dev, main]
 
 env:
   CARGO_TERM_COLOR: always
