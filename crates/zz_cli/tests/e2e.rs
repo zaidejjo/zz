@@ -273,6 +273,21 @@ e2e_success_test!(
     "branch_call_tails.zz"
 );
 e2e_success_test!(
+    e2e_regression_branch_early_return_calls,
+    "regression",
+    "branch_early_return_calls.zz"
+);
+e2e_success_test!(
+    e2e_regression_string_accum_loop,
+    "regression",
+    "string_accum_loop.zz"
+);
+e2e_success_test!(
+    e2e_regression_string_store_across_iter,
+    "regression",
+    "string_store_across_iter.zz"
+);
+e2e_success_test!(
     e2e_regression_fuzz_smoke_00,
     "regression",
     "fuzz_smoke_00.zz"

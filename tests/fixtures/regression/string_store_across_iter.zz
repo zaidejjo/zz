@@ -1,0 +1,43 @@
+// Regression: every retaining store must heal loop-arena strings to heap
+// (variable copies, array/dict/object slots, push, return). Sibling of
+// string_accum_loop: those shapes aliased arena memory past the reset.
+import std.vec
+
+struct Slot { val: str }
+
+func build(prefix: str, n: int) -> str {
+    out := ""
+    for i in 0..n {
+        chunk := prefix + str(i) + ","
+        out = out + chunk
+    }
+    out
+}
+
+func pick(c: bool, a: str, b: str) -> str {
+    if c {
+        return a + "!"
+    }
+    return b + "?"
+}
+
+s := build("k", 3)
+println(s)
+tmp := build("v", 2)
+cpy := tmp
+println(cpy)
+arr := [build("a", 1), build("b", 1)]
+println(arr[0] + arr[1])
+arr[0] = build("c", 1)
+println(arr[0])
+d := {"k": build("d", 1)}
+println(d["k"])
+u := Slot{val: build("e", 1)}
+println(u.val)
+u.val = build("f", 1)
+println(u.val)
+lst: [str] = []
+lst = vec.push(lst, build("g", 1))
+println(lst[0])
+println(pick(true, build("h", 1), build("i", 1)))
+println("string_store_across_iter_ok")
