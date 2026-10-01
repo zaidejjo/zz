@@ -560,6 +560,14 @@ static inline void zz_release(zz_value *v) {
     }
 }
 
+// Forward: defined in strings.c (same translation unit once the runtime
+// sources are concatenated). Heals an arena-owned string (refs==0
+// sentinel) into an independent heap copy; every other value passes
+// through unchanged. Retaining stores must heal: the per-iteration
+// loop-arena reset reuses the buffer, so a stored alias would read back
+// garbage on the next iteration (and dangle past loop-arena destroy).
+zz_value zz_str_heal_arena(zz_value v);
+
 static inline void zz_assign(zz_value *dst, zz_value src) {
     // Release old value if it's a refcounted type.
     if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY || dst->tag == ZZ_BYTES ||
@@ -567,6 +575,9 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
         dst->tag == ZZ_OPTION_SOME || dst->tag == ZZ_RESULT_OK ||
         dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON) {
         zz_release(dst);
+    }
+    if (src.tag == ZZ_STR && src.s && !src.s->interned && src.s->refs == 0) {
+        src = zz_str_heal_arena(src);
     }
     *dst = src;
     // Retain the new value for refcounted types.
