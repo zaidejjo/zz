@@ -12,6 +12,15 @@ name: release
 # dispatch. Push-to-main is deliberately NOT a trigger: every merge
 # already ran CI, and re-running here would duplicate it.
 #
+# Downstream trigger contract: docker-publish and aur-publish listen for
+# `release: published`, and GitHub does NOT fire that event when the
+# Release is created with GITHUB_TOKEN (token-authenticated API activity
+# never triggers new workflow runs — anti-recursion rule). So the tag +
+# Release below are created with a user PAT (`RELEASE_TOKEN` secret,
+# Contents read+write on this repo). Without it the Release still cuts
+# fine, but docker/AUR will never fire — check the step logs for the
+# explicit warning.
+#
 # Flow: resolve version -> skip if released -> sync Cargo.lock ->
 # build zips (x86_64 + aarch64, in parallel) -> create Release WITH
 # the zips attached (single shot, so `release: published` consumers
@@ -217,6 +226,13 @@ jobs:
         with:
           pattern: release-zip-*
           merge-multiple: true
+      - name: resolve release token
+        run: |
+          if [ -z "${{ secrets.RELEASE_TOKEN }}" ]; then
+            echo "::warning::RELEASE_TOKEN secret is not set — falling back to GITHUB_TOKEN. The Release will cut, but docker-publish/aur-publish will NOT trigger (GitHub suppresses workflow runs from token-created releases). Add a PAT with Contents read+write as RELEASE_TOKEN to enable the chain."
+          else
+            echo "using RELEASE_TOKEN (user PAT): downstream release workflows will trigger"
+          fi
       - name: create tag + release with assets (if missing)
         run: |
           TAG="${{ needs.cut.outputs.tag }}"
@@ -243,4 +259,7 @@ jobs:
             zz-*.zip
           echo "created release $TAG with prebuilt zips"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # User PAT when present so the `release: published` event is
+          # genuine and downstream workflows fire; GITHUB_TOKEN fallback
+          # cuts the Release but triggers nothing (see warning above).
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN != '' && secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}

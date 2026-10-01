@@ -24,12 +24,17 @@ ARG TARGETARCH
 ARG ZZ_VERSION
 ARG GITHUB_REPOSITORY=zaidejjo/zz
 
-FROM debian:bookworm-slim
+# NOTE: keep this distro in lockstep with the release builders
+# (ubuntu-latest / ubuntu-24.04-arm in release.yml): the prebuilt zips
+# link the builders' glibc, and a base with an OLDER glibc fails at
+# `zz --version` with `GLIBC_X.YY not found`. If runners move on
+# (e.g. ubuntu-26.04), bump this base to match.
+FROM ubuntu:24.04
 ARG TARGETARCH
 ARG ZZ_VERSION
 ARG GITHUB_REPOSITORY
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl unzip libssl3 && rm -rf /var/lib/apt/lists/*
+        ca-certificates curl unzip libssl3t64 && rm -rf /var/lib/apt/lists/*
 # Release zips are per-arch; map Docker arches onto their names.
 RUN case "$TARGETARCH" in \
         amd64) ZZARCH=x86_64 ;; \
