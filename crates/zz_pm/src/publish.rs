@@ -95,6 +95,17 @@ pub fn validate(manifest: &Manifest) -> Result<(), PublishError> {
         )));
     }
 
+    // Check the minimum-compiler requirement parses (it is stored
+    // verbatim and enforced by installers/runners).
+    if let Some(req) = manifest.package.zz.as_deref() {
+        if semver::VersionReq::parse(req).is_err() {
+            return Err(PublishError::InvalidField(format!(
+                "package.zz `{req}` is not a semver requirement (want e.g. \">=0.1.5\")\n\
+                 hint: fix the requirement in zz.toml"
+            )));
+        }
+    }
+
     // Check for path dependencies — these cannot be published
     let path_deps: Vec<String> = manifest
         .dependencies
@@ -324,6 +335,21 @@ mod tests {
         manifest.package.version = "1.0.0".to_string();
 
         assert!(validate(&manifest).is_ok());
+    }
+
+    #[test]
+    fn validate_zz_req() {
+        let mut manifest = Manifest::default();
+        manifest.package.name = "my_cool_lib".to_string();
+        manifest.package.version = "1.0.0".to_string();
+        // Absent: fine.
+        assert!(validate(&manifest).is_ok());
+        // Well-formed: stored, not rejected.
+        manifest.package.zz = Some(">=0.1.5".to_string());
+        assert!(validate(&manifest).is_ok());
+        // Malformed: rejected at publish time.
+        manifest.package.zz = Some("not-a-req!!!".to_string());
+        assert!(validate(&manifest).is_err());
     }
 
     #[test]
