@@ -50,6 +50,15 @@ zz_value zz_str_owned(char *s);            // takes ownership
 zz_value zz_str_static(const char *s);     // copy of a C literal
 zz_value zz_str_new_arena(const char *s, size_t len, zz_arena *arena);
 zz_value zz_str_cast_arena(zz_value v, int *err, zz_arena *arena); // arena str cast
+// Heal an arena-owned string (refs==0 sentinel) into an independent
+// heap-owned copy (refs==1). All other values pass through unchanged.
+// Every boundary that retains a value beyond the current loop iteration
+// (variable assignment, array/dict/object stores) must heal: the
+// per-iteration `zz_arena_reset` reuses the buffer, so aliasing it past
+// the reset reads back garbage (NUL bytes), and aliasing it past
+// `zz_arena_destroy` is use-after-free. Mirrors the string path of
+// `zz_value_dup` used at thread crossings.
+zz_value zz_str_heal_arena(zz_value v);
 
 // ---- string concatenation shims ----------------------------------------
 zz_value zz_binop_cat(zz_value a, zz_value b);       // str concat

@@ -340,6 +340,22 @@ impl Parser {
             _ => return self.parse_postfix(),
         };
         let op_tok = self.advance();
+        // Fold `-9223372036854775808` (i64::MIN): the positive counterpart
+        // is out of range as a literal, but negated it is exactly MIN.
+        // Only the exact boundary value folds; anything larger still errors
+        // at the literal below. Underscores are ignored, like elsewhere.
+        if matches!(op, UnOp::Neg) && self.peek_kind() == TokenKind::Int {
+            let lit = self.peek().clone();
+            let cleaned = lit.text.replace('_', "");
+            if cleaned.parse::<u64>().ok() == Some(i64::MAX as u64 + 1) {
+                self.advance();
+                let span = op_tok.span.join(lit.span);
+                return Expr::Int {
+                    value: i64::MIN,
+                    span,
+                };
+            }
+        }
         let expr = self.parse_unary();
         let span = op_tok.span.join(expr.span());
         Expr::Unary {

@@ -26,7 +26,25 @@ use zz_runtime::{Interp, Value};
 
 use session::Session;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Enforce the project's `[package] zz` minimum-compiler requirement, if
+/// any. No manifest or no `zz` key → pass. Called by the run/build/test
+/// entries so an outdated compiler fails fast with an upgrade hint
+/// instead of cryptic backend errors.
+pub(crate) fn enforce_project_zz(start: &std::path::Path) -> Result<(), String> {
+    let Some(root) = loader::find_project_root(start) else {
+        return Ok(());
+    };
+    let manifest_path = root.join("zz.toml");
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+    let Ok(manifest) = zz_pm::manifest::Manifest::load(&manifest_path) else {
+        return Ok(()); // unloadable: the normal flow reports it better
+    };
+    manifest.check_zz_version(VERSION)
+}
 
 const USAGE: &str = "\
 zz — the ZZ programming language
@@ -664,6 +682,8 @@ fn run_file(
             .unwrap_or(std::path::Path::new("."))
             .to_path_buf()
     });
+    // Fail fast on an unsatisfied `[package] zz` compiler requirement.
+    enforce_project_zz(script_path)?;
     // Discover plugin manifest signatures so `zz run` type-checks the
     // same dotted names the AOT path merges.
     let plugin_funcs = crate::build::discover_plugin_manifests(script_path);
@@ -923,6 +943,8 @@ fn run_native(
             .to_string()
     })?;
     let p = std::path::Path::new(path);
+    // Fail fast on an unsatisfied `[package] zz` compiler requirement.
+    enforce_project_zz(p)?;
     // Release mode for true native speed — unless `ZZ_NATIVE_DEV=1`
     // (parity sweeps: `-O0 -g`, no LTO, ~4x faster clang per fixture;
     // same generated C, separate cache entries via the fingerprint).
@@ -994,6 +1016,9 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
                 .to_string()
         })?;
     let p = std::path::Path::new(path);
+
+    // Fail fast on an unsatisfied `[package] zz` compiler requirement.
+    crate::enforce_project_zz(p)?;
 
     // Default (no flags) is a fast native debug build; -p upgrades to
     // optimized. --static/--pgo select their own option sets. Guards

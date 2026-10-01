@@ -477,6 +477,31 @@ pub fn add(args: &[String]) -> Result<(), String> {
     };
 
     manifest.dependencies.insert(pkg_name.clone(), dep_spec);
+    // `zz add` warns (not errors) when the added package already states
+    // an unsatisfiable compiler requirement — but only for path deps,
+    // whose manifest is readable right now. Registry/git deps are
+    // checked by the install leg below, which hard-errors with the
+    // upgrade hint.
+    if let zz_pm::manifest::DepSpec::Path(p) =
+        manifest.dependencies.get(&pkg_name).expect("just inserted")
+    {
+        let dep_toml = dir.join(&p.path).join("zz.toml");
+        if dep_toml.exists() {
+            if let Ok(dep_manifest) = zz_pm::manifest::Manifest::load(&dep_toml) {
+                if let Some(req) = dep_manifest.package.zz.as_deref() {
+                    if zz_pm::manifest::check_compiler_req(req, crate::VERSION).is_err() {
+                        eprintln!(
+                            "warning: dependency `{pkg_name}` needs zz {req}, \
+                             this is zz {}\n\
+                             hint: upgrade the compiler or loosen the dep's \
+                             `[package] zz` requirement",
+                            crate::VERSION
+                        );
+                    }
+                }
+            }
+        }
+    }
     manifest.save(&toml_path)?;
 
     println!("added `{pkg_name}` to zz.toml");
@@ -862,6 +887,29 @@ pub fn install(args: &[String]) -> Result<(), String> {
     if linked_count > 0 {
         println!("linked {linked_count} dependencies into vendor/");
     }
+    // Minimum-compiler requirements: the root project first, then every
+    // linked dependency that ships a manifest. Unsatisfied requirements
+    // fail the install with an upgrade hint (there is no point building
+    // native extensions for a toolchain that cannot satisfy the tree).
+    manifest
+        .check_zz_version(crate::VERSION)
+        .map_err(|e| format!("cannot install: {e}"))?;
+    for (dep_name, dep_spec) in &manifest.dependencies {
+        // Path deps resolve in place (never vendored); registry/git deps
+        // are checked through their vendor/ link.
+        let dep_toml = match dep_spec {
+            zz_pm::manifest::DepSpec::Path(p) => dir.join(&p.path).join("zz.toml"),
+            _ => dir.join("vendor").join(dep_name).join("zz.toml"),
+        };
+        if !dep_toml.exists() {
+            continue;
+        }
+        if let Ok(dep_manifest) = zz_pm::manifest::Manifest::load(&dep_toml) {
+            dep_manifest
+                .check_zz_version(crate::VERSION)
+                .map_err(|e| format!("cannot install dependency `{dep_name}`: {e}"))?;
+        }
+    }
     // Native plugins: build now so `zz run` works without a prior
     // `zz build` (registry tarballs exclude build outputs). Declarative
     // failures and gate violations fail the install; allowed legacy
@@ -1066,6 +1114,16 @@ fn build_and_install_bin(
     project_dir: &std::path::Path,
     bin_name: &str,
 ) -> Result<(), String> {
+    // Fail fast on an unsatisfied `[package] zz` compiler requirement
+    // (bare .zz files have no manifest to check — skip those).
+    let tool_toml = project_dir.join("zz.toml");
+    if tool_toml.exists() {
+        if let Ok(manifest) = zz_pm::manifest::Manifest::load(&tool_toml) {
+            manifest
+                .check_zz_version(crate::VERSION)
+                .map_err(|e| format!("cannot install tool `{bin_name}`: {e}"))?;
+        }
+    }
     crate::ui::header(&format!(
         "installing {bin_name} from {}",
         project_dir.display()

@@ -63,6 +63,44 @@ fn unary_minus() {
 }
 
 #[test]
+fn unary_minus_folds_i64_min() {
+    // `-9223372036854775808` has no positive counterpart: the literal
+    // alone is out of range, but folded with the minus it is exactly MIN.
+    let p = parse_ok("-9223372036854775808");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Int { value, .. }) => {
+            assert_eq!(*value, i64::MIN)
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn unary_minus_folds_i64_min_underscores() {
+    let p = parse_ok("-9_223_372_036_854_775_808");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Int { value, .. }) => {
+            assert_eq!(*value, i64::MIN)
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn unary_minus_past_min_still_errors() {
+    // One past MIN must keep failing (genuine overflow, not a literal).
+    let parsed = zz_frontend::parse("-9223372036854775809");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("out of range")),
+        "expected range error, got: {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
 fn parses_call() {
     let p = parse_ok("add(1, 2)");
     match &p.stmts[0] {

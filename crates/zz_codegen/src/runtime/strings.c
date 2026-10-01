@@ -289,6 +289,21 @@ zz_value zz_str_static(const char *src) {
     return v;
 }
 
+// Heal an arena-owned string into an independent heap-owned copy.
+// See strings.h for the full contract (retaining stores must heal).
+zz_value zz_str_heal_arena(zz_value v) {
+    if (v.tag != ZZ_STR || !v.s || v.s->interned || v.s->refs != 0) {
+        return v;
+    }
+    zz_str *s = str_alloc(v.s->len);
+    memcpy(zz_str_ptr(s), zz_str_cptr(v.s), v.s->len);
+    zz_str_ptr(s)[v.s->len] = '\0';
+    zz_value out;
+    out.tag = ZZ_STR;
+    out.s = s;
+    return out;
+}
+
 // Arena-aware string constructor. The zz_str header is bump-allocated
 // when arena is non-NULL. The data payload still uses malloc (strings
 // are often used with slice operations that need stable memory).
@@ -1219,10 +1234,12 @@ void zz_str_append_str(zz_value *a, zz_value b) {
     // Buffer not reusable: replace with a fresh allocation. Release the
     // old ref first so we don't leak (and don't double-free if the old
     // buffer happened to be interned — refs==1 interned strings stay put).
+    // Arena-owned source (refs==0 sentinel) is abandoned, never released
+    // or mutated: the arena reclaims it at reset.
     zz_str *fresh = str_alloc(need);
     memcpy(zz_str_ptr(fresh), zz_str_ptr(a->s), la);
     memcpy(zz_str_ptr(fresh) + la, zz_str_ptr(b.s), lb);
-    if (!a->s->interned && --a->s->refs == 0) {
+    if (!a->s->interned && a->s->refs != 0 && --a->s->refs == 0) {
         if (a->s->cap > 0) free(a->s->heap);
         zz_str_header_free(a->s);
     }
@@ -1247,7 +1264,8 @@ void zz_str_append_lit(zz_value *a, const char *lit, size_t lit_len) {
     zz_str *fresh = str_alloc(need);
     memcpy(zz_str_ptr(fresh), zz_str_ptr(a->s), la);
     memcpy(zz_str_ptr(fresh) + la, lit, lit_len);
-    if (!a->s->interned && --a->s->refs == 0) {
+    // Arena-owned source (refs==0 sentinel): abandon, never release.
+    if (!a->s->interned && a->s->refs != 0 && --a->s->refs == 0) {
         if (a->s->cap > 0) free(a->s->heap);
         zz_str_header_free(a->s);
     }

@@ -719,6 +719,26 @@ parity_strict!(
     "regression",
     "branch_call_tails.zz"
 );
+parity_strict!(
+    parity_regression_branch_early_return_calls,
+    "regression",
+    "branch_early_return_calls.zz"
+);
+parity_strict!(
+    parity_regression_string_accum_loop,
+    "regression",
+    "string_accum_loop.zz"
+);
+parity_strict!(
+    parity_regression_string_store_across_iter,
+    "regression",
+    "string_store_across_iter.zz"
+);
+parity_strict!(
+    parity_regression_string_index_set_binop,
+    "regression",
+    "string_index_set_binop.zz"
+);
 
 // Types
 parity_strict!(

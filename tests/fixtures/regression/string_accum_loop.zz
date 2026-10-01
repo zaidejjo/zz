@@ -1,0 +1,55 @@
+// Regression: string accumulators over loops must match on both engines.
+// Native placed `out = out + ...` results in the per-iteration loop arena
+// and reset it at the iteration end, so the accumulator read back NUL
+// garbage. Retaining stores now heal arena strings to heap copies.
+import std.vec
+
+struct Doc {
+    kinds: [str],
+    svals: [str],
+    ivals: [int],
+    t_tbl: [int],
+    t_keys: [str],
+    t_kids: [int],
+}
+
+func table_keys(doc: Doc, id: int) -> [str] {
+    out: [str] = []
+    for i in 0..len(doc.t_tbl) {
+        if doc.t_tbl[i] == id {
+            out = vec.push(out, doc.t_keys[i])
+        }
+    }
+    out
+}
+
+func table_kid(doc: Doc, id: int, key: str) -> int {
+    for i in 0..len(doc.t_tbl) {
+        if doc.t_tbl[i] == id && doc.t_keys[i] == key {
+            return doc.t_kids[i]
+        }
+    }
+    0 - 1
+}
+
+func emit(doc: Doc, id: int) -> str {
+    out := ""
+    keys := table_keys(doc, id)
+    for i in 0..len(keys) {
+        key := keys[i]
+        kid := table_kid(doc, id, key)
+        out = out + key + "=" + str(doc.ivals[kid]) + ";"
+    }
+    out
+}
+
+doc := Doc{
+    kinds: ["table", "table", "int", "int"],
+    svals: ["", "", "", ""],
+    ivals: [0, 0, 1, 2],
+    t_tbl: [0, 1, 1],
+    t_keys: ["table", "k", "j"],
+    t_kids: [1, 2, 3],
+}
+println(emit(doc, 1))
+println("string_accum_loop_ok")
