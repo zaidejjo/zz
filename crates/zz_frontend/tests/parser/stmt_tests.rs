@@ -403,3 +403,52 @@ fn decorator_on_generic_func_errors() {
     assert_eq!(errors.len(), 1);
     assert!(errors[0].message.contains("generic"));
 }
+
+#[test]
+fn parses_bare_destructure_decl() {
+    let p = parse_ok("a, b := f()");
+    assert_eq!(p.stmts.len(), 1);
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Destructure { pat, value, .. } => {
+            match pat {
+                zz_frontend::ast::Pattern::Tuple { pats, .. } => {
+                    assert_eq!(pats.len(), 2);
+                    assert!(matches!(pats[0], zz_frontend::ast::Pattern::Binding { .. }));
+                }
+                other => panic!("expected tuple pattern, got {other:?}"),
+            }
+            assert!(matches!(value, E::Call { .. }));
+        }
+        other => panic!("expected destructure, got {other:?}"),
+    }
+}
+
+#[test]
+fn bare_destructure_wildcard() {
+    let p = parse_ok("_, b := f()");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Destructure { pat, .. } => match pat {
+            zz_frontend::ast::Pattern::Tuple { pats, .. } => {
+                assert!(matches!(
+                    pats[0],
+                    zz_frontend::ast::Pattern::Wildcard { .. }
+                ));
+            }
+            other => panic!("expected tuple pattern, got {other:?}"),
+        },
+        other => panic!("expected destructure, got {other:?}"),
+    }
+}
+
+#[test]
+fn bare_destructure_does_not_steal_calls_or_decls() {
+    // `f(a, b)` is a call (LParen after ident, not a comma).
+    let p = parse_ok("f(a, b)");
+    assert!(matches!(
+        p.stmts[0],
+        zz_frontend::ast::Stmt::Expr(E::Call { .. })
+    ));
+    // `x := 1` stays a short declaration.
+    let p = parse_ok("x := 1");
+    assert!(matches!(p.stmts[0], zz_frontend::ast::Stmt::Decl { .. }));
+}

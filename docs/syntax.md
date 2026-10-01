@@ -309,6 +309,26 @@ ages := {"Alice": 30, "Bob": 25}
 empty := {}
 ```
 
+### Tuple Literals and Destructuring
+
+```zz
+t := (7, "seven")
+t[0]            // 7 (integer-literal index, checked at compile time)
+t[1]            // "seven"
+t[-1]           // "seven" (negative counts from the end, like arrays)
+len(t)          // 2
+
+// Destructuring — parens or bare form (identical meaning):
+(a, b) := t     // a = 7, b = "seven"
+c, d := t       // same; `_` skips: `_, e := t`
+```
+
+Dynamic indices (`t[i]`) are a compile error — destructure instead.
+Out-of-range literal indices are also caught at compile time.
+
+Tuples share the array representation: `t[0] = 99` writes in
+place, and behavior is identical on the VM and native backends.
+
 ### Indexing and Slicing
 
 ```zz

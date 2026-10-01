@@ -589,6 +589,7 @@ impl Checker {
                             .push(error_at("cannot assign to an index of a string", *span));
                         Type::Unit
                     }
+                    Type::Tuple(elems) => self.check_tuple_index(&elems, index),
                     Type::Bytes => {
                         self.errors
                             .push(error_at("cannot assign to an index of bytes", *span));
@@ -616,6 +617,51 @@ impl Checker {
                     other.span(),
                 ));
                 Type::Unit
+            }
+        }
+    }
+
+    /// Element type of a tuple index, shared by reads and writes.
+    /// Tuples index like arrays at runtime (AOT lowers them to arrays;
+    /// the VM stores them as `Tuple`), but the element type depends on
+    /// the position, so only integer literals type-check — negative
+    /// literals count from the end like arrays. Anything else should
+    /// destructure: `(a, b) := t`.
+    pub(crate) fn check_tuple_index(&mut self, elems: &[Type], index: &Expr) -> Type {
+        let pos: Option<usize> = match index {
+            Expr::Int { value, .. } if *value >= 0 => Some(*value as usize),
+            // Literal `i64::MIN` (the negation fold) and other negatives
+            // fall through to the out-of-bounds error below.
+            Expr::Int { .. } => None,
+            Expr::Unary { op, expr, .. } if *op == UnOp::Neg => match expr.as_ref() {
+                Expr::Int { value: 0, .. } => Some(0),
+                Expr::Int { value, .. } => elems.len().checked_sub(*value as usize),
+                _ => {
+                    self.errors.push(error_at(
+                        "tuple index must be an integer literal\n\
+                         hint: destructure with `(a, b) := t` for dynamic access",
+                        index.span(),
+                    ));
+                    return Type::Error;
+                }
+            },
+            _ => {
+                self.errors.push(error_at(
+                    "tuple index must be an integer literal\n\
+                     hint: destructure with `(a, b) := t` for dynamic access",
+                    index.span(),
+                ));
+                return Type::Error;
+            }
+        };
+        match pos {
+            Some(i) if i < elems.len() => elems[i].clone(),
+            _ => {
+                self.errors.push(error_at(
+                    format!("tuple index out of bounds for length {}", elems.len()),
+                    index.span(),
+                ));
+                Type::Error
             }
         }
     }
@@ -886,6 +932,7 @@ impl Checker {
                         self.ensure_int(it, index.span());
                         Type::Str
                     }
+                    Type::Tuple(elems) => self.check_tuple_index(&elems, index),
                     Type::Var(_) => {
                         self.errors.push(error_at(
                             "cannot index a value whose type could not be inferred",

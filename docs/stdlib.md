@@ -15,7 +15,7 @@ Available without imports:
 | `str` | `str(v: T) -> str` | Convert to string |
 | `int` | `int(v: T)` | Parse/convert to int (`.none` on failure) |
 | `float` | `float(v: T)` | Parse/convert to float (`.none` on failure) |
-| `len` | `len(v: T) -> int` | Length of array, bytes, string, dict, or range |
+| `len` | `len(v: T) -> int` | Length of array, tuple, bytes, string, dict, or range |
 | `range` | `range(start: int, stop: int, step: int)` | Create integer range |
 | `map` | `map(arr: [T] \| T.., f: func(T) -> U) -> [U]` | Apply function to each element |
 | `filter` | `filter(arr: [T] \| T.., f: func(T) -> bool) -> [T]` | Keep elements where predicate is true |

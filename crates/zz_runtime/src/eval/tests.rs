@@ -851,3 +851,37 @@ fn rotl_round_trip() {
         Value::Int(-1)
     );
 }
+
+#[test]
+fn tuple_index_read_write_len() {
+    assert_eq!(
+        eval_src("t := (10, \"twenty\", 30)\nt[0]").unwrap(),
+        Value::Int(10)
+    );
+    assert_eq!(
+        eval_src("t := (10, \"twenty\", 30)\nt[1]").unwrap(),
+        Value::Str("twenty".to_string().into())
+    );
+    assert_eq!(
+        eval_src("t := (10, \"twenty\", 30)\nt[-1]").unwrap(),
+        Value::Int(30)
+    );
+    // NOTE: `len` is a stdlib native, unavailable in the bare unit-test
+    // interp — covered by the e2e fixture instead.
+    assert_eq!(
+        eval_src("t := (10, \"twenty\", 30)\nt[0] = 99\nt[0]").unwrap(),
+        Value::Int(99)
+    );
+}
+
+#[test]
+fn tuple_index_out_of_bounds_errors_at_runtime() {
+    let err = eval_src("t := (1, 2)\nt[7]").unwrap_err();
+    assert!(err.message.contains("out of bounds"), "{err:?}");
+}
+
+#[test]
+fn bare_destructure_evaluates() {
+    assert_eq!(eval_src("a, b := (7, 9)\na + b").unwrap(), Value::Int(16));
+    assert_eq!(eval_src("_, b := (7, 9)\nb").unwrap(), Value::Int(9));
+}
