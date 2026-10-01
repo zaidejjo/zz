@@ -14,7 +14,9 @@ mod loader;
 mod pm;
 mod repl;
 mod session;
+mod setup;
 mod test_runner;
+mod ui;
 
 use zz_frontend::diag::{error_at, render_to_string, Files};
 use zz_frontend::span::Span;
@@ -42,6 +44,8 @@ PACKAGE MANAGER:
     zz new <name> [--template T]  create a new project directory
     zz add <pkg>[@ver]            add a dependency to zz.toml
     zz install, zz i              resolve deps, fetch into CAS, link
+    zz install --path <dir>       build the project at <dir> (release) and
+                                  install the binary into ~/.zz/bin
     zz install --allow-source-builds
                                 permit transitive native source builds
     zz install --allow-hooks    permit legacy [native] build hooks (direct only)
@@ -53,6 +57,8 @@ PACKAGE MANAGER:
     zz publish [--dry-run]        validate, pack, and upload to the registry
     zz cache gc                   garbage-collect unused CAS entries
     zz cache clean                clear build cache
+    zz setup [--yes]              create ~/.zz/bin, wire PATH + completions
+    zz completion [shell]         print shell completion (bash|zsh|fish|powershell)
 
 BUILD MODES (single Clang backend, always a native binary):
      zz build <file.zz>           debug build (-O0 -g, fast, dynamic) — the default
@@ -120,6 +126,7 @@ EXAMPLES:
     zz registry add qux --path ../qux  register a local alias (no server; share the file via dotfiles)
     zz registry list                  list local aliases
     zz install                        resolve and fetch all dependencies
+    zz install --path .               build this project and install it to ~/.zz/bin
     zz remove foo                     remove a dependency
     zz check .                       scan current directory
     zz check src/ --fix             fix all safe issues in src/
@@ -135,6 +142,9 @@ EXAMPLES:
 ";
 
 fn main() -> ExitCode {
+    // Self-heal ~/.zz/bin + PATH hint on every run (cheap, silent when piped).
+    setup::auto_heal();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Separate the subcommand from flags and path.
@@ -328,6 +338,20 @@ fn main() -> ExitCode {
             }
         },
         Some("cache") => match pm::cache(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("setup") => match setup::run(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("completion") => match setup::print_completion(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("zz: {msg}");
@@ -941,12 +965,12 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         build::BuildMode::Static => "static",
         build::BuildMode::Pgo => "pgo",
     };
-    println!(
-        "built {} ({}, {:.1} KB)",
+    crate::ui::ok(&format!(
+        "built {} ({mode_str}, {})",
         dest.display(),
-        mode_str,
-        meta as f64 / 1024.0
-    );
+        crate::ui::human_bytes(meta)
+    ));
+    println!("built {}", dest.display());
     Ok(())
 }
 

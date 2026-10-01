@@ -40,6 +40,7 @@ Verify:
 
 ```bash
 zz --version
+zz setup    # PATH + shell completions for bash/zsh/fish (run once)
 ```
 
 Hello world (`hello.zz`):
@@ -59,6 +60,12 @@ REPL, check, format:
 zz            # REPL (:help, :quit)
 zz check src/
 zz fmt src/
+```
+
+Install a project as a tool (`~/.zz/bin`):
+
+```bash
+zz install --path .
 ```
 
 ## Documentation

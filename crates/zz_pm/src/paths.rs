@@ -27,6 +27,15 @@ pub fn cache_objects_dir() -> PathBuf {
     zz_home().join("cache").join("objects")
 }
 
+/// `~/.zz/bin/` — installed compiler binaries and `zz install --path` tools.
+///
+/// This directory is the canonical user-tool location: the install scripts
+/// place `zz`/`zz-lsp` here, and `zz install --path <dir>` drops built
+/// project binaries here. It should be on `PATH` (see `zz setup`).
+pub fn bin_dir() -> PathBuf {
+    zz_home().join("bin")
+}
+
 /// `~/.zz/credentials.toml` — auth tokens (chmod 0600).
 pub fn credentials_path() -> PathBuf {
     zz_home().join("credentials.toml")
@@ -99,5 +108,12 @@ mod tests {
         env::remove_var("ZZ_HOME");
         let p = cache_objects_dir();
         assert!(p.ends_with("objects"), "should end with objects: {p:?}");
+    }
+
+    #[test]
+    fn bin_dir_under_home() {
+        let _guard = crate::paths::test_sync::lock_env();
+        env::remove_var("ZZ_HOME");
+        assert!(bin_dir().ends_with("bin"));
     }
 }
