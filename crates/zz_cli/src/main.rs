@@ -60,6 +60,7 @@ PACKAGE MANAGER:
     zz cache gc                   garbage-collect unused CAS entries
     zz cache clean                clear build cache
     zz setup [--yes]              create ~/.zz/bin, wire PATH + completions
+    zz setup --check              verify shell integration (no changes)
     zz completion [shell]         print shell completion (bash|zsh|fish|powershell)
 
 BUILD MODES (single Clang backend, always a native binary):

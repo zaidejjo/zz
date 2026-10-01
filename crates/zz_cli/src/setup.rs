@@ -110,9 +110,15 @@ _zz() {
 
 /// Fish completion: subcommands plus `*.zz` suffix completion for file args.
 pub const FISH_COMPLETION: &str = r#"# zz shell completion (fish) — managed by `zz setup`. Do not edit.
+function __fish_complete_zz_files --description 'ZZ source files and directories'
+    for f in *.zz
+        test -f "$f"; and printf '%s\n' "$f"
+    end
+    __fish_complete_directories
+end
 set -l zz_cmds run build test check fix fmt eval init new add install i remove update search info registry login publish cache setup completion help
 complete -c zz -f -n '__fish_use_subcommand' -a "$zz_cmds"
-complete -c zz -n '__fish_seen_subcommand_from run build test check fix fmt' -a '(__fish_complete_suffix .zz)' -d 'ZZ source file'
+complete -c zz -f -n '__fish_seen_subcommand_from run build test check fix fmt' -a '(__fish_complete_zz_files)' -d 'ZZ source file'
 complete -c zz -n '__fish_seen_subcommand_from completion' -f -a 'bash zsh fish powershell' -d 'Shell'
 complete -c zz -s h -l help -d 'Show help'
 complete -c zz -l version -d 'Show version'
@@ -419,10 +425,14 @@ fn write_if_different(path: &Path, content: &str) -> Result<bool, String> {
     }
 }
 
-/// `zz setup [--yes]`: create `~/.zz/bin`, wire PATH + completions.
-/// `--yes` skips nothing interactive (setup never prompts) — it exists so
-/// the install scripts can call setup non-interactively and explicitly.
-pub fn run(_args: &[String]) -> Result<(), String> {
+/// `zz setup [--yes|--check]`: create `~/.zz/bin`, wire PATH + completions.
+/// `--yes` exists so the install scripts can call setup non-interactively
+/// (setup never prompts). `--check` only reports status, exit 1 when
+/// anything is missing.
+pub fn run(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|a| a == "--check") {
+        return check();
+    }
     let bin = zz_pm::paths::bin_dir();
     ui::header("zz setup — shell integration");
 
@@ -472,8 +482,136 @@ pub fn run(_args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Stamp file remembering the one-time PATH hint was shown, so interactive
-/// users see it once — not on every invocation — until `zz setup` runs.
+/// Read-only view of shell integration for `zz setup --check`.
+pub struct ShellStatus {
+    pub shell: &'static str,
+    pub rc: PathBuf,
+    pub rc_wired: bool,
+    pub completion_file: PathBuf,
+    pub completion_installed: bool,
+}
+
+/// Read-only view of `zz setup` state.
+pub struct SetupStatus {
+    pub bin: PathBuf,
+    pub bin_exists: bool,
+    pub on_path: bool,
+    pub shells: Vec<ShellStatus>,
+}
+
+fn expected_completion(shell: &str) -> Option<&'static str> {
+    match shell {
+        "bash" => Some(BASH_COMPLETION),
+        "zsh" => Some(ZSH_COMPLETION),
+        "fish" => Some(FISH_COMPLETION),
+        _ => None,
+    }
+}
+
+/// Gather shell-integration status without changing anything.
+///
+/// Completion counts as installed only when the file exists with exactly
+/// the current script content (stale scripts from older releases fail).
+pub fn status() -> SetupStatus {
+    let home = home_dir();
+    let bin = zz_pm::paths::bin_dir();
+    let targets: &[(&str, PathBuf, PathBuf)] = &[
+        (
+            "bash",
+            home.join(".bashrc"),
+            home.join(".local")
+                .join("share")
+                .join("bash-completion")
+                .join("completions")
+                .join("zz"),
+        ),
+        ("zsh", home.join(".zshrc"), home.join(".zfunc").join("_zz")),
+        (
+            "fish",
+            home.join(".config").join("fish").join("config.fish"),
+            home.join(".config")
+                .join("fish")
+                .join("completions")
+                .join("zz.fish"),
+        ),
+    ];
+    let shells = targets
+        .iter()
+        .map(|(shell, rc, completion_file)| {
+            let rc_wired = std::fs::read_to_string(rc)
+                .map(|c| c.contains(MARK_BEGIN))
+                .unwrap_or(false);
+            let completion_installed = expected_completion(shell)
+                .and_then(|want| {
+                    std::fs::read_to_string(completion_file)
+                        .ok()
+                        .map(|have| have == want)
+                })
+                .unwrap_or(false);
+            ShellStatus {
+                shell,
+                rc: rc.clone(),
+                rc_wired,
+                completion_file: completion_file.clone(),
+                completion_installed,
+            }
+        })
+        .collect();
+    SetupStatus {
+        bin_exists: bin.is_dir(),
+        on_path: bin_on_path(&bin),
+        bin,
+        shells,
+    }
+}
+
+/// `zz setup --check`: report shell-integration state, changing nothing.
+/// Exits 1 with a fix hint when anything is missing.
+pub fn check() -> Result<(), String> {
+    let st = status();
+    ui::header("zz setup --check");
+    let mut missing = 0u32;
+    if st.bin_exists {
+        ui::ok(&format!("{} exists", st.bin.display()));
+    } else {
+        ui::warn(&format!("{} missing", st.bin.display()));
+        missing += 1;
+    }
+    if st.on_path {
+        ui::ok("~/.zz/bin is on PATH");
+    } else {
+        ui::warn("~/.zz/bin is not on PATH");
+        missing += 1;
+    }
+    for s in &st.shells {
+        if s.rc_wired {
+            ui::ok(&format!("{}: {} wired", s.shell, s.rc.display()));
+        } else {
+            ui::warn(&format!("{}: {} not wired", s.shell, s.rc.display()));
+            missing += 1;
+        }
+        if s.completion_installed {
+            ui::ok(&format!("{}: completion installed", s.shell));
+        } else {
+            ui::warn(&format!(
+                "{}: completion missing ({} stale or absent)",
+                s.shell,
+                s.completion_file.display()
+            ));
+            missing += 1;
+        }
+    }
+    if missing == 0 {
+        println!("shell integration OK — restart your shell if TAB still fails");
+        Ok(())
+    } else {
+        Err(format!(
+            "{missing} integration item(s) missing\n\
+              hint: run `zz setup`, then restart your shell"
+        ))
+    }
+}
+/// Stamp file remembering the one-time PATH hint was shown.
 fn hint_stamp_path() -> PathBuf {
     zz_pm::paths::zz_home().join(".setup-hint-shown")
 }
@@ -678,7 +816,60 @@ mod tests {
     }
 
     #[test]
-    fn bin_on_path_detects_entries() {
+    fn setup_check_reports_missing_then_ok() {
+        let _g = TEST_LOCK.lock().unwrap();
+        let dir = isolated_home("check");
+        let old_home = std::env::var_os("HOME");
+        let old_zz = std::env::var_os("ZZ_HOME");
+        std::env::set_var("HOME", &dir);
+        std::env::set_var("ZZ_HOME", dir.join(".zz"));
+
+        // Fresh home: everything missing.
+        let st = status();
+        assert!(!st.bin_exists);
+        assert!(!st.on_path);
+        assert!(st
+            .shells
+            .iter()
+            .all(|s| !s.rc_wired && !s.completion_installed));
+        assert!(check().is_err());
+
+        // Wire one shell by hand: rc marker + exact script content.
+        let zshrc = dir.join(".zshrc");
+        ensure_block_before(&zshrc, &["fpath=(~/.zfunc $fpath)"], Some("compinit")).unwrap();
+        let zfunc = dir.join(".zfunc");
+        std::fs::create_dir_all(&zfunc).unwrap();
+        std::fs::write(zfunc.join("_zz"), ZSH_COMPLETION).unwrap();
+        let st = status();
+        let zsh = st.shells.iter().find(|s| s.shell == "zsh").unwrap();
+        assert!(zsh.rc_wired);
+        assert!(zsh.completion_installed);
+        // Stale content fails the check.
+        std::fs::write(zfunc.join("_zz"), "# old").unwrap();
+        assert!(
+            !status()
+                .shells
+                .iter()
+                .find(|s| s.shell == "zsh")
+                .unwrap()
+                .completion_installed
+        );
+
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(z) = old_zz {
+            std::env::set_var("ZZ_HOME", z);
+        } else {
+            std::env::remove_var("ZZ_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_bin_on_path_detects_entries() {
         let _g = TEST_LOCK.lock().unwrap();
         let dir = isolated_home("path");
         let bin = dir.join("bin");
