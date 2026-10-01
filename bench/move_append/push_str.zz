@@ -1,0 +1,19 @@
+// push_str.zz — `b = vec.push(b, x)` on a string array.
+import std.env
+
+func first_arg(args: [str], fallback: str) -> str {
+    for a in args {
+        if a != "--" {
+            return a
+        }
+    }
+    fallback
+}
+
+n := int(first_arg(env.args(), "5000")) ?? 5000
+b: [str] = []
+for i in 0..n {
+    b = vec.push(b, "item_" + str(i))
+}
+println(len(b))
+println("PUSH_STR_DONE")
