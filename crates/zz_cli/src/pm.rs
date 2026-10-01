@@ -2,7 +2,7 @@
 //!
 //! Thin wrapper: parse args → call `zz_pm` functions → format output.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Handle `zz init [--template T] [--author A] [--description D] [--license L] [--repo URL]`.
 pub fn init(args: &[String]) -> Result<(), String> {
@@ -523,12 +523,15 @@ pub fn install(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `zz install --path <dir|file>`: build a project from source (release)
+/// `zz install --path <dir|file|pkg>`: build a tool from source (release)
 /// and install its binary into `~/.zz/bin` — the cargo-install equivalent.
 ///
 /// - `<dir>` must contain `zz.toml`; the entry is `src/main.zz`, then
 ///   `main.zz`. The binary is named after `[package] name`.
 /// - A direct `.zz` file is also accepted; the binary takes the file stem.
+/// - Anything else is treated as a package name (`name[@req]`): it is
+///   fetched from the registry (local aliases first), then built exactly
+///   like a local project.
 /// - Re-running overwrites the installed binary (with a warning).
 fn install_path(path_arg: &str) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
@@ -537,11 +540,11 @@ fn install_path(path_arg: &str) -> Result<(), String> {
     } else {
         cwd.join(path_arg)
     };
-    let (project_dir, entry, bin_name) = if target.is_file() {
+    if target.is_file() {
         if target.extension().and_then(|e| e.to_str()) != Some("zz") {
             return Err(format!(
                 "`{}` is not a .zz file\n\
-                  hint: usage: zz install --path <dir|file.zz>",
+                  hint: usage: zz install --path <dir|file.zz|pkg>",
                 target.display()
             ));
         }
@@ -554,56 +557,190 @@ fn install_path(path_arg: &str) -> Result<(), String> {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| cwd.clone());
-        (project_dir, target, stem)
-    } else if target.is_dir() {
-        let manifest = zz_pm::manifest::Manifest::load(&target.join("zz.toml")).map_err(|_| {
+        return build_and_install_bin(&target, &project_dir, &stem);
+    }
+    if target.is_dir() {
+        let (project_dir, entry, bin_name) = project_from_dir(&target)?;
+        return build_and_install_bin(&entry, &project_dir, &bin_name);
+    }
+    // Not a local path: treat it as a package name and fetch it.
+    install_remote_tool(path_arg, &[])
+}
+
+/// Read `zz.toml` + entry file from an existing project directory.
+/// Returns `(project_dir, entry, bin_name)`.
+fn project_from_dir(target: &std::path::Path) -> Result<(PathBuf, PathBuf, String), String> {
+    let manifest = zz_pm::manifest::Manifest::load(&target.join("zz.toml")).map_err(|_| {
+        format!(
+            "no zz.toml in `{}`\n\
+                  hint: run `zz init` there first, point --path at a .zz file, or pass a registry package name",
+            target.display()
+        )
+    })?;
+    let name = manifest.package.name.clone();
+    check_bin_name(&name)?;
+    let entry = ["src/main.zz", "main.zz"]
+        .iter()
+        .map(|c| target.join(c))
+        .find(|p| p.is_file())
+        .ok_or_else(|| {
             format!(
-                "no zz.toml in `{}`\n\
-                      hint: run `zz init` there first, or point --path at a .zz file",
+                "no entry file in `{}`\n\
+                  hint: expected src/main.zz or main.zz",
                 target.display()
             )
         })?;
-        let name = manifest.package.name.clone();
-        if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
-            return Err(format!("invalid package name `{name}` in zz.toml"));
-        }
-        let entry = ["src/main.zz", "main.zz"]
-            .iter()
-            .map(|c| target.join(c))
-            .find(|p| p.is_file())
-            .ok_or_else(|| {
-                format!(
-                    "no entry file in `{}`\n\
-                      hint: expected src/main.zz or main.zz",
-                    target.display()
-                )
-            })?;
-        (target, entry, name)
-    } else {
-        return Err(format!(
-            "no such file or directory: `{path_arg}`\n\
-              hint: usage: zz install --path <dir|file.zz> (try --path .)"
-        ));
-    };
+    Ok((target.to_path_buf(), entry, name))
+}
 
+/// Binary names become file names in `~/.zz/bin`: reject separators.
+fn check_bin_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(format!("invalid package name `{name}` in zz.toml"));
+    }
+    Ok(())
+}
+
+/// `zz install --path <name[@req]>`: fetch a package (local aliases, then
+/// the registry), build it from source, and install it into `~/.zz/bin`.
+fn install_remote_tool(spec: &str, args: &[String]) -> Result<(), String> {
+    let (pkg_name, version) = parse_pkg_spec(spec);
+    if pkg_name.is_empty()
+        || pkg_name.contains('/')
+        || pkg_name.contains('\\')
+        || pkg_name.contains("..")
+    {
+        return Err(format!(
+            "no such file or directory: `{spec}`\n\
+              hint: usage: zz install --path <dir|file.zz|pkg> (try --path .)"
+        ));
+    }
+
+    // Local aliases first: a `path` alias builds in place, a `git` alias
+    // is fetched into the CAS — both stay offline.
+    if let Some(alias) = registry_lookup(&pkg_name) {
+        match alias {
+            zz_pm::manifest::DepSpec::Path(p) => {
+                let dir = std::env::current_dir()
+                    .map_err(|e| format!("cannot get cwd: {e}"))?
+                    .join(&p.path);
+                if !dir.is_dir() {
+                    return Err(format!(
+                        "alias `{pkg_name}` points at missing dir `{}`",
+                        p.path
+                    ));
+                }
+                let (project_dir, entry, bin_name) = project_from_dir(&dir)?;
+                return build_and_install_bin(&entry, &project_dir, &bin_name);
+            }
+            zz_pm::manifest::DepSpec::Git(g) => {
+                crate::ui::header(&format!("installing {pkg_name} from git"));
+                let spinner =
+                    crate::ui::Spinner::start(&format!("Fetching {} #{}", pkg_name, g.rev));
+                let commit = match zz_pm::git::resolve_rev(&g.git, &g.rev) {
+                    Ok(commit) => commit,
+                    Err(e) => {
+                        drop(spinner);
+                        return Err(format!("cannot resolve {}#{}: {e}", g.git, g.rev));
+                    }
+                };
+                let cas_dir = match zz_pm::git::fetch_to_cas(&g.git, &commit) {
+                    Ok(dir) => dir,
+                    Err(e) => {
+                        drop(spinner);
+                        return Err(format!("cannot fetch {pkg_name}: {e}"));
+                    }
+                };
+                spinner.finish(&format!("fetched {pkg_name}"));
+                let (project_dir, entry, bin_name) = project_from_dir(&cas_dir)?;
+                return build_and_install_bin(&entry, &project_dir, &bin_name);
+            }
+            // A bare version never comes from the alias file; fall through.
+            zz_pm::manifest::DepSpec::Version(_) => {}
+        }
+    }
+
+    // Registry: latest (or `name@req`), verified hash, staged in the CAS.
+    let base = registry_base_from(args);
+    let client = zz_pm::remote::RegistryClient::new(&base);
+    crate::ui::header(&format!("installing {pkg_name} from {base}"));
+    crate::ui::step(1, 4, "Resolving version");
+    let info = client.fetch_metadata(&pkg_name).map_err(|e| match e {
+        zz_pm::remote::RemoteError::NotFound(_) => format!(
+            "package `{pkg_name}` not found on {base}\n\
+              hint: run `zz search {pkg_name}` to check the spelling"
+        ),
+        other => format!("cannot reach {base}: {other}"),
+    })?;
+    let req = version
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "*".to_string());
+    let picked = zz_pm::remote::pick_version(&info.metadata.versions, &req).map_err(|_| {
+        format!(
+            "no published version of `{pkg_name}` satisfies `{req}`\n\
+              hint: run `zz info {pkg_name}` to list available versions"
+        )
+    })?;
+    let sha = zz_pm::remote::expected_sha(&info, &picked);
+    let spinner = crate::ui::Spinner::start(&format!("Fetching {pkg_name} @ {picked}"));
+    let cas_dir = match client.fetch_to_cas(&pkg_name, &picked, &sha) {
+        Ok((dir, _)) => {
+            spinner.finish(&format!("fetched {pkg_name} @ {picked}"));
+            dir
+        }
+        Err(e) => {
+            drop(spinner);
+            return Err(format!("cannot fetch {pkg_name} @ {picked}: {e}"));
+        }
+    };
+    let (project_dir, entry, bin_name) = project_from_dir(&cas_dir)?;
+    build_and_install_bin(&entry, &project_dir, &bin_name)
+}
+
+/// Release-build `entry` and install the result as `bin_name` in
+/// `~/.zz/bin`. Shared by local and remote `install --path` flows.
+fn build_and_install_bin(
+    entry: &std::path::Path,
+    project_dir: &std::path::Path,
+    bin_name: &str,
+) -> Result<(), String> {
     crate::ui::header(&format!(
         "installing {bin_name} from {}",
         project_dir.display()
     ));
     crate::ui::step(1, 3, &format!("Building {} (release)", entry.display()));
-    let built = crate::build::build_release(
-        &entry,
+    // The clang link can run for minutes silently — spin with elapsed
+    // time so a big tool build never looks frozen.
+    let spinner = crate::ui::Spinner::start("Compiling release");
+    let built = match crate::build::build_release(
+        entry,
         crate::build::BuildMode::Release,
         &crate::build::ReleaseOptions::default(),
-    )?;
-    let size = std::fs::metadata(&built).map(|m| m.len()).unwrap_or(0);
-    crate::ui::progress(2, 3, &format!("built {}", crate::ui::human_bytes(size)));
+    ) {
+        Ok(built) => {
+            let size = std::fs::metadata(&built).map(|m| m.len()).unwrap_or(0);
+            spinner.finish(&format!("built {}", crate::ui::human_bytes(size)));
+            built
+        }
+        Err(e) => {
+            drop(spinner);
+            return Err(e);
+        }
+    };
+    crate::ui::progress(
+        2,
+        3,
+        &format!(
+            "built {}",
+            crate::ui::human_bytes(std::fs::metadata(&built).map(|m| m.len()).unwrap_or(0))
+        ),
+    );
 
     crate::ui::step(3, 3, "Installing into ~/.zz/bin");
     let bin_dir = zz_pm::paths::bin_dir();
     std::fs::create_dir_all(&bin_dir)
         .map_err(|e| format!("cannot create {}: {e}", bin_dir.display()))?;
-    let dest = bin_dir.join(&bin_name);
+    let dest = bin_dir.join(bin_name);
     if dest.exists() {
         crate::ui::warn(&format!("overwriting existing {}", dest.display()));
     }

@@ -44,8 +44,10 @@ PACKAGE MANAGER:
     zz new <name> [--template T]  create a new project directory
     zz add <pkg>[@ver]            add a dependency to zz.toml
     zz install, zz i              resolve deps, fetch into CAS, link
-    zz install --path <dir>       build the project at <dir> (release) and
-                                  install the binary into ~/.zz/bin
+    zz install --path <dir|file|pkg>
+                                  build from source (release) and install the
+                                  binary into ~/.zz/bin; a bare package name
+                                  is fetched from the registry first
     zz install --allow-source-builds
                                 permit transitive native source builds
     zz install --allow-hooks    permit legacy [native] build hooks (direct only)
@@ -957,19 +959,32 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         allow_source_builds,
         allow_hooks,
     };
-    let dest = build::build_release(p, mode, &rel)?;
-    let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
     let mode_str = match mode {
         build::BuildMode::Dev => "dev",
         build::BuildMode::Release => "release",
         build::BuildMode::Static => "static",
         build::BuildMode::Pgo => "pgo",
     };
-    crate::ui::ok(&format!(
-        "built {} ({mode_str}, {})",
-        dest.display(),
-        crate::ui::human_bytes(meta)
-    ));
+    crate::ui::header(&format!("building {path} ({mode_str})"));
+    // The clang link step can run for minutes with no output — spin with
+    // elapsed time so a big build never looks frozen. Cache hits finish
+    // instantly, so the spinner is just one extra line there.
+    let spinner = crate::ui::Spinner::start(&format!("Compiling {mode_str}"));
+    let dest = match build::build_release(p, mode, &rel) {
+        Ok(dest) => {
+            let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+            spinner.finish(&format!(
+                "built {} ({mode_str}, {})",
+                dest.display(),
+                crate::ui::human_bytes(meta)
+            ));
+            dest
+        }
+        Err(msg) => {
+            drop(spinner);
+            return Err(msg);
+        }
+    };
     println!("built {}", dest.display());
     Ok(())
 }
