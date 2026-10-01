@@ -4,10 +4,11 @@ name: aur-publish
 # Release is published. `yay -S zz-lang` installs a PREBUILT binary
 # (no compilation).
 #
-# Three jobs, strict order:
-#   build-assets — compile `zz`+`zz-lsp` per arch, zip, upload to Release.
-#   publish      — Arch container: point the PKGBUILD at the zips, generate
-#                  .SRCINFO with makepkg, upload both as a workflow artifact.
+# Two jobs, strict order:
+#   publish      — Arch container: download the release zips (built once
+#                  by the release workflow — nothing here compiles),
+#                  point the PKGBUILD at them, generate .SRCINFO with
+#                  makepkg, upload both as a workflow artifact.
 #   push-aur     — plain ubuntu-latest: clone the AUR repo over SSH and push.
 #                  (SSH lives here, not in the Arch container — stock Ubuntu
 #                  OpenSSH is the ecosystem standard for AUR publishing.)
@@ -26,10 +27,11 @@ name: aur-publish
 # Required repo secret: `AUR_SSH_PRIVATE_KEY` (AUR account SSH private key;
 # public key registered at https://aur.archlinux.org/account).
 #
-# Flow: build zips -> upload to Release -> resolve shas ->
+# Flow: release zips (built once by `release.yml`) -> resolve shas ->
 # render PKGBUILD -> makepkg --printsrcinfo (.SRCINFO) -> push zz-lang.git.
-# Re-running the same Release rebuilds + re-uploads (`--clobber`) and skips
-# the AUR push when it is already current.
+# Re-running the same Release re-renders + skips the AUR push when it is
+# already current. This workflow runs no tests and builds nothing: the
+# Release it consumes was cut from a green main.
 
 on:
   release:
@@ -54,63 +56,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-assets:
-    name: build release zip (${{ matrix.ziparch }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      # One arch failing must not cancel the other: we want both logs and
-      # the surviving zip still uploaded (publish still correctly refuses
-      # to push with a zip missing).
-      fail-fast: false
-      matrix:
-        include:
-          - ziparch: x86_64
-            runner: ubuntu-latest
-          - ziparch: aarch64
-            runner: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: install native deps
-        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev zip unzip
-      - name: build + zip
-        run: |
-          TAG="${{ github.event.release.tag_name || inputs.tag }}"
-          PKGVER="${TAG#v}"
-          CARGO_VER="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
-          if [ "$CARGO_VER" != "$PKGVER" ]; then
-            echo "error: Cargo.toml version ($CARGO_VER) != tag version ($PKGVER)." >&2
-            exit 1
-          fi
-          export CARGO_PROFILE_RELEASE_DEBUG=false
-          cargo build --release --locked -p zz_cli -p zz_lsp
-          ./target/release/zz --version
-          test -x ./target/release/zz-lsp
-          strip target/release/zz target/release/zz-lsp
-          ZIP="zz-$PKGVER-linux-${{ matrix.ziparch }}.zip"
-          rm -rf dist "$ZIP"
-          mkdir -p dist
-          cp target/release/zz target/release/zz-lsp LICENSE README.md dist/
-          (cd dist && zip -9 "../$ZIP" zz zz-lsp LICENSE README.md)
-          unzip -l "$ZIP"
-      - name: upload to release
-        run: |
-          TAG="${{ github.event.release.tag_name || inputs.tag }}"
-          PKGVER="${TAG#v}"
-          ZIP="zz-$PKGVER-linux-${{ matrix.ziparch }}.zip"
-          gh release upload "$TAG" "$ZIP" --clobber
-          echo "uploaded $ZIP to $TAG"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   publish:
     name: publish zz-lang to AUR
-    needs: [build-assets]
     runs-on: ubuntu-latest
     # makepkg --printsrcinfo is canonical for .SRCINFO; it only exists on Arch.
     container:
@@ -154,9 +101,11 @@ jobs:
             exit 1
           fi
           PKGREL="${{ inputs.pkgrel || '1' }}"
-          # Zips were built + uploaded by the build-assets job above.
+          # Zips were built once by the release workflow and attached to
+          # the Release before it was published (curl -fsSL fails loudly
+          # if an asset is missing — a half-ready Release never proceeds).
           for arch in x86_64 aarch64; do
-            ZIP_URL="https://github.com/zaidejjo/zz/releases/download/$TAG/zz-$PKGVER-linux-$arch.zip"
+            ZIP_URL="https://github.com/${{ github.repository }}/releases/download/$TAG/zz-$PKGVER-linux-$arch.zip"
             echo "downloading $ZIP_URL"
             curl -fsSL "$ZIP_URL" -o "/tmp/zz-$arch.zip"
           done
@@ -209,7 +158,7 @@ jobs:
     name: push zz-lang to AUR
     # SSH pushes run on plain ubuntu-latest (not the Arch container):
     # stock OpenSSH there is the ecosystem standard for AUR publishing.
-    needs: [build-assets, publish]
+    needs: [publish]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -225,6 +174,20 @@ jobs:
           path: /tmp/aur-pkg/
       - name: setup AUR ssh
         run: |
+          # Resolve HOME from the passwd db for whoever we actually are.
+          # Runners have shown a whoami/HOME split (user `runner` with
+          # HOME=/root), which makes `~/.ssh` point at an unwritable dir.
+          # Deriving it here keeps every path below correct regardless.
+          REAL_HOME="$(getent passwd "$(whoami)" | cut -d: -f6)"
+          [ -n "$REAL_HOME" ] || REAL_HOME="/home/$(whoami)"
+          if [ "$REAL_HOME" != "$HOME" ]; then
+            echo "HOME skew detected (whoami=$(whoami) HOME=$HOME resolved=$REAL_HOME), exporting fixed HOME"
+            export HOME="$REAL_HOME"
+          fi
+          if [ ! -w "$HOME" ]; then
+            echo "error: HOME=$HOME is not writable for user $(whoami); cannot set up SSH." >&2
+            exit 1
+          fi
           echo "whoami=$(whoami) HOME=$HOME"
           if [ -z "${AUR_SSH_PRIVATE_KEY:-}" ]; then
             echo "error: secret AUR_SSH_PRIVATE_KEY is not set." >&2

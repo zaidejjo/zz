@@ -2,24 +2,34 @@ name: release
 
 # Auto-cuts a GitHub Release from the workspace version in Cargo.toml.
 # You only bump `[workspace.package] version`, merge to main, and this
-# creates tag `vX.Y.Z` + Release (auto-generated notes). Downstream
-# publishers (docker-publish, aur-publish) trigger off that Release —
-# nobody hand-creates tags anymore.
+# creates tag `vX.Y.Z` + Release (auto-generated notes) with the
+# prebuilt `zz`+`zz-lsp` zips attached. Downstream publishers
+# (docker-publish, aur-publish) trigger off that Release and consume the
+# zips — nobody rebuilds the compiler, nobody hand-creates tags.
+#
+# Trigger: CI success on main (merge commits are tested by CI; release
+# only runs on a green tree — it runs no tests itself), plus manual
+# dispatch. Push-to-main is deliberately NOT a trigger: every merge
+# already ran CI, and re-running here would duplicate it.
+#
+# Flow: resolve version -> skip if released -> sync Cargo.lock ->
+# build zips (x86_64 + aarch64, in parallel) -> create Release WITH
+# the zips attached (single shot, so `release: published` consumers
+# never see a half-ready Release).
 #
 # Lock safety: bumping the workspace version without regenerating
-# Cargo.lock breaks every `cargo build --locked` downstream (Docker,
-# release zips). So before tagging, this syncs the lockfile
-# (`cargo metadata` refreshes it minimally) and pushes the fix to main.
-# A tag is only cut on a tree whose lock verifies clean.
+# Cargo.lock breaks every `cargo build --locked` downstream. So before
+# tagging, this syncs the lockfile (`cargo metadata` refreshes it
+# minimally) and pushes the fix. A tag is only cut on a tree whose
+# lock verifies clean.
 #
 # Idempotent: if tag `vX.Y.Z` or its Release already exists, no-op.
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
-    paths:
-      - Cargo.toml
-      - Cargo.lock
   workflow_dispatch:
     inputs:
       dry-run:
@@ -36,10 +46,16 @@ concurrency:
 jobs:
   cut:
     name: cut release from Cargo.toml
+    # Only run on green CI (manual dispatch always runs).
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
+    outputs:
+      pkgver: ${{ steps.ver.outputs.pkgver }}
+      tag: ${{ steps.ver.outputs.tag }}
+      skip: ${{ steps.exists.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,6 +71,9 @@ jobs:
           fi
           case "$PKGVER" in
             *"-"*|*" "*) echo "error: invalid version '$PKGVER'" >&2; exit 1 ;;
+          esac
+          case "$PKGVER" in
+            *"-"*) echo "error: pkgver must not contain '-': $PKGVER" >&2; exit 1 ;;
           esac
           TAG="v$PKGVER"
           echo "pkgver=$PKGVER" >> "$GITHUB_OUTPUT"
@@ -119,7 +138,7 @@ jobs:
           if [ -z "$(gh pr list --head "$BRANCH" --base main --json number --jq '.[0].number')" ]; then
             gh pr create --base main --head "$BRANCH" \
               --title "chore: sync Cargo.lock for $TAG" \
-              --body "Regenerates Cargo.lock for the $TAG version bump (required for \`cargo build --locked\` downstream: Docker, release zips). Merge this PR and the $TAG release cuts automatically."
+              --body "Regenerates Cargo.lock for the $TAG version bump (required for \`cargo build --locked\` downstream). Merge this PR and the $TAG release cuts automatically."
           else
             echo "lock-sync PR already open, updated in place"
           fi
@@ -128,25 +147,100 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: create tag + release (if missing)
-        if: steps.exists.outputs.skip != 'true'
+  build-assets:
+    name: build release zip (${{ matrix.ziparch }})
+    needs: [cut]
+    # Same CI gate as `cut` (a skipped `cut` leaves `skip` empty, which
+    # `!= 'true'` would wrongly pass — belt and suspenders).
+    if: ${{ (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && needs.cut.outputs.skip != 'true' }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One arch failing must not cancel the other: we want both logs.
+      # The publish step refuses to cut the Release with a zip missing.
+      fail-fast: false
+      matrix:
+        include:
+          - ziparch: x86_64
+            runner: ubuntu-latest
+          - ziparch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Build the exact tree CI tested: the main HEAD the release
+          # resolves from (workflow_run checks out the default branch).
+          ref: main
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install native deps
+        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev zip unzip
+      - name: build + zip
         run: |
-          TAG="${{ steps.ver.outputs.tag }}"
+          PKGVER="${{ needs.cut.outputs.pkgver }}"
+          TAG="${{ needs.cut.outputs.tag }}"
+          CARGO_VER="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ "$CARGO_VER" != "$PKGVER" ]; then
+            echo "error: Cargo.toml version ($CARGO_VER) != tag version ($PKGVER)." >&2
+            exit 1
+          fi
+          export CARGO_PROFILE_RELEASE_DEBUG=false
+          cargo build --release --locked -p zz_cli -p zz_lsp
+          ./target/release/zz --version
+          test -x ./target/release/zz-lsp
+          strip target/release/zz target/release/zz-lsp
+          ZIP="zz-$PKGVER-linux-${{ matrix.ziparch }}.zip"
+          rm -rf dist "$ZIP"
+          mkdir -p dist
+          cp target/release/zz target/release/zz-lsp LICENSE README.md dist/
+          (cd dist && zip -9 "../$ZIP" zz zz-lsp LICENSE README.md)
+          unzip -l "$ZIP"
+      - name: upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-zip-${{ matrix.ziparch }}
+          path: zz-*.zip
+          if-no-files-found: error
+
+  publish-release:
+    name: create release with prebuilt zips
+    needs: [cut, build-assets]
+    # Same CI gate as above (see build-assets).
+    if: ${{ (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && needs.cut.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-zip-*
+          merge-multiple: true
+      - name: create tag + release with assets (if missing)
+        run: |
+          TAG="${{ needs.cut.outputs.tag }}"
           if [ "${{ inputs['dry-run'] || 'false' }}" = "true" ]; then
-            echo "dry-run: would create release $TAG from ${{ github.sha }}"
+            echo "dry-run: would create release $TAG with:"
+            ls -la zz-*.zip
             exit 0
           fi
-          # Re-check: the lock-sync push above (or a concurrent run) may have
-          # created the tag while we worked.
+          # Re-check: a concurrent run may have cut the tag while we built.
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null \
             || gh release view "$TAG" >/dev/null 2>&1; then
             echo "tag/release $TAG appeared concurrently, nothing to do"
             exit 0
           fi
+          ls -la zz-*.zip
+          test -f "zz-${{ needs.cut.outputs.pkgver }}-linux-x86_64.zip" \
+            || { echo "error: x86_64 zip missing, refusing half-ready release." >&2; exit 1; }
+          test -f "zz-${{ needs.cut.outputs.pkgver }}-linux-aarch64.zip" \
+            || { echo "error: aarch64 zip missing, refusing half-ready release." >&2; exit 1; }
           gh release create "$TAG" \
             --target "main" \
             --title "$TAG" \
-            --generate-notes
-          echo "created release $TAG"
+            --generate-notes \
+            zz-*.zip
+          echo "created release $TAG with prebuilt zips"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
