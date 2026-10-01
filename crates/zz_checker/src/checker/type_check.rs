@@ -1400,14 +1400,22 @@ impl Checker {
                 Type::Int
             }
             _ => {
-                self.errors.push(error_at(
-                    format!(
-                        "bitwise `{}` requires `int` operands, found `{lt}` and `{rt}`\n\
-                         hint: use `int(x)` to cast, `&&`/`||` for boolean logic",
-                        op.symbol()
-                    ),
-                    span,
-                ));
+                // `Error` (earlier failure) and `Never` (divergent,
+                // unreachable operand) suppress cascading errors —
+                // same convention as `check_arith`.
+                if !matches!(
+                    (&lt, &rt),
+                    (Type::Error, _) | (_, Type::Error) | (Type::Never, _) | (_, Type::Never)
+                ) {
+                    self.errors.push(error_at(
+                        format!(
+                            "bitwise `{}` requires `int` operands, found `{lt}` and `{rt}`\n\
+                             hint: use `int(x)` to cast, `&&`/`||` for boolean logic",
+                            op.symbol()
+                        ),
+                        span,
+                    ));
+                }
                 Type::Error
             }
         }

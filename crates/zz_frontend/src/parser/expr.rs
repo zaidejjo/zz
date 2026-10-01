@@ -178,8 +178,8 @@ impl Parser {
         left
     }
 
-    /// `a | b` — bitwise OR. Binds tighter than `&&`/`||` comparisons
-    /// but looser than `^`, `&`, shifts and arithmetic, so
+    /// `a | b` — bitwise OR. Binds tighter than comparisons and
+    /// `&&`/`||`, but looser than `^`, `&`, shifts and arithmetic, so
     /// `flags & mask == expected` parses as `(flags & mask) == expected`.
     /// The single-`|` token doubles as the closure delimiter and pattern
     /// `|` in their own parse contexts — no ambiguity here.

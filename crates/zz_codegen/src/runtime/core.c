@@ -108,14 +108,22 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
                 fprintf(stderr, "zz error: negative shift count for `<<`\n");
                 exit(1);
             }
-            return zz_int((int64_t)((uint64_t)a.i << ((uint64_t)b.i & 63)));
+            // Masked `int` count: well-defined for all inputs, and the
+            // unsigned left operand makes `<<` modulo-2^64 (no signed
+            // overflow UB) before the two's-complement cast back.
+            int s = (int)((uint64_t)b.i & 63);
+            return zz_int((int64_t)((uint64_t)a.i << (unsigned)s));
         }
         case ZZOP_SHR: {
             if (b.i < 0) {
                 fprintf(stderr, "zz error: negative shift count for `>>`\n");
                 exit(1);
             }
-            return zz_int(a.i >> ((uint64_t)b.i & 63));
+            // Arithmetic (sign-extending) right shift: the left operand
+            // stays signed `int64_t` (shift operators promote — not
+            // convert — their operands, so no unsigned conversion here).
+            int s = (int)((uint64_t)b.i & 63);
+            return zz_int(a.i >> s);
         }
         }
     }
