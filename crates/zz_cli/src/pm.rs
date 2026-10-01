@@ -2,6 +2,7 @@
 //!
 //! Thin wrapper: parse args → call `zz_pm` functions → format output.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Handle `zz init [--template T] [--author A] [--description D] [--license L] [--repo URL]`.
@@ -40,23 +41,384 @@ pub fn init(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Handle `zz new <name> [--template cli|lib|web] [--author A] [--description D] [--license L] [--repo URL]`.
+/// Handle `zz new <name> [--template T|pkg:P|URL|PATH] [--force] [--no-git] [...]`.
+///
+/// Templates: builtin (`cli`, `lib`, `web`), `pkg:<registry-name>`,
+/// git URL, or local path (a `template/` subdir wins when present).
+/// Files support `{{name}}` / `{{Name}}` substitution. Conflicts refuse
+/// unless `--force`. Always `git init -b main` unless `--no-git`.
 pub fn new(args: &[String]) -> Result<(), String> {
     let template = parse_flag_value(args, "--template");
+    let force = args.iter().any(|a| a == "--force");
+    let no_git = args.iter().any(|a| a == "--no-git");
     let name = args
         .iter()
         .find(|a| !a.starts_with('-'))
         .ok_or("missing project name\n\nhint: usage: zz new <name> [--template cli|lib|web]")?;
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        return Err(format!(
+            "invalid project name `{name}`\n\
+              hint: use a plain directory name (e.g. myapp)"
+        ));
+    }
 
     let parent = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
-    let opts = init_options(args);
-    let project_dir =
-        zz_pm::manifest::Manifest::create_new_opts(&parent, name, template.as_deref(), &opts)?;
+    let project_dir = parent.join(name);
+    if project_dir.exists() && !is_empty_dir(&project_dir) && !force {
+        return Err(format!(
+            "`{}` already exists and is not empty\n\
+              hint: use --force to scaffold into it anyway",
+            project_dir.display()
+        ));
+    }
 
-    println!("created project `{}` at {}", name, project_dir.display());
+    match template.as_deref() {
+        None | Some("cli") | Some("lib") | Some("web") => {
+            let opts = init_options(args);
+            zz_pm::manifest::Manifest::create_new_opts(&parent, name, template.as_deref(), &opts)?;
+        }
+        Some(spec) => {
+            new_from_template(&parent, name, spec, args, force)?;
+        }
+    }
+
+    println!("created project `{name}` at {}", project_dir.display());
     println!("  zz.toml: created");
     println!("  src/main.zz: created");
     println!("  .gitignore: ensured (vendor/, build/, src/bin/)");
+
+    if no_git {
+        return Ok(());
+    }
+    match git_init_main(&project_dir) {
+        GitInit::Done => println!("  git: initialized (branch main)"),
+        GitInit::AlreadyRepo => println!("  git: already a repository"),
+        GitInit::NoGit => eprintln!("warning: git not found — skipping `git init`"),
+        GitInit::Failed(detail) => {
+            eprintln!("warning: `git init` failed ({detail}) — continuing without a repo")
+        }
+    }
+    Ok(())
+}
+
+/// Is `dir` missing, or an existing empty directory?
+fn is_empty_dir(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(mut rd) => rd.next().is_none(),
+        Err(_) => true,
+    }
+}
+
+/// Outcome of the `git init` step.
+enum GitInit {
+    Done,
+    AlreadyRepo,
+    NoGit,
+    Failed(String),
+}
+
+/// `git init -b main` (fallback: plain `init` on old git). Never commits.
+fn git_init_main(dir: &Path) -> GitInit {
+    if dir.join(".git").exists() {
+        return GitInit::AlreadyRepo;
+    }
+    // Probe once so a missing binary and a failed init report distinctly.
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return GitInit::NoGit;
+    }
+    let main_init = std::process::Command::new("git")
+        .arg("init")
+        .arg("-b")
+        .arg("main")
+        .arg("--quiet")
+        .current_dir(dir)
+        .status();
+    match main_init {
+        Ok(s) if s.success() => GitInit::Done,
+        Ok(_) => {
+            // git < 2.28 has no `-b`: plain init, then rename the branch.
+            let plain = std::process::Command::new("git")
+                .arg("init")
+                .arg("--quiet")
+                .current_dir(dir)
+                .status();
+            match plain {
+                Ok(p) if p.success() => {
+                    let _ = std::process::Command::new("git")
+                        .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+                        .current_dir(dir)
+                        .status();
+                    GitInit::Done
+                }
+                Ok(p) => GitInit::Failed(format!("exit {}", p.code().unwrap_or(-1))),
+                Err(e) => GitInit::Failed(format!("cannot run git: {e}")),
+            }
+        }
+        Err(e) => GitInit::Failed(format!("cannot run git: {e}")),
+    }
+}
+
+/// Scaffold from a registry / git / path template into a fresh manifest.
+fn new_from_template(
+    parent: &Path,
+    name: &str,
+    spec: &str,
+    args: &[String],
+    force: bool,
+) -> Result<(), String> {
+    // Resolve the template root (owned tempdir when fetched).
+    let (hold, root) = fetch_template_root(spec, args)?;
+    let src = {
+        let nested = root.join("template");
+        if nested.is_dir() {
+            nested
+        } else {
+            root.clone()
+        }
+    };
+    if !src.is_dir() {
+        return Err(format!(
+            "template `{spec}` has no files\n\
+              hint: expected a template/ directory or project files at the root"
+        ));
+    }
+
+    // Manifest first (same as builtin path), then overlay template files —
+    // never overwriting the generated zz.toml (deps come via `zz add`).
+    let project_dir = parent.join(name);
+    std::fs::create_dir_all(project_dir.join("src"))
+        .map_err(|e| format!("cannot create src/: {e}"))?;
+    let opts = init_options(args);
+    zz_pm::manifest::Manifest::create_init_opts(&project_dir, name, &opts)?;
+    let mut skipped_toml = false;
+    let overlay = overlay_template(&src, &project_dir, name, force, &mut skipped_toml);
+    // Fetched templates live in temp: remove regardless of overlay outcome.
+    if let Some(tmp) = hold {
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    overlay?;
+    if skipped_toml {
+        println!("  template zz.toml ignored (use `zz add` for dependencies)");
+    }
+    if !project_dir.join("src").join("main.zz").exists() && !project_dir.join("main.zz").exists() {
+        eprintln!("warning: template provides no src/main.zz entry file");
+    }
+    Ok(())
+}
+
+/// Fetch a template by spec; returns (tempdir guard, root dir).
+/// Tempdir guard keeps fetched content alive for the overlay step.
+fn fetch_template_root(spec: &str, args: &[String]) -> Result<(Option<PathBuf>, PathBuf), String> {
+    let trimmed = spec.strip_prefix("pkg:").unwrap_or(spec);
+    let is_url = spec.starts_with("http://")
+        || spec.starts_with("https://")
+        || spec.starts_with("git@")
+        || spec.ends_with(".git");
+    if is_url {
+        let tmp = std::env::temp_dir().join(format!("zz-template-{}", std::process::id()));
+        if tmp.exists() {
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+        let status = std::process::Command::new("git")
+            .args(["clone", "--depth", "1", spec])
+            .arg(&tmp)
+            .status()
+            .map_err(|_| "cannot run git — install git to use URL templates".to_string())?;
+        if !status.success() {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(format!("cannot clone template `{spec}`"));
+        }
+        return Ok((Some(tmp.clone()), tmp));
+    }
+    let as_path = std::path::PathBuf::from(spec);
+    if as_path.exists() {
+        let root = if as_path.is_absolute() {
+            as_path
+        } else {
+            std::env::current_dir()
+                .map_err(|e| format!("cannot get cwd: {e}"))?
+                .join(as_path)
+        };
+        return Ok((None, root));
+    }
+    // Registry package (bare name or `pkg:name`), latest version.
+    let base = registry_base_from(args);
+    let client = zz_pm::remote::RegistryClient::new(&base);
+    let info = client.fetch_metadata(trimmed).map_err(|e| match e {
+        zz_pm::remote::RemoteError::NotFound(_) => format!(
+            "template `{spec}` not found\n\
+              hint: builtin templates are cli|lib|web; try `zz search {trimmed}`"
+        ),
+        other => format!("cannot reach {base}: {other}"),
+    })?;
+    let latest = info.metadata.latest.clone();
+    let sha = zz_pm::remote::expected_sha(&info, &latest);
+    let spinner = crate::ui::Spinner::start(&format!("Fetching template {trimmed} @ {latest}"));
+    let cas_dir = match client.fetch_to_cas(trimmed, &latest, &sha) {
+        Ok((dir, _)) => {
+            spinner.finish(&format!("fetched template {trimmed} @ {latest}"));
+            dir
+        }
+        Err(e) => {
+            drop(spinner);
+            return Err(format!("cannot fetch template {trimmed}: {e}"));
+        }
+    };
+    Ok((None, cas_dir))
+}
+
+/// Copy template files into the project with `{{name}}` substitution.
+/// Skips `.git` and `zz.toml`; refuses to overwrite without `force`.
+fn overlay_template(
+    src: &Path,
+    dest: &Path,
+    name: &str,
+    force: bool,
+    skipped_toml: &mut bool,
+) -> Result<(), String> {
+    let mut stack = vec![src.to_path_buf()];
+    while let Some(cur) = stack.pop() {
+        let rd = std::fs::read_dir(&cur)
+            .map_err(|e| format!("cannot read template {}: {e}", cur.display()))?;
+        let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for path in entries {
+            let file_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if file_name == ".git" {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(src)
+                .map_err(|e| format!("bad template path: {e}"))?;
+            if path.is_dir() {
+                let target = dest.join(substitute_name(&rel.to_string_lossy(), name));
+                std::fs::create_dir_all(&target)
+                    .map_err(|e| format!("cannot create {}: {e}", target.display()))?;
+                stack.push(path);
+                continue;
+            }
+            if rel == Path::new("zz.toml") {
+                *skipped_toml = true;
+                continue;
+            }
+            let target_rel = substitute_name(&rel.to_string_lossy(), name);
+            let target = dest.join(&target_rel);
+            if target.exists() && !force {
+                return Err(format!(
+                    "template would overwrite `{target_rel}`\n\
+                      hint: pass --force to allow it"
+                ));
+            }
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+            }
+            let bytes =
+                std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            match String::from_utf8(bytes) {
+                Ok(text) => {
+                    let rendered = substitute_name(&text, name);
+                    std::fs::write(&target, rendered)
+                        .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+                }
+                Err(_) => {
+                    // Binary asset: copy raw, no substitution.
+                    let bytes = std::fs::read(&path)
+                        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                    std::fs::write(&target, bytes)
+                        .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Replace `{{name}}` (raw) and `{{Name}}` (PascalCase) placeholders.
+fn substitute_name(text: &str, name: &str) -> String {
+    text.replace("{{name}}", name)
+        .replace("{{Name}}", &pascal_case(name))
+}
+
+/// `my-tool` → `MyTool`.
+fn pascal_case(name: &str) -> String {
+    name.split(['-', '_', ' '])
+        .filter(|s| !s.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// Handle `zz clean [--deps]`: remove build outputs (`bin/`, `build/`,
+/// `src/bin/`); with `--deps` also `vendor/` + `zz.lock`. Explicit flags
+/// only — never prompts, script-safe.
+pub fn clean(args: &[String]) -> Result<(), String> {
+    let with_deps = args.iter().any(|a| a == "--deps");
+    let dir = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
+    clean_in(&dir, with_deps)
+}
+
+/// `zz clean` in an explicit directory (split for tests — no cwd games).
+fn clean_in(dir: &Path, with_deps: bool) -> Result<(), String> {
+    if with_deps && !dir.join("zz.toml").exists() {
+        return Err("no zz.toml found in current directory\n\
+            hint: --deps removes vendor/ + zz.lock, which need a project"
+            .to_string());
+    }
+    let mut targets = vec![
+        dir.join("bin"),
+        dir.join("build"),
+        dir.join("src").join("bin"),
+    ];
+    if with_deps {
+        targets.push(dir.join("vendor"));
+        targets.push(dir.join("zz.lock"));
+    }
+    let mut freed = 0u64;
+    let mut removed = 0u32;
+    for target in &targets {
+        if !target.exists() && !target.is_symlink() {
+            continue;
+        }
+        let size = if target.is_dir() && !target.is_symlink() {
+            zz_pm::paths::dir_usage(target).1
+        } else {
+            target.metadata().map(|m| m.len()).unwrap_or(0)
+        };
+        if target.is_dir() && !target.is_symlink() {
+            std::fs::remove_dir_all(target)
+                .map_err(|e| format!("cannot remove {}: {e}", target.display()))?;
+        } else {
+            std::fs::remove_file(target)
+                .map_err(|e| format!("cannot remove {}: {e}", target.display()))?;
+        }
+        freed += size;
+        removed += 1;
+        println!("removed {}", target.display());
+    }
+    if removed == 0 {
+        println!("nothing to clean");
+    } else {
+        println!(
+            "cleaned {removed} path(s), freed {}",
+            crate::ui::human_bytes(freed)
+        );
+    }
+    if with_deps {
+        println!("hint: run `zz install` to re-fetch dependencies");
+    }
     Ok(())
 }
 
@@ -1190,6 +1552,488 @@ pub fn update(args: &[String]) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Dependency inspection: outdated / deps / audit
+// ---------------------------------------------------------------------------
+
+/// Load the project manifest (required) and lockfile (optional).
+fn load_manifest_and_lock() -> Result<
+    (
+        PathBuf,
+        zz_pm::manifest::Manifest,
+        Option<zz_pm::lock::Lockfile>,
+    ),
+    String,
+> {
+    let dir = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
+    let toml_path = dir.join("zz.toml");
+    if !toml_path.exists() {
+        return Err("no zz.toml found in current directory\n\
+            hint: run `zz init` to create a project"
+            .to_string());
+    }
+    let manifest = zz_pm::manifest::Manifest::load(&toml_path)?;
+    let lock = zz_pm::lock::Lockfile::load(&dir.join("zz.lock")).ok();
+    Ok((dir, manifest, lock))
+}
+
+/// Short source label for a locked dep: registry, git, path, or other.
+fn dep_source_label(source: &str) -> &'static str {
+    if source.starts_with("registry+") {
+        "registry"
+    } else if source.starts_with("git+") {
+        "git"
+    } else if source == "path" {
+        "path"
+    } else {
+        "other"
+    }
+}
+
+/// Read a locked dep's own manifest (for graph traversal), best effort:
+/// path deps from disk, registry/git deps from the CAS. `None` when the
+/// content is not available locally (never touches the network).
+fn locked_dep_manifest(
+    dir: &Path,
+    manifest: &zz_pm::manifest::Manifest,
+    dep: &zz_pm::lock::LockedDep,
+) -> Option<zz_pm::manifest::Manifest> {
+    if dep.source == "path" {
+        let rel = match manifest.dependencies.get(&dep.name)? {
+            zz_pm::manifest::DepSpec::Path(p) => p.path.clone(),
+            _ => return None,
+        };
+        return zz_pm::manifest::Manifest::load(&dir.join(&rel).join("zz.toml")).ok();
+    }
+    if dep.source.starts_with("registry+") {
+        if dep.hash.is_empty() {
+            return None;
+        }
+        return zz_pm::manifest::Manifest::load(
+            &zz_pm::paths::cas_entry(&dep.hash).join("zz.toml"),
+        )
+        .ok();
+    }
+    if dep.source.starts_with("git+") {
+        let commit = dep.commit.as_deref()?;
+        return zz_pm::manifest::Manifest::load(&zz_pm::paths::cas_entry(commit).join("zz.toml"))
+            .ok();
+    }
+    None
+}
+
+/// Handle `zz outdated`: locked vs wanted vs latest per registry dep.
+pub fn outdated(args: &[String]) -> Result<(), String> {
+    let (_dir, manifest, lock) = load_manifest_and_lock()?;
+    let lock = lock.ok_or_else(|| {
+        "no zz.lock found\n\
+          hint: run `zz install` first"
+            .to_string()
+    })?;
+    let mut wanted: Vec<(&String, &String)> = manifest
+        .dependencies
+        .iter()
+        .filter_map(|(name, spec)| match spec {
+            zz_pm::manifest::DepSpec::Version(req) => Some((name, req)),
+            _ => None,
+        })
+        .collect();
+    wanted.sort_by(|a, b| a.0.cmp(b.0));
+    if wanted.is_empty() {
+        println!("no registry dependencies to check");
+        return Ok(());
+    }
+
+    let base = registry_base_from(args);
+    let client = zz_pm::remote::RegistryClient::new(&base);
+    crate::ui::header(&format!("checking {} packages on {base}", wanted.len()));
+    let mut rows: Vec<(String, String, String, String, String)> = Vec::new();
+    for (i, (name, req)) in wanted.iter().enumerate() {
+        crate::ui::progress(i + 1, wanted.len(), name);
+        let locked = lock
+            .find(name)
+            .map(|l| l.version.clone())
+            .unwrap_or_else(|| "—".to_string());
+        let info = match client.fetch_metadata(name) {
+            Ok(info) => info,
+            Err(zz_pm::remote::RemoteError::NotFound(_)) => {
+                rows.push((
+                    (*name).clone(),
+                    locked,
+                    "?".into(),
+                    "?".into(),
+                    "not found".into(),
+                ));
+                continue;
+            }
+            Err(e) => {
+                crate::ui::warn(&format!("skipping {name}: {e}"));
+                rows.push((
+                    (*name).clone(),
+                    locked,
+                    "?".into(),
+                    "?".into(),
+                    "offline".into(),
+                ));
+                continue;
+            }
+        };
+        let latest = info.metadata.latest.clone();
+        let wanted_ver = zz_pm::remote::pick_version(&info.metadata.versions, req)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| "∅".to_string());
+        let status = if wanted_ver == "∅" {
+            "no match"
+        } else if locked == latest {
+            "up to date"
+        } else if locked == wanted_ver {
+            "update available"
+        } else {
+            "behind requirement"
+        };
+        rows.push((
+            (*name).clone(),
+            locked,
+            wanted_ver,
+            latest,
+            status.to_string(),
+        ));
+    }
+    print!("{}", format_outdated_table(&rows));
+    if rows.iter().any(|r| r.4 == "no match") {
+        println!("hint: `zz info <pkg>` lists the available versions");
+    } else if rows
+        .iter()
+        .any(|r| r.4 == "update available" || r.4 == "behind requirement")
+    {
+        println!("hint: run `zz update [pkg]` to re-resolve, then `zz install`");
+    }
+    Ok(())
+}
+
+/// Aligned `outdated` table (pure for tests).
+fn format_outdated_table(rows: &[(String, String, String, String, String)]) -> String {
+    let header = ("package", "locked", "wanted", "latest", "status");
+    let mut widths = [
+        header.0.len(),
+        header.1.len(),
+        header.2.len(),
+        header.3.len(),
+        header.4.len(),
+    ];
+    for r in rows {
+        widths[0] = widths[0].max(r.0.len());
+        widths[1] = widths[1].max(r.1.len());
+        widths[2] = widths[2].max(r.2.len());
+        widths[3] = widths[3].max(r.3.len());
+        widths[4] = widths[4].max(r.4.len());
+    }
+    let mut out = format!(
+        "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {}\n",
+        header.0,
+        header.1,
+        header.2,
+        header.3,
+        header.4,
+        w0 = widths[0],
+        w1 = widths[1],
+        w2 = widths[2],
+        w3 = widths[3],
+    );
+    for r in rows {
+        out.push_str(&format!(
+            "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {}\n",
+            r.0,
+            r.1,
+            r.2,
+            r.3,
+            r.4,
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+            w3 = widths[3],
+        ));
+    }
+    out
+}
+
+/// Handle `zz deps tree [--depth N]` / `zz deps why <pkg>`.
+/// Flags without a subcommand (`zz deps --depth 2`) default to `tree`.
+pub fn deps(args: &[String]) -> Result<(), String> {
+    let (sub, rest) = match args.first().map(String::as_str) {
+        Some(s) if !s.starts_with('-') => (s, &args[1..]),
+        _ => ("tree", args),
+    };
+    match sub {
+        "tree" => {
+            let depth = rest
+                .iter()
+                .position(|a| a == "--depth")
+                .and_then(|i| rest.get(i + 1))
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(usize::MAX);
+            deps_tree(depth)
+        }
+        "why" => {
+            let target = rest
+                .first()
+                .ok_or("missing package name\n\nhint: usage: zz deps why <pkg>")?;
+            deps_why(target)
+        }
+        other => Err(format!(
+            "unknown deps subcommand `{other}`\n\
+              hint: usage: zz deps tree [--depth N] | zz deps why <pkg>"
+        )),
+    }
+}
+
+/// Child version label for display: locked version or requirement.
+fn dep_version_label(
+    name: &str,
+    manifest: &zz_pm::manifest::Manifest,
+    lock: &Option<zz_pm::lock::Lockfile>,
+) -> String {
+    if let Some(locked) = lock.as_ref().and_then(|l| l.find(name)) {
+        return format!("{} ({})", locked.version, dep_source_label(&locked.source));
+    }
+    match manifest.dependencies.get(name) {
+        Some(zz_pm::manifest::DepSpec::Version(req)) => format!("{req} (unresolved)"),
+        Some(zz_pm::manifest::DepSpec::Git(_)) => "git (unresolved)".to_string(),
+        Some(zz_pm::manifest::DepSpec::Path(_)) => "path (unresolved)".to_string(),
+        None => "?".to_string(),
+    }
+}
+
+fn deps_tree(max_depth: usize) -> Result<(), String> {
+    let (dir, manifest, lock) = load_manifest_and_lock()?;
+    if manifest.dependencies.is_empty() {
+        println!("no dependencies");
+        return Ok(());
+    }
+    let mut roots: Vec<String> = manifest.dependencies.keys().cloned().collect();
+    roots.sort();
+    let mut seen = HashSet::new();
+    for (i, root) in roots.iter().enumerate() {
+        let last_root = i + 1 == roots.len();
+        println!("{} {}", root, dep_version_label(root, &manifest, &lock));
+        print_tree_children(
+            &dir, &manifest, &lock, root, "", last_root, 1, max_depth, &mut seen,
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_tree_children(
+    dir: &Path,
+    manifest: &zz_pm::manifest::Manifest,
+    lock: &Option<zz_pm::lock::Lockfile>,
+    parent: &str,
+    prefix: &str,
+    parent_last: bool,
+    depth: usize,
+    max_depth: usize,
+    seen: &mut HashSet<String>,
+) {
+    if depth > max_depth {
+        return;
+    }
+    let locked = lock.as_ref().and_then(|l| l.find(parent));
+    let Some(dep) = locked else { return };
+    let Some(child_manifest) = locked_dep_manifest(dir, manifest, dep) else {
+        return;
+    };
+    let mut subs: Vec<String> = child_manifest.dependencies.keys().cloned().collect();
+    subs.sort();
+    for (i, sub) in subs.iter().enumerate() {
+        let last = i + 1 == subs.len();
+        let branch = if last { "└─ " } else { "├─ " };
+        let stem = if parent_last { "   " } else { "│  " };
+        if !seen.insert(sub.clone()) {
+            println!("{prefix}{branch}{sub} (cycle)");
+            continue;
+        }
+        println!(
+            "{prefix}{branch}{sub} {}",
+            dep_version_label(sub, manifest, lock)
+        );
+        let next_prefix = format!("{prefix}{stem}");
+        print_tree_children(
+            dir,
+            manifest,
+            lock,
+            sub,
+            &next_prefix,
+            last,
+            depth + 1,
+            max_depth,
+            seen,
+        );
+        seen.remove(sub);
+    }
+}
+
+fn deps_why(target: &str) -> Result<(), String> {
+    let (dir, manifest, lock) = load_manifest_and_lock()?;
+    if manifest.dependencies.contains_key(target) {
+        println!("{target} is a direct dependency (zz.toml)");
+        return Ok(());
+    }
+    let lock = lock.as_ref().ok_or_else(|| {
+        "no zz.lock found\n\
+          hint: run `zz install` first"
+            .to_string()
+    })?;
+    // Reverse edges: child -> parents, from every readable manifest.
+    let mut parents: HashMap<String, Vec<String>> = HashMap::new();
+    let mut queue: Vec<String> = manifest.dependencies.keys().cloned().collect();
+    let mut visited = HashSet::new();
+    while let Some(pkg) = queue.pop() {
+        if !visited.insert(pkg.clone()) {
+            continue;
+        }
+        let locked = lock.find(&pkg);
+        let Some(dep) = locked else { continue };
+        let Some(child_manifest) = locked_dep_manifest(&dir, &manifest, dep) else {
+            continue;
+        };
+        for sub in child_manifest.dependencies.keys() {
+            parents.entry(sub.clone()).or_default().push(pkg.clone());
+            queue.push(sub.clone());
+        }
+    }
+    if !parents.contains_key(target) {
+        return Err(format!(
+            "nothing depends on `{target}`\n\
+              hint: check the spelling with `zz deps tree`"
+        ));
+    }
+    // All chains from roots to target (DFS, capped).
+    let roots: HashSet<String> = manifest.dependencies.keys().cloned().collect();
+    let mut chains: Vec<Vec<String>> = Vec::new();
+    let mut stack = vec![vec![target.to_string()]];
+    while let Some(chain) = stack.pop() {
+        if chains.len() >= 10 {
+            break;
+        }
+        let head = chain.last().cloned().unwrap_or_default();
+        if roots.contains(&head) {
+            let mut full = chain.clone();
+            full.reverse();
+            chains.push(full);
+            continue;
+        }
+        if let Some(ps) = parents.get(&head) {
+            for p in ps {
+                if chain.contains(p) {
+                    continue;
+                }
+                let mut next = chain.clone();
+                next.push(p.clone());
+                stack.push(next);
+            }
+        }
+    }
+    chains.sort();
+    chains.dedup();
+    if chains.is_empty() {
+        return Err(format!(
+            "nothing depends on `{target}`\n\
+              hint: check the spelling with `zz deps tree`"
+        ));
+    }
+    for chain in &chains {
+        println!("{}", chain.join(" → "));
+    }
+    Ok(())
+}
+
+/// Handle `zz audit`: integrity of locked pins (published? hash matches?
+/// licensed? content present?). This is tamper/rot detection — not
+/// vulnerability scanning (the registry publishes no advisory feed).
+pub fn audit(args: &[String]) -> Result<(), String> {
+    let (_dir, _manifest, lock) = load_manifest_and_lock()?;
+    let lock = lock.ok_or_else(|| {
+        "no zz.lock found\n\
+          hint: run `zz install` first"
+            .to_string()
+    })?;
+    let locked: Vec<&zz_pm::lock::LockedDep> = lock
+        .deps
+        .iter()
+        .filter(|d| d.source.starts_with("registry+"))
+        .collect();
+    if locked.is_empty() {
+        println!("no registry pins to audit");
+        return Ok(());
+    }
+    let base = registry_base_from(args);
+    let client = zz_pm::remote::RegistryClient::new(&base);
+    crate::ui::header(&format!("auditing {} pins on {base}", locked.len()));
+    let mut errors = 0u32;
+    let mut warnings = 0u32;
+    for (i, dep) in locked.iter().enumerate() {
+        crate::ui::progress(i + 1, locked.len(), &dep.name);
+        let Some((_, name, version)) = zz_pm::remote::parse_registry_source(&dep.source) else {
+            crate::ui::warn(&format!("{}: unreadable lockfile source", dep.name));
+            warnings += 1;
+            continue;
+        };
+        let info = match client.fetch_metadata(&name) {
+            Ok(info) => info,
+            Err(e) => {
+                crate::ui::warn(&format!("{}: cannot verify ({e})", dep.name));
+                warnings += 1;
+                continue;
+            }
+        };
+        if !info.metadata.versions.contains(&version) {
+            crate::ui::warn(&format!("{}@{version}: no longer published!", dep.name));
+            errors += 1;
+            continue;
+        }
+        let expected = zz_pm::remote::expected_sha(&info, &version);
+        if !expected.is_empty() && expected != dep.hash {
+            crate::ui::warn(&format!(
+                "{}@{version}: lockfile hash does not match registry!",
+                dep.name
+            ));
+            errors += 1;
+            continue;
+        }
+        let licensed = info
+            .metadata
+            .version_details
+            .get(&version)
+            .map(|d| !d.license.is_empty())
+            .unwrap_or(false)
+            || !info.metadata.license.is_empty();
+        if !licensed {
+            crate::ui::warn(&format!("{}@{version}: no license metadata", dep.name));
+            warnings += 1;
+        }
+        if !dep.hash.is_empty() && !zz_pm::paths::cas_entry(&dep.hash).exists() {
+            crate::ui::warn(&format!(
+                "{}@{version}: content missing locally (run `zz install`)",
+                dep.name
+            ));
+            warnings += 1;
+        }
+    }
+    if errors > 0 {
+        return Err(format!(
+            "audit failed: {errors} error(s), {warnings} warning(s)\n\
+              hint: `zz update` + `zz install` re-pins from the registry"
+        ));
+    }
+    if warnings > 0 {
+        println!("audit passed with {warnings} warning(s)");
+    } else {
+        println!("audit passed: {} pins verified", locked.len());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1279,4 +2123,128 @@ fn count_entries(dir: &Path) -> usize {
     std::fs::read_dir(dir)
         .map(|rd| rd.filter_map(|e| e.ok()).count())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "zz_pm_test_{name}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn outdated_table_aligns_columns() {
+        let rows = vec![
+            (
+                "a".to_string(),
+                "0.1.0".to_string(),
+                "0.1.0".to_string(),
+                "0.2.0".to_string(),
+                "update available".to_string(),
+            ),
+            (
+                "longer-name".to_string(),
+                "1.0.0".to_string(),
+                "1.0.0".to_string(),
+                "1.0.0".to_string(),
+                "up to date".to_string(),
+            ),
+        ];
+        let table = format_outdated_table(&rows);
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("package"));
+        assert!(lines[1].contains("update available"));
+        // Aligned: status column starts at the same offset.
+        let status_off = |l: &str| l.find("update available").or_else(|| l.find("up to date"));
+        assert_eq!(status_off(lines[1]), status_off(lines[2]));
+    }
+
+    #[test]
+    fn pascal_and_substitution() {
+        assert_eq!(pascal_case("my-tool"), "MyTool");
+        assert_eq!(pascal_case("my_tool"), "MyTool");
+        assert_eq!(pascal_case("x"), "X");
+        assert_eq!(
+            substitute_name("pkg {{name}} struct {{Name}}", "my-tool"),
+            "pkg my-tool struct MyTool"
+        );
+    }
+
+    #[test]
+    fn bin_name_rejects_separators() {
+        assert!(check_bin_name("my-tool").is_ok());
+        assert!(check_bin_name("").is_err());
+        assert!(check_bin_name("a/b").is_err());
+        assert!(check_bin_name("..").is_err());
+    }
+
+    #[test]
+    fn overlay_copies_with_substitution_and_skips() {
+        let dir = temp_root("overlay");
+        let src = dir.join("tpl");
+        std::fs::create_dir_all(src.join("src")).unwrap();
+        std::fs::create_dir_all(src.join(".git")).unwrap();
+        std::fs::write(src.join("zz.toml"), "[package]\nname=\"x\"\n").unwrap();
+        std::fs::write(src.join(".git").join("config"), "x").unwrap();
+        std::fs::write(src.join("src").join("{{name}}.zz"), "struct {{Name}} {}\n").unwrap();
+        std::fs::write(src.join("blob.bin"), [0xff, 0x00, 0x41]).unwrap();
+        let dest = dir.join("proj");
+        std::fs::create_dir_all(&dest).unwrap();
+        let mut skipped = false;
+        overlay_template(&src, &dest, "my-tool", false, &mut skipped).unwrap();
+        assert!(skipped, "template zz.toml must be skipped");
+        assert!(!dest.join("zz.toml").exists());
+        assert!(!dest.join(".git").exists());
+        assert_eq!(
+            std::fs::read_to_string(dest.join("src").join("my-tool.zz")).unwrap(),
+            "struct MyTool {}\n"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("blob.bin")).unwrap(),
+            vec![0xff, 0x00, 0x41]
+        );
+        // Refuses to overwrite without --force.
+        let mut skipped2 = false;
+        assert!(overlay_template(&src, &dest, "my-tool", false, &mut skipped2).is_err());
+        assert!(overlay_template(&src, &dest, "my-tool", true, &mut skipped2).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clean_removes_build_outputs() {
+        let dir = temp_root("clean");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::create_dir_all(dir.join("src").join("bin")).unwrap();
+        std::fs::write(dir.join("bin").join("app"), "12345678").unwrap();
+        std::fs::write(dir.join("keep.zz"), "x := 1\n").unwrap();
+        clean_in(&dir, false).unwrap();
+        assert!(!dir.join("bin").exists());
+        assert!(!dir.join("src").join("bin").exists());
+        assert!(dir.join("keep.zz").exists());
+        // --deps needs a project.
+        assert!(clean_in(&dir, true).is_err());
+        std::fs::write(
+            dir.join("zz.toml"),
+            "[package]\nname=\"x\"\nversion=\"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("vendor")).unwrap();
+        std::fs::write(dir.join("zz.lock"), "lock").unwrap();
+        clean_in(&dir, true).unwrap();
+        assert!(!dir.join("vendor").exists());
+        assert!(!dir.join("zz.lock").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

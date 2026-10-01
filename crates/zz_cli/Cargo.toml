@@ -25,3 +25,4 @@ nu-ansi-term = "0.50"
 toml = "0.8"
 serde_json = { workspace = true }
 base64 = { workspace = true }
+ureq = { workspace = true }
