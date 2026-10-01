@@ -156,13 +156,92 @@ impl Parser {
     }
 
     pub(crate) fn parse_relational(&mut self) -> Expr {
-        let mut left = self.parse_additive();
+        let mut left = self.parse_bitor();
         loop {
             let op = match self.peek_kind() {
                 TokenKind::Lt => BinOp::Lt,
                 TokenKind::Gt => BinOp::Gt,
                 TokenKind::Le => BinOp::Le,
                 TokenKind::Ge => BinOp::Ge,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_bitor();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    /// `a | b` — bitwise OR. Binds tighter than `&&`/`||` comparisons
+    /// but looser than `^`, `&`, shifts and arithmetic, so
+    /// `flags & mask == expected` parses as `(flags & mask) == expected`.
+    /// The single-`|` token doubles as the closure delimiter and pattern
+    /// `|` in their own parse contexts — no ambiguity here.
+    pub(crate) fn parse_bitor(&mut self) -> Expr {
+        let mut left = self.parse_bitxor();
+        while self.at(TokenKind::Pipe) {
+            self.advance();
+            let right = self.parse_bitxor();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op: BinOp::BitOr,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    /// `a ^ b` — bitwise XOR. Between `|` and `&`.
+    pub(crate) fn parse_bitxor(&mut self) -> Expr {
+        let mut left = self.parse_bitand();
+        while self.at(TokenKind::Caret) {
+            self.advance();
+            let right = self.parse_bitand();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op: BinOp::BitXor,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    /// `a & b` — bitwise AND. Between `^` and shifts.
+    pub(crate) fn parse_bitand(&mut self) -> Expr {
+        let mut left = self.parse_shift();
+        while self.at(TokenKind::Amp) {
+            self.advance();
+            let right = self.parse_shift();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op: BinOp::BitAnd,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    /// `a << b` / `a >> b` — shifts. Tighter than `&` (so
+    /// `x & 0xFF << 8` is `x & (0xFF << 8)`), looser than additive
+    /// (so `a + b << c` is `(a + b) << c`).
+    pub(crate) fn parse_shift(&mut self) -> Expr {
+        let mut left = self.parse_additive();
+        loop {
+            let op = match self.peek_kind() {
+                TokenKind::Shl => BinOp::Shl,
+                TokenKind::Shr => BinOp::Shr,
                 _ => break,
             };
             self.advance();
@@ -257,6 +336,7 @@ impl Parser {
             TokenKind::Minus => UnOp::Neg,
             TokenKind::Plus => UnOp::Pos,
             TokenKind::Bang => UnOp::Not,
+            TokenKind::Tilde => UnOp::BitNot,
             _ => return self.parse_postfix(),
         };
         let op_tok = self.advance();

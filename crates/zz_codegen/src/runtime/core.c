@@ -37,6 +37,12 @@ zz_value zz_not(zz_value a) {
     return zz_bool(!zz_truthy(a));
 }
 
+zz_value zz_bitnot(zz_value a) {
+    if (a.tag == ZZ_INT)
+        return zz_int(~a.i);
+    return zz_unit();
+}
+
 static double dpow(double a, double b) {
     if (b == 0)
         return 1;
@@ -91,6 +97,26 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
             return zz_bool(a.i <= b.i);
         case ZZOP_GE:
             return zz_bool(a.i >= b.i);
+        case ZZOP_AND:
+            return zz_int(a.i & b.i);
+        case ZZOP_OR:
+            return zz_int(a.i | b.i);
+        case ZZOP_XOR:
+            return zz_int(a.i ^ b.i);
+        case ZZOP_SHL: {
+            if (b.i < 0) {
+                fprintf(stderr, "zz error: negative shift count for `<<`\n");
+                exit(1);
+            }
+            return zz_int((int64_t)((uint64_t)a.i << ((uint64_t)b.i & 63)));
+        }
+        case ZZOP_SHR: {
+            if (b.i < 0) {
+                fprintf(stderr, "zz error: negative shift count for `>>`\n");
+                exit(1);
+            }
+            return zz_int(a.i >> ((uint64_t)b.i & 63));
+        }
         }
     }
     // float

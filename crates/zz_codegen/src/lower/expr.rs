@@ -472,6 +472,9 @@ impl Lowerer {
                     zz_frontend::ast::UnOp::Not => {
                         format!("zz_not({})", box_scalar_operand(expr, names, &v))
                     }
+                    zz_frontend::ast::UnOp::BitNot => {
+                        format!("zz_bitnot({})", box_scalar_operand(expr, names, &v))
+                    }
                 }
             }
             Expr::Binary {
@@ -545,6 +548,11 @@ impl Lowerer {
                             zz_frontend::ast::BinOp::Gt => "ZZOP_GT",
                             zz_frontend::ast::BinOp::Le => "ZZOP_LE",
                             zz_frontend::ast::BinOp::Ge => "ZZOP_GE",
+                            zz_frontend::ast::BinOp::BitAnd => "ZZOP_AND",
+                            zz_frontend::ast::BinOp::BitOr => "ZZOP_OR",
+                            zz_frontend::ast::BinOp::BitXor => "ZZOP_XOR",
+                            zz_frontend::ast::BinOp::Shl => "ZZOP_SHL",
+                            zz_frontend::ast::BinOp::Shr => "ZZOP_SHR",
                             _ => "ZZOP_ADD",
                         };
                         // Check if either operand is a scalar. We treat both scalar-typed locals
@@ -567,7 +575,15 @@ impl Lowerer {
                                 | zz_frontend::ast::BinOp::Mul
                                 | zz_frontend::ast::BinOp::Div
                                 | zz_frontend::ast::BinOp::Rem
+                                | zz_frontend::ast::BinOp::BitAnd
+                                | zz_frontend::ast::BinOp::BitOr
+                                | zz_frontend::ast::BinOp::BitXor
                         );
+                        // NOTE: `Shl`/`Shr` deliberately stay out of the raw
+                        // path — raw C `<<` on signed overflow / shifts >=
+                        // width is UB. They route through `zz_binop`
+                        // (`ZZOP_SHL`/`ZZOP_SHR`) which masks `& 63` and
+                        // rejects negative counts.
                         if is_arith {
                             // Arena string concatenation: when Add is used on
                             // strings inside a loop, allocate the result on
@@ -590,6 +606,9 @@ impl Lowerer {
                                     zz_frontend::ast::BinOp::Mul => "*",
                                     zz_frontend::ast::BinOp::Div => "/",
                                     zz_frontend::ast::BinOp::Rem => "%",
+                                    zz_frontend::ast::BinOp::BitAnd => "&",
+                                    zz_frontend::ast::BinOp::BitOr => "|",
+                                    zz_frontend::ast::BinOp::BitXor => "^",
                                     _ => "+",
                                 };
                                 let lc = scalar_operand_c(left, names).unwrap_or_else(|| l.clone());

@@ -255,6 +255,27 @@ true || false   // true
 !true           // false
 ```
 
+### Bitwise (int-only)
+
+```zz
+6 & 3           // 2 (AND)
+6 | 3           // 7 (OR)
+6 ^ 3           // 5 (XOR)
+~6              // -7 (NOT)
+1 << 10         // 1024 (shift left)
+1024 >> 3        // 128 (shift right, arithmetic)
+```
+
+Precedence (tightest first): `~` > `+ -` > `<< >>` > `&` >
+`^` > `|` > comparison (`<`, `==`, …) > `&&` > `||`. So
+`flags & mask == expected` parses as `(flags & mask) == expected`,
+and `a + b << c` as `(a + b) << c`.
+
+Both operands (and `~`'s operand) must be `int` — floats, bools,
+and strings are type errors. Shifts mask the count to `& 63`
+(`1 << 64` is `1`); a negative shift count is a runtime error.
+`>>` on negative values shifts arithmetically (sign-extending).
+
 ### String Interpolation
 
 ```zz

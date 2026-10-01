@@ -1,0 +1,2 @@
+// E2E: Bitwise operators require int operands — float is a type error.
+x := 1.5 & 2

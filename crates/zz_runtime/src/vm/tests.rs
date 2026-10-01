@@ -472,3 +472,34 @@ fn bench_fib_vm_vs_tree() {
     assert_eq!(v.to_string(), tree_time.0);
     println!("fib(20) VM: {vm_time:?}  tree-walker: {:?}", tree_time.1);
 }
+
+#[test]
+fn vm_bitwise_matches_tree_walker() {
+    // Differential: VM and tree-walker must agree on values and errors.
+    for src in [
+        "6 & 3",
+        "6 | 3",
+        "6 ^ 3",
+        "~6",
+        "~0",
+        "1 << 10",
+        "1024 >> 3",
+        "-8 >> 2",
+        "1 << 63",
+        "1 << 64",
+        "1 | 2 ^ 3 & 5",
+        "1 + 2 << 3",
+        "8 >> 1 + 1",
+        "15 & 7 == 7",
+        "1 << -1",
+        "1 >> -5",
+        "func rotl(x: int, k: int) -> int { (x << k) | (x >> (64 - k)) }\nrotl(305419896, 4)",
+        "s := 123456789\ni := 0\nwhile i < 10 { s = (s << 13) ^ s\ns = s ^ (s >> 17)\ns = s ^ (s << 5)\ni = i + 1 }\ns",
+    ] {
+        assert_same(src);
+    }
+    // Spot-check absolute values through the VM.
+    assert_eq!(run_src("6 & 3").unwrap(), Value::Int(2));
+    assert_eq!(run_src("1 << 63").unwrap(), Value::Int(i64::MIN));
+    assert_eq!(run_src("~6").unwrap(), Value::Int(-7));
+}

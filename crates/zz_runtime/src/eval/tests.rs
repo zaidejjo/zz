@@ -799,3 +799,55 @@ fn pipe_chain() {
     .unwrap();
     assert_eq!(v, Value::Int(12));
 }
+
+#[test]
+fn bitwise_values() {
+    assert_eq!(eval_src("6 & 3").unwrap(), Value::Int(2));
+    assert_eq!(eval_src("6 | 3").unwrap(), Value::Int(7));
+    assert_eq!(eval_src("6 ^ 3").unwrap(), Value::Int(5));
+    assert_eq!(eval_src("~6").unwrap(), Value::Int(-7));
+    assert_eq!(eval_src("~0").unwrap(), Value::Int(-1));
+    assert_eq!(eval_src("1 << 10").unwrap(), Value::Int(1024));
+    assert_eq!(eval_src("1024 >> 3").unwrap(), Value::Int(128));
+    assert_eq!(eval_src("-8 >> 2").unwrap(), Value::Int(-2));
+}
+
+#[test]
+fn bitwise_precedence_evaluates() {
+    // & > ^ > |, shift between additive and &, comparisons loosest.
+    assert_eq!(eval_src("1 | 2 ^ 3 & 5").unwrap(), Value::Int(3));
+    assert_eq!(eval_src("1 + 2 << 3").unwrap(), Value::Int(24));
+    assert_eq!(eval_src("8 >> 1 + 1").unwrap(), Value::Int(2));
+    assert_eq!(eval_src("15 & 7 == 7").unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn shift_boundaries() {
+    assert_eq!(eval_src("1 << 63").unwrap(), Value::Int(i64::MIN));
+    // Counts mask to `& 63`: no panic, no UB.
+    assert_eq!(eval_src("1 << 64").unwrap(), Value::Int(1));
+    assert_eq!(eval_src("1 << 65").unwrap(), Value::Int(2));
+}
+
+#[test]
+fn negative_shift_errors() {
+    let err = eval_src("1 << -1").unwrap_err();
+    assert!(err.message.contains("negative shift"), "{err:?}");
+    let err = eval_src("1 >> -5").unwrap_err();
+    assert!(err.message.contains("negative shift"), "{err:?}");
+}
+
+#[test]
+fn rotl_round_trip() {
+    // Xoshiro-style rotate-left building block.
+    assert_eq!(
+        eval_src("func rotl(x: int, k: int) -> int { (x << k) | (x >> (64 - k)) }\nrotl(1, 1)")
+            .unwrap(),
+        Value::Int(2)
+    );
+    assert_eq!(
+        eval_src("func rotl(x: int, k: int) -> int { (x << k) | (x >> (64 - k)) }\nrotl(-1, 17)")
+            .unwrap(),
+        Value::Int(-1)
+    );
+}

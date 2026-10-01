@@ -353,6 +353,7 @@ e2e_success_test!(
     "extension_methods.zz"
 );
 e2e_success_test!(e2e_syntax_main_result, "syntax", "main_result.zz");
+e2e_success_test!(e2e_syntax_bitwise_ops, "syntax", "bitwise_ops.zz");
 
 // Type fixtures
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
@@ -603,6 +604,8 @@ e2e_error_test!(e2e_err_div_by_zero, "div_by_zero.zz");
 e2e_error_test!(e2e_err_unknown_field, "unknown_field.zz");
 e2e_error_test!(e2e_err_struct_init_assign, "struct_init_assign_error.zz");
 e2e_error_test!(e2e_err_int_float_cmp, "int_float_cmp.zz");
+e2e_error_test!(e2e_err_bitwise_float, "bitwise_float.zz");
+e2e_error_test!(e2e_err_bitwise_neg_shift, "bitwise_neg_shift.zz");
 e2e_error_test!(e2e_err_generic_unbound, "generic_unbound.zz");
 e2e_error_test!(e2e_err_pg_connect_refused, "pg_connect_refused.zz");
 e2e_error_test!(e2e_err_mysql_connect_refused, "mysql_connect_refused.zz");
