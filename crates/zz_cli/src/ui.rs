@@ -104,6 +104,70 @@ pub fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Live spinner for long single-shot work (e.g. the clang link step).
+///
+/// - TTY: animates `⠋ label… 3s` on one stderr line until [`Spinner::finish`].
+/// - Piped: prints `label…` once, then the finish line — logs stay linear.
+/// - Dropping without `finish` stops the thread silently (no output).
+pub struct Spinner {
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    tty: bool,
+}
+
+impl Spinner {
+    /// Start spinning with `label`. Cheap; use around any blocking call.
+    pub fn start(label: &str) -> Self {
+        use std::sync::atomic::AtomicBool;
+        let tty = color_enabled();
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        let handle = if tty {
+            let done = done.clone();
+            let label = label.to_string();
+            Some(std::thread::spawn(move || {
+                const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                let start = std::time::Instant::now();
+                let mut i = 0usize;
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    let frame = FRAMES[i % FRAMES.len()];
+                    eprint!("\r{frame} {label}… {}s", start.elapsed().as_secs());
+                    i += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                }
+                // Clear the spinner line for whatever prints next.
+                eprint!("\r\x1b[2K");
+            }))
+        } else {
+            eprintln!("{label}…");
+            None
+        };
+        Self { done, handle, tty }
+    }
+
+    /// Stop and report success: `✓ {msg}`.
+    pub fn finish(mut self, msg: &str) {
+        self.stop();
+        if self.tty {
+            eprintln!("\r\x1b[2K{} {msg}", paint("32", "✓"));
+        } else {
+            ok(msg);
+        }
+    }
+
+    fn stop(&mut self) {
+        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +206,14 @@ mod tests {
         assert_eq!(human_bytes(2048), "2.0 KB");
         assert_eq!(human_bytes(2 * 1024 * 1024), "2.0 MB");
         std::env::remove_var("NO_COLOR");
+    }
+
+    #[test]
+    fn spinner_start_finish_is_quiet_when_piped() {
+        // Under `cargo test` stderr is not a TTY: start prints one line,
+        // finish prints the ok line, no thread is spawned.
+        let spinner = Spinner::start("testing spinner");
+        assert!(spinner.handle.is_none());
+        spinner.finish("spinner done");
     }
 }
