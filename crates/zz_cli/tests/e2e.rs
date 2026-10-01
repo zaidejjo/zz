@@ -263,6 +263,16 @@ e2e_success_test!(
     "neg_after_loop.zz"
 );
 e2e_success_test!(
+    e2e_regression_branch_call_returns,
+    "regression",
+    "branch_call_returns.zz"
+);
+e2e_success_test!(
+    e2e_regression_branch_call_tails,
+    "regression",
+    "branch_call_tails.zz"
+);
+e2e_success_test!(
     e2e_regression_fuzz_smoke_00,
     "regression",
     "fuzz_smoke_00.zz"
