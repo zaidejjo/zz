@@ -22,7 +22,7 @@ name: release
 # explicit warning.
 #
 # Flow: resolve version -> skip if released -> sync Cargo.lock ->
-# build zips (linux + macos + windows, in parallel) -> create Release WITH
+# build zips (linux + macos, in parallel) -> create Release WITH
 # the zips attached (single shot, so `release: published` consumers
 # never see a half-ready Release).
 #
@@ -181,9 +181,6 @@ jobs:
           - os: macos
             arch: x86_64
             runner: macos-13
-          - os: windows
-            arch: x86_64
-            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -198,8 +195,7 @@ jobs:
       - name: install native deps (macos)
         if: matrix.os == 'macos'
         run: brew install zip unzip
-      - name: build + zip (unix)
-        if: matrix.os != 'windows'
+      - name: build + zip
         run: |
           PKGVER="${{ needs.cut.outputs.pkgver }}"
           TAG="${{ needs.cut.outputs.tag }}"
@@ -223,23 +219,6 @@ jobs:
           cp target/release/zz target/release/zz-lsp LICENSE README.md dist/
           (cd dist && zip -9 "../$ZIP" zz zz-lsp LICENSE README.md)
           unzip -l "$ZIP"
-      - name: build + zip (windows)
-        if: matrix.os == 'windows'
-        shell: pwsh
-        run: |
-          $PkgVer = "${{ needs.cut.outputs.pkgver }}"
-          $CargoVer = (Select-String -Path Cargo.toml -Pattern '^version = "' | Select-Object -First 1).Line.Split('"')[1]
-          if ($CargoVer -ne $PkgVer) { throw "Cargo.toml version ($CargoVer) != tag version ($PkgVer)" }
-          $env:CARGO_PROFILE_RELEASE_DEBUG = "false"
-          cargo build --release --locked -p zz_cli -p zz_lsp
-          .\target\release\zz.exe --version
-          if (-not (Test-Path .\target\release\zz-lsp.exe)) { throw "zz-lsp.exe missing" }
-          $Zip = "zz-$PkgVer-windows-${{ matrix.arch }}.zip"
-          Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
-          Remove-Item -Force $Zip -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path dist | Out-Null
-          Copy-Item target\release\zz.exe, target\release\zz-lsp.exe, LICENSE, README.md dist\
-          Compress-Archive -Path dist\zz.exe, dist\zz-lsp.exe, dist\LICENSE, dist\README.md -DestinationPath $Zip -CompressionLevel Optimal
       - name: upload zip artifact
         uses: actions/upload-artifact@v4
         with:
@@ -293,8 +272,6 @@ jobs:
             || { echo "error: macos aarch64 zip missing, refusing half-ready release." >&2; exit 1; }
           test -f "zz-${{ needs.cut.outputs.pkgver }}-macos-x86_64.zip" \
             || { echo "error: macos x86_64 zip missing, refusing half-ready release." >&2; exit 1; }
-          test -f "zz-${{ needs.cut.outputs.pkgver }}-windows-x86_64.zip" \
-            || { echo "error: windows x86_64 zip missing, refusing half-ready release." >&2; exit 1; }
           gh release create "$TAG" \
             --target "main" \
             --title "$TAG" \
