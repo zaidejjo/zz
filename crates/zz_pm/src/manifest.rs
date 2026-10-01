@@ -27,6 +27,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::hash;
 
+/// Check a `[package] zz = "<req>"` minimum-compiler requirement against
+/// the running compiler version (e.g. `(">=0.1.5", "0.1.6")`). Opt-in:
+/// callers skip entirely when no requirement is set. Errors carry an
+/// upgrade hint.
+pub fn check_compiler_req(req: &str, compiler_version: &str) -> Result<(), String> {
+    let req_parsed = semver::VersionReq::parse(req)
+        .map_err(|e| format!("invalid zz version requirement `{req}`: {e}"))?;
+    let ver = semver::Version::parse(compiler_version)
+        .map_err(|e| format!("invalid compiler version `{compiler_version}`: {e}"))?;
+    if req_parsed.matches(&ver) {
+        Ok(())
+    } else {
+        Err(format!(
+            "zz {req} is required, but this is zz {compiler_version}\n\n\
+             hint: upgrade the compiler (see `zz setup`) or loosen the \
+             package's `[package] zz` requirement"
+        ))
+    }
+}
+
 /// Top-level manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Manifest {
@@ -50,6 +70,7 @@ impl Default for Manifest {
                 repository: None,
                 category: None,
                 keywords: Vec::new(),
+                zz: None,
             },
             dependencies: HashMap::new(),
             native: None,
@@ -84,6 +105,14 @@ pub struct PackageSpec {
     /// Free-form discovery keywords (sent as `keywords` on publish).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
+    /// Minimum compiler version, as a semver requirement
+    /// (e.g. `zz = ">=0.1.5"`). Opt-in; absent means any compiler.
+    /// NOTE: parsers without this field (<= 0.1.5) *ignore* unknown keys,
+    /// so an old compiler never sees the requirement — enforcement only
+    /// protects compilers new enough to know the field. The field still
+    /// documents intent for humans and registries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zz: Option<String>,
 }
 
 /// Options for scaffolding a new manifest (`zz init` / `zz new` flags).
@@ -625,6 +654,17 @@ impl Manifest {
             .any(|d| matches!(d, DepSpec::Path(_)))
     }
 
+    /// Enforce this manifest's minimum-compiler requirement, if any.
+    /// `compiler_version` is the running `zz` version (e.g. `"0.1.6"`).
+    /// Returns `Ok` when no requirement is set or it is satisfied.
+    pub fn check_zz_version(&self, compiler_version: &str) -> Result<(), String> {
+        match &self.package.zz {
+            None => Ok(()),
+            Some(req) => check_compiler_req(req, compiler_version)
+                .map_err(|e| format!("{} requires {e}", self.package.name)),
+        }
+    }
+
     /// Resolve a path dep relative to the manifest directory.
     pub fn resolve_path_dep(&self, manifest_dir: &Path, dep_name: &str) -> Option<PathBuf> {
         match self.dependencies.get(dep_name)? {
@@ -650,6 +690,7 @@ impl Manifest {
                 repository: opts.repository.clone(),
                 category: None,
                 keywords: Vec::new(),
+                zz: None,
             },
             dependencies: HashMap::new(),
             native: None,
@@ -761,6 +802,7 @@ mod tests {
                 repository: None,
                 category: None,
                 keywords: Vec::new(),
+                zz: None,
             },
             dependencies: {
                 let mut d = HashMap::new();
@@ -949,6 +991,7 @@ foo = "^1.0"
                 repository: Some("https://github.com/user/enriched".into()),
                 category: Some("cli".into()),
                 keywords: vec!["tool".into()],
+                zz: None,
             },
             dependencies: HashMap::new(),
             native: None,
@@ -1224,6 +1267,84 @@ foo = "^1.0"
                 "`{t}` must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn zz_req_round_trip() {
+        let m = Manifest::parse(
+            r#"
+[package]
+name = "needs-new"
+version = "1.0.0"
+zz = ">=0.1.5"
+"#,
+        )
+        .unwrap();
+        assert_eq!(m.package.zz.as_deref(), Some(">=0.1.5"));
+        let d = tmp_dir("zz_req");
+        let path = d.join("zz.toml");
+        m.save(&path).unwrap();
+        let loaded = Manifest::load(&path).unwrap();
+        assert_eq!(loaded, m);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn zz_req_absent_by_default() {
+        let m = Manifest::parse(
+            r#"
+[package]
+name = "old"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+        assert_eq!(m.package.zz, None);
+    }
+
+    #[test]
+    fn unknown_fields_ignored() {
+        // Documents a protection limit: parsers without the `zz` field
+        // (<= 0.1.5) cannot be protected by it — serde ignores unknown
+        // keys, so an old compiler reads the manifest fine and fails
+        // later (if at all). Enforcement only guards new compilers.
+        let m = Manifest::parse(
+            r#"
+[package]
+name = "future"
+version = "9.9.9"
+zz = ">=9.9.9"
+some_future_key = "ignored"
+"#,
+        )
+        .unwrap();
+        assert_eq!(m.package.zz.as_deref(), Some(">=9.9.9"));
+    }
+
+    #[test]
+    fn check_compiler_req_table() {
+        assert!(check_compiler_req(">=0.1.5", "0.1.6").is_ok());
+        assert!(check_compiler_req(">=0.1.5", "0.1.5").is_ok());
+        assert!(check_compiler_req("^0.1.0", "0.1.6").is_ok());
+        assert!(check_compiler_req("=0.1.6", "0.1.6").is_ok());
+        let err = check_compiler_req(">=0.2.0", "0.1.6").unwrap_err();
+        assert!(err.contains("upgrade"), "{err}");
+        let err = check_compiler_req("=0.1.5", "0.1.6").unwrap_err();
+        assert!(err.contains("0.1.6"), "{err}");
+        assert!(check_compiler_req("not-a-req!!!", "0.1.6").is_err());
+    }
+
+    #[test]
+    fn check_zz_version_none_passes() {
+        let m = Manifest::parse(
+            r#"
+[package]
+name = "any"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+        assert!(m.check_zz_version("0.1.0").is_ok());
     }
 
     #[test]

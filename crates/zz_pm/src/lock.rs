@@ -328,6 +328,7 @@ mod tests {
                 repository: None,
                 category: None,
                 keywords: Vec::new(),
+                zz: None,
             },
             dependencies: deps,
             native: None,

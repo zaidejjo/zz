@@ -4,6 +4,15 @@
 #include "runtime.h"
 
 // ---- arrays ------------------------------------------------------------
+// Ownership-sharing store of a value into a container slot: arena-owned
+// strings are healed to heap copies (else the loop-arena reset corrupts
+// the stored element); every other value is shared via zz_clone.
+static zz_value zz_clone_for_store(zz_value v) {
+    if (v.tag == ZZ_STR && v.s && !v.s->interned && v.s->refs == 0) {
+        return zz_str_heal_arena(v);
+    }
+    return zz_clone(v);
+}
 zz_value zz_array_new(void) {
     zz_array *a = (zz_array *)calloc(1, sizeof(zz_array));
     a->refs = 1;  // ARC: initial reference count
@@ -116,7 +125,9 @@ void zz_array_push(zz_array *a, zz_value item) {
         }
         a->cap = nc;
     }
-    a->items[a->len++] = item;
+    // Move convention (callers transfer ownership): heal arena strings to
+    // heap so the stored element survives the loop-arena reset.
+    a->items[a->len++] = zz_str_heal_arena(item);
 }
 
 size_t zz_array_len(const zz_array *a) {
@@ -419,9 +430,20 @@ void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
         d->cap = nc;
     }
     zz_dict_entry *e = &d->entries[d->len++];
-    e->key = key.s;
-    key.s->refs++;
-    e->val = val;
+    if (key.s && !key.s->interned && key.s->refs == 0) {
+        // Arena-owned key: duplicate to heap. The `refs++` adoption below
+        // would claim arena memory as heap-owned (reset corruption, then a
+        // wild free when the entry releases).
+        zz_str *k = str_alloc(key.s->len);
+        memcpy(zz_str_ptr(k), zz_str_cptr(key.s), key.s->len);
+        zz_str_ptr(k)[key.s->len] = '\0';
+        e->key = k;
+    } else {
+        e->key = key.s;
+        key.s->refs++;
+    }
+    // Move convention: heal arena strings to heap.
+    e->val = zz_str_heal_arena(val);
 }
 
 size_t zz_dict_len(const zz_dict *d) {
@@ -623,7 +645,8 @@ static int zz_object_set_depth(zz_value *obj, const char *name, zz_value val, in
         if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
             zz_value *slot = &o->fields[i * 2 + 1];
             zz_release(slot);
-            *slot = zz_clone(val);
+            // Share convention (was zz_clone): heal arena strings to heap.
+            *slot = zz_clone_for_store(val);
             return 1;
         }
     }
@@ -797,7 +820,9 @@ zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
         }
         a->cap = new_cap;
     }
-    a->items[a->len++] = zz_clone(item);
+    // Share convention (was zz_clone): heal arena strings to heap so the
+    // element survives the loop-arena reset.
+    a->items[a->len++] = zz_clone_for_store(item);
     return zz_unit();
 }
 
@@ -822,7 +847,9 @@ zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
         }
         a->cap = new_cap;
     }
-    a->items[a->len++] = zz_clone(item);
+    // Share convention (was zz_clone): heal arena strings to heap so the
+    // element survives the loop-arena reset.
+    a->items[a->len++] = zz_clone_for_store(item);
     return out;
 }
 
@@ -889,7 +916,9 @@ zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err) {
     for (size_t j = o->len; j > (size_t)i; j--) {
         o->items[j] = o->items[j - 1];
     }
-    o->items[i] = zz_clone(item);
+    // Share convention: heal arena strings to heap (fresh heap array may
+    // still outlive the loop-arena reset via the caller's store).
+    o->items[i] = zz_clone_for_store(item);
     o->len++;
     return out;
 }

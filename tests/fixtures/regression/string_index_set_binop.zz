@@ -1,0 +1,14 @@
+// Regression: `a[i] = s + t` (string concat RHS) must store the string,
+// not wrap it in zz_int (C type error). Found by v2 fuzz shapes.
+func cat(a: str, b: str) -> str {
+    a + b
+}
+arr := ["x", "y"]
+arr[0] = arr[1] + "!"
+println(arr[0])
+arr[1] = cat(arr[0], "?")
+println(arr[1])
+i := 0
+arr[i] = "a" + "b"
+println(arr[i])
+println("string_index_set_binop_ok")

@@ -6,6 +6,15 @@
 closures capturing destructured vars, and loops. Every program prints
 only deterministic `int`/`bool` lines plus a `DONE` marker.
 
+`--shapes v2` adds three more families (new file prefix `gz*.zz`):
+S1 return-of-call-result in `if`/`else`, early-return, and `match`
+branches; S2 string accumulators over loops (calls, cross-iteration
+copies, array/dict pushes and slot stores); S3 stringify-like struct
+emits (by-value arena structs + key loops). These caught the native
+loop-arena store bug (NUL bytes), a SIGSEGV in dict-set of arena keys,
+and the index-set `zz_int` mis-boxing of string concats. Default mode
+is byte-identical for every seed (fixed-seed CI smoke fixtures).
+
 `run.sh` runs each case on the VM and native engines and compares exit
 codes plus stdout (purely-numeric lines stripped, like the parity
 harness). Result classes:

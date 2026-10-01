@@ -334,6 +334,9 @@ impl Rng {
 pub fn test_command(args: &[String]) -> Result<(), String> {
     let config = TestConfig::parse(args)?;
 
+    // Fail fast on an unsatisfied `[package] zz` compiler requirement.
+    crate::enforce_project_zz(std::path::Path::new(&config.path))?;
+
     let files = if config.changed {
         // When --changed, only load files that git says are modified.
         let changed = git_changed_files().unwrap_or_default();
