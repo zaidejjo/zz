@@ -1,61 +1,44 @@
-# Pre-built `zz` toolchain image: release CLI binary on slim Debian.
+# Pre-built `zz` toolchain image: release binaries on slim Debian.
 #
 # Published to GHCR by .github/workflows/docker-publish.yml as
-#   ghcr.io/<owner>/zz:latest   (main branch)
-#   ghcr.io/<owner>/zz:vX.Y.Z   (release tags)
+#   ghcr.io/<owner>/zz:latest    (latest Release)
+#   ghcr.io/<owner>/zz:1.2.3     (release tags + major/minor shorthands)
 # `<owner>` follows the repo automatically (`zaidejjo` today,
 # `zz-language` after the move) — no hardcoded owner anywhere.
+#
+# Nothing here compiles: ZZ_VERSION + TARGETARCH select the prebuilt zips
+# attached to the GitHub Release (built exactly once by the release
+# workflow), and both binaries ship. No Rust toolchain, no QEMU — both
+# architectures are plain file copies.
 #
 # Downstream services (zz-registry) use this as a base image instead of
 # compiling the toolchain themselves:
 #   FROM ghcr.io/<owner>/zz:latest AS tool
 #
-# Local build: docker build -f docker/Dockerfile.toolchain -t zz:local .
+# Local build (needs network for the Release zips):
+#   docker build -f docker/Dockerfile.toolchain --build-arg ZZ_VERSION=0.1.5 -t zz:local .
 
-FROM lukemathwalker/cargo-chef:latest-rust-1.98.1-bookworm AS chef
-# cargo-chef ships preinstalled in this image (saves a multi-minute
-# `cargo install`). Pinned to our toolchain (1.98) + distro (bookworm);
-# bump alongside `rust:1-bookworm` drift.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        clang pkg-config libssl-dev git binutils && rm -rf /var/lib/apt/lists/*
-WORKDIR /src
-# The workspace profile sets `debug = true` (profiling-friendly), but this
-# image strips the binary anyway — compiling debuginfo first is pure waste.
-# Env override keeps Cargo.toml untouched while cutting minutes off the
-# release compile. Inherited by planner/cacher/build below.
-ENV CARGO_PROFILE_RELEASE_DEBUG=false
-
-# Planner: dependency recipe (reruns only when Cargo.toml/lock change).
-FROM chef AS planner
-COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
-
-# Cacher: compile third-party deps once (cached as a layer until the
-# recipe changes). Works on any builder; GHA layer cache (type=gha in
-# the workflow) persists it across CI runs.
-FROM chef AS cacher
-COPY --from=planner /src/recipe.json recipe.json
-RUN cargo chef cook --locked --profile release --recipe-path recipe.json
-
-# Build: sources only — dependencies come from the cached layer above,
-# so reruns recompile just our crates.
-FROM cacher AS build
-COPY . .
-# Locked, release profile: the exact binary CI tested. Debuginfo already off
-# via CARGO_PROFILE_RELEASE_DEBUG (see chef stage); strip drops the last
-# remnants (~230MB saved vs an unstripped debug=true binary).
-RUN cargo build --locked --profile release --bin zz \
-    && mkdir -p /opt/zz-bin \
-    && cp target/release/zz /opt/zz-bin/zz \
-    && strip /opt/zz-bin/zz \
-    && /opt/zz-bin/zz --version
-# Promote out of target/ (keeps the final COPY obvious).
-RUN mkdir -p /opt/zz/bin && cp /opt/zz-bin/zz /opt/zz/bin/zz \
-    && rm -rf /opt/zz-bin
+ARG TARGETARCH
+ARG ZZ_VERSION
+ARG GITHUB_REPOSITORY=zaidejjo/zz
 
 FROM debian:bookworm-slim
+ARG TARGETARCH
+ARG ZZ_VERSION
+ARG GITHUB_REPOSITORY
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
-COPY --from=build /opt/zz/bin/zz /usr/local/bin/zz
+        ca-certificates curl unzip libssl3 && rm -rf /var/lib/apt/lists/*
+# Release zips are per-arch; map Docker arches onto their names.
+RUN case "$TARGETARCH" in \
+        amd64) ZZARCH=x86_64 ;; \
+        arm64) ZZARCH=aarch64 ;; \
+        *) echo "error: unsupported arch '$TARGETARCH'" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${ZZ_VERSION}/zz-${ZZ_VERSION}-linux-${ZZARCH}.zip" -o /tmp/zz.zip && \
+    unzip -p /tmp/zz.zip zz > /usr/local/bin/zz && \
+    unzip -p /tmp/zz.zip zz-lsp > /usr/local/bin/zz-lsp && \
+    chmod +x /usr/local/bin/zz /usr/local/bin/zz-lsp && \
+    rm /tmp/zz.zip && \
+    zz --version
 ENTRYPOINT ["zz"]
 CMD ["--version"]

@@ -2,17 +2,20 @@ name: docker-publish
 
 # Publishes the pre-built `zz` toolchain image to GHCR. Image name follows
 # the repo owner automatically (`github.repository_owner`), so moving
-# zaidejjo/zz -> zz-language/zz needs zero workflow changes — retagging
-# happens through docker/metadata-action.
+# zaidejjo/zz -> zz-language/zz needs zero workflow changes — the tags
+# below resolve the owner at runtime.
 #
-# Triggers: pushes to main, version tags (v*), or manual dispatch.
-# Flow: standard checks + full test suite FIRST; only a green tree is
-# packaged and pushed.
+# Triggers: a published GitHub Release, or manual dispatch. The image
+# installs the Release's prebuilt zips — nothing here compiles (the
+# compiler was built exactly once by the release workflow). This workflow
+# runs no tests: the Release it consumes was cut from a green main.
+#
+# Runs in parallel with aur-publish off the same `release: published`
+# event; both consume the same attached zips.
 
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
 
 env:
@@ -22,30 +25,8 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/zz
 
 jobs:
-  checks:
-    name: checks + tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: install native deps
-        # Native codegen links -lcurl -lsqlite3 and compiles with clang.
-        # The runner image doesn't guarantee the headers — install
-        # explicitly so the --native test legs don't fail.
-        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev
-      - name: fmt check
-        run: cargo fmt --check
-      - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: test
-        run: cargo test --all
-
   build-push:
     name: build + push toolchain image
-    needs: checks
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -53,23 +34,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            # main branch -> :latest
-            type=raw,value=latest,enable={{is_default_branch}}
-            # git tags v1.2.3 -> :1.2.3, :1.2, :1, :v1.2.3
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            # every build traceable to its commit
-            type=sha,prefix=sha-,format=short
+      - name: resolve version + tags
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            # Manual dispatch: version comes from the tree (normally main).
+            TAG="v$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          fi
+          case "$TAG" in
+            v*) VER="${TAG#v}" ;;
+            *) echo "error: tag must look like vX.Y.Z, got '$TAG'" >&2; exit 1 ;;
+          esac
+          MAJ="${VER%%.*}"
+          REST="${VER#*.}"
+          MIN="${REST%%.*}"
+          SHA="$(git rev-parse --short HEAD)"
+          REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          {
+            echo "version=$VER"
+            echo "tags=$REPO:latest,$REPO:$VER,$REPO:$MAJ.$MIN,$REPO:$MAJ,$REPO:v$VER,$REPO:sha-$SHA"
+          } >> "$GITHUB_OUTPUT"
+          echo "image tags: latest, $VER, $MAJ.$MIN, $MAJ, v$VER, sha-$SHA"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -88,12 +76,13 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.toolchain
-          # Render runs amd64; arm64 (QEMU-emulated, ~5-10x slower) ships on
-          # release tags only. Docker Desktop still runs the amd64 image on
-          # Apple silicon via Rosetta in between.
-          platforms: ${{ startsWith(github.ref, 'refs/tags/v') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          # Prebuilt zips ship per arch, so both platforms are plain file
+          # copies — no QEMU emulation needed (the old source build needed
+          # it for arm64 at ~5-10x slowdown).
+          platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.ver.outputs.tags }}
+          labels: org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+          build-args: |
+            ZZ_VERSION=${{ steps.ver.outputs.version }}
+            GITHUB_REPOSITORY=${{ github.repository }}
