@@ -375,6 +375,11 @@ e2e_success_test!(
 e2e_success_test!(e2e_syntax_main_result, "syntax", "main_result.zz");
 e2e_success_test!(e2e_syntax_bitwise_ops, "syntax", "bitwise_ops.zz");
 e2e_success_test!(e2e_syntax_tuple_ops, "syntax", "tuple_ops.zz");
+e2e_success_test!(
+    e2e_syntax_tuple_unboxed_struct,
+    "syntax",
+    "tuple_unboxed_struct.zz"
+);
 e2e_success_test!(e2e_syntax_compound_assign, "syntax", "compound_assign.zz");
 e2e_success_test!(e2e_syntax_generic_structs, "syntax", "generic_structs.zz");
 

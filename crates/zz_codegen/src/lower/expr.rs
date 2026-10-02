@@ -876,10 +876,13 @@ impl Lowerer {
                 } else {
                     // Boxed object: use runtime function.
                     // `zz_object_get_field` takes a pointer, so we need
-                    // an lvalue.  A simple Ident produces a C variable
-                    // name (lvalue), but anything else (Index, Call,
-                    // Field chain, …) is an rvalue — hoist to a temp.
-                    if matches!(obj.as_ref(), Expr::Ident { .. }) {
+                    // an lvalue.  A simple Ident usually produces a C
+                    // variable name (lvalue), but emission can also yield
+                    // an rvalue for one (e.g. `zz_clone(v0)`) — so check
+                    // the emitted form, not just the AST shape. Anything
+                    // else (Index, Call, Field chain, …) is an rvalue —
+                    // hoist to a temp.
+                    if matches!(obj.as_ref(), Expr::Ident { .. }) && is_simple_ident(&obj_val) {
                         format!("zz_object_get_field(&{obj_val}, \"{name}\")")
                     } else {
                         let tmp = names.fresh("_field_obj");
@@ -950,13 +953,7 @@ impl Lowerer {
                 };
                 out.push_str(&format!("    zz_value {arr_var} = {ctor};\n"));
                 for item in elems {
-                    let item_val = self.emit_expr(item, names, out);
-                    // Auto-box if needed
-                    let boxed = if let Expr::Ident { name: n, .. } = item {
-                        auto_box(&item_val, names.lookup_type(n))
-                    } else {
-                        item_val
-                    };
+                    let boxed = self.box_container_item(item, names, out);
                     out.push_str(&format!(
                         "    {{ int _e = 0; zz_vec_append({arr_var}, {boxed}, &_e); }}\n"
                     ));
@@ -980,12 +977,7 @@ impl Lowerer {
                 out.push_str(&format!("    zz_value {arr_var} = {ctor};\n"));
                 if !items.is_empty() {
                     for item in items {
-                        let item_val = self.emit_expr(item, names, out);
-                        let boxed = if let Expr::Ident { name: n, .. } = item {
-                            auto_box(&item_val, names.lookup_type(n))
-                        } else {
-                            item_val
-                        };
+                        let boxed = self.box_container_item(item, names, out);
                         out.push_str(&format!(
                             "    {{ int _e = 0; zz_vec_append({arr_var}, {boxed}, &_e); }}\n"
                         ));
@@ -3281,6 +3273,35 @@ impl Lowerer {
         }
 
         None
+    }
+
+    /// Box one array/tuple element into a `zz_value` for container append.
+    /// Unboxed structs (raw C values: literals, locals, field reads) route
+    /// through `emit_boxed_value` instead of emitting; raw scalars box via
+    /// the operand helper; already-boxed expressions pass through unchanged.
+    /// Without this, `(int, UnboxedStruct)` tuples and `[Point{...}]`
+    /// arrays hand a raw C struct to `zz_vec_append(zz_value)` and the C
+    /// build fails.
+    pub(super) fn box_container_item(
+        &self,
+        item: &Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        let unboxed: Option<String> = match self.ty_at(names, item.span()) {
+            Some(zz_checker::Type::Struct(s, _)) if self.is_unboxed_struct(s) => Some(s.clone()),
+            _ => None,
+        };
+        if let Some(sname) = unboxed {
+            return self.emit_boxed_value(&sname, item, names, out);
+        }
+        let item_val = self.emit_expr(item, names, out);
+        // Auto-box if needed (historical Ident fast path, preserved).
+        if let Expr::Ident { name: n, .. } = item {
+            auto_box(&item_val, names.lookup_type(n))
+        } else {
+            box_scalar_operand(item, names, &item_val)
+        }
     }
 
     /// Box an index expression to a `zz_value` for `idx` arguments. Scalar
