@@ -633,6 +633,11 @@ parity_strict!(parity_syntax_operators, "syntax", "operators.zz");
 parity_strict!(parity_syntax_bitwise_ops, "syntax", "bitwise_ops.zz");
 parity_strict!(parity_syntax_tuple_ops, "syntax", "tuple_ops.zz");
 parity_strict!(
+    parity_syntax_tuple_unboxed_struct,
+    "syntax",
+    "tuple_unboxed_struct.zz"
+);
+parity_strict!(
     parity_syntax_compound_assign,
     "syntax",
     "compound_assign.zz"
