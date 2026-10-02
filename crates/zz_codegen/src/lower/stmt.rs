@@ -242,6 +242,11 @@ impl Lowerer {
                 if self.green_active() {
                     self.stmt_direct.set(true);
                 }
+                // Move-on-self-reassign (`x = vec.push(x, e)` and friends):
+                // takes the slot and pushes in place when uniquely owned.
+                if self.try_emit_move_assign(target, value, names, out) {
+                    return;
+                }
                 let val = self.emit_expr(value, names, out);
                 // If the RHS expression was already lowered to a raw
                 // scalar (int64_t/double/bool), don't try to extract

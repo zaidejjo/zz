@@ -1,0 +1,22 @@
+// Move-append elision: self-reassignment takes must preserve value
+// semantics, including the no-fuse aliasing case (`b` read twice).
+b := [10, 20]
+// Two reads of `b`: no take allowed, generic clone path.
+b = vec.push(b, b[0])
+assert(len(b) == 3)
+assert(b[2] == 10)
+// Method form: `b = b.push(e)` fuses like the free form.
+c := []
+for i in 0..5 {
+    c = c.push(i * 2)
+}
+assert(len(c) == 5)
+assert(c[4] == 8)
+// Append spelling (value-identical to push on this engine).
+// NOTE: native lowers bare `vec.append` to an in-place unit mutator,
+// so assign-form append is VM-only (see move_append_append.zz).
+d := [7]
+d.push(8)
+assert(len(d) == 2)
+assert(d[1] == 8)
+println("move_append_ok")

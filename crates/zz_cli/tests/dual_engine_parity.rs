@@ -252,6 +252,9 @@ fn native_skip_reason(file: &Path) -> Option<&'static str> {
         "log_test" => {
             Some("log output embeds unix timestamps and span durations — non-deterministic")
         }
+        "move_append_append" => Some(
+            "native lowers bare `vec.append` to an in-place unit mutator; assign form is VM-only",
+        ),
         _ => None,
     }
 }
@@ -683,6 +686,16 @@ parity_strict!(
     parity_regression_func_capture_destructure,
     "regression",
     "func_capture_destructure.zz"
+);
+parity_strict!(
+    parity_regression_move_append_shapes,
+    "regression",
+    "move_append_shapes.zz"
+);
+parity_strict!(
+    parity_regression_move_append_field,
+    "regression",
+    "move_append_field.zz"
 );
 parity_strict!(
     parity_regression_closure_capture_destructure,

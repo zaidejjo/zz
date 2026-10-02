@@ -15,6 +15,7 @@ mod expr;
 mod extern_call;
 mod fn_decl;
 mod green;
+mod move_elide;
 mod stmt;
 
 use zz_frontend::ast::{Expr, Pattern, Stmt};

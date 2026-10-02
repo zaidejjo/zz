@@ -13,12 +13,15 @@
 //! 2. **No closures, no spawn in `RHS`.** A closure literal captures the
 //!    scope and could observe the transient `Unit` when invoked before the
 //!    store completes; `spawn` snapshots the scope (same hazard).
-//! 3. **No other calls in the moved value's way.** For `vec.push` shapes
-//!    the element argument must be call-free (a nested call could re-enter
-//!    user code that reads `x`). For `x = f(x, ...)` every argument other
-//!    than `x` itself must be call-free, closure-free and spawn-free; the
-//!    callee itself is vetted per engine (native: plain local + not
-//!    captured; VM: runtime scope-share check).
+//! 3. **No other calls in the moved value's way — for `ThreadCall`.**
+//!    For `vec.push` shapes the element argument needs no purity: engines
+//!    evaluate it *before* the take, while the slot is still intact, so
+//!    even calls/closures/spawns there observe the old value and the
+//!    take→push→store window runs no user code at all. For `x = f(x, ...)`
+//!    the take comes first, so every argument other than `x` itself must
+//!    be call-free, closure-free and spawn-free; the callee itself is
+//!    vetted per engine (native: plain local + not captured; VM: runtime
+//!    scope-share check).
 //! 4. **Loop iterators.** Sequential re-reads (conditions, bounds) are safe
 //!    by construction — the store completes before any re-read. The only
 //!    loop hazard is a *live borrow* of `x`'s buffer (native `for v in x`
@@ -53,6 +56,16 @@ pub enum MoveKind {
     ThreadCall(String),
 }
 
+impl MoveKind {
+    /// The moved variable (bare name; for fields, the container).
+    pub fn var(&self) -> &str {
+        match self {
+            MoveKind::VecPush(v) | MoveKind::ThreadCall(v) => v,
+            MoveKind::FieldPush { obj, .. } => obj,
+        }
+    }
+}
+
 /// Push-family callee spellings that never invoke user code.
 /// Bare `append` is intentionally absent: on native it lowers to the
 /// in-place mutator (unit return), so `x = vec.append(x, e)` is not the
@@ -62,6 +75,24 @@ fn is_push_callee(callee: &Expr) -> bool {
         Expr::Ident { name, .. } => name == "vec.push" || name == "std.vec.push",
         Expr::Path { parts, .. } => {
             parts.as_slice() == ["vec", "push"] || parts.as_slice() == ["std", "vec", "push"]
+        }
+        _ => false,
+    }
+}
+
+/// `is_push_callee` plus the append spellings. Only for engines where
+/// append is value-identical to push (the VM: both return the new array).
+/// The native backend must keep using `is_push_callee`.
+fn is_push_or_append_callee(callee: &Expr) -> bool {
+    if is_push_callee(callee) {
+        return true;
+    }
+    match callee {
+        Expr::Ident { name, .. } => {
+            name == "append" || name == "vec.append" || name == "std.vec.append"
+        }
+        Expr::Path { parts, .. } => {
+            parts.as_slice() == ["vec", "append"] || parts.as_slice() == ["std", "vec", "append"]
         }
         _ => false,
     }
@@ -247,7 +278,9 @@ pub fn has_closure_or_spawn(e: &Expr) -> bool {
         } => {
             has_closure_or_spawn(cond)
                 || block_has_closure_or_spawn(then)
-                || els.as_ref().is_some_and(|x| has_closure_or_spawn(x))
+                || els
+                    .as_ref()
+                    .is_some_and(|x| has_closure_or_spawn(x.as_ref()))
         }
         Expr::While { cond, body, .. } => {
             has_closure_or_spawn(cond) || block_has_closure_or_spawn(body)
@@ -258,7 +291,7 @@ pub fn has_closure_or_spawn(e: &Expr) -> bool {
             has_closure_or_spawn(scrutinee)
                 || arms.iter().any(|a| {
                     has_closure_or_spawn(&a.body)
-                        || a.guard.as_ref().is_some_and(|x| has_closure_or_spawn(x))
+                        || a.guard.as_ref().is_some_and(has_closure_or_spawn)
                 })
         }
         Expr::IfLet {
@@ -266,7 +299,9 @@ pub fn has_closure_or_spawn(e: &Expr) -> bool {
         } => {
             has_closure_or_spawn(value)
                 || block_has_closure_or_spawn(then)
-                || els.as_ref().is_some_and(|x| has_closure_or_spawn(x))
+                || els
+                    .as_ref()
+                    .is_some_and(|x| has_closure_or_spawn(x.as_ref()))
         }
         Expr::Try { expr, .. } => has_closure_or_spawn(expr),
         Expr::Block(b) => block_has_closure_or_spawn(b),
@@ -284,14 +319,18 @@ pub fn has_closure_or_spawn(e: &Expr) -> bool {
         } => {
             has_closure_or_spawn(obj)
                 || start.as_ref().is_some_and(|s| has_closure_or_spawn(s))
-                || end.as_ref().is_some_and(|x| has_closure_or_spawn(x))
+                || end
+                    .as_ref()
+                    .is_some_and(|x| has_closure_or_spawn(x.as_ref()))
         }
         Expr::ListComp {
             body, iter, filter, ..
         } => {
             has_closure_or_spawn(body)
                 || has_closure_or_spawn(iter)
-                || filter.as_ref().is_some_and(|x| has_closure_or_spawn(x))
+                || filter
+                    .as_ref()
+                    .is_some_and(|x| has_closure_or_spawn(x.as_ref()))
         }
         _ => false,
     }
@@ -303,7 +342,7 @@ fn block_has_closure_or_spawn(b: &Block) -> bool {
         Stmt::Assign { target, value, .. } => {
             has_closure_or_spawn(target) || has_closure_or_spawn(value)
         }
-        Stmt::Return { value, .. } => value.as_ref().is_some_and(|x| has_closure_or_spawn(x)),
+        Stmt::Return { value, .. } => value.as_ref().is_some_and(has_closure_or_spawn),
         Stmt::Expr(e) => has_closure_or_spawn(e),
         Stmt::For { iter, body, .. } => {
             has_closure_or_spawn(iter) || block_has_closure_or_spawn(body)
@@ -329,7 +368,11 @@ pub fn has_call(e: &Expr) -> bool {
         Expr::Closure { body, .. } => has_call(body),
         Expr::If {
             cond, then, els, ..
-        } => has_call(cond) || block_has_call(then) || els.as_ref().is_some_and(|x| has_call(x)),
+        } => {
+            has_call(cond)
+                || block_has_call(then)
+                || els.as_ref().is_some_and(|x| has_call(x.as_ref()))
+        }
         Expr::While { cond, body, .. } => has_call(cond) || block_has_call(body),
         Expr::Match {
             scrutinee, arms, ..
@@ -337,11 +380,15 @@ pub fn has_call(e: &Expr) -> bool {
             has_call(scrutinee)
                 || arms
                     .iter()
-                    .any(|a| has_call(&a.body) || a.guard.as_ref().is_some_and(|x| has_call(x)))
+                    .any(|a| has_call(&a.body) || a.guard.as_ref().is_some_and(has_call))
         }
         Expr::IfLet {
             value, then, els, ..
-        } => has_call(value) || block_has_call(then) || els.as_ref().is_some_and(|x| has_call(x)),
+        } => {
+            has_call(value)
+                || block_has_call(then)
+                || els.as_ref().is_some_and(|x| has_call(x.as_ref()))
+        }
         Expr::Try { expr, .. } => has_call(expr),
         Expr::Block(b) => block_has_call(b),
         Expr::Variant { arg, .. } => arg.as_ref().is_some_and(|a| has_call(a)),
@@ -356,11 +403,15 @@ pub fn has_call(e: &Expr) -> bool {
         } => {
             has_call(obj)
                 || start.as_ref().is_some_and(|s| has_call(s))
-                || end.as_ref().is_some_and(|x| has_call(x))
+                || end.as_ref().is_some_and(|x| has_call(x.as_ref()))
         }
         Expr::ListComp {
             body, iter, filter, ..
-        } => has_call(body) || has_call(iter) || filter.as_ref().is_some_and(|x| has_call(x)),
+        } => {
+            has_call(body)
+                || has_call(iter)
+                || filter.as_ref().is_some_and(|x| has_call(x.as_ref()))
+        }
         _ => false,
     }
 }
@@ -369,7 +420,7 @@ fn block_has_call(b: &Block) -> bool {
     b.stmts.iter().any(|s| match s {
         Stmt::Decl { value, .. } => has_call(value),
         Stmt::Assign { target, value, .. } => has_call(target) || has_call(value),
-        Stmt::Return { value, .. } => value.as_ref().is_some_and(|x| has_call(x)),
+        Stmt::Return { value, .. } => value.as_ref().is_some_and(has_call),
         Stmt::Expr(e) => has_call(e),
         Stmt::For { iter, body, .. } => has_call(iter) || block_has_call(body),
         Stmt::Defer { expr, .. } => has_call(expr),
@@ -378,8 +429,367 @@ fn block_has_call(b: &Block) -> bool {
     })
 }
 
+/// Copy `e`, rewriting every two-part `Path [m, x]` for which
+/// `is_global("m.x")` holds into `Ident(x)`. Module loaders qualify
+/// top-level references (`b` → `push_int.b`) before every engine sees
+/// them; the classifier and counters below only understand bare names,
+/// so consumers normalize first. Returns the copy when at least one
+/// rewrite fired (else `None`, and the original can be used directly).
+///
+/// Coverage mirrors [`count_refs`] exactly (a missed occurrence would
+/// under-count and wrongly allow a move), including statements nested in
+/// blocks.
+pub fn unqualify_expr(e: &Expr, is_global: &dyn Fn(&str) -> bool) -> Option<Expr> {
+    fn rw(e: &Expr, is_global: &dyn Fn(&str) -> bool, changed: &mut bool) -> Expr {
+        match e {
+            Expr::Path { parts, span } if parts.len() == 2 => {
+                let key = format!("{}.{}", parts[0], parts[1]);
+                if is_global(&key) {
+                    *changed = true;
+                    return Expr::Ident {
+                        name: parts[1].clone(),
+                        span: *span,
+                    };
+                }
+                e.clone()
+            }
+            Expr::Fmt { parts, span } => Expr::Fmt {
+                parts: parts
+                    .iter()
+                    .map(|p| match p {
+                        crate::ast::FmtPart::Expr(x, s) => crate::ast::FmtPart::Expr(
+                            Box::new(rw(x, is_global, changed)),
+                            s.clone(),
+                        ),
+                        other => other.clone(),
+                    })
+                    .collect(),
+                span: *span,
+            },
+            Expr::Paren { expr, span } => Expr::Paren {
+                expr: Box::new(rw(expr, is_global, changed)),
+                span: *span,
+            },
+            Expr::Tuple { items, span } => Expr::Tuple {
+                items: items.iter().map(|i| rw(i, is_global, changed)).collect(),
+                span: *span,
+            },
+            Expr::Unary { op, expr, span } => Expr::Unary {
+                op: *op,
+                expr: Box::new(rw(expr, is_global, changed)),
+                span: *span,
+            },
+            Expr::Binary {
+                op,
+                left,
+                right,
+                span,
+            } => Expr::Binary {
+                op: *op,
+                left: Box::new(rw(left, is_global, changed)),
+                right: Box::new(rw(right, is_global, changed)),
+                span: *span,
+            },
+            Expr::Call {
+                callee,
+                args,
+                named,
+                span,
+            } => Expr::Call {
+                callee: Box::new(rw(callee, is_global, changed)),
+                args: args.iter().map(|a| rw(a, is_global, changed)).collect(),
+                named: named
+                    .iter()
+                    .map(|(n, v)| (n.clone(), rw(v, is_global, changed)))
+                    .collect(),
+                span: *span,
+            },
+            Expr::Closure {
+                params,
+                ret_ty,
+                body,
+                span,
+            } => Expr::Closure {
+                params: params.clone(),
+                ret_ty: ret_ty.clone(),
+                body: Box::new(rw(body, is_global, changed)),
+                span: *span,
+            },
+            Expr::If {
+                cond,
+                then,
+                els,
+                span,
+            } => Expr::If {
+                cond: Box::new(rw(cond, is_global, changed)),
+                then: rw_block(then, is_global, changed),
+                els: els.as_ref().map(|x| Box::new(rw(x, is_global, changed))),
+                span: *span,
+            },
+            Expr::While { cond, body, span } => Expr::While {
+                cond: Box::new(rw(cond, is_global, changed)),
+                body: rw_block(body, is_global, changed),
+                span: *span,
+            },
+            Expr::Match {
+                scrutinee,
+                arms,
+                span,
+            } => Expr::Match {
+                scrutinee: Box::new(rw(scrutinee, is_global, changed)),
+                arms: arms
+                    .iter()
+                    .map(|a| crate::ast::MatchArm {
+                        pat: a.pat.clone(),
+                        guard: a.guard.as_ref().map(|g| rw(g, is_global, changed)),
+                        body: rw(&a.body, is_global, changed),
+                        span: a.span,
+                    })
+                    .collect(),
+                span: *span,
+            },
+            Expr::IfLet {
+                pat,
+                value,
+                then,
+                els,
+                span,
+            } => Expr::IfLet {
+                pat: pat.clone(),
+                value: Box::new(rw(value, is_global, changed)),
+                then: rw_block(then, is_global, changed),
+                els: els.as_ref().map(|x| Box::new(rw(x, is_global, changed))),
+                span: *span,
+            },
+            Expr::Try { expr, span } => Expr::Try {
+                expr: Box::new(rw(expr, is_global, changed)),
+                span: *span,
+            },
+            Expr::Block(b) => Expr::Block(rw_block(b, is_global, changed)),
+            Expr::Variant { name, arg, span } => Expr::Variant {
+                name: name.clone(),
+                arg: arg.as_ref().map(|a| Box::new(rw(a, is_global, changed))),
+                span: *span,
+            },
+            Expr::Array { elems, span } => Expr::Array {
+                elems: elems.iter().map(|x| rw(x, is_global, changed)).collect(),
+                span: *span,
+            },
+            Expr::Dict { entries, span } => Expr::Dict {
+                entries: entries
+                    .iter()
+                    .map(|(k, v)| (rw(k, is_global, changed), rw(v, is_global, changed)))
+                    .collect(),
+                span: *span,
+            },
+            Expr::Field { obj, name, span } => Expr::Field {
+                obj: Box::new(rw(obj, is_global, changed)),
+                name: name.clone(),
+                span: *span,
+            },
+            Expr::Range { start, end, span } => Expr::Range {
+                start: Box::new(rw(start, is_global, changed)),
+                end: Box::new(rw(end, is_global, changed)),
+                span: *span,
+            },
+            Expr::StructInit { name, fields, span } => Expr::StructInit {
+                name: name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(n, v)| (n.clone(), rw(v, is_global, changed)))
+                    .collect(),
+                span: *span,
+            },
+            Expr::Index { obj, index, span } => Expr::Index {
+                obj: Box::new(rw(obj, is_global, changed)),
+                index: Box::new(rw(index, is_global, changed)),
+                span: *span,
+            },
+            Expr::Slice {
+                obj,
+                start,
+                end,
+                span,
+            } => Expr::Slice {
+                obj: Box::new(rw(obj, is_global, changed)),
+                start: start.as_ref().map(|s| Box::new(rw(s, is_global, changed))),
+                end: end.as_ref().map(|x| Box::new(rw(x, is_global, changed))),
+                span: *span,
+            },
+            Expr::ListComp {
+                body,
+                var,
+                iter,
+                filter,
+                span,
+            } => Expr::ListComp {
+                body: Box::new(rw(body, is_global, changed)),
+                var: var.clone(),
+                iter: Box::new(rw(iter, is_global, changed)),
+                filter: filter.as_ref().map(|f| Box::new(rw(f, is_global, changed))),
+                span: *span,
+            },
+            _ => e.clone(),
+        }
+    }
+    fn rw_block(b: &Block, is_global: &dyn Fn(&str) -> bool, changed: &mut bool) -> Block {
+        Block {
+            stmts: b
+                .stmts
+                .iter()
+                .map(|s| match s {
+                    Stmt::Decl {
+                        ty,
+                        name,
+                        value,
+                        span,
+                        pub_,
+                        is_const,
+                    } => Stmt::Decl {
+                        ty: ty.clone(),
+                        name: name.clone(),
+                        value: rw(value, is_global, changed),
+                        span: *span,
+                        pub_: *pub_,
+                        is_const: *is_const,
+                    },
+                    Stmt::Assign {
+                        target,
+                        value,
+                        span,
+                    } => Stmt::Assign {
+                        target: rw(target, is_global, changed),
+                        value: rw(value, is_global, changed),
+                        span: *span,
+                    },
+                    Stmt::Return { value, span } => Stmt::Return {
+                        value: value.as_ref().map(|v| rw(v, is_global, changed)),
+                        span: *span,
+                    },
+                    Stmt::Expr(x) => Stmt::Expr(rw(x, is_global, changed)),
+                    Stmt::For {
+                        vars,
+                        iter,
+                        body,
+                        span,
+                    } => Stmt::For {
+                        vars: vars.clone(),
+                        iter: Box::new(rw(iter, is_global, changed)),
+                        body: rw_block(body, is_global, changed),
+                        span: *span,
+                    },
+                    Stmt::Defer { expr, span } => Stmt::Defer {
+                        expr: Box::new(rw(expr, is_global, changed)),
+                        span: *span,
+                    },
+                    Stmt::Destructure { pat, value, span } => Stmt::Destructure {
+                        pat: pat.clone(),
+                        value: rw(value, is_global, changed),
+                        span: *span,
+                    },
+                    other => other.clone(),
+                })
+                .collect(),
+            span: b.span,
+        }
+    }
+    let mut changed = false;
+    let out = rw(e, is_global, &mut changed);
+    changed.then_some(out)
+}
+
+/// True when `e` can unwind past the enclosing statement: `break` /
+/// `continue` expressions, `return` statements in nested blocks, or `?`
+/// (`Try`). A `ThreadCall` take must not precede these — the store would
+/// never run while the slot already holds `Unit`. (Push takes evaluate
+/// siblings *before* taking, so they need no such exclusion.)
+pub fn has_early_exit(e: &Expr) -> bool {
+    match e {
+        Expr::Break { .. } | Expr::Continue { .. } | Expr::Try { .. } => true,
+        Expr::Fmt { parts, .. } => parts.iter().any(|p| match p {
+            crate::ast::FmtPart::Expr(x, _) => has_early_exit(x),
+            _ => false,
+        }),
+        Expr::Paren { expr, .. } => has_early_exit(expr),
+        Expr::Tuple { items, .. } => items.iter().any(has_early_exit),
+        Expr::Unary { expr, .. } => has_early_exit(expr),
+        Expr::Binary { left, right, .. } => has_early_exit(left) || has_early_exit(right),
+        Expr::Closure { body, .. } => has_early_exit(body),
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            has_early_exit(callee)
+                || args.iter().any(has_early_exit)
+                || named.iter().any(|(_, v)| has_early_exit(v))
+        }
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            has_early_exit(cond)
+                || block_has_early_exit(then)
+                || els.as_ref().is_some_and(|x| has_early_exit(x.as_ref()))
+        }
+        Expr::While { cond, body, .. } => has_early_exit(cond) || block_has_early_exit(body),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            has_early_exit(scrutinee)
+                || arms.iter().any(|a| {
+                    has_early_exit(&a.body) || a.guard.as_ref().is_some_and(has_early_exit)
+                })
+        }
+        Expr::IfLet {
+            value, then, els, ..
+        } => {
+            has_early_exit(value)
+                || block_has_early_exit(then)
+                || els.as_ref().is_some_and(|x| has_early_exit(x.as_ref()))
+        }
+        Expr::Block(b) => block_has_early_exit(b),
+        Expr::Variant { arg, .. } => arg.as_ref().is_some_and(|a| has_early_exit(a.as_ref())),
+        Expr::Array { elems, .. } => elems.iter().any(has_early_exit),
+        Expr::Dict { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| has_early_exit(k) || has_early_exit(v)),
+        Expr::Field { obj, .. } => has_early_exit(obj),
+        Expr::Range { start, end, .. } => has_early_exit(start) || has_early_exit(end),
+        Expr::StructInit { fields, .. } => fields.iter().any(|(_, v)| has_early_exit(v)),
+        Expr::Index { obj, index, .. } => has_early_exit(obj) || has_early_exit(index),
+        Expr::Slice {
+            obj, start, end, ..
+        } => {
+            has_early_exit(obj)
+                || start.as_ref().is_some_and(|s| has_early_exit(s.as_ref()))
+                || end.as_ref().is_some_and(|x| has_early_exit(x.as_ref()))
+        }
+        Expr::ListComp {
+            body, iter, filter, ..
+        } => {
+            has_early_exit(body)
+                || has_early_exit(iter)
+                || filter.as_ref().is_some_and(|f| has_early_exit(f.as_ref()))
+        }
+        _ => false,
+    }
+}
+
+fn block_has_early_exit(b: &Block) -> bool {
+    b.stmts.iter().any(|s| match s {
+        Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
+        Stmt::Decl { value, .. } => has_early_exit(value),
+        Stmt::Assign { target, value, .. } => has_early_exit(target) || has_early_exit(value),
+        Stmt::Expr(e) => has_early_exit(e),
+        Stmt::For { iter, body, .. } => has_early_exit(iter) || block_has_early_exit(body),
+        Stmt::Defer { expr, .. } => has_early_exit(expr),
+        Stmt::Destructure { value, .. } => has_early_exit(value),
+        _ => false,
+    })
+}
+
 /// Receiver of a `.push(elem)` method call that is exactly the name `var`:
-/// `x.push(e)` as `Path [x, push]` or `Field { Ident x, push }`.
 fn is_push_method_on(callee: &Expr, var: &str) -> bool {
     match callee {
         Expr::Path { parts, .. } => parts.len() == 2 && parts[0] == var && parts[1] == "push",
@@ -404,10 +814,194 @@ fn as_field_path(e: &Expr) -> Option<(&str, &str)> {
     }
 }
 
+/// True when `e` is exactly the field path `(obj, field)`.
+fn is_field_ref(e: &Expr, obj: &str, field: &str) -> bool {
+    match e {
+        Expr::Path { parts, .. } => parts.len() == 2 && parts[0] == obj && parts[1] == field,
+        Expr::Field { obj: o, name, .. } => {
+            name == field
+                && match o.as_ref() {
+                    Expr::Ident { name: n, .. } => n == obj,
+                    Expr::Path { parts, .. } => parts.join(".") == obj,
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
+}
+
+/// Count references to exactly the field `(obj, field)`. Reads of the bare
+/// container or of sibling fields do not count: the take moves only the
+/// field, so sibling reads (evaluated pre-take) are sound — and a shared
+/// container merely forces the runtime fallback via the refcount check.
+pub fn count_field_refs(e: &Expr, obj: &str, field: &str) -> usize {
+    if is_field_ref(e, obj, field) {
+        return 1;
+    }
+    match e {
+        Expr::Fmt { parts, .. } => parts
+            .iter()
+            .map(|p| match p {
+                crate::ast::FmtPart::Expr(x, _) => count_field_refs(x, obj, field),
+                _ => 0,
+            })
+            .sum(),
+        Expr::Paren { expr, .. } => count_field_refs(expr, obj, field),
+        Expr::Tuple { items, .. } => items.iter().map(|i| count_field_refs(i, obj, field)).sum(),
+        Expr::Unary { expr, .. } => count_field_refs(expr, obj, field),
+        Expr::Binary { left, right, .. } => {
+            count_field_refs(left, obj, field) + count_field_refs(right, obj, field)
+        }
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            count_field_refs(callee, obj, field)
+                + args
+                    .iter()
+                    .map(|a| count_field_refs(a, obj, field))
+                    .sum::<usize>()
+                + named
+                    .iter()
+                    .map(|(_, v)| count_field_refs(v, obj, field))
+                    .sum::<usize>()
+        }
+        Expr::Closure { params, body, .. } => {
+            // A captured field read observes the slot when invoked: count
+            // it (fails single-occurrence, the conservative answer), unless
+            // shadowed by a closure param of the same container name.
+            if params.iter().any(|p| p.name.name == obj) {
+                0
+            } else {
+                count_field_refs(body, obj, field)
+            }
+        }
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            count_field_refs(cond, obj, field)
+                + count_block_field_refs(then, obj, field)
+                + els.as_ref().map_or(0, |x| count_field_refs(x, obj, field))
+        }
+        Expr::While { cond, body, .. } => {
+            count_field_refs(cond, obj, field) + count_block_field_refs(body, obj, field)
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            count_field_refs(scrutinee, obj, field)
+                + arms
+                    .iter()
+                    .map(|a| {
+                        count_field_refs(&a.body, obj, field)
+                            + a.guard
+                                .as_ref()
+                                .map_or(0, |g| count_field_refs(g, obj, field))
+                    })
+                    .sum::<usize>()
+        }
+        Expr::IfLet {
+            value, then, els, ..
+        } => {
+            count_field_refs(value, obj, field)
+                + count_block_field_refs(then, obj, field)
+                + els.as_ref().map_or(0, |x| count_field_refs(x, obj, field))
+        }
+        Expr::Try { expr, .. } => count_field_refs(expr, obj, field),
+        Expr::Block(b) => count_block_field_refs(b, obj, field),
+        Expr::Variant { arg, .. } => arg.as_ref().map_or(0, |a| count_field_refs(a, obj, field)),
+        Expr::Array { elems, .. } => elems.iter().map(|x| count_field_refs(x, obj, field)).sum(),
+        Expr::Dict { entries, .. } => entries
+            .iter()
+            .map(|(k, v)| count_field_refs(k, obj, field) + count_field_refs(v, obj, field))
+            .sum(),
+        Expr::Field { obj: o, .. } => count_field_refs(o, obj, field),
+        Expr::Range { start, end, .. } => {
+            count_field_refs(start, obj, field) + count_field_refs(end, obj, field)
+        }
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .map(|(_, v)| count_field_refs(v, obj, field))
+            .sum(),
+        Expr::Index { obj: o, index, .. } => {
+            count_field_refs(o, obj, field) + count_field_refs(index, obj, field)
+        }
+        Expr::Slice {
+            obj: o, start, end, ..
+        } => {
+            count_field_refs(o, obj, field)
+                + start
+                    .as_ref()
+                    .map_or(0, |s| count_field_refs(s, obj, field))
+                + end.as_ref().map_or(0, |x| count_field_refs(x, obj, field))
+        }
+        Expr::ListComp {
+            body,
+            var,
+            iter,
+            filter,
+            ..
+        } => {
+            // The comprehension variable shadows same-named containers.
+            if var.name == obj {
+                count_field_refs(iter, obj, field)
+            } else {
+                count_field_refs(body, obj, field)
+                    + count_field_refs(iter, obj, field)
+                    + filter
+                        .as_ref()
+                        .map_or(0, |f| count_field_refs(f, obj, field))
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn count_block_field_refs(b: &Block, obj: &str, field: &str) -> usize {
+    b.stmts
+        .iter()
+        .map(|s| count_stmt_field_refs(s, obj, field))
+        .sum()
+}
+
+fn count_stmt_field_refs(s: &Stmt, obj: &str, field: &str) -> usize {
+    match s {
+        Stmt::Decl { value, .. } => count_field_refs(value, obj, field),
+        Stmt::Assign { target, value, .. } => {
+            count_field_refs(target, obj, field) + count_field_refs(value, obj, field)
+        }
+        Stmt::Return { value, .. } => value
+            .as_ref()
+            .map_or(0, |v| count_field_refs(v, obj, field)),
+        Stmt::Expr(e) => count_field_refs(e, obj, field),
+        Stmt::For { iter, body, .. } => {
+            count_field_refs(iter, obj, field) + count_block_field_refs(body, obj, field)
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } => 0,
+        Stmt::Defer { expr, .. } => count_field_refs(expr, obj, field),
+        Stmt::Destructure { value, .. } => count_field_refs(value, obj, field),
+        Stmt::ExternBlock { .. } | Stmt::Link { .. } => 0,
+        _ => 0,
+    }
+}
+
 /// Classify `target = rhs` per the module rule. Returns the move shape when
 /// every static clause holds; per-engine guards (capture sets, callee
 /// scope-share, slot kinds) apply on top.
+/// Native-engine classification: push spellings only (see `is_push_callee`).
 pub fn classify_self_assign(target: &Expr, rhs: &Expr) -> Option<MoveKind> {
+    classify_with(target, rhs, &is_push_callee)
+}
+
+/// VM-engine classification: push plus append spellings (see
+/// `is_push_or_append_callee`; append is value-identical to push there).
+pub fn classify_self_assign_vm(target: &Expr, rhs: &Expr) -> Option<MoveKind> {
+    classify_with(target, rhs, &is_push_or_append_callee)
+}
+
+fn classify_with(target: &Expr, rhs: &Expr, is_push: &dyn Fn(&Expr) -> bool) -> Option<MoveKind> {
     // `s.f = ...` field shape first (target is not a bare Ident).
     if let Some((obj, field)) = as_field_path(target) {
         if let Expr::Call {
@@ -417,18 +1011,20 @@ pub fn classify_self_assign(target: &Expr, rhs: &Expr) -> Option<MoveKind> {
             ..
         } = rhs
         {
-            if named.is_empty() && is_push_callee(callee) && args.len() == 2 {
-                if as_field_path(&args[0]) == Some((obj, field))
-                    && count_refs(rhs, obj) == 1
-                    && !has_closure_or_spawn(rhs)
-                    && !has_call(&args[1])
-                    && !has_closure_or_spawn(&args[1])
-                {
-                    return Some(MoveKind::FieldPush {
-                        obj: obj.to_string(),
-                        field: field.to_string(),
-                    });
-                }
+            // Single occurrence of the exact field only (see
+            // `count_field_refs`): the take moves just the field. Sibling
+            // args need no purity: engines evaluate them *before* the take,
+            // while the slot is intact.
+            if named.is_empty()
+                && is_push(callee)
+                && args.len() == 2
+                && as_field_path(&args[0]) == Some((obj, field))
+                && count_field_refs(rhs, obj, field) == 1
+            {
+                return Some(MoveKind::FieldPush {
+                    obj: obj.to_string(),
+                    field: field.to_string(),
+                });
             }
         }
         return None;
@@ -446,29 +1042,36 @@ pub fn classify_self_assign(target: &Expr, rhs: &Expr) -> Option<MoveKind> {
         } => (callee, args, named),
         _ => return None,
     };
-    if !named.is_empty() || has_closure_or_spawn(rhs) || count_refs(rhs, var) != 1 {
+    if !named.is_empty() || count_refs(rhs, var) != 1 {
         return None;
     }
-    // `x = vec.push(x, e)`: x is args[0], element pure.
-    if is_push_callee(callee) && args.len() == 2 {
-        if matches!(&args[0], Expr::Ident { name: n, .. } if n == var)
-            && !has_call(&args[1])
-            && !has_closure_or_spawn(&args[1])
-        {
+    // `x = vec.push(x, e)`: x is args[0]. Sibling args need no purity (see
+    // the field shape above for why).
+    if is_push(callee) && args.len() == 2 {
+        if matches!(&args[0], Expr::Ident { name: n, .. } if n == var) {
             return Some(MoveKind::VecPush(var.clone()));
         }
         return None;
     }
     // `x = x.push(e)`: receiver is the callee, element is args[0].
     if is_push_method_on(callee, var) && args.len() == 1 {
-        if !has_call(&args[0]) && !has_closure_or_spawn(&args[0]) {
-            return Some(MoveKind::VecPush(var.clone()));
-        }
-        return None;
+        return Some(MoveKind::VecPush(var.clone()));
     }
-    // `x = f(x, ...)` (but not a second push spelling): callee must be a
-    // bare name so engines can vet it; every non-x argument call-free.
-    if matches!(callee, Expr::Ident { .. })
+    // `x = f(x, ...)` (but not a second push spelling): the callee is a
+    // plain reference — bare or dotted (same-module calls arrive qualified
+    // as `ns.f`, methods carry their receiver) — with no calls/closures of
+    // its own, so engines can vet it; every non-x argument is call-free.
+    // Closure literals as callees are out: creating one shares the scope.
+    let callee_ok = match callee {
+        Expr::Ident { .. } | Expr::Path { .. } | Expr::Field { .. } => {
+            !has_call(callee) && !has_closure_or_spawn(callee)
+        }
+        _ => false,
+    };
+    // No early exits anywhere in the RHS: the take precedes user code, so
+    // the store must be guaranteed to run.
+    if callee_ok
+        && !has_early_exit(rhs)
         && args
             .iter()
             .any(|a| matches!(a, Expr::Ident { name: n, .. } if n == var))
@@ -476,7 +1079,6 @@ pub fn classify_self_assign(target: &Expr, rhs: &Expr) -> Option<MoveKind> {
             matches!(a, Expr::Ident { name: n, .. } if n == var)
                 || (!has_call(a) && !has_closure_or_spawn(a))
         })
-        && !has_call(callee)
     {
         return Some(MoveKind::ThreadCall(var.clone()));
     }
@@ -539,6 +1141,8 @@ mod tests {
             kind("doc = combine(1, doc)\n"),
             Some(MoveKind::ThreadCall("doc".into()))
         );
+        // Dotted callees (qualified same-module calls, methods) qualify.
+        assert_eq!(kind("x = m.f(x)\n"), Some(MoveKind::ThreadCall("x".into())));
     }
 
     #[test]
@@ -550,19 +1154,47 @@ mod tests {
 
     #[test]
     fn must_not_closure_or_spawn() {
+        // ThreadCall: closures/spawns anywhere are out (take comes first).
         assert_eq!(kind("x = f(x, |v| v)\n"), None);
         assert_eq!(kind("x = apply(|v| x)\n"), None);
         assert_eq!(kind("x = f(x, spawn(g))\n"), None);
-        assert_eq!(kind("b = vec.push(b, spawn(g))\n"), None);
+        // Push shapes evaluate siblings pre-take: allowed.
+        assert_eq!(
+            kind("b = vec.push(b, spawn(g))\n"),
+            Some(MoveKind::VecPush("b".into()))
+        );
+    }
+
+    #[test]
+    fn push_elem_needs_no_purity() {
+        // Engines evaluate the element before the take (slot still
+        // intact), so calls/closures/spawns there are sound.
+        assert_eq!(
+            kind("b = vec.push(b, f())\n"),
+            Some(MoveKind::VecPush("b".into()))
+        );
+        assert_eq!(
+            kind("s.f = vec.push(s.f, len(s.g))\n"),
+            Some(MoveKind::FieldPush {
+                obj: "s".into(),
+                field: "f".into()
+            })
+        );
+    }
+
+    #[test]
+    fn must_not_early_exit() {
+        // The take precedes user code: any unwind would skip the store.
+        assert_eq!(kind("x = f(x, y?)\n"), None);
+        assert_eq!(kind("x = f(x, if c { break } else { 1 })\n"), None);
     }
 
     #[test]
     fn must_not_nested_calls() {
-        // Element / non-x args must be call-free.
-        assert_eq!(kind("b = vec.push(b, f())\n"), None);
+        // ThreadCall sibling args must be call-free (take comes first).
         assert_eq!(kind("x = f(x, g(1))\n"), None);
-        // Non-push, non-Ident callees are out of scope.
-        assert_eq!(kind("x = m.f(x)\n"), None);
+        // Callees running code of their own are out.
+        assert_eq!(kind("x = f()(x)\n"), None);
     }
 
     #[test]

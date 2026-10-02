@@ -1,0 +1,16 @@
+// VM-only: assign-form `vec.append` returns the new array on the VM
+// (like `vec.push`). The native backend lowers bare `vec.append` to an
+// in-place unit mutator instead, so this fixture is skipped on native
+// (see `native_skip_reason` in dual_engine_parity.rs).
+d := []
+for i in 0..5 {
+    d = vec.append(d, i)
+}
+assert(len(d) == 5)
+assert(d[4] == 4)
+// Method spelling agrees.
+e := [1]
+e.append(2)
+assert(len(e) == 2)
+assert(e[1] == 2)
+println("move_append_append_ok")

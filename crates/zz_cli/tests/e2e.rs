@@ -293,6 +293,21 @@ e2e_success_test!(
     "string_index_set_binop.zz"
 );
 e2e_success_test!(
+    e2e_regression_move_append_shapes,
+    "regression",
+    "move_append_shapes.zz"
+);
+e2e_success_test!(
+    e2e_regression_move_append_field,
+    "regression",
+    "move_append_field.zz"
+);
+e2e_success_test!(
+    e2e_regression_move_append_append,
+    "regression",
+    "move_append_append.zz"
+);
+e2e_success_test!(
     e2e_regression_fuzz_smoke_00,
     "regression",
     "fuzz_smoke_00.zz"

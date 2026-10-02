@@ -633,6 +633,20 @@ pub fn reachable_refs(
                     loads.insert(n.clone());
                     admit(n, funcs, &mut names, &mut stack);
                 }
+                // Move-take homes resolve exactly like `LoadVar` (plus
+                // storing back through the same binding).
+                Op::TakeVar(n, _) => {
+                    loads.insert(n.clone());
+                    admit(n, funcs, &mut names, &mut stack);
+                }
+                Op::VecPush { home, .. }
+                | Op::VecPushField { home, .. }
+                | Op::VecPushMethod { home, .. } => {
+                    if let crate::vm::op::TakeHome::Env(n) = home {
+                        loads.insert(n.clone());
+                        admit(n, funcs, &mut names, &mut stack);
+                    }
+                }
                 Op::LoadPath(parts, _) | Op::StorePath(parts, _) => {
                     if parts.is_empty() {
                         continue;

@@ -5,6 +5,14 @@ use zz_frontend::span::Span;
 
 use super::chunk::Chunk;
 
+/// A move-take home shared by the fused push/take ops: a frame slot or an
+/// env binding name.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TakeHome {
+    Slot(u16),
+    Env(String),
+}
+
 /// Bytecode instructions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
@@ -34,6 +42,40 @@ pub enum Op {
     LoadSlot(u16),
     /// Pop a value and write it to a compile-time-resolved local slot.
     StoreSlot(u16),
+    /// Take the slot's value out (leaving `Unit`), pushing it: the
+    /// single-occurrence load in `x = f(x, ...)` / `x = vec.push(x, e)`.
+    /// The final store completes before any user code can re-read the
+    /// slot (see `zz_frontend::move_elide`), and slots are never
+    /// scope-shared, so the transient is unobservable.
+    TakeSlot(u16),
+    /// Take the env binding's value out (leaving `Unit`), pushing it:
+    /// like `TakeSlot` for names that live in the environment. Falls back
+    /// to the `LoadVar` resolution chain (funcs, natives, plugins) with a
+    /// clone when the name is not an env binding, and errors identically
+    /// when unbound.
+    TakeVar(String, Span),
+    /// Pop an element; take the array home, push the element in (reusing
+    /// the owned `Vec`), store it back. Fused `x = vec.push(x, e)`:
+    /// zero clones on the steady path. Restores the home on a type error
+    /// (same error as `vec.push`).
+    VecPush { home: TakeHome, span: Span },
+    /// Pop an element; take the named field out of the home object
+    /// (leaving `Unit` in the field), push the element in, store the field
+    /// back. Fused `s.f = vec.push(s.f, e)`.
+    VecPushField {
+        home: TakeHome,
+        field: String,
+        span: Span,
+    },
+    /// Pop an element; take the home, and when it holds an array push in
+    /// place and store back (fused `x.push(e)` / `x.append(e)`). Otherwise
+    /// restore the home and run the generic method call with write-back,
+    /// so user-defined methods behave exactly as before.
+    VecPushMethod {
+        home: TakeHome,
+        method: String,
+        span: Span,
+    },
     /// In-place integer add: `slot[dst] = Int(slot[dst] + slot[src])`.
     ///
     /// Fused fast path for `x = x + y` inside hot loops: no stack traffic,

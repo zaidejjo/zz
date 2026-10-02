@@ -4,7 +4,7 @@ use zz_frontend::ast::{Block, Expr};
 use zz_frontend::span::Span;
 
 use super::chunk::Chunk;
-use super::op::Op;
+use super::op::{Op, TakeHome};
 use crate::env::{Env, EnvLink};
 use crate::eval::{EvalError, Interp};
 use crate::runtime::ops::{
@@ -442,38 +442,7 @@ impl Vm {
                     self.stack.push(Value::Bool(v.is_truthy()));
                 }
                 Op::LoadVar(name, span) => {
-                    let v = interp
-                        .env
-                        .get(name)
-                        .or_else(|| {
-                            interp
-                                .funcs
-                                .get(name)
-                                .map(|fv| Value::Func(Box::new(fv.clone())))
-                        })
-                        .or_else(|| {
-                            interp.natives.get(name).map(|entry| {
-                                Value::Native(Box::new(NativeFunc {
-                                    name: name.clone(),
-                                    arity: entry.arity,
-                                }))
-                            })
-                        })
-                        // C-only plugins (direct dlsym, no Rust shim).
-                        .or_else(|| crate::c_abi::native_value(name))
-                        .or_else(|| {
-                            // Selective-import alias (miss-only): resolve
-                            // `ns.sym` like a qualified path. See
-                            // tree-walker Ident eval for the full note.
-                            let qualified = interp.import_aliases.get(name).cloned();
-                            qualified.and_then(|q| {
-                                let parts: Vec<String> = q.split('.').map(str::to_string).collect();
-                                interp.resolve_path_value(&parts, *span).ok()
-                            })
-                        })
-                        .ok_or_else(|| {
-                            EvalError::new(format!("undefined variable `{name}`"), *span)
-                        })?;
+                    let v = Self::load_var(interp, name, *span)?;
                     self.stack.push(v);
                 }
                 Op::LoadPath(parts, span) => {
@@ -504,6 +473,112 @@ impl Vm {
                     let v = self.stack.pop().unwrap();
                     let base = self.frames.last().unwrap().stack_base;
                     self.stack[base + *slot as usize] = v;
+                }
+                Op::TakeSlot(slot) => {
+                    let base = self.frames.last().unwrap().stack_base;
+                    let v = std::mem::replace(&mut self.stack[base + *slot as usize], Value::Unit);
+                    self.stack.push(v);
+                }
+                Op::TakeVar(name, span) => {
+                    if let Some(v) = interp.env.get(name) {
+                        // Take: leave `Unit` behind until the matching store.
+                        // (Best-effort: if the assign fails the env is
+                        // unchanged and the clone is just a load.)
+                        interp.env.assign(name, Value::Unit);
+                        self.stack.push(v);
+                    } else {
+                        let v = Self::load_var_fallback(interp, name, *span)?;
+                        self.stack.push(v);
+                    }
+                }
+                Op::VecPush { home, span } => {
+                    let elem = self.stack.pop().unwrap();
+                    let Some(taken) = Self::take_home(self, interp, home) else {
+                        self.stack.push(elem);
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    let mut vs = match taken {
+                        Value::Array(b) => *b,
+                        other => {
+                            let msg = format!("`vec.push` expects an array, found `{other}`");
+                            Self::restore_home(self, interp, home, other);
+                            self.stack.push(elem);
+                            return Err(self.error(msg, *span));
+                        }
+                    };
+                    vs.push(elem);
+                    Self::restore_home(self, interp, home, Value::Array(Box::new(vs)));
+                }
+                Op::VecPushField { home, field, span } => {
+                    let elem = self.stack.pop().unwrap();
+                    let Some(mut taken) = Self::take_home(self, interp, home) else {
+                        self.stack.push(elem);
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    // `field_push_take` restores the field itself on type
+                    // errors; the home object stays intact either way.
+                    match Self::field_push_take(&mut taken, field, elem, *span) {
+                        Ok(()) => {}
+                        Err(msg) => {
+                            Self::restore_home(self, interp, home, taken);
+                            return Err(self.error(msg, *span));
+                        }
+                    }
+                    Self::restore_home(self, interp, home, taken);
+                }
+                Op::VecPushMethod { home, method, span } => {
+                    let elem = self.stack.pop().unwrap();
+                    let Some(taken) = Self::take_home(self, interp, home) else {
+                        self.stack.push(elem);
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    match taken {
+                        Value::Array(b) => {
+                            let mut vs = *b;
+                            vs.push(elem);
+                            Self::restore_home(self, interp, home, Value::Array(Box::new(vs)));
+                        }
+                        other => {
+                            // Not an array: restore first (no transient
+                            // during user code), then the generic method
+                            // call with write-back, exactly like before.
+                            Self::restore_home(self, interp, home, other.clone());
+                            let (f, recv) = interp.lookup_method_recv(&other, method, *span)?;
+                            let arg_vals = vec![recv, elem];
+                            self.call_value(f, arg_vals, *span, interp)?;
+                            let result = self.stack.pop().unwrap();
+                            Self::restore_home(self, interp, home, result);
+                            re_cache!();
+                            yield_check!();
+                        }
+                    }
                 }
                 Op::SlotAddInt { dst, src } => {
                     let base = self.frames.last().unwrap().stack_base;
@@ -1986,5 +2061,129 @@ impl Vm {
     /// Create an EvalError with the current backtrace attached.
     fn error(&self, message: impl Into<String>, span: Span) -> EvalError {
         EvalError::new(message, span).with_backtrace(self.backtrace())
+    }
+
+    /// `LoadVar` resolution chain (env, then funcs, then natives): shared by
+    /// `LoadVar` and the `TakeVar` fallback for non-env bindings.
+    fn load_var(interp: &mut Interp, name: &str, span: Span) -> Result<Value, EvalError> {
+        interp
+            .env
+            .get(name)
+            .or_else(|| {
+                interp
+                    .funcs
+                    .get(name)
+                    .map(|fv| Value::Func(Box::new(fv.clone())))
+            })
+            .or_else(|| {
+                interp.natives.get(name).map(|entry| {
+                    Value::Native(Box::new(NativeFunc {
+                        name: name.to_string(),
+                        arity: entry.arity,
+                    }))
+                })
+            })
+            // C-only plugins (direct dlsym, no Rust shim).
+            .or_else(|| crate::c_abi::native_value(name))
+            .or_else(|| {
+                // Selective-import alias (miss-only): resolve
+                // `ns.sym` like a qualified path. See
+                // tree-walker Ident eval for the full note.
+                let qualified = interp.import_aliases.get(name).cloned();
+                qualified.and_then(|q| {
+                    let parts: Vec<String> = q.split('.').map(str::to_string).collect();
+                    interp.resolve_path_value(&parts, span).ok()
+                })
+            })
+            .ok_or_else(|| EvalError::new(format!("undefined variable `{name}`"), span))
+    }
+
+    /// `TakeVar` fallback for names that are not env bindings (funcs,
+    /// natives, plugins): no take is possible, so load a clone exactly
+    /// like `LoadVar`.
+    fn load_var_fallback(interp: &mut Interp, name: &str, span: Span) -> Result<Value, EvalError> {
+        Self::load_var(interp, name, span)
+    }
+
+    /// Take the value out of a fused-op home (leaving `Unit`). Returns
+    /// `None` for unbound env homes (the caller errors like `LoadVar`).
+    fn take_home(vm: &mut Vm, interp: &mut Interp, home: &TakeHome) -> Option<Value> {
+        match home {
+            TakeHome::Slot(slot) => {
+                let base = vm.frames.last().unwrap().stack_base;
+                Some(std::mem::replace(
+                    &mut vm.stack[base + *slot as usize],
+                    Value::Unit,
+                ))
+            }
+            TakeHome::Env(name) => {
+                let v = interp.env.get(name)?;
+                interp.env.assign(name, Value::Unit);
+                Some(v)
+            }
+        }
+    }
+
+    /// Store a value back into a fused-op home.
+    fn restore_home(vm: &mut Vm, interp: &mut Interp, home: &TakeHome, v: Value) {
+        match home {
+            TakeHome::Slot(slot) => {
+                let base = vm.frames.last().unwrap().stack_base;
+                vm.stack[base + *slot as usize] = v;
+            }
+            TakeHome::Env(name) => {
+                if !interp.env.assign(name, v.clone()) {
+                    interp.env.define(name, v);
+                }
+            }
+        }
+    }
+
+    /// Push `elem` into the named field of an owned `home` object in place:
+    /// takes the field out (leaving `Unit`), reuses the owned `Vec`, stores
+    /// the field back. Direct fields answer inline; promoted, missing, or
+    /// non-object fields take the generic path (clone read + push +
+    /// promotion-aware write — same value, one extra clone).
+    /// Errors carry the message; the caller attaches its span and restores
+    /// the home first (REPL error-path parity).
+    fn field_push_take(
+        home: &mut Value,
+        field: &str,
+        elem: Value,
+        span: Span,
+    ) -> Result<(), String> {
+        if let Value::Object(o) = home {
+            if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n == field) {
+                let mut vs = match std::mem::replace(slot, Value::Unit) {
+                    Value::Array(b) => *b,
+                    other => {
+                        *slot = other;
+                        return Err(format!("`vec.push` expects an array, found `{}`", slot));
+                    }
+                };
+                vs.push(elem);
+                *slot = Value::Array(Box::new(vs));
+                return Ok(());
+            }
+        }
+        // Generic path: mirrors `GetField` + `vec.push` + `SetField`.
+        let cur = match object_field(home, field, span) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(e.message);
+            }
+        };
+        let mut vs = match cur {
+            Value::Array(b) => *b,
+            other => {
+                return Err(format!("`vec.push` expects an array, found `{other}`"));
+            }
+        };
+        vs.push(elem);
+        let pushed = Value::Array(Box::new(vs));
+        match set_object_field(home, field, pushed, span) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(e.message),
+        }
     }
 }
