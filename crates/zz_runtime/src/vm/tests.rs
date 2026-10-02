@@ -4,7 +4,7 @@ use zz_frontend::ast::{BinOp, Block, Expr, Ident, Param};
 use zz_frontend::parse;
 use zz_frontend::span::Span;
 
-use super::{Compiler, Op};
+use super::{Compiler, Op, Vm};
 use crate::eval::Interp;
 use crate::value::{FuncValue, Value};
 use crate::EvalError;
@@ -502,4 +502,211 @@ fn vm_bitwise_matches_tree_walker() {
     assert_eq!(run_src("6 & 3").unwrap(), Value::Int(2));
     assert_eq!(run_src("1 << 63").unwrap(), Value::Int(i64::MIN));
     assert_eq!(run_src("~6").unwrap(), Value::Int(-7));
+}
+
+/// Compile `src` with `vec.push` registered as a native (like the real
+/// `run_typed` pipeline does via `Interp::natives`).
+fn compile_with_push_native(src: &str) -> super::Chunk {
+    let parsed = parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let natives: Arc<std::collections::HashSet<String>> =
+        Arc::new(["vec.push".to_string()].into_iter().collect());
+    Compiler::compile_program_with_natives(&parsed.program, natives)
+}
+
+fn has_op(chunk: &super::Chunk, pred: impl FnMut(&Op) -> bool) -> bool {
+    chunk.code.iter().any(pred)
+}
+
+/// Regression: the free form `b = vec.push(b, e)` (2 args) must fuse to
+/// [`Op::VecPush`]. An earlier revision routed every callee ending in
+/// `push` through the method-take handler, which rejected the free form
+/// (`rx_key "vec" != target`) and silently disabled fusion.
+#[test]
+fn vm_fused_free_push_emits_vec_push_not_method() {
+    let chunk = compile_with_push_native("b := []\nb = vec.push(b, 1)\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::VecPush { .. })),
+        "expected fused VecPush, got {:?}",
+        chunk.code
+    );
+    assert!(
+        !has_op(&chunk, |op| matches!(op, Op::VecPushMethod { .. })),
+        "free push must not take the method path: {:?}",
+        chunk.code
+    );
+}
+
+/// The method form `b = b.push(e)` (1 arg) fuses through the
+/// runtime-checked [`Op::VecPushMethod`].
+#[test]
+fn vm_fused_method_push_emits_vec_push_method() {
+    let chunk = compile_with_push_native("b := []\nb = b.push(1)\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::VecPushMethod { .. })),
+        "expected fused VecPushMethod, got {:?}",
+        chunk.code
+    );
+}
+
+/// The field form `s.f = vec.push(s.f, e)` fuses to [`Op::VecPushField`].
+#[test]
+fn vm_fused_field_push_emits_vec_push_field() {
+    let chunk =
+        compile_with_push_native("struct W { f: [int] }\ns := W{f: []}\ns.f = vec.push(s.f, 1)\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::VecPushField { .. })),
+        "expected fused VecPushField, got {:?}",
+        chunk.code
+    );
+}
+
+/// `b = f(b, x)` inside a function body takes the single `b` load
+/// ([`Op::TakeSlot`]) instead of cloning it into the call.
+#[test]
+fn vm_thread_call_emits_take_slot() {
+    let chunk = compile_with_push_native(
+        "func f(x: [int], y: int) -> [int] { x }\nfunc g() -> [int] {\nb := [1]\nb = f(b, 2)\nb\n}\n",
+    );
+    let body_code = chunk
+        .code
+        .iter()
+        .find_map(|op| match op {
+            Op::MakeFunc { name, chunk, .. } if name == "g" => Some(chunk.code.clone()),
+            _ => None,
+        })
+        .expect("function g chunk");
+    assert!(
+        body_code.iter().any(|op| matches!(op, Op::TakeSlot(_))),
+        "expected TakeSlot in g, got {:?}",
+        body_code
+    );
+}
+
+/// Regression: tail `return x` / bare `x` moves the frame local out
+/// (NRVO-equivalent) instead of deep-cloning. Values must match the
+/// tree-walker, and outer bindings read through a tail closure must
+/// survive the call (only params take).
+#[test]
+fn vm_tail_take_moves_param_and_spares_outer() {
+    for src in [
+        "func f(x: [int]) -> [int] { x }\nf([1, 2])[1]",
+        "func f(x: [int]) -> [int] { return x }\nf([1, 2])[0]",
+        "func f(n: int) -> int { m := n * 2\nm }\nf(20)",
+        "struct W { f: [int] }\nfunc g(w: W) -> W { w }\ng(W{f: [7]}).f[0]",
+        "x := 10\nf := |u: int| x + u\nf(0) + x",
+        "x := [1, 2]\nf := |u: int| x[u]\nf(1) + x[0]",
+        "func f(x: int) -> int { g := |u: int| x + u\ng(0) + x }\nf(3)",
+        "func f(x: int) -> int { g := |u: int| x + u\ng(1) + g(2) + x }\nf(3)",
+        "f := |u: int| u + 1\nf(1) + f(2)",
+        "func f(n: int) -> int { defer println(\"dd\")\nn }\nf(41)",
+        "outer := 99\nfunc f() -> int { outer }\nf() + outer",
+    ] {
+        assert_same(src);
+    }
+    assert_eq!(
+        run_src("func f(x: [int]) -> [int] { x }\nf([1, 2, 3])[2]").unwrap(),
+        Value::Int(3)
+    );
+    assert_eq!(
+        run_src("x := 10\nf := |u: int| x + u\nf(0) + x").unwrap(),
+        Value::Int(20)
+    );
+}
+
+#[allow(clippy::ptr_arg)]
+fn len_fake(_interp: &mut Interp, args: &mut Vec<Value>, span: Span) -> Result<Value, EvalError> {
+    match args.first() {
+        Some(Value::Array(vs)) => Ok(Value::Int(vs.len() as i64)),
+        other => Err(EvalError::new(
+            format!("`len` expects an array, found `{other:?}`"),
+            span,
+        )),
+    }
+}
+
+/// Minimal `vec.push` stand-in (clone + push, like the real native).
+/// The bare test `Interp` ships no natives; registering the real
+/// `zz_stdlib` table would pull a dependency cycle into unit tests.
+#[allow(clippy::ptr_arg)]
+fn vec_push_fake(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let mut vs = match args.first() {
+        Some(Value::Array(vs)) => (**vs).clone(),
+        other => {
+            return Err(EvalError::new(
+                format!("`vec.push` expects an array, found `{other:?}`"),
+                span,
+            ));
+        }
+    };
+    let x = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument `x` for vec.push".to_string(), span))?;
+    vs.push(x);
+    Ok(Value::Array(Box::new(vs)))
+}
+
+/// Run `src` on the VM with `vec.push` registered (like `run_typed`).
+fn run_vm_native(src: &str) -> Result<Value, EvalError> {
+    let parsed = parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let mut natives = std::collections::HashMap::new();
+    natives.insert(
+        "vec.push".to_string(),
+        crate::runtime::NativeEntry {
+            arity: 2,
+            f: vec_push_fake,
+        },
+    );
+    natives.insert(
+        "len".to_string(),
+        crate::runtime::NativeEntry {
+            arity: 1,
+            f: len_fake,
+        },
+    );
+    let mut interp = Interp::with_natives(natives);
+    let names: Arc<std::collections::HashSet<String>> =
+        Arc::new(interp.natives.keys().cloned().collect());
+    let chunk = Arc::new(Compiler::compile_program_with_natives(
+        &parsed.program,
+        names,
+    ));
+    let mut vm = Vm::new();
+    match vm.run_chunk(&chunk, &mut interp) {
+        Ok(crate::runtime::Flow::Value(v)) => Ok(v),
+        Ok(_) => Err(EvalError::new("unexpected flow", Span::new(0, 0))),
+        Err(e) => Err(e),
+    }
+}
+
+/// Struct copy plus user-defined `push` method: the fused method op must
+/// take the generic (synchronous) call path with write-back, agreeing
+/// with the tree-walker. Guards the `VecPushMethod` fallback frame
+/// discipline (a prior revision awaited an async frame push on the
+/// stack and panicked out of bounds).
+#[test]
+fn vm_method_fallback_struct_copy_matches_tree_walker() {
+    // NOTE: `run_tree` can't serve here — the bare test `Interp` has no
+    // loader prelude, so the tree-walker's path eval for `vec.push`
+    // fails; `run_vm_native` wires the real native table like `run_typed`.
+    // VM/tree agreement for this shape is covered by the
+    // `move_append_*` e2e + parity fixtures (full loader pipeline).
+    let src = "struct W { f: [int] }\nimpl W {\n func push(w: W, x: int) -> W {\n W{f: vec.push(w.f, x)}\n }\n}\nfunc go(s: W) -> int {\nt := s\nt = t.push(2)\nlen(t.f)\n}\ngo(W{f: [1]})\n";
+    assert_eq!(run_vm_native(src).unwrap(), Value::Int(2));
+    let src2 = "struct W { f: [int] }\nimpl W {\n func push(w: W, x: int) -> W {\n W{f: vec.push(w.f, x)}\n }\n}\nt := W{f: [1]}\nt = t.push(2)\nlen(t.f)\n";
+    assert_eq!(run_vm_native(src2).unwrap(), Value::Int(2));
 }

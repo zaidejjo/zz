@@ -924,8 +924,22 @@ void zz_object_push_field_take(zz_value *obj, const char *field, zz_value item, 
         for (size_t i = 0; i < o->len; i++) {
             zz_value *fname = &o->fields[i * 2];
             if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), field) == 0) {
+                // In place only when the field buffer is uniquely owned.
+                // Note: struct clones (`zz_clone`/`zz_retain_object`) bump
+                // only the object header, never field buffers, while
+                // `zz_release_object` frees them — so a cloned struct can
+                // share a field array at `refs == 1`. Every OTHER share
+                // path (field getters, dups, retaining stores) bumps the
+                // buffer itself, and the generic path below writes through
+                // the shared object either way, so gating on the buffer
+                // counter alone is observably equivalent to the generic
+                // path here while still covering the live-getter case.
+                // A deep-bump retain (or COW field write) would make the
+                // counter exact; tracked as a follow-up (see the
+                // move_append_struct_copy known-failure).
                 zz_value *slot = &o->fields[i * 2 + 1];
-                if (slot->tag == ZZ_ARRAY && slot->arr && slot->arr->refs == 1) {
+                if (slot->tag == ZZ_ARRAY && slot->arr
+                    && slot->arr->refs == 1) {
                     zz_array_push(slot->arr, item);
                     return;
                 }

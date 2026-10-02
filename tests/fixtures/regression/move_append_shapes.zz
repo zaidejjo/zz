@@ -12,9 +12,8 @@ for i in 0..5 {
 }
 assert(len(c) == 5)
 assert(c[4] == 8)
-// Append spelling (value-identical to push on this engine).
-// NOTE: native lowers bare `vec.append` to an in-place unit mutator,
-// so assign-form append is VM-only (see move_append_append.zz).
+// Append spelling (value-identical to push on both engines since the
+// `vec.append` → `zz_vec_push` native remap; see move_append_append.zz).
 d := [7]
 d.push(8)
 assert(len(d) == 2)

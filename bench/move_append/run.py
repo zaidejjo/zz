@@ -23,9 +23,11 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-ZZ = os.path.join(ROOT, "target", "release", "zz")
-if not os.path.exists(ZZ):
-    ZZ = os.path.join(ROOT, "target", "debug", "zz")
+DEFAULT_ZZ = os.path.join(ROOT, "target", "release", "zz")
+if not os.path.exists(DEFAULT_ZZ):
+    DEFAULT_ZZ = os.path.join(ROOT, "target", "debug", "zz")
+# Overridden by --zz below (before/after comparisons across worktrees).
+ZZ = DEFAULT_ZZ
 BIN = os.path.join(HERE, "bin")
 CORPUS = os.path.join(HERE, "corpus")
 DEFAULT_OUT = os.path.join(ROOT, "docs", "perf", "baseline.md")
@@ -131,7 +133,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=DEFAULT_OUT)
     ap.add_argument("--skip-build", action="store_true")
+    ap.add_argument("--zz", default=DEFAULT_ZZ)
+    ap.add_argument("--title", default="Append-elision baseline (pre-optimization)")
     args = ap.parse_args()
+    global ZZ
+    ZZ = args.zz
 
     drivers = [m[0] for m in MICRO] + ["parse_proxy"]
     bins = {} if args.skip_build else build_native(drivers)
@@ -186,7 +192,7 @@ def main():
         return (f"{wall_ms}", f"{rss}")
 
     lines = []
-    lines.append("# Append-elision baseline (pre-optimization)")
+    lines.append(f"# {args.title}")
     lines.append("")
     lines.append(f"Date: {date} · Machine: `{machine}` · zz: `{zz_version()}`")
     lines.append(f"Commit: `{commit}` · Corpus manifest sha: `{corpus_sha()}`")

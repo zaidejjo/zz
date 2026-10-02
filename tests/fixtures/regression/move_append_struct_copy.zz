@@ -1,0 +1,31 @@
+// Struct copies under move-append takes (VM-correct values).
+//
+// KNOWN DIVERGENCE (native): `t := s` shares struct identity on native
+// (`zz_clone` bumps only the object header, never field buffers, while
+// `zz_release_object` frees them), so mutating the copy's field is also
+// visible through the source. The VM deep-copies (value semantics) and
+// prints s_len=1 then t_len=2. Tracked in `known_native_failure` as
+// "move_append_struct_copy"; fix options are documented in
+// docs/perf/append-elision-report.md (deep-bump retain vs COW field
+// write). The `zz_object_push_field_take` in-place path gates on the
+// field buffer counter so takes never corrupt a getter-extracted live
+// share (the `a` case below prints a_len=1 on both).
+//
+// NOTE: values print as `name=value` (not bare numbers) so the
+// dual-engine parity harness — which strips purely-numeric lines —
+// actually compares them.
+struct W2 { f: [int] }
+s := W2{f: [1]}
+t := s
+t.f = vec.push(t.f, 2)
+println("s_len={len(s.f)}")
+println("t_len={len(t.f)}")
+
+// Getter-extracted share stays intact on both engines.
+u := W2{f: [1]}
+a := u.f
+u.f = vec.push(u.f, 9)
+println("a_len={len(a)}")
+println("u_len={len(u.f)}")
+
+println("move_append_struct_copy_ok")

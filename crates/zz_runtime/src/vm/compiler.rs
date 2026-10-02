@@ -193,8 +193,11 @@ impl Compiler {
         // frame slot, letting the slot peepholes fire in top-level loops.
         let mut defined: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut free: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Top-level statements run inline in the main frame: pass
+        // `nested = false` so their references don't force environment
+        // promotion (only nested function/closure bodies capture).
         for stmt in &program.stmts {
-            super::capture::scan_stmt_captured(stmt, &mut defined, &mut free);
+            super::capture::scan_stmt_captured(stmt, &mut defined, &mut free, false);
         }
         // Only names that are actually declared at top level matter for
         // promotion; paths like `std.time.now_ms` or `p.x` are not top-level
@@ -310,8 +313,11 @@ impl Compiler {
         // in the environment so closures can capture them by reference.
         let mut defined: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut free: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Top-level statements run inline in the main frame: pass
+        // `nested = false` so their references don't force environment
+        // promotion (only nested function/closure bodies capture).
         for stmt in &program.stmts {
-            super::capture::scan_stmt_captured(stmt, &mut defined, &mut free);
+            super::capture::scan_stmt_captured(stmt, &mut defined, &mut free, false);
         }
         let mut captured: std::collections::HashSet<String> = std::collections::HashSet::new();
         for name in &free {
@@ -749,6 +755,76 @@ impl Compiler {
         }
         match self.move_home_of(name) {
             Some(TakeHome::Slot(slot)) => Some(TakeHome::Slot(slot)),
+            _ => None,
+        }
+    }
+
+    /// Take plan for `ns.x = f(ns.x, ...)` on a module-global target:
+    /// like [`Compiler::thread_take_home`], but the flag key is the
+    /// qualified name (consumed by the `compile_path_load` hook). Slot
+    /// homes only, and only when no nested function can name the global
+    /// (a free reference would have forced it into the environment —
+    /// see `captured_at_top` — so a slot home proves callees cannot
+    /// observe the transient `Unit`). Shadowing is safe by construction:
+    /// the flag matches the exact qualified spelling, so a lookalike
+    /// local simply never fires the take and keeps the cloning load.
+    fn thread_take_home_path(&self, parts: &[String]) -> Option<(String, TakeHome)> {
+        if parts.len() != 2 {
+            return None;
+        }
+        let key = parts.join(".");
+        if !self.is_global_key(&key) {
+            return None;
+        }
+        let home = match self.move_home_of(&key) {
+            Some(TakeHome::Slot(slot)) => TakeHome::Slot(slot),
+            _ => return None,
+        };
+        if self.captured.contains(&parts[1]) || self.captured.contains(&key) {
+            return None;
+        }
+        if self.is_main && self.scope_depth == 0 {
+            return None;
+        }
+        Some((key, home))
+    }
+
+    /// Classify a qualified-global ThreadCall against normalized copies:
+    /// the target as its bare name, the RHS unqualified. Returns the bare
+    /// var when `parts[1] = f(parts[1]-spelled…, …)` holds every static
+    /// clause (single occurrence, callee shape, sibling purity, no early
+    /// exits — see `zz_frontend::move_elide`).
+    fn thread_classify_path(&self, parts: &[String], value: &Expr, span: Span) -> Option<String> {
+        let nv = self.normalize_move_value(value);
+        let v2 = nv.as_ref().unwrap_or(value);
+        let target = Expr::Ident {
+            name: parts[1].clone(),
+            span,
+        };
+        match classify_self_assign_vm(&target, v2) {
+            Some(MoveKind::ThreadCall(var)) if var == parts[1] => {
+                // The single occurrence must spell the target exactly
+                // (bare or identically qualified): a differently-spelled
+                // occurrence names another variable.
+                let target_path = Expr::Path {
+                    parts: parts.to_vec(),
+                    span,
+                };
+                let single_ok = match value {
+                    Expr::Call { args, .. } => {
+                        args.iter()
+                            .filter(|a| Self::same_surface(a, &target_path))
+                            .count()
+                            + usize::from(matches!(
+                                value,
+                                Expr::Call { callee, .. } if Self::same_surface(callee, &target_path)
+                            ))
+                            == 1
+                    }
+                    _ => false,
+                };
+                single_ok.then_some(var)
+            }
             _ => None,
         }
     }
@@ -1310,6 +1386,25 @@ impl Compiler {
         // A top-level var promoted to a slot is declared under its full
         // dotted name (`add_to_1M.sum`); resolve the joined name first.
         let full = parts.join(".");
+        // Move-take: the single global load in `ns.x = f(ns.x, ...)`
+        // takes instead of cloning (flag set by the Assign arm; the home
+        // must still match, guarding against shadowed lookalikes).
+        if let Some((flag_key, flag_home)) = self.move_take.clone() {
+            if flag_key == full {
+                let home = match self.resolve(&full) {
+                    Resolved::Slot(slot) => TakeHome::Slot(slot as u16),
+                    Resolved::Env => TakeHome::Env(full.clone()),
+                };
+                if home == flag_home {
+                    self.move_take = None;
+                    match home {
+                        TakeHome::Slot(slot) => self.emit(Op::TakeSlot(slot)),
+                        TakeHome::Env(n) => self.emit(Op::TakeVar(n, span)),
+                    }
+                    return;
+                }
+            }
+        }
         if let Resolved::Slot(slot) = self.resolve(&full) {
             self.emit(Op::LoadSlot(slot as u16));
         } else if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
@@ -1715,6 +1810,21 @@ impl Compiler {
                         self.emit_const(Value::Unit);
                         return StmtValue::Discard;
                     }
+                    // Move-take for `ns.x = f(ns.x, ...)`: thread the
+                    // global through the call instead of cloning it
+                    // (slot homes only; the flag is consumed by the
+                    // single matching path load, cleared either way).
+                    if parts.len() == 2 && self.thread_classify_path(parts, value, *span).is_some()
+                    {
+                        if let Some((flag_key, home)) = self.thread_take_home_path(parts) {
+                            self.move_take = Some((flag_key, home));
+                            self.compile_expr(value);
+                            self.move_take = None;
+                            self.compile_path_store(parts, *span);
+                            self.emit_const(Value::Unit);
+                            return StmtValue::Discard;
+                        }
+                    }
                     let full = parts.join(".");
                     // Namespaced top-level slot promotion: `ns.sum = ns.sum + i`
                     // resolves to a direct slot when the full name is a local.
@@ -2033,6 +2143,113 @@ impl Compiler {
             }
         }
         sub.stack_height = params.len();
+        // Tail-take: a function ending in `return x` / bare `x` moves the
+        // local out of its slot instead of deep-cloning it. The frame dies
+        // on return, so the vacated slot (Unit) is never observed — this
+        // is the NRVO-equivalent for threaded accumulators
+        // (`doc = push_node(doc, x)`): without it the final `doc`
+        // costs a full O(n) deep clone per key (quadratic overall).
+        // Only frame locals qualify (params or block-declared names):
+        // an outer/global binding must keep the cloning load so the
+        // owner still holds its value after the call.
+        if let Some(last) = block.stmts.last() {
+            let tail_name: Option<String> = match last {
+                Stmt::Return {
+                    value: Some(Expr::Ident { name, .. }),
+                    ..
+                } => Some(name.clone()),
+                Stmt::Return { .. } => None,
+                Stmt::Expr(Expr::Ident { name, .. }) => Some(name.clone()),
+                _ => None,
+            };
+            if let Some(name) = tail_name {
+                let is_param = params.iter().any(|p| p.name.name == name);
+                // Block-local check via exact binding collection (no
+                // substring matching): only a real frame local may be
+                // taken; outer bindings keep the cloning load.
+                let mut bound = std::collections::HashSet::new();
+                for s in &block.stmts[..block.stmts.len() - 1] {
+                    match s {
+                        Stmt::Decl { name: n, .. } => {
+                            bound.insert(n.name.clone());
+                        }
+                        Stmt::Destructure { pat, .. } => {
+                            super::capture::collect_pattern_bindings(pat, &mut bound);
+                        }
+                        _ => {}
+                    }
+                }
+                let is_block_local = bound.contains(&name);
+                // Slot homes only: an env-homed tail (captured param or
+                // local, or any destructured binding — those always live
+                // in the environment) shares env storage with closures
+                // created in this frame (`MakeClosure` clones the
+                // `EnvLink`, and deferred closures run after the
+                // return) — taking would expose the `Unit` hole to
+                // them. Slot homes are never captured (capture forces
+                // env promotion), so the take is unobservable. Env
+                // tails keep the cloning load via the normal path.
+                // (`declare_local`: a Decl is slot-homed exactly when
+                // the name is not captured; same for params.)
+                let is_decl_bound = block.stmts[..block.stmts.len() - 1]
+                    .iter()
+                    .any(|s| matches!(s, Stmt::Decl { name: n, .. } if n.name == name));
+                let is_slot_home = !sub.captured.contains(&name)
+                    && (is_decl_bound || params.iter().any(|p| p.name.name == name));
+                if (is_param || is_block_local) && is_slot_home {
+                    // Compile the prefix normally (mirrors the
+                    // `compile_block_body` statement loop), then take
+                    // the tail local instead of cloning it.
+                    let scope_base = sub.locals.len();
+                    let n = block.stmts.len();
+                    for stmt in &block.stmts[..n - 1] {
+                        let v = sub.compile_stmt(stmt);
+                        if matches!(v, StmtValue::Discard) {
+                            sub.emit(Op::Pop);
+                        }
+                    }
+                    let home = sub.resolve(&name);
+                    let is_return = matches!(last, Stmt::Return { .. });
+                    let span = last.span();
+                    match home {
+                        Resolved::Slot(slot) => {
+                            sub.emit(Op::TakeSlot(slot as u16));
+                        }
+                        // Unreachable by the `is_slot_home` gate above
+                        // (static home analysis); cloning load keeps
+                        // the impossible path value-correct.
+                        Resolved::Env => {
+                            sub.emit(Op::LoadVar(name.clone(), span));
+                        }
+                    }
+                    if is_return {
+                        sub.emit(Op::Return);
+                    }
+                    // Mirror `compile_block_body` cleanup scoped to
+                    // block-declared locals (params stay: the frame
+                    // truncate discards them). The tail here is an
+                    // Expr/Return, never a trailing `Keep` declaration,
+                    // so `drop` is the plain slot count. (After an
+                    // explicit `Return` this is dead code, matching the
+                    // normal path which also emits cleanup after it.)
+                    let slot_count = sub.locals[scope_base..]
+                        .iter()
+                        .filter(|l| !l.in_env)
+                        .count();
+                    if slot_count > 0 {
+                        sub.emit(Op::PopN {
+                            n: slot_count as u16,
+                            span: block.span,
+                        });
+                    }
+                    sub.locals.truncate(scope_base);
+                    if needs_env {
+                        sub.emit(Op::ExitScope);
+                    }
+                    return Arc::new(sub.chunk);
+                }
+            }
+        }
         sub.compile_block_body(block, false);
         if needs_env {
             sub.emit(Op::ExitScope);
@@ -2251,6 +2468,33 @@ impl Compiler {
             }
         }
         sub.stack_height = params.len();
+        // Tail-take for closures: `|doc| doc` moves an *uncaptured*
+        // param out instead of deep-cloning. Slot homes only: an
+        // env-homed (captured) param lives in the shared definition
+        // environment, so taking would corrupt later calls; outer
+        // bindings keep the cloning load.
+        if let Expr::Ident { name, .. } = body {
+            if params.iter().any(|p| &p.name.name == name) && !sub.captured.contains(name) {
+                match sub.resolve(name) {
+                    Resolved::Slot(slot) => {
+                        sub.emit(Op::TakeSlot(slot as u16));
+                    }
+                    // Unreachable (uncaptured params are slots);
+                    // cloning load keeps it value-correct.
+                    Resolved::Env => {
+                        sub.compile_expr(body);
+                        if needs_env {
+                            sub.emit(Op::ExitScope);
+                        }
+                        return Arc::new(sub.chunk);
+                    }
+                }
+                if needs_env {
+                    sub.emit(Op::ExitScope);
+                }
+                return Arc::new(sub.chunk);
+            }
+        }
         sub.compile_expr(body);
         if needs_env {
             sub.emit(Op::ExitScope);

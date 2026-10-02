@@ -480,11 +480,9 @@ impl Vm {
                     self.stack.push(v);
                 }
                 Op::TakeVar(name, span) => {
-                    if let Some(v) = interp.env.get(name) {
-                        // Take: leave `Unit` behind until the matching store.
-                        // (Best-effort: if the assign fails the env is
-                        // unchanged and the clone is just a load.)
-                        interp.env.assign(name, Value::Unit);
+                    // Move out of the env (no clone); falls back to the
+                    // `LoadVar` chain for non-env bindings.
+                    if let Some(v) = interp.env.take(name) {
                         self.stack.push(v);
                     } else {
                         let v = Self::load_var_fallback(interp, name, *span)?;
@@ -568,14 +566,20 @@ impl Vm {
                         other => {
                             // Not an array: restore first (no transient
                             // during user code), then the generic method
-                            // call with write-back, exactly like before.
+                            // call with write-back. The call runs
+                            // synchronously via `Interp::call` (same path
+                            // the tree-walker uses): `Vm::call_value`
+                            // only *pushes* a callee frame for user funcs
+                            // and returns, so awaiting a result on the
+                            // stack here would read a live frame's slots.
                             Self::restore_home(self, interp, home, other.clone());
                             let (f, recv) = interp.lookup_method_recv(&other, method, *span)?;
                             let arg_vals = vec![recv, elem];
-                            self.call_value(f, arg_vals, *span, interp)?;
-                            let result = self.stack.pop().unwrap();
+                            let result = interp.call(f, arg_vals, *span).map_err(|mut e| {
+                                e.backtrace.extend(self.backtrace());
+                                e
+                            })?;
                             Self::restore_home(self, interp, home, result);
-                            re_cache!();
                             yield_check!();
                         }
                     }
@@ -2025,9 +2029,14 @@ impl Vm {
     }
 
     fn unwind_frame(&mut self, flow: Flow, interp: &mut Interp) -> Unwind {
-        let v = match &flow {
-            Flow::Return(v) => v.clone(),
-            Flow::Break(_) | Flow::Continue(_) => Value::Unit,
+        // Move (never clone) the return payload out: the frame is
+        // discarded below, so this is its last use. Cloning here costs
+        // a full deep copy per call return — O(n) per key for threaded
+        // accumulators like `doc = push_node(doc, x)`.
+        let (payload, brk, ctn) = match flow {
+            Flow::Return(v) => (Some(v), None, None),
+            Flow::Break(s) => (None, Some(s), None),
+            Flow::Continue(s) => (None, None, Some(s)),
             Flow::Value(_) => unreachable!("unwind_frame on a plain value"),
             Flow::Yield(_) => return Unwind::Error(crate::runtime::EvalError::yield_escape()),
         };
@@ -2036,18 +2045,22 @@ impl Vm {
         self.stack.truncate(f.stack_base);
         interp.env = f.prev_env;
         if self.frames.is_empty() {
-            return Unwind::Escaped(flow);
-        }
-        match flow {
-            Flow::Return(_) => {
-                self.stack.push(v);
-                Unwind::Continue
+            if let Some(span) = brk {
+                return Unwind::Escaped(Flow::Break(span));
             }
-            Flow::Break(span) => Unwind::Error(self.error("`break` outside of a loop", span)),
-            Flow::Continue(span) => Unwind::Error(self.error("`continue` outside of a loop", span)),
-            Flow::Value(_) => unreachable!(),
-            Flow::Yield(_) => Unwind::Error(crate::runtime::EvalError::yield_escape()),
+            if let Some(span) = ctn {
+                return Unwind::Escaped(Flow::Continue(span));
+            }
+            return Unwind::Escaped(Flow::Return(payload.unwrap_or(Value::Unit)));
         }
+        if let Some(span) = brk {
+            return Unwind::Error(self.error("`break` outside of a loop", span));
+        }
+        if let Some(span) = ctn {
+            return Unwind::Error(self.error("`continue` outside of a loop", span));
+        }
+        self.stack.push(payload.unwrap_or(Value::Unit));
+        Unwind::Continue
     }
 
     /// Build a backtrace string from the current call stack.
@@ -2116,11 +2129,7 @@ impl Vm {
                     Value::Unit,
                 ))
             }
-            TakeHome::Env(name) => {
-                let v = interp.env.get(name)?;
-                interp.env.assign(name, Value::Unit);
-                Some(v)
-            }
+            TakeHome::Env(name) => interp.env.take(name),
         }
     }
 
@@ -2132,7 +2141,10 @@ impl Vm {
                 vm.stack[base + *slot as usize] = v;
             }
             TakeHome::Env(name) => {
-                if !interp.env.assign(name, v.clone()) {
+                // The take proved the binding; nothing unbinds in the
+                // window, so this always hits the same owning scope with
+                // zero clones. The define arm is unreachable insurance.
+                if let Err(v) = interp.env.try_assign(name, v) {
                     interp.env.define(name, v);
                 }
             }
