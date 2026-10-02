@@ -1417,6 +1417,34 @@ pub(crate) fn is_dup_safe(e: &Expr) -> bool {
     }
 }
 
+/// Map a binary operator to its `zz_binop` runtime opcode (`ZZOP_*`
+/// in `runtime/core.h`). Shared by the expression Binary lowering and
+/// compound assignment on index/field targets, which always route
+/// through the boxed path.
+pub(crate) fn binop_runtime_op(op: &zz_frontend::ast::BinOp) -> &'static str {
+    use zz_frontend::ast::BinOp;
+    match op {
+        BinOp::Add => "ZZOP_ADD",
+        BinOp::Sub => "ZZOP_SUB",
+        BinOp::Mul => "ZZOP_MUL",
+        BinOp::Div => "ZZOP_DIV",
+        BinOp::Rem => "ZZOP_REM",
+        BinOp::Pow => "ZZOP_POW",
+        BinOp::Eq => "ZZOP_EQ",
+        BinOp::Ne => "ZZOP_NE",
+        BinOp::Lt => "ZZOP_LT",
+        BinOp::Gt => "ZZOP_GT",
+        BinOp::Le => "ZZOP_LE",
+        BinOp::Ge => "ZZOP_GE",
+        BinOp::BitAnd => "ZZOP_AND",
+        BinOp::BitOr => "ZZOP_OR",
+        BinOp::BitXor => "ZZOP_XOR",
+        BinOp::Shl => "ZZOP_SHL",
+        BinOp::Shr => "ZZOP_SHR",
+        _ => "ZZOP_ADD",
+    }
+}
+
 /// Classify a binary operand as a recognized scalar shape, returning its C
 /// type (`"int64_t"` / `"double"`) if so. Recognized shapes:
 ///   - Int literal  → `"int64_t"`

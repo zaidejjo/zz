@@ -212,6 +212,10 @@ fn collect_stmt_tokens(stmt: &Stmt, source: &str, out: &mut Vec<RawToken>) {
             collect_expr_tokens(target, source, out);
             collect_expr_tokens(value, source, out);
         }
+        Stmt::CompoundAssign { target, value, .. } => {
+            collect_expr_tokens(target, source, out);
+            collect_expr_tokens(value, source, out);
+        }
         Stmt::Destructure { value, .. } => collect_expr_tokens(value, source, out),
         Stmt::ExternBlock { items, .. } => {
             for item in items {

@@ -146,6 +146,11 @@ impl<'a> Walk<'a> {
                 self.expr(target);
                 self.expr(value);
             }
+            Stmt::CompoundAssign { target, value, .. } => {
+                // Same as `=`: the target is read and written.
+                self.expr(target);
+                self.expr(value);
+            }
             Stmt::Destructure { pat, value, .. } => {
                 self.expr(value);
                 self.bind_pattern(pat);

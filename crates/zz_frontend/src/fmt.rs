@@ -288,6 +288,16 @@ impl<'a> FmtCtx<'a> {
                 self.write_str(" = ");
                 self.fmt_expr(value, source);
             }
+            Stmt::CompoundAssign {
+                target, op, value, ..
+            } => {
+                self.write_indent();
+                self.fmt_expr(target, source);
+                self.write_str(" ");
+                self.write_str(op.symbol());
+                self.write_str("= ");
+                self.fmt_expr(value, source);
+            }
             Stmt::Destructure { pat, value, .. } => {
                 self.write_indent();
                 self.fmt_pattern(pat, source);

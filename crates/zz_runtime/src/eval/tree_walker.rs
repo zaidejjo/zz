@@ -293,6 +293,18 @@ impl Interp {
                 self.assign_target(target, v)?;
                 Ok(Flow::Value(Value::Unit))
             }
+            Stmt::CompoundAssign {
+                target,
+                op,
+                value,
+                span,
+            } => {
+                // Receiver first (read current), then the RHS — matching
+                // the `tmp = recv; tmp = tmp OP rhs` lowering in the spec.
+                // Each side evaluates exactly once.
+                self.compound_assign_target(target, *op, value, *span)?;
+                Ok(Flow::Value(Value::Unit))
+            }
             Stmt::Expr(e) => {
                 // Method call write-back: if `obj.method(args)` is called as a
                 // statement, the return value (e.g. the new array from push/pop)
@@ -420,6 +432,80 @@ impl Interp {
                 let iv = self.eval(index)?.into_value()?;
                 let mut objv = self.eval(obj)?.into_value()?;
                 set_index(&mut objv, &iv, value, *span)?;
+                self.write_back(obj, objv)
+            }
+            other => Err(EvalError::new(
+                "cannot assign to this expression".to_string(),
+                other.span(),
+            )),
+        }
+    }
+
+    /// `target OP= rhs_expr` — like [`Self::assign_target`] but reads
+    /// the current value first and applies `op` before storing. The
+    /// receiver evaluates exactly once: it is loaded, then the RHS
+    /// evaluates, then the result stores back into the same evaluated
+    /// receiver — so `arr[i()] += f()` calls `i()` then `f()`, once
+    /// each, matching the `tmp = recv; tmp = tmp OP rhs` lowering
+    /// (receiver-first, left-to-right). Write-back rules (Ident-only
+    /// field parents, `write_back` for index roots) mirror
+    /// `assign_target` exactly — including its quirks — so `OP=`
+    /// never diverges from `=` except for collapsing the double
+    /// evaluation that textual expansion would perform.
+    fn compound_assign_target(
+        &mut self,
+        target: &Expr,
+        op: BinOp,
+        rhs_expr: &Expr,
+        span: Span,
+    ) -> Result<(), EvalError> {
+        match target {
+            Expr::Ident { name, span: tspan } => {
+                let cur = self.env.get(name).ok_or_else(|| {
+                    EvalError::new(format!("undefined variable `{name}`"), *tspan)
+                })?;
+                let rhs = self.eval(rhs_expr)?.into_value()?;
+                let new = eval_binary(op, cur, rhs, span)?;
+                if !self.env.assign(name, new) {
+                    return Err(EvalError::new(
+                        format!("undefined variable `{name}`"),
+                        *tspan,
+                    ));
+                }
+                Ok(())
+            }
+            Expr::Path { parts, span: pspan } => {
+                let cur = self.resolve_path_value(parts, *pspan)?;
+                let rhs = self.eval(rhs_expr)?.into_value()?;
+                let new = eval_binary(op, cur, rhs, span)?;
+                self.assign_path(parts, new, *pspan)
+            }
+            Expr::Field {
+                obj,
+                name,
+                span: fspan,
+            } => {
+                let mut objv = self.eval(obj)?.into_value()?;
+                let cur = object_field(&objv, name, *fspan)?;
+                let rhs = self.eval(rhs_expr)?.into_value()?;
+                let new = eval_binary(op, cur, rhs, span)?;
+                set_object_field(&mut objv, name, new, *fspan)?;
+                if let Expr::Ident { name, .. } = &**obj {
+                    self.env.assign(name, objv);
+                }
+                Ok(())
+            }
+            Expr::Index {
+                obj,
+                index,
+                span: ispan,
+            } => {
+                let mut objv = self.eval(obj)?.into_value()?;
+                let iv = self.eval(index)?.into_value()?;
+                let cur = get_index(&objv, &iv, *ispan)?;
+                let rhs = self.eval(rhs_expr)?.into_value()?;
+                let new = eval_binary(op, cur, rhs, span)?;
+                set_index(&mut objv, &iv, new, *ispan)?;
                 self.write_back(obj, objv)
             }
             other => Err(EvalError::new(

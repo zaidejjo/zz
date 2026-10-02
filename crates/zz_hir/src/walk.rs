@@ -100,6 +100,10 @@ fn walk_stmt_in<'a>(
             walk_expr_in(tp, scope, target, f);
             walk_expr_in(tp, scope, value, f);
         }
+        Stmt::CompoundAssign { target, value, .. } => {
+            walk_expr_in(tp, scope, target, f);
+            walk_expr_in(tp, scope, value, f);
+        }
         Stmt::Destructure { value, .. } => {
             walk_expr_in(tp, scope, value, f);
         }

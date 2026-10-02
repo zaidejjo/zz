@@ -282,6 +282,16 @@ impl Prescan {
                 self.expr(lower, target, false);
                 self.expr(lower, value, true);
             }
+            Stmt::CompoundAssign { target, value, .. } => {
+                // Same rule as `=`: the receiver is recomputed after a
+                // potential suspension point, so a blocking RHS with a
+                // non-plain target taints.
+                if is_direct_blocking_call(value) && !matches!(target, Expr::Ident { .. }) {
+                    self.tainted = true;
+                }
+                self.expr(lower, target, false);
+                self.expr(lower, value, true);
+            }
             Stmt::Expr(e) => self.expr(lower, e, true),
             Stmt::For { iter, body, .. } => {
                 self.expr(lower, iter, false);

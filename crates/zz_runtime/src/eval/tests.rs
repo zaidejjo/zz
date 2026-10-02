@@ -885,3 +885,70 @@ fn bare_destructure_evaluates() {
     assert_eq!(eval_src("a, b := (7, 9)\na + b").unwrap(), Value::Int(16));
     assert_eq!(eval_src("_, b := (7, 9)\nb").unwrap(), Value::Int(9));
 }
+
+#[test]
+fn compound_assign_equivalence() {
+    // `x OP= y` observes exactly `x = x OP y` for every operator.
+    for (op_eq, plain) in [
+        ("x += 7", "x = x + 7"),
+        ("x -= 7", "x = x - 7"),
+        ("x *= 7", "x = x * 7"),
+        ("x /= 7", "x = x / 7"),
+        ("x %= 7", "x = x % 7"),
+        ("x **= 3", "x = x ** 3"),
+        ("x &= 7", "x = x & 7"),
+        ("x |= 7", "x = x | 7"),
+        ("x ^= 7", "x = x ^ 7"),
+        ("x <<= 2", "x = x << 2"),
+        ("x >>= 2", "x = x >> 2"),
+    ] {
+        let a = eval_src(&format!("x := 100\n{op_eq}\nx")).unwrap();
+        let b = eval_src(&format!("x := 100\n{plain}\nx")).unwrap();
+        assert_eq!(a, b, "{op_eq} vs {plain}");
+    }
+    assert_eq!(eval_src("x := 100\nx += 7\nx").unwrap(), Value::Int(107));
+    assert_eq!(
+        eval_src("s := \"a\"\ns += \"b\"\ns").unwrap(),
+        Value::Str("ab".to_string().into())
+    );
+}
+
+#[test]
+fn compound_assign_single_evaluation() {
+    // Receiver and RHS each evaluate exactly once (shared counter).
+    let src = "n := 0
+func bump() -> int {
+    n = n + 1
+    n
+}
+arr := [10, 20, 30]
+arr[bump()] += bump()
+n * 100 + arr[1]";
+    // bump() runs exactly twice (index once, rhs once): n == 2,
+    // arr[1] == 20 + 2 == 22 → 2*100 + 22 == 222.
+    assert_eq!(eval_src(src).unwrap(), Value::Int(222));
+}
+
+#[test]
+fn compound_assign_keeps_value_semantics() {
+    // Mutating a parameter never escapes to the caller.
+    let src = "struct Rng { s0: int }
+func change(r: Rng) -> int {
+    r.s0 += 100
+    r.s0
+}
+rng := Rng{ s0: 10 }
+a := change(rng)
+a * 1000 + rng.s0";
+    assert_eq!(eval_src(src).unwrap(), Value::Int(110010));
+}
+
+#[test]
+fn compound_assign_shared_cow_safety() {
+    // Compound-assigning through one alias must not leak into another.
+    let src = "a := [1, 2, 3]
+b := a
+b[0] += 10
+a[0] * 100 + b[0]";
+    assert_eq!(eval_src(src).unwrap(), Value::Int(111));
+}

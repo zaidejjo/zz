@@ -521,3 +521,105 @@ fn vm_tuple_ops_match_tree_walker() {
         assert_same(src);
     }
 }
+
+#[test]
+fn vm_compound_assign_matches_tree_walker() {
+    for src in [
+        "x := 100\nx += 7\nx",
+        "x := 100\nx -= 7\nx",
+        "x := 100\nx *= 7\nx",
+        "x := 100\nx /= 7\nx",
+        "x := 100\nx %= 7\nx",
+        "x := 2\nx **= 10\nx",
+        "x := 100\nx &= 7\nx",
+        "x := 100\nx |= 7\nx",
+        "x := 100\nx ^= 7\nx",
+        "x := 100\nx <<= 2\nx",
+        "x := 100\nx >>= 2\nx",
+        "s := \"a\"\ns += \"b\"\ns",
+        "struct P { x: int }\np := P{ x: 10 }\np.x += 5\np.x",
+        "a := [10, 20, 30]\na[1] *= 2\na[1]",
+        "a := [10, 20, 30]\na[0] += 1\na[2] -= 1\na[0] * 100 + a[2]",
+        "x := 0\nx += 1\nx += 1\nx += 1\nx",
+        "struct Rng { s0: int }\nfunc change(r: Rng) -> int { r.s0 += 100\nr.s0 }\nrng := Rng{ s0: 10 }\nchange(rng) * 1000 + rng.s0",
+    ] {
+        assert_same(src);
+    }
+}
+
+/// Structural proof that `x OP= y` uses the same fused slot ops as
+/// `x = x OP y`: compare opcode discriminants of both compilations.
+#[test]
+fn vm_compound_assign_fuses_like_plain_assign() {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    fn opcodes(src: &str) -> Vec<&'static str> {
+        let parsed = parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let (_res, types) = zz_checker::check_program_typed(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let chunk = super::Compiler::compile_program_typed(
+            &parsed.program,
+            Arc::new(types),
+            HashMap::new(),
+            Arc::new(HashSet::new()),
+        );
+        chunk
+            .code
+            .iter()
+            .map(|op| match op {
+                Op::PushConst(_) => "PushConst",
+                Op::IntAdd(_) => "IntAdd",
+                Op::IntSub(_) => "IntSub",
+                Op::IntMul(_) => "IntMul",
+                Op::IntDiv(_) => "IntDiv",
+                Op::IntRem(_) => "IntRem",
+                Op::SlotInc { .. } => "SlotInc",
+                Op::SlotAddInt { .. } => "SlotAddInt",
+                Op::SlotAddIntImm { .. } => "SlotAddIntImm",
+                Op::SlotBinaryInt { .. } => "SlotBinaryInt",
+                Op::SlotBinaryIntImm { .. } => "SlotBinaryIntImm",
+                Op::BinOp(..) => "BinOp",
+                Op::LoadSlot(_) => "LoadSlot",
+                Op::StoreSlot(_) => "StoreSlot",
+                Op::LoadVar(..) => "LoadVar",
+                Op::StoreVar(..) => "StoreVar",
+                Op::DefineVar(_) => "DefineVar",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    // Identical opcode streams (spans aside) for every operator.
+    for (compound, plain) in [
+        ("x := 0\nx += 1", "x := 0\nx = x + 1"),
+        ("x := 0\nx += 7", "x := 0\nx = x + 7"),
+        ("x := 0\nx -= 7", "x := 0\nx = x - 7"),
+        ("x := 0\nx *= 7", "x := 0\nx = x * 7"),
+        ("x := 0\nx &= 7", "x := 0\nx = x & 7"),
+        ("x := 0\nx <<= 2", "x := 0\nx = x << 2"),
+    ] {
+        assert_eq!(
+            opcodes(compound),
+            opcodes(plain),
+            "opcode mismatch: {compound} vs {plain}"
+        );
+    }
+    // The fused fast paths actually fire.
+    let inc = opcodes("x := 0\nx += 1");
+    assert!(inc.contains(&"SlotInc"), "SlotInc missing: {inc:?}");
+    let add_imm = opcodes("x := 0\nx += 7");
+    assert!(
+        add_imm.contains(&"SlotAddIntImm"),
+        "SlotAddIntImm missing: {add_imm:?}"
+    );
+}

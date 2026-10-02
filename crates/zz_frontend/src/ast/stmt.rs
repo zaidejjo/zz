@@ -1,7 +1,7 @@
 //! Statement AST nodes.
 
 use crate::ast::expr::{Expr, Ident, Pattern};
-use crate::ast::types::Ty;
+use crate::ast::types::{BinOp, Ty};
 use crate::span::Span;
 
 /// A parameter in a function signature or closure.
@@ -188,6 +188,15 @@ pub enum Stmt {
         value: Expr,
         span: Span,
     },
+    /// `target OP= value` (`x += 1`, `arr[i] *= 2`) — compound
+    /// assignment. Semantically `target = target OP value` with the
+    /// receiver evaluated exactly once; never an alias or reference.
+    CompoundAssign {
+        target: Expr,
+        op: BinOp,
+        value: Expr,
+        span: Span,
+    },
     /// Tuple destructuring: `(a, b) := expr`
     Destructure {
         pat: Pattern,
@@ -221,6 +230,7 @@ impl Stmt {
             | Stmt::Continue { span }
             | Stmt::Defer { span, .. }
             | Stmt::Assign { span, .. } => *span,
+            Stmt::CompoundAssign { span, .. } => *span,
             Stmt::ExternBlock { span, .. } | Stmt::Link { span, .. } => *span,
             Stmt::Impl { span, .. } => *span,
             Stmt::Destructure { span, .. } => *span,

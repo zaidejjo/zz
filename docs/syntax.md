@@ -359,6 +359,63 @@ b := Box{ items: [1, 2, 3] }
 b.items[1] = 99  // b.items == [1, 99, 3]
 ```
 
+### Compound Assignment
+
+`x OP= y` is equivalent to `x = x OP y` with the receiver evaluated
+exactly once (so `arr[i()] += f()` calls `i()` then `f()`, once each —
+unlike textual expansion, which would evaluate `i()` twice):
+
+```zz
+x := 10
+x += 1    // 11, like x = x + 1
+x -= 2    // 9
+x *= 3    // 27
+x /= 4    // 6 (integer division)
+x %= 4    // 2
+n := 2
+n **= 10  // 1024
+
+p.x += 5        // struct fields (same targets as `=`)
+arr[0] *= 2     // indices
+
+// Bitwise forms work too:
+flags := 0
+flags |= 4
+flags &= 7
+flags ^= 1
+flags <<= 2
+flags >>= 1
+```
+
+Type rules are exactly the binary operator's: `x += 1.5` is accepted
+precisely when `x = x + 1.5` is. Cannot be chained (`x += y += z`
+is an error — split it into two statements).
+
+### Value Semantics
+
+Function parameters are values (copies) from the programmer's
+perspective — a function can never mutate its caller's variables:
+
+```zz
+struct Counter { n: int }
+
+func bump(c: Counter) -> int {
+    c.n += 100   // mutates only the local copy
+    c.n
+}
+
+c := Counter{ n: 10 }
+bump(c)     // 110
+c.n         // still 10
+```
+
+There are no reference parameters, no borrows, and no borrow checker.
+`value semantics != mandatory physical memcpy`: the compiler and
+runtime may eliminate physical copies and reuse storage internally
+(copy-on-write, in-place slot operations) whenever provably safe, but
+such optimizations are never observable — no alias can witness an
+intermediate mutation. Correctness always wins over optimization.
+
 ### Ranges
 
 ```zz

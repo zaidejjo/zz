@@ -198,6 +198,21 @@ fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &
                 mark_escaping_recursive(value, tp, ctx.func_name, result);
             }
         }
+        Stmt::CompoundAssign { target, value, .. } => {
+            // Same escape behavior as `=`: the target is also read, which
+            // never escapes anything the plain assignment wouldn't.
+            if let Expr::Ident { name, .. } = target {
+                if ctx.global_names.contains(name) || ctx.param_names.contains(name) {
+                    mark_escaping_recursive(value, tp, ctx.func_name, result);
+                } else {
+                    let cls = classify_expr(value, tp, ctx);
+                    result.classes.insert(value.span(), cls);
+                    analyze_expr(value, tp, ctx, result);
+                }
+            } else {
+                mark_escaping_recursive(value, tp, ctx.func_name, result);
+            }
+        }
         Stmt::Expr(e) => {
             analyze_expr(e, tp, ctx, result);
         }

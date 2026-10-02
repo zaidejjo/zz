@@ -1896,3 +1896,47 @@ fn bare_destructure_binds_names() {
     assert_eq!(r.bindings["a"], Type::Int);
     assert_eq!(r.bindings["b"], Type::Str);
 }
+
+#[test]
+fn compound_assign_valid_combinations() {
+    for src in [
+        "x := 1\nx += 2",
+        "x := 1\nx -= 2",
+        "x := 1\nx *= 2",
+        "x := 8\nx /= 2",
+        "x := 8\nx %= 3",
+        "x := 2\nx **= 10",
+        "x := 1.5\nx += 2.5",
+        "x := 6\nx &= 3",
+        "x := 6\nx |= 3",
+        "x := 1\nx <<= 4",
+        "s := \"a\"\ns += \"b\"",
+    ] {
+        let r = check_src(src);
+        assert!(!has_errors(&r), "{src} errors: {:?}", r.errors);
+    }
+}
+
+#[test]
+fn compound_assign_matches_binary_op_rules() {
+    // Whatever `x = x OP y` rejects, `x OP= y` rejects identically.
+    errors_contain("x := 1\nx += 1.5", "type mismatch");
+    errors_contain("x := 1\nx &= 1.5", "requires `int` operands");
+    errors_contain("x := true\nx |= false", "requires `int` operands");
+    errors_contain("x := \"a\"\nx -= \"b\"", "cannot apply");
+    errors_contain("nope += 1", "undefined variable");
+}
+
+#[test]
+fn compound_assign_rejects_const() {
+    errors_contain("const x = 1\nx += 2", "immutable variable");
+}
+
+#[test]
+fn compound_assign_field_and_index() {
+    let r = check_src("struct P { x: int }\np := P{ x: 1 }\np.x += 2");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    let r = check_src("a := [1, 2]\na[0] *= 3");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    errors_contain("a := [1]\na[0] += \"s\"", "cannot apply");
+}

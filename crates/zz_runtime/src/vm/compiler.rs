@@ -426,11 +426,13 @@ impl Compiler {
             Op::MakeDict(n) => 1 - 2 * *n as i64,
             Op::IndexOp(_) => -1,
             Op::StoreIndexOp(_) => -2,
+            Op::CompoundIndexOp { .. } => -2,
             Op::SliceOp(_) => -2,
             Op::MakeRange(_) => -1,
             Op::MakeStruct { field_names, .. } => 1 - field_names.len() as i64,
             Op::GetField(..) | Op::GetFieldIdx(..) => 0,
             Op::SetField(..) | Op::SetFieldIdx(..) => -1,
+            Op::CompoundFieldOp { .. } => -1,
             Op::MakeVariant { has_arg, .. } => {
                 if *has_arg {
                     0
@@ -1232,6 +1234,77 @@ impl Compiler {
                     StmtValue::Discard
                 }
                 _ => unreachable!("unhandled assignment target"),
+            },
+            Stmt::CompoundAssign {
+                target,
+                op,
+                value,
+                span,
+            } => match target {
+                Expr::Ident { .. } | Expr::Path { .. } => {
+                    // Side-effect-free receivers: rewrite to the plain
+                    // Assign path with a synthesized
+                    // `target = target OP value`, so slot fusion, green
+                    // handling, and struct paths behave identically.
+                    // (Re-evaluating an Ident/Path is unobservable.)
+                    //
+                    // The fused fast paths key off the Binary node's
+                    // span in the checker's type table, which has no
+                    // entry for a synthesized node. Seed it with the
+                    // target's own type: the checker already unified
+                    // `target OP value` with the target, so this is
+                    // exactly what `x = x OP y` would have recorded.
+                    // Without it, `x += 1` falls off the SlotInc fast
+                    // path and runs ~25% slower than `x = x + 1`.
+                    if let Some(ty) = self.type_of(target.span()).cloned() {
+                        // `types` is shared (`Arc`); `make_mut` clones
+                        // only if another owner exists, otherwise edits
+                        // in place — either way our synthetic entry never
+                        // leaks into anyone else's table.
+                        if let Some(types) = self.types.as_mut() {
+                            let table = std::sync::Arc::make_mut(types);
+                            table.insert(zz_checker::SpanKey::new(&self.type_scope, *span), ty);
+                        }
+                    }
+                    let synthetic = Stmt::Assign {
+                        target: target.clone(),
+                        value: Expr::Binary {
+                            op: *op,
+                            left: Box::new(target.clone()),
+                            right: Box::new(value.clone()),
+                            span: *span,
+                        },
+                        span: *span,
+                    };
+                    self.compile_stmt(&synthetic)
+                }
+                Expr::Index { obj, index, .. } => {
+                    // Receiver first (same order as the tree-walker),
+                    // each evaluated exactly once.
+                    self.compile_expr(obj);
+                    self.compile_expr(index);
+                    self.compile_expr(value);
+                    self.emit(Op::CompoundIndexOp {
+                        op: *op,
+                        span: *span,
+                    });
+                    self.compile_write_back(obj);
+                    self.emit_const(Value::Unit);
+                    StmtValue::Discard
+                }
+                Expr::Field { obj, name, .. } => {
+                    self.compile_expr(obj);
+                    self.compile_expr(value);
+                    self.emit(Op::CompoundFieldOp {
+                        name: name.clone(),
+                        op: *op,
+                        span: *span,
+                    });
+                    self.compile_write_back(obj);
+                    self.emit_const(Value::Unit);
+                    StmtValue::Discard
+                }
+                _ => unreachable!("unhandled compound assignment target"),
             },
             Stmt::Expr(e) => {
                 // Method call write-back: if `obj.method(args)` is called as a
