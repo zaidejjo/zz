@@ -224,6 +224,10 @@ fn walk_stmt_for_graph(tp: &TypedProgram, stmt: &Stmt, caller: &str, cg: &mut Ca
             walk_expr_for_graph(tp, target, caller, cg);
             walk_expr_for_graph(tp, value, caller, cg);
         }
+        Stmt::CompoundAssign { target, value, .. } => {
+            walk_expr_for_graph(tp, target, caller, cg);
+            walk_expr_for_graph(tp, value, caller, cg);
+        }
         Stmt::Destructure { value, .. } => walk_expr_for_graph(tp, value, caller, cg),
         Stmt::Expr(e) => walk_expr_for_graph(tp, e, caller, cg),
         Stmt::Struct { .. }

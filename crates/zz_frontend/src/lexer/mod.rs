@@ -122,6 +122,9 @@ impl<'a> Lexer<'a> {
                 ';' => self.emit_significant(TokenKind::StmtEnd, self.pos, self.pos + 1),
                 '/' if self.peek_char_at(1) == Some('/') => self.lex_line_comment(),
                 '/' if self.peek_char_at(1) == Some('*') => self.lex_block_comment(),
+                '/' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::SlashEq, self.pos, self.pos + 2)
+                }
                 '/' => self.emit_significant(TokenKind::Slash, self.pos, self.pos + 1),
                 '#' => self.lex_line_comment(),
                 '(' => self.emit_significant(TokenKind::LParen, self.pos, self.pos + 1),
@@ -165,15 +168,30 @@ impl<'a> Lexer<'a> {
                 }
                 '[' => self.emit_significant(TokenKind::LBracket, self.pos, self.pos + 1),
                 ']' => self.emit_significant(TokenKind::RBracket, self.pos, self.pos + 1),
+                '+' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::PlusEq, self.pos, self.pos + 2)
+                }
                 '+' => self.emit_significant(TokenKind::Plus, self.pos, self.pos + 1),
                 '-' if self.peek_char_at(1) == Some('>') => {
                     self.emit_significant(TokenKind::Arrow, self.pos, self.pos + 2)
                 }
+                '-' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::MinusEq, self.pos, self.pos + 2)
+                }
                 '-' => self.emit_significant(TokenKind::Minus, self.pos, self.pos + 1),
+                '*' if self.peek_char_at(1) == Some('*') && self.peek_char_at(2) == Some('=') => {
+                    self.emit_significant(TokenKind::StarStarEq, self.pos, self.pos + 3)
+                }
                 '*' if self.peek_char_at(1) == Some('*') => {
                     self.emit_significant(TokenKind::StarStar, self.pos, self.pos + 2)
                 }
+                '*' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::StarEq, self.pos, self.pos + 2)
+                }
                 '*' => self.emit_significant(TokenKind::Star, self.pos, self.pos + 1),
+                '%' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::PercentEq, self.pos, self.pos + 2)
+                }
                 '%' => self.emit_significant(TokenKind::Percent, self.pos, self.pos + 1),
                 '=' if self.peek_char_at(1) == Some('=') => {
                     self.emit_significant(TokenKind::Eq, self.pos, self.pos + 2)
@@ -186,6 +204,9 @@ impl<'a> Lexer<'a> {
                     self.emit_significant(TokenKind::Ne, self.pos, self.pos + 2)
                 }
                 '!' => self.emit_significant(TokenKind::Bang, self.pos, self.pos + 1),
+                '<' if self.peek_char_at(1) == Some('<') && self.peek_char_at(2) == Some('=') => {
+                    self.emit_significant(TokenKind::ShlEq, self.pos, self.pos + 3)
+                }
                 '<' if self.peek_char_at(1) == Some('<') => {
                     self.emit_significant(TokenKind::Shl, self.pos, self.pos + 2)
                 }
@@ -193,6 +214,9 @@ impl<'a> Lexer<'a> {
                     self.emit_significant(TokenKind::Le, self.pos, self.pos + 2)
                 }
                 '<' => self.emit_significant(TokenKind::Lt, self.pos, self.pos + 1),
+                '>' if self.peek_char_at(1) == Some('>') && self.peek_char_at(2) == Some('=') => {
+                    self.emit_significant(TokenKind::ShrEq, self.pos, self.pos + 3)
+                }
                 '>' if self.peek_char_at(1) == Some('>') => {
                     self.emit_significant(TokenKind::Shr, self.pos, self.pos + 2)
                 }
@@ -203,7 +227,13 @@ impl<'a> Lexer<'a> {
                 '&' if self.peek_char_at(1) == Some('&') => {
                     self.emit_significant(TokenKind::AndAnd, self.pos, self.pos + 2)
                 }
+                '&' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::AmpEq, self.pos, self.pos + 2)
+                }
                 '&' => self.emit_significant(TokenKind::Amp, self.pos, self.pos + 1),
+                '^' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::CaretEq, self.pos, self.pos + 2)
+                }
                 '^' => self.emit_significant(TokenKind::Caret, self.pos, self.pos + 1),
                 '~' => self.emit_significant(TokenKind::Tilde, self.pos, self.pos + 1),
                 '|' if self.peek_char_at(1) == Some('|') => {
@@ -211,6 +241,9 @@ impl<'a> Lexer<'a> {
                 }
                 '|' if self.peek_char_at(1) == Some('>') => {
                     self.emit_significant(TokenKind::PipeGt, self.pos, self.pos + 2)
+                }
+                '|' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::PipeEq, self.pos, self.pos + 2)
                 }
                 '|' => self.emit_significant(TokenKind::Pipe, self.pos, self.pos + 1),
                 '?' if self.peek_char_at(1) == Some('?') => {
@@ -352,6 +385,17 @@ impl<'a> Lexer<'a> {
                     | TokenKind::Tilde
                     | TokenKind::Shl
                     | TokenKind::Shr
+                    | TokenKind::PlusEq
+                    | TokenKind::MinusEq
+                    | TokenKind::StarEq
+                    | TokenKind::SlashEq
+                    | TokenKind::PercentEq
+                    | TokenKind::StarStarEq
+                    | TokenKind::AmpEq
+                    | TokenKind::PipeEq
+                    | TokenKind::CaretEq
+                    | TokenKind::ShlEq
+                    | TokenKind::ShrEq
                     | TokenKind::QuestionQuestion
                     | TokenKind::Colon
                     | TokenKind::Comma

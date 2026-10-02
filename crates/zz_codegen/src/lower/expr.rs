@@ -157,6 +157,9 @@ fn mentions_stmt(s: &Stmt, name: &str) -> bool {
         Stmt::Assign { target, value, .. } => {
             mentions_ident(target, name) || mentions_ident(value, name)
         }
+        Stmt::CompoundAssign { target, value, .. } => {
+            mentions_ident(target, name) || mentions_ident(value, name)
+        }
         Stmt::Destructure { pat, value, .. } => {
             mentions_pat(pat, name) || mentions_ident(value, name)
         }
@@ -535,26 +538,7 @@ impl Lowerer {
                         format!("zz_elvis({tmp}, {r})")
                     }
                     _ => {
-                        let cop = match op {
-                            zz_frontend::ast::BinOp::Add => "ZZOP_ADD",
-                            zz_frontend::ast::BinOp::Sub => "ZZOP_SUB",
-                            zz_frontend::ast::BinOp::Mul => "ZZOP_MUL",
-                            zz_frontend::ast::BinOp::Div => "ZZOP_DIV",
-                            zz_frontend::ast::BinOp::Rem => "ZZOP_REM",
-                            zz_frontend::ast::BinOp::Pow => "ZZOP_POW",
-                            zz_frontend::ast::BinOp::Eq => "ZZOP_EQ",
-                            zz_frontend::ast::BinOp::Ne => "ZZOP_NE",
-                            zz_frontend::ast::BinOp::Lt => "ZZOP_LT",
-                            zz_frontend::ast::BinOp::Gt => "ZZOP_GT",
-                            zz_frontend::ast::BinOp::Le => "ZZOP_LE",
-                            zz_frontend::ast::BinOp::Ge => "ZZOP_GE",
-                            zz_frontend::ast::BinOp::BitAnd => "ZZOP_AND",
-                            zz_frontend::ast::BinOp::BitOr => "ZZOP_OR",
-                            zz_frontend::ast::BinOp::BitXor => "ZZOP_XOR",
-                            zz_frontend::ast::BinOp::Shl => "ZZOP_SHL",
-                            zz_frontend::ast::BinOp::Shr => "ZZOP_SHR",
-                            _ => "ZZOP_ADD",
-                        };
+                        let cop = binop_runtime_op(op);
                         // Check if either operand is a scalar. We treat both scalar-typed locals
                         // AND Int/Float literals as scalar operands so that patterns like
                         // `i + 1` or `count + n` unbox to raw C arithmetic instead of routing
@@ -3319,6 +3303,50 @@ impl Lowerer {
             return format!("zz_bool({emitted})");
         }
         emitted
+    }
+
+    /// Box a raw-scalar index-store RHS to a `zz_value` before storing.
+    /// Extracted from the `obj[idx] = v` lowering so compound assignment
+    /// (`obj[idx] OP= v`) boxes identically.
+    pub(super) fn box_index_store_value(
+        &self,
+        value: &Expr,
+        val: String,
+        names: &NameCtx,
+    ) -> String {
+        let ast_says_scalar = super::expr_emits_raw_scalar(value);
+        let ident = match value {
+            Expr::Ident { name, .. } => Some(name.as_str()),
+            _ => None,
+        };
+        let val_is_actually_scalar =
+            crate::lower::context::emitted_is_raw_scalar(&val, names, ident)
+                || (ast_says_scalar && !val.starts_with("zz_"));
+        let value_is_scalar = ast_says_scalar || val_is_actually_scalar;
+        if value_is_scalar {
+            if let Expr::Ident { name, .. } = value {
+                let name_str = name.clone();
+                auto_box(&val, names.lookup_type(&name_str))
+            } else if let Expr::Path { parts, .. } = value {
+                let joined = parts.join(".");
+                auto_box(&val, names.lookup_type(&joined))
+            } else if val.starts_with("(double)(") {
+                format!("zz_float({val})")
+            } else if val.starts_with("(bool)(") {
+                format!("zz_bool({val})")
+            } else if val_is_actually_scalar {
+                // Genuinely raw scalar (int ident/arithmetic):
+                // box it. (String concats over string idents
+                // trip the AST-only check above but lower to
+                // a zz_value — wrapping one in zz_int is a C
+                // type error.)
+                format!("zz_int({val})")
+            } else {
+                val
+            }
+        } else {
+            val
+        }
     }
 
     pub(super) fn emit_str_literal(&self, s: &str) -> String {

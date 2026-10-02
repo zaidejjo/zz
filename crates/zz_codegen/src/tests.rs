@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use zz_checker::{FuncSig, Type};
 use zz_hir::{ReachableSet, TypedProgram};
 
-use crate::{build_native, compile, native_supported, BuildOptions};
+use crate::{build_native, compile, lower_only, native_supported, BuildOptions};
 
 /// Seed the real stdlib signatures for typed building.
 use zz_stdlib::stdlib_funcs;
@@ -1054,4 +1054,76 @@ func main() {
         lowered.source.contains("zz_arena_reset"),
         "missing arena reset in generated C"
     );
+}
+
+/// Structural proof that `x OP= y` lowers to the same C as `x = x OP y`
+/// for plain receivers: normalize the target statement text, then
+/// compare generated sources for equality.
+#[test]
+fn compound_assign_lowers_like_plain_assign() {
+    fn lowered(body: &str) -> String {
+        let src = format!("func main() {{\n{body}\n}}\n");
+        let (pruned, reach) = build_reachable(&src);
+        lower_only(&pruned, &reach, "main").source
+    }
+
+    for (compound, plain) in [
+        ("x += 1", "x = x + 1"),
+        ("x -= y", "x = x - y"),
+        ("x *= 2", "x = x * 2"),
+        ("x /= 2", "x = x / 2"),
+        ("x &= mask", "x = x & mask"),
+        ("x <<= 2", "x = x << 2"),
+        ("s += t", "s = s + t"),
+    ] {
+        let a = lowered(&format!(
+            "x := 0\ny := 0\nmask := 0\ns := \"\"\nt := \"\"\n{compound}"
+        ));
+        let b = lowered(&format!(
+            "x := 0\ny := 0\nmask := 0\ns := \"\"\nt := \"\"\n{plain}"
+        ));
+        // The only difference may be the source-text echo in comments;
+        // the emitted statements must match line-for-line.
+        let norm = |s: &str| {
+            s.lines()
+                .filter(|l| {
+                    !(l.contains("x += 1")
+                        || l.contains("x = x + 1")
+                        || l.contains("x -= y")
+                        || l.contains("x = x - y")
+                        || l.contains("x *= 2")
+                        || l.contains("x = x * 2")
+                        || l.contains("x /= 2")
+                        || l.contains("x = x / 2")
+                        || l.contains("x &= mask")
+                        || l.contains("x = x & mask")
+                        || l.contains("x <<= 2")
+                        || l.contains("x = x << 2")
+                        || l.contains("s += t")
+                        || l.contains("s = s + t"))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let (na, nb) = (norm(&a), norm(&b));
+        // Function emission order is nondeterministic (map iteration),
+        // so compare as multisets of lines.
+        let mut la: Vec<&str> = na.lines().collect();
+        let mut lb: Vec<&str> = nb.lines().collect();
+        la.sort_unstable();
+        lb.sort_unstable();
+        if la != lb {
+            let mut diff = String::new();
+            for (i, (x, y)) in la.iter().zip(lb.iter()).enumerate() {
+                if x != y {
+                    diff.push_str(&format!("line {i}:\n  compound: {x}\n  plain:    {y}\n"));
+                    if diff.len() > 2000 {
+                        break;
+                    }
+                }
+            }
+            diff.push_str(&format!("lengths: {} vs {}\n", la.len(), lb.len()));
+            panic!("C mismatch ({compound} vs {plain}):\n{diff}");
+        }
+    }
 }

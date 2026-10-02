@@ -449,30 +449,7 @@ impl Checker {
                 // Reject assignment to immutable (`const`) variables. The target is an
                 // `Ident` in plain programs and a `Path` (e.g. `ns.x`) after
                 // the loader namespaces top-level bindings.
-                let tname: Option<String> = match target {
-                    Expr::Ident { name, .. } => Some(name.clone()),
-                    Expr::Path { parts, .. } => Some(parts.join(".")),
-                    _ => None,
-                };
-                if let Some(tname) = tname {
-                    if let Some(def_span) = self.lookup_const_span(&tname) {
-                        let display = Self::display_name(&tname);
-                        self.errors.push(
-                            error_at(
-                                format!("cannot assign to immutable variable `{}`", display),
-                                target.span(),
-                            )
-                            .with_secondary(zz_frontend::diag::SecondaryLabel {
-                                span: def_span,
-                                message: "variable defined as immutable here".to_string(),
-                            })
-                            .with_note(format!(
-                                "hint: remove `const` to make `{}` mutable",
-                                display
-                            )),
-                        );
-                    }
-                }
+                self.reject_const_target(target);
                 let errors_before = self.errors.len();
                 let tt = self.check_assign_target(target);
                 let vt = self.check_expr(value);
@@ -490,11 +467,70 @@ impl Checker {
                 }
                 Type::Unit
             }
+            Stmt::CompoundAssign {
+                target,
+                op,
+                value,
+                span,
+            } => {
+                // `target OP= value` checks exactly like
+                // `target = target OP value`: same const rule, same
+                // target rules, same binary-op rules (check_binary
+                // re-checks both sides, so float promotion, int-only
+                // bitwise, and error messages are identical).
+                self.reject_const_target(target);
+                let errors_before = self.errors.len();
+                let tt = self.check_assign_target(target);
+                let bt = self.check_binary(*op, target, value, *span);
+                // Phase 2.2: same route-table propagation as `=`.
+                match target {
+                    Expr::Ident { name, .. } => self.propagate_http_routes(name, value),
+                    Expr::Path { parts, .. } => self.propagate_http_routes(&parts.join("."), value),
+                    _ => {}
+                }
+                if self.errors.len() == errors_before {
+                    if let Err(e) = self.unifier.unify(&bt, &tt) {
+                        self.report_mismatch(e, *span);
+                    }
+                }
+                Type::Unit
+            }
         }
     }
 
     /// Type of an assignment target: a variable, a qualified name, or a
     /// struct field path.
+    /// Reject assignment to immutable (`const`) variables. The target
+    /// is an `Ident` in plain programs and a `Path` (e.g. `ns.x`) after
+    /// the loader namespaces top-level bindings. Shared by `=` and
+    /// compound assignment so both reject `const` identically.
+    pub(crate) fn reject_const_target(&mut self, target: &Expr) {
+        let tname: Option<String> = match target {
+            Expr::Ident { name, .. } => Some(name.clone()),
+            Expr::Path { parts, .. } => Some(parts.join(".")),
+            _ => None,
+        };
+        if let Some(tname) = tname {
+            if let Some(def_span) = self.lookup_const_span(&tname) {
+                let display = Self::display_name(&tname);
+                self.errors.push(
+                    error_at(
+                        format!("cannot assign to immutable variable `{}`", display),
+                        target.span(),
+                    )
+                    .with_secondary(zz_frontend::diag::SecondaryLabel {
+                        span: def_span,
+                        message: "variable defined as immutable here".to_string(),
+                    })
+                    .with_note(format!(
+                        "hint: remove `const` to make `{}` mutable",
+                        display
+                    )),
+                );
+            }
+        }
+    }
+
     pub(crate) fn check_assign_target(&mut self, target: &Expr) -> Type {
         match target {
             Expr::Ident { name, span } => self.lookup(name, *span),

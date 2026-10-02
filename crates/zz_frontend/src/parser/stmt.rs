@@ -1,7 +1,8 @@
 //! Statement parsing.
 
 use crate::ast::{
-    Block, Decorator, ExternFunc, Ident, ImportItem, Param, Pattern, Stmt, TraitBound, TypeParam,
+    BinOp, Block, Decorator, ExternFunc, Ident, ImportItem, Param, Pattern, Stmt, TraitBound,
+    TypeParam,
 };
 use crate::diag::error_at;
 use crate::span::Span;
@@ -220,6 +221,26 @@ impl Parser {
                     let span = expr.span().join(value.span());
                     return Stmt::Assign {
                         target: expr,
+                        value,
+                        span,
+                    };
+                }
+                // `expr OP= value` — compound assignment (`x += 1`).
+                // Same targets as `=` (validated by the checker); chaining
+                // (`x += y += z`) is rejected with a hint.
+                if let Some(op) = self.peek_compound_op() {
+                    self.advance();
+                    let value = self.parse_expr();
+                    if self.peek_compound_op().is_some() {
+                        self.error_here(
+                            "cannot chain compound assignment\n\
+                             hint: split into separate statements",
+                        );
+                    }
+                    let span = expr.span().join(value.span());
+                    return Stmt::CompoundAssign {
+                        target: expr,
+                        op,
                         value,
                         span,
                     };
@@ -693,6 +714,25 @@ impl Parser {
             },
             value,
             span,
+        }
+    }
+
+    /// Map a compound-assignment token (`+=`, `<<=`, …) to its binary
+    /// operator, or `None` when the next token isn't one.
+    pub(crate) fn peek_compound_op(&self) -> Option<BinOp> {
+        match self.peek_kind() {
+            TokenKind::PlusEq => Some(BinOp::Add),
+            TokenKind::MinusEq => Some(BinOp::Sub),
+            TokenKind::StarEq => Some(BinOp::Mul),
+            TokenKind::SlashEq => Some(BinOp::Div),
+            TokenKind::PercentEq => Some(BinOp::Rem),
+            TokenKind::StarStarEq => Some(BinOp::Pow),
+            TokenKind::AmpEq => Some(BinOp::BitAnd),
+            TokenKind::PipeEq => Some(BinOp::BitOr),
+            TokenKind::CaretEq => Some(BinOp::BitXor),
+            TokenKind::ShlEq => Some(BinOp::Shl),
+            TokenKind::ShrEq => Some(BinOp::Shr),
+            _ => None,
         }
     }
 

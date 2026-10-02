@@ -187,6 +187,7 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
             None
         }
         Stmt::Assign { .. } => None,
+        Stmt::CompoundAssign { .. } => None,
         Stmt::Destructure { .. } => None,
         Stmt::ExternBlock { .. } => None,
         Stmt::Link { .. } => None,

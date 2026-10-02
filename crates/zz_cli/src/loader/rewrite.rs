@@ -147,6 +147,10 @@ impl<'a> Rewriter<'a> {
                 self.rewrite_expr(target);
                 self.rewrite_expr(value);
             }
+            Stmt::CompoundAssign { target, value, .. } => {
+                self.rewrite_expr(target);
+                self.rewrite_expr(value);
+            }
             Stmt::Destructure { value, .. } => {
                 self.rewrite_expr(value);
             }

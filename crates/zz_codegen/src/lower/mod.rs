@@ -23,7 +23,7 @@ pub use context::{Lowerer, NameCtx};
 
 // Internal helpers shared across the lowering submodules.
 pub(crate) use context::{
-    auto_box, box_scalar_operand, emit_guard_expr, is_dup_safe, scalar_operand_c,
+    auto_box, binop_runtime_op, box_scalar_operand, emit_guard_expr, is_dup_safe, scalar_operand_c,
     scalar_operand_type,
 };
 

@@ -142,6 +142,10 @@ fn collect_stmt_defs(stmt: &Stmt, source: &str, defs: &mut HashMap<u32, Definiti
             collect_expr_defs(target, source, defs);
             collect_expr_defs(value, source, defs);
         }
+        Stmt::CompoundAssign { target, value, .. } => {
+            collect_expr_defs(target, source, defs);
+            collect_expr_defs(value, source, defs);
+        }
         Stmt::Defer { expr, .. } => {
             collect_expr_defs(expr, source, defs);
         }
@@ -363,6 +367,10 @@ fn walk_stmt<'a>(stmt: &'a Stmt, source: &str, offset: u32, result: &mut NodeAtO
             }
         }
         Stmt::Assign { target, value, .. } => {
+            walk_expr(target, source, offset, result);
+            walk_expr(value, source, offset, result);
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
             walk_expr(target, source, offset, result);
             walk_expr(value, source, offset, result);
         }
@@ -864,6 +872,10 @@ fn collect_name_refs_in_stmt(stmt: &Stmt, name: &str, refs: &mut Vec<Reference>)
             collect_name_refs_in_expr(target, name, refs);
             collect_name_refs_in_expr(value, name, refs);
         }
+        Stmt::CompoundAssign { target, value, .. } => {
+            collect_name_refs_in_expr(target, name, refs);
+            collect_name_refs_in_expr(value, name, refs);
+        }
         Stmt::Defer { expr, .. } => collect_name_refs_in_expr(expr, name, refs),
         Stmt::Destructure { value, .. } => collect_name_refs_in_expr(value, name, refs),
         Stmt::Impl { methods, .. } => {
@@ -1110,6 +1122,12 @@ fn collect_hl_stmt(stmt: &Stmt, name: &str, source: &str, out: &mut Vec<Highligh
         }
         Stmt::Assign { target, value, .. } => {
             collect_hl_write(target, name, out);
+            collect_hl_expr(value, name, out);
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
+            // Compound assignment reads AND writes the target.
+            collect_hl_write(target, name, out);
+            collect_hl_expr(target, name, out);
             collect_hl_expr(value, name, out);
         }
         Stmt::Defer { expr, .. } => collect_hl_expr(expr, name, out),

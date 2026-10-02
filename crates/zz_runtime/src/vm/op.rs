@@ -169,6 +169,13 @@ pub enum Op {
     /// Pop a value, an index, and an object; write `object[index] = value`;
     /// push the mutated object back (for write-back).
     StoreIndexOp(Span),
+    /// Pop a value, an index, and an object; push the mutated object
+    /// back with `object[index] OP value` stored (for write-back).
+    /// Single evaluation: the object/index were compiled once.
+    CompoundIndexOp {
+        op: zz_frontend::ast::BinOp,
+        span: Span,
+    },
     /// Pop an end bound, a start bound (either `int` or `Unit` for absent),
     /// and an object; push the slice.
     SliceOp(Span),
@@ -190,6 +197,14 @@ pub enum Op {
     /// Pop a value and an object; write `object.field = value`; push the
     /// mutated object back (for write-back).
     SetField(String, Span),
+    /// Pop a value and an object; write `object.field OP value`; push
+    /// the mutated object back (for write-back). Single evaluation:
+    /// the object was compiled once.
+    CompoundFieldOp {
+        name: String,
+        op: zz_frontend::ast::BinOp,
+        span: Span,
+    },
     /// Pop a value and an object; write `object.fields[idx] = value`; push
     /// the mutated object back (O(1) for known struct types).
     SetFieldIdx(u16, Span),

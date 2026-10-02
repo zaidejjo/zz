@@ -258,6 +258,16 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
             fp_expr(value, out);
             out.push(']');
         }
+        Stmt::CompoundAssign {
+            target, op, value, ..
+        } => {
+            out.push_str("CompoundAssign[");
+            fp_expr(target, out);
+            out.push_str(op.symbol());
+            out.push('=');
+            fp_expr(value, out);
+            out.push(']');
+        }
         Stmt::Destructure { pat, value, .. } => {
             out.push_str("Destructure[");
             fp_pattern(pat, out);

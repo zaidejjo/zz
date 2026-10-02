@@ -310,6 +310,17 @@ fn expand_stmts(
                 value: expand_expr(value, taken, errors),
                 span: *span,
             }),
+            Stmt::CompoundAssign {
+                target,
+                op,
+                value,
+                span,
+            } => out.push(Stmt::CompoundAssign {
+                target: expand_expr(target, taken, errors),
+                op: *op,
+                value: expand_expr(value, taken, errors),
+                span: *span,
+            }),
             Stmt::Destructure { pat, value, span } => out.push(Stmt::Destructure {
                 pat: pat.clone(),
                 value: expand_expr(value, taken, errors),

@@ -408,6 +408,15 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.space();
                 self.emit_expr(value);
             }
+            Stmt::CompoundAssign {
+                target, op, value, ..
+            } => {
+                self.emit_expr(target);
+                self.space();
+                self.text(format!("{}=", op.symbol()));
+                self.space();
+                self.emit_expr(value);
+            }
             Stmt::Import {
                 path,
                 alias,
