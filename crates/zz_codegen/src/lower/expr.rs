@@ -953,10 +953,7 @@ impl Lowerer {
                 };
                 out.push_str(&format!("    zz_value {arr_var} = {ctor};\n"));
                 for item in elems {
-                    let boxed = self.box_container_item(item, names, out);
-                    out.push_str(&format!(
-                        "    {{ int _e = 0; zz_vec_append({arr_var}, {boxed}, &_e); }}\n"
-                    ));
+                    self.append_container_item(&arr_var, item, names, out);
                 }
                 arr_var
             }
@@ -977,10 +974,7 @@ impl Lowerer {
                 out.push_str(&format!("    zz_value {arr_var} = {ctor};\n"));
                 if !items.is_empty() {
                     for item in items {
-                        let boxed = self.box_container_item(item, names, out);
-                        out.push_str(&format!(
-                            "    {{ int _e = 0; zz_vec_append({arr_var}, {boxed}, &_e); }}\n"
-                        ));
+                        self.append_container_item(&arr_var, item, names, out);
                     }
                 }
                 arr_var
@@ -2910,10 +2904,22 @@ impl Lowerer {
                 if let Some(sig) = self.tp.structs.get(name) {
                     if let Some((_, field_type)) = sig.fields.iter().find(|(n, _)| n == field_name)
                     {
+                        // Scalar fields arrive boxed (`zz_int(1)`, call
+                        // results) or raw (locals, arithmetic) depending on
+                        // the producer — extract `.i`/`.f`/`.b` only from
+                        // boxed forms, otherwise use the raw value as-is.
+                        // (Unconditional extraction miscompiles
+                        // `Box{v: i}` for raw `i` as `(i).i`.)
+                        let ident = match field_expr {
+                            Expr::Ident { name, .. } => Some(name.as_str()),
+                            _ => None,
+                        };
+                        let raw =
+                            crate::lower::context::emitted_is_raw_scalar(&field_val, names, ident);
                         let final_val = match field_type {
-                            zz_checker::Type::Int => format!("({field_val}).i"),
-                            zz_checker::Type::Float => format!("({field_val}).f"),
-                            zz_checker::Type::Bool => format!("({field_val}).b"),
+                            zz_checker::Type::Int if !raw => format!("({field_val}).i"),
+                            zz_checker::Type::Float if !raw => format!("({field_val}).f"),
+                            zz_checker::Type::Bool if !raw => format!("({field_val}).b"),
                             _ => field_val,
                         };
                         field_inits.push(format!(".{field_name} = {final_val}"));
@@ -3275,33 +3281,55 @@ impl Lowerer {
         None
     }
 
-    /// Box one array/tuple element into a `zz_value` for container append.
+    /// Append one array/tuple element, boxing it into a `zz_value` first.
     /// Unboxed structs (raw C values: literals, locals, field reads) route
     /// through `emit_boxed_value` instead of emitting; raw scalars box via
     /// the operand helper; already-boxed expressions pass through unchanged.
     /// Without this, `(int, UnboxedStruct)` tuples and `[Point{...}]`
     /// arrays hand a raw C struct to `zz_vec_append(zz_value)` and the C
     /// build fails.
-    pub(super) fn box_container_item(
+    ///
+    /// The boxed object is freshly constructed per element, and
+    /// `zz_vec_append` clones for store — so the temp is released right
+    /// after the append statement. Without the release, every iteration
+    /// of a loop building such tuples retains one object (~0.5KB/draw
+    /// for a 4-int struct). The release only fires for temp names
+    /// `emit_boxed_value` created (inline fallbacks like `zz_unit()` are
+    /// appended bare, and borrowed locals never reach this branch).
+    pub(super) fn append_container_item(
         &self,
+        arr_var: &str,
         item: &Expr,
         names: &mut NameCtx,
         out: &mut String,
-    ) -> String {
+    ) {
         let unboxed: Option<String> = match self.ty_at(names, item.span()) {
             Some(zz_checker::Type::Struct(s, _)) if self.is_unboxed_struct(s) => Some(s.clone()),
             _ => None,
         };
         if let Some(sname) = unboxed {
-            return self.emit_boxed_value(&sname, item, names, out);
+            let tmp = self.emit_boxed_value(&sname, item, names, out);
+            if is_simple_ident(&tmp) {
+                out.push_str(&format!(
+                    "    {{ int _e = 0; zz_vec_append({arr_var}, {tmp}, &_e); zz_release(&{tmp}); }}\n"
+                ));
+            } else {
+                out.push_str(&format!(
+                    "    {{ int _e = 0; zz_vec_append({arr_var}, {tmp}, &_e); }}\n"
+                ));
+            }
+            return;
         }
         let item_val = self.emit_expr(item, names, out);
         // Auto-box if needed (historical Ident fast path, preserved).
-        if let Expr::Ident { name: n, .. } = item {
+        let boxed = if let Expr::Ident { name: n, .. } = item {
             auto_box(&item_val, names.lookup_type(n))
         } else {
             box_scalar_operand(item, names, &item_val)
-        }
+        };
+        out.push_str(&format!(
+            "    {{ int _e = 0; zz_vec_append({arr_var}, {boxed}, &_e); }}\n"
+        ));
     }
 
     /// Box an index expression to a `zz_value` for `idx` arguments. Scalar

@@ -1127,3 +1127,28 @@ fn compound_assign_lowers_like_plain_assign() {
         }
     }
 }
+
+/// The boxed temp of an unboxed-struct tuple/array element must be
+/// released after the cloning append, or every such construction
+/// retains one object (loops building `(int, Rng)` tuples grew ~0.5KB
+/// per draw). Borrowed locals and inline fallbacks take other paths
+/// and must NOT gain a release.
+#[test]
+fn container_struct_temp_is_released_after_append() {
+    let src = "struct Rng { s0: int, s1: int }\nfunc next(r: Rng) -> (int, Rng) {\n return (r.s0 + 1, Rng{ s0: r.s0 + 1, s1: r.s1 })\n}\nfunc main() {\n r := Rng{ s0: 1, s1: 2 }\n v, r := next(r)\n println(v)\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    let c = lower_only(&pruned, &reach, "main").source;
+    // The struct-element append must carry its temp release on the same
+    // line (scan user code only: the runtime prelude also mentions
+    // zz_release in definitions).
+    let appends: Vec<&str> = c
+        .lines()
+        .filter(|l| l.contains("zz_vec_append(") && l.contains("__obj"))
+        .collect();
+    assert_eq!(appends.len(), 1, "expected one struct-element append");
+    assert!(
+        appends[0].contains("zz_release(&__obj"),
+        "struct temp must be released after the cloning append: {}",
+        appends[0]
+    );
+}
