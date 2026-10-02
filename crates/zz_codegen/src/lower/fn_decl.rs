@@ -165,7 +165,7 @@ impl Lowerer {
             if let Some(sig) = tp.structs.get(name) {
                 // Emit dependencies first.
                 for (_, field_type) in &sig.fields {
-                    if let zz_checker::Type::Struct(dep_name) = field_type {
+                    if let zz_checker::Type::Struct(dep_name, _) = field_type {
                         if is_unboxed(dep_name) {
                             emit_struct(dep_name, tp, is_unboxed, emitted, preamble);
                         }
@@ -178,7 +178,7 @@ impl Lowerer {
                         zz_checker::Type::Int => "int64_t".to_string(),
                         zz_checker::Type::Float => "double".to_string(),
                         zz_checker::Type::Bool => "bool".to_string(),
-                        zz_checker::Type::Struct(n) if is_unboxed(n) => {
+                        zz_checker::Type::Struct(n, _) if is_unboxed(n) => {
                             format!("zz_struct_{}", mangle(n))
                         }
                         _ => "zz_value".to_string(),
@@ -266,7 +266,7 @@ impl Lowerer {
                     zz_checker::Type::Bool => {
                         format!("zz_str_cast(zz_bool(self->{fname}), &_e)")
                     }
-                    zz_checker::Type::Struct(inner) if self.is_unboxed_struct(inner) => {
+                    zz_checker::Type::Struct(inner, _) if self.is_unboxed_struct(inner) => {
                         format!("zz_struct_debug_{m}(&self->{fname})", m = mangle(inner),)
                     }
                     // Boxed members (strings, boxed structs, arrays, ...):

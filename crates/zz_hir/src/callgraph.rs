@@ -40,7 +40,7 @@ fn resolve_methods(tp: &TypedProgram, caller: &str, recv: &Expr, method: &str) -
         Some(Type::Json) => vec![format!("json.{method}")],
         // Opaque handles dispatch on their module tag (`regex.*`, …).
         Some(Type::Opaque(tag)) => vec![format!("{tag}.{method}")],
-        Some(Type::Struct(s)) => {
+        Some(Type::Struct(s, _)) => {
             let fq = format!("{s}.{method}");
             if tp.funcs.contains_key(&fq) {
                 vec![fq]
@@ -72,7 +72,7 @@ fn resolve_methods(tp: &TypedProgram, caller: &str, recv: &Expr, method: &str) -
 /// a struct whose last name segment equals the field name. Mirrors the
 /// checker's rule (see `zz_checker::checker::structs`).
 fn is_embedded_field(fname: &str, fty: &Type) -> bool {
-    matches!(fty, Type::Struct(s) if s.rsplit('.').next().unwrap_or(s) == fname)
+    matches!(fty, Type::Struct(s, _) if s.rsplit('.').next().unwrap_or(s) == fname)
 }
 
 /// Search structs embedded in `root` (transitively, breadth-first) for a
@@ -84,7 +84,7 @@ fn find_promoted_method(tp: &TypedProgram, root: &str, method: &str) -> Option<S
         queue.remove(0);
         let sig = tp.structs.get(&cur)?;
         for (fname, fty) in &sig.fields {
-            if let Type::Struct(inner) = fty {
+            if let Type::Struct(inner, _) = fty {
                 if is_embedded_field(fname, fty) && !visited.contains(inner) {
                     let fq = format!("{inner}.{method}");
                     if tp.funcs.contains_key(&fq) {
@@ -587,7 +587,12 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
                     stmts.push(stmt.clone());
                 }
             }
-            Stmt::Impl { name, methods, .. } => {
+            Stmt::Impl {
+                name,
+                generics,
+                methods,
+                ..
+            } => {
                 let tname = name.join(".");
                 let keep: Vec<Stmt> = methods
                     .iter()
@@ -604,6 +609,7 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
                 if !keep.is_empty() {
                     stmts.push(Stmt::Impl {
                         name: name.clone(),
+                        generics: generics.clone(),
                         methods: keep,
                         span: stmt.span(),
                         pub_: false,

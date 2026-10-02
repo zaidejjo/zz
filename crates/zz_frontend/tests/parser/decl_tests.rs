@@ -290,3 +290,73 @@ fn paren_type_still_parses_as_grouped() {
         other => panic!("unexpected: {other:?}"),
     }
 }
+
+#[test]
+fn parses_generic_struct() {
+    let p = parse_ok("struct Box<T> { v: T }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Struct {
+            name,
+            generics,
+            fields,
+            ..
+        } => {
+            assert_eq!(name, &vec!["Box".to_string()]);
+            assert_eq!(
+                generics.iter().map(|g| g.name.clone()).collect::<Vec<_>>(),
+                vec!["T".to_string()]
+            );
+            assert_eq!(fields.len(), 1);
+            assert!(matches!(&fields[0].1.kind, TyKind::Named(n, a) if n == "T" && a.is_empty()));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_generic_struct_multi_param() {
+    let p = parse_ok("struct Pair<A, B> { a: A, b: B }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Struct { generics, .. } => {
+            assert_eq!(generics.len(), 2);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_generic_impl() {
+    let p = parse_ok("impl Box<T> { func get(self) -> T { self.v } }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Impl {
+            name,
+            generics,
+            methods,
+            ..
+        } => {
+            assert_eq!(name, &vec!["Box".to_string()]);
+            assert_eq!(generics.len(), 1);
+            assert_eq!(methods.len(), 1);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn struct_bounds_are_an_error() {
+    let parsed = zz_frontend::parse("struct Box<T: Num> { v: T }");
+    assert!(
+        parsed.errors.iter().any(|e| e.message.contains("bounds")),
+        "expected bounds error, got {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
+fn plain_struct_has_no_generics() {
+    let p = parse_ok("struct Point { x: int }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Struct { generics, .. } => assert!(generics.is_empty()),
+        other => panic!("unexpected: {other:?}"),
+    }
+}

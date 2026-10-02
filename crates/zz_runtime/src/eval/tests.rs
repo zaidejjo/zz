@@ -952,3 +952,16 @@ b[0] += 10
 a[0] * 100 + b[0]";
     assert_eq!(eval_src(src).unwrap(), Value::Int(111));
 }
+
+#[test]
+fn generic_struct_value_semantics() {
+    // Type arguments erase at runtime; mutation never escapes.
+    let src = "struct Box<T> { v: T }\nfunc change<T>(b: Box<T>) -> T {\n b.v\n}\nb := Box{ v: 10 }\nchange(b) * 1000 + b.v";
+    assert_eq!(eval_src(src).unwrap(), Value::Int(10010));
+}
+
+#[test]
+fn generic_struct_nested_access() {
+    let src = "struct Box<T> { v: T }\nstruct Wrap<T> { inner: Box<T>, n: int }\nw := Wrap{ inner: Box{ v: 1 }, n: 5 }\nw.inner.v * 100 + w.n";
+    assert_eq!(eval_src(src).unwrap(), Value::Int(105));
+}

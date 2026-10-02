@@ -413,6 +413,7 @@ impl Parser {
     pub(crate) fn parse_struct(&mut self, pub_: bool) -> Stmt {
         let struct_tok = self.advance();
         let name = self.parse_dotted_ident();
+        let generics = self.parse_struct_generics();
         if !self.eat(TokenKind::LBrace) {
             self.error_here("expected `{` to start struct body");
             // Recovery: skip to the closing brace so the field loop below
@@ -489,15 +490,54 @@ impl Parser {
         let span = struct_tok.span.join(end);
         Stmt::Struct {
             name,
+            generics,
             fields,
             span,
             pub_,
         }
     }
 
+    /// Parse `<T, U>` after a struct/impl name. Plain identifiers only:
+    /// storage and receivers need no trait bounds (`<T: Num>` is rejected
+    /// with a hint to bound at the function instead).
+    pub(crate) fn parse_struct_generics(&mut self) -> Vec<crate::ast::Ident> {
+        if !self.eat(TokenKind::Lt) {
+            return Vec::new();
+        }
+        let mut gs = Vec::new();
+        loop {
+            let name = self
+                .expect_ident()
+                .unwrap_or_else(|| dummy_ident(self.peek().span));
+            if self.eat(TokenKind::Colon) {
+                self.error_here(
+                    "struct type parameters do not take bounds\n\
+                     hint: bound the generic function instead (e.g. `func get<T: Num>(b: Box[T])`)",
+                );
+                // Skip the bound list so recovery lands on `,`/`>`.
+                while !self.at(TokenKind::Comma)
+                    && !self.at(TokenKind::Gt)
+                    && !self.at(TokenKind::Eof)
+                {
+                    self.advance();
+                }
+            }
+            gs.push(name);
+            if self.eat(TokenKind::Comma) {
+                continue;
+            }
+            break;
+        }
+        if !self.eat_gt_close() {
+            self.error_here("expected `>` to close generic parameters");
+        }
+        gs
+    }
+
     pub(crate) fn parse_impl(&mut self, pub_: bool) -> Stmt {
         let impl_tok = self.advance();
         let name = self.parse_dotted_ident();
+        let generics = self.parse_struct_generics();
         if !self.eat(TokenKind::LBrace) {
             self.error_here("expected `{` to start impl body");
             self.skip_to_rbrace();
@@ -548,6 +588,7 @@ impl Parser {
         let span = impl_tok.span.join(end);
         Stmt::Impl {
             name,
+            generics,
             methods,
             span,
             pub_,
@@ -1120,6 +1161,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
         }
         Stmt::Struct {
             name,
+            generics,
             fields,
             span: mut sp,
             pub_,
@@ -1127,6 +1169,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
             span(&mut sp);
             Stmt::Struct {
                 name,
+                generics,
                 fields,
                 span: sp,
                 pub_,
@@ -1134,6 +1177,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
         }
         Stmt::Impl {
             name,
+            generics,
             methods,
             span: mut sp,
             pub_,
@@ -1141,6 +1185,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
             span(&mut sp);
             Stmt::Impl {
                 name,
+                generics,
                 methods,
                 span: sp,
                 pub_,

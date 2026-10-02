@@ -623,3 +623,58 @@ fn vm_compound_assign_fuses_like_plain_assign() {
         "SlotAddIntImm missing: {add_imm:?}"
     );
 }
+
+/// Structural proof of zero-cost erasure: a generic struct program
+/// compiles to the same opcode *shape* as its hand-monomorphized twin
+/// (names differ, so only discriminants are compared).
+#[test]
+fn vm_generic_struct_erases_like_monomorphic() {
+    use std::collections::{HashMap, HashSet};
+
+    fn disc(op: &Op) -> &'static str {
+        match op {
+            Op::PushConst(_) => "PushConst",
+            Op::MakeStruct { .. } => "MakeStruct",
+            Op::RegisterStruct { .. } => "RegisterStruct",
+            Op::GetField(..) => "GetField",
+            Op::GetFieldIdx(..) => "GetFieldIdx",
+            Op::SetField(..) => "SetField",
+            Op::SetFieldIdx(..) => "SetFieldIdx",
+            Op::LoadSlot(_) => "LoadSlot",
+            Op::StoreSlot(_) => "StoreSlot",
+            Op::LoadVar(..) => "LoadVar",
+            Op::StoreVar(..) => "StoreVar",
+            Op::DefineVar(_) => "DefineVar",
+            Op::Call { .. } => "Call",
+            Op::Return => "Return",
+            Op::BinOp(..) => "BinOp",
+            _ => "other",
+        }
+    }
+
+    fn opcodes(src: &str) -> Vec<&'static str> {
+        let parsed = parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let (_res, types) = zz_checker::check_program_typed(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let chunk = super::Compiler::compile_program_typed(
+            &parsed.program,
+            Arc::new(types),
+            HashMap::new(),
+            Arc::new(HashSet::new()),
+        );
+        chunk.code.iter().map(disc).collect()
+    }
+
+    let generic = "struct Box<T> { v: T }\nfunc main() {\n b := Box{ v: 42 }\n b.v\n}";
+    let mono = "struct BoxInt { v: int }\nfunc main() {\n b := BoxInt{ v: 42 }\n b.v\n}";
+    assert_eq!(opcodes(generic), opcodes(mono));
+}

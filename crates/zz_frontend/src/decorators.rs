@@ -163,6 +163,7 @@ fn expand_stmts(
             }
             Stmt::Impl {
                 name,
+                generics,
                 methods,
                 span,
                 pub_,
@@ -270,6 +271,7 @@ fn expand_stmts(
                 }
                 out.push(Stmt::Impl {
                     name: name.clone(),
+                    generics: generics.clone(),
                     methods: expanded_methods,
                     span: *span,
                     pub_: *pub_,

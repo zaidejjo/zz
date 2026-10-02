@@ -204,7 +204,7 @@ impl Lowerer {
         let Some((_, first)) = sig.params.first() else {
             return false;
         };
-        let zz_checker::Type::Struct(sname) = first else {
+        let zz_checker::Type::Struct(sname, _) = first else {
             return false;
         };
         let method = fname.rsplit('.').next().unwrap_or(fname);
@@ -418,7 +418,7 @@ impl Lowerer {
                 .funcs
                 .get(fname)
                 .and_then(|sig| sig.params.first().map(|(_, t)| t.clone()))
-                .filter(|t| matches!(t, zz_checker::Type::Struct(_)))
+                .filter(|t| matches!(t, zz_checker::Type::Struct(_, _)))
                 .filter(|_| self.is_impl_method(fname))
                 .map(|t| self.type_to_c(&t));
             let proto = match first_struct_c {

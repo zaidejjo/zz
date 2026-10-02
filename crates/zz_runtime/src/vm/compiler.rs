@@ -930,7 +930,7 @@ impl Compiler {
             Expr::Field { obj, name, span } => {
                 self.compile_expr(obj);
                 // Type-driven fast path for set.
-                if let Some(zz_checker::Type::Struct(struct_name)) = self.type_of(obj.span()) {
+                if let Some(zz_checker::Type::Struct(struct_name, _)) = self.type_of(obj.span()) {
                     if let Some(sig) = self.structs.as_ref().and_then(|s| s.get(struct_name)) {
                         if let Some(idx) = sig.fields.iter().position(|(n, _)| n == name) {
                             self.emit(Op::SetFieldIdx(idx as u16, *span));
@@ -1218,7 +1218,8 @@ impl Compiler {
                     self.compile_expr(value);
                     self.compile_expr(obj);
                     // Type-driven fast path for field assignment.
-                    if let Some(zz_checker::Type::Struct(struct_name)) = self.type_of(obj.span()) {
+                    if let Some(zz_checker::Type::Struct(struct_name, _)) = self.type_of(obj.span())
+                    {
                         if let Some(sig) = self.structs.as_ref().and_then(|s| s.get(struct_name)) {
                             if let Some(idx) = sig.fields.iter().position(|(n, _)| n == name) {
                                 self.emit(Op::SetFieldIdx(idx as u16, *span));
@@ -1621,7 +1622,7 @@ impl Compiler {
         let ty = self.type_of(span)?;
         match ty {
             zz_checker::Type::Array(inner) => match inner.as_ref() {
-                zz_checker::Type::Struct(name) => Some(name.clone()),
+                zz_checker::Type::Struct(name, _) => Some(name.clone()),
                 _ => None,
             },
             _ => None,
@@ -2428,7 +2429,7 @@ impl Compiler {
                 self.compile_expr(obj);
                 // Type-driven fast path: if the receiver is a known struct
                 // type, resolve the field index at compile time for O(1) access.
-                if let Some(zz_checker::Type::Struct(struct_name)) = self.type_of(obj.span()) {
+                if let Some(zz_checker::Type::Struct(struct_name, _)) = self.type_of(obj.span()) {
                     if let Some(sig) = self.structs.as_ref().and_then(|s| s.get(struct_name)) {
                         if let Some(idx) = sig.fields.iter().position(|(n, _)| n == name) {
                             self.emit(Op::GetFieldIdx(idx as u16, *span));

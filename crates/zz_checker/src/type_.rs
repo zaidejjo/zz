@@ -59,7 +59,10 @@ pub enum Type {
     /// Task join handle (produced by `spawn`).
     TaskJoin,
     /// A named struct type: `Point` from `struct Point { ... }`.
-    Struct(String),
+    /// Generic instantiations carry their arguments
+    /// (`Box[int]` from `struct Box[T]`); non-generic structs use `[]`.
+    /// Arguments are erased at runtime (values only store the name).
+    Struct(String, Vec<Type>),
     /// `a..b` — an integer range (used by `for` loops).
     Range(Box<Type>),
     /// Inference variable.
@@ -146,7 +149,20 @@ impl fmt::Display for Type {
             Type::Opaque(tag) => write!(f, "{tag}"),
             Type::Chan => write!(f, "chan"),
             Type::TaskJoin => write!(f, "task.join"),
-            Type::Struct(n) => write!(f, "{n}"),
+            Type::Struct(n, args) => {
+                write!(f, "{n}")?;
+                if !args.is_empty() {
+                    write!(f, "[")?;
+                    for (i, a) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{a}")?;
+                    }
+                    write!(f, "]")?;
+                }
+                Ok(())
+            }
             Type::Range(t) => write!(f, "{t}.."),
             Type::Var(_) => write!(f, "_"),
             Type::Named(n) => write!(f, "{n}"),

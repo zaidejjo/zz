@@ -72,9 +72,11 @@ impl FuncSig {
     }
 }
 
-/// A registered struct definition: field names and their types.
+/// A registered struct definition: type parameters and field types
+/// (which may reference the parameters as `Type::Named`).
 #[derive(Debug, Clone)]
 pub struct StructSig {
+    pub generics: Vec<String>,
     pub fields: Vec<(String, Type)>,
 }
 
@@ -240,12 +242,68 @@ fn check_program_impl(
     // orphan duplicates are compile errors here, not last-wins.
     let mut seen = HashMap::new();
     for stmt in &program.stmts {
-        if let Stmt::Impl { name, methods, .. } = stmt {
+        if let Stmt::Impl {
+            name,
+            generics: impl_generics,
+            methods,
+            ..
+        } = stmt
+        {
             let type_name = name.join(".");
             let is_known_struct = checker.structs.contains_key(&type_name);
             let builtin_key = Checker::builtin_ext_key(&type_name);
             let is_extension = builtin_key.is_some() || !is_known_struct;
             let type_key = builtin_key.unwrap_or_else(|| type_name.clone());
+            // Generic structs need a matching generic impl (`impl Box[T]`);
+            // the parameters scope over every method below.
+            let struct_generics: Vec<String> = checker
+                .structs
+                .get(&type_name)
+                .map(|s| s.generics.clone())
+                .unwrap_or_default();
+            let impl_gen_names: Vec<String> =
+                impl_generics.iter().map(|g| g.name.clone()).collect();
+            if is_extension {
+                if !impl_gen_names.is_empty() {
+                    checker.errors.push(zz_frontend::diag::error_at(
+                        format!(
+                            "generic `impl` requires a generic struct (`{type_name}` is not one)"
+                        ),
+                        stmt.span(),
+                    ));
+                }
+            } else if struct_generics.len() != impl_gen_names.len() {
+                if struct_generics.is_empty() {
+                    checker.errors.push(zz_frontend::diag::error_at(
+                        format!(
+                            "struct `{type_name}` is not generic (expected `impl {type_name}` without type parameters)"
+                        ),
+                        stmt.span(),
+                    ));
+                } else {
+                    checker.errors.push(zz_frontend::diag::error_at(
+                        format!(
+                            "generic struct `{type_name}` takes {} type parameter{} (expected `impl {type_name}[{}]`)",
+                            struct_generics.len(),
+                            if struct_generics.len() == 1 { "" } else { "s" },
+                            struct_generics.join(", "),
+                        ),
+                        stmt.span(),
+                    ));
+                }
+            } else {
+                // Duplicate parameter names (`impl Box[T, T]`) shadow each
+                // other in substitution maps; reject rather than guess.
+                let mut seen_gen = std::collections::HashSet::new();
+                for g in &impl_gen_names {
+                    if !seen_gen.insert(g.clone()) {
+                        checker.errors.push(zz_frontend::diag::error_at(
+                            format!("duplicate type parameter `{g}` in `impl {type_name}`"),
+                            stmt.span(),
+                        ));
+                    }
+                }
+            }
             for method in methods {
                 if let Stmt::Func {
                     name: mname,
@@ -258,16 +316,43 @@ fn check_program_impl(
                 {
                     let method_name = mname.join(".");
                     let full_name = format!("{}.{}", type_key, method_name);
-                    let gen_names: Vec<String> =
+                    let method_gens: Vec<String> =
                         generics.iter().map(|g| g.name.name.clone()).collect();
+                    // Impl parameters scope over every method (so the
+                    // receiver's `Box[int]` unifies `T := int` at call
+                    // sites through the existing instantiation path).
+                    // A method parameter shadowing an impl parameter
+                    // would collapse two distinct variables; reject it.
+                    for g in generics {
+                        if impl_gen_names.contains(&g.name.name) {
+                            checker.errors.push(zz_frontend::diag::error_at(
+                                format!(
+                                    "type parameter `{}` shadows an `impl {}` parameter (rename one)",
+                                    g.name.name, type_name
+                                ),
+                                g.name.span,
+                            ));
+                        }
+                    }
+                    let gen_names: Vec<String> = impl_gen_names
+                        .iter()
+                        .cloned()
+                        .chain(method_gens.iter().cloned())
+                        .collect();
                     let gen_bounds: Vec<(String, Vec<zz_frontend::ast::TraitBound>)> = generics
                         .iter()
                         .map(|g| (g.name.name.clone(), g.bounds.clone()))
                         .collect();
                     // Build params, replacing `self` with the receiver type
-                    // (builtin mapped, else struct by name).
-                    let self_ty =
-                        Checker::self_type_for_impl(&type_name, &type_key, &mut checker.unifier);
+                    // (builtin mapped, else struct by name — generic structs
+                    // keep their parameters as `Named` so calls instantiate
+                    // them from the receiver).
+                    let self_ty = Checker::self_type_for_impl(
+                        &type_name,
+                        &type_key,
+                        &impl_gen_names,
+                        &mut checker.unifier,
+                    );
                     let sig_params: Vec<(String, Type)> = params
                         .iter()
                         .enumerate()
@@ -716,6 +801,7 @@ impl Checker {
     pub(crate) fn self_type_for_impl(
         type_name: &str,
         type_key: &str,
+        impl_generics: &[String],
         unifier: &mut crate::unify::Unifier,
     ) -> Type {
         match type_key {
@@ -726,7 +812,13 @@ impl Checker {
             "vec" => Type::Array(Box::new(unifier.fresh_var())),
             "option" => Type::Option(Box::new(unifier.fresh_var())),
             "result" => Type::Result(Box::new(unifier.fresh_var()), Box::new(unifier.fresh_var())),
-            _ => Type::Struct(type_name.to_string()),
+            _ => Type::Struct(
+                type_name.to_string(),
+                impl_generics
+                    .iter()
+                    .map(|g| Type::Named(g.clone()))
+                    .collect(),
+            ),
         }
     }
 
