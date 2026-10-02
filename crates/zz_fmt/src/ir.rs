@@ -571,7 +571,12 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.emit_expr(v);
                 }
             }
-            Stmt::Struct { name, fields, .. } => {
+            Stmt::Struct {
+                name,
+                generics,
+                fields,
+                ..
+            } => {
                 if stmt_is_pub(stmt) {
                     self.text("pub");
                     self.space();
@@ -583,6 +588,16 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         self.text(".");
                     }
                     self.text(n);
+                }
+                if !generics.is_empty() {
+                    self.text("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.text(", ");
+                        }
+                        self.text(g.name.clone());
+                    }
+                    self.text(">");
                 }
                 self.space();
                 if fields.is_empty() {
@@ -622,6 +637,7 @@ impl<'src, 'a> Ctx<'src, 'a> {
             }
             Stmt::Impl {
                 name,
+                generics,
                 methods,
                 span,
                 ..
@@ -637,6 +653,16 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         self.text(".");
                     }
                     self.text(n);
+                }
+                if !generics.is_empty() {
+                    self.text("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.text(", ");
+                        }
+                        self.text(g.name.clone());
+                    }
+                    self.text(">");
                 }
                 self.space();
                 self.text("{");

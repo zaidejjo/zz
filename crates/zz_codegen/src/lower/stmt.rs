@@ -67,7 +67,7 @@ impl Lowerer {
                 let struct_copy: Option<String> = match value {
                     Expr::Ident { .. } | Expr::Field { .. } | Expr::Path { .. } => {
                         match self.ty_at(names, value.span()) {
-                            Some(zz_checker::Type::Struct(s)) => Some(s.clone()),
+                            Some(zz_checker::Type::Struct(s, _)) => Some(s.clone()),
                             _ => None,
                         }
                     }
@@ -483,7 +483,7 @@ impl Lowerer {
                         // were already handled by the direct paths above.
                         if parts.len() >= 2 {
                             if let Some(base_cid) = names.lookup(&parts[0]).map(str::to_string) {
-                                if let Some(zz_checker::Type::Struct(sname)) =
+                                if let Some(zz_checker::Type::Struct(sname, _)) =
                                     names.checker_types.get(&parts[0]).cloned()
                                 {
                                     let base_is_raw = names

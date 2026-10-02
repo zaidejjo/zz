@@ -142,7 +142,11 @@ impl<'a> FmtCtx<'a> {
                 self.fmt_block(body, source);
             }
             Stmt::Struct {
-                name, fields, pub_, ..
+                name,
+                generics,
+                fields,
+                pub_,
+                ..
             } => {
                 self.write_indent();
                 if *pub_ {
@@ -150,6 +154,16 @@ impl<'a> FmtCtx<'a> {
                 }
                 self.write_str("struct ");
                 self.write_str(&name.join("."));
+                if !generics.is_empty() {
+                    self.write_str("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.write_str(", ");
+                        }
+                        self.write_str(&g.name);
+                    }
+                    self.write_str(">");
+                }
                 self.write_str(" {");
                 if fields.is_empty() {
                     self.write_str("}");
@@ -306,6 +320,7 @@ impl<'a> FmtCtx<'a> {
             }
             Stmt::Impl {
                 name,
+                generics,
                 methods,
                 pub_,
                 ..
@@ -316,6 +331,16 @@ impl<'a> FmtCtx<'a> {
                 }
                 self.write_str("impl ");
                 self.write_str(&name.join("."));
+                if !generics.is_empty() {
+                    self.write_str("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.write_str(", ");
+                        }
+                        self.write_str(&g.name);
+                    }
+                    self.write_str(">");
+                }
                 self.write_str(" {");
                 if methods.is_empty() {
                     self.write_str("}");

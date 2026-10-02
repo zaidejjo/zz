@@ -245,7 +245,7 @@ impl Lowerer {
             "bool" => Some(format!("zz_bool({cid})")),
             t if t.starts_with("zz_struct_") => {
                 let sname = match names.checker_types.get(name) {
-                    Some(zz_checker::Type::Struct(s)) => s.clone(),
+                    Some(zz_checker::Type::Struct(s, _)) => s.clone(),
                     _ => return None,
                 };
                 let ident = Expr::Ident {
@@ -826,7 +826,8 @@ impl Lowerer {
                         .lookup_type(obj_name)
                         .map(|t| t.starts_with("zz_struct_"))
                         .unwrap_or(false)
-                } else if let Some(zz_checker::Type::Struct(sname)) = self.ty_at(names, obj.span())
+                } else if let Some(zz_checker::Type::Struct(sname, _)) =
+                    self.ty_at(names, obj.span())
                 {
                     self.is_unboxed_struct(sname)
                 } else {
@@ -837,7 +838,7 @@ impl Lowerer {
                     // scalar fields so the result is always a zz_value.
                     // Derive the field C type from the parent object's struct type.
                     let field_ctype = self.ty_at(names, obj.span()).and_then(|ot| {
-                        if let zz_checker::Type::Struct(sname) = ot {
+                        if let zz_checker::Type::Struct(sname, _) = ot {
                             if let Some(sig) = self.tp.structs.get(sname) {
                                 if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == name) {
                                     return Some(self.type_to_c(ft));
@@ -859,7 +860,7 @@ impl Lowerer {
                     let raw = self
                         .ty_at(names, obj.span())
                         .and_then(|ot| match ot {
-                            zz_checker::Type::Struct(sname) => self
+                            zz_checker::Type::Struct(sname, _) => self
                                 .resolve_access_chain(sname, std::slice::from_ref(name))
                                 .map(|(chain, _)| {
                                     let mut acc = format!("({obj_val})");
@@ -1559,7 +1560,7 @@ impl Lowerer {
                     .funcs
                     .get(&fname)
                     .and_then(|sig| sig.params.first().map(|(_, t)| t.clone()))
-                    .map(|t| matches!(&t, zz_checker::Type::Struct(_)))
+                    .map(|t| matches!(&t, zz_checker::Type::Struct(_, _)))
                     .unwrap_or(false);
                 out.push_str(&format!(
                     "        zz_value {err_tmp} = zz_match_err({tmp});\n"
@@ -1937,7 +1938,7 @@ impl Lowerer {
                 // Look up receiver type and dispatch.
                 if let Some(zzty) = self.ty_at(names, obj.span()) {
                     match zzty {
-                        zz_checker::Type::Struct(sname) => {
+                        zz_checker::Type::Struct(sname, _) => {
                             // Keep the direct-form convention (no receiver);
                             // promotion included for embedded methods.
                             if let Some((target, _)) = self.struct_method_target(sname, method) {
@@ -2285,7 +2286,9 @@ impl Lowerer {
                 .enumerate()
                 .map(|(i, _)| {
                     sig.params.get(i).and_then(|(_, t)| match t {
-                        zz_checker::Type::Struct(s) if self.is_unboxed_struct(s) => Some(s.clone()),
+                        zz_checker::Type::Struct(s, _) if self.is_unboxed_struct(s) => {
+                            Some(s.clone())
+                        }
                         _ => None,
                     })
                 })
@@ -2427,7 +2430,7 @@ impl Lowerer {
                 // scalar that must be boxed for function calls.
                 // Derive field type from the parent object's struct type.
                 let ctype = self.ty_at(names, obj.span()).and_then(|ot| {
-                    if let zz_checker::Type::Struct(sname) = ot {
+                    if let zz_checker::Type::Struct(sname, _) = ot {
                         if let Some(sig) = self.tp.structs.get(sname) {
                             if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == name) {
                                 return Some(self.type_to_c(ft));
@@ -2960,7 +2963,7 @@ impl Lowerer {
                     .iter()
                     .find(|(n, _)| n == fname)
                     .and_then(|(_, ft)| match ft {
-                        zz_checker::Type::Struct(inner) if self.is_unboxed_struct(inner) => {
+                        zz_checker::Type::Struct(inner, _) if self.is_unboxed_struct(inner) => {
                             Some(inner.clone())
                         }
                         _ => None,
@@ -3034,7 +3037,7 @@ impl Lowerer {
                 name: fname.clone(),
                 span: value.span(),
             };
-            if let zz_checker::Type::Struct(inner) = fty {
+            if let zz_checker::Type::Struct(inner, _) = fty {
                 if self.is_unboxed_struct(inner) {
                     let child = self.emit_boxed_value(inner, &access, names, out);
                     out.push_str(&format!(
@@ -3090,7 +3093,7 @@ impl Lowerer {
                         _ => field_val,
                     };
                     field_inits.push(format!(".{fname} = {final_val}"));
-                } else if let zz_checker::Type::Struct(inner) = fty {
+                } else if let zz_checker::Type::Struct(inner, _) = fty {
                     let child: Vec<(Vec<String>, &Expr)> = entries
                         .iter()
                         .filter(|(p, _)| p.len() > 1 && &p[0] == fname)
@@ -3125,7 +3128,7 @@ impl Lowerer {
                 {
                     // An unboxed struct value stored in a boxed parent must
                     // be boxed into a runtime object first.
-                    if let zz_checker::Type::Struct(inner) = fty {
+                    if let zz_checker::Type::Struct(inner, _) = fty {
                         if self.is_unboxed_struct(inner) {
                             let child = self.emit_boxed_value(inner, fexpr, names, out);
                             out.push_str(&format!(
@@ -3139,7 +3142,7 @@ impl Lowerer {
                     out.push_str(&format!(
                         "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed_fval});\n",
                     ));
-                } else if let zz_checker::Type::Struct(inner) = fty {
+                } else if let zz_checker::Type::Struct(inner, _) = fty {
                     let child: Vec<(Vec<String>, &Expr)> = entries
                         .iter()
                         .filter(|(p, _)| p.len() > 1 && &p[0] == fname)

@@ -165,7 +165,7 @@ fn dot_access_completions(
     // 1. Try struct field access (existing logic).
     let obj_type = resolve_obj_type(program, cr, obj_name);
     let struct_name = match obj_type.clone() {
-        Some(Type::Struct(name)) => name,
+        Some(Type::Struct(name, _)) => name,
         Some(other) => {
             // Receiver-typed method completions (`str.`, `vec.`, scalar ext
             // methods, ...): list `ns.method` entries from the merged funcs
@@ -352,8 +352,14 @@ fn resolve_obj_type(program: &Program, cr: &CheckResult, name: &str) -> Option<T
         return Some(func_sig_to_type(sig));
     }
     // 3. Check struct name.
-    if cr.structs.contains_key(name) {
-        return Some(Type::Struct(name.to_string()));
+    if let Some(sig) = cr.structs.get(name) {
+        // Generic parameters stay symbolic in hovers (`Box[T]`).
+        let args = sig
+            .generics
+            .iter()
+            .map(|g| Type::Named(g.clone()))
+            .collect();
+        return Some(Type::Struct(name.to_string(), args));
     }
     // 4. Walk AST for Decl.
     for stmt in &program.stmts {
@@ -678,7 +684,7 @@ fn type_from_annotation(ty: &zz_frontend::ast::Ty) -> Type {
                 "bool" => Type::Bool,
                 "str" => Type::Str,
                 "void" | "unit" => Type::Unit,
-                _ => Type::Struct(name),
+                _ => Type::Struct(name, Vec::new()),
             }
         }
         TyKind::Int => Type::Int,

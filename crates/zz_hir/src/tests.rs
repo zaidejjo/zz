@@ -230,7 +230,7 @@ fn struct_and_options_resolve() {
     let mut saw_struct_init = false;
     walk_exprs(tp, &mut |te| {
         if let zz_frontend::ast::Expr::StructInit { .. } = te.expr {
-            assert!(matches!(te.ty, Some(Type::Struct(_))), "got {:?}", te.ty);
+            assert!(matches!(te.ty, Some(Type::Struct(_, _))), "got {:?}", te.ty);
             saw_struct_init = true;
         }
         true

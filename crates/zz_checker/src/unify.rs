@@ -119,7 +119,14 @@ impl Unifier {
             | (Type::Never, _)
             | (_, Type::Never) => true,
             (Type::Named(x), Type::Named(y)) => x == y,
-            (Type::Struct(x), Type::Struct(y)) => x == y,
+            (Type::Struct(x, xa), Type::Struct(y, ya)) => {
+                x == y
+                    && xa.len() == ya.len()
+                    && xa
+                        .iter()
+                        .zip(ya.iter())
+                        .all(|(x, y)| self.eq_resolved(x, y))
+            }
             (Type::Opaque(x), Type::Opaque(y)) => x == y,
             (Type::Tuple(xs), Type::Tuple(ys)) => {
                 xs.len() == ys.len()
@@ -186,6 +193,9 @@ impl Unifier {
                 Box::new(self.resolve_deep(&v)),
             ),
             Type::Union(ts) => Type::Union(ts.iter().map(|x| self.resolve_deep(x)).collect()),
+            Type::Struct(n, args) => {
+                Type::Struct(n, args.iter().map(|x| self.resolve_deep(x)).collect())
+            }
             Type::Range(t) => Type::Range(Box::new(self.resolve_deep(&t))),
             Type::Ptr { mutable, inner } => Type::Ptr {
                 mutable,
@@ -316,7 +326,19 @@ impl Unifier {
             // surviving arm instead (join(Never, T) = T).
             (Type::Never, _) | (_, Type::Never) => Ok(()),
             (Type::Named(a), Type::Named(b)) if a == b => Ok(()),
-            (Type::Struct(a), Type::Struct(b)) if a == b => Ok(()),
+            (Type::Struct(a, aa), Type::Struct(b, bb)) if a == b => {
+                if aa.len() != bb.len() {
+                    return Err(UnifyError {
+                        left: a.to_string(),
+                        right: b.to_string(),
+                        message: "type argument arity mismatch".into(),
+                    });
+                }
+                for (x, y) in aa.iter().zip(bb.iter()) {
+                    self.unify_inner(x, y, journal)?;
+                }
+                Ok(())
+            }
             // Opaque handles unify only within the same module tag.
             (Type::Opaque(a), Type::Opaque(b)) if a == b => Ok(()),
             (Type::Range(x), Type::Range(y)) => self.unify_inner(x, y, journal),
@@ -478,6 +500,7 @@ impl Unifier {
             Type::Array(x) => self.occurs(id, x),
             Type::Dict(k, v) => self.occurs(id, k) || self.occurs(id, v),
             Type::Union(ts) => ts.iter().any(|x| self.occurs(id, x)),
+            Type::Struct(_, args) => args.iter().any(|x| self.occurs(id, x)),
             Type::Range(x) => self.occurs(id, x),
             Type::Ptr { inner, .. } => self.occurs(id, inner),
             _ => false,

@@ -527,6 +527,44 @@ Explicit (`User{ Base: Base{ id: 1, name: "Z" }, age: 19 }`) and shorthand
 Mixing an explicit embedded value with flattened leaves of the same subtree
 is rejected as ambiguous.
 
+### Generic Structs
+
+Structs take type parameters (`struct Box<T> { v: T }`). Construction
+infers the arguments (`Box{ v: 1 }` is `Box<int>`), exactly like generic
+function calls — no turbofish needed. Annotate when you want to pin it
+(`x: Box<int> = Box{ v: 1 }`):
+
+```zz
+struct Box<T> { v: T }
+
+impl Box<T> {
+    func get(self) -> T {
+        self.v
+    }
+}
+
+b := Box{ v: 42 }      // Box[int]
+println(b.get())       // 42
+s := Box{ v: "hi" }    // Box[str]
+
+struct Pair<A, B> { a: A, b: B }
+p := Pair{ a: 1, b: "s" }   // Pair[int, str]
+```
+
+Rules:
+- Use sites name their arguments (`Box<int>`); a bare `Box` for a generic
+  struct is an error, as is the wrong count (`Pair<int>`).
+- `Box<int>` and `Box<str>` are distinct types — assigning one to the
+  other is a type mismatch.
+- `impl Box<T>` scopes `T` over every method; the receiver unifies the
+  arguments at each call. A plain `impl Box` for a generic struct is an
+  error, and a method parameter may not shadow an impl parameter.
+- Type arguments erase at runtime: values store field data only, so
+  generic code runs identically to hand-monomorphized code (same
+  opcodes, same generated C — verified by test, not just claimed).
+  Value semantics hold unchanged: functions receive copies regardless
+  of type arguments.
+
 ### Method Call Syntax
 
 Method calls desugar to function calls with the receiver as the first argument:

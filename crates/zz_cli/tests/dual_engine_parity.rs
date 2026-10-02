@@ -637,6 +637,11 @@ parity_strict!(
     "syntax",
     "compound_assign.zz"
 );
+parity_strict!(
+    parity_syntax_generic_structs,
+    "syntax",
+    "generic_structs.zz"
+);
 parity_strict!(parity_syntax_fstrings, "syntax", "fstrings.zz");
 parity_strict!(parity_syntax_dicts, "syntax", "dicts.zz");
 parity_strict!(parity_syntax_string_blocks, "syntax", "string_blocks.zz");

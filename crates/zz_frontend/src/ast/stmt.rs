@@ -149,16 +149,23 @@ pub enum Stmt {
     },
     /// `struct Point { x: int, y: int }` — a named record type.
     /// For cross-module: `struct shapes.Point { ... }` stores ["shapes", "Point"].
+    /// `generics` holds plain type parameters (`struct Box[T] { v: T }`);
+    /// bounds are rejected by the parser (storage needs no constraints).
     Struct {
         name: Vec<String>,
+        generics: Vec<Ident>,
         fields: Vec<(Ident, Ty)>,
         span: Span,
         pub_: bool,
     },
     /// `impl Point { func dist(self) -> int { ... } }` — method block.
     /// Methods inside are registered as `TypeName.method_name` functions.
+    /// `impl Box[T]` scopes `T` over every method (prepended to each
+    /// method's own generics at registration, so call-site instantiation
+    /// unifies struct arguments from the receiver automatically).
     Impl {
         name: Vec<String>,
+        generics: Vec<Ident>,
         methods: Vec<Stmt>,
         span: Span,
         pub_: bool,
