@@ -431,6 +431,12 @@ e2e_success_test!(e2e_types_smart_try_convert, "types", "smart_try_convert.zz");
 // Stdlib fixtures
 e2e_success_test!(e2e_stdlib_strings, "stdlib", "strings.zz");
 e2e_success_test!(e2e_stdlib_vectors, "stdlib", "vectors.zz");
+e2e_success_test!(e2e_stdlib_str_utf8_parity, "stdlib", "str_utf8_parity.zz");
+e2e_success_test!(
+    e2e_stdlib_vec_nested_str_parity,
+    "stdlib",
+    "vec_nested_str_parity.zz"
+);
 e2e_success_test!(e2e_stdlib_math_ops, "stdlib", "math_ops.zz");
 e2e_success_test!(e2e_stdlib_math_consts, "stdlib", "math_consts.zz");
 e2e_success_test!(e2e_stdlib_enumerate_loop, "stdlib", "enumerate_loop.zz");

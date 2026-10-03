@@ -17,6 +17,19 @@ zz_value zz_dict_new(void);
 zz_value zz_dict_new_sized(size_t hint);
 zz_value zz_range(int64_t start, int64_t end, int64_t step);
 
+// ---- arena healing -----------------------------------------------------
+// True when the container header lives on an arena (or the C stack), so a
+// retaining store into an escaping container must copy it to the heap
+// first — the per-iteration `zz_arena_reset` would otherwise corrupt the
+// stored alias (nested-array first-element garbage + SIGSEGV class).
+int zz_array_is_arena(const zz_array *a);
+int zz_dict_is_arena(const zz_dict *d);
+// Heal for move paths (callers transfer ownership: `zz_array_push`,
+// `zz_assign`): arena-owned values (deep: nested arena values copied
+// recursively, heap elements shared via clone) become independent
+// heap-owned copies; heap values pass through unchanged (adopted).
+zz_value zz_heal_for_move(zz_value v);
+
 // ---- arena-aware constructors -------------------------------------------
 // When arena is non-NULL, the object header is bump-allocated on the arena
 // (O(1) alloc, freed in bulk at arena reset). When arena is NULL, falls

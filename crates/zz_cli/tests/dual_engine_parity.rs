@@ -860,6 +860,16 @@ parity_strict!(parity_types_type_inference, "types", "type_inference.zz");
 
 // Stdlib
 parity_strict!(parity_stdlib_strings, "stdlib", "strings.zz");
+parity_strict!(
+    parity_stdlib_str_utf8_parity,
+    "stdlib",
+    "str_utf8_parity.zz"
+);
+parity_strict!(
+    parity_stdlib_vec_nested_str_parity,
+    "stdlib",
+    "vec_nested_str_parity.zz"
+);
 parity_strict!(parity_stdlib_console, "stdlib", "console.zz");
 parity_strict!(parity_stdlib_envmod, "stdlib", "envmod.zz");
 parity_strict!(parity_stdlib_env_test, "stdlib", "env_test.zz");

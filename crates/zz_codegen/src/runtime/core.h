@@ -567,6 +567,13 @@ static inline void zz_release(zz_value *v) {
 // loop-arena reset reuses the buffer, so a stored alias would read back
 // garbage on the next iteration (and dangle past loop-arena destroy).
 zz_value zz_str_heal_arena(zz_value v);
+// Forward: defined in collections.c. Arena predicates + move-path heal
+// for containers (deep copy of arena-owned arrays/dicts, adopt heap).
+// `zz_assign` heals through these so `a[i] = lit` and `x = lit` inside
+// loops never alias the loop arena past its reset.
+int zz_array_is_arena(const zz_array *a);
+int zz_dict_is_arena(const zz_dict *d);
+zz_value zz_heal_for_move(zz_value v);
 
 static inline void zz_assign(zz_value *dst, zz_value src) {
     // Release old value if it's a refcounted type.
@@ -576,15 +583,26 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
         dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON) {
         zz_release(dst);
     }
+    // Heal arena-owned values into independent heap copies (loop-arena
+    // reset would otherwise corrupt the stored alias). Healed values
+    // arrive fresh-owned (refs==1, solely ours), so the retain below
+    // must be skipped for them — retaining would leak one share.
+    int healed = 0;
     if (src.tag == ZZ_STR && src.s && !src.s->interned && src.s->refs == 0) {
         src = zz_str_heal_arena(src);
+    } else if (src.tag == ZZ_ARRAY && src.arr && zz_array_is_arena(src.arr)) {
+        src = zz_heal_for_move(src);
+        healed = 1;
+    } else if (src.tag == ZZ_DICT && src.dict && zz_dict_is_arena(src.dict)) {
+        src = zz_heal_for_move(src);
+        healed = 1;
     }
     *dst = src;
     // Retain the new value for refcounted types.
-    if (src.tag == ZZ_ARRAY || src.tag == ZZ_BYTES || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
+    if (!healed && (src.tag == ZZ_ARRAY || src.tag == ZZ_BYTES || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
         src.tag == ZZ_OBJECT ||
         src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
-        src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON) {
+        src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON)) {
         zz_retain(dst);
     }
 }

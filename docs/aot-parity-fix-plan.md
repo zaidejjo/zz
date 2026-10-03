@@ -1,7 +1,7 @@
 # AOT parity fix plan — nested `[[str]]` corruption + UTF-8 string measure
 
 Branch: `fix/aot-nested-array-utf8-parity` (branched from `dev` @ `8604635`)
-Status: PLAN ONLY — no runtime/codegen changes yet.
+Status: FIXED + VERIFIED — see §7. Implementation committed on this branch.
 Toolchain verified: `zz 0.1.6`, `clang 22.1.8`, Linux x86_64, repo `/home/zaid/Projects/zz_lang`.
 
 ## 0. Repro status on this branch (2026-10-03)
@@ -189,3 +189,59 @@ All three keep the `vec.push` copy-on-write contract (VM: input untouched) — a
 - Unicode `lower`/`upper`/`trim` parity (VM Unicode-aware vs AOT ASCII-only) — document, fix separately.
 - Char-count caching in `zz_str` header (perf) — only if benchmarks regress.
 - Table-pkg flat workaround (`cells:[str]` row-major + `nrows/ncols`) stays valid regardless; this branch removes the need for it on native.
+- Chained index *stores* (`t.rows[0][0] = x`): VM drops the write into a temp
+  clone (read-back shows the old value), native writes through. Pre-existing
+  lowering-level divergence, untouched by this fix; new fixtures deliberately
+  cover reads only. Fix separately (either engine converging needs a
+  semantics decision + its own parity tests).
+
+## 7. Fix record (implemented on this branch)
+
+### Bug 2 — UTF-8 measure (VM parity restored)
+- `runtime/strings.h`: new `zz_utf8_seq_len` / `zz_str_char_len` /
+  `zz_str_char_byte_off` helpers; `zz_str_get` rewritten char-indexed
+  (negative-aware, OOB → unit + err). Invalid bytes count as one
+  single-byte char each (never crash/loop).
+- `runtime/strings.c`: `zz_str_length` returns chars; `zz_str_split` empty
+  separator emits per-char items AND matches Rust `split("")` exactly
+  (`"ab"` → `["", "a", "b", ""]`, `""` → `["", ""]`).
+- `runtime/collections.c`: `zz_len` / `zz_len_field` (`ZZ_STR` arms) return
+  chars; `zz_slice_value` (`ZZ_STR` arm) normalizes + maps char bounds to
+  byte offsets. Byte-internal ops (concat/compare/print/hash) untouched.
+- Verified: `mini4` → `3/3/╭/─` on `--native` (`-O0` and `-p -O3`);
+  extended edge fixture (negative index, slices, empty/ASCII, split empties)
+  byte-identical VM vs native.
+
+### Bug 1 — nested `[[str]]` arena aliasing (SIGSEGV fixed)
+- Reproduced on `dev` HEAD: struct-field + loop push (`loopfield.zz`)
+  SIGSEGVs natively while VM passes. Root cause: inner literals use
+  `zz_array_new_arena_sized` (header + items on the loop arena); retaining
+  stores only healed strings, so the outer heap array aliased arena memory
+  and `zz_arena_reset` overwrote it (first-element garbage → tag corruption
+  → `<value>` → SIGSEGV). Minimal 2-push repros pass because straight-line
+  temps are never released/reset.
+- `runtime/collections.{h,c}`: `zz_array_is_arena` / `zz_dict_is_arena`
+  predicates; `zz_heal_for_move` (move convention: copy arena incl. deep
+  nested + wrapper lookthrough, adopt heap) and extended
+  `zz_clone_for_store` (share convention: copy arena, `zz_clone` heap);
+  depth-capped at 32. Applied at every ingress: `zz_array_push`,
+  `zz_vec_append`/`push`/`insert`, `zz_dict_set`, `zz_object_set_field`,
+  `zz_assign` (skips the retain when it healed — fresh-owned needs none).
+  Ownership conventions per site preserved (share sites still bump, move
+  sites still adopt — no new leaks).
+- Hardening in the same area: `zz_array_push` + `zz_vec_insert` growth now
+  migrates `ZZ_ARRAY_ARENA_MAGIC` buffers to malloc before realloc
+  (`zz_vec_append` already did; realloc-on-arena is heap corruption).
+- Verified: `loopfield` + `tablelike` (10-row struct loop) + `mini1/mini2`
+  identical VM vs native at `-O0` and `-p`; ASan+UBSan clean (no UAF/UB;
+  only pre-existing exit-time leaks, same as baseline).
+
+### Tests added
+- `tests/fixtures/stdlib/str_utf8_parity.zz` + `vec_nested_str_parity.zz`
+  (plain + struct + loop shapes, read-only), registered strict in both
+  `crates/zz_cli/tests/e2e.rs` and `dual_engine_parity.rs`.
+- Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`
+  clean; `./scripts/test-fast.sh` green (incl. full dual-engine parity).
+  Note: `zz_lsp cross_file::parse_file_entry_performance` flaked once
+  under parallel clang load (66ms vs threshold) and passes in isolation
+  (0.02s) — unrelated crate, no shared code with this fix.
