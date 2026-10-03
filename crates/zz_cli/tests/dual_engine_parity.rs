@@ -678,6 +678,9 @@ parity_strict!(
     "syntax",
     "struct_scalar_fields.zz"
 );
+// Bug 8 regression: free-function method syntax (`p.bump()` === `bump(p)`)
+// must lower the receiver on both engines.
+parity_strict!(parity_syntax_method_free_fn, "syntax", "method_free_fn.zz");
 parity_strict!(
     parity_syntax_for_annotated_decl,
     "syntax",
