@@ -2109,10 +2109,13 @@ impl Lowerer {
                     match zzty {
                         zz_checker::Type::Struct(sname, _) => {
                             // Impl methods keep the direct-form convention
-                            // (no receiver; struct-pointer convention);
-                            // promotion included for embedded methods.
+                            // (struct-pointer receiver); promotion included
+                            // for embedded methods. The receiver is kept so
+                            // the impl call site can pass `&recv` — including
+                            // non-Ident receivers like `arr[0]` (boxed at
+                            // runtime, unboxed into a temp at the call site).
                             if let Some((target, _)) = self.struct_method_target(sname, method) {
-                                (target, None)
+                                (target, Some(*obj.clone()))
                             } else {
                                 // Free function on a non-Ident receiver
                                 // (`origin().bump()`, `arr[0].bump()`,
@@ -2499,12 +2502,12 @@ impl Lowerer {
         // struct first are NOT impl methods): the emitted arg is a raw C
         // struct and must be boxed into a runtime object. Positional: slot
         // i of ordered_args matches sig param i (named args already
-        // reordered above); the method receiver (if any) lives outside.
-        // With a method receiver present on a NON-impl callee, sig
-        // param 0 IS the receiver, so explicit args shift by one
-        // (params[i+1] <-> ordered_args[i]). Impl methods keep the old
-        // mapping (their own emission path handles self separately).
-        let recv_shift = usize::from(method_receiver.is_some() && !self.is_impl_method(&cname));
+        // reordered above); the method receiver (if any) lives outside
+        // `ordered_args`. Whenever a receiver is present, explicit arg `i`
+        // maps to sig param `i+1` (param 0 is the receiver) — for impl
+        // methods and non-impl callees alike, since the impl emission path
+        // also passes `self` separately (`skip(1)` below).
+        let recv_shift = usize::from(method_receiver.is_some());
         let struct_box_for_arg: Vec<Option<String>> = match self.tp.funcs.get(&cname) {
             Some(sig) => ordered_args
                 .iter()
@@ -2921,15 +2924,45 @@ impl Lowerer {
             let is_impl_method = self.is_impl_method(&cname_for_native);
             if is_impl_method {
                 if let Some(method_receiver) = method_receiver_for_call.as_ref() {
-                    // For struct receivers, use the raw C variable name
-                    // (no clone) so we can take its address for the
-                    // struct-pointer parameter. For non-struct receivers,
-                    // emit normally.
-                    let recv_val = if let Expr::Ident { name, .. } = method_receiver {
-                        if let Some(cid) = names.lookup(name) {
-                            cid.to_string()
+                    // Struct name from `ns.Type.method` (e.g. `main.Box`
+                    // from `main.Box.inc`).
+                    let sname: Option<String> = cname_for_native
+                        .rsplit_once('.')
+                        .map(|(s, _)| s.to_string());
+                    let unboxed = sname.as_deref().is_some_and(|s| self.is_unboxed_struct(s));
+                    // Unbox a boxed `zz_value` temp into a raw struct temp
+                    // for unboxed-receiver methods. Boxed-receiver methods
+                    // take `zz_value *self`, so the boxed temp passes
+                    // directly.
+                    let unbox_tmp = |boxed: &str, names: &mut NameCtx, out: &mut String| {
+                        if unboxed {
+                            let sname = sname.clone().unwrap_or_default();
+                            let raw = names.fresh("_recv_raw");
+                            let ctype = format!("zz_struct_{}", mangle(&sname));
+                            out.push_str(&format!("    {ctype} {raw};\n"));
+                            self.emit_unbox_struct(&sname, boxed, &raw, names, out);
+                            raw
                         } else {
-                            self.emit_expr(method_receiver, names, out)
+                            boxed.to_string()
+                        }
+                    };
+                    let recv_val = if let Expr::Ident { name, .. } = method_receiver {
+                        match names.lookup(name) {
+                            Some(cid) => {
+                                let cid = cid.to_string();
+                                // Raw struct local: pass its address
+                                // directly. Boxed local (e.g. bound to a
+                                // call/index result): unbox into a temp.
+                                let is_raw = names
+                                    .lookup_type(name)
+                                    .is_some_and(|t| t.starts_with("zz_struct_"));
+                                if is_raw {
+                                    cid
+                                } else {
+                                    unbox_tmp(&cid, names, out)
+                                }
+                            }
+                            None => self.emit_expr(method_receiver, names, out),
                         }
                     } else if let Expr::Path { parts, .. } = method_receiver {
                         // Promoted struct receiver (`u.Base`): emit the raw
@@ -2942,10 +2975,19 @@ impl Lowerer {
                             let rv = self.emit_expr(method_receiver, names, out);
                             let tmp = names.fresh("_recv");
                             out.push_str(&format!("    zz_value {tmp} = {rv};\n"));
-                            tmp
+                            unbox_tmp(&tmp, names, out)
                         }
                     } else {
-                        self.emit_expr(method_receiver, names, out)
+                        // Arbitrary receiver (`arr[0]`, `make_pt()`, ...):
+                        // always a boxed `zz_value` at runtime (array
+                        // elements and call results never inhabit raw C
+                        // structs). Materialize into a temp, then unbox
+                        // into a raw struct temp when the method expects
+                        // an unboxed receiver.
+                        let rv = self.emit_expr(method_receiver, names, out);
+                        let boxed = names.fresh("_recv_box");
+                        out.push_str(&format!("    zz_value {boxed} = {rv};\n"));
+                        unbox_tmp(&boxed, names, out)
                     };
                     let rest_args: Vec<String> = arg_items.into_iter().skip(1).collect();
                     let rest_n = rest_args.len();
@@ -3536,6 +3578,71 @@ impl Lowerer {
             ));
         }
         obj_tmp
+    }
+
+    /// Unbox a boxed struct `zz_value` (`boxed`, a `zz_object`) into a raw
+    /// unboxed C struct lvalue (`raw`, e.g. `zz_struct_ns__Box`). Emits one
+    /// field extraction per declared field: `zz_object_get_field` yields an
+    /// owned `zz_value`, whose scalar payload (`.i`/`.f`/`.b`) fills the raw
+    /// field. Nested unboxed structs recurse through a field temp. Only
+    /// called for unboxed struct types (all fields scalar or nested
+    /// unboxed), so every field has a known scalar extraction.
+    fn emit_unbox_struct(
+        &self,
+        sname: &str,
+        boxed: &str,
+        raw: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) {
+        let fields: Vec<(String, zz_checker::Type)> = self
+            .tp
+            .structs
+            .get(sname)
+            .map(|s| s.fields.clone())
+            .unwrap_or_default();
+        for (fname, fty) in &fields {
+            // Follow embedded promotion when the field lives in a base
+            // struct (`u.id` → `(u).Base.id`).
+            let chain = self
+                .resolve_access_chain(sname, std::slice::from_ref(fname))
+                .map(|(c, _)| c)
+                .unwrap_or_else(|| vec![fname.clone()]);
+            let mut acc = format!("({raw})");
+            for p in &chain {
+                acc = format!("({acc}).{p}");
+            }
+            match fty {
+                zz_checker::Type::Int => {
+                    out.push_str(&format!(
+                        "    {acc} = zz_object_get_field(&{boxed}, \"{fname}\").i;\n"
+                    ));
+                }
+                zz_checker::Type::Float => {
+                    out.push_str(&format!(
+                        "    {acc} = zz_object_get_field(&{boxed}, \"{fname}\").f;\n"
+                    ));
+                }
+                zz_checker::Type::Bool => {
+                    out.push_str(&format!(
+                        "    {acc} = zz_object_get_field(&{boxed}, \"{fname}\").b;\n"
+                    ));
+                }
+                zz_checker::Type::Struct(inner, _) if self.is_unboxed_struct(inner) => {
+                    let ftmp = names.fresh("_unbox_f");
+                    out.push_str(&format!(
+                        "    zz_value {ftmp} = zz_object_get_field(&{boxed}, \"{fname}\");\n"
+                    ));
+                    // Nested boxed object → raw nested struct temp, then copy.
+                    let ntmp = names.fresh("_unbox_n");
+                    let nctype = format!("zz_struct_{}", mangle(inner));
+                    out.push_str(&format!("    {nctype} {ntmp};\n"));
+                    self.emit_unbox_struct(inner, &ftmp, &ntmp, names, out);
+                    out.push_str(&format!("    {acc} = {ntmp};\n"));
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Box a binary operand that lowers to a raw unboxed struct into a

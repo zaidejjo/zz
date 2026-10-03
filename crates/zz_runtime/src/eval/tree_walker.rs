@@ -990,18 +990,31 @@ impl Interp {
                 if !named_vals.is_empty() {
                     if let Value::Func(fv) = &f {
                         let n = fv.params.len();
-                        let mut reordered: Vec<Value> = vec![Value::Unit; n];
+                        let mut reordered: Vec<Option<Value>> = vec![None; n];
                         for (i, v) in arg_vals.iter().enumerate() {
                             if i < n {
-                                reordered[i] = v.clone();
+                                reordered[i] = Some(v.clone());
                             }
                         }
                         for (name, val) in &named_vals {
                             if let Some(i) = fv.params.iter().position(|p| &p.name.name == name) {
-                                reordered[i] = val.clone();
+                                reordered[i] = Some(val.clone());
                             }
                         }
-                        arg_vals = reordered;
+                        // Unfilled slots take their default (evaluated in
+                        // the caller's environment); slots without defaults
+                        // fall back to unit and let `call` report arity.
+                        let mut filled: Vec<Value> = Vec::with_capacity(n);
+                        for (i, slot) in reordered.into_iter().enumerate() {
+                            match slot {
+                                Some(v) => filled.push(v),
+                                None => match fv.params.get(i).and_then(|p| p.default.as_ref()) {
+                                    Some(d) => filled.push(self.eval(d)?.into_value()?),
+                                    None => filled.push(Value::Unit),
+                                },
+                            }
+                        }
+                        arg_vals = filled;
                     }
                 }
                 self.call(f, arg_vals, *span).map(Flow::Value)
@@ -1451,10 +1464,10 @@ impl Interp {
     fn call_func(
         &mut self,
         fv: FuncValue,
-        args: Vec<Value>,
+        mut args: Vec<Value>,
         span: Span,
     ) -> Result<Value, EvalError> {
-        if args.len() != fv.params.len() {
+        if args.len() > fv.params.len() {
             return Err(EvalError::new(
                 format!(
                     "expected {} arguments, found {}",
@@ -1463,6 +1476,30 @@ impl Interp {
                 ),
                 span,
             ));
+        }
+        if args.len() < fv.params.len() {
+            // Fill omitted trailing defaults (evaluated in the caller's
+            // environment, mirroring call-site inline expansion). Every
+            // missing slot must have a default; the first default-less
+            // slot is still an arity error, matching the checker.
+            for p in &fv.params[args.len()..] {
+                match &p.default {
+                    Some(d) => {
+                        let v = self.eval(d)?.into_value()?;
+                        args.push(v);
+                    }
+                    None => {
+                        return Err(EvalError::new(
+                            format!(
+                                "expected {} arguments, found {}",
+                                fv.params.len(),
+                                args.len()
+                            ),
+                            span,
+                        ));
+                    }
+                }
+            }
         }
         let mut scope = Env::with_parent(&fv.env);
         for (p, v) in fv.params.iter().zip(args) {

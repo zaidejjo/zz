@@ -200,6 +200,35 @@ fn check_program_impl(
         initial_structs,
         initial_consts,
     );
+    // Offset fresh-var ids above any `Var(id)` carried in seed signatures
+    // from already-checked modules. Those ids were allocated by a previous
+    // checker's unifier; reusing them here would unify unrelated types
+    // across the module boundary.
+    {
+        let mut max_seen: Option<u32> = None;
+        let bump = |max_seen: &mut Option<u32>, t: &Type| {
+            if let Some(id) = inference::max_var_id(t) {
+                *max_seen = Some(max_seen.map_or(id, |m| m.max(id)));
+            }
+        };
+        for ty in checker.env.iter().flat_map(|s| s.values()) {
+            bump(&mut max_seen, ty);
+        }
+        for sig in checker.funcs.values() {
+            for (_, pt) in &sig.params {
+                bump(&mut max_seen, pt);
+            }
+            bump(&mut max_seen, &sig.ret);
+        }
+        for sig in checker.structs.values() {
+            for (_, ft) in &sig.fields {
+                bump(&mut max_seen, ft);
+            }
+        }
+        if let Some(m) = max_seen {
+            checker.unifier.reserve_vars_above(m.saturating_add(1));
+        }
+    }
     checker.errors.append(&mut decorator_errors);
 
     // Track which items are pub (for cross-module export).
@@ -575,7 +604,11 @@ fn check_program_impl(
     // is never popped, so pop_scope's check never fires for it).
     checker.emit_global_unused_warnings();
 
-    // Build pub-only maps for cross-module export.
+    // Build pub-only maps for cross-module export. Signature types are
+    // deep-resolved so inferred returns (e.g. `ping()` with no annotation
+    // unifies its ret var to `unit` during body checking) export as
+    // concrete types, never as the defining checker's `Var(id)` — a bare
+    // id would collide with the importer's own fresh vars.
     let pub_bindings: HashMap<String, Type> = bindings
         .iter()
         .filter(|(k, _)| pub_bindings_set.contains(k.as_str()))
@@ -585,13 +618,30 @@ fn check_program_impl(
         .funcs
         .iter()
         .filter(|(k, _)| pub_funcs_set.contains(k.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| {
+            let mut sig = v.clone();
+            sig.params = sig
+                .params
+                .iter()
+                .map(|(n, t)| (n.clone(), checker.unifier.resolve_deep(t)))
+                .collect();
+            sig.ret = checker.unifier.resolve_deep(&sig.ret);
+            (k.clone(), sig)
+        })
         .collect();
     let pub_structs: HashMap<String, StructSig> = checker
         .structs
         .iter()
         .filter(|(k, _)| pub_structs_set.contains(k.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| {
+            let mut sig = v.clone();
+            sig.fields = sig
+                .fields
+                .iter()
+                .map(|(n, t)| (n.clone(), checker.unifier.resolve_deep(t)))
+                .collect();
+            (k.clone(), sig)
+        })
         .collect();
 
     // Deep-resolve the recorded span types now that all unification is done.

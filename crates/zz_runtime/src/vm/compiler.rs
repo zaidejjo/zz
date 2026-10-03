@@ -3028,11 +3028,34 @@ impl Compiler {
                         Expr::Path { parts, .. } => Some(parts[0].as_str()),
                         _ => None,
                     };
-                    let has_named_or_defaults = callee_name.is_some_and(|cn| {
+                    // Resolve the `func_info` key: bare `Ident` calls use
+                    // the short name while keys are namespaced (`g` vs
+                    // `main.g`). Exact match first, then a unique
+                    // `*.name` suffix (mirrors the AOT owned-fallback).
+                    let info_key: Option<String> = callee_name.and_then(|cn| {
+                        if self.func_info.contains_key(cn) {
+                            Some(cn.to_string())
+                        } else {
+                            let suffix = format!(".{cn}");
+                            let mut hits: Vec<&String> = self
+                                .func_info
+                                .keys()
+                                .filter(|k| k.ends_with(&suffix))
+                                .collect();
+                            hits.sort_unstable();
+                            hits.dedup();
+                            if hits.len() == 1 {
+                                Some(hits[0].clone())
+                            } else {
+                                None
+                            }
+                        }
+                    });
+                    let has_named_or_defaults = info_key.as_ref().is_some_and(|k| {
                         !named.is_empty()
                             || self
                                 .func_info
-                                .get(cn)
+                                .get(k)
                                 .is_some_and(|fi| fi.has_default.iter().any(|&d| d))
                     });
 
@@ -3041,8 +3064,9 @@ impl Compiler {
                     } else if is_range {
                         3
                     } else if has_named_or_defaults {
-                        callee_name
-                            .and_then(|cn| self.func_info.get(cn))
+                        info_key
+                            .as_ref()
+                            .and_then(|k| self.func_info.get(k))
                             .map_or(args.len() + named.len(), |fi| fi.param_names.len())
                     } else {
                         args.len() + named.len()
@@ -3064,7 +3088,7 @@ impl Compiler {
                             }
                         }
                     } else if has_named_or_defaults {
-                        self.compile_reordered_args(callee_name.unwrap(), args, named);
+                        self.compile_reordered_args(info_key.as_deref().unwrap(), args, named);
                     } else {
                         for a in args {
                             self.compile_expr(a);

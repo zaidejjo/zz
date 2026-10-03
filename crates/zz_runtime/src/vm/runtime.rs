@@ -1960,7 +1960,8 @@ impl Vm {
     ) -> Result<(), EvalError> {
         match callee {
             Value::Func(fv) if fv.chunk.is_some() => {
-                if args.len() != fv.params.len() {
+                let mut args = args;
+                if args.len() > fv.params.len() {
                     return Err(self.error(
                         format!(
                             "expected {} arguments, found {}",
@@ -1969,6 +1970,32 @@ impl Vm {
                         ),
                         span,
                     ));
+                }
+                if args.len() < fv.params.len() {
+                    // Fill omitted trailing defaults (evaluated against the
+                    // caller's environment). Mirrors `Interp::call_func` so
+                    // cross-module calls — whose defaults the per-program
+                    // compiler never saw — still honor the checker contract.
+                    let missing = fv.params.len() - args.len();
+                    let start = args.len();
+                    for i in 0..missing {
+                        match fv.params[start + i].default.as_ref() {
+                            Some(d) => {
+                                let v = interp.eval(d)?.into_value()?;
+                                args.push(v);
+                            }
+                            None => {
+                                return Err(self.error(
+                                    format!(
+                                        "expected {} arguments, found {}",
+                                        fv.params.len(),
+                                        start
+                                    ),
+                                    span,
+                                ));
+                            }
+                        }
+                    }
                 }
                 let stack_base = self.stack.len();
                 self.stack.extend(args);

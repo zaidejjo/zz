@@ -1152,3 +1152,33 @@ fn container_struct_temp_is_released_after_append() {
         appends[0]
     );
 }
+
+#[test]
+fn native_indexed_struct_method_receiver() {
+    // Indexed receivers (`arr[0].method()`) once dropped `self` in AOT
+    // lowering (`method(NULL, 0)` — C arity error), and impl-method call
+    // sites misaligned explicit args against `self` (first user arg boxed
+    // as the struct). Both now lower like the VM.
+    let src = r#"
+struct Box { v: int }
+impl Box {
+    func inc(self, n: int) -> Box {
+        Box{ v: self.v + n }
+    }
+    func get(self) -> int {
+        self.v
+    }
+}
+func main() {
+    arr := [Box{ v: 1 }]
+    arr[0] = arr[0].inc(41)
+    println(arr[0].get())
+    b := Box{ v: 1 }
+    c := b.inc(41)
+    println(c.get())
+    println(b.inc(1).get())
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "42\n42\n2\n");
+}

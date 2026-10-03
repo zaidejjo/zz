@@ -34,6 +34,18 @@ impl Unifier {
         Type::Var(id)
     }
 
+    /// Ensure future `fresh_var` ids never collide with variables imported
+    /// from already-checked modules. Seed signatures may carry `Var(id)`
+    /// ids allocated by a previous checker's unifier; without this offset
+    /// the new checker would reuse the same ids for unrelated locals and
+    /// unify them together (e.g. an imported `-> unit` ret var colliding
+    /// with an empty `[]` element var, mis-typing both as `str`).
+    pub fn reserve_vars_above(&mut self, next_free: u32) {
+        if self.next_var < next_free {
+            self.next_var = next_free;
+        }
+    }
+
     /// Directly bind a variable to a type (no occurs check — use when the
     /// type cannot contain the variable).
     pub fn bind(&mut self, id: u32, ty: Type) {

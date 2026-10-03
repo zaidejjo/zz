@@ -2047,3 +2047,41 @@ fn plain_struct_unaffected_by_generics() {
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["p"], Type::Struct("Point".into(), vec![]));
 }
+
+#[test]
+fn cross_module_inferred_ret_resolves_on_export() {
+    // Regression: `pub func ping()` with no return annotation exported its
+    // return type as a bare `Var(0)`. The importing module's fresh unifier
+    // then reused id 0 for an unrelated local (e.g. an empty `[]` element
+    // var), unifying `unit` with `str` and rejecting a valid program.
+    // Export now deep-resolves (ret becomes `unit`) and the importer
+    // offsets fresh ids above seeded ones.
+    let dep = check_src("pub func ping() {}");
+    assert!(!has_errors(&dep), "errors: {:?}", dep.errors);
+    let ping = dep.pub_funcs.get("ping").expect("pub ping").clone();
+    assert_eq!(ping.ret, Type::Unit, "exported ret must resolve to unit");
+    let mut seed = HashMap::new();
+    seed.insert("n.ping".to_string(), ping);
+    let main = "func main() -> [str] {\n    stop := false\n    if stop {\n        n.ping()\n    }\n    []\n}";
+    let r = check_src_with_funcs(main, seed);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn cross_module_nonunit_block_still_rejected() {
+    // A single-branch `if` whose body yields a non-unit value is still an
+    // error — including for cross-module calls. Only the spurious
+    // var-collision failure above was fixed.
+    let dep = check_src("pub func zstr() -> str { \"s\" }");
+    assert!(!has_errors(&dep), "errors: {:?}", dep.errors);
+    let zstr = dep.pub_funcs.get("zstr").expect("pub zstr").clone();
+    let mut seed = HashMap::new();
+    seed.insert("o.zstr".to_string(), zstr);
+    let main = "func main() -> [str] {\n    out: [str] = []\n    stop := false\n    if stop {\n        o.zstr()\n    }\n    out\n}";
+    let r = check_src_with_funcs(main, seed);
+    let errs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        errs.iter().any(|e| e.contains("type mismatch")),
+        "expected a type-mismatch error, got: {errs:?}"
+    );
+}
