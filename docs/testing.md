@@ -1,6 +1,12 @@
 # `zz test` — Built-in Test Framework
 
-VM-only in v1. AOT (`zz build`) harness, doctests, and `--isolate` subprocess mode are deferred (stubs below).
+Two engines: VM (default, in-process interpreter) and AOT (`--native`,
+per-file dev build with one process per test). Discovery, filters, and
+output are identical on both.
+
+Zero-config layout: with no path, `zz test` uses `./tests/` when it holds
+`.zz` files, else the current directory. No `zz.toml` needed — just drop
+test files in `tests/` (e.g. `tests/unit/math_test.zz`).
 
 ## Decorators
 
@@ -52,13 +58,14 @@ Metadata flags (`@test(...)` named args only):
 ## CLI
 
 ```
-zz test [filter] [FLAGS]
+zz test [path] [FLAGS]          # VM by default; ./tests/ when present, else .
+zz test --native [path] [FLAGS] # AOT: dev build per file, one process per test
 zz test --list
 ```
 
 | Flag | Meaning |
 |------|---------|
-| `[filter]` | Substring filter on `file :: test_name` |
+| `[path]` | `.zz` file or directory (default: `./tests/` if it holds `.zz` files, else `.`) |
 | `--exact` | Filter is exact match, not substring |
 | `--tag <t>` | Only tests with `tag = t` |
 | `--skip <s>` | Exclude tests matching substring `s` |
@@ -69,11 +76,28 @@ zz test --list
 | `--list` | List discovered tests without running |
 | `--repeat N` | Run suite N times |
 | `--fail-fast` | Stop after first failure |
+| `--fail-on-empty` | Exit 1 when no tests matched (default: exit 0) |
+| `--native`, `--aot` | AOT engine: compile each file once (dev), one process per test |
+| `--engine=vm\|native` | Select the test engine (default `vm`) |
+| `-p`, `--release` | With `--native`: optimized build (default: dev) |
+| `--timeout <ms>` | Soft time budget per test (default 60000): overruns print a notice, never interrupt or fail |
 | `--json` | Structured per-test JSON to stdout |
 | `--junit <path>` | JUnit XML for CI |
-| `--slow-threshold <ms>` | Mark passing tests slower than threshold with ⚠️ |
+| `--slow-threshold <ms>` | Mark passing tests slower than threshold as slow |
 | `--changed` | Only tests affected by files changed since last success (content hash, conservative) |
 | `-h/--help` | Help |
+
+### Engines
+
+- **VM** (default): fastest. Each test runs in a fresh `Interp`;
+  `@teardown` always runs, even on failure.
+- **AOT** (`--native`, dev build; `-p` upgrades to release): each test
+  file is compiled once, then every test runs in its own process.
+  A failing `assert` aborts only its own process (exit-code isolation),
+  and segfaults/signal deaths are reported per test instead of killing
+  the suite. Limitation: `@teardown` is skipped when its test fails in
+  AOT (the process is already gone); the VM still runs it. `should_panic`,
+  `retry`, `cases`, `timeout`, and `@setup` behave the same on both.
 
 ### `--nocapture` + parallel execution
 
@@ -103,18 +127,30 @@ Failure output includes `file:line` + source snippet. Structural diffing:
 - Structs/arrays/maps → recursive field/index diff, only differing fields highlighted, nesting via indentation.
 
 ```
-❌ [FAIL] tests/unit/math_test.zz :: test_addition (attempt 1/1, 2ms)
-   Assertion Failed: Expected equality
-   ------------------------------------------
-   - Left:  15        (red)
-   + Right: 18        (green)
+test test_addition ... ok (2ms)
+test test_flaky ... ok (5ms) (retried 2x)
+test test_slow ... ok (1.20s) (slow)
+test test_over ... ok (65.20s) (took 65.20s; over 60s soft budget, not interrupted)
+test test_broken ... FAILED (3ms)
+  error: Assertion Failed: Expected equality
+  - Left:  15
+  + Right: 18
 ```
 
 ## Terminal UI & Output Modes
 
+- Cargo-style blocks per file: `Running <file>`, `running N tests`,
+  `test <name> ... ok|FAILED|ignored (<dur>)`, then
+  `test result: ok|FAILED. X passed; Y failed; Z ignored; finished in <dur>`.
+  `ok` is green, `FAILED` red, `ignored` yellow; piped output is plain.
+  No symbols — `grep FAILED` / `grep "^test .* ok"` work in CI.
+- Durations print as `898ms` below a second, `1.20s` at/above it.
+- The 60s soft budget (`--timeout <ms>`) only prints a notice; tests are
+  never interrupted or failed by it. Hard timeouts come only from
+  `@test(timeout = ms)` (VM: watcher thread, AOT: child killed).
 - Live spinner/counter on TTY only; non-TTY/non-interactive falls back to plain, color-free, spinner-free output automatically.
-- Per-test timing; `--slow-threshold` flags slow passes with ⚠️ even on pass.
-- Summary: total, passed (green), failed (red), ignored (yellow), retried/flaky (magenta), wall-clock, seed.
+- Per-test timing; `--slow-threshold` flags slow passes even on pass.
+- Global footer across files: `test result: ... N total across M files; ...`.
 - `--json`: one JSON object per test (name, file, status, attempts, duration_ms, stdout, stderr, diff).
 - `--junit <path>`: JUnit XML (Jenkins/GitLab/GH Actions).
 
@@ -134,30 +170,33 @@ Non-TTY detection via `IsTerminal`; colors via `std.colors` with plain fallback.
 
 ```toml
 [test]
-threads = 4
-timeout = 1000
+jobs = 4
+serial = false
+fail-fast = false
+slow-threshold = 200   # ms
+timeout = 60000        # ms, soft budget (notice only)
 seed = 42
-tags = ["unit"]
-slow_threshold_ms = 200
-retry = 0
+repeat = 1
+engine = "vm"          # or "native"
 ```
 
-CLI flags always override file config. File is searched upward from `cwd`.
+CLI flags always override file config. No config file is required.
 
 ## Deferred
 
 - **Doctests:** `/// ```zz ... ``` ` extraction → `doctests` category. Design stub: reuse doc-comment trivia, register as synthetic `@test` with `file:line` of fence.
-- **AOT harness:** `zz build` test binary + same discovery.
-- **`--isolate` subprocess mode:** per-test child `zz test --run-one` for true segfault isolation.
+- **`--isolate` subprocess mode:** per-test child `zz test --run-one` for true segfault isolation *in the VM engine* (AOT already isolates per test).
 - **Precise `--changed`:** cross-file fine-grained dependency hashing.
 
 ## Examples
 
 ```bash
-zz test                          # all tests, parallel
+zz test                          # ./tests/ when present, else ., VM, parallel
 zz test parser --tag unit        # filtered
 zz test --seed 123 --serial      # reproducible serial run
 zz test --nocapture              # live output (implies --serial)
+zz test --native                 # AOT (dev build), one process per test
+zz test --native -p              # AOT, optimized release build
 zz test --list
 zz test --json > results.json
 zz test --junit junit.xml

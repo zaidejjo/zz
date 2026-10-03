@@ -1,16 +1,28 @@
 //! `zz test` — discover and run `@test`-annotated functions.
 //!
+//! Engines:
+//! - VM (default): each test runs in a fresh `Interp` (in-process).
+//! - AOT (`--native`): each test file is compiled once (dev profile) into
+//!   a per-test dispatch binary; every test runs in its own process
+//!   (exit-code isolation — a failing `assert` aborts only its process).
+//!
 //! Design decisions (see docs/test-isolation.md):
-//! - Each test runs in a **fresh `Interp`** (in-process isolation; no fork).
-//! - Panic isolation via `std::panic::catch_unwind`.
-//! - Timeout via cooperative budget (op counter), not wall-clock.
+//! - VM: panic isolation via `std::panic::catch_unwind`.
+//! - Timeout: `@test(timeout = ms)` is a hard timeout (VM: watcher thread,
+//!   AOT: child kill). `--timeout <ms>` (default 60s) is a soft budget —
+//!   overruns print a notice but never interrupt or fail the test.
 //! - `--nocapture` forces `--serial` (interleaved output is noise).
 //! - `--jobs N` uses a thread pool with work-stealing (default: logical cores).
+//! - Files run sequentially so output stays grouped per file
+//!   (`Running <file>` blocks); tests *within* a file run serial/parallel
+//!   per `--serial`/`--jobs`.
+//! - No-arg discovery prefers `./tests/` when it holds `.zz` files
+//!   (zero-config; no `zz.toml` needed), else the current directory.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,9 +34,23 @@ use zz_runtime::{Interp, Value};
 
 use crate::loader;
 
+/// Soft per-test time budget: overruns print a notice but never
+/// interrupt or fail the test. Configurable via `--timeout <ms>`.
+const DEFAULT_SOFT_BUDGET: Duration = Duration::from_secs(60);
+
+/// Harness files generated for AOT mode. Discovery skips them so a
+/// leftover harness is never picked up as a test file.
+const AOT_HARNESS_PREFIX: &str = "zz_test_harness_";
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestEngine {
+    Vm,
+    Native,
+}
 
 struct TestConfig {
     path: String,
@@ -33,7 +59,9 @@ struct TestConfig {
     tag: Option<String>,
     skip: Option<String>,
     fail_fast: bool,
+    fail_on_empty: bool,
     slow_threshold: Option<Duration>,
+    soft_budget: Duration,
     nocapture: bool,
     serial: bool,
     jobs: usize,
@@ -43,11 +71,13 @@ struct TestConfig {
     junit_path: Option<String>,
     repeat: usize,
     changed: bool,
+    engine: TestEngine,
+    native_release: bool,
 }
 
 impl TestConfig {
     fn parse(args: &[String]) -> Result<Self, String> {
-        // Load zz.toml defaults first.
+        // Load zz.toml defaults first (optional; absence is fine).
         let defaults = load_zz_toml_defaults();
 
         let mut path: Option<String> = None;
@@ -56,7 +86,9 @@ impl TestConfig {
         let mut tag: Option<String> = None;
         let mut skip: Option<String> = None;
         let mut fail_fast = defaults.fail_fast;
+        let mut fail_on_empty = false;
         let mut slow_threshold = defaults.slow_threshold;
+        let mut soft_budget = defaults.soft_budget;
         let mut nocapture = false;
         let mut serial = defaults.serial;
         let mut jobs: Option<usize> = defaults.jobs;
@@ -66,16 +98,73 @@ impl TestConfig {
         let mut junit_path: Option<String> = None;
         let mut repeat: usize = defaults.repeat;
         let mut changed = false;
+        let mut engine = defaults.engine;
+        let mut native_release = false;
 
         let mut i = 0;
         while i < args.len() {
+            // `--flag=value` forms for value flags.
+            if args[i].starts_with("--filter=")
+                || args[i].starts_with("--tag=")
+                || args[i].starts_with("--skip=")
+                || args[i].starts_with("--jobs=")
+                || args[i].starts_with("--seed=")
+                || args[i].starts_with("--slow-threshold=")
+                || args[i].starts_with("--junit=")
+                || args[i].starts_with("--repeat=")
+                || args[i].starts_with("--timeout=")
+                || args[i].starts_with("--engine=")
+            {
+                let (flag, val) = args[i].split_once('=').unwrap();
+                let val = val.to_string();
+                match flag {
+                    "--filter" => filter = Some(val),
+                    "--tag" => tag = Some(val),
+                    "--skip" => skip = Some(val),
+                    "--jobs" => jobs = val.parse::<usize>().ok(),
+                    "--seed" => seed = val.parse::<u64>().ok(),
+                    "--slow-threshold" => {
+                        if let Ok(ms) = val.parse::<u64>() {
+                            slow_threshold = Some(Duration::from_millis(ms));
+                        }
+                    }
+                    "--junit" => junit_path = Some(val),
+                    "--repeat" => {
+                        if let Ok(n) = val.parse::<usize>() {
+                            repeat = n.max(1);
+                        }
+                    }
+                    "--timeout" => {
+                        if let Ok(ms) = val.parse::<u64>() {
+                            soft_budget = Duration::from_millis(ms);
+                        }
+                    }
+                    "--engine" => {
+                        engine = match val.as_str() {
+                            "vm" => TestEngine::Vm,
+                            "native" | "aot" => TestEngine::Native,
+                            _ => {
+                                return Err(format!(
+                                    "unknown --engine `{val}`\n\nhint: use --engine vm|native"
+                                ));
+                            }
+                        };
+                    }
+                    _ => {}
+                }
+                i += 1;
+                continue;
+            }
             match args[i].as_str() {
                 "--nocapture" | "--no-capture" => nocapture = true,
                 "--serial" => serial = true,
                 "--exact" => exact = true,
                 "--fail-fast" => fail_fast = true,
+                "--fail-on-empty" => fail_on_empty = true,
                 "--list" => list_only = true,
                 "--json" => json_output = true,
+                "--native" | "--aot" => engine = TestEngine::Native,
+                "-p" | "--release" => native_release = true,
                 "--filter" | "-f" => {
                     i += 1;
                     filter = args.get(i).cloned();
@@ -102,6 +191,30 @@ impl TestConfig {
                         slow_threshold = Some(Duration::from_millis(ms));
                     }
                 }
+                "--timeout" => {
+                    i += 1;
+                    if let Some(ms) = args.get(i).and_then(|s| s.parse::<u64>().ok()) {
+                        soft_budget = Duration::from_millis(ms);
+                    }
+                }
+                "--engine" => {
+                    i += 1;
+                    match args.get(i).map(String::as_str) {
+                        Some("vm") => engine = TestEngine::Vm,
+                        Some("native") | Some("aot") => engine = TestEngine::Native,
+                        Some(other) => {
+                            return Err(format!(
+                                "unknown --engine `{other}`\n\nhint: use --engine vm|native"
+                            ));
+                        }
+                        None => {
+                            return Err(
+                                "missing value for --engine\n\nhint: use --engine vm|native"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
                 "--junit" => {
                     i += 1;
                     junit_path = args.get(i).cloned();
@@ -125,15 +238,26 @@ impl TestConfig {
                            --serial         Run tests sequentially\n  \
                            --seed <n>       Shuffle seed for reproducible order\n  \
                            --fail-fast      Stop after first failure\n  \
+                           --fail-on-empty  Exit 1 when no tests matched (default: exit 0)\n  \
                            --list           List discovered tests without running\n  \
                            --nocapture      Show stdout/stderr live (forces serial)\n  \
-                           --slow-threshold Mark passes slower than N ms with ⚠️\n  \
+                           --slow-threshold Mark passes slower than N ms\n  \
+                           --timeout <ms>   Soft time budget per test (default 60000);\n  \
+                           overruns print a notice, never interrupt or fail\n  \
+                           --native, --aot  Run tests as AOT binaries (dev build)\n  \
+                           --engine=vm|native  Select the test engine (default vm)\n  \
+                           -p, --release    With --native: optimized build (default: dev)\n  \
                            --json           Structured JSON output to stdout\n  \
                            --junit <path>   JUnit XML to file\n  \
                            --repeat N       Run tests N times\n  \
                            --changed        Only run tests for files changed vs git HEAD\n  \
                            -h, --help       Show this help\n\n\
-                         Without a path, discovers @test functions in the current directory."
+                         ENGINES:\n  \
+                           VM (default): in-process interpreter, fastest.\n  \
+                           AOT (--native): each file compiled once (dev), each test\n  \
+                           runs in its own process (exit-code isolation).\n\n\
+                         Without a path, uses ./tests/ when it holds .zz files,\n  \
+                         else the current directory. No zz.toml required."
                         .to_string());
                 }
                 other if other.starts_with('-') => {
@@ -148,7 +272,7 @@ impl TestConfig {
             i += 1;
         }
 
-        let path = path.unwrap_or_else(|| ".".to_string());
+        let path = path.unwrap_or_else(default_test_path);
 
         // --nocapture forces --serial
         if nocapture {
@@ -178,7 +302,9 @@ impl TestConfig {
             tag,
             skip,
             fail_fast,
+            fail_on_empty,
             slow_threshold,
+            soft_budget,
             nocapture,
             serial,
             jobs,
@@ -188,6 +314,8 @@ impl TestConfig {
             junit_path,
             repeat,
             changed,
+            engine,
+            native_release,
         })
     }
 
@@ -213,8 +341,10 @@ struct TestDefaults {
     serial: bool,
     fail_fast: bool,
     slow_threshold: Option<Duration>,
+    soft_budget: Duration,
     seed: Option<u64>,
     repeat: usize,
+    engine: TestEngine,
 }
 
 impl Default for TestDefaults {
@@ -224,13 +354,16 @@ impl Default for TestDefaults {
             serial: false,
             fail_fast: false,
             slow_threshold: None,
+            soft_budget: DEFAULT_SOFT_BUDGET,
             seed: None,
             repeat: 1,
+            engine: TestEngine::Vm,
         }
     }
 }
 
 /// Load `[test]` section from `zz.toml` in the current directory.
+/// Missing file / section is fine (zero-config); only overrides apply.
 fn load_zz_toml_defaults() -> TestDefaults {
     let Ok(content) = std::fs::read_to_string("zz.toml") else {
         return TestDefaults::default();
@@ -265,8 +398,48 @@ fn load_zz_toml_defaults() -> TestDefaults {
     if let Some(v) = test_section.get("repeat").and_then(|v| v.as_integer()) {
         d.repeat = (v.max(1)) as usize;
     }
+    if let Some(v) = test_section.get("timeout").and_then(|v| v.as_integer()) {
+        d.soft_budget = Duration::from_millis(v.max(0) as u64);
+    }
+    if let Some(v) = test_section.get("engine").and_then(|v| v.as_str()) {
+        d.engine = match v {
+            "native" | "aot" => TestEngine::Native,
+            _ => TestEngine::Vm,
+        };
+    }
 
     d
+}
+
+/// No-arg test root: `./tests/` when it holds `.zz` files, else `.`.
+/// Zero-config — no `zz.toml` needed.
+fn default_test_path() -> String {
+    let tests = Path::new("tests");
+    if tests.is_dir() && dir_has_zz(tests) {
+        return "tests".to_string();
+    }
+    ".".to_string()
+}
+
+fn dir_has_zz(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') || name == "target" || name == "vendor" || name == "build" {
+                continue;
+            }
+            if dir_has_zz(&p) {
+                return true;
+            }
+        } else if p.extension().and_then(|e| e.to_str()) == Some("zz") {
+            return true;
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +453,8 @@ struct TestResult {
     passed: bool,
     ignored: bool,
     slow: bool,
+    /// Duration exceeded the soft budget (notice only, never fails).
+    over_budget: bool,
     reason: Option<String>,
     duration: Duration,
     error_msg: Option<String>,
@@ -373,12 +548,16 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let mut all_tests: Vec<TestInfo> = Vec::new();
+    // Discover per file (keeps file grouping for output).
+    let mut groups: Vec<(PathBuf, Vec<TestInfo>)> = Vec::new();
     let mut load_errors = false;
-
     for file in &files {
         match discover_tests(file) {
-            Ok(tests) => all_tests.extend(tests),
+            Ok(tests) => {
+                if !tests.is_empty() {
+                    groups.push((file.clone(), tests));
+                }
+            }
             Err(e) => {
                 eprintln!("zz test: {e}");
                 load_errors = true;
@@ -390,9 +569,15 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
         return Err("failed to load some test files".to_string());
     }
 
-    apply_filters(&mut all_tests, &config);
+    // Filter within each group; drop empty groups.
+    for (_, tests) in groups.iter_mut() {
+        let mut v = std::mem::take(tests);
+        apply_filters(&mut v, &config);
+        *tests = v;
+    }
+    groups.retain(|(_, t)| !t.is_empty());
 
-    if all_tests.is_empty() {
+    if groups.is_empty() {
         let msg = match (&config.filter, &config.tag, &config.skip) {
             (f, t, s) if f.is_some() || t.is_some() || s.is_some() => {
                 let mut parts = Vec::new();
@@ -414,59 +599,129 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
         } else {
             eprintln!("zz test: {msg}");
         }
+        if config.fail_on_empty {
+            return Err(msg);
+        }
         return Ok(());
     }
 
     if config.list_only {
-        print_test_list(&all_tests, config.use_color());
+        print_test_list_grouped(&groups, config.use_color());
         return Ok(());
     }
 
-    // Deterministic shuffle
-    let mut tests = all_tests;
+    // Deterministic shuffle *within* each file (seeded; files stay sorted
+    // so output blocks are stable).
     if !config.serial {
         let mut rng = Rng::new(config.seed);
-        rng.shuffle(&mut tests);
+        for (_, tests) in groups.iter_mut() {
+            rng.shuffle(tests);
+        }
+    }
+
+    // AOT: compile one dispatch binary per file up front (dev by default,
+    // release with `-p/--release`). VM needs no setup.
+    let mut aot_bins: BTreeMap<PathBuf, (PathBuf, PathBuf)> = BTreeMap::new();
+    if config.engine == TestEngine::Native {
+        for (file, tests) in &groups {
+            match build_aot_harness(file, tests, config.native_release) {
+                Ok(b) => {
+                    aot_bins.insert(file.clone(), b);
+                }
+                Err(e) => {
+                    cleanup_aot(&mut aot_bins);
+                    return Err(e);
+                }
+            }
+        }
     }
 
     let repeat = config.repeat;
     let mut all_results: Vec<TestResult> = Vec::new();
     let overall_start = Instant::now();
+    let use_color = config.use_color();
+    let total_files = groups.len();
 
     for iteration in 0..repeat {
         if repeat > 1 && !config.json_output {
             eprintln!("\n--- iteration {}/{} ---", iteration + 1, repeat);
         }
-
-        let start = Instant::now();
-        let results = if config.parallel() {
-            run_parallel(&tests, &config)?
-        } else {
-            run_serial(&tests, &config)?
-        };
-
-        let iter_failed = results.iter().filter(|r| !r.passed && !r.ignored).count();
-
-        // Summary per iteration (non-json)
-        if !config.json_output {
-            let seed_note = if !config.serial {
-                format!(" (seed={})", config.seed)
-            } else {
-                String::new()
-            };
-            if repeat > 1 {
-                eprintln!("  iteration {}:", iteration + 1);
+        let iter_start = Instant::now();
+        let mut iter_results: Vec<TestResult> = Vec::new();
+        let mut failed_seen = false;
+        let engine_label = match config.engine {
+            TestEngine::Vm => "vm",
+            TestEngine::Native => {
+                if config.native_release {
+                    "aot (release)"
+                } else {
+                    "aot (dev)"
+                }
             }
-            print_summary(&results, start.elapsed(), config.use_color(), &seed_note);
+        };
+        if !config.json_output {
+            if config.serial {
+                eprintln!("engine: {engine_label}");
+            } else {
+                eprintln!("engine: {engine_label} (seed={})", config.seed);
+            }
         }
 
-        all_results.extend(results);
+        for (gi, (file, tests)) in groups.iter().enumerate() {
+            if config.fail_fast && failed_seen {
+                // Remaining files skipped without running (streamed too).
+                for t in tests {
+                    let s = skipped_result(t, "skipped (--fail-fast)");
+                    if !config.json_output {
+                        print_test_line(&s, &config);
+                    }
+                    iter_results.push(s);
+                }
+                continue;
+            }
+            if !config.json_output {
+                if gi > 0 {
+                    eprintln!();
+                }
+                eprintln!("Running {}", file.display());
+                eprintln!("running {} tests", tests.len());
+            }
+            let file_start = Instant::now();
+            let bin = aot_bins.get(file).map(|(_, b)| b.clone());
+            // Streams each result test-by-test; the file footer follows.
+            let results = match run_group(tests, &config, bin.as_deref()) {
+                Ok(r) => r,
+                Err(e) => {
+                    cleanup_aot(&mut aot_bins);
+                    return Err(e);
+                }
+            };
+            let elapsed = file_start.elapsed();
+            if !config.json_output {
+                print_file_footer(&results, elapsed, use_color, &config);
+            }
+            if results.iter().any(|r| !r.passed && !r.ignored) {
+                failed_seen = true;
+            }
+            if config.fail_fast && failed_seen && gi + 1 < groups.len() {
+                eprintln!("stopping after first failure (--fail-fast)");
+            }
+            iter_results.extend(results);
+        }
+
+        if !config.json_output && total_files > 1 {
+            print_global_footer(&iter_results, iter_start.elapsed(), total_files, use_color);
+        }
+
+        all_results.extend(iter_results);
 
         // --fail-fast across iterations
-        if config.fail_fast && iter_failed > 0 {
+        if config.fail_fast && all_results.iter().any(|r| !r.passed && !r.ignored) {
             break;
         }
     }
+
+    cleanup_aot(&mut aot_bins);
 
     // --junit (aggregate across all iterations)
     if let Some(ref path) = config.junit_path {
@@ -480,25 +735,39 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
 
     // Aggregate summary for repeat mode
     if repeat > 1 && !config.json_output {
-        let total_passed = all_results
-            .iter()
-            .filter(|r| r.passed && !r.ignored)
-            .count();
-        let total_failed = all_results
-            .iter()
-            .filter(|r| !r.passed && !r.ignored)
-            .count();
-        let total_ignored = all_results.iter().filter(|r| r.ignored).count();
+        let (total_passed, total_failed, total_ignored, total_skipped) = {
+            let mut p = 0;
+            let mut f = 0;
+            let mut ig = 0;
+            let mut sk = 0;
+            for r in &all_results {
+                if r.ignored {
+                    ig += 1;
+                } else if r.passed {
+                    p += 1;
+                } else if is_failfast_skip(r) {
+                    sk += 1;
+                } else {
+                    f += 1;
+                }
+            }
+            (p, f, ig, sk)
+        };
         let total = all_results.len();
+        let skipped_info = if total_skipped > 0 {
+            format!("; {total_skipped} skipped")
+        } else {
+            String::new()
+        };
         eprintln!(
-            "\n--- aggregate: {total_failed} failed, {total_passed} passed, {total_ignored} ignored, {total} total in {:.2?} ---",
-            overall_start.elapsed()
+            "\naggregate: {total_failed} failed, {total_passed} passed, {total_ignored} ignored{skipped_info}, {total} total in {}",
+            fmt_dur(overall_start.elapsed())
         );
     }
 
     let failed = all_results
         .iter()
-        .filter(|r| !r.passed && !r.ignored)
+        .filter(|r| !r.passed && !r.ignored && !is_failfast_skip(r))
         .count();
     if failed > 0 {
         Err("tests failed".to_string())
@@ -507,132 +776,124 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Serial runner
-// ---------------------------------------------------------------------------
-
-fn run_serial(tests: &[TestInfo], config: &TestConfig) -> Result<Vec<TestResult>, String> {
-    let mut results = Vec::new();
-    let total = tests.len();
-    let use_color = config.use_color();
-
-    for (idx, test) in tests.iter().enumerate() {
-        if !config.nocapture && !config.json_output && use_color {
-            eprint!("\r\x1b[2m  running {}/{} ...\x1b[0m", idx + 1, total);
-            let _ = std::io::stderr().flush();
-        }
-
-        let r = run_single_test(test, config);
-
-        if !config.nocapture && !config.json_output && use_color {
-            eprint!("\r\x1b[2K");
-        }
-
-        if !config.nocapture && !config.json_output {
-            print_result_line(&r, use_color, config.slow_threshold);
-        }
-
-        let should_fail_fast = config.fail_fast && !r.passed && !r.ignored;
-        results.push(r);
-
-        if should_fail_fast && idx + 1 < total {
-            eprintln!("  stopping after first failure (--fail-fast)");
-            break;
-        }
+fn skipped_result(test: &TestInfo, msg: &str) -> TestResult {
+    TestResult {
+        name: test.name.clone(),
+        file: test.file.clone(),
+        passed: false,
+        ignored: false,
+        slow: false,
+        over_budget: false,
+        reason: None,
+        duration: Duration::ZERO,
+        error_msg: Some(msg.to_string()),
+        retried: 0,
     }
-
-    Ok(results)
 }
 
 // ---------------------------------------------------------------------------
-// Parallel runner
+// Group runner (one file): streams each result test-by-test as it finishes
 // ---------------------------------------------------------------------------
 
-fn run_parallel(tests: &[TestInfo], config: &TestConfig) -> Result<Vec<TestResult>, String> {
-    let total = tests.len();
-    let jobs = config.jobs.min(total);
-    let use_color = config.use_color();
+/// Run one file's tests with the selected engine (`aot_bin = None` → VM).
+/// Every result prints live, test-by-test: serially in order, parallel in
+/// completion order. Files still run sequentially so blocks stay grouped.
+fn run_group(
+    tests: &[TestInfo],
+    config: &TestConfig,
+    aot_bin: Option<&Path>,
+) -> Result<Vec<TestResult>, String> {
+    if config.parallel() {
+        run_group_parallel(tests, config, aot_bin)
+    } else {
+        run_group_serial(tests, config, aot_bin)
+    }
+}
 
-    // Shared state
+fn run_group_serial(
+    tests: &[TestInfo],
+    config: &TestConfig,
+    aot_bin: Option<&Path>,
+) -> Result<Vec<TestResult>, String> {
+    let mut results = Vec::with_capacity(tests.len());
+    for (idx, test) in tests.iter().enumerate() {
+        let r = match aot_bin {
+            Some(bin) => run_single_test_aot(test, idx, bin, config),
+            None => run_single_test_vm(test, config),
+        };
+        let stop = config.fail_fast && !r.passed && !r.ignored;
+        if !config.json_output {
+            print_test_line(&r, config);
+        }
+        results.push(r);
+        if stop {
+            // Mark the rest skipped so totals stay accurate.
+            for t in &tests[results.len()..] {
+                let s = skipped_result(t, "skipped (--fail-fast)");
+                if !config.json_output {
+                    print_test_line(&s, config);
+                }
+                results.push(s);
+            }
+            break;
+        }
+    }
+    Ok(results)
+}
+
+fn run_group_parallel(
+    tests: &[TestInfo],
+    config: &TestConfig,
+    aot_bin: Option<&Path>,
+) -> Result<Vec<TestResult>, String> {
+    let total = tests.len();
+    let jobs = config.jobs.min(total).max(1);
+
     let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..total).collect()));
     let results: Arc<Mutex<Vec<Option<TestResult>>>> = Arc::new(Mutex::new(vec![None; total]));
-    let completed = Arc::new(AtomicUsize::new(0));
     let fail_fast_flag = Arc::new(AtomicBool::new(false));
-
-    // Progress thread (only for TTY, non-json, non-nocapture)
-    let show_progress = !config.nocapture && !config.json_output && use_color;
-    let progress_handle = if show_progress {
-        let completed = Arc::clone(&completed);
-        Some(std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(100));
-            let done = completed.load(Ordering::Relaxed);
-            if done >= total {
-                break;
-            }
-            eprint!("\r\x1b[2m  running {done}/{total} ...\x1b[0m");
-            let _ = std::io::stderr().flush();
-        }))
-    } else {
-        None
-    };
+    // Serializes multi-line result blocks so parallel completions never
+    // interleave mid-test.
+    let print_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+    let aot_bin = aot_bin.map(|p| p.to_path_buf());
 
     std::thread::scope(|s| {
         let handles: Vec<_> = (0..jobs)
             .map(|_| {
                 let queue = Arc::clone(&queue);
                 let results = Arc::clone(&results);
-                let completed = Arc::clone(&completed);
                 let fail_fast_flag = Arc::clone(&fail_fast_flag);
+                let print_lock = Arc::clone(&print_lock);
                 let config_ref = config;
+                let bin_clone = aot_bin.clone();
 
-                s.spawn(move || {
-                    loop {
-                        // Pull next test from queue
-                        let idx = {
-                            let mut q = queue.lock().unwrap();
-                            q.pop_front()
-                        };
-
-                        let idx = match idx {
-                            Some(i) => i,
-                            None => break, // queue empty
-                        };
-
-                        // Check fail-fast
-                        if fail_fast_flag.load(Ordering::Relaxed) {
-                            // Put it back so we don't lose it, but break
-                            queue.lock().unwrap().push_front(idx);
-                            break;
-                        }
-
-                        let test = &tests[idx];
-                        let r = run_single_test(test, config_ref);
-
-                        // Check fail-fast after run
-                        if config_ref.fail_fast && !r.passed && !r.ignored {
-                            fail_fast_flag.store(true, Ordering::Relaxed);
-                        }
-
-                        // Store result
-                        {
-                            let mut res = results.lock().unwrap();
-                            res[idx] = Some(r);
-                        }
-
-                        let _done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-
-                        // Print result line (parallel mode: print as completed)
-                        if !config_ref.nocapture && !config_ref.json_output {
-                            let res = results.lock().unwrap();
-                            if let Some(ref r) = res[idx] {
-                                // Clear progress, print result
-                                if use_color {
-                                    eprint!("\r\x1b[2K");
-                                }
-                                print_result_line(r, use_color, config_ref.slow_threshold);
-                            }
-                        }
+                s.spawn(move || loop {
+                    let idx = {
+                        let mut q = queue.lock().unwrap();
+                        q.pop_front()
+                    };
+                    let idx = match idx {
+                        Some(i) => i,
+                        None => break,
+                    };
+                    if fail_fast_flag.load(Ordering::Relaxed) {
+                        queue.lock().unwrap().push_front(idx);
+                        break;
                     }
+                    let test = &tests[idx];
+                    let r = match bin_clone.as_deref() {
+                        Some(bin) => run_single_test_aot(test, idx, bin, config_ref),
+                        None => run_single_test_vm(test, config_ref),
+                    };
+                    if config_ref.fail_fast && !r.passed && !r.ignored {
+                        fail_fast_flag.store(true, Ordering::Relaxed);
+                    }
+                    // Stream test-by-test in completion order.
+                    if !config_ref.json_output {
+                        let _guard = print_lock.lock().unwrap();
+                        print_test_line(&r, config_ref);
+                    }
+                    results.lock().unwrap()[idx] = Some(r);
                 })
             })
             .collect();
@@ -642,44 +903,27 @@ fn run_parallel(tests: &[TestInfo], config: &TestConfig) -> Result<Vec<TestResul
         }
     });
 
-    // Wait for progress thread
-    if let Some(h) = progress_handle {
-        let _ = h.join();
-    }
-
-    // Clear progress line one last time
-    if show_progress {
-        eprint!("\r\x1b[2K");
-    }
-
-    // Collect results in order
     let results = Arc::try_unwrap(results)
         .map_err(|_| "results Arc still referenced".to_string())?
         .into_inner()
         .unwrap();
 
-    let results: Vec<TestResult> = results
+    Ok(results
         .into_iter()
         .enumerate()
-        .filter_map(|(i, r)| {
-            r.or_else(|| {
-                // Skipped due to fail-fast
-                Some(TestResult {
-                    name: tests[i].name.clone(),
-                    file: tests[i].file.clone(),
-                    passed: false,
-                    ignored: false,
-                    slow: false,
-                    reason: None,
-                    duration: Duration::ZERO,
-                    error_msg: Some("skipped (--fail-fast)".to_string()),
-                    retried: 0,
-                })
-            })
+        .map(|(i, r)| match r {
+            Some(r) => r,
+            // Never ran (fail-fast): stream its marker in file order.
+            None => {
+                let s = skipped_result(&tests[i], "skipped (--fail-fast)");
+                if !config.json_output {
+                    let _guard = print_lock.lock().unwrap();
+                    print_test_line(&s, config);
+                }
+                s
+            }
         })
-        .collect();
-
-    Ok(results)
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -689,7 +933,7 @@ fn run_parallel(tests: &[TestInfo], config: &TestConfig) -> Result<Vec<TestResul
 fn apply_filters(tests: &mut Vec<TestInfo>, config: &TestConfig) {
     if let Some(ref pat) = config.filter {
         if config.exact {
-            tests.retain(|t| t.name == *pat);
+            tests.retain(|t| t.name == *pat || display_name(&t.name, &t.file) == *pat);
         } else {
             let pat_lower = pat.to_lowercase();
             tests.retain(|t| t.name.to_lowercase().contains(&pat_lower));
@@ -971,7 +1215,7 @@ fn discover_in_stmt(stmt: &Stmt, file: &Path, module_index: usize) -> Vec<TestIn
 // Execution
 // ---------------------------------------------------------------------------
 
-fn run_single_test(test: &TestInfo, config: &TestConfig) -> TestResult {
+fn run_single_test_vm(test: &TestInfo, config: &TestConfig) -> TestResult {
     let max_retries = test.meta.retry.unwrap_or(0);
     let mut attempt = 0;
 
@@ -990,6 +1234,9 @@ fn run_single_test(test: &TestInfo, config: &TestConfig) -> TestResult {
                 r.slow = true;
             }
         }
+        if !r.ignored && r.duration > config.soft_budget {
+            r.over_budget = true;
+        }
 
         return r;
     }
@@ -1005,6 +1252,7 @@ fn run_test_attempt(test: &TestInfo, nocapture: bool) -> TestResult {
             passed: true,
             ignored: true,
             slow: false,
+            over_budget: false,
             reason: test.meta.reason.clone(),
             duration: start.elapsed(),
             error_msg: None,
@@ -1040,6 +1288,7 @@ fn run_test_attempt(test: &TestInfo, nocapture: bool) -> TestResult {
                     passed: false,
                     ignored: false,
                     slow: false,
+                    over_budget: false,
                     reason: None,
                     duration: start.elapsed(),
                     error_msg: Some(format!("timeout: exceeded {timeout_ms}ms limit")),
@@ -1058,6 +1307,7 @@ fn run_test_attempt(test: &TestInfo, nocapture: bool) -> TestResult {
             passed: true,
             ignored: false,
             slow: false,
+            over_budget: false,
             reason: None,
             duration: start.elapsed(),
             error_msg: None,
@@ -1077,6 +1327,7 @@ fn run_test_attempt(test: &TestInfo, nocapture: bool) -> TestResult {
                 passed,
                 ignored: false,
                 slow: false,
+                over_budget: false,
                 reason: if test.meta.should_panic {
                     Some("should_panic".to_string())
                 } else {
@@ -1109,6 +1360,7 @@ fn run_test_attempt(test: &TestInfo, nocapture: bool) -> TestResult {
                 passed,
                 ignored: false,
                 slow: false,
+                over_budget: false,
                 reason: if test.meta.should_panic {
                     Some("should_panic".to_string())
                 } else {
@@ -1260,114 +1512,587 @@ fn call_named_fn(interp: &mut Interp, name: &str, span: Span) -> Result<(), Stri
 }
 
 // ---------------------------------------------------------------------------
-// Output: --list
+// AOT engine: per-file dispatch binary, one process per test
 // ---------------------------------------------------------------------------
 
-fn print_test_list(tests: &[TestInfo], use_color: bool) {
-    for t in tests {
-        let tag_info = t
-            .meta
-            .tag
-            .as_deref()
-            .map(|t| format!(" [tag={t}]"))
-            .unwrap_or_default();
-        if use_color {
-            println!(
-                "  \x1b[36m{}\x1b[0m :: {}{tag_info}",
-                t.file.display(),
-                t.name
-            );
-        } else {
-            println!("  {} :: {}{tag_info}", t.file.display(), t.name);
+/// Compile one dispatch binary for a test file (dev by default, release
+/// with `-p/--release`). The harness inlines the test file's source plus a
+/// generated `main(args)` that runs a single test selected by argv[0].
+/// Returns `(harness_source_path, binary_path)`; both are cleaned up by
+/// [`cleanup_aot`] (the build cache entry is kept).
+fn build_aot_harness(
+    file: &Path,
+    tests: &[TestInfo],
+    release: bool,
+) -> Result<(PathBuf, PathBuf), String> {
+    let source = std::fs::read_to_string(file)
+        .map_err(|e| format!("cannot read test file `{}`: {e}", file.display()))?;
+    // A test file with its own `func main` would collide with the harness
+    // entrypoint; park it aside (it never runs under `zz test`).
+    let source = source
+        .replace("func main(", "func __zz_user_main(")
+        .replace("pub func main(", "pub func __zz_user_main(");
+    let orig_ns = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let prefix = format!("{orig_ns}.");
+
+    fn bare_name(qualified: &str, prefix: &str) -> String {
+        qualified
+            .strip_prefix(prefix)
+            .unwrap_or(qualified)
+            .to_string()
+    }
+
+    fn zz_literal(v: &Value) -> String {
+        match v {
+            Value::Int(n) => n.to_string(),
+            Value::Float(f) => {
+                if f.is_finite() && f.fract() == 0.0 {
+                    format!("{f:.1}")
+                } else {
+                    format!("{f:?}")
+                }
+            }
+            Value::Bool(b) => b.to_string(),
+            Value::Str(s) => {
+                let e: String = s
+                    .chars()
+                    .flat_map(|c| match c {
+                        '\\' => vec!['\\', '\\'],
+                        '"' => vec!['\\', '"'],
+                        '\n' => vec!['\\', 'n'],
+                        '\r' => vec!['\\', 'r'],
+                        '\t' => vec!['\\', 't'],
+                        c => vec![c],
+                    })
+                    .collect();
+                format!("\"{e}\"")
+            }
+            _ => "0".to_string(),
         }
     }
-    println!();
-    println!("{} tests found", tests.len());
+
+    let mut arms = String::new();
+    for (idx, test) in tests.iter().enumerate() {
+        let call = bare_name(&test.func_name.join("."), &prefix);
+        let args = test
+            .case_values
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(zz_literal)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let setup = test
+            .setup_fn
+            .as_deref()
+            .map(|s| format!("        {}()\n", bare_name(s, &prefix)))
+            .unwrap_or_default();
+        let teardown = test
+            .teardown_fn
+            .as_deref()
+            .map(|s| format!("        {}()\n", bare_name(s, &prefix)))
+            .unwrap_or_default();
+        // Separate `if`s (never `else if`): ZZ unifies `if/else` arm
+        // types, and test functions may return anything. The trailing
+        // bare `return` both normalizes every arm to unit (a no-else
+        // `if` requires a unit arm) and stops dispatch after a match.
+        // NOTE: a failing `assert` aborts the process, so `@teardown`
+        // is skipped on AOT failure (the VM still runs it). Documented.
+        arms.push_str(&format!(
+            "    if which == \"t{idx}\" {{\n{setup}        {call}({args})\n{teardown}        return\n    }}\n"
+        ));
+    }
+    arms.push_str("    fail(\"unknown test: \" + which)\n");
+
+    let harness_src = format!(
+        "{source}\n// __zz_test_harness__: generated by `zz test --native`, do not edit.\nfunc main(args: [str]) {{\n    if len(args) == 0 {{\n        fail(\"zz test harness: missing test id\")\n    }}\n    which := args[0]\n{arms}}}\n"
+    );
+
+    let harness_name = format!("{AOT_HARNESS_PREFIX}{orig_ns}_{}.zz", std::process::id());
+    let harness_path = file
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(&harness_name);
+    std::fs::write(&harness_path, &harness_src)
+        .map_err(|e| format!("cannot write AOT harness `{}`: {e}", harness_path.display()))?;
+
+    let mode = if release {
+        crate::build::BuildMode::Release
+    } else {
+        crate::build::BuildMode::Dev
+    };
+    let bin = match crate::build::build_release(
+        &harness_path,
+        mode,
+        &crate::build::ReleaseOptions::default(),
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = std::fs::remove_file(&harness_path);
+            return Err(format!("AOT build failed for `{}`: {e}", file.display()));
+        }
+    };
+    Ok((harness_path, bin))
+}
+
+/// Remove harness sources and their published `bin/` copies.
+/// The content cache under `~/.zz/cache` is kept for fast reruns.
+fn cleanup_aot(bins: &mut BTreeMap<PathBuf, (PathBuf, PathBuf)>) {
+    for (_, (harness, bin)) in std::mem::take(bins) {
+        let _ = std::fs::remove_file(&harness);
+        // Only the `bin/` copy next to the harness goes away; the cache
+        // entry stays. Never delete anything outside the harness dir.
+        if let Some(name) = harness.file_stem().and_then(|s| s.to_str()) {
+            if name.starts_with(AOT_HARNESS_PREFIX) {
+                let _ = std::fs::remove_file(&bin);
+                // Drop the now-empty `bin/` dir; keep it if others use it.
+                if let Some(dir) = bin.parent() {
+                    let _ = std::fs::remove_dir(dir);
+                }
+            }
+        }
+    }
+}
+
+/// Run one test as its own AOT process (`t<idx>` selects the dispatch
+/// arm). Exit 0 = pass; anything else = fail (inverted for `should_panic`).
+/// `@test(timeout = ms)` kills the child; the soft `--timeout` budget only
+/// marks `over_budget` (never interrupts).
+fn run_single_test_aot(test: &TestInfo, idx: usize, bin: &Path, config: &TestConfig) -> TestResult {
+    let max_retries = test.meta.retry.unwrap_or(0);
+    let mut attempt = 0;
+    loop {
+        let r = run_aot_attempt(test, idx, bin, config);
+        if !r.passed && !r.ignored && attempt < max_retries {
+            attempt += 1;
+            continue;
+        }
+        let mut r = r;
+        r.retried = attempt;
+        if let Some(threshold) = config.slow_threshold {
+            if r.passed && !r.ignored && r.duration >= threshold {
+                r.slow = true;
+            }
+        }
+        if !r.ignored && r.duration > config.soft_budget {
+            r.over_budget = true;
+        }
+        return r;
+    }
+}
+
+fn run_aot_attempt(test: &TestInfo, idx: usize, bin: &Path, config: &TestConfig) -> TestResult {
+    let start = Instant::now();
+    if test.meta.ignore {
+        return TestResult {
+            name: test.name.clone(),
+            file: test.file.clone(),
+            passed: true,
+            ignored: true,
+            slow: false,
+            over_budget: false,
+            reason: test.meta.reason.clone(),
+            duration: start.elapsed(),
+            error_msg: None,
+            retried: 0,
+        };
+    }
+
+    let id = format!("t{idx}");
+    let mut child = match std::process::Command::new(bin)
+        .arg(&id)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return TestResult {
+                name: test.name.clone(),
+                file: test.file.clone(),
+                passed: false,
+                ignored: false,
+                slow: false,
+                over_budget: false,
+                reason: None,
+                duration: start.elapsed(),
+                error_msg: Some(format!("cannot run AOT test binary: {e}")),
+                retried: 0,
+            };
+        }
+    };
+
+    // Drain pipes on threads: a chatty test (large stdout) must never
+    // block forever on a full pipe while we only poll for exit.
+    let child_stdout = child.stdout.take();
+    let child_stderr = child.stderr.take();
+    let out_drain = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut out) = child_stdout {
+            use std::io::Read;
+            let _ = out.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let err_drain = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut err) = child_stderr {
+            use std::io::Read;
+            let _ = err.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    // Poll for exit so `@test(timeout = ms)` can kill a hung child.
+    let hard_deadline = test
+        .meta
+        .timeout_ms
+        .map(|ms| start + Duration::from_millis(ms));
+    enum WaitOutcome {
+        Exited(std::process::ExitStatus),
+        TimedOut,
+        WaitError,
+    }
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break WaitOutcome::Exited(status),
+            Ok(None) => {
+                if let Some(deadline) = hard_deadline {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break WaitOutcome::TimedOut;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => break WaitOutcome::WaitError,
+        }
+    };
+
+    let message_of = |status: std::process::ExitStatus, stderr: &str| {
+        let tail: Vec<&str> = stderr.lines().rev().take(20).collect();
+        let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+        let tail = tail.trim();
+        if tail.is_empty() {
+            match status.code() {
+                Some(code) => format!("AOT test exited with code {code}"),
+                None => "AOT test killed by signal".to_string(),
+            }
+        } else {
+            tail.to_string()
+        }
+    };
+
+    match outcome {
+        WaitOutcome::TimedOut => {
+            // Drains end at kill-time EOF; join so no reader outlives us.
+            let _ = out_drain.join();
+            let _ = err_drain.join();
+            let ms = test.meta.timeout_ms.unwrap_or(0);
+            TestResult {
+                name: test.name.clone(),
+                file: test.file.clone(),
+                passed: false,
+                ignored: false,
+                slow: false,
+                over_budget: false,
+                reason: None,
+                duration: start.elapsed(),
+                error_msg: Some(format!("timeout: exceeded {ms}ms limit")),
+                retried: 0,
+            }
+        }
+        WaitOutcome::WaitError => {
+            let _ = out_drain.join();
+            let _ = err_drain.join();
+            TestResult {
+                name: test.name.clone(),
+                file: test.file.clone(),
+                passed: false,
+                ignored: false,
+                slow: false,
+                over_budget: false,
+                reason: None,
+                duration: start.elapsed(),
+                error_msg: Some("AOT test child status unknown".to_string()),
+                retried: 0,
+            }
+        }
+        WaitOutcome::Exited(status) => {
+            // Cap the failure message: last 20 lines of stderr.
+            let stderr = err_drain
+                .join()
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default();
+            let _ = out_drain.join();
+            if status.success() {
+                if test.meta.should_panic {
+                    TestResult {
+                        name: test.name.clone(),
+                        file: test.file.clone(),
+                        passed: false,
+                        ignored: false,
+                        slow: false,
+                        over_budget: false,
+                        reason: Some("should_panic".to_string()),
+                        duration: start.elapsed(),
+                        error_msg: Some("expected panic, test passed".to_string()),
+                        retried: 0,
+                    }
+                } else {
+                    TestResult {
+                        name: test.name.clone(),
+                        file: test.file.clone(),
+                        passed: true,
+                        ignored: false,
+                        slow: false,
+                        over_budget: false,
+                        reason: None,
+                        duration: start.elapsed(),
+                        error_msg: None,
+                        retried: 0,
+                    }
+                }
+            } else {
+                let msg = message_of(status, &stderr);
+                if test.meta.should_panic {
+                    TestResult {
+                        name: test.name.clone(),
+                        file: test.file.clone(),
+                        passed: true,
+                        ignored: false,
+                        slow: false,
+                        over_budget: false,
+                        reason: Some("should_panic".to_string()),
+                        duration: start.elapsed(),
+                        error_msg: Some(msg),
+                        retried: 0,
+                    }
+                } else {
+                    if config.nocapture {
+                        eprintln!("  FAILED: {}: {msg}", test.name);
+                    }
+                    TestResult {
+                        name: test.name.clone(),
+                        file: test.file.clone(),
+                        passed: false,
+                        ignored: false,
+                        slow: false,
+                        over_budget: false,
+                        reason: None,
+                        duration: start.elapsed(),
+                        error_msg: Some(msg),
+                        retried: 0,
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Output: per-test result line
+// Output: --list (grouped per file)
 // ---------------------------------------------------------------------------
 
-fn print_result_line(r: &TestResult, use_color: bool, _slow_threshold: Option<Duration>) {
-    let (sym, color) = if r.passed {
-        if r.ignored {
-            ("\u{25CB}", "\x1b[33m") // ○ yellow
-        } else {
-            ("\u{2713}", "\x1b[32m") // ✓ green
+fn print_test_list_grouped(groups: &[(PathBuf, Vec<TestInfo>)], _use_color: bool) {
+    let mut total = 0;
+    for (file, tests) in groups {
+        println!("Running {}", file.display());
+        println!("running {} tests", tests.len());
+        for t in tests {
+            let tag_info = t
+                .meta
+                .tag
+                .as_deref()
+                .map(|t| format!(" [tag={t}]"))
+                .unwrap_or_default();
+            println!("test {}{tag_info}", display_name(&t.name, &t.file));
+            total += 1;
+        }
+        println!();
+    }
+    println!("{total} tests found");
+}
+
+// ---------------------------------------------------------------------------
+// Output: cargo-style per-file blocks, no symbols
+// ---------------------------------------------------------------------------
+
+/// Bare test name for display: strip the `<file-stem>.` namespace prefix
+/// (`basic_assertions.test_x` → `test_x`). Group headers already show the
+/// file, so the prefix is noise. Filtering still uses the qualified name.
+fn display_name(name: &str, file: &Path) -> String {
+    if let Some(stem) = file.file_stem().and_then(|s| s.to_str()) {
+        let prefix = format!("{stem}.");
+        if let Some(bare) = name.strip_prefix(&prefix) {
+            return bare.to_string();
+        }
+    }
+    name.to_string()
+}
+/// `898ms` below a second, `1.20s` at/above it.
+fn fmt_dur(d: Duration) -> String {
+    if d.as_millis() < 1000 {
+        format!("{}ms", d.as_millis())
+    } else {
+        format!("{:.2}s", d.as_secs_f64())
+    }
+}
+
+fn status_word(r: &TestResult) -> &'static str {
+    if r.ignored {
+        "ignored"
+    } else if r.passed {
+        "ok"
+    } else if is_failfast_skip(r) {
+        "skipped"
+    } else {
+        "FAILED"
+    }
+}
+
+/// A `--fail-fast` leftover: never ran, not a real failure.
+fn is_failfast_skip(r: &TestResult) -> bool {
+    !r.passed && !r.ignored && r.error_msg.as_deref() == Some("skipped (--fail-fast)")
+}
+
+/// `test <name> ... <ok|FAILED|ignored> (<dur>)` — word first, status last.
+/// Colors: `ok` green, `FAILED` red, `ignored` yellow. No symbols.
+fn print_test_line(r: &TestResult, config: &TestConfig) {
+    let use_color = config.use_color();
+    let status = status_word(r);
+    let colored = if use_color {
+        match status {
+            "ok" => format!("\x1b[32m{status}\x1b[0m"),
+            "FAILED" => format!("\x1b[31m{status}\x1b[0m"),
+            _ => format!("\x1b[33m{status}\x1b[0m"),
         }
     } else {
-        ("\u{2717}", "\x1b[31m") // ✗ red
+        status.to_string()
     };
 
-    let retry_info = if r.retried > 0 {
-        format!(" (retried {}x)", r.retried)
+    let mut extra = String::new();
+    if r.retried > 0 {
+        extra.push_str(&format!(" (retried {}x)", r.retried));
+    }
+    if let Some(reason) = r.reason.as_deref() {
+        // `should_panic` is engine bookkeeping, not worth a suffix.
+        if reason != "should_panic" {
+            extra.push_str(&format!(" -- {reason}"));
+        }
+    }
+    if r.slow {
+        extra.push_str(" (slow)");
+    }
+    if r.over_budget {
+        extra.push_str(&format!(
+            " (took {}; over {} soft budget, not interrupted)",
+            fmt_dur(r.duration),
+            fmt_dur(config.soft_budget),
+        ));
+    }
+
+    eprintln!(
+        "test {} ... {} ({}){extra}",
+        display_name(&r.name, &r.file),
+        colored,
+        fmt_dur(r.duration)
+    );
+
+    if !r.passed && !r.ignored {
+        if let Some(msg) = r.error_msg.as_deref() {
+            for line in msg.lines() {
+                let line = line.trim_end();
+                if !line.is_empty() {
+                    eprintln!("  {line}");
+                }
+            }
+        }
+    }
+}
+
+/// `test result: <ok|FAILED>. X passed; Y failed; Z ignored; finished in <dur>`
+fn print_file_footer(
+    results: &[TestResult],
+    elapsed: Duration,
+    use_color: bool,
+    config: &TestConfig,
+) {
+    let passed = results.iter().filter(|r| r.passed && !r.ignored).count();
+    let failed = results
+        .iter()
+        .filter(|r| !r.passed && !r.ignored && !is_failfast_skip(r))
+        .count();
+    let ignored = results.iter().filter(|r| r.ignored).count();
+    let skipped = results.iter().filter(|r| is_failfast_skip(r)).count();
+    let over = results.iter().filter(|r| r.over_budget).count();
+
+    eprintln!();
+    let verdict = if failed == 0 { "ok" } else { "FAILED" };
+    let skipped_info = if skipped > 0 {
+        format!("; {skipped} skipped")
     } else {
         String::new()
     };
-
-    let reason_info = r
-        .reason
-        .as_deref()
-        .map(|r| format!(" \u{2014} {r}"))
-        .unwrap_or_default();
-
-    let slow_info = if r.slow { " \u{26A0}\u{FE0F}" } else { "" };
-
-    let dur_ms = r.duration.as_millis();
-
     if use_color {
+        let v = if failed == 0 {
+            format!("\x1b[32m{verdict}\x1b[0m")
+        } else {
+            format!("\x1b[31m{verdict}\x1b[0m")
+        };
         eprintln!(
-            "  {color}{sym}\x1b[0m {} {color}{dur_ms}ms\x1b[0m{retry_info}{reason_info}{slow_info}",
-            r.name,
+            "test result: {v}. {passed} passed; {failed} failed; {ignored} ignored{skipped_info}; finished in {}",
+            fmt_dur(elapsed),
         );
     } else {
         eprintln!(
-            "  {sym} {} {dur_ms}ms{retry_info}{reason_info}{slow_info}",
-            r.name,
+            "test result: {verdict}. {passed} passed; {failed} failed; {ignored} ignored{skipped_info}; finished in {}",
+            fmt_dur(elapsed),
+        );
+    }
+    if over > 0 {
+        eprintln!(
+            "note: {over} test(s) exceeded the {} soft budget (not interrupted)",
+            fmt_dur(config.soft_budget),
         );
     }
 }
 
-// ---------------------------------------------------------------------------
-// Output: summary
-// ---------------------------------------------------------------------------
-
-fn print_summary(results: &[TestResult], elapsed: Duration, use_color: bool, seed_note: &str) {
-    let total = results.len();
+fn print_global_footer(results: &[TestResult], elapsed: Duration, files: usize, use_color: bool) {
     let passed = results.iter().filter(|r| r.passed && !r.ignored).count();
-    let failed = results.iter().filter(|r| !r.passed && !r.ignored).count();
+    let failed = results
+        .iter()
+        .filter(|r| !r.passed && !r.ignored && !is_failfast_skip(r))
+        .count();
     let ignored = results.iter().filter(|r| r.ignored).count();
-    let slow = results.iter().filter(|r| r.slow).count();
-
+    let skipped = results.iter().filter(|r| is_failfast_skip(r)).count();
+    let total = results.len();
     eprintln!();
-
-    if use_color {
-        if failed == 0 {
-            eprint!("\x1b[32m{passed} passed\x1b[0m");
-        } else {
-            eprint!("\x1b[31m{failed} failed\x1b[0m, \x1b[32m{passed} passed\x1b[0m");
-        }
-        if ignored > 0 {
-            eprint!(", {ignored} ignored");
-        }
-        if slow > 0 {
-            eprint!(", \x1b[33m{slow} slow\x1b[0m");
-        }
-        eprintln!(", {total} total{seed_note} ({elapsed:.2?})");
+    let verdict = if failed == 0 { "ok" } else { "FAILED" };
+    let skipped_info = if skipped > 0 {
+        format!("; {skipped} skipped")
     } else {
-        if failed == 0 {
-            eprint!("{passed} passed");
+        String::new()
+    };
+    if use_color {
+        let v = if failed == 0 {
+            format!("\x1b[32m{verdict}\x1b[0m")
         } else {
-            eprint!("{failed} failed, {passed} passed");
-        }
-        if ignored > 0 {
-            eprint!(", {ignored} ignored");
-        }
-        if slow > 0 {
-            eprint!(", {slow} slow");
-        }
-        eprintln!(", {total} total{seed_note} ({elapsed:.2?})");
+            format!("\x1b[31m{verdict}\x1b[0m")
+        };
+        eprintln!(
+            "test result: {v}. {passed} passed; {failed} failed; {ignored} ignored{skipped_info}; {total} total across {files} files; finished in {}",
+            fmt_dur(elapsed),
+        );
+    } else {
+        eprintln!(
+            "test result: {verdict}. {passed} passed; {failed} failed; {ignored} ignored{skipped_info}; {total} total across {files} files; finished in {}",
+            fmt_dur(elapsed),
+        );
     }
 }
 
@@ -1380,10 +2105,13 @@ fn print_json_results(results: &[TestResult]) -> Result<(), String> {
     writeln!(stdout, "[").map_err(|e| format!("write error: {e}"))?;
 
     for (i, r) in results.iter().enumerate() {
+        // Fail-fast leftovers never ran: report `skipped`, not `failed`.
         let status = if r.ignored {
             "ignored"
         } else if r.passed {
             "passed"
+        } else if is_failfast_skip(r) {
+            "skipped"
         } else {
             "failed"
         };
@@ -1437,8 +2165,14 @@ fn json_escape(s: &str) -> String {
 
 fn write_junit(path: &str, results: &[TestResult]) -> Result<(), String> {
     let total = results.len();
-    let failures = results.iter().filter(|r| !r.passed && !r.ignored).count();
-    let skipped = results.iter().filter(|r| r.ignored).count();
+    let failures = results
+        .iter()
+        .filter(|r| !r.passed && !r.ignored && !is_failfast_skip(r))
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|r| r.ignored || is_failfast_skip(r))
+        .count();
     let time_s: f64 = results.iter().map(|r| r.duration.as_secs_f64()).sum();
 
     let mut xml = String::new();
@@ -1456,8 +2190,12 @@ fn write_junit(path: &str, results: &[TestResult]) -> Result<(), String> {
             r.duration.as_secs_f64(),
         ));
 
-        if r.ignored {
-            let message = r.reason.as_deref().unwrap_or("ignored");
+        if r.ignored || is_failfast_skip(r) {
+            let message = r
+                .reason
+                .as_deref()
+                .or(r.error_msg.as_deref())
+                .unwrap_or("skipped");
             xml.push_str(&format!("<skipped message=\"{}\"/>", xml_escape(message),));
         } else if !r.passed {
             let message = r.error_msg.as_deref().unwrap_or("test failed");
@@ -1527,13 +2265,25 @@ fn collect_zz_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String
                 // path deps), which would recurse forever. Matches the
                 // skip sets in `zz_pm::hash` / `zz_pm::cas` and the
                 // scaffolded `.gitignore` (vendor/, build/, src/bin/).
-                if name.starts_with('.') || name == "target" || name == "vendor" || name == "build"
+                // `bin/` holds published AOT artifacts next to sources.
+                if name.starts_with('.')
+                    || name == "target"
+                    || name == "vendor"
+                    || name == "build"
+                    || name == "bin"
                 {
                     continue;
                 }
             }
             collect_zz_recursive(&path, out)?;
         } else if path.extension().and_then(|e| e.to_str()) == Some("zz") {
+            // Never pick up generated AOT harnesses (also removed after
+            // the run; the skip guards leftovers from killed runs).
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if stem.starts_with(AOT_HARNESS_PREFIX) {
+                    continue;
+                }
+            }
             out.push(path);
         }
     }

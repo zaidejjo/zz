@@ -108,7 +108,8 @@ FLAGS:
     --fix, -f          apply safe auto-fixes (typo replacements, field corrections)
     --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
     --interactive, -i  with --fix, prompt for ambiguous fixes interactively
-    --native           with run, use the native AOT compiler instead of the VM
+    --native           with run/test, use the native AOT compiler instead of the VM
+                         (test: per-file dev build, one process per test)
     --embed <dir>      with run/build, serve (VM) or bake (native) a static asset
                        directory, readable at runtime via `fs.embedfs()`
     -p, --release      with build, full optimization (-O3 -flto=thin, dynamic, stripped)
