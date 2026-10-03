@@ -687,6 +687,11 @@ parity_strict!(
 // must lower the receiver on both engines.
 parity_strict!(parity_syntax_method_free_fn, "syntax", "method_free_fn.zz");
 parity_strict!(
+    parity_syntax_method_chain_recv,
+    "syntax",
+    "method_chain_recv.zz"
+);
+parity_strict!(
     parity_syntax_for_annotated_decl,
     "syntax",
     "for_annotated_decl.zz"

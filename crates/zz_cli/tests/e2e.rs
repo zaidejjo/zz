@@ -401,6 +401,11 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_syntax_struct_impl, "syntax", "struct_impl.zz");
 e2e_success_test!(e2e_syntax_method_free_fn, "syntax", "method_free_fn.zz");
+e2e_success_test!(
+    e2e_syntax_method_chain_recv,
+    "syntax",
+    "method_chain_recv.zz"
+);
 e2e_success_test!(e2e_syntax_function_types, "syntax", "function_types.zz");
 e2e_success_test!(e2e_syntax_decorators, "syntax", "decorators.zz");
 e2e_success_test!(
