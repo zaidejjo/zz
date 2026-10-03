@@ -107,6 +107,7 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "term.read_key" | "std.term.read_key" => Some("zz_term_read_key"),
         "term.get_size" | "std.term.get_size" => Some("zz_term_get_size"),
         "term.is_tty" | "std.term.is_tty" => Some("zz_term_is_tty"),
+        "term.flush" | "std.term.flush" => Some("zz_term_flush"),
         // Raw argv shares the fixed `zz_env_args` symbol (one source of
         // truth for both spellings and both engines).
         "args.get_raw" | "std.args.get_raw" => Some("zz_env_args"),
@@ -311,6 +312,7 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
         "zz_term_read_key" => Some("zz_value zz_term_read_key(zz_value unit, int *err);"),
         "zz_term_get_size" => Some("zz_value zz_term_get_size(zz_value unit, int *err);"),
         "zz_term_is_tty" => Some("zz_value zz_term_is_tty(zz_value unit, int *err);"),
+        "zz_term_flush" => Some("zz_value zz_term_flush(zz_value unit, int *err);"),
         "zz_args_parser" => Some("zz_value zz_args_parser(zz_value unit, int *err);"),
         "zz_args_str_flag" => {
             Some("zz_value zz_args_str_flag(zz_value h, zz_value name, zz_value def, int *err);")

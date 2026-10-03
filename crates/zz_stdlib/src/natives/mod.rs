@@ -2317,11 +2317,13 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("std.term.read_key", 0, term::term_read_key),
         ("std.term.get_size", 0, term::term_get_size),
         ("std.term.is_tty", 0, term::term_is_tty),
+        ("std.term.flush", 0, term::term_flush),
         ("term.enable_raw", 0, term::term_enable_raw),
         ("term.disable_raw", 0, term::term_disable_raw),
         ("term.read_key", 0, term::term_read_key),
         ("term.get_size", 0, term::term_get_size),
         ("term.is_tty", 0, term::term_is_tty),
+        ("term.flush", 0, term::term_flush),
     ] {
         m.insert(name.into(), NativeEntry { arity, f: func });
     }
