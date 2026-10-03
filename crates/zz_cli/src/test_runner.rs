@@ -665,6 +665,9 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
             } else {
                 eprintln!("engine: {engine_label} (seed={})", config.seed);
             }
+            if config.native_release && config.engine == TestEngine::Vm {
+                eprintln!("note: -p/--release only affects --native (VM ignores it)");
+            }
         }
 
         for (gi, (file, tests)) in groups.iter().enumerate() {
@@ -1531,7 +1534,9 @@ fn build_aot_harness(
     // entrypoint; park it aside (it never runs under `zz test`).
     let source = source
         .replace("func main(", "func __zz_user_main(")
-        .replace("pub func main(", "pub func __zz_user_main(");
+        .replace("func main (", "func __zz_user_main (")
+        .replace("pub func main(", "pub func __zz_user_main(")
+        .replace("pub func main (", "pub func __zz_user_main (");
     let orig_ns = file
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -1548,13 +1553,7 @@ fn build_aot_harness(
     fn zz_literal(v: &Value) -> String {
         match v {
             Value::Int(n) => n.to_string(),
-            Value::Float(f) => {
-                if f.is_finite() && f.fract() == 0.0 {
-                    format!("{f:.1}")
-                } else {
-                    format!("{f:?}")
-                }
-            }
+            Value::Float(f) => float_literal(*f),
             Value::Bool(b) => b.to_string(),
             Value::Str(s) => {
                 let e: String = s
@@ -1934,6 +1933,63 @@ fn display_name(name: &str, file: &Path) -> String {
     }
     name.to_string()
 }
+
+/// Plain-decimal float literal the ZZ lexer accepts (it has no exponent
+/// notation, and Rust `{:?}` emits `1e300` past ~1e16). Expansion is
+/// digit-exact, so the literal parses back to the same `f64`. Non-finite
+/// values can't come from source literals (only via 300+ digit monsters);
+/// stay loud instead of substituting silently.
+fn float_literal(f: f64) -> String {
+    if !f.is_finite() {
+        return "1.0/0.0".to_string();
+    }
+    let s = format!("{f:?}");
+    if !(s.contains('e') || s.contains('E')) {
+        if f.fract() == 0.0 && !s.contains('.') {
+            return format!("{s}.0");
+        }
+        return s;
+    }
+    let (neg, rest) = match s.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, s.as_str()),
+    };
+    let (mant, exp): (&str, i32) = match rest.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse().unwrap_or(0)),
+        None => (rest, 0),
+    };
+    let digits: String = mant.chars().filter(|c| *c != '.').collect();
+    let frac_len = mant
+        .split('.')
+        .nth(1)
+        .map(|fr| fr.len() as i32)
+        .unwrap_or(0);
+    let point = digits.len() as i32 - frac_len + exp; // digits before '.'
+    let mut out = String::new();
+    if neg {
+        out.push('-');
+    }
+    if point <= 0 {
+        out.push_str("0.");
+        out.push_str(&"0".repeat((-point) as usize));
+        let trimmed = digits.trim_start_matches('0');
+        if trimmed.is_empty() {
+            out.push('0');
+        } else {
+            out.push_str(trimmed);
+        }
+    } else if point as usize >= digits.len() {
+        out.push_str(&digits);
+        out.push_str(&"0".repeat(point as usize - digits.len()));
+        out.push_str(".0");
+    } else {
+        out.push_str(&digits[..point as usize]);
+        out.push('.');
+        out.push_str(&digits[point as usize..]);
+    }
+    out
+}
+
 /// `898ms` below a second, `1.20s` at/above it.
 fn fmt_dur(d: Duration) -> String {
     if d.as_millis() < 1000 {
@@ -2295,3 +2351,24 @@ fn collect_zz_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String
 // ---------------------------------------------------------------------------
 
 use std::io::IsTerminal;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn float_literal_has_no_exponents_and_roundtrips() {
+        for f in [
+            0.0, 1.0, -2.5, 0.1, 3.141_62, 123456.789, 1e300, 1.5e-7, -1.25e-10, 5e-324,
+        ] {
+            let lit = float_literal(f);
+            assert!(
+                !lit.contains(['e', 'E']),
+                "exponent leaked into {lit} for {f}"
+            );
+            let back: f64 = lit.parse().expect("literal must parse");
+            assert_eq!(back, f, "roundtrip failed for {lit}");
+        }
+        assert_eq!(float_literal(f64::INFINITY), "1.0/0.0");
+    }
+}

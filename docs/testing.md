@@ -147,7 +147,10 @@ test test_broken ... FAILED (3ms)
 - Durations print as `898ms` below a second, `1.20s` at/above it.
 - The 60s soft budget (`--timeout <ms>`) only prints a notice; tests are
   never interrupted or failed by it. Hard timeouts come only from
-  `@test(timeout = ms)` (VM: watcher thread, AOT: child killed).
+  `@test(timeout = ms)` (VM: watcher thread, AOT: child killed). Note the
+  VM timeout abandons its worker thread (Rust can't kill threads): an
+  overrun test may keep running in the background while the suite moves
+  on — use AOT for a true kill.
 - Live spinner/counter on TTY only; non-TTY/non-interactive falls back to plain, color-free, spinner-free output automatically.
 - Per-test timing; `--slow-threshold` flags slow passes even on pass.
 - Global footer across files: `test result: ... N total across M files; ...`.
