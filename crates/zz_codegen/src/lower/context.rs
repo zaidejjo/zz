@@ -1078,12 +1078,62 @@ impl Lowerer {
             Expr::Ident { name, .. } => names
                 .lookup_type(name)
                 .and_then(|ct| self.unmangled_struct_name(ct)),
-            Expr::Path { .. } | Expr::Field { .. } => match self.ty_at(names, e.span()) {
-                Some(zz_checker::Type::Struct(s, _)) if self.is_unboxed_struct(s) => {
-                    Some(s.clone())
+            Expr::Path { parts, .. } => {
+                // Raw only when rooted at an unboxed local; a path rooted
+                // at a boxed value (`q.x` where `q: zz_value`) lowers
+                // boxed and must flow through the runtime formatter.
+                let root_raw = parts
+                    .first()
+                    .and_then(|b| names.lookup_type(b))
+                    .map(|t| t.starts_with("zz_struct_"))
+                    .unwrap_or(false);
+                if !root_raw {
+                    return None;
                 }
-                _ => None,
-            },
+                match self.ty_at(names, e.span()) {
+                    Some(zz_checker::Type::Struct(s, _)) if self.is_unboxed_struct(s) => {
+                        Some(s.clone())
+                    }
+                    _ => None,
+                }
+            }
+            Expr::Field { .. } => {
+                // Same root rule as the Field lowering itself: chains
+                // rooted at calls/indexes are boxed at the first step.
+                let mut cur = e;
+                let root_raw = loop {
+                    match cur {
+                        Expr::Paren { expr, .. } => cur = expr.as_ref(),
+                        Expr::Field { obj: inner, .. } => cur = inner.as_ref(),
+                        Expr::Path { parts, .. } => {
+                            break parts
+                                .first()
+                                .and_then(|b| names.lookup_type(b))
+                                .map(|t| t.starts_with("zz_struct_"))
+                                .unwrap_or(false);
+                        }
+                        Expr::Ident { name: b, .. } => {
+                            break names
+                                .lookup_type(b)
+                                .map(|t| t.starts_with("zz_struct_"))
+                                .unwrap_or(false);
+                        }
+                        Expr::StructInit { name: s, .. } => {
+                            break self.is_unboxed_struct(s);
+                        }
+                        _ => break false,
+                    }
+                };
+                if !root_raw {
+                    return None;
+                }
+                match self.ty_at(names, e.span()) {
+                    Some(zz_checker::Type::Struct(s, _)) if self.is_unboxed_struct(s) => {
+                        Some(s.clone())
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }

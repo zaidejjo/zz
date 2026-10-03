@@ -914,7 +914,8 @@ zz_value zz_elvis(zz_value left, zz_value right) {
 // =====================================================================
 
 // len(v) — array/element length, bytes length, string char length
-// (Unicode scalar values, matching the VM), or 0 for other types.
+// (Unicode scalar values, matching the VM), dict entry count, or 0
+// for other types.
 zz_value zz_len(zz_value v, int *err) {
     (void)err;
     if (v.tag == ZZ_ARRAY) {
@@ -925,6 +926,9 @@ zz_value zz_len(zz_value v, int *err) {
     }
     if (v.tag == ZZ_STR) {
         return (zz_value){ZZ_INT, {.i = (int64_t)zz_str_char_len(v.s)}};
+    }
+    if (v.tag == ZZ_DICT) {
+        return (zz_value){ZZ_INT, {.i = v.dict ? (int64_t)v.dict->len : 0}};
     }
     return (zz_value){ZZ_INT, {.i = 0}};
 }
@@ -948,6 +952,9 @@ zz_value zz_len_field(zz_value *obj, const char *field, int *err) {
                 }
                 if (slot->tag == ZZ_STR && slot->s) {
                     return (zz_value){ZZ_INT, {.i = (int64_t)zz_str_char_len(slot->s)}};
+                }
+                if (slot->tag == ZZ_DICT) {
+                    return (zz_value){ZZ_INT, {.i = slot->dict ? (int64_t)slot->dict->len : 0}};
                 }
                 return (zz_value){ZZ_INT, {.i = 0}};
             }

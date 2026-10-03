@@ -688,19 +688,24 @@ impl Parser {
                 // because `if x == y{ ... }` would be misparsed as struct init.
                 // Nor is `{ Ident :` alone: a block opening with an annotated
                 // declaration (`for x in xs {\n r: int = ... }`, `if c {
-                // x: int = ... }`) looks identical through the colon (the
-                // newline after `{` is not a StmtEnd token). But `=` never
-                // continues an expression, so `{ Ident : Ident =` is always
-                // a block with a declaration, never a struct field.
+                // x: int = ... }`, `while r < nrows { row: [str] = ... }`)
+                // looks identical through the colon (the newline after `{`
+                // is not a StmtEnd token). But `=` never continues an
+                // expression, so `{ Ident : <type> =` is always a block
+                // with a declaration, never a struct field. The type may
+                // be any shape (`int`, `[str]`, `{str: int}`,
+                // `Map<str, int>`, ...), so disambiguate by speculatively
+                // parsing one type after the colon and checking for `=`.
                 if self.at(TokenKind::LBrace)
                     && self.peek_kind_at(1) == TokenKind::Ident
                     && (self.peek_kind_at(2) == TokenKind::Colon
                         || self.peek_kind_at(2) == TokenKind::LBrace)
-                    && !(self.peek_kind_at(2) == TokenKind::Colon
-                        && self.peek_kind_at(3) == TokenKind::Ident
-                        && self.peek_kind_at(4) == TokenKind::Assign)
                 {
-                    return self.parse_struct_init(parts, tok.span.join(end));
+                    let is_decl_block = self.peek_kind_at(2) == TokenKind::Colon
+                        && self.brace_starts_typed_decl_block();
+                    if !is_decl_block {
+                        return self.parse_struct_init(parts, tok.span.join(end));
+                    }
                 }
                 // Recover from common mistake: `User{ id = 1 }` instead of
                 // `User{ id: 1 }`.  Detect `{ Ident =` and route to struct
@@ -999,6 +1004,34 @@ impl Parser {
         self.errors.truncate(save_errs);
         let block = self.parse_block();
         Expr::Block(block)
+    }
+
+    /// True when `{` at the cursor opens a block whose first statement is
+    /// a typed declaration (`{ name: <type> = ... }`) rather than a struct
+    /// literal (`Point{ x: 1 }`). The caller must have verified the
+    /// `{ Ident :` prefix. Disambiguates by speculatively parsing one
+    /// type after the colon: a trailing `=` proves a declaration
+    /// (`row: [str] = []`, `r: int = 0`, `m: {str: int} = ...`,
+    /// `v: Map<str, int> = ...`), since `=` never continues an
+    /// expression. All speculative state (position, diagnostics,
+    /// delimiter tracking) is restored.
+    pub(crate) fn brace_starts_typed_decl_block(&mut self) -> bool {
+        let save_pos = self.pos;
+        let save_errs = self.errors.len();
+        let save_delims = self.delim_stack.len();
+        let save_gt = self.pending_gt;
+        // Skip `{`, field/block name, and `:`.
+        self.advance();
+        self.advance();
+        self.advance();
+        self.skip_stmt_ends();
+        let _ = self.parse_type();
+        let is_decl = self.at(TokenKind::Assign);
+        self.pos = save_pos;
+        self.errors.truncate(save_errs);
+        self.delim_stack.truncate(save_delims);
+        self.pending_gt = save_gt;
+        is_decl
     }
 
     /// Parse a dict literal `{ key: value, ... }`. Returns `None` (leaving

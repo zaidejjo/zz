@@ -824,7 +824,11 @@ impl Lowerer {
                 // `zz_value`s at runtime — array elements (including DB
                 // row dicts standing in for structs) never inhabit raw
                 // C structs — so they must use the runtime accessor even
-                // when the checker type is an unboxed struct.
+                // when the checker type is an unboxed struct. Call results
+                // are also always boxed: every function returns `zz_value`
+                // (struct returns are boxed via `emit_boxed_value`), so
+                // `make_pt().x` and `id_pt(q).x` must use the runtime
+                // accessor, never raw `(call).field`.
                 let is_unboxed = if matches!(obj.as_ref(), Expr::Index { .. }) {
                     false
                 } else if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
@@ -832,11 +836,59 @@ impl Lowerer {
                         .lookup_type(obj_name)
                         .map(|t| t.starts_with("zz_struct_"))
                         .unwrap_or(false)
-                } else if let Some(zz_checker::Type::Struct(sname, _)) =
-                    self.ty_at(names, obj.span())
-                {
+                } else if let Expr::StructInit { name: sname, .. } = obj.as_ref() {
+                    // A struct literal of unboxed type lowers to a raw C
+                    // struct value, so `Pt{...}.x` can use direct access.
                     self.is_unboxed_struct(sname)
+                } else if matches!(
+                    obj.as_ref(),
+                    Expr::Field { .. } | Expr::Path { .. } | Expr::Paren { .. }
+                ) {
+                    // Field/Path chains lower raw only when rooted at a raw
+                    // unboxed value (an unboxed local or literal). A chain
+                    // rooted at a call/index (`make_pt().a.b`) is boxed at
+                    // the first step, so every outer step stays boxed even
+                    // though the checker type is still a struct.
+                    let root_is_raw = {
+                        let mut cur = obj.as_ref();
+                        loop {
+                            match cur {
+                                Expr::Paren { expr, .. } => cur = expr.as_ref(),
+                                Expr::Field { obj: inner, .. } => cur = inner.as_ref(),
+                                Expr::Path { parts, .. } => {
+                                    break parts
+                                        .first()
+                                        .and_then(|b| names.lookup_type(b))
+                                        .map(|t| t.starts_with("zz_struct_"))
+                                        .unwrap_or(false);
+                                }
+                                Expr::Ident { name: b, .. } => {
+                                    break names
+                                        .lookup_type(b)
+                                        .map(|t| t.starts_with("zz_struct_"))
+                                        .unwrap_or(false);
+                                }
+                                Expr::StructInit { name: s, .. } => {
+                                    break self.is_unboxed_struct(s);
+                                }
+                                _ => break false,
+                            }
+                        }
+                    };
+                    if root_is_raw {
+                        if let Some(zz_checker::Type::Struct(sname, _)) =
+                            self.ty_at(names, obj.span())
+                        {
+                            self.is_unboxed_struct(sname)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
                 } else {
+                    // Calls, arrays, dicts, blocks, if/match, etc. all lower
+                    // to boxed `zz_value` — never raw structs.
                     false
                 };
                 if is_unboxed {
