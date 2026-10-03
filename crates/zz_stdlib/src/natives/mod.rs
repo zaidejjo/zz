@@ -31,6 +31,7 @@ pub(crate) mod regexp;
 pub(crate) mod result_mod;
 pub(crate) mod str_mod;
 pub(crate) mod sys;
+pub(crate) mod term;
 pub(crate) mod time;
 pub(crate) mod uuid;
 pub(crate) mod vec_mod;
@@ -2302,6 +2303,28 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: sys::sys_avail_mem,
         },
     );
+
+    // std.term — terminal control: raw mode, single-key reads, size
+    // (both spellings each). Fallible ops return Result so non-TTY
+    // stdin degrades gracefully instead of hanging.
+    for (name, arity, func) in [
+        (
+            "std.term.enable_raw",
+            0_usize,
+            term::term_enable_raw as zz_runtime::NativeFn,
+        ),
+        ("std.term.disable_raw", 0, term::term_disable_raw),
+        ("std.term.read_key", 0, term::term_read_key),
+        ("std.term.get_size", 0, term::term_get_size),
+        ("std.term.is_tty", 0, term::term_is_tty),
+        ("term.enable_raw", 0, term::term_enable_raw),
+        ("term.disable_raw", 0, term::term_disable_raw),
+        ("term.read_key", 0, term::term_read_key),
+        ("term.get_size", 0, term::term_get_size),
+        ("term.is_tty", 0, term::term_is_tty),
+    ] {
+        m.insert(name.into(), NativeEntry { arity, f: func });
+    }
 
     // std.args — raw argv + flag parser (both spellings each).
     m.insert(

@@ -52,6 +52,8 @@ pub mod process;
 pub mod regexp;
 /// `std.sys` system information (os, arch, cpu, hostname, memory).
 pub mod sys;
+/// `std.term` terminal control (raw mode, single-key reads, size).
+pub mod term;
 /// `std.time` high-resolution extension (ns/µs clocks, micro sleeps).
 pub mod time_ext;
 /// `std.uuid` identifier generation (v4 random, v7 time-ordered).

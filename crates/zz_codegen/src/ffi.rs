@@ -102,6 +102,11 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "sys.hostname" | "std.sys.hostname" => Some("zz_sys_hostname"),
         "sys.total_mem" | "std.sys.total_mem" => Some("zz_sys_total_mem"),
         "sys.avail_mem" | "std.sys.avail_mem" => Some("zz_sys_avail_mem"),
+        "term.enable_raw" | "std.term.enable_raw" => Some("zz_term_enable_raw"),
+        "term.disable_raw" | "std.term.disable_raw" => Some("zz_term_disable_raw"),
+        "term.read_key" | "std.term.read_key" => Some("zz_term_read_key"),
+        "term.get_size" | "std.term.get_size" => Some("zz_term_get_size"),
+        "term.is_tty" | "std.term.is_tty" => Some("zz_term_is_tty"),
         // Raw argv shares the fixed `zz_env_args` symbol (one source of
         // truth for both spellings and both engines).
         "args.get_raw" | "std.args.get_raw" => Some("zz_env_args"),
@@ -299,6 +304,13 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
         "zz_sys_hostname" => Some("zz_value zz_sys_hostname(zz_value unit, int *err);"),
         "zz_sys_total_mem" => Some("zz_value zz_sys_total_mem(zz_value unit, int *err);"),
         "zz_sys_avail_mem" => Some("zz_value zz_sys_avail_mem(zz_value unit, int *err);"),
+        "zz_term_enable_raw" => Some("zz_value zz_term_enable_raw(zz_value unit, int *err);"),
+        "zz_term_disable_raw" => {
+            Some("zz_value zz_term_disable_raw(zz_value unit, int *err);")
+        }
+        "zz_term_read_key" => Some("zz_value zz_term_read_key(zz_value unit, int *err);"),
+        "zz_term_get_size" => Some("zz_value zz_term_get_size(zz_value unit, int *err);"),
+        "zz_term_is_tty" => Some("zz_value zz_term_is_tty(zz_value unit, int *err);"),
         "zz_args_parser" => Some("zz_value zz_args_parser(zz_value unit, int *err);"),
         "zz_args_str_flag" => {
             Some("zz_value zz_args_str_flag(zz_value h, zz_value name, zz_value def, int *err);")

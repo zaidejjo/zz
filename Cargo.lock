@@ -3650,6 +3650,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.3.4",
  "hmac",
+ "libc",
  "rand_core",
  "rcgen",
  "regex",

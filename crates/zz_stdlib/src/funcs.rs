@@ -619,6 +619,28 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert("sys.total_mem".into(), sig(vec![], Type::Int));
     m.insert("sys.avail_mem".into(), sig(vec![], Type::Int));
 
+    // std.term — terminal control (raw mode, single-key reads, size).
+    // Fallible ops return Result so non-TTY stdin degrades gracefully;
+    // `is_tty` is the total predicate. Both spellings.
+    let res_unit2 = || Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
+    let res_int = || Type::Result(Box::new(Type::Int), Box::new(Type::Str));
+    let res_size = || {
+        Type::Result(
+            Box::new(Type::Array(Box::new(Type::Int))),
+            Box::new(Type::Str),
+        )
+    };
+    m.insert("std.term.enable_raw".into(), sig(vec![], res_unit2()));
+    m.insert("std.term.disable_raw".into(), sig(vec![], res_unit2()));
+    m.insert("std.term.read_key".into(), sig(vec![], res_int()));
+    m.insert("std.term.get_size".into(), sig(vec![], res_size()));
+    m.insert("std.term.is_tty".into(), sig(vec![], Type::Bool));
+    m.insert("term.enable_raw".into(), sig(vec![], res_unit2()));
+    m.insert("term.disable_raw".into(), sig(vec![], res_unit2()));
+    m.insert("term.read_key".into(), sig(vec![], res_int()));
+    m.insert("term.get_size".into(), sig(vec![], res_size()));
+    m.insert("term.is_tty".into(), sig(vec![], Type::Bool));
+
     // std.args — raw argv + flag parser. Parser handles are Opaque("args"),
     // dispatching `args.*` methods by tag. Both spellings (like json).
     let args_t = Type::Opaque("args".to_string());
@@ -3749,7 +3771,22 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 712);
+        // std.term — raw mode, single-key reads, size (both spellings).
+        for name in [
+            "std.term.enable_raw",
+            "std.term.disable_raw",
+            "std.term.read_key",
+            "std.term.get_size",
+            "std.term.is_tty",
+            "term.enable_raw",
+            "term.disable_raw",
+            "term.read_key",
+            "term.get_size",
+            "term.is_tty",
+        ] {
+            assert!(funcs.contains_key(name), "missing {name}");
+        }
+        assert_eq!(funcs.len(), 722);
     }
 
     #[test]

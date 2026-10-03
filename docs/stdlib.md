@@ -35,6 +35,7 @@ Available without imports:
 | `std.env` | Environment variables, CLI args |
 | `std.math` | Math functions |
 | `std.time` | Time and sleep |
+| `std.term` | Raw mode, single-key reads, terminal size |
 
 ---
 
@@ -656,6 +657,45 @@ start := time.now_ms()
 time.sleep_ms(1000)
 elapsed := time.now_ms() - start
 println("Slept for {elapsed}ms")
+```
+
+---
+
+## `std.term` -- Terminal Control
+
+```zz
+import std.term
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `term.enable_raw` | `term.enable_raw() -> Result<unit, str>` | Save termios, switch stdin to raw (byte-at-a-time, no echo) |
+| `term.disable_raw` | `term.disable_raw() -> Result<unit, str>` | Restore saved terminal state (idempotent) |
+| `term.read_key` | `term.read_key() -> Result<int, str>` | Block for one stdin byte (`0–255`) |
+| `term.get_size` | `term.get_size() -> Result<[int, int], str>` | Terminal `[cols, rows]` via `TIOCGWINSZ` |
+| `term.is_tty` | `term.is_tty() -> bool` | Total predicate for graceful degradation |
+
+Raw mode clears `ICANON`/`ECHO` (plus `ISIG`, so Ctrl+C arrives as
+byte `3` and ZZ code can restore the terminal via `defer` instead of
+dying with a raw TTY). Arrow keys arrive as three reads
+(`27, 91, 68/67/65/66`) — decode them with successive `read_key`
+calls. Non-TTY stdin (pipes, CI) fails soft with
+`.err("std.term.<op>: not a tty")`, so always pair with `is_tty`:
+
+```zz
+import std.term
+
+func main() {
+    match term.enable_raw() {
+        .ok(_) => println("raw on"),
+        .err(e) => println("no tty: {e}"),
+    }
+    defer term.disable_raw()
+    match term.read_key() {
+        .ok(k) => println("key: {k}"),
+        .err(e) => println("read failed: {e}"),
+    }
+}
 ```
 
 ---
