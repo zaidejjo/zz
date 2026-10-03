@@ -158,9 +158,19 @@ zz_value zz_tuple(zz_value a, zz_value b);
 
 // ---- vec natives -------------------------------------------------------
 zz_value zz_len(zz_value v, int *err);
+zz_value zz_len_field(zz_value *obj, const char *field, int *err);
 zz_value zz_vec_len(zz_value v, int *err);
 zz_value zz_vec_append(zz_value arr, zz_value item, int *err);
 zz_value zz_vec_push(zz_value arr, zz_value item, int *err);
+// Move-aware push for `x = vec.push(x, e)`: `taken` is owned (the caller
+// moved it out of its slot, which now holds unit). A uniquely-owned heap
+// array (refs==1) grows in place — no dup, no copy; anything else takes
+// the copy-on-write fallback (`zz_vec_push` + release of the taken share,
+// which balances the take exactly like the old assign-release did).
+zz_value zz_vec_push_take(zz_value taken, zz_value item, int *err);
+// Move-aware field push for `s.f = vec.push(s.f, e)` on boxed structs:
+// same in-place rule for the field array, copy fallback otherwise.
+void zz_object_push_field_take(zz_value *obj, const char *field, zz_value item, int *err);
 zz_value zz_vec_pop(zz_value arr, int *err);
 zz_value zz_vec_remove(zz_value arr, zz_value idx, int *err);
 zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err);

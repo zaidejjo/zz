@@ -447,6 +447,134 @@ impl EnvLink {
         }
     }
 
+    /// Move a binding's value out, leaving `Unit` behind — the take half
+    /// of fused move ops. Walks like [`EnvLink::assign`] (same owning
+    /// scope, same frozen-detach discipline), but moves instead of
+    /// cloning: no per-take deep copy. Returns `None` when unbound.
+    pub fn take(&mut self, name: &str) -> Option<Value> {
+        let (val, replacement) = Self::take_rec(self, name);
+        if val.is_some() {
+            *self = replacement;
+        }
+        val
+    }
+
+    /// Take recursion (see [`EnvLink::take`]).
+    fn take_rec(link: &EnvLink, name: &str) -> (Option<Value>, EnvLink) {
+        match link {
+            EnvLink::Owned(rc) => {
+                if rc.borrow().vars.contains_key(name) {
+                    let v = {
+                        let mut b = rc.borrow_mut();
+                        let slot = b.vars.get_mut(name).unwrap();
+                        let v = std::mem::replace(slot, Value::Unit);
+                        b.bump();
+                        v
+                    };
+                    (Some(v), link.clone())
+                } else {
+                    let parent = rc.borrow().parent.clone();
+                    match parent {
+                        Some(p) => {
+                            let (val, np) = Self::take_rec(&p, name);
+                            if val.is_some() {
+                                rc.borrow_mut().parent = Some(np);
+                            }
+                            (val, link.clone())
+                        }
+                        None => (None, link.clone()),
+                    }
+                }
+            }
+            EnvLink::Frozen(f) => {
+                if f.vars.contains_key(name) {
+                    // Detach (see `assign_rec`): the owned copy carries
+                    // the `Unit` left behind, spliced in by the caller.
+                    let mut owned = Env {
+                        vars: f.vars.clone(),
+                        parent: f.parent.clone().map(EnvLink::Frozen),
+                        version: std::cell::Cell::new(0),
+                    };
+                    let v = {
+                        let slot = owned.vars.get_mut(name).unwrap();
+                        std::mem::replace(slot, Value::Unit)
+                    };
+                    owned.bump();
+                    (Some(v), EnvLink::Owned(Rc::new(RefCell::new(owned))))
+                } else {
+                    match &f.parent {
+                        Some(fp) => {
+                            let wrapped = EnvLink::Frozen(Arc::clone(fp));
+                            let (val, np) = Self::take_rec(&wrapped, name);
+                            let link2 = if val.is_some() { np } else { link.clone() };
+                            (val, link2)
+                        }
+                        None => (None, link.clone()),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Assign, but only when the name is already bound (no define
+    /// fallback): the restore half of fused move ops. Consumes `value`
+    /// on success; returns it on miss so the caller loses nothing.
+    /// The miss is unreachable for restores (the take proved the
+    /// binding, and nothing unbinds mid-statement), but the signature
+    /// keeps the impossible path honest instead of cloning defensively.
+    pub fn try_assign(&mut self, name: &str, value: Value) -> Result<(), Value> {
+        let (res, replacement) = Self::try_assign_rec(self, name, value);
+        if res.is_ok() {
+            *self = replacement;
+        }
+        res
+    }
+
+    /// Restore recursion (see [`EnvLink::try_assign`]).
+    fn try_assign_rec(link: &EnvLink, name: &str, value: Value) -> (Result<(), Value>, EnvLink) {
+        match link {
+            EnvLink::Owned(rc) => {
+                if rc.borrow().vars.contains_key(name) {
+                    rc.borrow_mut().define(name, value);
+                    (Ok(()), link.clone())
+                } else {
+                    let parent = rc.borrow().parent.clone();
+                    match parent {
+                        Some(p) => {
+                            let (res, np) = Self::try_assign_rec(&p, name, value);
+                            if res.is_ok() {
+                                rc.borrow_mut().parent = Some(np);
+                            }
+                            (res, link.clone())
+                        }
+                        None => (Err(value), link.clone()),
+                    }
+                }
+            }
+            EnvLink::Frozen(f) => {
+                if f.vars.contains_key(name) {
+                    let mut owned = Env {
+                        vars: f.vars.clone(),
+                        parent: f.parent.clone().map(EnvLink::Frozen),
+                        version: std::cell::Cell::new(0),
+                    };
+                    owned.define(name, value);
+                    (Ok(()), EnvLink::Owned(Rc::new(RefCell::new(owned))))
+                } else {
+                    match &f.parent {
+                        Some(fp) => {
+                            let wrapped = EnvLink::Frozen(Arc::clone(fp));
+                            let (res, np) = Self::try_assign_rec(&wrapped, name, value);
+                            let link2 = if res.is_ok() { np } else { link.clone() };
+                            (res, link2)
+                        }
+                        None => (Err(value), link.clone()),
+                    }
+                }
+            }
+        }
+    }
+
     /// Merge a child's locals into this scope (or-pattern bindings).
     /// Detaches frozen links first (see `define`).
     pub fn absorb_locals(&mut self, child: &EnvLink) {

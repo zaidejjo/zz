@@ -1,0 +1,43 @@
+// thread_doc.zz — `doc = f(doc, x)` threading an 11-array struct
+// through a call (the toml arena shape: 5 array pushes per key).
+import std.env
+
+struct Doc11 {
+    a1: [int],
+    a2: [int],
+    a3: [int],
+    a4: [int],
+    a5: [int],
+    a6: [int],
+    a7: [int],
+    a8: [int],
+    a9: [int],
+    a10: [int],
+    a11: [int],
+}
+
+func push_node(doc: Doc11, x: int) -> Doc11 {
+    doc.a1 = vec.push(doc.a1, x)
+    doc.a2 = vec.push(doc.a2, x)
+    doc.a3 = vec.push(doc.a3, x)
+    doc.a4 = vec.push(doc.a4, x)
+    doc.a5 = vec.push(doc.a5, x)
+    doc
+}
+
+func first_arg(args: [str], fallback: str) -> str {
+    for a in args {
+        if a != "--" {
+            return a
+        }
+    }
+    fallback
+}
+
+n := int(first_arg(env.args(), "2000")) ?? 2000
+doc := Doc11{a1: [], a2: [], a3: [], a4: [], a5: [], a6: [], a7: [], a8: [], a9: [], a10: [], a11: []}
+for i in 0..n {
+    doc = push_node(doc, i)
+}
+println(len(doc.a1))
+println("THREAD_DOC_DONE")

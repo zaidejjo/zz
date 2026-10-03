@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Param, Pattern, Program, Stmt};
+use zz_frontend::move_elide::{classify_self_assign_vm, unqualify_expr, MoveKind};
 use zz_frontend::span::Span;
 
 use super::capture::*;
 use super::chunk::Chunk;
-use super::op::Op;
+use super::op::{Op, TakeHome};
 use crate::value::Value;
 
 /// Extract an integer literal from an expression, if it is one.
@@ -29,6 +30,7 @@ struct Local {
 }
 
 /// How a variable reference resolves.
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Resolved {
     /// A local stack slot.
     Slot(usize),
@@ -87,6 +89,14 @@ pub struct Compiler {
     /// the Fmt lowers to template + bound params (DbQuery) instead of
     /// string concatenation.
     in_db_query: bool,
+    /// Pending take for `x = f(x, ...)`: while set, the single `x` load
+    /// takes instead of cloning (see `zz_frontend::move_elide`). Consumed
+    /// by the matching load; cleared after the RHS compiles either way.
+    move_take: Option<(String, TakeHome)>,
+    /// Qualified top-level declaration names, inherited by sub-compilers so
+    /// function bodies can normalize module-global references the same way
+    /// the top level does.
+    top_globals: std::collections::HashSet<String>,
 }
 
 enum JumpKind {
@@ -129,6 +139,8 @@ impl Compiler {
             structs: None,
             native_names: None,
             in_db_query: false,
+            move_take: None,
+            top_globals: std::collections::HashSet::new(),
             type_scope: zz_checker::TOP_SCOPE.to_string(),
         }
     }
@@ -181,8 +193,11 @@ impl Compiler {
         // frame slot, letting the slot peepholes fire in top-level loops.
         let mut defined: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut free: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Top-level statements run inline in the main frame: pass
+        // `nested = false` so their references don't force environment
+        // promotion (only nested function/closure bodies capture).
         for stmt in &program.stmts {
-            super::capture::scan_stmt_captured(stmt, &mut defined, &mut free);
+            super::capture::scan_stmt_captured(stmt, &mut defined, &mut free, false);
         }
         // Only names that are actually declared at top level matter for
         // promotion; paths like `std.time.now_ms` or `p.x` are not top-level
@@ -239,6 +254,16 @@ impl Compiler {
         }
         c.promoted_slots = promoted_slots;
         c.stack_height = promoted_index;
+        // Qualified top-level declaration names for move-elision
+        // normalization (sub-compilers inherit a clone when created).
+        c.top_globals = program
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Stmt::Decl { name, .. } => Some(name.name.clone()),
+                _ => None,
+            })
+            .collect();
         for (i, stmt) in program.stmts.iter().enumerate() {
             let v = c.compile_stmt(stmt);
             if i < program.stmts.len() - 1 && matches!(v, StmtValue::Discard) {
@@ -288,8 +313,11 @@ impl Compiler {
         // in the environment so closures can capture them by reference.
         let mut defined: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut free: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Top-level statements run inline in the main frame: pass
+        // `nested = false` so their references don't force environment
+        // promotion (only nested function/closure bodies capture).
         for stmt in &program.stmts {
-            super::capture::scan_stmt_captured(stmt, &mut defined, &mut free);
+            super::capture::scan_stmt_captured(stmt, &mut defined, &mut free, false);
         }
         let mut captured: std::collections::HashSet<String> = std::collections::HashSet::new();
         for name in &free {
@@ -336,6 +364,16 @@ impl Compiler {
         }
         c.promoted_slots = promoted_slots;
         c.stack_height = promoted_index;
+        // Qualified top-level declaration names for move-elision
+        // normalization (sub-compilers inherit a clone when created).
+        c.top_globals = program
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Stmt::Decl { name, .. } => Some(name.name.clone()),
+                _ => None,
+            })
+            .collect();
         for (i, stmt) in program.stmts.iter().enumerate() {
             let v = c.compile_stmt(stmt);
             if i < program.stmts.len() - 1 && matches!(v, StmtValue::Discard) {
@@ -360,6 +398,10 @@ impl Compiler {
             | Op::BinOp(_, span)
             | Op::UnOp(_, span) => *span,
             Op::LoadVar(_, span) | Op::StoreVar(_, span) => *span,
+            Op::TakeVar(_, span)
+            | Op::VecPush { span, .. }
+            | Op::VecPushField { span, .. }
+            | Op::VecPushMethod { span, .. } => *span,
             Op::LoadPath(_, span) | Op::StorePath(_, span) => *span,
             Op::JumpIfFalseBool(_, span) => *span,
             Op::ForSetup { span, .. } | Op::WhileCond { span, .. } => *span,
@@ -395,8 +437,10 @@ impl Compiler {
             Op::Pop => -1,
             Op::Truthy => 0,
             Op::LoadVar(..) | Op::LoadPath(..) | Op::LoadSlot(_) => 1,
+            Op::TakeSlot(_) | Op::TakeVar(..) => 1,
             Op::DefineVar(_) => 0,
             Op::StoreVar(..) | Op::StorePath(..) | Op::StoreSlot(_) => -1,
+            Op::VecPush { .. } | Op::VecPushField { .. } | Op::VecPushMethod { .. } => -1,
             Op::SlotAddInt { .. } => 0,
             Op::SlotInc { .. } => 0,
             Op::SlotAddIntImm { .. } => 0,
@@ -554,6 +598,548 @@ impl Compiler {
             _ => return None,
         };
         Some((dst, src))
+    }
+
+    // ---- move-on-self-reassign (append elision) ----
+    //
+    // `x = vec.push(x, e)` compiles to element + fused push op (take, push
+    // reusing the owned `Vec`, store back): zero clones on the steady path.
+    // `x = f(x, ...)` sets `move_take` so the single `x` load takes instead
+    // of cloning. Static eligibility comes from
+    // `zz_frontend::move_elide::classify_self_assign_vm`; the gates here
+    // are VM-specific (see each helper).
+
+    /// A move-take home: frame slot or env binding name.
+    fn move_home_of(&self, key: &str) -> Option<TakeHome> {
+        for local in self.locals.iter().rev() {
+            if local.name == key {
+                if local.in_env {
+                    return Some(TakeHome::Env(key.to_string()));
+                }
+                return Some(TakeHome::Slot(local.slot as u16));
+            }
+        }
+        if self.is_global_key(key) {
+            return Some(TakeHome::Env(key.to_string()));
+        }
+        None
+    }
+
+    /// Module-qualified binding: exactly two segments and known at compile
+    /// time (a local entry or a top-level declaration). Anything else is a
+    /// field path (or unknown) and stays as written.
+    fn is_global_key(&self, key: &str) -> bool {
+        key.split('.').count() == 2
+            && (self.locals.iter().any(|l| l.name == key) || self.top_globals.contains(key))
+    }
+
+    /// Canonical free push/append callee resolving to the real native (not
+    /// shadowed by a user func, registered). Returns the spelling.
+    fn move_push_native(&self, callee: &Expr) -> Option<String> {
+        let spelling = match callee {
+            Expr::Ident { name, .. } => name.clone(),
+            Expr::Path { parts, .. } => parts.join("."),
+            _ => return None,
+        };
+        if !matches!(
+            spelling.as_str(),
+            "vec.push" | "std.vec.push" | "vec.append" | "std.vec.append" | "append"
+        ) {
+            return None;
+        }
+        if self.func_info.contains_key(&spelling) {
+            return None;
+        }
+        if !self
+            .native_names
+            .as_ref()
+            .is_some_and(|n| n.contains(&spelling))
+        {
+            return None;
+        }
+        // A bare name could be a shadowing local (dotted names cannot be).
+        if !spelling.contains('.') && self.locals.iter().any(|l| l.name == spelling) {
+            return None;
+        }
+        Some(spelling)
+    }
+
+    /// The element expression of a free push/append call on `var`, read off
+    /// the original RHS (so every other name emits exactly as written).
+    /// The receiver must spell `var` exactly (bare or identically
+    /// qualified): a differently-spelled receiver names another variable.
+    fn move_push_elem<'a>(&self, var: &str, value: &'a Expr) -> Option<&'a Expr> {
+        let Expr::Call { callee, args, .. } = value else {
+            return None;
+        };
+        if self.move_push_native(callee).is_none() || args.len() != 2 {
+            return None;
+        }
+        match &args[0] {
+            Expr::Ident { name, .. } if name == var => Some(&args[1]),
+            Expr::Path { parts, .. }
+                if parts.len() == 2 && parts[1] == var && self.is_global_key(&parts.join(".")) =>
+            {
+                Some(&args[1])
+            }
+            _ => None,
+        }
+    }
+
+    /// Normalized value copy for classification, or `None` when nothing
+    /// qualified needed rewriting (the original can be used directly).
+    /// (Targets normalize the same way at their call sites.)
+    fn normalize_move_value(&self, value: &Expr) -> Option<Expr> {
+        let is_global = |k: &str| self.is_global_key(k);
+        unqualify_expr(value, &is_global)
+    }
+
+    /// Fused `x = vec.push(x, e)` / `x = vec.append(x, e)` for an Ident
+    /// target. Returns true when emitted (caller pushes the statement
+    /// value and returns).
+    fn try_emit_move_push_ident(&mut self, name: &str, span: Span, value: &Expr) -> bool {
+        let nv = self.normalize_move_value(value);
+        let v2 = nv.as_ref().unwrap_or(value);
+        let target = Expr::Ident {
+            name: name.to_string(),
+            span,
+        };
+        if !matches!(
+            classify_self_assign_vm(&target, v2),
+            Some(MoveKind::VecPush(_))
+        ) {
+            return false;
+        }
+        // Method form (`x.push(e)`) goes through the runtime-checked
+        // op; free form (`vec.push(x, e)`) has two args and must not
+        // route there (its callee also ends in `push`).
+        if matches!(value, Expr::Call { callee, args, .. }
+            if args.len() == 1 && Self::method_push_name(callee).is_some())
+        {
+            return self.try_emit_move_method(name, value, span);
+        }
+        let elem = match self.move_push_elem(name, value) {
+            Some(e) => e,
+            None => return false,
+        };
+        let home = match self.move_home_of(name) {
+            Some(h) => h,
+            None => return false,
+        };
+        self.compile_expr(elem);
+        self.emit(Op::VecPush { home, span });
+        true
+    }
+
+    /// Take plan for `x = f(x, ...)` on an Ident target: `Some` home when
+    /// every static clause holds (the caller sets `move_take`, compiles the
+    /// RHS generically, then clears it). Slot homes of uncaptured,
+    /// non-top-level locals only: globals are readable by same-module
+    /// callees, captured names are scope-shared.
+    fn thread_take_home(&self, name: &str, value: &Expr) -> Option<TakeHome> {
+        let nv = self.normalize_move_value(value);
+        let v2 = nv.as_ref().unwrap_or(value);
+        let target = Expr::Ident {
+            name: name.to_string(),
+            span: Span::default(),
+        };
+        if !matches!(
+            classify_self_assign_vm(&target, v2),
+            Some(MoveKind::ThreadCall(_))
+        ) {
+            return None;
+        }
+        if self.captured.contains(name) {
+            return None;
+        }
+        if self.is_main && self.scope_depth == 0 {
+            return None;
+        }
+        match self.move_home_of(name) {
+            Some(TakeHome::Slot(slot)) => Some(TakeHome::Slot(slot)),
+            _ => None,
+        }
+    }
+
+    /// Take plan for `ns.x = f(ns.x, ...)` on a module-global target:
+    /// like [`Compiler::thread_take_home`], but the flag key is the
+    /// qualified name (consumed by the `compile_path_load` hook). Slot
+    /// homes only, and only when no nested function can name the global
+    /// (a free reference would have forced it into the environment —
+    /// see `captured_at_top` — so a slot home proves callees cannot
+    /// observe the transient `Unit`). Shadowing is safe by construction:
+    /// the flag matches the exact qualified spelling, so a lookalike
+    /// local simply never fires the take and keeps the cloning load.
+    fn thread_take_home_path(&self, parts: &[String]) -> Option<(String, TakeHome)> {
+        if parts.len() != 2 {
+            return None;
+        }
+        let key = parts.join(".");
+        if !self.is_global_key(&key) {
+            return None;
+        }
+        let home = match self.move_home_of(&key) {
+            Some(TakeHome::Slot(slot)) => TakeHome::Slot(slot),
+            _ => return None,
+        };
+        if self.captured.contains(&parts[1]) || self.captured.contains(&key) {
+            return None;
+        }
+        if self.is_main && self.scope_depth == 0 {
+            return None;
+        }
+        Some((key, home))
+    }
+
+    /// Classify a qualified-global ThreadCall against normalized copies:
+    /// the target as its bare name, the RHS unqualified. Returns the bare
+    /// var when `parts[1] = f(parts[1]-spelled…, …)` holds every static
+    /// clause (single occurrence, callee shape, sibling purity, no early
+    /// exits — see `zz_frontend::move_elide`).
+    fn thread_classify_path(&self, parts: &[String], value: &Expr, span: Span) -> Option<String> {
+        let nv = self.normalize_move_value(value);
+        let v2 = nv.as_ref().unwrap_or(value);
+        let target = Expr::Ident {
+            name: parts[1].clone(),
+            span,
+        };
+        match classify_self_assign_vm(&target, v2) {
+            Some(MoveKind::ThreadCall(var)) if var == parts[1] => {
+                // The single occurrence must spell the target exactly
+                // (bare or identically qualified): a differently-spelled
+                // occurrence names another variable.
+                let target_path = Expr::Path {
+                    parts: parts.to_vec(),
+                    span,
+                };
+                let single_ok = match value {
+                    Expr::Call { args, .. } => {
+                        args.iter()
+                            .filter(|a| Self::same_surface(a, &target_path))
+                            .count()
+                            + usize::from(matches!(
+                                value,
+                                Expr::Call { callee, .. } if Self::same_surface(callee, &target_path)
+                            ))
+                            == 1
+                    }
+                    _ => false,
+                };
+                single_ok.then_some(var)
+            }
+            _ => None,
+        }
+    }
+
+    /// Same surface: bare idents match by name, paths by exact parts.
+    /// Move emission requires the receiver to spell the target exactly —
+    /// a differently-spelled occurrence names another variable (e.g. a
+    /// shadowing local vs. a module-global twin).
+    fn same_surface(a: &Expr, b: &Expr) -> bool {
+        match (a, b) {
+            (Expr::Ident { name: n1, .. }, Expr::Ident { name: n2, .. }) => n1 == n2,
+            (Expr::Path { parts: p1, .. }, Expr::Path { parts: p2, .. }) => p1 == p2,
+            _ => false,
+        }
+    }
+
+    /// Receiver key for method takes: bare or dotted single reference, as
+    /// written. Complex receivers have no home op and fall back.
+    fn method_home_key(callee: &Expr) -> Option<String> {
+        match callee {
+            Expr::Path { parts, .. } if parts.len() == 2 => Some(parts[0].clone()),
+            Expr::Field { obj, .. } => match obj.as_ref() {
+                Expr::Ident { name, .. } => Some(name.clone()),
+                Expr::Path { parts, .. } if parts.len() == 1 => Some(parts[0].clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Method name for method takes (`push`/`append` on the VM, where both
+    /// return the new array).
+    fn method_push_name(callee: &Expr) -> Option<String> {
+        match callee {
+            Expr::Path { parts, .. } if parts.len() == 2 => {
+                if parts[1] == "push" || parts[1] == "append" {
+                    Some(parts[1].clone())
+                } else {
+                    None
+                }
+            }
+            Expr::Field { name, .. } if name == "push" || name == "append" => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Fused method push/append-assign (`x = x.push(e)`, `ns.b =
+    /// ns.b.append(e)`): runtime-checked receiver (arrays go in place,
+    /// anything else takes the generic call with write-back). Needs no
+    /// capture guards — the home is restored before any user code runs.
+    /// Returns true when emitted.
+    fn try_emit_move_method(&mut self, target_key: &str, value: &Expr, span: Span) -> bool {
+        let Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } = value
+        else {
+            return false;
+        };
+        if !named.is_empty() || args.len() != 1 {
+            return false;
+        }
+        let (method, rx_key) = match (
+            Self::method_push_name(callee),
+            Self::method_home_key(callee),
+        ) {
+            (Some(m), Some(k)) => (m, k),
+            _ => return false,
+        };
+        if rx_key != target_key {
+            return false;
+        }
+        // Dotted stdlib natives (`fs.remove(x)`) are real calls, not
+        // array-method takes (checked via the joined callee below).
+        let home = match self.move_home_of(&rx_key) {
+            Some(h) => h,
+            None => return false,
+        };
+        // A joined dotted call that resolves to a native is never a
+        // receiver-method take (`fs.remove(x)`, either callee shape).
+        let joined = match callee.as_ref() {
+            Expr::Path { parts, .. } if parts.len() == 2 => Some(parts.join(".")),
+            Expr::Field { obj, name, .. } => match obj.as_ref() {
+                Expr::Ident { name: o, .. } => Some(format!("{o}.{name}")),
+                Expr::Path { parts, .. } if parts.len() == 1 => {
+                    Some(format!("{}.{name}", parts[0]))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if joined.is_some_and(|j| self.native_names.as_ref().is_some_and(|n| n.contains(&j))) {
+            return false;
+        }
+        self.compile_expr(&args[0]);
+        self.emit(Op::VecPushMethod { home, method, span });
+        true
+    }
+
+    /// Fused field push/append-assign (`s.f = vec.push(s.f, e)`).
+    /// Returns true when emitted.
+    fn try_emit_move_field(&mut self, obj: &str, field: &str, value: &Expr, span: Span) -> bool {
+        let elem = match value {
+            // Receiver of `vec.push`/`append` is args[0]; spelling-identity
+            // below pins its exact surface.
+            Expr::Call { callee, args, .. }
+                if args.len() == 2 && self.move_push_native(callee).is_some() =>
+            {
+                let receiver_ok = match &args[0] {
+                    Expr::Path { parts: rp, .. } => rp.len() == 2 && rp[0] == obj && rp[1] == field,
+                    Expr::Field {
+                        obj: o, name: n, ..
+                    } => {
+                        n.as_str() == field
+                            && matches!(o.as_ref(), Expr::Ident { name: on, .. } if on.as_str() == obj)
+                    }
+                    _ => false,
+                };
+                if !receiver_ok {
+                    return false;
+                }
+                &args[1]
+            }
+            _ => return false,
+        };
+        let home = match self.move_home_of(obj) {
+            Some(h) => h,
+            None => return false,
+        };
+        self.compile_expr(elem);
+        self.emit(Op::VecPushField {
+            home,
+            field: field.to_string(),
+            span,
+        });
+        true
+    }
+
+    /// Fused push/append statement (`x.push(e)`, `x.append(e)`,
+    /// `append(x, e)`): take the home, push reusing the owned `Vec`, store
+    /// back. Method homes go through the runtime-checked op (arrays in
+    /// place, anything else the generic call); the free `append` spelling
+    /// is name-gated like the assign path. Returns true when emitted.
+    fn try_emit_move_push_stmt(&mut self, e: &Expr) -> bool {
+        let Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } = e
+        else {
+            return false;
+        };
+        if !named.is_empty() {
+            return false;
+        }
+        let span = e.span();
+        // Bare `append(x, e)` (statement write-back shape).
+        if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+            if fname == "append" && args.len() == 2 {
+                let home_key = match &args[0] {
+                    Expr::Ident { name, .. } => name.clone(),
+                    Expr::Path { parts, .. } if parts.len() == 2 => parts.join("."),
+                    _ => return false,
+                };
+                if self.move_push_native(callee).is_none() {
+                    return false;
+                }
+                let home = match self.move_home_of(&home_key) {
+                    Some(h) => h,
+                    None => return false,
+                };
+                self.compile_expr(&args[1]);
+                self.emit(Op::VecPush { home, span });
+                return true;
+            }
+            return false;
+        }
+        // Method shape (`rx.push(e)` / `rx.append(e)`, Path or Field callee).
+        if args.len() != 1 {
+            return false;
+        }
+        let (method, rx_key) = match (
+            Self::method_push_name(callee),
+            Self::method_home_key(callee),
+        ) {
+            (Some(m), Some(k)) => (m, k),
+            _ => return false,
+        };
+        // Dotted stdlib natives are real calls, never receiver takes.
+        if let Expr::Path { parts, .. } = callee.as_ref() {
+            if parts.len() == 2
+                && self
+                    .native_names
+                    .as_ref()
+                    .is_some_and(|n| n.contains(&parts.join(".")))
+            {
+                return false;
+            }
+        }
+        if let Expr::Field { obj, .. } = callee.as_ref() {
+            if let Expr::Ident { name: o, .. } = obj.as_ref() {
+                let joined = format!("{o}.{method}");
+                if self
+                    .native_names
+                    .as_ref()
+                    .is_some_and(|n| n.contains(&joined))
+                {
+                    return false;
+                }
+            }
+        }
+        let home = match self.move_home_of(&rx_key) {
+            Some(h) => h,
+            None => return false,
+        };
+        self.compile_expr(&args[0]);
+        self.emit(Op::VecPushMethod { home, method, span });
+        true
+    }
+
+    /// Path-target assign hook (`ns.b = ...`, `s.f = ...`). Returns true
+    /// when a fused take was emitted (caller pushes the statement value).
+    fn try_emit_move_path(&mut self, parts: &[String], span: Span, value: &Expr) -> bool {
+        if parts.len() != 2 {
+            return false;
+        }
+        let key = parts.join(".");
+        // Module-global home (`ns.b = vec.push(ns.b, e)`): normalize the
+        // value (qualified refs become bare) and classify against the bare
+        // target, mirroring the native backend. Struct fields take the
+        // `FieldPush` branch below.
+        if self.is_global_key(&key) {
+            let nv = self.normalize_move_value(value);
+            let v2 = nv.as_ref().unwrap_or(value);
+            let bare = Expr::Ident {
+                name: parts[1].clone(),
+                span,
+            };
+            let Some(MoveKind::VecPush(var)) = classify_self_assign_vm(&bare, v2) else {
+                return false;
+            };
+            if var != parts[1] {
+                return false;
+            }
+            // Receiver must spell the target exactly (bare or identically
+            // qualified): a differently-spelled occurrence names another
+            // variable (shadowing twin).
+            let target = Expr::Path {
+                parts: parts.to_vec(),
+                span,
+            };
+            let receiver_ok = match value {
+                Expr::Call { args, .. } => {
+                    args.first().is_some_and(|r| Self::same_surface(r, &target))
+                }
+                _ => false,
+            };
+            if !receiver_ok {
+                return false;
+            }
+            let home = match self.move_home_of(&key) {
+                Some(h) => h,
+                None => return false,
+            };
+            // Method form (`ns.b.push(e)`) goes through the
+            // runtime-checked op; free form has two args (see above).
+            if matches!(value, Expr::Call { callee, args, .. }
+                if args.len() == 1 && Self::method_push_name(callee).is_some())
+            {
+                return self.try_emit_move_method(&key, value, span);
+            }
+            let elem = match self.move_push_elem(&var, value) {
+                Some(e) => e,
+                None => return false,
+            };
+            self.compile_expr(elem);
+            self.emit(Op::VecPush { home, span });
+            return true;
+        }
+        let target = Expr::Path {
+            parts: parts.to_vec(),
+            span,
+        };
+        let nv = self.normalize_move_value(value);
+        let v2 = nv.as_ref().unwrap_or(value);
+        // ThreadCall never applies to path targets (globals are readable
+        // by same-module callees).
+        match classify_self_assign_vm(&target, v2) {
+            Some(MoveKind::FieldPush { obj, field }) => {
+                // Receiver spelling must equal the target spelling.
+                let receiver_ok = match value {
+                    Expr::Call { args, .. } => args.first().is_some_and(|r| match r {
+                        Expr::Path { parts: rp, .. } => rp == parts,
+                        Expr::Field {
+                            obj: o, name: n, ..
+                        } => {
+                            n == &field
+                                && matches!(o.as_ref(), Expr::Ident { name: on, .. } if on == &obj)
+                        }
+                        _ => false,
+                    }),
+                    _ => false,
+                };
+                if !receiver_ok {
+                    return false;
+                }
+                self.try_emit_move_field(&obj, &field, value, span)
+            }
+            _ => false,
+        }
     }
 
     /// Extended peephole for `x = x op N` / `x = x op y` on local slots.
@@ -802,6 +1388,25 @@ impl Compiler {
         // A top-level var promoted to a slot is declared under its full
         // dotted name (`add_to_1M.sum`); resolve the joined name first.
         let full = parts.join(".");
+        // Move-take: the single global load in `ns.x = f(ns.x, ...)`
+        // takes instead of cloning (flag set by the Assign arm; the home
+        // must still match, guarding against shadowed lookalikes).
+        if let Some((flag_key, flag_home)) = self.move_take.clone() {
+            if flag_key == full {
+                let home = match self.resolve(&full) {
+                    Resolved::Slot(slot) => TakeHome::Slot(slot as u16),
+                    Resolved::Env => TakeHome::Env(full.clone()),
+                };
+                if home == flag_home {
+                    self.move_take = None;
+                    match home {
+                        TakeHome::Slot(slot) => self.emit(Op::TakeSlot(slot)),
+                        TakeHome::Env(n) => self.emit(Op::TakeVar(n, span)),
+                    }
+                    return;
+                }
+            }
+        }
         if let Resolved::Slot(slot) = self.resolve(&full) {
             self.emit(Op::LoadSlot(slot as u16));
         } else if let Resolved::Slot(slot) = self.resolve(&parts[0]) {
@@ -1179,8 +1784,19 @@ impl Compiler {
                         self.emit(op);
                         self.emit_const(Value::Unit);
                         StmtValue::Discard
+                    } else if self.try_emit_move_push_ident(name, *span, value) {
+                        self.emit_const(Value::Unit);
+                        StmtValue::Discard
                     } else {
+                        // Move-take for `x = f(x, ...)`: the flag makes the
+                        // single `x` load take; cleared after the RHS either
+                        // way (unfired means some exotic path skipped the
+                        // load — the generic clone stands in).
+                        if let Some(home) = self.thread_take_home(name, value) {
+                            self.move_take = Some((name.clone(), home));
+                        }
                         self.compile_expr(value);
+                        self.move_take = None;
                         match self.resolve(name) {
                             Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
                             Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
@@ -1190,6 +1806,27 @@ impl Compiler {
                     }
                 }
                 Expr::Path { parts, span } => {
+                    // Move-take: fused push/field takes (locals and
+                    // module-global homes).
+                    if parts.len() == 2 && self.try_emit_move_path(parts, *span, value) {
+                        self.emit_const(Value::Unit);
+                        return StmtValue::Discard;
+                    }
+                    // Move-take for `ns.x = f(ns.x, ...)`: thread the
+                    // global through the call instead of cloning it
+                    // (slot homes only; the flag is consumed by the
+                    // single matching path load, cleared either way).
+                    if parts.len() == 2 && self.thread_classify_path(parts, value, *span).is_some()
+                    {
+                        if let Some((flag_key, home)) = self.thread_take_home_path(parts) {
+                            self.move_take = Some((flag_key, home));
+                            self.compile_expr(value);
+                            self.move_take = None;
+                            self.compile_path_store(parts, *span);
+                            self.emit_const(Value::Unit);
+                            return StmtValue::Discard;
+                        }
+                    }
                     let full = parts.join(".");
                     // Namespaced top-level slot promotion: `ns.sum = ns.sum + i`
                     // resolves to a direct slot when the full name is a local.
@@ -1215,6 +1852,39 @@ impl Compiler {
                     StmtValue::Discard
                 }
                 Expr::Field { obj, name, span } => {
+                    // Move-take for simple field homes (`s.f = ...`).
+                    if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                        let target = Expr::Path {
+                            parts: vec![obj_name.clone(), name.clone()],
+                            span: *span,
+                        };
+                        let nv = self.normalize_move_value(value);
+                        let v2 = nv.as_ref().unwrap_or(value);
+                        if let Some(MoveKind::FieldPush { obj: o, field: f }) =
+                            classify_self_assign_vm(&target, v2)
+                        {
+                            // Receiver must spell the target exactly (a
+                            // differently-spelled occurrence names another
+                            // variable, e.g. a shadowing twin).
+                            let receiver_ok = match value {
+                                Expr::Call { args, .. } => {
+                                    args.first().is_some_and(|r| {
+                                        matches!(r, Expr::Field { obj: ro, name: rn, .. }
+                                            if rn == &f && matches!(ro.as_ref(), Expr::Ident { name: on, .. } if on == &o))
+                                    })
+                                }
+                                _ => false,
+                            };
+                            if o == *obj_name
+                                && f == *name
+                                && receiver_ok
+                                && self.try_emit_move_field(&o, &f, value, *span)
+                            {
+                                self.emit_const(Value::Unit);
+                                return StmtValue::Discard;
+                            }
+                        }
+                    }
                     self.compile_expr(value);
                     self.compile_expr(obj);
                     // Type-driven fast path for field assignment.
@@ -1308,6 +1978,13 @@ impl Compiler {
                 _ => unreachable!("unhandled compound assignment target"),
             },
             Stmt::Expr(e) => {
+                // Move-take: fused `x.push(e)` / `x.append(e)` /
+                // `append(x, e)` statements (take, push reusing the owned
+                // `Vec`, store back — the existing write-back below stays
+                // for every other method).
+                if self.try_emit_move_push_stmt(e) {
+                    return StmtValue::None;
+                }
                 // Method call write-back: if `obj.method(args)` is called as a
                 // statement, the return value (e.g. the new array from push/pop)
                 // must be written back to `obj` so the mutation is visible.
@@ -1507,6 +2184,7 @@ impl Compiler {
     fn compile_func_body(&mut self, scope: &str, block: &Block, params: &[Param]) -> Arc<Chunk> {
         let mut sub = Compiler::new();
         sub.type_scope = scope.to_string();
+        sub.top_globals = self.top_globals.clone();
         sub.types = self.types.clone();
         sub.structs = self.structs.clone();
         sub.native_names = self.native_names.clone();
@@ -1539,6 +2217,113 @@ impl Compiler {
             }
         }
         sub.stack_height = params.len();
+        // Tail-take: a function ending in `return x` / bare `x` moves the
+        // local out of its slot instead of deep-cloning it. The frame dies
+        // on return, so the vacated slot (Unit) is never observed — this
+        // is the NRVO-equivalent for threaded accumulators
+        // (`doc = push_node(doc, x)`): without it the final `doc`
+        // costs a full O(n) deep clone per key (quadratic overall).
+        // Only frame locals qualify (params or block-declared names):
+        // an outer/global binding must keep the cloning load so the
+        // owner still holds its value after the call.
+        if let Some(last) = block.stmts.last() {
+            let tail_name: Option<String> = match last {
+                Stmt::Return {
+                    value: Some(Expr::Ident { name, .. }),
+                    ..
+                } => Some(name.clone()),
+                Stmt::Return { .. } => None,
+                Stmt::Expr(Expr::Ident { name, .. }) => Some(name.clone()),
+                _ => None,
+            };
+            if let Some(name) = tail_name {
+                let is_param = params.iter().any(|p| p.name.name == name);
+                // Block-local check via exact binding collection (no
+                // substring matching): only a real frame local may be
+                // taken; outer bindings keep the cloning load.
+                let mut bound = std::collections::HashSet::new();
+                for s in &block.stmts[..block.stmts.len() - 1] {
+                    match s {
+                        Stmt::Decl { name: n, .. } => {
+                            bound.insert(n.name.clone());
+                        }
+                        Stmt::Destructure { pat, .. } => {
+                            super::capture::collect_pattern_bindings(pat, &mut bound);
+                        }
+                        _ => {}
+                    }
+                }
+                let is_block_local = bound.contains(&name);
+                // Slot homes only: an env-homed tail (captured param or
+                // local, or any destructured binding — those always live
+                // in the environment) shares env storage with closures
+                // created in this frame (`MakeClosure` clones the
+                // `EnvLink`, and deferred closures run after the
+                // return) — taking would expose the `Unit` hole to
+                // them. Slot homes are never captured (capture forces
+                // env promotion), so the take is unobservable. Env
+                // tails keep the cloning load via the normal path.
+                // (`declare_local`: a Decl is slot-homed exactly when
+                // the name is not captured; same for params.)
+                let is_decl_bound = block.stmts[..block.stmts.len() - 1]
+                    .iter()
+                    .any(|s| matches!(s, Stmt::Decl { name: n, .. } if n.name == name));
+                let is_slot_home = !sub.captured.contains(&name)
+                    && (is_decl_bound || params.iter().any(|p| p.name.name == name));
+                if (is_param || is_block_local) && is_slot_home {
+                    // Compile the prefix normally (mirrors the
+                    // `compile_block_body` statement loop), then take
+                    // the tail local instead of cloning it.
+                    let scope_base = sub.locals.len();
+                    let n = block.stmts.len();
+                    for stmt in &block.stmts[..n - 1] {
+                        let v = sub.compile_stmt(stmt);
+                        if matches!(v, StmtValue::Discard) {
+                            sub.emit(Op::Pop);
+                        }
+                    }
+                    let home = sub.resolve(&name);
+                    let is_return = matches!(last, Stmt::Return { .. });
+                    let span = last.span();
+                    match home {
+                        Resolved::Slot(slot) => {
+                            sub.emit(Op::TakeSlot(slot as u16));
+                        }
+                        // Unreachable by the `is_slot_home` gate above
+                        // (static home analysis); cloning load keeps
+                        // the impossible path value-correct.
+                        Resolved::Env => {
+                            sub.emit(Op::LoadVar(name.clone(), span));
+                        }
+                    }
+                    if is_return {
+                        sub.emit(Op::Return);
+                    }
+                    // Mirror `compile_block_body` cleanup scoped to
+                    // block-declared locals (params stay: the frame
+                    // truncate discards them). The tail here is an
+                    // Expr/Return, never a trailing `Keep` declaration,
+                    // so `drop` is the plain slot count. (After an
+                    // explicit `Return` this is dead code, matching the
+                    // normal path which also emits cleanup after it.)
+                    let slot_count = sub.locals[scope_base..]
+                        .iter()
+                        .filter(|l| !l.in_env)
+                        .count();
+                    if slot_count > 0 {
+                        sub.emit(Op::PopN {
+                            n: slot_count as u16,
+                            span: block.span,
+                        });
+                    }
+                    sub.locals.truncate(scope_base);
+                    if needs_env {
+                        sub.emit(Op::ExitScope);
+                    }
+                    return Arc::new(sub.chunk);
+                }
+            }
+        }
         sub.compile_block_body(block, false);
         if needs_env {
             sub.emit(Op::ExitScope);
@@ -1726,6 +2511,7 @@ impl Compiler {
     fn compile_closure_body(&mut self, body: &Expr, params: &[Param]) -> Arc<Chunk> {
         let mut sub = Compiler::new();
         sub.type_scope = self.type_scope.clone();
+        sub.top_globals = self.top_globals.clone();
         sub.types = self.types.clone();
         sub.structs = self.structs.clone();
         sub.native_names = self.native_names.clone();
@@ -1756,6 +2542,33 @@ impl Compiler {
             }
         }
         sub.stack_height = params.len();
+        // Tail-take for closures: `|doc| doc` moves an *uncaptured*
+        // param out instead of deep-cloning. Slot homes only: an
+        // env-homed (captured) param lives in the shared definition
+        // environment, so taking would corrupt later calls; outer
+        // bindings keep the cloning load.
+        if let Expr::Ident { name, .. } = body {
+            if params.iter().any(|p| &p.name.name == name) && !sub.captured.contains(name) {
+                match sub.resolve(name) {
+                    Resolved::Slot(slot) => {
+                        sub.emit(Op::TakeSlot(slot as u16));
+                    }
+                    // Unreachable (uncaptured params are slots);
+                    // cloning load keeps it value-correct.
+                    Resolved::Env => {
+                        sub.compile_expr(body);
+                        if needs_env {
+                            sub.emit(Op::ExitScope);
+                        }
+                        return Arc::new(sub.chunk);
+                    }
+                }
+                if needs_env {
+                    sub.emit(Op::ExitScope);
+                }
+                return Arc::new(sub.chunk);
+            }
+        }
         sub.compile_expr(body);
         if needs_env {
             sub.emit(Op::ExitScope);
@@ -1775,10 +2588,32 @@ impl Compiler {
             Expr::Continue { span } => {
                 self.emit(Op::Continue(*span));
             }
-            Expr::Ident { name, span } => match self.resolve(name) {
-                Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
-                Resolved::Env => self.emit(Op::LoadVar(name.clone(), *span)),
-            },
+            Expr::Ident { name, span } => {
+                // Move-take: the single `x` load in `x = f(x, ...)` takes
+                // instead of cloning (flag set by the Assign arm, consumed
+                // here exactly once — the home must still match, guarding
+                // against shadowed lookalikes).
+                if let Some((flag_var, flag_home)) = self.move_take.clone() {
+                    if flag_var == *name {
+                        let home = match self.resolve(name) {
+                            Resolved::Slot(slot) => TakeHome::Slot(slot as u16),
+                            Resolved::Env => TakeHome::Env(name.clone()),
+                        };
+                        if home == flag_home {
+                            self.move_take = None;
+                            match home {
+                                TakeHome::Slot(slot) => self.emit(Op::TakeSlot(slot)),
+                                TakeHome::Env(n) => self.emit(Op::TakeVar(n, *span)),
+                            }
+                            return;
+                        }
+                    }
+                }
+                match self.resolve(name) {
+                    Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
+                    Resolved::Env => self.emit(Op::LoadVar(name.clone(), *span)),
+                }
+            }
             Expr::Path { parts, span } => self.compile_path_load(parts, *span),
             Expr::Paren { expr, .. } => self.compile_expr(expr),
             Expr::Unary { op, expr, span } => {

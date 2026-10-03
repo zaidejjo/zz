@@ -119,7 +119,10 @@ void zz_array_push(zz_array *a, zz_value item) {
             zz_value *new_items = (zz_value *)malloc(nc * sizeof(zz_value));
             for (size_t i = 0; i < a->len; i++) new_items[i] = a->items[i];
             a->items = new_items;
-            a->refs = 0;
+            // Preserve an accurate `refs == 1` (fresh heap array claiming
+            // its first buffer): it proves single ownership, which the
+            // move-aware push relies on. Anything else becomes 0.
+            if (a->refs != 1) a->refs = 0;
         } else {
             a->items = (zz_value *)realloc(a->items, nc * sizeof(zz_value));
         }
@@ -787,6 +790,36 @@ zz_value zz_len(zz_value v, int *err) {
     return (zz_value){ZZ_INT, {.i = 0}};
 }
 
+// len(s.f) without the getter's retain: reading a field only to measure it
+// must not bump the array's refcount (each leaked share defeats the next
+// move-aware push). Direct fields answer inline; anything else takes the
+// exact old path (get + len + release of the getter's share).
+zz_value zz_len_field(zz_value *obj, const char *field, int *err) {
+    if (obj && obj->tag == ZZ_OBJECT && obj->obj) {
+        zz_object *o = obj->obj;
+        for (size_t i = 0; i < o->len; i++) {
+            zz_value *fname = &o->fields[i * 2];
+            if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), field) == 0) {
+                zz_value *slot = &o->fields[i * 2 + 1];
+                if (slot->tag == ZZ_ARRAY && slot->arr) {
+                    return (zz_value){ZZ_INT, {.i = (int64_t)slot->arr->len}};
+                }
+                if (slot->tag == ZZ_BYTES && slot->bytes) {
+                    return (zz_value){ZZ_INT, {.i = (int64_t)slot->bytes->len}};
+                }
+                if (slot->tag == ZZ_STR && slot->s) {
+                    return (zz_value){ZZ_INT, {.i = (int64_t)slot->s->len}};
+                }
+                return (zz_value){ZZ_INT, {.i = 0}};
+            }
+        }
+    }
+    zz_value cur = zz_object_get_field(obj, field);
+    zz_value r = zz_len(cur, err);
+    zz_release(&cur);
+    return r;
+}
+
 // vec.len(v) — same as len for arrays.
 zz_value zz_vec_len(zz_value v, int *err) {
     return zz_len(v, err);
@@ -814,7 +847,9 @@ zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
                 new_items[i] = a->items[i];
             }
             a->items = new_items;
-            a->refs = 0;  // Arena-allocated header, malloc'd items
+            // Preserve `refs == 1` (see `zz_array_push`): only untracked
+            // shares (sentinels) collapse to 0.
+            if (a->refs != 1) a->refs = 0;  // Arena-allocated header, malloc'd items
         } else {
             a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
         }
@@ -841,7 +876,10 @@ zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
                 new_items[i] = a->items[i];
             }
             a->items = new_items;
-            a->refs = 0;
+            // Preserve `refs == 1` (see `zz_array_push`): dup results stay
+            // provably single-owner, so a later move-aware push can go
+            // in place instead of copying again.
+            if (a->refs != 1) a->refs = 0;
         } else {
             a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
         }
@@ -851,6 +889,74 @@ zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
     // element survives the loop-arena reset.
     a->items[a->len++] = zz_clone_for_store(item);
     return out;
+}
+
+// Move-aware push for `x = vec.push(x, e)` (see collections.h).
+// The fast path moves the element in (no bump, no copy); the fallback
+// heals the counter (dup preserves `refs == 1`, the taken share is
+// released, the result adopted without a bump), so at most one copy ever
+// precedes in-place pushes.
+zz_value zz_vec_push_take(zz_value taken, zz_value item, int *err) {
+    if (taken.tag == ZZ_ARRAY && taken.arr && taken.arr->refs == 1) {
+        // Uniquely owned: refs==1 excludes every sentinel (arena 0,
+        // STACK/LIT/ARENA magics) and any live borrow, so the items
+        // buffer is malloc'd (or NULL when empty) and growth is sound.
+        // `zz_array_push` takes element ownership (move convention: the
+        // emitted element temp's share transfers into the array).
+        zz_array_push(taken.arr, item);
+        return taken;
+    }
+    zz_value out = zz_vec_push(taken, item, err);
+    // Balance the take: the old codegen's assign-release freed the slot's
+    // old share here (and additionally leaked the argument-clone share,
+    // which no longer exists).
+    zz_release(&taken);
+    return out;
+}
+
+// Move-aware field push for `s.f = vec.push(s.f, e)` (see collections.h).
+// Same in-place rule for the field array; the fallback heals like above
+// (drops the getter's share the old lowering leaked, adopts the dup
+// without a bump), so a field pays at most one copy, ever.
+void zz_object_push_field_take(zz_value *obj, const char *field, zz_value item, int *err) {
+    if (obj && obj->tag == ZZ_OBJECT && obj->obj) {
+        zz_object *o = obj->obj;
+        for (size_t i = 0; i < o->len; i++) {
+            zz_value *fname = &o->fields[i * 2];
+            if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), field) == 0) {
+                // In place only when the field buffer is uniquely owned.
+                // Note: struct clones (`zz_clone`/`zz_retain_object`) bump
+                // only the object header, never field buffers, while
+                // `zz_release_object` frees them — so a cloned struct can
+                // share a field array at `refs == 1`. Every OTHER share
+                // path (field getters, dups, retaining stores) bumps the
+                // buffer itself, and the generic path below writes through
+                // the shared object either way, so gating on the buffer
+                // counter alone is observably equivalent to the generic
+                // path here while still covering the live-getter case.
+                // A deep-bump retain (or COW field write) would make the
+                // counter exact; tracked as a follow-up (see the
+                // move_append_struct_copy known-failure).
+                zz_value *slot = &o->fields[i * 2 + 1];
+                if (slot->tag == ZZ_ARRAY && slot->arr
+                    && slot->arr->refs == 1) {
+                    zz_array_push(slot->arr, item);
+                    return;
+                }
+                zz_value cur = zz_object_get_field(obj, field);
+                zz_value n = zz_vec_push(cur, item, err);
+                zz_release(&cur);
+                zz_release(slot);
+                *slot = n;
+                return;
+            }
+        }
+    }
+    // Non-object base or absent/promoted field: same get+push+set shape
+    // (getters return unit, setters no-op, matching old lowering).
+    zz_value cur = zz_object_get_field(obj, field);
+    zz_value n = zz_vec_push(cur, item, err);
+    zz_object_set_field(obj, field, n);
 }
 
 // vec.pop(arr) — remove and return a NEW array without the last element
@@ -907,7 +1013,8 @@ zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err) {
             zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
             for (size_t j = 0; j < o->len; j++) new_items[j] = o->items[j];
             o->items = new_items;
-            o->refs = 0;
+            // Preserve `refs == 1` (see `zz_array_push`).
+            if (o->refs != 1) o->refs = 0;
         } else {
             o->items = (zz_value *)realloc(o->items, new_cap * sizeof(zz_value));
         }

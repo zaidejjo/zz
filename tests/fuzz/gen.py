@@ -329,6 +329,208 @@ def gen_stringify_program(seed):
     return "\n".join(lines) + "\n"
 
 
+
+
+# --- v3 shapes: move-append takes, aliasing, early exits. ---
+# Every case prints only deterministic ints plus a DONE marker.
+# Covered: free/method/append pushes, field pushes, thread calls,
+# live aliases, self-push, double-read elems, dict slots, closures
+# over the pushed array, and `?` early exit inside a push.
+
+
+def gen_v3_alias(seed):
+    """Copied array must not observe the later push (b keeps old len)."""
+    rng = random.Random(1000091 * seed + 21)
+    a = [rng.randint(0, 20) for _ in range(rng.randint(1, 3))]
+    k = rng.randint(0, 50)
+    lines = ["import std.vec"]
+    lines.append(f"a := [{', '.join(map(str, a))}]")
+    lines.append("b := a")
+    lines.append(f"a = vec.push(a, {k})")
+    lines.append("println(len(a))")
+    lines.append("println(len(b))")
+    lines.append("println(b[0])")
+    lines.append(f"println(a[{len(a)}])")
+    lines.append('println("DONE")')
+    return "\n".join(lines) + "\n"
+
+
+def gen_v3_selfpush(seed):
+    """Push the array (nested) or an element read of it back in."""
+    rng = random.Random(1000093 * seed + 31)
+    if rng.random() < 0.5:
+        x0 = rng.randint(0, 9)
+        x1 = rng.randint(0, 9)
+        lines = ["import std.vec"]
+        lines.append(f"x := [[{x0}], [{x1}]]")
+        lines.append("x = vec.push(x, x[0])")
+        lines.append("println(len(x))")
+        lines.append("println(len(x[2]))")
+        lines.append("println(x[2][0])")
+    else:
+        y0, y1 = rng.randint(0, 9), rng.randint(0, 9)
+        lines = ["import std.vec"]
+        lines.append(f"y := [{y0}, {y1}]")
+        lines.append("y = vec.push(y, y[0])")
+        lines.append("println(len(y))")
+        lines.append(f"println(y[2])")
+    lines.append('println("DONE")')
+    return "\n".join(lines) + "\n"
+
+
+def gen_v3_methodloop(seed):
+    """`x = x.push(e)` in a loop (fused method path)."""
+    rng = random.Random(1000097 * seed + 41)
+    n = rng.randint(2, 7)
+    m = rng.randint(1, 5)
+    lines = ["import std.vec"]
+    lines.append("x := []")
+    lines.append(f"for i in 0..{n} {{")
+    lines.append(f"    x = x.push(i * {m})")
+    lines.append("}")
+    lines.append("println(len(x))")
+    lines.append(f"println(x[{n - 1}])")
+    lines.append('println("DONE")')
+    return "\n".join(lines) + "\n"
+
+
+def gen_v3_appendloop(seed):
+    """`x = vec.append(x, e)` in a loop (append value shape)."""
+    rng = random.Random(1000103 * seed + 51)
+    n = rng.randint(2, 7)
+    k = rng.randint(0, 9)
+    lines = ["import std.vec"]
+    lines.append(f"x := [{k}]")
+    lines.append(f"for i in 0..{n} {{")
+    lines.append("    x = vec.append(x, i)")
+    lines.append("}")
+    lines.append("println(len(x))")
+    lines.append(f"println(x[{n}])")
+    lines.append('println("DONE")')
+    return "\n".join(lines) + "\n"
+
+
+def gen_v3_fieldloop(seed):
+    """Two struct fields pushed per iteration (field-take path)."""
+    rng = random.Random(1000121 * seed + 61)
+    n = rng.randint(2, 6)
+    k = rng.randint(0, 9)
+    lines = ["import std.vec"]
+    lines.append("struct Fq { q: [int], w: [int] }")
+    lines.append(f"s := Fq{{q: [], w: [{k}]}}")
+    lines.append(f"for i in 0..{n} {{")
+    lines.append("    s.q = vec.push(s.q, i)")
+    lines.append("    s.w = vec.push(s.w, i)")
+    lines.append("}")
+    lines.append("println(len(s.q))")
+    lines.append("println(len(s.w))")
+    lines.append(f"println(s.q[{n - 1}])")
+    lines.append(f"println(s.w[{n}])")
+    lines.append('println("DONE")')
+    return "\n".join(lines) + "\n"
+
+
+def gen_v3_thread(seed):
+    """`x = f(x, k)` threading an array through a call."""
+    rng = random.Random(1000127 * seed + 71)
+    n = rng.randint(2, 6)
+    c = rng.randint(1, 9)
+    lines = ["import std.vec"]
+    lines.append(f"func ad(d: [int], k: int) -> [int] {{")
+    lines.append(f"    vec.push(d, k + {c})")
+    lines.append("}")
+    lines.append("x := []")
+    lines.append(f"for i in 0..{n} {{")
+    lines.append("    x = ad(x, i)")
+    lines.append("}")
+    lines.append("println(len(x))")
+    lines.append(f"println(x[{n - 1}])")
+    lines.append('println("DONE")')
+    return "\n".join(lines) + "\n"
+
+
+def gen_v3_closurecap(seed):
+    """Closure over the array, called after a push (sees stored value)."""
+    rng = random.Random(1000133 * seed + 81)
+    a = [rng.randint(0, 20) for _ in range(rng.randint(1, 3))]
+    k = rng.randint(0, 50)
+    lines = ["import std.vec"]
+    lines.append(f"a := [{', '.join(map(str, a))}]")
+    lines.append("c := |d: int| len(a) + d")
+    lines.append(f"a = vec.push(a, {k})")
+    lines.append("println(c(0))")
+    lines.append("println(len(a))")
+    lines.append('println("DONE")')
+    return "\n".join(lines) + "\n"
+
+
+def gen_v3_dictpush(seed):
+    """Array behind a dict slot pushed back through the slot."""
+    rng = random.Random(1000141 * seed + 91)
+    a, b = rng.randint(0, 20), rng.randint(0, 20)
+    k = rng.randint(0, 50)
+    lines = ["import std.vec"]
+    lines.append(f'd := {{"k": [{a}, {b}]}}')
+    lines.append(f'd["k"] = vec.push(d["k"], {k})')
+    lines.append('println(len(d["k"]))')
+    lines.append(f'println(d["k"][2])')
+    lines.append('println("DONE")')
+    return "\n".join(lines) + "\n"
+
+
+def gen_v3_earlyexit(seed):
+    """`?` inside a push: error propagates, success path pushes."""
+    rng = random.Random(1000157 * seed + 101)
+    a, b = rng.randint(0, 20), rng.randint(0, 20)
+    lines = ["import std.vec"]
+    lines.append("func pk(v: int) -> Result<int, str> {")
+    lines.append("    if v == 0 {")
+    lines.append('        return .err("bad")')
+    lines.append("    }")
+    lines.append("    return .ok(v * 2)")
+    lines.append("}")
+    lines.append("func bd(v: int) -> Result<[int], str> {")
+    lines.append(f"    o := [{a}, {b}]")
+    lines.append("    o = vec.push(o, pk(v)?)")
+    lines.append("    .ok(o)")
+    lines.append("}")
+    lines.append("r := bd(1)")
+    lines.append("match r {")
+    lines.append('    .ok(v) => println(len(v)),')
+    lines.append('    .err(e) => println(-1),')
+    lines.append("}")
+    lines.append("r2 := bd(0)")
+    lines.append("match r2 {")
+    lines.append('    .ok(v) => println(len(v)),')
+    lines.append('    .err(e) => println(-1),')
+    lines.append("}")
+    lines.append('println("DONE")')
+    return "\n".join(lines) + "\n"
+
+
+def gen_program_v3(seed):
+    rng = random.Random(999979 * seed + 17)
+    k = rng.random()
+    if k < 0.12:
+        return gen_v3_alias(seed)
+    if k < 0.24:
+        return gen_v3_selfpush(seed)
+    if k < 0.36:
+        return gen_v3_methodloop(seed)
+    if k < 0.48:
+        return gen_v3_appendloop(seed)
+    if k < 0.60:
+        return gen_v3_fieldloop(seed)
+    if k < 0.72:
+        return gen_v3_thread(seed)
+    if k < 0.84:
+        return gen_v3_closurecap(seed)
+    if k < 0.93:
+        return gen_v3_dictpush(seed)
+    return gen_v3_earlyexit(seed)
+
+
+
 def gen_program_v2(seed):
     rng = random.Random(999983 * seed + 7)
     k = rng.random()
@@ -346,13 +548,19 @@ if __name__ == "__main__":
     # struct emits) live behind `--shapes v2` so the default mode stays
     # byte-identical for every seed (fixed-seed CI smoke fixtures).
     if len(sys.argv) > 1 and sys.argv[1] == "--shapes":
-        assert sys.argv[2] == "v2", "only --shapes v2 is supported"
+        assert sys.argv[2] in ("v2", "v3"), "only --shapes v2/v3 are supported"
         start, count, outdir = int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
         os.makedirs(outdir, exist_ok=True)
-        for i in range(start, start + count):
-            with open(f"{outdir}/gz{i:05d}.zz", "w") as f:
-                f.write(gen_program_v2(i))
-        print(f"wrote {count} v2 programs")
+        if sys.argv[2] == "v3":
+            for i in range(start, start + count):
+                with open(f"{outdir}/ga{i:05d}.zz", "w") as f:
+                    f.write(gen_program_v3(i))
+            print(f"wrote {count} v3 programs")
+        else:
+            for i in range(start, start + count):
+                with open(f"{outdir}/gz{i:05d}.zz", "w") as f:
+                    f.write(gen_program_v2(i))
+            print(f"wrote {count} v2 programs")
     else:
         start, count, outdir = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
         os.makedirs(outdir, exist_ok=True)

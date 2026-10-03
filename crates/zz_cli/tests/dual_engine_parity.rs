@@ -279,6 +279,9 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "scalar_global_copy" => {
             Some("C codegen: top-level int global copied into another global unboxed twice (`(zz_global_v1).i` on int64_t)")
         }
+        "move_append_struct_copy" => {
+            Some("native: struct clone shares identity (`zz_clone` bumps only the object header, never field buffers), so mutating the copy's array field is visible through the source (VM prints 1/2, native 2/2)")
+        }
 
         // --- Output differences (native runs but output differs) ---
         "concurrency_panic_test" => Some("native: panic/fail inside task closures lowers to unit (no err plumbing through zz_call_closure); VM yields .err"),
@@ -699,6 +702,41 @@ parity_strict!(
     parity_regression_func_capture_destructure,
     "regression",
     "func_capture_destructure.zz"
+);
+parity_strict!(
+    parity_regression_move_append_shapes,
+    "regression",
+    "move_append_shapes.zz"
+);
+parity_strict!(
+    parity_regression_move_append_field,
+    "regression",
+    "move_append_field.zz"
+);
+parity_strict!(
+    parity_regression_move_append_alias,
+    "regression",
+    "move_append_alias.zz"
+);
+parity_strict!(
+    parity_regression_move_append_early_exit,
+    "regression",
+    "move_append_early_exit.zz"
+);
+parity_strict!(
+    parity_regression_move_append_spawn,
+    "regression",
+    "move_append_spawn.zz"
+);
+parity_strict!(
+    parity_regression_move_append_append,
+    "regression",
+    "move_append_append.zz"
+);
+parity_known_failure!(
+    parity_regression_move_append_struct_copy,
+    "regression",
+    "move_append_struct_copy.zz"
 );
 parity_strict!(
     parity_regression_closure_capture_destructure,

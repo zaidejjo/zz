@@ -1,0 +1,43 @@
+// Move-append aliasing: takes must never disturb live shares.
+// NOTE: values print as `name=value` (not bare numbers) so the
+// dual-engine parity harness — which strips purely-numeric lines —
+// actually compares them.
+a := [1, 2, 3]
+b := a
+a = vec.push(a, 9)
+println("a_len={len(a)}")
+println("b_len={len(b)}")
+println("b0={b[0]}")
+println("a3={a[3]}")
+
+// Self-push into a nested array (double read: generic path, same value).
+x := [[1], [2]]
+x = vec.push(x, x[0])
+println("x_len={len(x)}")
+println("x2_len={len(x[2])}")
+
+// Element computed from the array itself (double read: generic path).
+y := [5, 6]
+y = vec.push(y, y[0])
+println("y_len={len(y)}")
+println("y2={y[2]}")
+
+// Index-assign shape (not fused on either engine: same value).
+d := {"k": [1, 2]}
+d["k"] = vec.push(d["k"], 3)
+println("dk_len={len(d["k"])}")
+
+// Struct copies are covered in move_append_struct_copy.zz (native
+// shares struct identity on clone: known divergence, tracked in
+// known_native_failure).
+// Break skips the store window: excluded from takes, loop state intact.
+z := [1]
+for i in 0..5 {
+    if i == 2 {
+        break
+    }
+    z = vec.push(z, i)
+}
+println("z_len={len(z)}")
+
+println("move_append_alias_ok")

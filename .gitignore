@@ -16,6 +16,10 @@ bench/native/bench_loop
 bench/native/bench_str
 bench/native/_go/main
 bench/native/.bin
+# move-append elision harness: generated corpus + built binaries
+# (regenerate deterministically via gen_corpus.py, seed 7)
+bench/move_append/corpus/
+bench/move_append/bin/
 bench/native/categories/*
 !bench/native/categories/*.zz
 benchmarks/arena_bench

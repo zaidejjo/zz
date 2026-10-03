@@ -1,0 +1,24 @@
+// Move-append across spawn: `task.spawn` snapshots scope, so a task
+// that reads the array before the main push observes the pre-push value.
+// Rendezvous makes the order deterministic: the task sends its snapshot,
+// the main thread pushes only after receiving it.
+import std.task
+import std.chan
+
+a := [1, 2]
+seen := std.chan()
+go := std.chan()
+h := task.spawn(|_| {
+    std.chan.send(seen, len(a))
+    std.chan.recv(go)
+})
+n: int = std.chan.recv(seen)
+a = vec.push(a, 3)
+std.chan.send(go, 0)
+task.join(h)
+// NOTE: `name=value` form so parity (which strips bare numbers)
+// compares the snapshot and the pushed length for real.
+println("seen={n}")
+println("a_len={len(a)}")
+
+println("move_append_spawn_ok")

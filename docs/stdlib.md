@@ -116,6 +116,7 @@ import std.vec
 |----------|-----------|-------------|
 | `vec.len` | `vec.len(v: [T]) -> int` | Array length |
 | `vec.push` | `vec.push(v: [T], x: T) -> [T]` | New array with `x` appended |
+| `vec.append` | `vec.append(v: [T], x: T) -> [T]` | Alias for `vec.push`: new array with `x` appended |
 | `vec.pop` | `vec.pop(v: [T]) -> [T]` | New array with last element removed |
 | `vec.reverse` | `vec.reverse(v: [T]) -> [T]` | Reversed copy |
 | `vec.join` | `vec.join(v: [T], sep: str) -> str` | Join as string |

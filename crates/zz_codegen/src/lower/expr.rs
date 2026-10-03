@@ -320,6 +320,12 @@ impl Lowerer {
                 Some(cid) => {
                     // Check if the variable is a scalar type that can be used directly
                     if let Some(ctype) = names.lookup_type(name) {
+                        // Moved-from temporaries (`x = f(x)` fast path):
+                        // the slot was taken, so pass the temp through
+                        // without a `zz_clone` bump.
+                        if super::move_elide::is_moved_type(Some(ctype)) {
+                            return cid.to_string();
+                        }
                         match ctype {
                             "int64_t" | "double" | "bool" => cid.to_string(),
                             // Raw C structs are Copy (not refcounted) — pass
@@ -2074,6 +2080,17 @@ impl Lowerer {
         }
 
         let mut arg_items: Vec<String> = Vec::new();
+        // `len(s.f)` without the getter's retain (see `zz_len_field`):
+        // runs before arg emission so the field is never cloned.
+        if cname == "len"
+            && method_receiver.is_none()
+            && named.is_empty()
+            && ordered_args.len() == 1
+        {
+            if let Some(len_c) = self.try_emit_len_field(ordered_args[0], names) {
+                return len_c;
+            }
+        }
         // sqlz early-out: sqlz.query/sqlz.exec (+ db.* alias, + pg.* free
         // form) lower via emit_db_call, which needs the raw Exprs (Fmt
         // split into template + binds). Runs BEFORE the generic

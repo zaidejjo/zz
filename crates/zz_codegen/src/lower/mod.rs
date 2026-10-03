@@ -15,6 +15,7 @@ mod expr;
 mod extern_call;
 mod fn_decl;
 mod green;
+mod move_elide;
 mod stmt;
 
 use zz_frontend::ast::{Expr, Pattern, Stmt};
@@ -785,7 +786,12 @@ fn native_impl(name: &str) -> Option<&'static str> {
         // vec methods — bare names for method dispatch
         "vec.len" | "std.vec.len" | "vec_len" => Some("zz_vec_len"),
         "bytes.len" | "std.bytes.len" => Some("zz_len"),
-        "vec.append" | "std.vec.append" => Some("zz_vec_append"),
+        // `vec.append` is documented (stdlib.md, checker sigs) as an alias
+        // for `vec.push`: it returns the new array. Map to the value form
+        // `zz_vec_push`; statement position still mutates in place via the
+        // existing void-context `zz_vec_push` → `zz_vec_append` swap in
+        // expr.rs (same as `vec.push` and bare `append`).
+        "vec.append" | "std.vec.append" => Some("zz_vec_push"),
         "vec.push" | "std.vec.push" => Some("zz_vec_push"),
         "vec.pop" | "std.vec.pop" => Some("zz_vec_pop"),
         "vec.remove" | "std.vec.remove" => Some("zz_vec_remove"),

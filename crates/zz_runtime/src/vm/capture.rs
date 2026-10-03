@@ -21,7 +21,7 @@ pub(crate) fn scan_block_captured(
         params.iter().map(|p| p.name.name.clone()).collect();
     let mut free = std::collections::HashSet::new();
     for stmt in &block.stmts {
-        scan_stmt_captured(stmt, &mut defined, &mut free);
+        scan_stmt_captured(stmt, &mut defined, &mut free, true);
     }
     free
 }
@@ -34,78 +34,90 @@ pub(crate) fn scan_closure_captured(
     let mut defined: std::collections::HashSet<String> =
         params.iter().map(|p| p.name.name.clone()).collect();
     let mut free = std::collections::HashSet::new();
-    scan_expr_captured(body, &mut defined, &mut free);
+    scan_expr_captured(body, &mut defined, &mut free, true);
     free
 }
 
+/// `nested` marks code that executes outside the current frame
+/// (function and closure bodies, transitively): only references made
+/// there can observe the environment, so only they count toward
+/// capture. Top-level statements — including loop bodies and blocks,
+/// which run inline in the current frame — resolve through slots and
+/// must not force environment promotion.
 pub(crate) fn scan_expr_captured(
     expr: &Expr,
     defined: &mut std::collections::HashSet<String>,
     free: &mut std::collections::HashSet<String>,
+    nested: bool,
 ) {
     match expr {
         Expr::Ident { name, .. } => {
-            if !defined.contains(name) {
+            if nested && !defined.contains(name) {
                 free.insert(name.clone());
             }
         }
         Expr::Closure { params, body, .. } => {
             let mut inner: std::collections::HashSet<String> =
                 params.iter().map(|p| p.name.name.clone()).collect();
-            scan_expr_captured(body, &mut inner, free);
+            scan_expr_captured(body, &mut inner, free, true);
         }
         Expr::Block(block) => {
             let mut inner = defined.clone();
             for stmt in &block.stmts {
-                scan_stmt_captured(stmt, &mut inner, free);
+                scan_stmt_captured(stmt, &mut inner, free, nested);
             }
         }
-        Expr::Paren { expr, .. } => scan_expr_captured(expr, defined, free),
-        Expr::Unary { expr, .. } => scan_expr_captured(expr, defined, free),
+        Expr::Paren { expr, .. } => scan_expr_captured(expr, defined, free, nested),
+        Expr::Unary { expr, .. } => scan_expr_captured(expr, defined, free, nested),
         Expr::Binary { left, right, .. } => {
-            scan_expr_captured(left, defined, free);
-            scan_expr_captured(right, defined, free);
+            scan_expr_captured(left, defined, free, nested);
+            scan_expr_captured(right, defined, free, nested);
         }
         Expr::Call { callee, args, .. } => {
-            scan_expr_captured(callee, defined, free);
+            // Callee position resolves through the environment at
+            // runtime (`CallPath`/`CallMethod` never consult slots), so
+            // a callee root naming a top-level binding must stay
+            // environment-promoted even in inline code (`p.dist()`).
+            // Argument and receiver values use slot-aware loads.
+            scan_expr_captured(callee, defined, free, true);
             for a in args {
-                scan_expr_captured(a, defined, free);
+                scan_expr_captured(a, defined, free, nested);
             }
         }
         Expr::If {
             cond, then, els, ..
         } => {
-            scan_expr_captured(cond, defined, free);
+            scan_expr_captured(cond, defined, free, nested);
             let mut inner = defined.clone();
             for stmt in &then.stmts {
-                scan_stmt_captured(stmt, &mut inner, free);
+                scan_stmt_captured(stmt, &mut inner, free, nested);
             }
             if let Some(e) = els {
-                scan_expr_captured(e, defined, free);
+                scan_expr_captured(e, defined, free, nested);
             }
         }
         Expr::Fmt { parts, .. } => {
             for part in parts {
                 if let FmtPart::Expr(e, _) = part {
-                    scan_expr_captured(e, defined, free);
+                    scan_expr_captured(e, defined, free, nested);
                 }
             }
         }
         Expr::While { cond, body, .. } => {
-            scan_expr_captured(cond, defined, free);
+            scan_expr_captured(cond, defined, free, nested);
             let mut inner = defined.clone();
             for stmt in &body.stmts {
-                scan_stmt_captured(stmt, &mut inner, free);
+                scan_stmt_captured(stmt, &mut inner, free, nested);
             }
         }
         Expr::Match {
             scrutinee, arms, ..
         } => {
-            scan_expr_captured(scrutinee, defined, free);
+            scan_expr_captured(scrutinee, defined, free, nested);
             for arm in arms {
                 let mut inner = defined.clone();
                 collect_pattern_bindings(&arm.pat, &mut inner);
-                scan_expr_captured(&arm.body, &mut inner, free);
+                scan_expr_captured(&arm.body, &mut inner, free, nested);
             }
         }
         Expr::IfLet {
@@ -115,30 +127,30 @@ pub(crate) fn scan_expr_captured(
             els,
             ..
         } => {
-            scan_expr_captured(value, defined, free);
+            scan_expr_captured(value, defined, free, nested);
             let mut inner = defined.clone();
             collect_pattern_bindings(pat, &mut inner);
             for stmt in &then.stmts {
-                scan_stmt_captured(stmt, &mut inner, free);
+                scan_stmt_captured(stmt, &mut inner, free, nested);
             }
             if let Some(e) = els {
-                scan_expr_captured(e, defined, free);
+                scan_expr_captured(e, defined, free, nested);
             }
         }
-        Expr::Try { expr, .. } => scan_expr_captured(expr, defined, free),
+        Expr::Try { expr, .. } => scan_expr_captured(expr, defined, free, nested),
         Expr::Variant { arg, .. } => {
             if let Some(a) = arg {
-                scan_expr_captured(a, defined, free);
+                scan_expr_captured(a, defined, free, nested);
             }
         }
         Expr::Array { elems, .. } => {
             for e in elems {
-                scan_expr_captured(e, defined, free);
+                scan_expr_captured(e, defined, free, nested);
             }
         }
         Expr::Tuple { items, .. } => {
             for e in items {
-                scan_expr_captured(e, defined, free);
+                scan_expr_captured(e, defined, free, nested);
             }
         }
         Expr::ListComp {
@@ -148,43 +160,43 @@ pub(crate) fn scan_expr_captured(
             filter,
             ..
         } => {
-            scan_expr_captured(iter, defined, free);
+            scan_expr_captured(iter, defined, free, nested);
             let mut inner = defined.clone();
             inner.insert(var.name.clone());
             if let Some(f) = filter {
-                scan_expr_captured(f, &mut inner, free);
+                scan_expr_captured(f, &mut inner, free, nested);
             }
-            scan_expr_captured(body, &mut inner, free);
+            scan_expr_captured(body, &mut inner, free, nested);
         }
         Expr::Dict { entries, .. } => {
             for (k, v) in entries {
-                scan_expr_captured(k, defined, free);
-                scan_expr_captured(v, defined, free);
+                scan_expr_captured(k, defined, free, nested);
+                scan_expr_captured(v, defined, free, nested);
             }
         }
-        Expr::Field { obj, .. } => scan_expr_captured(obj, defined, free),
+        Expr::Field { obj, .. } => scan_expr_captured(obj, defined, free, nested),
         Expr::Range { start, end, .. } => {
-            scan_expr_captured(start, defined, free);
-            scan_expr_captured(end, defined, free);
+            scan_expr_captured(start, defined, free, nested);
+            scan_expr_captured(end, defined, free, nested);
         }
         Expr::StructInit { fields, .. } => {
             for (_, v) in fields {
-                scan_expr_captured(v, defined, free);
+                scan_expr_captured(v, defined, free, nested);
             }
         }
         Expr::Index { obj, index, .. } => {
-            scan_expr_captured(obj, defined, free);
-            scan_expr_captured(index, defined, free);
+            scan_expr_captured(obj, defined, free, nested);
+            scan_expr_captured(index, defined, free, nested);
         }
         Expr::Slice {
             obj, start, end, ..
         } => {
-            scan_expr_captured(obj, defined, free);
+            scan_expr_captured(obj, defined, free, nested);
             if let Some(e) = start {
-                scan_expr_captured(e, defined, free);
+                scan_expr_captured(e, defined, free, nested);
             }
             if let Some(e) = end {
-                scan_expr_captured(e, defined, free);
+                scan_expr_captured(e, defined, free, nested);
             }
         }
         Expr::Int { .. }
@@ -200,6 +212,9 @@ pub(crate) fn scan_expr_captured(
         // kept as a fallback for namespaced top-level bindings stored as
         // single slots.
         Expr::Path { parts, .. } => {
+            if !nested {
+                return;
+            }
             let root = parts[0].clone();
             if !defined.contains(&root) {
                 free.insert(root);
@@ -216,10 +231,11 @@ pub(crate) fn scan_stmt_captured(
     stmt: &Stmt,
     defined: &mut std::collections::HashSet<String>,
     free: &mut std::collections::HashSet<String>,
+    nested: bool,
 ) {
     match stmt {
         Stmt::Decl { name, value, .. } => {
-            scan_expr_captured(value, defined, free);
+            scan_expr_captured(value, defined, free, nested);
             defined.insert(name.name.clone());
         }
         Stmt::Import { .. } => {}
@@ -230,50 +246,50 @@ pub(crate) fn scan_stmt_captured(
             let mut inner: std::collections::HashSet<String> =
                 params.iter().map(|p| p.name.name.clone()).collect();
             for stmt in &body.stmts {
-                scan_stmt_captured(stmt, &mut inner, free);
+                scan_stmt_captured(stmt, &mut inner, free, true);
             }
             defined.insert(name.join("."));
         }
         Stmt::Return { value, .. } => {
             if let Some(e) = value {
-                scan_expr_captured(e, defined, free);
+                scan_expr_captured(e, defined, free, nested);
             }
         }
         Stmt::Struct { .. } => {}
         Stmt::Impl { methods, .. } => {
             for method in methods {
-                scan_stmt_captured(method, defined, free);
+                scan_stmt_captured(method, defined, free, nested);
             }
         }
         Stmt::For {
             vars, iter, body, ..
         } => {
-            scan_expr_captured(iter, defined, free);
+            scan_expr_captured(iter, defined, free, nested);
             let mut inner = defined.clone();
             for v in vars {
                 inner.insert(v.name.clone());
             }
             for stmt in &body.stmts {
-                scan_stmt_captured(stmt, &mut inner, free);
+                scan_stmt_captured(stmt, &mut inner, free, nested);
             }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
         Stmt::Defer { expr, .. } => {
-            scan_expr_captured(expr, defined, free);
+            scan_expr_captured(expr, defined, free, nested);
         }
         Stmt::Assign { target, value, .. } => {
-            scan_expr_captured(value, defined, free);
-            scan_expr_captured(target, defined, free);
+            scan_expr_captured(value, defined, free, nested);
+            scan_expr_captured(target, defined, free, nested);
         }
         Stmt::CompoundAssign { target, value, .. } => {
-            scan_expr_captured(value, defined, free);
-            scan_expr_captured(target, defined, free);
+            scan_expr_captured(value, defined, free, nested);
+            scan_expr_captured(target, defined, free, nested);
         }
         Stmt::Destructure { pat, value, .. } => {
-            scan_expr_captured(value, defined, free);
+            scan_expr_captured(value, defined, free, nested);
             collect_pattern_bindings(pat, defined);
         }
-        Stmt::Expr(e) => scan_expr_captured(e, defined, free),
+        Stmt::Expr(e) => scan_expr_captured(e, defined, free, nested),
     }
 }
 
