@@ -674,6 +674,7 @@ import std.term
 | `term.read_key` | `term.read_key() -> Result<int, str>` | Block for one stdin byte (`0–255`) |
 | `term.get_size` | `term.get_size() -> Result<[int, int], str>` | Terminal `[cols, rows]` via `TIOCGWINSZ` |
 | `term.is_tty` | `term.is_tty() -> bool` | Total predicate for graceful degradation |
+| `term.flush` | `term.flush()` | Flush stdout now (interactive renders without trailing newline) |
 
 Raw mode clears `ICANON`/`ECHO` (plus `ISIG`, so Ctrl+C arrives as
 byte `3` and ZZ code can restore the terminal via `defer` instead of

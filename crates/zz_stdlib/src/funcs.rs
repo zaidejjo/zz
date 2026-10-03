@@ -635,11 +635,13 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert("std.term.read_key".into(), sig(vec![], res_int()));
     m.insert("std.term.get_size".into(), sig(vec![], res_size()));
     m.insert("std.term.is_tty".into(), sig(vec![], Type::Bool));
+    m.insert("std.term.flush".into(), sig(vec![], Type::Unit));
     m.insert("term.enable_raw".into(), sig(vec![], res_unit2()));
     m.insert("term.disable_raw".into(), sig(vec![], res_unit2()));
     m.insert("term.read_key".into(), sig(vec![], res_int()));
     m.insert("term.get_size".into(), sig(vec![], res_size()));
     m.insert("term.is_tty".into(), sig(vec![], Type::Bool));
+    m.insert("term.flush".into(), sig(vec![], Type::Unit));
 
     // std.args — raw argv + flag parser. Parser handles are Opaque("args"),
     // dispatching `args.*` methods by tag. Both spellings (like json).
@@ -3778,15 +3780,17 @@ mod tests {
             "std.term.read_key",
             "std.term.get_size",
             "std.term.is_tty",
+            "std.term.flush",
             "term.enable_raw",
             "term.disable_raw",
             "term.read_key",
             "term.get_size",
             "term.is_tty",
+            "term.flush",
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 722);
+        assert_eq!(funcs.len(), 724);
     }
 
     #[test]

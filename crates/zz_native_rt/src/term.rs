@@ -193,6 +193,14 @@ pub fn get_size() -> Result<(i64, i64), String> {
     unix::get_size()
 }
 
+/// Flush stdout immediately (total — interactive renders without a
+/// trailing newline would otherwise sit buffered while `read_key`
+/// blocks; `println`/`input` flush on their own, `print` does not).
+pub fn flush() {
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+}
+
 fn ok_unit() -> CValue {
     CValue::unit()
 }
@@ -266,6 +274,14 @@ pub extern "C" fn zz_term_get_size(_unit: CValue, err: *mut std::ffi::c_int) -> 
 pub extern "C" fn zz_term_is_tty(_unit: CValue, err: *mut std::ffi::c_int) -> CValue {
     let _ = err;
     CValue::boolean(is_tty())
+}
+
+/// `term.flush()` (total).
+#[no_mangle]
+pub extern "C" fn zz_term_flush(_unit: CValue, err: *mut std::ffi::c_int) -> CValue {
+    let _ = err;
+    flush();
+    CValue::unit()
 }
 
 #[cfg(test)]

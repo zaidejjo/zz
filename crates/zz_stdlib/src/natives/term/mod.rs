@@ -69,3 +69,12 @@ pub(crate) fn term_is_tty(
 ) -> Result<Value, EvalError> {
     Ok(Value::Bool(zz_native_rt::term::is_tty()))
 }
+
+pub(crate) fn term_flush(
+    _interp: &mut Interp,
+    _args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    zz_native_rt::term::flush();
+    Ok(Value::Unit)
+}
