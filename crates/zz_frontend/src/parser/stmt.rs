@@ -1056,6 +1056,10 @@ impl Parser {
                 span,
             });
             if self.eat(TokenKind::Comma) {
+                // Trailing comma: `func f(a: int, b: int,)` ends the list.
+                if self.at(TokenKind::RParen) {
+                    break;
+                }
                 continue;
             }
             break;
