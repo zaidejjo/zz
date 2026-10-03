@@ -1,0 +1,37 @@
+// E2E: std.term — raw mode, single-key reads, terminal size.
+//
+// Hermetic by construction: the e2e harness pipes stdin (closed pipe when
+// no `<stem>.stdin` sibling exists), so stdin is never a TTY here. The
+// fallible ops must fail soft with `.err` (never block, never touch real
+// termios); `disable_raw` stays a no-op success; `is_tty` is false.
+// Interactive behavior (real key bytes) is covered by the manual
+// `examples/raw_test.zz` smoke script instead.
+import std.term
+
+tty := term.is_tty()
+println("is_tty: {tty}")
+
+match term.enable_raw() {
+    .ok(_) => println("enable: ok"),
+    .err(e) => println("enable: err: {e}"),
+}
+
+match term.disable_raw() {
+    .ok(_) => println("disable: ok"),
+    .err(e) => println("disable: err: {e}"),
+}
+
+match term.read_key() {
+    .ok(k) => println("key: {k}"),
+    .err(e) => println("key: err: {e}"),
+}
+
+match term.get_size() {
+    .ok(sz) => println("size: {sz[0]}x{sz[1]}"),
+    .err(e) => println("size: err: {e}"),
+}
+
+// Bare `term.*` spellings resolve through the same natives.
+println("std_spell: {std.term.is_tty() == tty}")
+
+println("term_ok")

@@ -85,6 +85,7 @@ pub const STDLIB_MODULES: &[&str] = &[
     "sqlz.postgres",
     "sqlz.mysql",
     "colors",
+    "term",
     "test",
 ];
 
