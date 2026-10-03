@@ -19,7 +19,7 @@ pub(crate) mod encoding;
 pub(crate) mod env;
 pub mod fs;
 pub(crate) mod http;
-pub(crate) mod io;
+pub mod io;
 pub(crate) mod iterators;
 pub(crate) mod json;
 pub(crate) mod log;

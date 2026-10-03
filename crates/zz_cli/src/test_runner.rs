@@ -73,6 +73,8 @@ struct TestConfig {
     changed: bool,
     engine: TestEngine,
     native_release: bool,
+    allow_source_builds: bool,
+    allow_hooks: bool,
 }
 
 impl TestConfig {
@@ -100,6 +102,8 @@ impl TestConfig {
         let mut changed = false;
         let mut engine = defaults.engine;
         let mut native_release = false;
+        let mut allow_source_builds = false;
+        let mut allow_hooks = false;
 
         let mut i = 0;
         while i < args.len() {
@@ -165,6 +169,8 @@ impl TestConfig {
                 "--json" => json_output = true,
                 "--native" | "--aot" => engine = TestEngine::Native,
                 "-p" | "--release" => native_release = true,
+                "--allow-source-builds" => allow_source_builds = true,
+                "--allow-hooks" => allow_hooks = true,
                 "--filter" | "-f" => {
                     i += 1;
                     filter = args.get(i).cloned();
@@ -247,6 +253,10 @@ impl TestConfig {
                            --native, --aot  Run tests as AOT binaries (dev build)\n  \
                            --engine=vm|native  Select the test engine (default vm)\n  \
                            -p, --release    With --native: optimized build (default: dev)\n  \
+                           --allow-source-builds  With --native: compile transitive native deps\n  \
+                           from source when no prebuilt covers the host tag\n  \
+                           --allow-hooks    With --native: run legacy [native] build hooks\n  \
+                           (direct deps only; transitive hooks always error)\n  \
                            --json           Structured JSON output to stdout\n  \
                            --junit <path>   JUnit XML to file\n  \
                            --repeat N       Run tests N times\n  \
@@ -316,6 +326,8 @@ impl TestConfig {
             changed,
             engine,
             native_release,
+            allow_source_builds,
+            allow_hooks,
         })
     }
 
@@ -458,6 +470,9 @@ struct TestResult {
     reason: Option<String>,
     duration: Duration,
     error_msg: Option<String>,
+    /// Captured stdout (VM: per-test buffer; AOT: child stdout).
+    /// Shown only for failed tests; always present in `--json`.
+    stdout: String,
     retried: u32,
 }
 
@@ -624,7 +639,7 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
     let mut aot_bins: BTreeMap<PathBuf, (PathBuf, PathBuf)> = BTreeMap::new();
     if config.engine == TestEngine::Native {
         for (file, tests) in &groups {
-            match build_aot_harness(file, tests, config.native_release) {
+            match build_aot_harness(file, tests, &config) {
                 Ok(b) => {
                     aot_bins.insert(file.clone(), b);
                 }
@@ -790,6 +805,7 @@ fn skipped_result(test: &TestInfo, msg: &str) -> TestResult {
         reason: None,
         duration: Duration::ZERO,
         error_msg: Some(msg.to_string()),
+        stdout: String::new(),
         retried: 0,
     }
 }
@@ -849,16 +865,46 @@ fn run_group_parallel(
     config: &TestConfig,
     aot_bin: Option<&Path>,
 ) -> Result<Vec<TestResult>, String> {
+    // `tag = "serial"` lane: tests touching process-global state
+    // (log level, env, ports) run sequentially up front, even in
+    // parallel mode; the rest share the pool. Documented in testing.md.
+    let (serial_lane, par_lane): (Vec<usize>, Vec<usize>) =
+        (0..tests.len()).partition(|&i| tests[i].meta.tag.as_deref() == Some("serial"));
     let total = tests.len();
-    let jobs = config.jobs.min(total).max(1);
+    let jobs = config.jobs.min(par_lane.len().max(1)).max(1);
 
-    let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..total).collect()));
+    let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new(par_lane.into_iter().collect()));
     let results: Arc<Mutex<Vec<Option<TestResult>>>> = Arc::new(Mutex::new(vec![None; total]));
     let fail_fast_flag = Arc::new(AtomicBool::new(false));
     // Serializes multi-line result blocks so parallel completions never
     // interleave mid-test.
     let print_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
     let aot_bin = aot_bin.map(|p| p.to_path_buf());
+
+    // Serial lane first, in file order (streams live, like serial mode).
+    for idx in serial_lane {
+        if config.fail_fast && fail_fast_flag.load(Ordering::Relaxed) {
+            let s = skipped_result(&tests[idx], "skipped (--fail-fast)");
+            if !config.json_output {
+                let _guard = print_lock.lock().unwrap();
+                print_test_line(&s, config);
+            }
+            results.lock().unwrap()[idx] = Some(s);
+            continue;
+        }
+        let r = match aot_bin.as_deref() {
+            Some(bin) => run_single_test_aot(&tests[idx], idx, bin, config),
+            None => run_single_test_vm(&tests[idx], config),
+        };
+        if config.fail_fast && !r.passed && !r.ignored {
+            fail_fast_flag.store(true, Ordering::Relaxed);
+        }
+        if !config.json_output {
+            let _guard = print_lock.lock().unwrap();
+            print_test_line(&r, config);
+        }
+        results.lock().unwrap()[idx] = Some(r);
+    }
 
     std::thread::scope(|s| {
         let handles: Vec<_> = (0..jobs)
@@ -1245,7 +1291,73 @@ fn run_single_test_vm(test: &TestInfo, config: &TestConfig) -> TestResult {
     }
 }
 
+/// Env marker: this process IS a timeout worker (spawned by a parent
+/// `zz test`), so timed tests run inline instead of spawning grandchildren.
+const WORKER_ENV: &str = "ZZ_TEST_WORKER";
+
+fn worker_mode() -> bool {
+    std::env::var_os(WORKER_ENV).is_some()
+}
+
+/// Drain a child process's pipes on threads: a chatty child must never
+/// block forever on a full pipe while the parent only polls for exit.
+struct PipeDrains {
+    out: std::thread::JoinHandle<Vec<u8>>,
+    err: Option<std::thread::JoinHandle<Vec<u8>>>,
+}
+
+fn spawn_drains(child: &mut std::process::Child, with_stderr: bool) -> PipeDrains {
+    let child_stdout = child.stdout.take();
+    let out = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut o) = child_stdout {
+            use std::io::Read;
+            let _ = o.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let err = with_stderr.then(|| {
+        let child_stderr = child.stderr.take();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut e) = child_stderr {
+                use std::io::Read;
+                let _ = e.read_to_end(&mut buf);
+            }
+            buf
+        })
+    });
+    PipeDrains { out, err }
+}
+
+fn finish_drains(d: PipeDrains) -> (Vec<u8>, Vec<u8>) {
+    (
+        d.out.join().unwrap_or_default(),
+        d.err
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default(),
+    )
+}
+
+/// One attempt with per-test stdout capture (VM engine).
+///
+/// Unless `--nocapture` (live output), `print`/`println` during the
+/// attempt go to a thread-local buffer instead of the terminal. The
+/// buffer lands on [`TestResult::stdout`]: shown only for failed tests,
+/// always present in `--json`. Passing suites stay quiet — and piped
+/// JSON is never polluted by test prints.
 fn run_test_attempt(test: &TestInfo, nocapture: bool) -> TestResult {
+    if !nocapture {
+        zz_stdlib::natives::io::test_capture_start();
+    }
+    let mut r = run_test_attempt_inner(test, nocapture);
+    if !nocapture {
+        r.stdout = zz_stdlib::natives::io::test_capture_take();
+    }
+    r
+}
+
+fn run_test_attempt_inner(test: &TestInfo, nocapture: bool) -> TestResult {
     let start = Instant::now();
 
     if test.meta.ignore {
@@ -1259,45 +1371,22 @@ fn run_test_attempt(test: &TestInfo, nocapture: bool) -> TestResult {
             reason: test.meta.reason.clone(),
             duration: start.elapsed(),
             error_msg: None,
+            stdout: String::new(),
             retried: 0,
         };
     }
 
-    // If timeout is set, run in a thread and join with deadline.
+    // A hard `@test(timeout = ms)` runs the test in a worker subprocess
+    // (re-executed `zz test` for just this test) so the deadline is a
+    // true wall-clock kill: the child is killed on overrun, leaving no
+    // abandoned thread behind (threads can't be killed in Rust) and
+    // preempting even blocking natives. Untimed tests stay in-process.
     let result = if let Some(timeout_ms) = test.meta.timeout_ms {
-        let test_clone = TestInfo {
-            name: test.name.clone(),
-            file: test.file.clone(),
-            meta: test.meta.clone(),
-            module_index: test.module_index,
-            func_name: test.func_name.clone(),
-            setup_fn: test.setup_fn.clone(),
-            teardown_fn: test.teardown_fn.clone(),
-            case_values: test.case_values.clone(),
-        };
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_test_isolated(&test_clone)
-            }));
-            let _ = tx.send(outcome);
-        });
-        match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                return TestResult {
-                    name: test.name.clone(),
-                    file: test.file.clone(),
-                    passed: false,
-                    ignored: false,
-                    slow: false,
-                    over_budget: false,
-                    reason: None,
-                    duration: start.elapsed(),
-                    error_msg: Some(format!("timeout: exceeded {timeout_ms}ms limit")),
-                    retried: 0,
-                };
-            }
+        if worker_mode() {
+            // Worker child itself: run inline (never spawn grandchildren).
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_test_isolated(test)))
+        } else {
+            return run_test_in_worker(test, timeout_ms, nocapture);
         }
     } else {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_test_isolated(test)))
@@ -1314,6 +1403,7 @@ fn run_test_attempt(test: &TestInfo, nocapture: bool) -> TestResult {
             reason: None,
             duration: start.elapsed(),
             error_msg: None,
+            stdout: String::new(),
             retried: 0,
         },
         Ok(Err(e)) => {
@@ -1338,6 +1428,7 @@ fn run_test_attempt(test: &TestInfo, nocapture: bool) -> TestResult {
                 },
                 duration: start.elapsed(),
                 error_msg,
+                stdout: String::new(),
                 retried: 0,
             }
         }
@@ -1371,9 +1462,219 @@ fn run_test_attempt(test: &TestInfo, nocapture: bool) -> TestResult {
                 },
                 duration: start.elapsed(),
                 error_msg: Some(msg),
+                stdout: String::new(),
                 retried: 0,
             }
         }
+    }
+}
+
+/// Run a timed VM test in a worker subprocess (same `zz` binary, single
+/// test, JSON report) with a true wall-clock deadline.
+///
+/// The child re-discovers just this test (`--exact` on its qualified
+/// name, scoped to its file) and prints one JSON object; the parent maps
+/// it back onto [`TestResult`]. On overrun the child is killed — nothing
+/// leaks, and even blocking natives are preempted. Only timed tests pay
+/// the spawn cost; everything else stays in-process.
+fn run_test_in_worker(test: &TestInfo, timeout_ms: u64, nocapture: bool) -> TestResult {
+    let start = Instant::now();
+    let fail = |msg: String| TestResult {
+        name: test.name.clone(),
+        file: test.file.clone(),
+        passed: false,
+        ignored: false,
+        slow: false,
+        over_budget: false,
+        reason: None,
+        duration: start.elapsed(),
+        error_msg: Some(msg),
+        stdout: String::new(),
+        retried: 0,
+    };
+
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        // No worker possible (embedded binary): run inline without
+        // timeout enforcement rather than refusing the test.
+        Err(_) => {
+            return match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_test_isolated(test)
+            })) {
+                Ok(Ok(())) => TestResult {
+                    name: test.name.clone(),
+                    file: test.file.clone(),
+                    passed: true,
+                    ignored: false,
+                    slow: false,
+                    over_budget: false,
+                    reason: None,
+                    duration: start.elapsed(),
+                    error_msg: None,
+                    stdout: String::new(),
+                    retried: 0,
+                },
+                Ok(Err(e)) => fail(e),
+                Err(_) => fail("worker fallback panicked".to_string()),
+            };
+        }
+    };
+    let file = match std::fs::canonicalize(&test.file) {
+        Ok(p) => p,
+        Err(e) => {
+            return fail(format!(
+                "cannot resolve test file `{}`: {e}",
+                test.file.display()
+            ));
+        }
+    };
+
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("test")
+        .arg(&file)
+        .arg("--exact")
+        .arg("--filter")
+        .arg(&test.name)
+        .arg("--serial")
+        .arg("--json")
+        .env(WORKER_ENV, "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(if nocapture {
+            std::process::Stdio::inherit()
+        } else {
+            std::process::Stdio::piped()
+        });
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return fail(format!("cannot spawn test worker: {e}")),
+    };
+    let drains = spawn_drains(&mut child, !nocapture);
+
+    let deadline = start + Duration::from_millis(timeout_ms);
+    let timed_out = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break false,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break true;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => break true,
+        }
+    };
+    let (out_bytes, err_bytes) = finish_drains(drains);
+
+    if timed_out {
+        return TestResult {
+            name: test.name.clone(),
+            file: test.file.clone(),
+            passed: false,
+            ignored: false,
+            slow: false,
+            over_budget: false,
+            reason: None,
+            duration: start.elapsed(),
+            error_msg: Some(format!("timeout: exceeded {timeout_ms}ms limit")),
+            stdout: String::new(),
+            retried: 0,
+        };
+    }
+
+    map_worker_report(test, &out_bytes, &err_bytes, start.elapsed())
+}
+
+/// Map a worker child's JSON report back onto [`TestResult`].
+/// Unparseable output is a loud failure, never a silent pass.
+fn map_worker_report(
+    test: &TestInfo,
+    out_bytes: &[u8],
+    err_bytes: &[u8],
+    duration: Duration,
+) -> TestResult {
+    let fail = |msg: String| TestResult {
+        name: test.name.clone(),
+        file: test.file.clone(),
+        passed: false,
+        ignored: false,
+        slow: false,
+        over_budget: false,
+        reason: None,
+        duration,
+        error_msg: Some(msg),
+        stdout: String::new(),
+        retried: 0,
+    };
+    let text = String::from_utf8_lossy(out_bytes);
+    let entry = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v.as_array()?.first().cloned())
+        .and_then(|v| v.as_object().cloned());
+    let Some(entry) = entry else {
+        let err_text = String::from_utf8_lossy(err_bytes).into_owned();
+        let tail: Vec<&str> = err_text.lines().rev().take(10).collect();
+        let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+        let tail = tail.trim();
+        let msg = if tail.is_empty() {
+            "test worker produced no report".to_string()
+        } else {
+            format!("test worker produced no report:\n{tail}")
+        };
+        return fail(msg);
+    };
+    let status = entry
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("failed");
+    let opt_str = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    let child_duration = entry
+        .get("duration_ms")
+        .and_then(|v| v.as_u64())
+        .map(Duration::from_millis)
+        .unwrap_or(duration);
+    let stdout = opt_str("stdout").unwrap_or_default();
+    match status {
+        "passed" => TestResult {
+            name: test.name.clone(),
+            file: test.file.clone(),
+            passed: true,
+            ignored: false,
+            slow: false,
+            over_budget: false,
+            reason: opt_str("reason"),
+            duration: child_duration,
+            error_msg: opt_str("error"),
+            stdout,
+            retried: 0,
+        },
+        "ignored" => TestResult {
+            name: test.name.clone(),
+            file: test.file.clone(),
+            passed: true,
+            ignored: true,
+            slow: false,
+            over_budget: false,
+            reason: opt_str("reason"),
+            duration: child_duration,
+            error_msg: None,
+            stdout,
+            retried: 0,
+        },
+        _ => TestResult {
+            name: test.name.clone(),
+            file: test.file.clone(),
+            passed: false,
+            ignored: false,
+            slow: false,
+            over_budget: false,
+            reason: opt_str("reason"),
+            duration: child_duration,
+            error_msg: opt_str("error"),
+            stdout,
+            retried: 0,
+        },
     }
 }
 
@@ -1526,7 +1827,7 @@ fn call_named_fn(interp: &mut Interp, name: &str, span: Span) -> Result<(), Stri
 fn build_aot_harness(
     file: &Path,
     tests: &[TestInfo],
-    release: bool,
+    config: &TestConfig,
 ) -> Result<(PathBuf, PathBuf), String> {
     let source = std::fs::read_to_string(file)
         .map_err(|e| format!("cannot read test file `{}`: {e}", file.display()))?;
@@ -1589,20 +1890,27 @@ fn build_aot_harness(
             .as_deref()
             .map(|s| format!("        {}()\n", bare_name(s, &prefix)))
             .unwrap_or_default();
-        let teardown = test
-            .teardown_fn
-            .as_deref()
-            .map(|s| format!("        {}()\n", bare_name(s, &prefix)))
-            .unwrap_or_default();
+        // Dispatch arms: `t<idx>` runs `@setup` + the test, `d<idx>`
+        // runs `@teardown` alone. The runner always executes the
+        // teardown arm afterwards in a fresh process — even when the
+        // test aborts the first process via `exit(1)` — mirroring the
+        // VM, which drains defers and calls teardown on failure.
+        // (Caveat: setup-established *in-memory* state is not visible
+        // to teardown across processes; share cross-phase state via
+        // the filesystem. Documented.)
         // Separate `if`s (never `else if`): ZZ unifies `if/else` arm
         // types, and test functions may return anything. The trailing
         // bare `return` both normalizes every arm to unit (a no-else
         // `if` requires a unit arm) and stops dispatch after a match.
-        // NOTE: a failing `assert` aborts the process, so `@teardown`
-        // is skipped on AOT failure (the VM still runs it). Documented.
         arms.push_str(&format!(
-            "    if which == \"t{idx}\" {{\n{setup}        {call}({args})\n{teardown}        return\n    }}\n"
+            "    if which == \"t{idx}\" {{\n{setup}        {call}({args})\n        return\n    }}\n"
         ));
+        if test.teardown_fn.is_some() {
+            let td = bare_name(test.teardown_fn.as_deref().unwrap_or(""), &prefix);
+            arms.push_str(&format!(
+                "    if which == \"d{idx}\" {{\n        {td}()\n        return\n    }}\n"
+            ));
+        }
     }
     arms.push_str("    fail(\"unknown test: \" + which)\n");
 
@@ -1618,16 +1926,17 @@ fn build_aot_harness(
     std::fs::write(&harness_path, &harness_src)
         .map_err(|e| format!("cannot write AOT harness `{}`: {e}", harness_path.display()))?;
 
-    let mode = if release {
+    let mode = if config.native_release {
         crate::build::BuildMode::Release
     } else {
         crate::build::BuildMode::Dev
     };
-    let bin = match crate::build::build_release(
-        &harness_path,
-        mode,
-        &crate::build::ReleaseOptions::default(),
-    ) {
+    let rel = crate::build::ReleaseOptions {
+        allow_source_builds: config.allow_source_builds,
+        allow_hooks: config.allow_hooks,
+        ..Default::default()
+    };
+    let bin = match crate::build::build_release(&harness_path, mode, &rel) {
         Ok(b) => b,
         Err(e) => {
             let _ = std::fs::remove_file(&harness_path);
@@ -1664,7 +1973,14 @@ fn run_single_test_aot(test: &TestInfo, idx: usize, bin: &Path, config: &TestCon
     let max_retries = test.meta.retry.unwrap_or(0);
     let mut attempt = 0;
     loop {
-        let r = run_aot_attempt(test, idx, bin, config);
+        // Test arm always runs first ...
+        let r = run_aot_attempt(test, &format!("t{idx}"), bin, config, true);
+        // ... then teardown runs in a fresh process even when the test
+        // aborted the first one. Best-effort, like the VM's `let _ =`
+        // teardown call: failures are discarded, the side effects stand.
+        if test.teardown_fn.is_some() {
+            let _ = run_aot_attempt(test, &format!("d{idx}"), bin, config, false);
+        }
         if !r.passed && !r.ignored && attempt < max_retries {
             attempt += 1;
             continue;
@@ -1683,7 +1999,13 @@ fn run_single_test_aot(test: &TestInfo, idx: usize, bin: &Path, config: &TestCon
     }
 }
 
-fn run_aot_attempt(test: &TestInfo, idx: usize, bin: &Path, config: &TestConfig) -> TestResult {
+fn run_aot_attempt(
+    test: &TestInfo,
+    arm: &str,
+    bin: &Path,
+    config: &TestConfig,
+    hard_timeout: bool,
+) -> TestResult {
     let start = Instant::now();
     if test.meta.ignore {
         return TestResult {
@@ -1696,11 +2018,12 @@ fn run_aot_attempt(test: &TestInfo, idx: usize, bin: &Path, config: &TestConfig)
             reason: test.meta.reason.clone(),
             duration: start.elapsed(),
             error_msg: None,
+            stdout: String::new(),
             retried: 0,
         };
     }
 
-    let id = format!("t{idx}");
+    let id = arm.to_string();
     let mut child = match std::process::Command::new(bin)
         .arg(&id)
         .stdout(std::process::Stdio::piped())
@@ -1719,37 +2042,24 @@ fn run_aot_attempt(test: &TestInfo, idx: usize, bin: &Path, config: &TestConfig)
                 reason: None,
                 duration: start.elapsed(),
                 error_msg: Some(format!("cannot run AOT test binary: {e}")),
+                stdout: String::new(),
                 retried: 0,
             };
         }
     };
 
-    // Drain pipes on threads: a chatty test (large stdout) must never
-    // block forever on a full pipe while we only poll for exit.
-    let child_stdout = child.stdout.take();
-    let child_stderr = child.stderr.take();
-    let out_drain = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut out) = child_stdout {
-            use std::io::Read;
-            let _ = out.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let err_drain = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut err) = child_stderr {
-            use std::io::Read;
-            let _ = err.read_to_end(&mut buf);
-        }
-        buf
-    });
+    let drains = spawn_drains(&mut child, true);
 
-    // Poll for exit so `@test(timeout = ms)` can kill a hung child.
-    let hard_deadline = test
-        .meta
-        .timeout_ms
-        .map(|ms| start + Duration::from_millis(ms));
+    // Poll for exit; the test arm honors `@test(timeout = ms)` with a
+    // kill, the teardown arm waits unbounded (mirrors the VM, which
+    // never times out teardown either).
+    let hard_deadline = if hard_timeout {
+        test.meta
+            .timeout_ms
+            .map(|ms| start + Duration::from_millis(ms))
+    } else {
+        None
+    };
     enum WaitOutcome {
         Exited(std::process::ExitStatus),
         TimedOut,
@@ -1772,25 +2082,29 @@ fn run_aot_attempt(test: &TestInfo, idx: usize, bin: &Path, config: &TestConfig)
         }
     };
 
+    /// Last 15 lines of a stream, for failure detail.
+    fn tail15(s: &str) -> String {
+        let tail: Vec<&str> = s.lines().rev().take(15).collect();
+        tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+    }
+    // Assert diagnostics arrive on stderr; test prints ride on stdout
+    // (shown separately with `| `). Keep them apart, no duplication.
     let message_of = |status: std::process::ExitStatus, stderr: &str| {
-        let tail: Vec<&str> = stderr.lines().rev().take(20).collect();
-        let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
-        let tail = tail.trim();
-        if tail.is_empty() {
+        let err = tail15(stderr).trim().to_string();
+        if err.is_empty() {
             match status.code() {
                 Some(code) => format!("AOT test exited with code {code}"),
                 None => "AOT test killed by signal".to_string(),
             }
         } else {
-            tail.to_string()
+            err
         }
     };
 
     match outcome {
         WaitOutcome::TimedOut => {
             // Drains end at kill-time EOF; join so no reader outlives us.
-            let _ = out_drain.join();
-            let _ = err_drain.join();
+            let _ = finish_drains(drains);
             let ms = test.meta.timeout_ms.unwrap_or(0);
             TestResult {
                 name: test.name.clone(),
@@ -1802,12 +2116,12 @@ fn run_aot_attempt(test: &TestInfo, idx: usize, bin: &Path, config: &TestConfig)
                 reason: None,
                 duration: start.elapsed(),
                 error_msg: Some(format!("timeout: exceeded {ms}ms limit")),
+                stdout: String::new(),
                 retried: 0,
             }
         }
         WaitOutcome::WaitError => {
-            let _ = out_drain.join();
-            let _ = err_drain.join();
+            let _ = finish_drains(drains);
             TestResult {
                 name: test.name.clone(),
                 file: test.file.clone(),
@@ -1818,16 +2132,15 @@ fn run_aot_attempt(test: &TestInfo, idx: usize, bin: &Path, config: &TestConfig)
                 reason: None,
                 duration: start.elapsed(),
                 error_msg: Some("AOT test child status unknown".to_string()),
+                stdout: String::new(),
                 retried: 0,
             }
         }
         WaitOutcome::Exited(status) => {
-            // Cap the failure message: last 20 lines of stderr.
-            let stderr = err_drain
-                .join()
-                .map(|b| String::from_utf8_lossy(&b).into_owned())
-                .unwrap_or_default();
-            let _ = out_drain.join();
+            // Cap the failure detail: child stdout tail, then stderr.
+            let (out_bytes, err_bytes) = finish_drains(drains);
+            let stdout = String::from_utf8_lossy(&out_bytes).into_owned();
+            let stderr = String::from_utf8_lossy(&err_bytes).into_owned();
             if status.success() {
                 if test.meta.should_panic {
                     TestResult {
@@ -1840,6 +2153,7 @@ fn run_aot_attempt(test: &TestInfo, idx: usize, bin: &Path, config: &TestConfig)
                         reason: Some("should_panic".to_string()),
                         duration: start.elapsed(),
                         error_msg: Some("expected panic, test passed".to_string()),
+                        stdout: String::new(),
                         retried: 0,
                     }
                 } else {
@@ -1853,6 +2167,7 @@ fn run_aot_attempt(test: &TestInfo, idx: usize, bin: &Path, config: &TestConfig)
                         reason: None,
                         duration: start.elapsed(),
                         error_msg: None,
+                        stdout: String::new(),
                         retried: 0,
                     }
                 }
@@ -1869,6 +2184,7 @@ fn run_aot_attempt(test: &TestInfo, idx: usize, bin: &Path, config: &TestConfig)
                         reason: Some("should_panic".to_string()),
                         duration: start.elapsed(),
                         error_msg: Some(msg),
+                        stdout,
                         retried: 0,
                     }
                 } else {
@@ -1885,6 +2201,7 @@ fn run_aot_attempt(test: &TestInfo, idx: usize, bin: &Path, config: &TestConfig)
                         reason: None,
                         duration: start.elapsed(),
                         error_msg: Some(msg),
+                        stdout,
                         retried: 0,
                     }
                 }
@@ -2059,6 +2376,14 @@ fn print_test_line(r: &TestResult, config: &TestConfig) {
         fmt_dur(r.duration)
     );
 
+    // Captured stdout prints only on failure (cargo-style); passing
+    // tests stay quiet unless `--nocapture` streams live.
+    if !r.passed && !r.ignored && !r.stdout.trim().is_empty() {
+        for line in r.stdout.lines() {
+            eprintln!("  | {line}");
+        }
+    }
+
     if !r.passed && !r.ignored {
         if let Some(msg) = r.error_msg.as_deref() {
             for line in msg.lines() {
@@ -2190,7 +2515,7 @@ fn print_json_results(results: &[TestResult]) -> Result<(), String> {
             stdout,
             "  {{\"name\": \"{}\", \"file\": \"{}\", \"status\": \"{}\", \
              \"duration_ms\": {}, \"attempts\": {}, \"slow\": {}, \
-             \"error\": {}, \"reason\": {}}}{comma}",
+             \"error\": {}, \"reason\": {}, \"stdout\": \"{}\"}}{comma}",
             json_escape(&r.name),
             json_escape(&file),
             status,
@@ -2199,6 +2524,7 @@ fn print_json_results(results: &[TestResult]) -> Result<(), String> {
             r.slow,
             error,
             reason,
+            json_escape(&r.stdout),
         )
         .map_err(|e| format!("write error: {e}"))?;
     }
@@ -2260,6 +2586,11 @@ fn write_junit(path: &str, results: &[TestResult]) -> Result<(), String> {
                 xml_escape(message),
                 xml_escape(message),
             ));
+        }
+        if !r.stdout.trim().is_empty() {
+            // CDATA can't contain `]]>`; split it across sections.
+            let safe = r.stdout.replace("]]>", "]]]]><![CDATA[>");
+            xml.push_str(&format!("<system-out><![CDATA[{safe}]]></system-out>"));
         }
 
         xml.push_str("</testcase>\n");

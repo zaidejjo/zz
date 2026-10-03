@@ -95,9 +95,13 @@ zz test --list
   file is compiled once, then every test runs in its own process.
   A failing `assert` aborts only its own process (exit-code isolation),
   and segfaults/signal deaths are reported per test instead of killing
-  the suite. Limitation: `@teardown` is skipped when its test fails in
-  AOT (the process is already gone); the VM still runs it. `should_panic`,
-  `retry`, `cases`, `timeout`, and `@setup` behave the same on both.
+  the suite. `@setup` runs in the test's process; `@teardown` always
+  runs too, in a fresh process afterwards (best-effort, failures
+  discarded — same as the VM's teardown handling). Note: setup/teardown
+  share only external state (files, ports) across the two processes, not
+  in-memory globals. `should_panic`, `retry`, `cases`, `timeout` behave
+  the same on both. Extra AOT flags: `--allow-source-builds`,
+  `--allow-hooks` (same meaning as `zz build`).
 
 ### `--nocapture` + parallel execution
 
@@ -147,10 +151,17 @@ test test_broken ... FAILED (3ms)
 - Durations print as `898ms` below a second, `1.20s` at/above it.
 - The 60s soft budget (`--timeout <ms>`) only prints a notice; tests are
   never interrupted or failed by it. Hard timeouts come only from
-  `@test(timeout = ms)` (VM: watcher thread, AOT: child killed). Note the
-  VM timeout abandons its worker thread (Rust can't kill threads): an
-  overrun test may keep running in the background while the suite moves
-  on — use AOT for a true kill.
+  `@test(timeout = ms)`: VM runs the test in a worker subprocess and
+  kills it on overrun (true wall-clock, even for blocking natives);
+  AOT kills the test process the same way.
+- Tests tagged `serial` (`@test(tag = "serial")`) always run
+  sequentially in file order, even in parallel mode — use for tests
+  touching process-global state (log level, fixed ports, cwd).
+- Test stdout is captured per test: passing suites stay quiet (use
+  `--nocapture` for live output); a failing test prints its captured
+  output with `| `, and `--json`/`--junit` always carry it
+  (`stdout` field / `<system-out>`). This also keeps `--json` clean
+  for machine parsing.
 - Live spinner/counter on TTY only; non-TTY/non-interactive falls back to plain, color-free, spinner-free output automatically.
 - Per-test timing; `--slow-threshold` flags slow passes even on pass.
 - Global footer across files: `test result: ... N total across M files; ...`.
