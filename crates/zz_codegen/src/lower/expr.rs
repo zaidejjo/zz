@@ -2065,6 +2065,28 @@ impl Lowerer {
                         self.resolve_path_receiver(parts, names)
                     {
                         (recv_cname, Some(recv_expr))
+                    } else if names.lookup(&parts[0]).is_some() {
+                        // Head is a local but no impl target matched
+                        // (`o.inner.bump()` with free `bump`): the tail is
+                        // a free-function call on the head chain. Resolve
+                        // it and keep the chain as receiver instead of
+                        // emitting a bogus `o.inner.bump` direct call
+                        // (which lowers to unit / reads OOB).
+                        let method = parts.last().cloned().unwrap_or_default();
+                        let recv_expr = Expr::Path {
+                            parts: parts[..parts.len() - 1].to_vec(),
+                            span: callee.span(),
+                        };
+                        match self.field_free_target(&method, None) {
+                            Some(t) => (t, Some(recv_expr)),
+                            None => {
+                                let mut fixed = parts.clone();
+                                if let Some(head) = self.import_ns_aliases.get(&parts[0]) {
+                                    fixed[0] = head.clone();
+                                }
+                                (fixed.join("."), None)
+                            }
+                        }
                     } else {
                         // Module head aliases (`pg` from
                         // `import std.sqlz.postgres as pg`) rewrite the head.
@@ -2086,12 +2108,23 @@ impl Lowerer {
                 if let Some(zzty) = self.ty_at(names, obj.span()) {
                     match zzty {
                         zz_checker::Type::Struct(sname, _) => {
-                            // Keep the direct-form convention (no receiver);
+                            // Impl methods keep the direct-form convention
+                            // (no receiver; struct-pointer convention);
                             // promotion included for embedded methods.
                             if let Some((target, _)) = self.struct_method_target(sname, method) {
                                 (target, None)
                             } else {
-                                (format!("{sname}.{method}"), None)
+                                // Free function on a non-Ident receiver
+                                // (`origin().bump()`, `arr[0].bump()`,
+                                // `Pt{..}.bump()`): resolve and KEEP the
+                                // receiver as first arg. Dropping it makes
+                                // the callee read args[0] out of bounds
+                                // (silent zeroed structs/segfaults).
+                                let receiver = *obj.clone();
+                                match self.field_free_target(method, Some(sname.as_str())) {
+                                    Some(t) => (t, Some(receiver)),
+                                    None => (method.clone(), None),
+                                }
                             }
                         }
                         // Canonical `sqlz.*`; `db.*` alias resolves to the
@@ -2112,12 +2145,26 @@ impl Lowerer {
                             if !ns.is_empty() {
                                 (format!("{ns}.{method}"), Some(*obj.clone()))
                             } else {
-                                (method.clone(), None)
+                                // Unknown-type receiver (e.g. a span the
+                                // checker never recorded): still resolve a
+                                // free function and keep the receiver —
+                                // mirrors the VM's bare-callable rule.
+                                let receiver = *obj.clone();
+                                match self.field_free_target(method, None) {
+                                    Some(t) => (t, Some(receiver)),
+                                    None => (method.clone(), None),
+                                }
                             }
                         }
                     }
                 } else {
-                    (method.clone(), None)
+                    // No recorded receiver type at all: same free-function
+                    // fallback with the receiver kept.
+                    let receiver = *obj.clone();
+                    match self.field_free_target(method, None) {
+                        Some(t) => (t, Some(receiver)),
+                        None => (method.clone(), None),
+                    }
                 }
             }
             _ => return "zz_unit()".to_string(),
@@ -2453,12 +2500,17 @@ impl Lowerer {
         // struct and must be boxed into a runtime object. Positional: slot
         // i of ordered_args matches sig param i (named args already
         // reordered above); the method receiver (if any) lives outside.
+        // With a method receiver present on a NON-impl callee, sig
+        // param 0 IS the receiver, so explicit args shift by one
+        // (params[i+1] <-> ordered_args[i]). Impl methods keep the old
+        // mapping (their own emission path handles self separately).
+        let recv_shift = usize::from(method_receiver.is_some() && !self.is_impl_method(&cname));
         let struct_box_for_arg: Vec<Option<String>> = match self.tp.funcs.get(&cname) {
             Some(sig) => ordered_args
                 .iter()
                 .enumerate()
                 .map(|(i, _)| {
-                    sig.params.get(i).and_then(|(_, t)| match t {
+                    sig.params.get(i + recv_shift).and_then(|(_, t)| match t {
                         zz_checker::Type::Struct(s, _) if self.is_unboxed_struct(s) => {
                             Some(s.clone())
                         }
@@ -3343,6 +3395,52 @@ impl Lowerer {
             }
             obj_tmp
         }
+    }
+
+    /// Resolve a free function for `Field`-callee method syntax
+    /// (`recv.method()` where the receiver is not a bare local).
+    /// Mirrors the checker's `Struct(sname)` → `{ns}.{method}` fallback
+    /// order: bare name, `{ns}.{method}` (when the struct name is
+    /// namespaced), unique `*.{method}` suffix, bare native. Returns
+    /// `None` when nothing resolves — callers then keep the old
+    /// `(method, None)` fallthrough.
+    fn field_free_target(&self, method: &str, sname: Option<&str>) -> Option<String> {
+        // Bare names count only with a real definition: reachable_funcs
+        // can hold phantom short names (the callgraph records
+        // Field-callee method tails unqualified), and resolving to one
+        // drops the call to unit downstream where tp.funcs/native_impl
+        // know nothing under that spelling.
+        if self.tp.funcs.contains_key(method) {
+            return Some(method.to_string());
+        }
+        if let Some(s) = sname {
+            if let Some((ns, _)) = s.rsplit_once('.') {
+                let cand = format!("{ns}.{method}");
+                if self.reachable_funcs.contains(&cand) || self.tp.funcs.contains_key(&cand) {
+                    return Some(cand);
+                }
+            }
+        }
+        let suffix = format!(".{method}");
+        let mut hits: Vec<&String> = self
+            .reachable_funcs
+            .iter()
+            .filter(|f| f.ends_with(&suffix))
+            .collect();
+        for k in self.tp.funcs.keys() {
+            if k.ends_with(&suffix) && !hits.contains(&k) {
+                hits.push(k);
+            }
+        }
+        hits.sort_unstable();
+        hits.dedup();
+        if hits.len() == 1 {
+            return Some(hits[0].clone());
+        }
+        if self.reachable_natives.contains(method) || native_supported(method) {
+            return Some(method.to_string());
+        }
+        None
     }
 
     /// Box a struct field value for `zz_object_set_field` given the field
