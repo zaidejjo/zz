@@ -24,8 +24,8 @@ pub use context::{Lowerer, NameCtx};
 
 // Internal helpers shared across the lowering submodules.
 pub(crate) use context::{
-    auto_box, box_scalar_operand, emit_guard_expr, is_dup_safe, scalar_operand_c,
-    scalar_operand_type,
+    auto_box, binop_runtime_op, box_scalar_operand, emit_guard_expr, is_dup_safe, is_simple_ident,
+    scalar_operand_c, scalar_operand_type,
 };
 
 /// Result of lowering.
@@ -205,7 +205,7 @@ impl Lowerer {
         let Some((_, first)) = sig.params.first() else {
             return false;
         };
-        let zz_checker::Type::Struct(sname) = first else {
+        let zz_checker::Type::Struct(sname, _) = first else {
             return false;
         };
         let method = fname.rsplit('.').next().unwrap_or(fname);
@@ -419,7 +419,7 @@ impl Lowerer {
                 .funcs
                 .get(fname)
                 .and_then(|sig| sig.params.first().map(|(_, t)| t.clone()))
-                .filter(|t| matches!(t, zz_checker::Type::Struct(_)))
+                .filter(|t| matches!(t, zz_checker::Type::Struct(_, _)))
                 .filter(|_| self.is_impl_method(fname))
                 .map(|t| self.type_to_c(&t));
             let proto = match first_struct_c {

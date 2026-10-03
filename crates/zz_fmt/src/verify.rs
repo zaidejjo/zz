@@ -201,12 +201,23 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
             }
             out.push(']');
         }
-        Stmt::Struct { name, fields, .. } => {
+        Stmt::Struct {
+            name,
+            generics,
+            fields,
+            ..
+        } => {
             out.push_str("Struct-kw[");
             for p in name {
                 out.push_str(p);
                 out.push('.');
             }
+            out.push('<');
+            for g in generics {
+                out.push_str(&g.name);
+                out.push(',');
+            }
+            out.push('>');
             out.push('{');
             for (n, t) in fields {
                 out.push_str(&n.name);
@@ -216,12 +227,23 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
             }
             out.push_str("}]");
         }
-        Stmt::Impl { name, methods, .. } => {
+        Stmt::Impl {
+            name,
+            generics,
+            methods,
+            ..
+        } => {
             out.push_str("Impl-kw[");
             for p in name {
                 out.push_str(p);
                 out.push('.');
             }
+            out.push('<');
+            for g in generics {
+                out.push_str(&g.name);
+                out.push(',');
+            }
+            out.push('>');
             out.push('{');
             for m in methods {
                 fp_stmt(m, out);
@@ -254,6 +276,16 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
         Stmt::Assign { target, value, .. } => {
             out.push_str("Assign[");
             fp_expr(target, out);
+            out.push('=');
+            fp_expr(value, out);
+            out.push(']');
+        }
+        Stmt::CompoundAssign {
+            target, op, value, ..
+        } => {
+            out.push_str("CompoundAssign[");
+            fp_expr(target, out);
+            out.push_str(op.symbol());
             out.push('=');
             fp_expr(value, out);
             out.push(']');

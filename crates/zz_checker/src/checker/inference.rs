@@ -170,15 +170,44 @@ impl Checker {
                     }
                     Type::Named(name.clone())
                 } else if self.structs.contains_key(name) {
-                    if !args.is_empty() {
-                        self.errors.push(error_at(
-                            format!("struct `{name}` does not take type arguments"),
-                            ty.span,
-                        ));
-                    }
                     // Canonicalize selective imports, mirroring
                     // StructInit: `Product` → `product.Product`.
-                    Type::Struct(self.canonical_struct_name(name))
+                    let cname = self.canonical_struct_name(name);
+                    let want = self
+                        .structs
+                        .get(&cname)
+                        .map(|s| s.generics.len())
+                        .unwrap_or(0);
+                    if args.is_empty() && want > 0 {
+                        self.errors.push(error_at(
+                            format!(
+                                "struct `{name}` takes {want} type argument{} (e.g. `{name}<{}>`)",
+                                if want == 1 { "" } else { "s" },
+                                vec!["T"; want].join(", "),
+                            ),
+                            ty.span,
+                        ));
+                        Type::Struct(cname, Vec::new())
+                    } else if args.len() != want {
+                        if !(args.is_empty() && want == 0) {
+                            self.errors.push(error_at(
+                                format!(
+                                    "struct `{name}` takes {want} type argument{} but {} given",
+                                    if want == 1 { "" } else { "s" },
+                                    args.len(),
+                                ),
+                                ty.span,
+                            ));
+                        }
+                        Type::Struct(cname, Vec::new())
+                    } else {
+                        Type::Struct(
+                            cname,
+                            args.iter()
+                                .map(|a| self.ast_to_type_inner(a, generics))
+                                .collect(),
+                        )
+                    }
                 } else if name == "json" {
                     Type::Json
                 } else if name == "bytes" {
@@ -220,6 +249,7 @@ pub(crate) fn contains_var(t: &Type) -> bool {
         Type::Func(ps, r) => ps.iter().any(contains_var) || contains_var(r),
         Type::Array(x) => contains_var(x),
         Type::Dict(k, v) => contains_var(k) || contains_var(v),
+        Type::Struct(_, args) => args.iter().any(contains_var),
         Type::Union(ts) => ts.iter().any(contains_var),
         Type::Range(x) => contains_var(x),
         Type::Ptr { inner, .. } => contains_var(inner),
@@ -273,6 +303,9 @@ pub(crate) fn subst(t: &Type, subs: &std::collections::HashMap<String, Type>) ->
         ),
         Type::Array(x) => Type::Array(Box::new(subst(x, subs))),
         Type::Dict(k, v) => Type::Dict(Box::new(subst(k, subs)), Box::new(subst(v, subs))),
+        Type::Struct(n, args) => {
+            Type::Struct(n.clone(), args.iter().map(|x| subst(x, subs)).collect())
+        }
         Type::Union(ts) => Type::Union(ts.iter().map(|x| subst(x, subs)).collect()),
         Type::Range(x) => Type::Range(Box::new(subst(x, subs))),
         Type::Ptr { mutable, inner } => Type::Ptr {

@@ -403,3 +403,121 @@ fn decorator_on_generic_func_errors() {
     assert_eq!(errors.len(), 1);
     assert!(errors[0].message.contains("generic"));
 }
+
+#[test]
+fn parses_bare_destructure_decl() {
+    let p = parse_ok("a, b := f()");
+    assert_eq!(p.stmts.len(), 1);
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Destructure { pat, value, .. } => {
+            match pat {
+                zz_frontend::ast::Pattern::Tuple { pats, .. } => {
+                    assert_eq!(pats.len(), 2);
+                    assert!(matches!(pats[0], zz_frontend::ast::Pattern::Binding { .. }));
+                }
+                other => panic!("expected tuple pattern, got {other:?}"),
+            }
+            assert!(matches!(value, E::Call { .. }));
+        }
+        other => panic!("expected destructure, got {other:?}"),
+    }
+}
+
+#[test]
+fn bare_destructure_wildcard() {
+    let p = parse_ok("_, b := f()");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Destructure { pat, .. } => match pat {
+            zz_frontend::ast::Pattern::Tuple { pats, .. } => {
+                assert!(matches!(
+                    pats[0],
+                    zz_frontend::ast::Pattern::Wildcard { .. }
+                ));
+            }
+            other => panic!("expected tuple pattern, got {other:?}"),
+        },
+        other => panic!("expected destructure, got {other:?}"),
+    }
+}
+
+#[test]
+fn bare_destructure_does_not_steal_calls_or_decls() {
+    // `f(a, b)` is a call (LParen after ident, not a comma).
+    let p = parse_ok("f(a, b)");
+    assert!(matches!(
+        p.stmts[0],
+        zz_frontend::ast::Stmt::Expr(E::Call { .. })
+    ));
+    // `x := 1` stays a short declaration.
+    let p = parse_ok("x := 1");
+    assert!(matches!(p.stmts[0], zz_frontend::ast::Stmt::Decl { .. }));
+}
+
+#[test]
+fn parses_compound_assign_all_ops() {
+    use zz_frontend::ast::BinOp;
+    let cases = [
+        ("x += 1", BinOp::Add),
+        ("x -= 1", BinOp::Sub),
+        ("x *= 2", BinOp::Mul),
+        ("x /= 2", BinOp::Div),
+        ("x %= 2", BinOp::Rem),
+        ("x **= 2", BinOp::Pow),
+        ("x &= 1", BinOp::BitAnd),
+        ("x |= 1", BinOp::BitOr),
+        ("x ^= 1", BinOp::BitXor),
+        ("x <<= 1", BinOp::Shl),
+        ("x >>= 1", BinOp::Shr),
+    ];
+    for (src, want) in cases {
+        let p = parse_ok(src);
+        match &p.stmts[0] {
+            zz_frontend::ast::Stmt::CompoundAssign { op, value, .. } => {
+                assert_eq!(*op, want, "{src}");
+                assert!(matches!(value, E::Int { .. }), "{src}");
+            }
+            other => panic!("{src}: expected compound assign, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn compound_assign_targets() {
+    // Field, index, and path targets parse like `=`.
+    let p = parse_ok("p.x += 1");
+    assert!(matches!(
+        p.stmts[0],
+        zz_frontend::ast::Stmt::CompoundAssign { .. }
+    ));
+    let p = parse_ok("arr[i] *= 2");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::CompoundAssign { target, .. } => {
+            assert!(matches!(target, E::Index { .. }));
+        }
+        other => panic!("expected compound assign, got {other:?}"),
+    }
+}
+
+#[test]
+fn compound_assign_chaining_is_an_error() {
+    let parsed = zz_frontend::parse("x += y += z");
+    assert!(
+        parsed.errors.iter().any(|e| e.message.contains("chain")),
+        "expected chaining error, got {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
+fn compound_assign_does_not_steal_plain_forms() {
+    // Plain assignment, short decl, and comparisons are untouched.
+    let p = parse_ok("x = 1");
+    assert!(matches!(p.stmts[0], zz_frontend::ast::Stmt::Assign { .. }));
+    let p = parse_ok("x := 1");
+    assert!(matches!(p.stmts[0], zz_frontend::ast::Stmt::Decl { .. }));
+    let p = parse_ok("x == 1");
+    assert!(matches!(
+        p.stmts[0],
+        zz_frontend::ast::Stmt::Expr(E::Binary { .. })
+    ));
+}

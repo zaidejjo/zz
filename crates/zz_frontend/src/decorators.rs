@@ -163,6 +163,7 @@ fn expand_stmts(
             }
             Stmt::Impl {
                 name,
+                generics,
                 methods,
                 span,
                 pub_,
@@ -270,6 +271,7 @@ fn expand_stmts(
                 }
                 out.push(Stmt::Impl {
                     name: name.clone(),
+                    generics: generics.clone(),
                     methods: expanded_methods,
                     span: *span,
                     pub_: *pub_,
@@ -307,6 +309,17 @@ fn expand_stmts(
                 span,
             } => out.push(Stmt::Assign {
                 target: expand_expr(target, taken, errors),
+                value: expand_expr(value, taken, errors),
+                span: *span,
+            }),
+            Stmt::CompoundAssign {
+                target,
+                op,
+                value,
+                span,
+            } => out.push(Stmt::CompoundAssign {
+                target: expand_expr(target, taken, errors),
+                op: *op,
                 value: expand_expr(value, taken, errors),
                 span: *span,
             }),

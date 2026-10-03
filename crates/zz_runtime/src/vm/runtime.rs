@@ -1261,6 +1261,15 @@ impl Vm {
                     set_index(&mut ov, &iv, value, *span)?;
                     self.stack.push(ov);
                 }
+                Op::CompoundIndexOp { op, span } => {
+                    let rhs = self.stack.pop().unwrap();
+                    let iv = self.stack.pop().unwrap();
+                    let mut ov = self.stack.pop().unwrap();
+                    let cur = get_index(&ov, &iv, *span)?;
+                    let new = eval_binary(*op, cur, rhs, *span)?;
+                    set_index(&mut ov, &iv, new, *span)?;
+                    self.stack.push(ov);
+                }
                 Op::SliceOp(span) => {
                     let e = self.stack.pop().unwrap();
                     let s = self.stack.pop().unwrap();
@@ -1361,6 +1370,14 @@ impl Vm {
                     let mut ov = self.stack.pop().unwrap();
                     let value = self.stack.pop().unwrap();
                     set_object_field(&mut ov, name, value, *span)?;
+                    self.stack.push(ov);
+                }
+                Op::CompoundFieldOp { name, op, span } => {
+                    let rhs = self.stack.pop().unwrap();
+                    let mut ov = self.stack.pop().unwrap();
+                    let cur = object_field(&ov, name, *span)?;
+                    let new = eval_binary(*op, cur, rhs, *span)?;
+                    set_object_field(&mut ov, name, new, *span)?;
                     self.stack.push(ov);
                 }
                 Op::SetFieldIdx(idx, span) => {

@@ -409,6 +409,14 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_syntax_main_result, "syntax", "main_result.zz");
 e2e_success_test!(e2e_syntax_bitwise_ops, "syntax", "bitwise_ops.zz");
+e2e_success_test!(e2e_syntax_tuple_ops, "syntax", "tuple_ops.zz");
+e2e_success_test!(
+    e2e_syntax_tuple_unboxed_struct,
+    "syntax",
+    "tuple_unboxed_struct.zz"
+);
+e2e_success_test!(e2e_syntax_compound_assign, "syntax", "compound_assign.zz");
+e2e_success_test!(e2e_syntax_generic_structs, "syntax", "generic_structs.zz");
 
 // Type fixtures
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
@@ -661,6 +669,16 @@ e2e_error_test!(e2e_err_struct_init_assign, "struct_init_assign_error.zz");
 e2e_error_test!(e2e_err_int_float_cmp, "int_float_cmp.zz");
 e2e_error_test!(e2e_err_bitwise_float, "bitwise_float.zz");
 e2e_error_test!(e2e_err_bitwise_neg_shift, "bitwise_neg_shift.zz");
+e2e_error_test!(e2e_err_tuple_index_oob, "tuple_index_oob.zz");
+e2e_error_test!(e2e_err_tuple_index_dynamic, "tuple_index_dynamic.zz");
+e2e_error_test!(e2e_err_compound_type_mismatch, "compound_type_mismatch.zz");
+e2e_error_test!(e2e_err_compound_const, "compound_const.zz");
+e2e_error_test!(e2e_err_compound_chain, "compound_chain.zz");
+e2e_error_test!(
+    e2e_err_generic_struct_mismatch,
+    "generic_struct_mismatch.zz"
+);
+e2e_error_test!(e2e_err_generic_struct_arity, "generic_struct_arity.zz");
 e2e_error_test!(e2e_err_generic_unbound, "generic_unbound.zz");
 e2e_error_test!(e2e_err_pg_connect_refused, "pg_connect_refused.zz");
 e2e_error_test!(e2e_err_mysql_connect_refused, "mysql_connect_refused.zz");

@@ -1,0 +1,4 @@
+// E2E: Dynamic tuple index is a compile error (destructure instead).
+t := (1, 2)
+i := 0
+println(t[i])

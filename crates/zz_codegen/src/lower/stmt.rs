@@ -67,7 +67,7 @@ impl Lowerer {
                 let struct_copy: Option<String> = match value {
                     Expr::Ident { .. } | Expr::Field { .. } | Expr::Path { .. } => {
                         match self.ty_at(names, value.span()) {
-                            Some(zz_checker::Type::Struct(s)) => Some(s.clone()),
+                            Some(zz_checker::Type::Struct(s, _)) => Some(s.clone()),
                             _ => None,
                         }
                     }
@@ -488,7 +488,7 @@ impl Lowerer {
                         // were already handled by the direct paths above.
                         if parts.len() >= 2 {
                             if let Some(base_cid) = names.lookup(&parts[0]).map(str::to_string) {
-                                if let Some(zz_checker::Type::Struct(sname)) =
+                                if let Some(zz_checker::Type::Struct(sname, _)) =
                                     names.checker_types.get(&parts[0]).cloned()
                                 {
                                     let base_is_raw = names
@@ -575,34 +575,69 @@ impl Lowerer {
                         let i = self.emit_expr(index, names, out);
                         // Box a scalar index to a zz_value.
                         let i_boxed = self.box_index_arg(index, i, names);
-                        // Box a raw-scalar RHS to a zz_value before storing.
-                        let boxed_val = if value_is_scalar {
-                            if let Expr::Ident { name, .. } = value {
-                                let name_str = name.clone();
-                                auto_box(&val, names.lookup_type(&name_str))
-                            } else if let Expr::Path { parts, .. } = value {
-                                let joined = parts.join(".");
-                                auto_box(&val, names.lookup_type(&joined))
-                            } else if val.starts_with("(double)(") {
-                                format!("zz_float({val})")
-                            } else if val.starts_with("(bool)(") {
-                                format!("zz_bool({val})")
-                            } else if val_is_actually_scalar {
-                                // Genuinely raw scalar (int ident/arithmetic):
-                                // box it. (String concats over string idents
-                                // trip the AST-only check above but lower to
-                                // a zz_value — wrapping one in zz_int is a C
-                                // type error.)
-                                format!("zz_int({val})")
-                            } else {
-                                val.clone()
-                            }
-                        } else {
-                            val.clone()
-                        };
+                        let boxed_val = self.box_index_store_value(value, val.clone(), names);
                         out.push_str(&format!(
                             "    {{ int _e = 0; zz_index_set({o}, {i_boxed}, {boxed_val}, &_e); }}\n"
                         ));
+                    }
+                    _ => {}
+                }
+            }
+            Stmt::CompoundAssign {
+                target,
+                op,
+                value,
+                span,
+            } => {
+                // RHS first (same order as `=`).
+                match target {
+                    Expr::Ident { .. } | Expr::Path { .. } => {
+                        // Side-effect-free receivers: delegate to the plain
+                        // Assign path with `target = target OP value`,
+                        // inheriting scalar fast paths, string-append, struct
+                        // paths, and array-len tracking identically.
+                        let synthetic = Stmt::Assign {
+                            target: target.clone(),
+                            value: Expr::Binary {
+                                op: *op,
+                                left: Box::new(target.clone()),
+                                right: Box::new(value.clone()),
+                                span: *span,
+                            },
+                            span: *span,
+                        };
+                        self.emit_stmt(&synthetic, names, out, is_tail);
+                    }
+                    Expr::Index { obj, index, .. } => {
+                        // Receiver first (same order as the tree-walker
+                        // and VM): single evaluation, then read →
+                        // boxed zz_binop → write. Index stores are
+                        // already runtime-dispatched, so the boxed path
+                        // is always correct here.
+                        let o = self.emit_expr(obj, names, out);
+                        let i = self.emit_expr(index, names, out);
+                        let i_boxed = self.box_index_arg(index, i, names);
+                        let rhs = self.emit_expr(value, names, out);
+                        let rhs_boxed = self.box_index_store_value(value, rhs, names);
+                        let cop = binop_runtime_op(op);
+                        out.push_str(&format!(
+                            "    {{ int _e = 0; zz_value _co = {o}; zz_value _ci = {i_boxed};\n"
+                        ));
+                        out.push_str("      zz_value _cc = zz_index_get(_co, _ci, &_e);\n");
+                        out.push_str(&format!(
+                            "      zz_value _cr = zz_binop({cop}, _cc, {rhs_boxed});\n"
+                        ));
+                        out.push_str("      zz_index_set(_co, _ci, _cr, &_e); }\n");
+                    }
+                    Expr::Field { obj, .. } => {
+                        // Mirror plain `=` (which drops the store for
+                        // non-trivial receivers) but still evaluate both
+                        // sides exactly once, receiver first, so side
+                        // effects are preserved, matching the VM.
+                        let o = self.emit_expr(obj, names, out);
+                        let rhs = self.emit_expr(value, names, out);
+                        let rhs_boxed = box_scalar_operand(value, names, &rhs);
+                        out.push_str(&format!("    (void)({o}); (void)({rhs_boxed});\n"));
                     }
                     _ => {}
                 }

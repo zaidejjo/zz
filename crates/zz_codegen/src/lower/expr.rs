@@ -157,6 +157,9 @@ fn mentions_stmt(s: &Stmt, name: &str) -> bool {
         Stmt::Assign { target, value, .. } => {
             mentions_ident(target, name) || mentions_ident(value, name)
         }
+        Stmt::CompoundAssign { target, value, .. } => {
+            mentions_ident(target, name) || mentions_ident(value, name)
+        }
         Stmt::Destructure { pat, value, .. } => {
             mentions_pat(pat, name) || mentions_ident(value, name)
         }
@@ -242,7 +245,7 @@ impl Lowerer {
             "bool" => Some(format!("zz_bool({cid})")),
             t if t.starts_with("zz_struct_") => {
                 let sname = match names.checker_types.get(name) {
-                    Some(zz_checker::Type::Struct(s)) => s.clone(),
+                    Some(zz_checker::Type::Struct(s, _)) => s.clone(),
                     _ => return None,
                 };
                 let ident = Expr::Ident {
@@ -541,26 +544,7 @@ impl Lowerer {
                         format!("zz_elvis({tmp}, {r})")
                     }
                     _ => {
-                        let cop = match op {
-                            zz_frontend::ast::BinOp::Add => "ZZOP_ADD",
-                            zz_frontend::ast::BinOp::Sub => "ZZOP_SUB",
-                            zz_frontend::ast::BinOp::Mul => "ZZOP_MUL",
-                            zz_frontend::ast::BinOp::Div => "ZZOP_DIV",
-                            zz_frontend::ast::BinOp::Rem => "ZZOP_REM",
-                            zz_frontend::ast::BinOp::Pow => "ZZOP_POW",
-                            zz_frontend::ast::BinOp::Eq => "ZZOP_EQ",
-                            zz_frontend::ast::BinOp::Ne => "ZZOP_NE",
-                            zz_frontend::ast::BinOp::Lt => "ZZOP_LT",
-                            zz_frontend::ast::BinOp::Gt => "ZZOP_GT",
-                            zz_frontend::ast::BinOp::Le => "ZZOP_LE",
-                            zz_frontend::ast::BinOp::Ge => "ZZOP_GE",
-                            zz_frontend::ast::BinOp::BitAnd => "ZZOP_AND",
-                            zz_frontend::ast::BinOp::BitOr => "ZZOP_OR",
-                            zz_frontend::ast::BinOp::BitXor => "ZZOP_XOR",
-                            zz_frontend::ast::BinOp::Shl => "ZZOP_SHL",
-                            zz_frontend::ast::BinOp::Shr => "ZZOP_SHR",
-                            _ => "ZZOP_ADD",
-                        };
+                        let cop = binop_runtime_op(op);
                         // Check if either operand is a scalar. We treat both scalar-typed locals
                         // AND Int/Float literals as scalar operands so that patterns like
                         // `i + 1` or `count + n` unbox to raw C arithmetic instead of routing
@@ -848,7 +832,8 @@ impl Lowerer {
                         .lookup_type(obj_name)
                         .map(|t| t.starts_with("zz_struct_"))
                         .unwrap_or(false)
-                } else if let Some(zz_checker::Type::Struct(sname)) = self.ty_at(names, obj.span())
+                } else if let Some(zz_checker::Type::Struct(sname, _)) =
+                    self.ty_at(names, obj.span())
                 {
                     self.is_unboxed_struct(sname)
                 } else {
@@ -859,7 +844,7 @@ impl Lowerer {
                     // scalar fields so the result is always a zz_value.
                     // Derive the field C type from the parent object's struct type.
                     let field_ctype = self.ty_at(names, obj.span()).and_then(|ot| {
-                        if let zz_checker::Type::Struct(sname) = ot {
+                        if let zz_checker::Type::Struct(sname, _) = ot {
                             if let Some(sig) = self.tp.structs.get(sname) {
                                 if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == name) {
                                     return Some(self.type_to_c(ft));
@@ -881,7 +866,7 @@ impl Lowerer {
                     let raw = self
                         .ty_at(names, obj.span())
                         .and_then(|ot| match ot {
-                            zz_checker::Type::Struct(sname) => self
+                            zz_checker::Type::Struct(sname, _) => self
                                 .resolve_access_chain(sname, std::slice::from_ref(name))
                                 .map(|(chain, _)| {
                                     let mut acc = format!("({obj_val})");
@@ -897,10 +882,13 @@ impl Lowerer {
                 } else {
                     // Boxed object: use runtime function.
                     // `zz_object_get_field` takes a pointer, so we need
-                    // an lvalue.  A simple Ident produces a C variable
-                    // name (lvalue), but anything else (Index, Call,
-                    // Field chain, …) is an rvalue — hoist to a temp.
-                    if matches!(obj.as_ref(), Expr::Ident { .. }) {
+                    // an lvalue.  A simple Ident usually produces a C
+                    // variable name (lvalue), but emission can also yield
+                    // an rvalue for one (e.g. `zz_clone(v0)`) — so check
+                    // the emitted form, not just the AST shape. Anything
+                    // else (Index, Call, Field chain, …) is an rvalue —
+                    // hoist to a temp.
+                    if matches!(obj.as_ref(), Expr::Ident { .. }) && is_simple_ident(&obj_val) {
                         format!("zz_object_get_field(&{obj_val}, \"{name}\")")
                     } else {
                         let tmp = names.fresh("_field_obj");
@@ -971,16 +959,7 @@ impl Lowerer {
                 };
                 out.push_str(&format!("    zz_value {arr_var} = {ctor};\n"));
                 for item in elems {
-                    let item_val = self.emit_expr(item, names, out);
-                    // Auto-box if needed
-                    let boxed = if let Expr::Ident { name: n, .. } = item {
-                        auto_box(&item_val, names.lookup_type(n))
-                    } else {
-                        item_val
-                    };
-                    out.push_str(&format!(
-                        "    {{ int _e = 0; zz_vec_append({arr_var}, {boxed}, &_e); }}\n"
-                    ));
+                    self.append_container_item(&arr_var, item, names, out);
                 }
                 arr_var
             }
@@ -1001,15 +980,7 @@ impl Lowerer {
                 out.push_str(&format!("    zz_value {arr_var} = {ctor};\n"));
                 if !items.is_empty() {
                     for item in items {
-                        let item_val = self.emit_expr(item, names, out);
-                        let boxed = if let Expr::Ident { name: n, .. } = item {
-                            auto_box(&item_val, names.lookup_type(n))
-                        } else {
-                            item_val
-                        };
-                        out.push_str(&format!(
-                            "    {{ int _e = 0; zz_vec_append({arr_var}, {boxed}, &_e); }}\n"
-                        ));
+                        self.append_container_item(&arr_var, item, names, out);
                     }
                 }
                 arr_var
@@ -1581,7 +1552,7 @@ impl Lowerer {
                     .funcs
                     .get(&fname)
                     .and_then(|sig| sig.params.first().map(|(_, t)| t.clone()))
-                    .map(|t| matches!(&t, zz_checker::Type::Struct(_)))
+                    .map(|t| matches!(&t, zz_checker::Type::Struct(_, _)))
                     .unwrap_or(false);
                 out.push_str(&format!(
                     "        zz_value {err_tmp} = zz_match_err({tmp});\n"
@@ -1959,7 +1930,7 @@ impl Lowerer {
                 // Look up receiver type and dispatch.
                 if let Some(zzty) = self.ty_at(names, obj.span()) {
                     match zzty {
-                        zz_checker::Type::Struct(sname) => {
+                        zz_checker::Type::Struct(sname, _) => {
                             // Keep the direct-form convention (no receiver);
                             // promotion included for embedded methods.
                             if let Some((target, _)) = self.struct_method_target(sname, method) {
@@ -2318,7 +2289,9 @@ impl Lowerer {
                 .enumerate()
                 .map(|(i, _)| {
                     sig.params.get(i).and_then(|(_, t)| match t {
-                        zz_checker::Type::Struct(s) if self.is_unboxed_struct(s) => Some(s.clone()),
+                        zz_checker::Type::Struct(s, _) if self.is_unboxed_struct(s) => {
+                            Some(s.clone())
+                        }
                         _ => None,
                     })
                 })
@@ -2460,7 +2433,7 @@ impl Lowerer {
                 // scalar that must be boxed for function calls.
                 // Derive field type from the parent object's struct type.
                 let ctype = self.ty_at(names, obj.span()).and_then(|ot| {
-                    if let zz_checker::Type::Struct(sname) = ot {
+                    if let zz_checker::Type::Struct(sname, _) = ot {
                         if let Some(sig) = self.tp.structs.get(sname) {
                             if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == name) {
                                 return Some(self.type_to_c(ft));
@@ -2948,10 +2921,22 @@ impl Lowerer {
                 if let Some(sig) = self.tp.structs.get(name) {
                     if let Some((_, field_type)) = sig.fields.iter().find(|(n, _)| n == field_name)
                     {
+                        // Scalar fields arrive boxed (`zz_int(1)`, call
+                        // results) or raw (locals, arithmetic) depending on
+                        // the producer — extract `.i`/`.f`/`.b` only from
+                        // boxed forms, otherwise use the raw value as-is.
+                        // (Unconditional extraction miscompiles
+                        // `Box{v: i}` for raw `i` as `(i).i`.)
+                        let ident = match field_expr {
+                            Expr::Ident { name, .. } => Some(name.as_str()),
+                            _ => None,
+                        };
+                        let raw =
+                            crate::lower::context::emitted_is_raw_scalar(&field_val, names, ident);
                         let final_val = match field_type {
-                            zz_checker::Type::Int => format!("({field_val}).i"),
-                            zz_checker::Type::Float => format!("({field_val}).f"),
-                            zz_checker::Type::Bool => format!("({field_val}).b"),
+                            zz_checker::Type::Int if !raw => format!("({field_val}).i"),
+                            zz_checker::Type::Float if !raw => format!("({field_val}).f"),
+                            zz_checker::Type::Bool if !raw => format!("({field_val}).b"),
                             _ => field_val,
                         };
                         field_inits.push(format!(".{field_name} = {final_val}"));
@@ -2993,7 +2978,7 @@ impl Lowerer {
                     .iter()
                     .find(|(n, _)| n == fname)
                     .and_then(|(_, ft)| match ft {
-                        zz_checker::Type::Struct(inner) if self.is_unboxed_struct(inner) => {
+                        zz_checker::Type::Struct(inner, _) if self.is_unboxed_struct(inner) => {
                             Some(inner.clone())
                         }
                         _ => None,
@@ -3067,7 +3052,7 @@ impl Lowerer {
                 name: fname.clone(),
                 span: value.span(),
             };
-            if let zz_checker::Type::Struct(inner) = fty {
+            if let zz_checker::Type::Struct(inner, _) = fty {
                 if self.is_unboxed_struct(inner) {
                     let child = self.emit_boxed_value(inner, &access, names, out);
                     out.push_str(&format!(
@@ -3123,7 +3108,7 @@ impl Lowerer {
                         _ => field_val,
                     };
                     field_inits.push(format!(".{fname} = {final_val}"));
-                } else if let zz_checker::Type::Struct(inner) = fty {
+                } else if let zz_checker::Type::Struct(inner, _) = fty {
                     let child: Vec<(Vec<String>, &Expr)> = entries
                         .iter()
                         .filter(|(p, _)| p.len() > 1 && &p[0] == fname)
@@ -3158,7 +3143,7 @@ impl Lowerer {
                 {
                     // An unboxed struct value stored in a boxed parent must
                     // be boxed into a runtime object first.
-                    if let zz_checker::Type::Struct(inner) = fty {
+                    if let zz_checker::Type::Struct(inner, _) = fty {
                         if self.is_unboxed_struct(inner) {
                             let child = self.emit_boxed_value(inner, fexpr, names, out);
                             out.push_str(&format!(
@@ -3172,7 +3157,7 @@ impl Lowerer {
                     out.push_str(&format!(
                         "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed_fval});\n",
                     ));
-                } else if let zz_checker::Type::Struct(inner) = fty {
+                } else if let zz_checker::Type::Struct(inner, _) = fty {
                     let child: Vec<(Vec<String>, &Expr)> = entries
                         .iter()
                         .filter(|(p, _)| p.len() > 1 && &p[0] == fname)
@@ -3313,6 +3298,57 @@ impl Lowerer {
         None
     }
 
+    /// Append one array/tuple element, boxing it into a `zz_value` first.
+    /// Unboxed structs (raw C values: literals, locals, field reads) route
+    /// through `emit_boxed_value` instead of emitting; raw scalars box via
+    /// the operand helper; already-boxed expressions pass through unchanged.
+    /// Without this, `(int, UnboxedStruct)` tuples and `[Point{...}]`
+    /// arrays hand a raw C struct to `zz_vec_append(zz_value)` and the C
+    /// build fails.
+    ///
+    /// The boxed object is freshly constructed per element, and
+    /// `zz_vec_append` clones for store — so the temp is released right
+    /// after the append statement. Without the release, every iteration
+    /// of a loop building such tuples retains one object (~0.5KB/draw
+    /// for a 4-int struct). The release only fires for temp names
+    /// `emit_boxed_value` created (inline fallbacks like `zz_unit()` are
+    /// appended bare, and borrowed locals never reach this branch).
+    pub(super) fn append_container_item(
+        &self,
+        arr_var: &str,
+        item: &Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) {
+        let unboxed: Option<String> = match self.ty_at(names, item.span()) {
+            Some(zz_checker::Type::Struct(s, _)) if self.is_unboxed_struct(s) => Some(s.clone()),
+            _ => None,
+        };
+        if let Some(sname) = unboxed {
+            let tmp = self.emit_boxed_value(&sname, item, names, out);
+            if is_simple_ident(&tmp) {
+                out.push_str(&format!(
+                    "    {{ int _e = 0; zz_vec_append({arr_var}, {tmp}, &_e); zz_release(&{tmp}); }}\n"
+                ));
+            } else {
+                out.push_str(&format!(
+                    "    {{ int _e = 0; zz_vec_append({arr_var}, {tmp}, &_e); }}\n"
+                ));
+            }
+            return;
+        }
+        let item_val = self.emit_expr(item, names, out);
+        // Auto-box if needed (historical Ident fast path, preserved).
+        let boxed = if let Expr::Ident { name: n, .. } = item {
+            auto_box(&item_val, names.lookup_type(n))
+        } else {
+            box_scalar_operand(item, names, &item_val)
+        };
+        out.push_str(&format!(
+            "    {{ int _e = 0; zz_vec_append({arr_var}, {boxed}, &_e); }}\n"
+        ));
+    }
+
     /// Box an index expression to a `zz_value` for `idx` arguments. Scalar
     /// locals (int64_t/double/bool) and raw arithmetic need an explicit box;
     /// already-boxed expressions pass through unchanged.
@@ -3336,6 +3372,50 @@ impl Lowerer {
             return format!("zz_bool({emitted})");
         }
         emitted
+    }
+
+    /// Box a raw-scalar index-store RHS to a `zz_value` before storing.
+    /// Extracted from the `obj[idx] = v` lowering so compound assignment
+    /// (`obj[idx] OP= v`) boxes identically.
+    pub(super) fn box_index_store_value(
+        &self,
+        value: &Expr,
+        val: String,
+        names: &NameCtx,
+    ) -> String {
+        let ast_says_scalar = super::expr_emits_raw_scalar(value);
+        let ident = match value {
+            Expr::Ident { name, .. } => Some(name.as_str()),
+            _ => None,
+        };
+        let val_is_actually_scalar =
+            crate::lower::context::emitted_is_raw_scalar(&val, names, ident)
+                || (ast_says_scalar && !val.starts_with("zz_"));
+        let value_is_scalar = ast_says_scalar || val_is_actually_scalar;
+        if value_is_scalar {
+            if let Expr::Ident { name, .. } = value {
+                let name_str = name.clone();
+                auto_box(&val, names.lookup_type(&name_str))
+            } else if let Expr::Path { parts, .. } = value {
+                let joined = parts.join(".");
+                auto_box(&val, names.lookup_type(&joined))
+            } else if val.starts_with("(double)(") {
+                format!("zz_float({val})")
+            } else if val.starts_with("(bool)(") {
+                format!("zz_bool({val})")
+            } else if val_is_actually_scalar {
+                // Genuinely raw scalar (int ident/arithmetic):
+                // box it. (String concats over string idents
+                // trip the AST-only check above but lower to
+                // a zz_value — wrapping one in zz_int is a C
+                // type error.)
+                format!("zz_int({val})")
+            } else {
+                val
+            }
+        } else {
+            val
+        }
     }
 
     pub(super) fn emit_str_literal(&self, s: &str) -> String {

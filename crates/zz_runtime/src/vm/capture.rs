@@ -281,6 +281,10 @@ pub(crate) fn scan_stmt_captured(
             scan_expr_captured(value, defined, free, nested);
             scan_expr_captured(target, defined, free, nested);
         }
+        Stmt::CompoundAssign { target, value, .. } => {
+            scan_expr_captured(value, defined, free, nested);
+            scan_expr_captured(target, defined, free, nested);
+        }
         Stmt::Destructure { pat, value, .. } => {
             scan_expr_captured(value, defined, free, nested);
             collect_pattern_bindings(pat, defined);

@@ -146,7 +146,7 @@ pub(crate) async fn handle_hover(backend: &Backend, params: HoverParams) -> Resu
         name: field, obj, ..
     }) = node.expr
     {
-        if let Some(zz_checker::Type::Struct(struct_name)) =
+        if let Some(zz_checker::Type::Struct(struct_name, _)) =
             crate::lookup::resolve_type_of_expr(program, check_result, obj)
         {
             if let Some(ssig) = check_result.structs.get(&struct_name) {

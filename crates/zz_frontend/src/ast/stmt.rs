@@ -1,7 +1,7 @@
 //! Statement AST nodes.
 
 use crate::ast::expr::{Expr, Ident, Pattern};
-use crate::ast::types::Ty;
+use crate::ast::types::{BinOp, Ty};
 use crate::span::Span;
 
 /// A parameter in a function signature or closure.
@@ -149,16 +149,23 @@ pub enum Stmt {
     },
     /// `struct Point { x: int, y: int }` — a named record type.
     /// For cross-module: `struct shapes.Point { ... }` stores ["shapes", "Point"].
+    /// `generics` holds plain type parameters (`struct Box[T] { v: T }`);
+    /// bounds are rejected by the parser (storage needs no constraints).
     Struct {
         name: Vec<String>,
+        generics: Vec<Ident>,
         fields: Vec<(Ident, Ty)>,
         span: Span,
         pub_: bool,
     },
     /// `impl Point { func dist(self) -> int { ... } }` — method block.
     /// Methods inside are registered as `TypeName.method_name` functions.
+    /// `impl Box[T]` scopes `T` over every method (prepended to each
+    /// method's own generics at registration, so call-site instantiation
+    /// unifies struct arguments from the receiver automatically).
     Impl {
         name: Vec<String>,
+        generics: Vec<Ident>,
         methods: Vec<Stmt>,
         span: Span,
         pub_: bool,
@@ -185,6 +192,15 @@ pub enum Stmt {
     /// `target = value` — assignment to a variable or struct field.
     Assign {
         target: Expr,
+        value: Expr,
+        span: Span,
+    },
+    /// `target OP= value` (`x += 1`, `arr[i] *= 2`) — compound
+    /// assignment. Semantically `target = target OP value` with the
+    /// receiver evaluated exactly once; never an alias or reference.
+    CompoundAssign {
+        target: Expr,
+        op: BinOp,
         value: Expr,
         span: Span,
     },
@@ -221,6 +237,7 @@ impl Stmt {
             | Stmt::Continue { span }
             | Stmt::Defer { span, .. }
             | Stmt::Assign { span, .. } => *span,
+            Stmt::CompoundAssign { span, .. } => *span,
             Stmt::ExternBlock { span, .. } | Stmt::Link { span, .. } => *span,
             Stmt::Impl { span, .. } => *span,
             Stmt::Destructure { span, .. } => *span,

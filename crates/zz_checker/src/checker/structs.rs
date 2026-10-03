@@ -15,64 +15,122 @@
 use crate::checker::{Checker, FuncSig};
 use crate::type_::Type;
 use zz_frontend::ast::Stmt;
+use zz_frontend::diag::error_at;
 
 impl Checker {
     pub(crate) fn collect_struct(&mut self, stmt: &Stmt) {
-        let (name, fields) = match stmt {
-            Stmt::Struct { name, fields, .. } => (name, fields),
+        let (name, generics, fields) = match stmt {
+            Stmt::Struct {
+                name,
+                generics,
+                fields,
+                ..
+            } => (name, generics, fields),
             _ => unreachable!(),
         };
-        let gens = self.current_generics.clone();
+        // Reject duplicate type parameters (`struct P[T, T]`).
+        let mut seen = std::collections::HashSet::new();
+        for g in generics {
+            if !seen.insert(g.name.clone()) {
+                self.errors.push(error_at(
+                    format!(
+                        "duplicate type parameter `{}` in struct `{}`",
+                        g.name,
+                        name.join(".")
+                    ),
+                    g.span,
+                ));
+            }
+        }
+        let gen_names: Vec<String> = generics.iter().map(|g| g.name.clone()).collect();
         let sig_fields = fields
             .iter()
-            .map(|(fname, fty)| (fname.name.clone(), self.ast_to_type(fty, &gens)))
+            .map(|(fname, fty)| (fname.name.clone(), self.ast_to_type(fty, &gen_names)))
             .collect();
         let full_name = name.join(".");
-        self.structs
-            .insert(full_name, crate::checker::StructSig { fields: sig_fields });
+        // Shadowing a builtin amid generics is still a collision; the
+        // plain-struct path reports it elsewhere, so only check arity here.
+        self.structs.insert(
+            full_name,
+            crate::checker::StructSig {
+                generics: gen_names,
+                fields: sig_fields,
+            },
+        );
     }
 
     /// True when a struct field is an embedded (anonymous) field: its type
     /// is a struct whose last name segment equals the field name.
     pub(crate) fn is_embedded_field(fname: &str, fty: &Type) -> bool {
         match fty {
-            Type::Struct(s) => s.rsplit('.').next().unwrap_or(s) == fname,
+            Type::Struct(s, _) => s.rsplit('.').next().unwrap_or(s) == fname,
             _ => false,
         }
     }
 
-    /// Direct field type, or the type promoted through embedded structs
-    /// (breadth-first, so the nearest embedding wins). Cycle-safe.
-    pub(crate) fn resolve_struct_field(&self, sname: &str, field: &str) -> Option<Type> {
-        self.resolve_struct_field_path(sname, field)
-            .map(|(_, ty)| ty)
-    }
-
-    /// Like [`Checker::resolve_struct_field`], but also returns the path of
-    /// embedded field names leading to the field (empty = direct).
-    pub(crate) fn resolve_struct_field_path(
+    /// Substitution map from a struct's generic parameters to the
+    /// concrete arguments at this use site. Empty when arities differ
+    /// (already reported elsewhere) — lookups then keep `Named` as-is.
+    pub(crate) fn struct_arg_map(
         &self,
         sname: &str,
+        args: &[Type],
+    ) -> std::collections::HashMap<String, Type> {
+        match self.structs.get(sname) {
+            Some(sig) if sig.generics.len() == args.len() => sig
+                .generics
+                .iter()
+                .cloned()
+                .zip(args.iter().cloned())
+                .collect(),
+            _ => std::collections::HashMap::new(),
+        }
+    }
+
+    /// Direct field type with the use-site arguments substituted
+    /// (`Box[int].v` → `int`). Returns `None` for unknown structs,
+    /// unknown fields, or arity mismatch details (handled by callers).
+    pub(crate) fn direct_field_type(
+        &self,
+        sname: &str,
+        args: &[Type],
+        field: &str,
+    ) -> Option<Type> {
+        let sig = self.structs.get(sname)?;
+        let (_, ft) = sig.fields.iter().find(|(n, _)| n == field)?;
+        let map = self.struct_arg_map(sname, args);
+        Some(crate::checker::inference::subst(ft, &map))
+    }
+
+    /// Like [`Checker::direct_field_type`], but also returns the path of
+    /// embedded field names leading to the field (empty = direct).
+    /// Generic arguments thread through embedded levels: stepping into
+    /// `Base` via a field of type `Base[int]` continues with
+    /// `args=[int]`. Cycle-safe.
+    pub(crate) fn resolve_struct_field_generic(
+        &self,
+        sname: &str,
+        args: &[Type],
         field: &str,
     ) -> Option<(Vec<String>, Type)> {
         let mut visited = vec![sname.to_string()];
-        // Queue of (struct name, path of embedded fields to reach it).
-        let mut queue: Vec<(String, Vec<String>)> = vec![(sname.to_string(), Vec::new())];
-        while let Some((cur, path)) = queue.first().cloned() {
+        let mut queue: Vec<(String, Vec<Type>, Vec<String>)> =
+            vec![(sname.to_string(), args.to_vec(), Vec::new())];
+        while let Some((cur, cur_args, path)) = queue.first().cloned() {
             queue.remove(0);
             let sig = self.structs.get(&cur)?;
+            let map = self.struct_arg_map(&cur, &cur_args);
             if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == field) {
-                // Direct hits win at every level; an embedded field's own
-                // name also resolves (so `u.Base` keeps working).
-                return Some((path, ft.clone()));
+                return Some((path, crate::checker::inference::subst(ft, &map)));
             }
             for (fname, fty) in &sig.fields {
-                if let Type::Struct(inner) = fty {
-                    if Self::is_embedded_field(fname, fty) && !visited.contains(inner) {
+                let concrete = crate::checker::inference::subst(fty, &map);
+                if let Type::Struct(inner, inner_args) = &concrete {
+                    if Self::is_embedded_field(fname, &concrete) && !visited.contains(inner) {
                         visited.push(inner.clone());
                         let mut next_path = path.clone();
                         next_path.push(fname.clone());
-                        queue.push((inner.clone(), next_path));
+                        queue.push((inner.clone(), inner_args.clone(), next_path));
                     }
                 }
             }
@@ -80,6 +138,39 @@ impl Checker {
         None
     }
 
+    /// Concrete type of the embedded value defining `method` when called
+    /// on `(sname, args)`: BFS over embedded fields carrying each level's
+    /// substituted arguments, returning the first value whose struct base
+    /// matches `defining` (mirrors [`Checker::find_struct_method`).
+    /// The runtime passes this embedded value as the receiver, so method
+    /// calls unify it (not the outer type) against the method's `self`.
+    pub(crate) fn promoted_method_receiver(
+        &self,
+        sname: &str,
+        args: &[Type],
+        defining: &str,
+    ) -> Option<Type> {
+        let mut visited = vec![sname.to_string()];
+        let mut queue: Vec<(String, Vec<Type>)> = vec![(sname.to_string(), args.to_vec())];
+        while let Some((cur, cur_args)) = queue.first().cloned() {
+            queue.remove(0);
+            let sig = self.structs.get(&cur)?;
+            let map = self.struct_arg_map(&cur, &cur_args);
+            for (fname, fty) in &sig.fields {
+                let concrete = crate::checker::inference::subst(fty, &map);
+                if let Type::Struct(inner, inner_args) = &concrete {
+                    if inner == defining {
+                        return Some(concrete.clone());
+                    }
+                    if Self::is_embedded_field(fname, &concrete) && !visited.contains(inner) {
+                        visited.push(inner.clone());
+                        queue.push((inner.clone(), inner_args.clone()));
+                    }
+                }
+            }
+        }
+        None
+    }
     /// First required leaf path under struct `sname` (reached via `prefix`)
     /// that is not covered by the given concrete literal paths. An explicit
     /// value at a path covers its whole subtree; otherwise embedded
@@ -102,7 +193,7 @@ impl Checker {
                 continue;
             }
             match fty {
-                Type::Struct(inner) if Self::is_embedded_field(fname, fty) => {
+                Type::Struct(inner, _) if Self::is_embedded_field(fname, fty) => {
                     if let Some(leaf) = self.first_uncovered_leaf(inner, &path, given, depth + 1) {
                         return Some(leaf);
                     }
@@ -129,7 +220,7 @@ impl Checker {
                 if !out.contains(fname) {
                     out.push(fname.clone());
                 }
-                if let Type::Struct(inner) = fty {
+                if let Type::Struct(inner, _) = fty {
                     if Self::is_embedded_field(fname, fty) && !visited.contains(inner) {
                         visited.push(inner.clone());
                         queue.push(inner.clone());
@@ -166,7 +257,7 @@ impl Checker {
                 continue;
             };
             for (fname, fty) in &sig.fields {
-                if let Type::Struct(inner) = fty {
+                if let Type::Struct(inner, _) = fty {
                     if Self::is_embedded_field(fname, fty) && !visited.contains(inner) {
                         visited.push(inner.clone());
                         queue.push(inner.clone());

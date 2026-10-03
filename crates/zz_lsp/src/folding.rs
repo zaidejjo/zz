@@ -49,6 +49,10 @@ fn collect_stmt_folds(stmt: &Stmt, source: &str, out: &mut Vec<FoldingRange>) {
             collect_expr_folds(target, source, out);
             collect_expr_folds(value, source, out);
         }
+        Stmt::CompoundAssign { target, value, .. } => {
+            collect_expr_folds(target, source, out);
+            collect_expr_folds(value, source, out);
+        }
         Stmt::Defer { expr, .. } => collect_expr_folds(expr, source, out),
         Stmt::Expr(e) => collect_expr_folds(e, source, out),
         _ => {}

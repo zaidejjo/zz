@@ -235,6 +235,10 @@ fn count_stmt_refs(s: &Stmt, name: &str) -> usize {
     match s {
         Stmt::Decl { value, .. } => count_refs(value, name),
         Stmt::Assign { target, value, .. } => count_refs(target, name) + count_refs(value, name),
+        // `x OP= e` reads and writes its target like `x = x OP e`.
+        Stmt::CompoundAssign { target, value, .. } => {
+            count_refs(target, name) + count_refs(value, name)
+        }
         Stmt::Return { value, .. } => value.as_ref().map_or(0, |v| count_refs(v, name)),
         Stmt::Expr(e) => count_refs(e, name),
         Stmt::Func { .. } | Stmt::Struct { .. } | Stmt::Impl { .. } | Stmt::Import { .. } => 0,

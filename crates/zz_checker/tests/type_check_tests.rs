@@ -222,7 +222,7 @@ fn recursion_works() {
 fn struct_def_and_init() {
     let r = check_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
-    assert_eq!(r.bindings["p"], Type::Struct("Point".into()));
+    assert_eq!(r.bindings["p"], Type::Struct("Point".into(), vec![]));
     assert_eq!(r.structs["Point"].fields.len(), 2);
 }
 
@@ -356,7 +356,7 @@ fn struct_embedding_flat_init() {
         "struct Base { id: int, name: str }\nstruct User { Base, age: int }\nu := User{ id: 1, name: \"Zaid\", age: 19 }",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
-    assert_eq!(r.bindings["u"], Type::Struct("User".into()));
+    assert_eq!(r.bindings["u"], Type::Struct("User".into(), vec![]));
 }
 
 #[test]
@@ -431,7 +431,7 @@ fn struct_duplicate_definition_errors() {
 fn struct_type_annotation_resolves() {
     let r = check_src("struct Point { x: int, y: int }\np: Point = Point{ x: 1, y: 2 }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
-    assert_eq!(r.bindings["p"], Type::Struct("Point".into()));
+    assert_eq!(r.bindings["p"], Type::Struct("Point".into(), vec![]));
 }
 
 // --- for loops ---------------------------------------------------------
@@ -964,7 +964,7 @@ fn method_funcs() -> HashMap<String, FuncSig> {
             generics: Vec::new(),
             bounds: Vec::new(),
             params: vec![
-                ("p".to_string(), Type::Struct("Point".to_string())),
+                ("p".to_string(), Type::Struct("Point".to_string(), vec![])),
                 ("scale".to_string(), Type::Int),
             ],
             has_default: vec![],
@@ -1035,7 +1035,10 @@ fn method_call_namespaced_by_struct_type() {
             extern_c_symbol: None,
             generics: Vec::new(),
             bounds: Vec::new(),
-            params: vec![("p".to_string(), Type::Struct("shapes.Point".to_string()))],
+            params: vec![(
+                "p".to_string(),
+                Type::Struct("shapes.Point".to_string(), vec![]),
+            )],
             has_default: vec![],
             ret: Type::Int,
         },
@@ -1044,6 +1047,7 @@ fn method_call_namespaced_by_struct_type() {
     structs.insert(
         "shapes.Point".to_string(),
         StructSig {
+            generics: Vec::new(),
             fields: vec![("x".to_string(), Type::Int)],
         },
     );
@@ -1200,6 +1204,7 @@ fn typo_suggestion_struct_field() {
             s.insert(
                 "Point".to_string(),
                 StructSig {
+                    generics: Vec::new(),
                     fields: vec![("x".to_string(), Type::Int), ("y".to_string(), Type::Int)],
                 },
             );
@@ -1337,6 +1342,7 @@ fn struct_init_marks_import_used() {
             s.insert(
                 "ml.Circle".to_string(),
                 StructSig {
+                    generics: Vec::new(),
                     fields: vec![("rad".to_string(), Type::Int)],
                 },
             );
@@ -1850,4 +1856,194 @@ fn bitwise_result_flows_into_int_context() {
     let r = check_src("x := (6 & 3) + (1 << 4)\ny: int = x");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["x"], Type::Int);
+}
+
+#[test]
+fn tuple_index_reads_element_types() {
+    let r = check_src("t := (1, \"two\", 3.5)\na := t[0]\nb := t[1]\nc := t[2]");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Int);
+    assert_eq!(r.bindings["b"], Type::Str);
+    assert_eq!(r.bindings["c"], Type::Float);
+}
+
+#[test]
+fn tuple_negative_index_counts_from_end() {
+    let r = check_src("t := (1, \"two\")\na := t[-1]");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Str);
+}
+
+#[test]
+fn tuple_index_out_of_bounds_errors() {
+    errors_contain("t := (1, 2)\nx := t[5]", "out of bounds");
+    errors_contain("t := (1, 2)\nx := t[-3]", "out of bounds");
+}
+
+#[test]
+fn tuple_dynamic_index_errors_with_hint() {
+    errors_contain(
+        "t := (1, 2)\ni := 0\nx := t[i]",
+        "must be an integer literal",
+    );
+}
+
+#[test]
+fn tuple_index_write_checks_element_type() {
+    let r = check_src("t := (1, \"two\")\nt[0] = 99");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    errors_contain("t := (1, \"two\")\nt[0] = \"s\"", "type mismatch");
+}
+
+#[test]
+fn bare_destructure_binds_names() {
+    let r = check_src("a, b := (1, \"two\")");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Int);
+    assert_eq!(r.bindings["b"], Type::Str);
+}
+
+#[test]
+fn compound_assign_valid_combinations() {
+    for src in [
+        "x := 1\nx += 2",
+        "x := 1\nx -= 2",
+        "x := 1\nx *= 2",
+        "x := 8\nx /= 2",
+        "x := 8\nx %= 3",
+        "x := 2\nx **= 10",
+        "x := 1.5\nx += 2.5",
+        "x := 6\nx &= 3",
+        "x := 6\nx |= 3",
+        "x := 1\nx <<= 4",
+        "s := \"a\"\ns += \"b\"",
+    ] {
+        let r = check_src(src);
+        assert!(!has_errors(&r), "{src} errors: {:?}", r.errors);
+    }
+}
+
+#[test]
+fn compound_assign_matches_binary_op_rules() {
+    // Whatever `x = x OP y` rejects, `x OP= y` rejects identically.
+    errors_contain("x := 1\nx += 1.5", "type mismatch");
+    errors_contain("x := 1\nx &= 1.5", "requires `int` operands");
+    errors_contain("x := true\nx |= false", "requires `int` operands");
+    errors_contain("x := \"a\"\nx -= \"b\"", "cannot apply");
+    errors_contain("nope += 1", "undefined variable");
+}
+
+#[test]
+fn compound_assign_rejects_const() {
+    errors_contain("const x = 1\nx += 2", "immutable variable");
+}
+
+#[test]
+fn compound_assign_field_and_index() {
+    let r = check_src("struct P { x: int }\np := P{ x: 1 }\np.x += 2");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    let r = check_src("a := [1, 2]\na[0] *= 3");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    errors_contain("a := [1]\na[0] += \"s\"", "cannot apply");
+}
+
+#[test]
+fn generic_struct_infers_from_literal() {
+    let r = check_src("struct Box<T> { v: T }\nb := Box{ v: 42 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["b"], Type::Struct("Box".into(), vec![Type::Int]));
+    let r = check_src("struct Box<T> { v: T }\ns := Box{ v: \"hi\" }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["s"], Type::Struct("Box".into(), vec![Type::Str]));
+}
+
+#[test]
+fn generic_struct_annotation_checked() {
+    let r = check_src("struct Box<T> { v: T }\nx: Box<int> = Box{ v: 1 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    errors_contain(
+        "struct Box<T> { v: T }\ns: Box<str> = Box{ v: 1 }",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn generic_struct_field_access_substitutes() {
+    let r = check_src("struct Box<T> { v: T }\nb := Box{ v: 42 }\nx: int = b.v");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    errors_contain(
+        "struct Box<T> { v: T }\nb := Box{ v: 42 }\nx: str = b.v",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn generic_struct_multi_param() {
+    let r = check_src("struct Pair<A, B> { a: A, b: B }\np := Pair{ a: 1, b: \"s\" }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(
+        r.bindings["p"],
+        Type::Struct("Pair".into(), vec![Type::Int, Type::Str])
+    );
+}
+
+#[test]
+fn generic_struct_nested() {
+    let r = check_src("struct Box<T> { v: T }\nn := Box{ v: Box{ v: 1 } }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(
+        r.bindings["n"],
+        Type::Struct(
+            "Box".into(),
+            vec![Type::Struct("Box".into(), vec![Type::Int])]
+        )
+    );
+}
+
+#[test]
+fn generic_struct_methods() {
+    let r = check_src(
+        "struct Box<T> { v: T }\nimpl Box<T> { func get(self) -> T { self.v } }\nb := Box{ v: 42 }\nx: int = b.get()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    errors_contain(
+        "struct Box<T> { v: T }\nimpl Box<T> { func get(self) -> T { self.v } }\nb := Box{ v: 42 }\nx: str = b.get()",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn generic_struct_arity_errors() {
+    errors_contain(
+        "struct P { x: int }\np: P<int> = P{ x: 1 }",
+        "takes 0 type arguments",
+    );
+    errors_contain(
+        "struct Box<T> { v: T }\nb: Box = Box{ v: 1 }",
+        "takes 1 type argument",
+    );
+    errors_contain(
+        "struct Pair<A, B> { a: A, b: B }\np: Pair<int> = Pair{ a: 1, b: 2 }",
+        "takes 2 type arguments",
+    );
+}
+
+#[test]
+fn generic_struct_impl_mismatch() {
+    errors_contain(
+        "struct Box<T> { v: T }\nimpl Box { func get(self) -> int { self.v } }",
+        "expected `impl",
+    );
+    errors_contain(
+        "struct Box<T> { v: T }\nstruct Box<T> { w: T }",
+        "duplicate definition of struct",
+    );
+    errors_contain("struct Box<T, T> { v: T }", "duplicate type parameter");
+}
+
+#[test]
+fn plain_struct_unaffected_by_generics() {
+    let r = check_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["p"], Type::Struct("Point".into(), vec![]));
 }

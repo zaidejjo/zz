@@ -408,6 +408,15 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.space();
                 self.emit_expr(value);
             }
+            Stmt::CompoundAssign {
+                target, op, value, ..
+            } => {
+                self.emit_expr(target);
+                self.space();
+                self.text(format!("{}=", op.symbol()));
+                self.space();
+                self.emit_expr(value);
+            }
             Stmt::Import {
                 path,
                 alias,
@@ -562,7 +571,12 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.emit_expr(v);
                 }
             }
-            Stmt::Struct { name, fields, .. } => {
+            Stmt::Struct {
+                name,
+                generics,
+                fields,
+                ..
+            } => {
                 if stmt_is_pub(stmt) {
                     self.text("pub");
                     self.space();
@@ -574,6 +588,16 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         self.text(".");
                     }
                     self.text(n);
+                }
+                if !generics.is_empty() {
+                    self.text("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.text(", ");
+                        }
+                        self.text(g.name.clone());
+                    }
+                    self.text(">");
                 }
                 self.space();
                 if fields.is_empty() {
@@ -613,6 +637,7 @@ impl<'src, 'a> Ctx<'src, 'a> {
             }
             Stmt::Impl {
                 name,
+                generics,
                 methods,
                 span,
                 ..
@@ -628,6 +653,16 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         self.text(".");
                     }
                     self.text(n);
+                }
+                if !generics.is_empty() {
+                    self.text("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.text(", ");
+                        }
+                        self.text(g.name.clone());
+                    }
+                    self.text(">");
                 }
                 self.space();
                 self.text("{");
@@ -927,15 +962,22 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.text(")");
                 }
             }
-            Pattern::Tuple { pats, .. } => {
-                self.text("(");
+            Pattern::Tuple { pats, span } => {
+                // Same form-preservation rule as the legacy formatter:
+                // bare `a, b := ...` must not gain parens.
+                let paren = self.source.as_bytes().get(span.start as usize) == Some(&b'(');
+                if paren {
+                    self.text("(");
+                }
                 for (i, p) in pats.iter().enumerate() {
                     if i > 0 {
                         self.text(", ");
                     }
                     self.emit_pattern(p);
                 }
-                self.text(")");
+                if paren {
+                    self.text(")");
+                }
             }
             Pattern::Or { pats, .. } => {
                 for (i, p) in pats.iter().enumerate() {

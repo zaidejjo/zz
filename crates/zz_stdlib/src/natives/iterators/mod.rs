@@ -39,6 +39,9 @@ pub(crate) fn len(
 ) -> Result<Value, EvalError> {
     match args.first() {
         Some(Value::Array(vs)) => Ok(Value::Int(vs.len() as i64)),
+        // Tuples share the array representation (AOT lowers them to
+        // arrays, where `zz_len` already counts them).
+        Some(Value::Tuple(vs)) => Ok(Value::Int(vs.len() as i64)),
         Some(Value::Bytes(b)) => Ok(Value::Int(b.len() as i64)),
         Some(Value::Str(s)) => Ok(Value::Int(s.chars().count() as i64)),
         Some(Value::Dict(entries)) => Ok(Value::Int(entries.len() as i64)),
@@ -56,7 +59,7 @@ pub(crate) fn len(
             }
         }
         Some(other) => Err(EvalError::new(
-            format!("len expects array, bytes, string, dict, or range, found `{other}`"),
+            format!("len expects array, tuple, bytes, string, dict, or range, found `{other}`"),
             span,
         )),
         None => Err(EvalError::new("missing argument for len", span)),

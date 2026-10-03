@@ -387,7 +387,18 @@ impl ZZHighlighter {
             | TokenKind::Caret
             | TokenKind::Tilde
             | TokenKind::Shl
-            | TokenKind::Shr => (Color::White, false),
+            | TokenKind::Shr
+            | TokenKind::PlusEq
+            | TokenKind::MinusEq
+            | TokenKind::StarEq
+            | TokenKind::SlashEq
+            | TokenKind::PercentEq
+            | TokenKind::StarStarEq
+            | TokenKind::AmpEq
+            | TokenKind::PipeEq
+            | TokenKind::CaretEq
+            | TokenKind::ShlEq
+            | TokenKind::ShrEq => (Color::White, false),
 
             // Assignment — red
             TokenKind::Assign | TokenKind::ColonEq => (Color::Red, false),

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use zz_checker::{FuncSig, Type};
 use zz_hir::{ReachableSet, TypedProgram};
 
-use crate::{build_native, compile, native_supported, BuildOptions};
+use crate::{build_native, compile, lower_only, native_supported, BuildOptions};
 
 /// Seed the real stdlib signatures for typed building.
 use zz_stdlib::stdlib_funcs;
@@ -1053,5 +1053,102 @@ func main() {
     assert!(
         lowered.source.contains("zz_arena_reset"),
         "missing arena reset in generated C"
+    );
+}
+
+/// Structural proof that `x OP= y` lowers to the same C as `x = x OP y`
+/// for plain receivers: normalize the target statement text, then
+/// compare generated sources for equality.
+#[test]
+fn compound_assign_lowers_like_plain_assign() {
+    fn lowered(body: &str) -> String {
+        let src = format!("func main() {{\n{body}\n}}\n");
+        let (pruned, reach) = build_reachable(&src);
+        lower_only(&pruned, &reach, "main").source
+    }
+
+    for (compound, plain) in [
+        ("x += 1", "x = x + 1"),
+        ("x -= y", "x = x - y"),
+        ("x *= 2", "x = x * 2"),
+        ("x /= 2", "x = x / 2"),
+        ("x &= mask", "x = x & mask"),
+        ("x <<= 2", "x = x << 2"),
+        ("s += t", "s = s + t"),
+    ] {
+        let a = lowered(&format!(
+            "x := 0\ny := 0\nmask := 0\ns := \"\"\nt := \"\"\n{compound}"
+        ));
+        let b = lowered(&format!(
+            "x := 0\ny := 0\nmask := 0\ns := \"\"\nt := \"\"\n{plain}"
+        ));
+        // The only difference may be the source-text echo in comments;
+        // the emitted statements must match line-for-line.
+        let norm = |s: &str| {
+            s.lines()
+                .filter(|l| {
+                    !(l.contains("x += 1")
+                        || l.contains("x = x + 1")
+                        || l.contains("x -= y")
+                        || l.contains("x = x - y")
+                        || l.contains("x *= 2")
+                        || l.contains("x = x * 2")
+                        || l.contains("x /= 2")
+                        || l.contains("x = x / 2")
+                        || l.contains("x &= mask")
+                        || l.contains("x = x & mask")
+                        || l.contains("x <<= 2")
+                        || l.contains("x = x << 2")
+                        || l.contains("s += t")
+                        || l.contains("s = s + t"))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let (na, nb) = (norm(&a), norm(&b));
+        // Function emission order is nondeterministic (map iteration),
+        // so compare as multisets of lines.
+        let mut la: Vec<&str> = na.lines().collect();
+        let mut lb: Vec<&str> = nb.lines().collect();
+        la.sort_unstable();
+        lb.sort_unstable();
+        if la != lb {
+            let mut diff = String::new();
+            for (i, (x, y)) in la.iter().zip(lb.iter()).enumerate() {
+                if x != y {
+                    diff.push_str(&format!("line {i}:\n  compound: {x}\n  plain:    {y}\n"));
+                    if diff.len() > 2000 {
+                        break;
+                    }
+                }
+            }
+            diff.push_str(&format!("lengths: {} vs {}\n", la.len(), lb.len()));
+            panic!("C mismatch ({compound} vs {plain}):\n{diff}");
+        }
+    }
+}
+
+/// The boxed temp of an unboxed-struct tuple/array element must be
+/// released after the cloning append, or every such construction
+/// retains one object (loops building `(int, Rng)` tuples grew ~0.5KB
+/// per draw). Borrowed locals and inline fallbacks take other paths
+/// and must NOT gain a release.
+#[test]
+fn container_struct_temp_is_released_after_append() {
+    let src = "struct Rng { s0: int, s1: int }\nfunc next(r: Rng) -> (int, Rng) {\n return (r.s0 + 1, Rng{ s0: r.s0 + 1, s1: r.s1 })\n}\nfunc main() {\n r := Rng{ s0: 1, s1: 2 }\n v, r := next(r)\n println(v)\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    let c = lower_only(&pruned, &reach, "main").source;
+    // The struct-element append must carry its temp release on the same
+    // line (scan user code only: the runtime prelude also mentions
+    // zz_release in definitions).
+    let appends: Vec<&str> = c
+        .lines()
+        .filter(|l| l.contains("zz_vec_append(") && l.contains("__obj"))
+        .collect();
+    assert_eq!(appends.len(), 1, "expected one struct-element append");
+    assert!(
+        appends[0].contains("zz_release(&__obj"),
+        "struct temp must be released after the cloning append: {}",
+        appends[0]
     );
 }

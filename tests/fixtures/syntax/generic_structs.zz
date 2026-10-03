@@ -1,0 +1,44 @@
+// E2E: Generic structs — declaration, inference, methods, nesting.
+struct Box<T> {
+    v: T,
+}
+
+impl Box<T> {
+    func get(self) -> T {
+        self.v
+    }
+}
+
+struct Pair<A, B> {
+    a: A,
+    b: B,
+}
+
+struct Wrap<T> {
+    inner: Box<T>,
+    n: int,
+}
+
+func first<T>(b: Box<T>) -> T {
+    b.v
+}
+
+func main() {
+    b := Box{ v: 42 }
+    println(b.v)
+    println(b.get())
+    println(first(b))
+    s := Box{ v: "hi" }
+    println(s.get())
+    x: Box<int> = Box{ v: 1 }
+    println(x.get())
+    p := Pair{ a: 1, b: "s" }
+    println(p.a)
+    println(p.b)
+    w := Wrap{ inner: Box{ v: 1 }, n: 5 }
+    println(w.inner.v)
+    println(w.n)
+    n := Box{ v: Box{ v: "deep" } }
+    println(n.v.v)
+    println("generic_structs_ok")
+}

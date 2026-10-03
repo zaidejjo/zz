@@ -309,6 +309,26 @@ ages := {"Alice": 30, "Bob": 25}
 empty := {}
 ```
 
+### Tuple Literals and Destructuring
+
+```zz
+t := (7, "seven")
+t[0]            // 7 (integer-literal index, checked at compile time)
+t[1]            // "seven"
+t[-1]           // "seven" (negative counts from the end, like arrays)
+len(t)          // 2
+
+// Destructuring — parens or bare form (identical meaning):
+(a, b) := t     // a = 7, b = "seven"
+c, d := t       // same; `_` skips: `_, e := t`
+```
+
+Dynamic indices (`t[i]`) are a compile error — destructure instead.
+Out-of-range literal indices are also caught at compile time.
+
+Tuples share the array representation: `t[0] = 99` writes in
+place, and behavior is identical on the VM and native backends.
+
 ### Indexing and Slicing
 
 ```zz
@@ -338,6 +358,63 @@ struct Box { items: [int] }
 b := Box{ items: [1, 2, 3] }
 b.items[1] = 99  // b.items == [1, 99, 3]
 ```
+
+### Compound Assignment
+
+`x OP= y` is equivalent to `x = x OP y` with the receiver evaluated
+exactly once (so `arr[i()] += f()` calls `i()` then `f()`, once each —
+unlike textual expansion, which would evaluate `i()` twice):
+
+```zz
+x := 10
+x += 1    // 11, like x = x + 1
+x -= 2    // 9
+x *= 3    // 27
+x /= 4    // 6 (integer division)
+x %= 4    // 2
+n := 2
+n **= 10  // 1024
+
+p.x += 5        // struct fields (same targets as `=`)
+arr[0] *= 2     // indices
+
+// Bitwise forms work too:
+flags := 0
+flags |= 4
+flags &= 7
+flags ^= 1
+flags <<= 2
+flags >>= 1
+```
+
+Type rules are exactly the binary operator's: `x += 1.5` is accepted
+precisely when `x = x + 1.5` is. Cannot be chained (`x += y += z`
+is an error — split it into two statements).
+
+### Value Semantics
+
+Function parameters are values (copies) from the programmer's
+perspective — a function can never mutate its caller's variables:
+
+```zz
+struct Counter { n: int }
+
+func bump(c: Counter) -> int {
+    c.n += 100   // mutates only the local copy
+    c.n
+}
+
+c := Counter{ n: 10 }
+bump(c)     // 110
+c.n         // still 10
+```
+
+There are no reference parameters, no borrows, and no borrow checker.
+`value semantics != mandatory physical memcpy`: the compiler and
+runtime may eliminate physical copies and reuse storage internally
+(copy-on-write, in-place slot operations) whenever provably safe, but
+such optimizations are never observable — no alias can witness an
+intermediate mutation. Correctness always wins over optimization.
 
 ### Ranges
 
@@ -449,6 +526,44 @@ Explicit (`User{ Base: Base{ id: 1, name: "Z" }, age: 19 }`) and shorthand
 (`User{ Base{ id: 1, name: "Z" }, age: 19 }`) inits mean the same thing.
 Mixing an explicit embedded value with flattened leaves of the same subtree
 is rejected as ambiguous.
+
+### Generic Structs
+
+Structs take type parameters (`struct Box<T> { v: T }`). Construction
+infers the arguments (`Box{ v: 1 }` is `Box<int>`), exactly like generic
+function calls — no turbofish needed. Annotate when you want to pin it
+(`x: Box<int> = Box{ v: 1 }`):
+
+```zz
+struct Box<T> { v: T }
+
+impl Box<T> {
+    func get(self) -> T {
+        self.v
+    }
+}
+
+b := Box{ v: 42 }      // Box[int]
+println(b.get())       // 42
+s := Box{ v: "hi" }    // Box[str]
+
+struct Pair<A, B> { a: A, b: B }
+p := Pair{ a: 1, b: "s" }   // Pair[int, str]
+```
+
+Rules:
+- Use sites name their arguments (`Box<int>`); a bare `Box` for a generic
+  struct is an error, as is the wrong count (`Pair<int>`).
+- `Box<int>` and `Box<str>` are distinct types — assigning one to the
+  other is a type mismatch.
+- `impl Box<T>` scopes `T` over every method; the receiver unifies the
+  arguments at each call. A plain `impl Box` for a generic struct is an
+  error, and a method parameter may not shadow an impl parameter.
+- Type arguments erase at runtime: values store field data only, so
+  generic code runs identically to hand-monomorphized code (same
+  opcodes, same generated C — verified by test, not just claimed).
+  Value semantics hold unchanged: functions receive copies regardless
+  of type arguments.
 
 ### Method Call Syntax
 

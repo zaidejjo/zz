@@ -222,13 +222,14 @@ impl Lowerer {
 
     /// Checker struct name for a possibly module-qualified object name.
     fn obj_struct(&self, names: &NameCtx, obj: &str) -> Option<String> {
-        if let Some(zz_checker::Type::Struct(sname)) = names.checker_types.get(obj).cloned() {
+        if let Some(zz_checker::Type::Struct(sname, _)) = names.checker_types.get(obj).cloned() {
             return Some(sname);
         }
         // Globals are keyed qualified (`ns.s`); the checker map may hold
         // the bare name.
         if let Some(tail) = obj.rsplit('.').next() {
-            if let Some(zz_checker::Type::Struct(sname)) = names.checker_types.get(tail).cloned() {
+            if let Some(zz_checker::Type::Struct(sname, _)) = names.checker_types.get(tail).cloned()
+            {
                 return Some(sname);
             }
         }

@@ -605,7 +605,7 @@ impl Lowerer {
         if let Some(sig) = self.tp.structs.get(name) {
             sig.fields
                 .iter()
-                .all(|(_, ty)| self.is_scalar_type(ty) || matches!(ty, zz_checker::Type::Struct(inner) if self.is_unboxed_struct(inner)))
+                .all(|(_, ty)| self.is_scalar_type(ty) || matches!(ty, zz_checker::Type::Struct(inner, _) if self.is_unboxed_struct(inner)))
         } else {
             false
         }
@@ -636,7 +636,7 @@ impl Lowerer {
                     format!("const {base} *")
                 }
             }
-            zz_checker::Type::Struct(name) => {
+            zz_checker::Type::Struct(name, _) => {
                 if self.is_unboxed_struct(name) {
                     format!("zz_struct_{}", mangle(name))
                 } else {
@@ -807,7 +807,7 @@ impl Lowerer {
             zz_checker::Type::Int => Some("int64_t"),
             zz_checker::Type::Float => Some("double"),
             zz_checker::Type::Bool => Some("bool"),
-            zz_checker::Type::Struct(name) if self.is_unboxed_struct(name) => {
+            zz_checker::Type::Struct(name, _) if self.is_unboxed_struct(name) => {
                 // Return a static string — leak the Box for the 'static lifetime.
                 // This is fine for codegen: small number of struct types, process exits.
                 // Route through `mangle()` so a namespaced struct (e.g. `mod.Rect`)
@@ -823,7 +823,7 @@ impl Lowerer {
     /// is a struct whose last name segment equals the field name
     /// (`User.Base: Base`). Mirrors the checker's rule.
     pub(super) fn is_embedded_sig_field(fname: &str, fty: &zz_checker::Type) -> bool {
-        matches!(fty, zz_checker::Type::Struct(s) if s.rsplit('.').next().unwrap_or(s) == fname)
+        matches!(fty, zz_checker::Type::Struct(s, _) if s.rsplit('.').next().unwrap_or(s) == fname)
     }
 
     /// Resolve an un-mangled struct name from a C type string
@@ -850,7 +850,7 @@ impl Lowerer {
                 return Some(path);
             }
             for (fname, fty) in &sig.fields {
-                if let zz_checker::Type::Struct(inner) = fty {
+                if let zz_checker::Type::Struct(inner, _) = fty {
                     if Self::is_embedded_sig_field(fname, fty) && !visited.contains(inner) {
                         visited.push(inner.clone());
                         let mut next = path.clone();
@@ -877,7 +877,7 @@ impl Lowerer {
             queue.remove(0);
             let sig = self.tp.structs.get(&cur)?;
             for (fname, fty) in &sig.fields {
-                if let zz_checker::Type::Struct(inner) = fty {
+                if let zz_checker::Type::Struct(inner, _) = fty {
                     if Self::is_embedded_sig_field(fname, fty) && !visited.contains(inner) {
                         if self.reachable_funcs.contains(&format!("{inner}.{method}")) {
                             let mut found = path.clone();
@@ -906,7 +906,7 @@ impl Lowerer {
             if i + 1 == path.len() {
                 return Some(self.type_to_c(fty));
             }
-            if let zz_checker::Type::Struct(inner) = fty {
+            if let zz_checker::Type::Struct(inner, _) = fty {
                 cur = inner.clone();
             } else {
                 return None;
@@ -951,7 +951,7 @@ impl Lowerer {
                 full.push(f.clone());
                 if !last {
                     match sig.fields.iter().find(|(n, _)| n == f).map(|(_, t)| t) {
-                        Some(zz_checker::Type::Struct(inner)) => cur = inner.clone(),
+                        Some(zz_checker::Type::Struct(inner, _)) => cur = inner.clone(),
                         _ => return None,
                     }
                 }
@@ -965,7 +965,7 @@ impl Lowerer {
                     let (_, t) = s.fields.iter().find(|(n, _)| n == p)?;
                     full.push(p.clone());
                     match t {
-                        zz_checker::Type::Struct(inner) => cur = inner.clone(),
+                        zz_checker::Type::Struct(inner, _) => cur = inner.clone(),
                         _ => return None,
                     }
                 }
@@ -974,7 +974,7 @@ impl Lowerer {
                     let s = self.tp.structs.get(&cur)?;
                     let (_, t) = s.fields.iter().find(|(n, _)| n == f)?;
                     match t {
-                        zz_checker::Type::Struct(inner) => cur = inner.clone(),
+                        zz_checker::Type::Struct(inner, _) => cur = inner.clone(),
                         _ => return None,
                     }
                 }
@@ -994,11 +994,11 @@ impl Lowerer {
         obj_name: &str,
         obj_span: Option<zz_frontend::span::Span>,
     ) -> Option<String> {
-        if let Some(zz_checker::Type::Struct(s)) = names.checker_types.get(obj_name) {
+        if let Some(zz_checker::Type::Struct(s, _)) = names.checker_types.get(obj_name) {
             return Some(s.clone());
         }
         if let Some(span) = obj_span {
-            if let Some(zz_checker::Type::Struct(s)) = self.ty_at(names, span) {
+            if let Some(zz_checker::Type::Struct(s, _)) = self.ty_at(names, span) {
                 return Some(s.clone());
             }
         }
@@ -1079,7 +1079,9 @@ impl Lowerer {
                 .lookup_type(name)
                 .and_then(|ct| self.unmangled_struct_name(ct)),
             Expr::Path { .. } | Expr::Field { .. } => match self.ty_at(names, e.span()) {
-                Some(zz_checker::Type::Struct(s)) if self.is_unboxed_struct(s) => Some(s.clone()),
+                Some(zz_checker::Type::Struct(s, _)) if self.is_unboxed_struct(s) => {
+                    Some(s.clone())
+                }
                 _ => None,
             },
             _ => None,
@@ -1414,6 +1416,34 @@ pub(crate) fn is_dup_safe(e: &Expr) -> bool {
         | Expr::Path { .. } => true,
         Expr::Paren { expr, .. } => is_dup_safe(expr),
         _ => false,
+    }
+}
+
+/// Map a binary operator to its `zz_binop` runtime opcode (`ZZOP_*`
+/// in `runtime/core.h`). Shared by the expression Binary lowering and
+/// compound assignment on index/field targets, which always route
+/// through the boxed path.
+pub(crate) fn binop_runtime_op(op: &zz_frontend::ast::BinOp) -> &'static str {
+    use zz_frontend::ast::BinOp;
+    match op {
+        BinOp::Add => "ZZOP_ADD",
+        BinOp::Sub => "ZZOP_SUB",
+        BinOp::Mul => "ZZOP_MUL",
+        BinOp::Div => "ZZOP_DIV",
+        BinOp::Rem => "ZZOP_REM",
+        BinOp::Pow => "ZZOP_POW",
+        BinOp::Eq => "ZZOP_EQ",
+        BinOp::Ne => "ZZOP_NE",
+        BinOp::Lt => "ZZOP_LT",
+        BinOp::Gt => "ZZOP_GT",
+        BinOp::Le => "ZZOP_LE",
+        BinOp::Ge => "ZZOP_GE",
+        BinOp::BitAnd => "ZZOP_AND",
+        BinOp::BitOr => "ZZOP_OR",
+        BinOp::BitXor => "ZZOP_XOR",
+        BinOp::Shl => "ZZOP_SHL",
+        BinOp::Shr => "ZZOP_SHR",
+        _ => "ZZOP_ADD",
     }
 }
 

@@ -142,6 +142,10 @@ fn collect_stmt_defs(stmt: &Stmt, source: &str, defs: &mut HashMap<u32, Definiti
             collect_expr_defs(target, source, defs);
             collect_expr_defs(value, source, defs);
         }
+        Stmt::CompoundAssign { target, value, .. } => {
+            collect_expr_defs(target, source, defs);
+            collect_expr_defs(value, source, defs);
+        }
         Stmt::Defer { expr, .. } => {
             collect_expr_defs(expr, source, defs);
         }
@@ -363,6 +367,10 @@ fn walk_stmt<'a>(stmt: &'a Stmt, source: &str, offset: u32, result: &mut NodeAtO
             }
         }
         Stmt::Assign { target, value, .. } => {
+            walk_expr(target, source, offset, result);
+            walk_expr(value, source, offset, result);
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
             walk_expr(target, source, offset, result);
             walk_expr(value, source, offset, result);
         }
@@ -625,8 +633,13 @@ pub fn resolve_type_at(
     }
 
     // Check struct definitions.
-    if let Some(_sig) = check_result.structs.get(&name) {
-        return Some(Type::Struct(name));
+    if let Some(sig) = check_result.structs.get(&name) {
+        let args = sig
+            .generics
+            .iter()
+            .map(|g| Type::Named(g.clone()))
+            .collect();
+        return Some(Type::Struct(name, args));
     }
 
     // Check top-level bindings.
@@ -640,7 +653,8 @@ pub fn resolve_type_at(
     }) = node.expr
     {
         // Resolve the object type, then look up the field.
-        if let Some(Type::Struct(struct_name)) = resolve_type_of_expr(program, check_result, obj) {
+        if let Some(Type::Struct(struct_name, _)) = resolve_type_of_expr(program, check_result, obj)
+        {
             if let Some(sig) = check_result.structs.get(&struct_name) {
                 for (fname, fty) in &sig.fields {
                     if fname == field {
@@ -655,7 +669,7 @@ pub fn resolve_type_at(
         if parts.len() >= 2 {
             let obj_name = &parts[0];
             let field = parts.last().unwrap();
-            if let Some(Type::Struct(struct_name)) = check_result.bindings.get(obj_name) {
+            if let Some(Type::Struct(struct_name, _)) = check_result.bindings.get(obj_name) {
                 if let Some(sig) = check_result.structs.get(struct_name) {
                     for (fname, fty) in &sig.fields {
                         if fname == field {
@@ -683,8 +697,13 @@ pub fn resolve_type_of_expr(
             if let Some(sig) = check_result.funcs.get(name) {
                 return Some(func_sig_to_type(name, sig));
             }
-            if let Some(_sig) = check_result.structs.get(name) {
-                return Some(Type::Struct(name.clone()));
+            if let Some(sig) = check_result.structs.get(name) {
+                let args = sig
+                    .generics
+                    .iter()
+                    .map(|g| Type::Named(g.clone()))
+                    .collect();
+                return Some(Type::Struct(name.clone(), args));
             }
             check_result.bindings.get(name).cloned()
         }
@@ -693,14 +712,19 @@ pub fn resolve_type_of_expr(
             if let Some(sig) = check_result.funcs.get(&joined) {
                 return Some(func_sig_to_type(&joined, sig));
             }
-            if let Some(_sig) = check_result.structs.get(&joined) {
-                return Some(Type::Struct(joined));
+            if let Some(sig) = check_result.structs.get(&joined) {
+                let args = sig
+                    .generics
+                    .iter()
+                    .map(|g| Type::Named(g.clone()))
+                    .collect();
+                return Some(Type::Struct(joined, args));
             }
             check_result.bindings.get(&joined).cloned()
         }
         Expr::Field { obj, name, .. } => {
             let obj_type = resolve_type_of_expr(program, check_result, obj)?;
-            if let Type::Struct(struct_name) = obj_type {
+            if let Type::Struct(struct_name, _) = obj_type {
                 if let Some(sig) = check_result.structs.get(&struct_name) {
                     for (fname, fty) in &sig.fields {
                         if fname == name {
@@ -861,6 +885,10 @@ fn collect_name_refs_in_stmt(stmt: &Stmt, name: &str, refs: &mut Vec<Reference>)
             }
         }
         Stmt::Assign { target, value, .. } => {
+            collect_name_refs_in_expr(target, name, refs);
+            collect_name_refs_in_expr(value, name, refs);
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
             collect_name_refs_in_expr(target, name, refs);
             collect_name_refs_in_expr(value, name, refs);
         }
@@ -1110,6 +1138,12 @@ fn collect_hl_stmt(stmt: &Stmt, name: &str, source: &str, out: &mut Vec<Highligh
         }
         Stmt::Assign { target, value, .. } => {
             collect_hl_write(target, name, out);
+            collect_hl_expr(value, name, out);
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
+            // Compound assignment reads AND writes the target.
+            collect_hl_write(target, name, out);
+            collect_hl_expr(target, name, out);
             collect_hl_expr(value, name, out);
         }
         Stmt::Defer { expr, .. } => collect_hl_expr(expr, name, out),

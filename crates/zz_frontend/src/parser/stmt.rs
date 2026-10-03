@@ -1,7 +1,8 @@
 //! Statement parsing.
 
 use crate::ast::{
-    Block, Decorator, ExternFunc, Ident, ImportItem, Param, Pattern, Stmt, TraitBound, TypeParam,
+    BinOp, Block, Decorator, ExternFunc, Ident, ImportItem, Param, Pattern, Stmt, TraitBound,
+    TypeParam,
 };
 use crate::diag::error_at;
 use crate::span::Span;
@@ -119,6 +120,9 @@ impl Parser {
             TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {
                 self.parse_short_decl(false, false)
             }
+            // `a, b := expr` — bare tuple destructuring declaration
+            // (no parens). Same AST as `(a, b) := expr`.
+            TokenKind::Ident if self.at_bare_destructure() => self.parse_bare_destructure_decl(),
             // `const x = expr` / `const x: type = expr` — immutable binding.
             TokenKind::Const => self.parse_const_decl(false),
             // `(a, b) := expr` — tuple destructuring declaration.
@@ -217,6 +221,26 @@ impl Parser {
                     let span = expr.span().join(value.span());
                     return Stmt::Assign {
                         target: expr,
+                        value,
+                        span,
+                    };
+                }
+                // `expr OP= value` — compound assignment (`x += 1`).
+                // Same targets as `=` (validated by the checker); chaining
+                // (`x += y += z`) is rejected with a hint.
+                if let Some(op) = self.peek_compound_op() {
+                    self.advance();
+                    let value = self.parse_expr();
+                    if self.peek_compound_op().is_some() {
+                        self.error_here(
+                            "cannot chain compound assignment\n\
+                             hint: split into separate statements",
+                        );
+                    }
+                    let span = expr.span().join(value.span());
+                    return Stmt::CompoundAssign {
+                        target: expr,
+                        op,
                         value,
                         span,
                     };
@@ -389,6 +413,7 @@ impl Parser {
     pub(crate) fn parse_struct(&mut self, pub_: bool) -> Stmt {
         let struct_tok = self.advance();
         let name = self.parse_dotted_ident();
+        let generics = self.parse_struct_generics();
         if !self.eat(TokenKind::LBrace) {
             self.error_here("expected `{` to start struct body");
             // Recovery: skip to the closing brace so the field loop below
@@ -465,15 +490,54 @@ impl Parser {
         let span = struct_tok.span.join(end);
         Stmt::Struct {
             name,
+            generics,
             fields,
             span,
             pub_,
         }
     }
 
+    /// Parse `<T, U>` after a struct/impl name. Plain identifiers only:
+    /// storage and receivers need no trait bounds (`<T: Num>` is rejected
+    /// with a hint to bound at the function instead).
+    pub(crate) fn parse_struct_generics(&mut self) -> Vec<crate::ast::Ident> {
+        if !self.eat(TokenKind::Lt) {
+            return Vec::new();
+        }
+        let mut gs = Vec::new();
+        loop {
+            let name = self
+                .expect_ident()
+                .unwrap_or_else(|| dummy_ident(self.peek().span));
+            if self.eat(TokenKind::Colon) {
+                self.error_here(
+                    "struct type parameters do not take bounds\n\
+                     hint: bound the generic function instead (e.g. `func get<T: Num>(b: Box[T])`)",
+                );
+                // Skip the bound list so recovery lands on `,`/`>`.
+                while !self.at(TokenKind::Comma)
+                    && !self.at(TokenKind::Gt)
+                    && !self.at(TokenKind::Eof)
+                {
+                    self.advance();
+                }
+            }
+            gs.push(name);
+            if self.eat(TokenKind::Comma) {
+                continue;
+            }
+            break;
+        }
+        if !self.eat_gt_close() {
+            self.error_here("expected `>` to close generic parameters");
+        }
+        gs
+    }
+
     pub(crate) fn parse_impl(&mut self, pub_: bool) -> Stmt {
         let impl_tok = self.advance();
         let name = self.parse_dotted_ident();
+        let generics = self.parse_struct_generics();
         if !self.eat(TokenKind::LBrace) {
             self.error_here("expected `{` to start impl body");
             self.skip_to_rbrace();
@@ -524,6 +588,7 @@ impl Parser {
         let span = impl_tok.span.join(end);
         Stmt::Impl {
             name,
+            generics,
             methods,
             span,
             pub_,
@@ -687,6 +752,75 @@ impl Parser {
             pat: Pattern::Tuple {
                 pats,
                 span: lparen.span.join(rparen),
+            },
+            value,
+            span,
+        }
+    }
+
+    /// Map a compound-assignment token (`+=`, `<<=`, …) to its binary
+    /// operator, or `None` when the next token isn't one.
+    pub(crate) fn peek_compound_op(&self) -> Option<BinOp> {
+        match self.peek_kind() {
+            TokenKind::PlusEq => Some(BinOp::Add),
+            TokenKind::MinusEq => Some(BinOp::Sub),
+            TokenKind::StarEq => Some(BinOp::Mul),
+            TokenKind::SlashEq => Some(BinOp::Div),
+            TokenKind::PercentEq => Some(BinOp::Rem),
+            TokenKind::StarStarEq => Some(BinOp::Pow),
+            TokenKind::AmpEq => Some(BinOp::BitAnd),
+            TokenKind::PipeEq => Some(BinOp::BitOr),
+            TokenKind::CaretEq => Some(BinOp::BitXor),
+            TokenKind::ShlEq => Some(BinOp::Shl),
+            TokenKind::ShrEq => Some(BinOp::Shr),
+            _ => None,
+        }
+    }
+
+    /// True when the upcoming tokens form a bare destructuring head:
+    /// `Ident (, Ident)+ :=`. (`_` lexes as `Ident`, so wildcards are
+    /// included.) Anything else starting with `Ident` is a short decl,
+    /// call, or expression — never a bare destructure.
+    pub(crate) fn at_bare_destructure(&self) -> bool {
+        if self.peek_kind_at(0) != TokenKind::Ident {
+            return false;
+        }
+        let mut i = 1usize;
+        // Require at least one `, Ident` pair (a lone `x := ...` is a
+        // short declaration, handled elsewhere).
+        let mut pairs = 0u32;
+        while self.peek_kind_at(i) == TokenKind::Comma
+            && self.peek_kind_at(i + 1) == TokenKind::Ident
+        {
+            pairs += 1;
+            i += 2;
+        }
+        pairs > 0 && self.peek_kind_at(i) == TokenKind::ColonEq
+    }
+
+    /// Parse `a, b := expr` — bare tuple destructuring declaration.
+    /// Same AST as `(a, b) := expr`: elements parse as full patterns
+    /// (bindings and `_` wildcards), checked and evaluated by the
+    /// shared `Stmt::Destructure` paths on all engines.
+    pub(crate) fn parse_bare_destructure_decl(&mut self) -> Stmt {
+        let start = self.peek().span;
+        let mut pats = Vec::new();
+        loop {
+            pats.push(self.parse_pattern());
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        let pat_end = self.previous().span;
+        if !self.eat(TokenKind::ColonEq) {
+            self.error_here("expected `:=` after destructuring pattern");
+        }
+        let value = self.parse_expr();
+        let span = start.join(value.span());
+        Stmt::Destructure {
+            pat: Pattern::Tuple {
+                pats,
+                span: start.join(pat_end),
             },
             value,
             span,
@@ -1027,6 +1161,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
         }
         Stmt::Struct {
             name,
+            generics,
             fields,
             span: mut sp,
             pub_,
@@ -1034,6 +1169,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
             span(&mut sp);
             Stmt::Struct {
                 name,
+                generics,
                 fields,
                 span: sp,
                 pub_,
@@ -1041,6 +1177,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
         }
         Stmt::Impl {
             name,
+            generics,
             methods,
             span: mut sp,
             pub_,
@@ -1048,6 +1185,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
             span(&mut sp);
             Stmt::Impl {
                 name,
+                generics,
                 methods,
                 span: sp,
                 pub_,
