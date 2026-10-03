@@ -110,6 +110,37 @@ fn parses_call() {
 }
 
 #[test]
+fn parses_call_trailing_comma() {
+    for src in ["add(1, 2,)", "add(\n    1,\n    2,\n)"] {
+        let p = parse_ok(src);
+        match &p.stmts[0] {
+            zz_frontend::ast::Stmt::Expr(E::Call { args, .. }) => assert_eq!(args.len(), 2),
+            other => panic!("unexpected for `{src}`: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn parses_call_trailing_comma_named_args() {
+    let p = parse_ok("greet(\"bo\", greeting: \"hey\",)");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Call { args, named, .. }) => {
+            assert_eq!(args.len(), 1);
+            assert_eq!(named.len(), 1);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn call_semicolon_still_rejected() {
+    // An explicit `;` is a real StmtEnd even inside parens: `f(a, ;)`
+    // must stay an error, unlike a bare trailing comma.
+    let parsed = zz_frontend::parse("f(a, ;)");
+    assert!(!parsed.errors.is_empty(), "expected parse errors");
+}
+
+#[test]
 fn parses_closure() {
     let p = parse_ok("|x: int, y| x + y");
     match &p.stmts[0] {
@@ -118,6 +149,24 @@ fn parses_closure() {
             assert!(params[0].ty.is_some());
             assert!(params[1].ty.is_none());
         }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_closure_trailing_comma() {
+    let p = parse_ok("|x: int, y,| x + y");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Closure { params, .. }) => assert_eq!(params.len(), 2),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_func_params_trailing_comma() {
+    let p = parse_ok("func add(a: int, b: int,) -> int { a + b }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { params, .. } => assert_eq!(params.len(), 2),
         other => panic!("unexpected: {other:?}"),
     }
 }

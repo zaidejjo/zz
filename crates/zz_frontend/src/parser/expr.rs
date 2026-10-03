@@ -515,6 +515,13 @@ impl Parser {
                 args.push(self.parse_expr());
             }
             if self.eat(TokenKind::Comma) {
+                // Trailing comma: `f(a, b,)` ends the list here, matching
+                // array/tuple/dict literals. Newlines inside parens are
+                // lexer trivia, so multi-line trailing commas just work.
+                // (No StmtEnd skipping: an explicit `;` must still error.)
+                if self.at(TokenKind::RParen) {
+                    break;
+                }
                 continue;
             }
             break;
@@ -970,6 +977,10 @@ impl Parser {
                 });
 
                 if self.eat(TokenKind::Comma) {
+                    // Trailing comma: `|x, y,| body` ends the list here.
+                    if self.at(TokenKind::Pipe) {
+                        break;
+                    }
                     continue;
                 }
                 break;
