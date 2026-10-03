@@ -522,14 +522,23 @@ impl Lowerer {
                 match op {
                     zz_frontend::ast::BinOp::And => {
                         // `zz_truthy` takes `zz_value`: box raw-scalar
-                        // operands (e.g. `bool` locals lower to C `bool`).
+                        // operands (e.g. `bool` locals lower to C `bool`)
+                        // and raw unboxed structs (e.g. `p && q`).
+                        let raw_l = l.clone();
+                        let raw_r = r.clone();
                         let l = box_scalar_operand(left, names, &l);
+                        let l = self.box_struct_operand(left, l, &raw_l, names, out);
                         let r = box_scalar_operand(right, names, &r);
+                        let r = self.box_struct_operand(right, r, &raw_r, names, out);
                         format!("zz_bool(zz_truthy({l}) && zz_truthy({r}))")
                     }
                     zz_frontend::ast::BinOp::Or => {
+                        let raw_l = l.clone();
+                        let raw_r = r.clone();
                         let l = box_scalar_operand(left, names, &l);
+                        let l = self.box_struct_operand(left, l, &raw_l, names, out);
                         let r = box_scalar_operand(right, names, &r);
+                        let r = self.box_struct_operand(right, r, &raw_r, names, out);
                         format!("zz_bool(zz_truthy({l}) || zz_truthy({r}))")
                     }
                     zz_frontend::ast::BinOp::Elvis => {
@@ -537,8 +546,12 @@ impl Lowerer {
                         // double-evaluation (which would call side-effecting natives
                         // like `input()` twice). Box: the temp is `zz_value`
                         // but a raw-scalar operand lowers to its C type.
+                        let raw_l = l.clone();
+                        let raw_r = r.clone();
                         let l = box_scalar_operand(left, names, &l);
+                        let l = self.box_struct_operand(left, l, &raw_l, names, out);
                         let r = box_scalar_operand(right, names, &r);
+                        let r = self.box_struct_operand(right, r, &raw_r, names, out);
                         let tmp = names.fresh("elvis");
                         out.push_str(&format!("    zz_value {tmp} = {l};\n"));
                         format!("zz_elvis({tmp}, {r})")
@@ -638,26 +651,41 @@ impl Lowerer {
                             {
                                 // Mixed: one scalar, one boxed. Box both
                                 // sides and dispatch through zz_binop.
+                                // Struct operands (never scalar-typed) box
+                                // from raw structs to runtime objects here.
                                 let boxed_l = box_scalar_operand(left, names, &l);
+                                let boxed_l =
+                                    self.box_struct_operand(left, boxed_l, &l, names, out);
                                 let boxed_r = box_scalar_operand(right, names, &r);
+                                let boxed_r =
+                                    self.box_struct_operand(right, boxed_r, &r, names, out);
                                 format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                             } else {
                                 // Neither operand has a known scalar type in
                                 // NameCtx, but struct field accesses like
                                 // `(v0).width` are raw C scalars that need
                                 // boxing for `zz_binop`. Use `box_scalar_operand`
-                                // which recognizes the cast pattern.
+                                // which recognizes the cast pattern. Raw
+                                // unboxed structs box to objects here.
                                 let boxed_l = box_scalar_operand(left, names, &l);
+                                let boxed_l =
+                                    self.box_struct_operand(left, boxed_l, &l, names, out);
                                 let boxed_r = box_scalar_operand(right, names, &r);
+                                let boxed_r =
+                                    self.box_struct_operand(right, boxed_r, &r, names, out);
                                 format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                             }
                         } else {
                             // Comparisons / pow / etc: use the boxed path
                             // (result must be zz_value). Also handles
                             // struct field accesses that emit as raw C
-                            // scalars.
+                            // scalars, plus raw unboxed structs (e.g.
+                            // `Pt{...} == p`, `p == q`) which box to
+                            // runtime objects for `zz_binop`.
                             let boxed_l = box_scalar_operand(left, names, &l);
+                            let boxed_l = self.box_struct_operand(left, boxed_l, &l, names, out);
                             let boxed_r = box_scalar_operand(right, names, &r);
+                            let boxed_r = self.box_struct_operand(right, boxed_r, &r, names, out);
                             format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                         }
                     }
@@ -3245,6 +3273,98 @@ impl Lowerer {
                 box_scalar_operand(fexpr, names, &fval)
             }
             _ => fval,
+        }
+    }
+
+    /// Un-mangled struct name when `e` lowers to a raw (unboxed) C struct
+    /// value: struct literals of unboxed type plus Ident/Path/Field shapes
+    /// rooted at raw values (see `unboxed_struct_of_expr`). Calls, indexes,
+    /// arrays, blocks, etc. lower boxed and yield `None`.
+    fn struct_box_name(&self, e: &Expr, names: &NameCtx) -> Option<String> {
+        if let Expr::StructInit { name, .. } = e {
+            if self.is_unboxed_struct(name) {
+                return Some(name.clone());
+            }
+            return None;
+        }
+        self.unboxed_struct_of_expr(e, names)
+    }
+
+    /// Box an already-emitted raw struct expression (`(v0)`, `(lit)`, …)
+    /// into a runtime `ZZ_OBJECT` so `zz_binop`/`zz_truthy` receive a
+    /// `zz_value`. Raw producers (locals, literals, field reads) are pure,
+    /// so reusing the emitted text per field is side-effect free. The
+    /// emitted operand itself is left untouched (no re-emission).
+    fn box_raw_struct(
+        &self,
+        sname: &str,
+        raw: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        let sig_fields: Vec<(String, zz_checker::Type)> = self
+            .tp
+            .structs
+            .get(sname)
+            .map(|s| s.fields.clone())
+            .unwrap_or_default();
+        if sig_fields.is_empty() {
+            return "zz_unit()".to_string();
+        }
+        let n = sig_fields.len();
+        let obj_tmp = names.fresh("__eqobj");
+        let names_arr_tmp = names.fresh("__eqfields");
+        out.push_str(&format!("    zz_value {names_arr_tmp}[{n}];\n"));
+        for (i, (fname, _)) in sig_fields.iter().enumerate() {
+            out.push_str(&format!(
+                "    {names_arr_tmp}[{i}] = zz_str_static(\"{fname}\");\n",
+            ));
+        }
+        out.push_str(&format!(
+            "    zz_value {obj_tmp} = zz_object_new(\"{sname}\", {names_arr_tmp}, {n});\n",
+        ));
+        for (fname, fty) in &sig_fields {
+            // Follow embedded promotion when the field lives in a base
+            // struct (`u.id` → `(u).Base.id`).
+            let chain = self
+                .resolve_access_chain(sname, std::slice::from_ref(fname))
+                .map(|(c, _)| c)
+                .unwrap_or_else(|| vec![fname.clone()]);
+            let mut acc = format!("({raw})");
+            for p in &chain {
+                acc = format!("({acc}).{p}");
+            }
+            let boxed = match fty {
+                zz_checker::Type::Int => format!("zz_int({acc})"),
+                zz_checker::Type::Float => format!("zz_float({acc})"),
+                zz_checker::Type::Bool => format!("zz_bool({acc})"),
+                zz_checker::Type::Struct(inner, _) if self.is_unboxed_struct(inner) => {
+                    self.box_raw_struct(inner, &acc, names, out)
+                }
+                _ => format!("zz_clone({acc})"),
+            };
+            out.push_str(&format!(
+                "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed});\n",
+            ));
+        }
+        obj_tmp
+    }
+
+    /// Box a binary operand that lowers to a raw unboxed struct into a
+    /// runtime object; pass through everything else unchanged. `emitted`
+    /// is the already scalar-boxed operand text (identity for structs).
+    fn box_struct_operand(
+        &self,
+        e: &Expr,
+        emitted: String,
+        raw: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        if let Some(sname) = self.struct_box_name(e, names) {
+            self.box_raw_struct(&sname, raw, names, out)
+        } else {
+            emitted
         }
     }
 
