@@ -61,6 +61,127 @@ static double dpow(double a, double b) {
     return neg ? 1.0 / r : r;
 }
 
+// Deep value equality for `==`/`!=` (mirrors the VM's `Value::PartialEq`):
+// structs compare by type name + fields, dicts by key/value pairs,
+// arrays (and tuples) element-wise, strings by bytes, numerics with
+// int/float mixing. Mismatched types compare as unequal.
+static int zz_str_bytes_eq(const zz_str *a, const zz_str *b) {
+    if (a == b)
+        return 1;
+    if (!a || !b)
+        return 0;
+    if (a->len != b->len)
+        return 0;
+    if (a->len == 0)
+        return 1;
+    return memcmp(zz_str_cptr(a), zz_str_cptr(b), a->len) == 0;
+}
+
+static int zz_values_equal(zz_value a, zz_value b) {
+    if (a.tag == ZZ_INT && b.tag == ZZ_INT)
+        return a.i == b.i;
+    if ((a.tag == ZZ_INT || a.tag == ZZ_FLOAT) &&
+        (b.tag == ZZ_INT || b.tag == ZZ_FLOAT)) {
+        double x = a.tag == ZZ_FLOAT ? a.f : (double)a.i;
+        double y = b.tag == ZZ_FLOAT ? b.f : (double)b.i;
+        return x == y;
+    }
+    if (a.tag != b.tag)
+        return 0;
+    switch (a.tag) {
+    case ZZ_UNIT:
+        return 1;
+    case ZZ_BOOL:
+        return a.b == b.b;
+    case ZZ_STR:
+        return zz_str_bytes_eq(a.s, b.s);
+    case ZZ_BYTES: {
+        if (!a.bytes || !b.bytes)
+            return a.bytes == b.bytes;
+        if (a.bytes->len != b.bytes->len)
+            return 0;
+        if (a.bytes->len == 0)
+            return 1;
+        return memcmp(a.bytes->buf->data + a.bytes->off,
+                      b.bytes->buf->data + b.bytes->off, a.bytes->len) == 0;
+    }
+    case ZZ_ARRAY:
+    case ZZ_TUPLE: {
+        zz_array *aa = a.arr, *bb = b.arr;
+        if (!aa || !bb)
+            return aa == bb;
+        if (aa->len != bb->len)
+            return 0;
+        for (size_t i = 0; i < aa->len; i++) {
+            if (!zz_values_equal(aa->items[i], bb->items[i]))
+                return 0;
+        }
+        return 1;
+    }
+    case ZZ_DICT: {
+        zz_dict *da = a.dict, *db = b.dict;
+        if (!da || !db)
+            return da == db;
+        if (da->len != db->len)
+            return 0;
+        for (size_t i = 0; i < da->len; i++) {
+            zz_dict_entry *e = &da->entries[i];
+            int found = 0;
+            for (size_t j = 0; j < db->len; j++) {
+                zz_dict_entry *f = &db->entries[j];
+                if (zz_str_bytes_eq(e->key, f->key)) {
+                    if (!zz_values_equal(e->val, f->val))
+                        return 0;
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found)
+                return 0;
+        }
+        return 1;
+    }
+    case ZZ_OBJECT: {
+        zz_object *oa = a.obj, *ob = b.obj;
+        if (!oa || !ob)
+            return oa == ob;
+        if (oa->len != ob->len)
+            return 0;
+        if (oa->type_name || ob->type_name) {
+            if (!oa->type_name || !ob->type_name)
+                return 0;
+            if (strcmp(oa->type_name, ob->type_name) != 0)
+                return 0;
+        }
+        for (size_t i = 0; i < oa->len; i++) {
+            zz_value an = oa->fields[i * 2], bn = ob->fields[i * 2];
+            zz_value av = oa->fields[i * 2 + 1], bv = ob->fields[i * 2 + 1];
+            if (an.tag != ZZ_STR || bn.tag != ZZ_STR)
+                return 0;
+            if (!zz_str_bytes_eq(an.s, bn.s))
+                return 0;
+            if (!zz_values_equal(av, bv))
+                return 0;
+        }
+        return 1;
+    }
+    case ZZ_OPTION_NONE:
+        return 1;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON: {
+        if (!a.payload || !b.payload)
+            return a.payload == b.payload;
+        return zz_values_equal(*a.payload, *b.payload);
+    }
+    case ZZ_RANGE:
+        return a.i == b.i;
+    default:
+        return 0;
+    }
+}
+
 zz_value zz_binop(int op, zz_value a, zz_value b) {
     // int fast path
     if (a.tag == ZZ_INT && b.tag == ZZ_INT) {
@@ -211,6 +332,13 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
         if (op == ZZOP_EQ || op == ZZOP_NE) {
             return zz_binop(op, *a.payload, *b.payload);
         }
+    }
+    // Deep equality for objects/dicts/arrays/options (e.g. struct `==`):
+    // the VM compares every value via `PartialEq`; the paths above only
+    // covered scalars. Mismatched types compare as unequal.
+    if (op == ZZOP_EQ || op == ZZOP_NE) {
+        int eq = zz_values_equal(a, b);
+        return zz_bool(op == ZZOP_EQ ? eq : !eq);
     }
     return zz_unit();
 }
@@ -3388,9 +3516,12 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         zz_value row = zz_dict_new();
         for (int i = 0; i < ncol; i++) {
-            /* Use the real SQL column name so ZZ struct field access
-               (e.g. users[0].id) works in AOT mode.  Fall back to
-               the positional "cN" form if the name is unavailable. */
+            /* Real SQL column name so ZZ struct field access
+               (e.g. users[0].id) works in AOT mode, PLUS the
+               positional "cN" alias so unannotated `row{c0..}`
+               reads (the VM fallback shape) work too. Both keys
+               point at the same value; a column literally named
+               e.g. "c0" simply overwrites with an identical value. */
             const char *cname = sqlite3_column_name(st, i);
             char fallback[32];
             if (!cname || !cname[0]) {
@@ -3418,7 +3549,21 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
             }
             int derr = 0;
             zz_value k = zz_str_owned(copy_cstr(cname, strlen(cname)));
+            /* Clone for the positional alias below: `zz_index_set`
+               adopts the value (move convention), so the second
+               insert needs its own reference. */
+            zz_value alias_val = zz_clone(val);
             zz_index_set(row, k, val, &derr);
+            char poskey[32];
+            snprintf(poskey, sizeof poskey, "c%d", i);
+            if (strcmp(poskey, cname) != 0) {
+                zz_value ka = zz_str_owned(copy_cstr(poskey, strlen(poskey)));
+                int aerr2 = 0;
+                zz_index_set(row, ka, alias_val, &aerr2);
+                (void)aerr2;
+            } else {
+                zz_release(&alias_val);
+            }
             (void)derr;
         }
         int aerr = 0;

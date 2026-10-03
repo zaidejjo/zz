@@ -200,8 +200,17 @@ fn rows_to_cvalue(cols: &[crate::pg_wire::ColDesc], raw: Vec<Vec<Option<Vec<u8>>
         };
         for row in raw {
             let dict = zz_dict_new();
-            for (cell, col) in row.into_iter().zip(cols.iter()) {
+            for (i, (cell, col)) in row.into_iter().zip(cols.iter()).enumerate() {
+                // Positional `cN` alias alongside the real column name so
+                // unannotated `row{c0..}` reads match the VM/SQLite shape.
+                // Two independent values (no shared heap alias): the dict
+                // adopts each insert.
+                let alias_cell = cell.clone();
                 dict_insert(dict, &col.name, pg_cell_to_cvalue(cell, col.type_oid));
+                let pos = format!("c{i}");
+                if pos != col.name {
+                    dict_insert(dict, &pos, pg_cell_to_cvalue(alias_cell, col.type_oid));
+                }
             }
             crate::cabi::zz_array_push(arr_ptr, dict);
         }
