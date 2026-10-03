@@ -68,26 +68,78 @@ zz_value zz_binop_cat_str(zz_value a, zz_value b);   // str + Display(b)
 // Returns void; *a is mutated. Generated for hot `s = s + literal` loops.
 void zz_str_append_str(zz_value *a, zz_value b);
 
-// Index a string by byte offset: `s[i]` → 1-char string, negative counts
-// from the end. Out of bounds (or non-int index) → unit + *err, mirroring
-// zz_bytes_get. Byte-based like zz_slice_value ("ASCII-compatible");
-// the VM counts Unicode chars instead — established engine difference
-// for non-ASCII, same as slicing.
+// ---- UTF-8 character helpers -------------------------------------------
+// `str` is UTF-8; `len` / `str.length` / indexing / slicing all count
+// Unicode scalar values (chars), matching the VM (`s.chars().count()`).
+// Byte length stays in `s->len` for storage/concat/compare/print/hash.
+//
+// Invalid bytes (lone continuation, truncated sequence, bad continuation)
+// count as one single-byte char each: never crash, never loop forever,
+// always terminate. Pure ASCII is unaffected (bytes == chars).
+static inline size_t zz_utf8_seq_len(const unsigned char *p, size_t remain) {
+    unsigned char c = p[0];
+    size_t want;
+    if (c < 0x80) return 1;
+    if ((c & 0xE0) == 0xC0) want = 2;
+    else if ((c & 0xF0) == 0xE0) want = 3;
+    else if ((c & 0xF8) == 0xF0) want = 4;
+    else return 1; // lone continuation or 0xF8+ : one byte char
+    if (want > remain) return 1; // truncated: one byte char
+    for (size_t k = 1; k < want; k++) {
+        if ((p[k] & 0xC0) != 0x80) return 1; // bad continuation: resync
+    }
+    return want;
+}
+
+// Number of Unicode scalar values in `s` (chars, not bytes).
+static inline size_t zz_str_char_len(const zz_str *s) {
+    if (!s) return 0;
+    const unsigned char *p = (const unsigned char *)zz_str_cptr(s);
+    size_t n = s->len, i = 0, count = 0;
+    while (i < n) {
+        i += zz_utf8_seq_len(p + i, n - i);
+        count++;
+    }
+    return count;
+}
+
+// Byte offset of the `char_idx`-th char (0-based) plus its byte length in
+// `*out_clen`. Returns `(size_t)-1` when out of range. Caller normalizes
+// negatives against `zz_str_char_len` first.
+static inline size_t zz_str_char_byte_off(const zz_str *s, size_t char_idx, size_t *out_clen) {
+    const unsigned char *p = (const unsigned char *)zz_str_cptr(s);
+    size_t n = s->len, i = 0;
+    for (size_t c = 0; i < n; c++) {
+        size_t l = zz_utf8_seq_len(p + i, n - i);
+        if (c == char_idx) {
+            if (out_clen) *out_clen = l;
+            return i;
+        }
+        i += l;
+    }
+    return (size_t)-1;
+}
+
+// Index a string by char: `s[i]` → 1-char string, negative counts
+// from the end (in chars). Out of bounds (or non-int index) → unit + *err,
+// mirroring zz_bytes_get. Char-based like the VM; slicing below agrees.
 static inline zz_value zz_str_get(const zz_str *s, zz_value idx, int *err) {
     *err = 0;
     if (idx.tag != ZZ_INT || !s) {
         *err = 1;
         return zz_unit();
     }
+    int64_t n = (int64_t)zz_str_char_len(s);
     int64_t i = idx.i;
-    int64_t n = (int64_t)s->len;
     if (i < 0)
         i += n;
     if (i < 0 || i >= n) {
         *err = 1;
         return zz_unit();
     }
-    return zz_str_new(zz_str_cptr(s) + (size_t)i, 1);
+    size_t clen = 1;
+    size_t off = zz_str_char_byte_off(s, (size_t)i, &clen);
+    return zz_str_new(zz_str_cptr(s) + off, clen);
 }
 void zz_str_append_lit(zz_value *a, const char *lit, size_t len);
 

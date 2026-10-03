@@ -1271,11 +1271,13 @@ void zz_str_append_lit(zz_value *a, const char *lit, size_t lit_len) {
     }
     a->s = fresh;
 }
-// str.length(s) — string length in bytes.
+// str.length(s) — string length in chars (Unicode scalar values),
+// matching the VM (`s.chars().count()`). Byte length stays in `s->len`
+// for storage; only this user-visible measure counts chars.
 zz_value zz_str_length(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return (zz_value){ZZ_INT, {.i = 0}};
-    return (zz_value){ZZ_INT, {.i = (int64_t)s.s->len}};
+    return (zz_value){ZZ_INT, {.i = (int64_t)zz_str_char_len(s.s)}};
 }
 
 // str.lower(s) — lowercase copy.
@@ -1467,11 +1469,24 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
     if (sep.tag == ZZ_STR) { sd = zz_str_ptr(sep.s); slen = sep.s->len; }
     zz_value arr = zz_array_new();
     if (slen == 0) {
-        // Split into individual characters.
-        for (size_t i = 0; i < len; i++) {
-            zz_value item = zz_str_new(d + i, 1);
+        // Empty separator: leading "" + one item per char (Unicode scalar
+        // values, like the VM) + trailing "" — matches Rust `split("")`
+        // exactly (`"ab"` → `["", "a", "b", ""]`, `""` → `["", ""]`).
+        {
+            int sub_err = 0;
+            zz_vec_append(arr, zz_str_static(""), &sub_err);
+        }
+        size_t i = 0;
+        while (i < len) {
+            size_t l = zz_utf8_seq_len((const unsigned char *)(d + i), len - i);
+            zz_value item = zz_str_new(d + i, l);
             int sub_err = 0;
             zz_vec_append(arr, item, &sub_err);
+            i += l;
+        }
+        {
+            int sub_err = 0;
+            zz_vec_append(arr, zz_str_static(""), &sub_err);
         }
         return arr;
     }

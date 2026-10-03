@@ -3,14 +3,130 @@
 // extraction helpers, and higher-order iterators.
 #include "runtime.h"
 
-// ---- arrays ------------------------------------------------------------
-// Ownership-sharing store of a value into a container slot: arena-owned
-// strings are healed to heap copies (else the loop-arena reset corrupts
-// the stored element); every other value is shared via zz_clone.
-static zz_value zz_clone_for_store(zz_value v) {
-    if (v.tag == ZZ_STR && v.s && !v.s->interned && v.s->refs == 0) {
-        return zz_str_heal_arena(v);
+// ---- arena healing -------------------------------------------------------
+// Retaining stores (array/dict/object slots, `zz_assign`) must never alias
+// arena-owned values: the per-iteration `zz_arena_reset` reuses the buffer,
+// so a stored alias reads back garbage on the next iteration — the nested
+// `[[str]]` first-element corruption + SIGSEGV class (loop-built inner
+// arrays stored into an outer array, then the arena reset overwrote them).
+// Strings already heal via `zz_str_heal_arena`; arrays and dicts need the
+// same treatment (deep: nested arena values copied recursively, heap
+// elements shared via `zz_clone`).
+//
+// Two flavors, mirroring the string path:
+//   - `zz_clone_for_store` (share convention, callers pass borrowed):
+//     arena → fresh heap copy, heap → `zz_clone` (bump).
+//   - `zz_heal_for_move` (move convention, callers transfer ownership —
+//     `zz_array_push`, `zz_assign`): arena → fresh heap copy, heap →
+//     unchanged (adopted, no bump).
+//
+// Depth-capped at 32 (like ZZ_EMBED_MAX_DEPTH / ZZ_PRINT_MAX_DEPTH):
+// pathological nesting falls back to sharing. Arena-fresh values cannot
+// be cyclic without an escaping store (which heals), so the cap is a
+// backstop, never a behavior.
+#define ZZ_HEAL_MAX_DEPTH 32
+
+int zz_array_is_arena(const zz_array *a) {
+    if (!a) return 0;
+    return a->refs == 0 || a->refs == ZZ_ARRAY_STACK_MAGIC ||
+           a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_ARENA_MAGIC;
+}
+
+int zz_dict_is_arena(const zz_dict *d) {
+    if (!d) return 0;
+    return d->refs == 0 || d->refs == ZZ_DICT_ARENA_MAGIC;
+}
+
+// True when storing `v` must copy instead of share: top-level arena
+// ownership, or a variant/tuple wrapper around a value that does.
+// Heap-rooted arrays/dicts are guaranteed clean (every ingress path
+// heals), so no deep element walk is needed — O(1) for containers,
+// O(wrapper depth) otherwise.
+static int value_needs_heal(zz_value v, int depth) {
+    if (depth > ZZ_HEAL_MAX_DEPTH) return 0;
+    switch (v.tag) {
+    case ZZ_STR:
+        return v.s && !v.s->interned && v.s->refs == 0;
+    case ZZ_ARRAY:
+        return v.arr && zz_array_is_arena(v.arr);
+    case ZZ_DICT:
+        return v.dict && zz_dict_is_arena(v.dict);
+    case ZZ_TUPLE:
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON:
+        return v.payload && value_needs_heal(*v.payload, depth + 1);
+    default:
+        return 0;
     }
+}
+
+static zz_value heal_deep_copy(zz_value v, int depth) {
+    if (depth > ZZ_HEAL_MAX_DEPTH) return zz_clone(v);
+    switch (v.tag) {
+    case ZZ_STR:
+        if (v.s && !v.s->interned && v.s->refs == 0) return zz_str_heal_arena(v);
+        return zz_clone(v);
+    case ZZ_ARRAY: {
+        if (!v.arr || !zz_array_is_arena(v.arr)) return zz_clone(v);
+        zz_value out = zz_array_new();
+        for (size_t i = 0; i < v.arr->len; i++) {
+            // Elements arrive owned (fresh copy or bumped clone) and
+            // `zz_array_push` adopts (move convention) — exactly one
+            // share lands in the slot. Push also re-heals, which is a
+            // no-op here (outputs are heap-owned), doubling only a few
+            // tag branches, never correctness.
+            zz_array_push(out.arr, heal_deep_copy(v.arr->items[i], depth + 1));
+        }
+        return out;
+    }
+    case ZZ_DICT: {
+        if (!v.dict || !zz_dict_is_arena(v.dict)) return zz_clone(v);
+        zz_value out = zz_dict_new();
+        for (size_t i = 0; i < v.dict->len; i++) {
+            zz_value k = heal_deep_copy((zz_value){ZZ_STR, {.s = v.dict->entries[i].key}}, depth + 1);
+            zz_value val = heal_deep_copy(v.dict->entries[i].val, depth + 1);
+            // `zz_dict_set` adopts the value as-is (move convention) but
+            // shares the key (`refs++`), so drop our key temp only: the
+            // dict keeps exactly one share of each.
+            zz_dict_set(out.dict, k, val);
+            zz_release(&k);
+        }
+        return out;
+    }
+    case ZZ_TUPLE:
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON: {
+        if (!v.payload) return v;
+        // Clean payloads stay shared (no rebuild churn); only
+        // arena-containing payloads get a fresh wrapper + healed inner.
+        if (!value_needs_heal(*v.payload, depth + 1)) return zz_clone(v);
+        zz_value *slot = (zz_value *)malloc(sizeof(zz_value));
+        if (!slot) return zz_clone(v);
+        *slot = heal_deep_copy(*v.payload, depth + 1);
+        zz_value out = v;
+        out.payload = slot;
+        return out;
+    }
+    default:
+        return zz_clone(v);
+    }
+}
+
+zz_value zz_heal_for_move(zz_value v) {
+    if (value_needs_heal(v, 0)) return heal_deep_copy(v, 0);
+    return v;
+}
+
+// Ownership-sharing store of a value into a container slot: arena-owned
+// values (strings, arrays, dicts, wrappers around them) are healed to
+// independent heap copies (else the loop-arena reset corrupts the stored
+// element); every other value is shared via zz_clone.
+static zz_value zz_clone_for_store(zz_value v) {
+    if (value_needs_heal(v, 0)) return heal_deep_copy(v, 0);
     return zz_clone(v);
 }
 zz_value zz_array_new(void) {
@@ -114,8 +230,12 @@ void zz_array_push_lit(zz_array *a, zz_value item) {
 void zz_array_push(zz_array *a, zz_value item) {
     if (a->len == a->cap) {
         size_t nc = a->cap == 0 ? 4 : a->cap * 2;
-        // Stack/lit/arena arrays need migration to malloc before realloc.
-        if (a->refs == ZZ_ARRAY_STACK_MAGIC || a->refs == ZZ_ARRAY_LIT_MAGIC || a->items == NULL) {
+        // Stack/lit/arena arrays need migration to malloc before realloc
+        // (realloc on arena/stack memory corrupts the heap — SIGSEGV
+        // class; ARENA_MAGIC was missing here while zz_vec_append
+        // handled it).
+        if (a->refs == ZZ_ARRAY_STACK_MAGIC || a->refs == ZZ_ARRAY_LIT_MAGIC
+            || a->refs == ZZ_ARRAY_ARENA_MAGIC || a->items == NULL) {
             zz_value *new_items = (zz_value *)malloc(nc * sizeof(zz_value));
             for (size_t i = 0; i < a->len; i++) new_items[i] = a->items[i];
             a->items = new_items;
@@ -128,9 +248,10 @@ void zz_array_push(zz_array *a, zz_value item) {
         }
         a->cap = nc;
     }
-    // Move convention (callers transfer ownership): heal arena strings to
-    // heap so the stored element survives the loop-arena reset.
-    a->items[a->len++] = zz_str_heal_arena(item);
+    // Move convention (callers transfer ownership): arena-owned values
+    // heal to heap copies so the stored element survives the loop-arena
+    // reset; heap values are adopted as-is.
+    a->items[a->len++] = zz_heal_for_move(item);
 }
 
 size_t zz_array_len(const zz_array *a) {
@@ -354,8 +475,8 @@ zz_value zz_dict_new_sized(size_t hint) {
 // (zz_index_get lives inline in collections.h; only the setter, which is
 // never loop-hot, stays out-of-line here.)
 
-// Slice a value by byte indices (array elements or ASCII-compatible strings).
-// Missing bounds (unit) mean "from 0" / "to end". Matches the VM for ASCII.
+// Slice a value by char/element indices (arrays count elements, strings
+// count chars like the VM). Missing bounds (unit) mean "from 0" / "to end".
 zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err) {
     int64_t n;
     switch (obj.tag) {
@@ -377,20 +498,34 @@ zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err) {
         int64_t e = end.tag == ZZ_INT ? end.i : n;
         return zz_bytes_slice(obj.bytes, s, e);
     }
-    case ZZ_STR:
-        n = (int64_t)obj.s->len;
-        {
-            int64_t si = 0, ei = n;
-            if (start.tag == ZZ_INT) si = start.i;
-            if (end.tag == ZZ_INT) ei = end.i;
-            if (si < 0) si += n;
-            if (ei < 0) ei += n;
-            if (si < 0) si = 0;
-            if (ei > n) ei = n;
-            if (si > ei) si = ei;
-            zz_value out = zz_str_new(zz_str_cptr(obj.s) + si, (size_t)(ei - si));
-            return out;
+    case ZZ_STR: {
+        int64_t nchars = (int64_t)zz_str_char_len(obj.s);
+        int64_t si = 0, ei = nchars;
+        if (start.tag == ZZ_INT) si = start.i;
+        if (end.tag == ZZ_INT) ei = end.i;
+        if (si < 0) si += nchars;
+        if (ei < 0) ei += nchars;
+        if (si < 0) si = 0;
+        if (ei > nchars) ei = nchars;
+        if (si > ei) si = ei;
+        size_t byte_lo, byte_hi;
+        if (si >= nchars) {
+            byte_lo = obj.s->len;
+        } else {
+            size_t cl = 1;
+            byte_lo = zz_str_char_byte_off(obj.s, (size_t)si, &cl);
         }
+        if (ei >= nchars) {
+            byte_hi = obj.s->len;
+        } else if (ei <= si) {
+            byte_hi = byte_lo;
+        } else {
+            size_t cl = 1;
+            byte_hi = zz_str_char_byte_off(obj.s, (size_t)ei, &cl);
+        }
+        zz_value out = zz_str_new(zz_str_cptr(obj.s) + byte_lo, byte_hi - byte_lo);
+        return out;
+    }
     default:
         if (err) *err = 1;
         return zz_unit();
@@ -445,8 +580,11 @@ void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
         e->key = key.s;
         key.s->refs++;
     }
-    // Move convention: heal arena strings to heap.
-    e->val = zz_str_heal_arena(val);
+    // Move convention (callers transfer ownership): arena-owned values
+    // heal to heap copies so the stored element survives the loop-arena
+    // reset; heap values are adopted as-is (no bump — same as the old
+    // `zz_str_heal_arena` passthrough, extended to containers).
+    e->val = zz_heal_for_move(val);
 }
 
 size_t zz_dict_len(const zz_dict *d) {
@@ -648,7 +786,7 @@ static int zz_object_set_depth(zz_value *obj, const char *name, zz_value val, in
         if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
             zz_value *slot = &o->fields[i * 2 + 1];
             zz_release(slot);
-            // Share convention (was zz_clone): heal arena strings to heap.
+            // Share convention (was zz_clone): heal arena-owned values to heap.
             *slot = zz_clone_for_store(val);
             return 1;
         }
@@ -775,7 +913,8 @@ zz_value zz_elvis(zz_value left, zz_value right) {
 //  Missing stdlib natives — bare builtins and module functions
 // =====================================================================
 
-// len(v) — array length, string length, byte length, or 0 for other types.
+// len(v) — array/element length, bytes length, string char length
+// (Unicode scalar values, matching the VM), or 0 for other types.
 zz_value zz_len(zz_value v, int *err) {
     (void)err;
     if (v.tag == ZZ_ARRAY) {
@@ -785,7 +924,7 @@ zz_value zz_len(zz_value v, int *err) {
         return (zz_value){ZZ_INT, {.i = v.bytes ? (int64_t)v.bytes->len : 0}};
     }
     if (v.tag == ZZ_STR) {
-        return (zz_value){ZZ_INT, {.i = (int64_t)v.s->len}};
+        return (zz_value){ZZ_INT, {.i = (int64_t)zz_str_char_len(v.s)}};
     }
     return (zz_value){ZZ_INT, {.i = 0}};
 }
@@ -808,7 +947,7 @@ zz_value zz_len_field(zz_value *obj, const char *field, int *err) {
                     return (zz_value){ZZ_INT, {.i = (int64_t)slot->bytes->len}};
                 }
                 if (slot->tag == ZZ_STR && slot->s) {
-                    return (zz_value){ZZ_INT, {.i = (int64_t)slot->s->len}};
+                    return (zz_value){ZZ_INT, {.i = (int64_t)zz_str_char_len(slot->s)}};
                 }
                 return (zz_value){ZZ_INT, {.i = 0}};
             }
@@ -855,7 +994,7 @@ zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
         }
         a->cap = new_cap;
     }
-    // Share convention (was zz_clone): heal arena strings to heap so the
+    // Share convention (was zz_clone): heal arena-owned values to heap so the
     // element survives the loop-arena reset.
     a->items[a->len++] = zz_clone_for_store(item);
     return zz_unit();
@@ -885,7 +1024,7 @@ zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
         }
         a->cap = new_cap;
     }
-    // Share convention (was zz_clone): heal arena strings to heap so the
+    // Share convention (was zz_clone): heal arena-owned values to heap so the
     // element survives the loop-arena reset.
     a->items[a->len++] = zz_clone_for_store(item);
     return out;
@@ -1009,7 +1148,8 @@ zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err) {
     zz_array *o = out.arr;
     if (o->len >= o->cap) {
         size_t new_cap = o->cap ? o->cap * 2 : 8;
-        if (o->refs == ZZ_ARRAY_STACK_MAGIC || o->refs == ZZ_ARRAY_LIT_MAGIC || o->items == NULL) {
+        if (o->refs == ZZ_ARRAY_STACK_MAGIC || o->refs == ZZ_ARRAY_LIT_MAGIC
+            || o->refs == ZZ_ARRAY_ARENA_MAGIC || o->items == NULL) {
             zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
             for (size_t j = 0; j < o->len; j++) new_items[j] = o->items[j];
             o->items = new_items;
@@ -1023,7 +1163,7 @@ zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err) {
     for (size_t j = o->len; j > (size_t)i; j--) {
         o->items[j] = o->items[j - 1];
     }
-    // Share convention: heal arena strings to heap (fresh heap array may
+    // Share convention: heal arena-owned values to heap (fresh heap array may
     // still outlive the loop-arena reset via the caller's store).
     o->items[i] = zz_clone_for_store(item);
     o->len++;
