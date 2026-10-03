@@ -273,6 +273,12 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "struct_impl" => {
             Some("C codegen: unboxed struct returned/fielded as zz_value and vice versa")
         }
+        // NOTE: `destructuring` was listed here (top-level tuple values
+        // printed empty natively) but the sweep now reports FIXED — native
+        // matches the VM, so it runs as strict parity (verified 2026-10-03).
+        "struct_embedding" => {
+            Some("C codegen: global unboxed struct passed raw (zz_struct_*) to display builtins (println/fmt/str_cast) instead of its debug_string; verified pre-existing on origin/dev without the method-dispatch fix")
+        }
         "local_wildcard" => {
             Some("C codegen: imported scalar global unboxed twice (`(zz_global_PI).i` on int64_t)")
         }
@@ -288,7 +294,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "encoding_test" => Some("native: different error message format for bad base64/hex/url"),
         "math_extended_test" => Some("native: float precision + error message differences"),
         "decorators" => Some("native: only the final marker prints; decorator wrapper output missing"),
-        "destructuring" => Some("native: top-level tuple-destructured values print empty"),
         "extension_methods" => {
             Some("native: extension-method call results missing + spurious conflict diagnostics on stderr")
         }
@@ -678,6 +683,9 @@ parity_strict!(
     "syntax",
     "struct_scalar_fields.zz"
 );
+// Bug 8 regression: free-function method syntax (`p.bump()` === `bump(p)`)
+// must lower the receiver on both engines.
+parity_strict!(parity_syntax_method_free_fn, "syntax", "method_free_fn.zz");
 parity_strict!(
     parity_syntax_for_annotated_decl,
     "syntax",

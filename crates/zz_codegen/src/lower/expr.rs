@@ -1940,14 +1940,89 @@ impl Lowerer {
                                 }
                             }
                             if found_ns.is_empty() {
-                                // Also check if the bare method name is a native
-                                // (e.g. `len`, `println`).
-                                if self.reachable_natives.contains(method) {
-                                    // Bare builtin — no receiver injection needed.
-                                    (method.clone(), None)
-                                } else {
-                                    // Unknown — fall through
-                                    (method.clone(), None)
+                                // Free-function / bare-native method syntax
+                                // (mirrors the VM's `lookup_method_recv`
+                                // bare-callable-first rule and the checker's
+                                // Path-method `funcs.get(method)` branch):
+                                // `p.bump()` where `bump` is a free function
+                                // resolves to `bump(p)` — the receiver becomes
+                                // the first argument. Without this the call
+                                // lowers to `bump()` with the receiver dropped
+                                // (arity mismatch: the callee reads `args[0]`
+                                // out of bounds — Bug 8's garbage/hang/segfault).
+                                //
+                                // Name resolution has three shapes because the
+                                // loader namespaces top-level items by file
+                                // stem (`bump` → `m1.bump`) while the method
+                                // tail of a true receiver call stays bare
+                                // (locals shadow the namespace rewrite):
+                                //   1. bare `method` (harness/REPL programs),
+                                //   2. `{struct-ns}.{method}` (same-module
+                                //      free function — mirrors the checker's
+                                //      `Struct(sname)` → `{ns}.{method}`
+                                //      fallback),
+                                //   3. unique `*.{method}` suffix (mirrors the
+                                //      callgraph candidates + the bare-Ident
+                                //      `owned_fallback` below).
+                                let receiver = Expr::Ident {
+                                    name: obj_name.clone(),
+                                    span: first_ident_span,
+                                };
+                                let mut target: Option<String> = None;
+                                if self.reachable_funcs.contains(method)
+                                    || self.tp.funcs.contains_key(method)
+                                {
+                                    target = Some(method.clone());
+                                }
+                                if target.is_none() {
+                                    if let Some(unmangled) = self.dispatch_struct_name(
+                                        names,
+                                        names.lookup_type(obj_name),
+                                        obj_name,
+                                        first_ident_span,
+                                    ) {
+                                        if let Some((ns, _)) = unmangled.rsplit_once('.') {
+                                            let cand = format!("{ns}.{method}");
+                                            if self.reachable_funcs.contains(&cand)
+                                                || self.tp.funcs.contains_key(&cand)
+                                            {
+                                                target = Some(cand);
+                                            }
+                                        }
+                                    }
+                                }
+                                if target.is_none() {
+                                    let suffix = format!(".{method}");
+                                    let mut hits: Vec<&String> = self
+                                        .reachable_funcs
+                                        .iter()
+                                        .filter(|f| f.ends_with(&suffix))
+                                        .collect();
+                                    for k in self.tp.funcs.keys() {
+                                        if k.ends_with(&suffix) && !hits.contains(&k) {
+                                            hits.push(k);
+                                        }
+                                    }
+                                    hits.sort_unstable();
+                                    hits.dedup();
+                                    if hits.len() == 1 {
+                                        target = Some(hits[0].clone());
+                                    }
+                                }
+                                if target.is_none()
+                                    && (self.reachable_natives.contains(method)
+                                        || native_supported(method))
+                                {
+                                    // Bare native with an untyped receiver
+                                    // (`xs.len()` missing type info → `len(xs)`).
+                                    target = Some(method.clone());
+                                }
+                                match target {
+                                    Some(t) => (t, Some(receiver)),
+                                    None => {
+                                        // Unknown — fall through to unit below.
+                                        (method.clone(), None)
+                                    }
                                 }
                             } else {
                                 let receiver = Expr::Ident {
@@ -2346,7 +2421,22 @@ impl Lowerer {
             } else {
                 self.emit_expr(recv, names, out)
             };
-            if recv_is_struct {
+            if recv_is_struct && self.is_impl_method(&cname) {
+                arg_items.push(recv_val);
+            } else if let Some(sname) = self.struct_box_name(recv, names) {
+                // Free-function / native method syntax on an unboxed struct
+                // (`p.bump()` → `bump(p)`): regular funcs and natives take
+                // boxed `zz_value` args, so the raw C struct must be boxed
+                // into a runtime object — exactly like `struct_box_for_arg`
+                // does for positional struct params. `box_raw_struct` reuses
+                // the already-emitted raw value (pure for Ident/Path/Field
+                // roots) with no re-emission.
+                arg_items.push(self.box_raw_struct(&sname, &recv_val, names, out));
+            } else if recv_is_struct {
+                // Defensive: unboxed receiver where `struct_box_name` missed
+                // (should not happen for Ident/Path). Push raw so a shape
+                // mismatch surfaces as a loud C type error, never a silent
+                // arg drop.
                 arg_items.push(recv_val);
             } else {
                 let boxed = auto_box(&recv_val, None); // receiver is always zz_value
