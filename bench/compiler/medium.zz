@@ -1,0 +1,25 @@
+// P0 compiler bench: medium file — structs, impls, loops, strings.
+struct Point { x: int, y: int }
+
+impl Point {
+    func sum(self) -> int { self.x + self.y }
+    func moved(self, dx: int, dy: int) -> Point {
+        Point{ x: self.x + dx, y: self.y + dy }
+    }
+}
+
+func fib(n: int) -> int {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+func main() -> int {
+    total := 0
+    for i in 0..1000 {
+        p := Point{ x: i, y: i * 2 }
+        total = total + p.sum()
+    }
+    total = total + fib(15)
+    println("total={total}")
+    return total
+}
