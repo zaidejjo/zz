@@ -169,69 +169,99 @@ impl Checker {
                         ));
                     }
                     Type::Named(name.clone())
-                } else if self.structs.contains_key(name) {
-                    // Canonicalize selective imports, mirroring
-                    // StructInit: `Product` → `product.Product`.
-                    let cname = self.canonical_struct_name(name);
-                    let want = self
-                        .structs
-                        .get(&cname)
-                        .map(|s| s.generics.len())
-                        .unwrap_or(0);
-                    if args.is_empty() && want > 0 {
-                        self.errors.push(error_at(
-                            format!(
+                } else {
+                    // Type-position uses count for unused-import tracking
+                    // (`import shapes` + `t: shapes.Tokens` marks `shapes`
+                    // used). Bare names are skipped: a type sharing a
+                    // variable's name must not silence its warning.
+                    if name.contains('.') {
+                        self.used_names.insert(name.clone());
+                    }
+                    if self.alias_asts.contains_key(name)
+                        || self.aliases.contains_key(name)
+                        || self
+                            .import_aliases
+                            .get(name)
+                            .is_some_and(|q| self.aliases.contains_key(q))
+                    {
+                        // Type aliases erase: uses resolve to the target type.
+                        // Unconverted program-local aliases convert on demand
+                        // inside `expand_alias` (order-independent).
+                        let cname = self.canonical_alias_name(name);
+                        // A bare name resolved through a selective import
+                        // counts as using that import (mirrors value
+                        // lookups through `import_aliases`).
+                        if cname != *name {
+                            self.used_names.insert(name.clone());
+                        }
+                        self.expand_alias(&cname, args, generics, ty.span)
+                    } else if self.structs.contains_key(name) {
+                        // Canonicalize selective imports, mirroring
+                        // StructInit: `Product` → `product.Product`.
+                        let cname = self.canonical_struct_name(name);
+                        if cname != *name {
+                            self.used_names.insert(name.clone());
+                        }
+                        let want = self
+                            .structs
+                            .get(&cname)
+                            .map(|s| s.generics.len())
+                            .unwrap_or(0);
+                        if args.is_empty() && want > 0 {
+                            self.errors.push(error_at(
+                                format!(
                                 "struct `{name}` takes {want} type argument{} (e.g. `{name}<{}>`)",
                                 if want == 1 { "" } else { "s" },
                                 vec!["T"; want].join(", "),
                             ),
-                            ty.span,
-                        ));
-                        Type::Struct(cname, Vec::new())
-                    } else if args.len() != want {
-                        if !(args.is_empty() && want == 0) {
-                            self.errors.push(error_at(
-                                format!(
-                                    "struct `{name}` takes {want} type argument{} but {} given",
-                                    if want == 1 { "" } else { "s" },
-                                    args.len(),
-                                ),
                                 ty.span,
                             ));
+                            Type::Struct(cname, Vec::new())
+                        } else if args.len() != want {
+                            if !(args.is_empty() && want == 0) {
+                                self.errors.push(error_at(
+                                    format!(
+                                        "struct `{name}` takes {want} type argument{} but {} given",
+                                        if want == 1 { "" } else { "s" },
+                                        args.len(),
+                                    ),
+                                    ty.span,
+                                ));
+                            }
+                            Type::Struct(cname, Vec::new())
+                        } else {
+                            Type::Struct(
+                                cname,
+                                args.iter()
+                                    .map(|a| self.ast_to_type_inner(a, generics))
+                                    .collect(),
+                            )
                         }
-                        Type::Struct(cname, Vec::new())
+                    } else if name == "json" {
+                        Type::Json
+                    } else if name == "bytes" {
+                        Type::Bytes
+                    } else if name == "db" || name == "sqlz" {
+                        Type::Db
+                    } else if name == "chan" {
+                        Type::Chan
+                    } else if name == "task.join" {
+                        Type::TaskJoin
+                    } else if name == "http.server" {
+                        Type::HttpServer
+                    } else if name == "tcp.stream" {
+                        Type::TcpStream
+                    } else if name == "tcp.listener" {
+                        Type::TcpListener
+                    } else if name == "http.response" {
+                        Type::Response
+                    } else if name == "http.request" {
+                        Type::HttpRequest
                     } else {
-                        Type::Struct(
-                            cname,
-                            args.iter()
-                                .map(|a| self.ast_to_type_inner(a, generics))
-                                .collect(),
-                        )
+                        self.errors
+                            .push(error_at(format!("unknown type `{name}`"), ty.span));
+                        Type::Unit
                     }
-                } else if name == "json" {
-                    Type::Json
-                } else if name == "bytes" {
-                    Type::Bytes
-                } else if name == "db" || name == "sqlz" {
-                    Type::Db
-                } else if name == "chan" {
-                    Type::Chan
-                } else if name == "task.join" {
-                    Type::TaskJoin
-                } else if name == "http.server" {
-                    Type::HttpServer
-                } else if name == "tcp.stream" {
-                    Type::TcpStream
-                } else if name == "tcp.listener" {
-                    Type::TcpListener
-                } else if name == "http.response" {
-                    Type::Response
-                } else if name == "http.request" {
-                    Type::HttpRequest
-                } else {
-                    self.errors
-                        .push(error_at(format!("unknown type `{name}`"), ty.span));
-                    Type::Unit
                 }
             }
         }

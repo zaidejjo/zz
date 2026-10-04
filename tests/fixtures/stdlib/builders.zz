@@ -1,0 +1,23 @@
+// E2E: str/bytes builders (linear assembly).
+import std.str
+import std.bytes
+
+func main() {
+    b := str.builder()
+    b = str.push_part(b, "a")
+    b = str.push_part(b, "b")
+    b = str.push_part(b, "c")
+    println(str.finish(b))
+    println(str.builder_len(b))
+    println(str.join_parts(["x", "y"], "-"))
+
+    bb := bytes.builder()
+    bb = bytes.push_byte(bb, 1)
+    bb = bytes.push_byte(bb, 300)
+    bb = bytes.push_byte(bb, 0 - 1)
+    println(bb)
+    println(bytes.len_of(bb))
+    println(bytes.extend([1], [2, 3]))
+    println(bytes.from_ints([65, 66]))
+    println("builders_ok")
+}

@@ -23,6 +23,11 @@ const ARGS_MOD_ZZ: &str = include_str!("../zz/args/mod.zz");
 const COLORS_MOD_ZZ: &str = include_str!("../zz/colors/mod.zz");
 const PATH_MOD_ZZ: &str = include_str!("../zz/path/mod.zz");
 const HTTP_MOD_ZZ: &str = include_str!("../zz/http/mod.zz");
+const MAP_ZZ: &str = include_str!("../zz/collections/map.zz");
+const SET_ZZ: &str = include_str!("../zz/collections/set.zz");
+const DEC_MOD_ZZ: &str = include_str!("../zz/dec/mod.zz");
+const BYTES_MOD_ZZ: &str = include_str!("../zz/bytes/mod.zz");
+const CSV_MOD_ZZ: &str = include_str!("../zz/csv/mod.zz");
 
 /// All embedded source files, in compilation order.
 const ZZ_SOURCES: &[(&str, &str)] = &[
@@ -36,6 +41,11 @@ const ZZ_SOURCES: &[(&str, &str)] = &[
     ("std:colors.mod.zz", COLORS_MOD_ZZ),
     ("std:path.mod.zz", PATH_MOD_ZZ),
     ("std:http.mod.zz", HTTP_MOD_ZZ),
+    ("std:collections.map.zz", MAP_ZZ),
+    ("std:collections.set.zz", SET_ZZ),
+    ("std:dec.mod.zz", DEC_MOD_ZZ),
+    ("std:bytes.mod.zz", BYTES_MOD_ZZ),
+    ("std:csv.mod.zz", CSV_MOD_ZZ),
 ];
 
 /// Compiled pure-ZZ stdlib programs, computed once.
@@ -64,6 +74,7 @@ fn compile_one(
         initial_bindings.clone(),
         initial_funcs.clone(),
         initial_structs.clone(),
+        HashMap::new(),
     );
     let has_errors = res
         .diagnostics
@@ -164,9 +175,11 @@ mod tests {
     #[test]
     fn compile_pure_zz_stdlib() {
         let programs = zz_stdlib_programs();
-        // Should have compiled ten modules (str, math, collections/vec,
-        // json, regexp, time, args, colors, path, http).
-        assert_eq!(programs.len(), 10, "expected 10 pure-ZZ stdlib modules");
+        // Should have compiled fifteen modules (str, math, collections/vec,
+        // json, regexp, time, args, colors, path, http, map, set, dec,
+        // bytes, csv). TOML lives as an external package (~/Projects/toml),
+        // not in the stdlib.
+        assert_eq!(programs.len(), 15, "expected 15 pure-ZZ stdlib modules");
         // Each module should have a non-empty types map.
         for (i, tp) in programs.iter().enumerate() {
             assert!(
@@ -433,6 +446,69 @@ mod tests {
             args_prog.funcs.contains_key("ArgsParser.new"),
             "ArgsParser.new should be defined"
         );
+    }
+
+    #[test]
+    fn pure_zz_new_modules_have_expected_functions() {
+        let programs = zz_stdlib_programs();
+        // map (collections/map.zz, index 10)
+        let map_prog = &programs[10];
+        for name in [
+            "map.has",
+            "map.get_or",
+            "map.keys",
+            "map.values",
+            "map.merge",
+            "map.remove",
+        ] {
+            assert!(
+                map_prog.funcs.contains_key(name),
+                "{name} should be defined"
+            );
+        }
+        // set (collections/set.zz, index 11)
+        let set_prog = &programs[11];
+        for name in [
+            "set.has",
+            "set.insert",
+            "set.union",
+            "set.intersect",
+            "set.diff",
+        ] {
+            assert!(
+                set_prog.funcs.contains_key(name),
+                "{name} should be defined"
+            );
+        }
+        // dec (dec/mod.zz, index 12)
+        let dec_prog = &programs[12];
+        for name in ["dec.add", "dec.cmp", "dec.format", "dec.is_valid"] {
+            assert!(
+                dec_prog.funcs.contains_key(name),
+                "{name} should be defined"
+            );
+        }
+        // bytes builders (bytes/mod.zz, index 13)
+        let bytes_prog = &programs[13];
+        for name in [
+            "bytes.builder",
+            "bytes.push_byte",
+            "str.builder",
+            "str.finish",
+        ] {
+            assert!(
+                bytes_prog.funcs.contains_key(name),
+                "{name} should be defined"
+            );
+        }
+        // csv (csv/mod.zz, index 14)
+        let csv_prog = &programs[14];
+        for name in ["csv.parse", "csv.stringify", "csv.to_json", "csv.header"] {
+            assert!(
+                csv_prog.funcs.contains_key(name),
+                "{name} should be defined"
+            );
+        }
     }
 
     #[test]

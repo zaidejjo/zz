@@ -1,0 +1,10 @@
+// Support module for alias_import.zz: cross-module `pub type` aliases.
+pub type Tokens = [str]
+
+pub func make() -> Tokens {
+    ["a", "b"]
+}
+
+pub struct Point { x: int, y: int }
+
+pub type Points = [Point]

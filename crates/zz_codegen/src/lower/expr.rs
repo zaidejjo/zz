@@ -149,8 +149,8 @@ fn mentions_stmt(s: &Stmt, name: &str) -> bool {
                 || decorators.iter().any(|d| mentions_decorator(d, name))
         }
         Stmt::Return { value, .. } => value.as_ref().is_some_and(|v| mentions_ident(v, name)),
-        // Struct shapes carry types only.
-        Stmt::Struct { .. } => false,
+        // Struct shapes and aliases carry types only.
+        Stmt::Struct { .. } | Stmt::TypeAlias { .. } => false,
         Stmt::Impl { methods, .. } => methods.iter().any(|m| mentions_stmt(m, name)),
         Stmt::For { iter, body, .. } => mentions_ident(iter, name) || mentions_block(body, name),
         Stmt::Defer { expr, .. } => mentions_ident(expr, name),

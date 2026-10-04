@@ -694,7 +694,11 @@ impl Lowerer {
                 out.push_str(&format!("    zz_value {tmp} = {rhs};\n"));
                 self.emit_destructure_pat(pat, &tmp, names, out);
             }
-            Stmt::Func { .. } | Stmt::Struct { .. } | Stmt::Impl { .. } | Stmt::Import { .. } => {}
+            Stmt::Func { .. }
+            | Stmt::Struct { .. }
+            | Stmt::TypeAlias { .. }
+            | Stmt::Impl { .. }
+            | Stmt::Import { .. } => {}
             // Top-level only: emitted in the preamble by `Lowerer::lower`.
             Stmt::ExternBlock { .. } | Stmt::Link { .. } => {}
         }

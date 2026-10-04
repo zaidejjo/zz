@@ -1,0 +1,287 @@
+// Pure-ZZ CSV — RFC4180 subset, shared by VM and AOT.
+// Module: std.csv
+//
+// Rows are `[[str]]` (first row = header when present). No custom
+// structs so callers need no definitions. Delimiter is explicit:
+// `csv.parse` uses comma, `csv.parse_delim` takes one char.
+// Self-contained: no imports from other pure-ZZ modules.
+// Unterminated trailing quote is treated as end-of-field.
+// Fields assemble by repeated concat (O(n^2) worst case on huge
+// single fields); split giant cells upstream if that matters.
+
+func csv.delim_first(delimiter: str) -> str {
+    if delimiter == "" {
+        return ","
+    }
+    delimiter[0]
+}
+
+func csv.json_escape(s: str) -> str {
+    t := str.replace(s, "\\", "\\\\")
+    t = str.replace(t, "\"", "\\\"")
+    t = str.replace(t, "\n", "\\n")
+    t = str.replace(t, "\t", "\\t")
+    t
+}
+
+func csv.parse(src: str) -> [[str]] {
+    csv.parse_delim(src, ",")
+}
+
+func csv.parse_delim(src: str, delimiter: str) -> [[str]] {
+    d := csv.delim_first(delimiter)
+    rows: [[str]] = []
+    row: [str] = []
+    field := ""
+    in_q := false
+    i := 0
+    n := str.length(src)
+    while i < n {
+        c := src[i]
+        if c == "\"" {
+            if in_q {
+                nxt := ""
+                if i + 1 < n {
+                    nxt = src[i + 1]
+                }
+                if nxt == "\"" {
+                    field = field + "\""
+                    i = i + 2
+                } else {
+                    in_q = false
+                    i = i + 1
+                }
+            } else {
+                in_q = true
+                i = i + 1
+            }
+        } else {
+            if c == d {
+                if in_q {
+                    field = field + c
+                    i = i + 1
+                } else {
+                    row = vec.push(row, field)
+                    field = ""
+                    i = i + 1
+                }
+            } else {
+                if c == "\r" {
+                    if in_q {
+                        field = field + c
+                        i = i + 1
+                    } else {
+                        row = vec.push(row, field)
+                        rows = vec.push(rows, row)
+                        row = []
+                        field = ""
+                        if i + 1 < n {
+                            if src[i + 1] == "\n" {
+                                i = i + 2
+                            } else {
+                                i = i + 1
+                            }
+                        } else {
+                            i = i + 1
+                        }
+                    }
+                } else {
+                    if c == "\n" {
+                        if in_q {
+                            field = field + c
+                            i = i + 1
+                        } else {
+                            row = vec.push(row, field)
+                            rows = vec.push(rows, row)
+                            row = []
+                            field = ""
+                            i = i + 1
+                        }
+                    } else {
+                        field = field + c
+                        i = i + 1
+                    }
+                }
+            }
+        }
+    }
+    row = vec.push(row, field)
+    rows = vec.push(rows, row)
+    if vec.len(rows) == 1 {
+        only := rows[0]
+        if vec.len(only) == 1 {
+            if only[0] == "" {
+                empty: [[str]] = []
+                return empty
+            }
+        }
+    }
+    // A single trailing newline (`"a\n"`) closes the last row; don't
+    // report a phantom empty row after it.
+    if vec.len(rows) >= 2 {
+        last := rows[vec.len(rows) - 1]
+        if vec.len(last) == 1 {
+            if last[0] == "" {
+                ends_nl := str.ends_with(src, "\n")
+                if ends_nl {
+                    out: [[str]] = []
+                    i := 0
+                    while i < vec.len(rows) - 1 {
+                        out = vec.push(out, rows[i])
+                        i = i + 1
+                    }
+                    return out
+                }
+                if str.ends_with(src, "\r") {
+                    out: [[str]] = []
+                    i := 0
+                    while i < vec.len(rows) - 1 {
+                        out = vec.push(out, rows[i])
+                        i = i + 1
+                    }
+                    return out
+                }
+            }
+        }
+    }
+    rows
+}
+
+func csv.needs_quote(cell: str, d: str) -> bool {
+    if str.contains(cell, d) {
+        return true
+    }
+    if str.contains(cell, "\"") {
+        return true
+    }
+    if str.contains(cell, "\n") {
+        return true
+    }
+    str.contains(cell, "\r")
+}
+
+func csv.escape_cell(cell: str) -> str {
+    str.replace(cell, "\"", "\"\"")
+}
+
+func csv.stringify(rows: [[str]]) -> str {
+    csv.stringify_delim(rows, ",")
+}
+
+func csv.stringify_delim(rows: [[str]], delimiter: str) -> str {
+    d := csv.delim_first(delimiter)
+    out := ""
+    ri := 0
+    rn := vec.len(rows)
+    while ri < rn {
+        row := rows[ri]
+        ci := 0
+        cn := vec.len(row)
+        first := true
+        while ci < cn {
+            cell := row[ci]
+            if first {
+                first = false
+            } else {
+                out = out + d
+            }
+            if csv.needs_quote(cell, d) {
+                out = out + "\"" + csv.escape_cell(cell) + "\""
+            } else {
+                out = out + cell
+            }
+            ci = ci + 1
+        }
+        if ri + 1 < rn {
+            out = out + "\n"
+        }
+        ri = ri + 1
+    }
+    out
+}
+
+func csv.header(rows: [[str]]) -> [str] {
+    if vec.len(rows) == 0 {
+        empty: [str] = []
+        return empty
+    }
+    rows[0]
+}
+
+func csv.records(rows: [[str]]) -> [[str]] {
+    out: [[str]] = []
+    i := 1
+    while i < vec.len(rows) {
+        out = vec.push(out, rows[i])
+        i = i + 1
+    }
+    out
+}
+
+func csv.len(rows: [[str]]) -> int {
+    vec.len(rows)
+}
+
+func csv.get_cell(rows: [[str]], r: int, c: int, default: str) -> str {
+    if r < 0 {
+        return default
+    }
+    if c < 0 {
+        return default
+    }
+    if r >= vec.len(rows) {
+        return default
+    }
+    row := rows[r]
+    if c >= vec.len(row) {
+        return default
+    }
+    row[c]
+}
+
+func csv.validate(src: str) -> bool {
+    rows := csv.parse(src)
+    vec.len(rows) > 0
+}
+
+func csv.to_json(rows: [[str]]) -> json {
+    if vec.len(rows) == 0 {
+        return json.parse_or_null("[]")
+    }
+    head := rows[0]
+    obj := "["
+    ri := 1
+    first_row := true
+    while ri < vec.len(rows) {
+        row := rows[ri]
+        if first_row {
+            first_row = false
+        } else {
+            obj = obj + ","
+        }
+        obj = obj + "{"
+        ci := 0
+        first_col := true
+        while ci < vec.len(head) {
+            val := ""
+            if ci < vec.len(row) {
+                val = row[ci]
+            }
+            if first_col {
+                first_col = false
+            } else {
+                obj = obj + ","
+            }
+            obj = obj + "\"" + csv.json_escape(head[ci]) + "\":\"" + csv.json_escape(val) + "\""
+            ci = ci + 1
+        }
+        obj = obj + "}"
+        ri = ri + 1
+    }
+    obj = obj + "]"
+    r := json.parse(obj)
+    match r {
+        .ok(j) => j,
+        .err(e) => json.parse_or_null("[]"),
+    }
+}

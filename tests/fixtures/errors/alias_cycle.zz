@@ -1,0 +1,8 @@
+// ERROR: cyclic type aliases must report, not hang.
+type A = B
+type B = A
+
+func main() {
+    x: A = 1
+    println(x)
+}

@@ -106,6 +106,22 @@ fn collect_stmt_defs(stmt: &Stmt, source: &str, defs: &mut HashMap<u32, Definiti
                 }
             }
         }
+        // Aliases define a named type: register like structs so
+        // goto-definition lands on the alias. `DefKind::Struct` is
+        // reused (both are named type definitions).
+        Stmt::TypeAlias { name, .. } => {
+            let joined = name.join(".");
+            if let Some(span) = find_name_in_source(source, &joined) {
+                defs.insert(
+                    span.start,
+                    Definition {
+                        name: joined,
+                        span,
+                        kind: DefKind::Struct,
+                    },
+                );
+            }
+        }
         Stmt::Decl { name, value, .. } => {
             defs.insert(
                 name.span.start,
@@ -358,6 +374,15 @@ fn walk_stmt<'a>(stmt: &'a Stmt, source: &str, offset: u32, result: &mut NodeAtO
             }
         }
         Stmt::Struct { name, .. } => {
+            let joined = name.join(".");
+            if let Some(name_span) = find_name_in_source(source, &joined) {
+                if offset >= name_span.start && offset < name_span.end {
+                    result.name = Some(joined);
+                    result.name_span = Some(name_span);
+                }
+            }
+        }
+        Stmt::TypeAlias { name, .. } => {
             let joined = name.join(".");
             if let Some(name_span) = find_name_in_source(source, &joined) {
                 if offset >= name_span.start && offset < name_span.end {
@@ -848,6 +873,10 @@ fn collect_name_refs_in_stmt(stmt: &Stmt, name: &str, refs: &mut Vec<Reference>)
                 }
             }
         }
+        // Alias declaration names need no source walk here: the
+        // definition itself is recorded via `collect_definitions`,
+        // and type-position usages aren't tracked (same as structs).
+        Stmt::TypeAlias { .. } => {}
         Stmt::Decl {
             name: ident, value, ..
         } => {
@@ -1106,6 +1135,17 @@ fn collect_hl_stmt(stmt: &Stmt, name: &str, source: &str, out: &mut Vec<Highligh
                 }
             }
         }
+        Stmt::TypeAlias { name: aname, .. } => {
+            let joined = aname.join(".");
+            if joined == name {
+                if let Some(span) = find_name_in_source(source, &joined) {
+                    out.push(Highlight {
+                        span,
+                        kind: HighlightKind::Write,
+                    });
+                }
+            }
+        }
         Stmt::Decl {
             name: ident, value, ..
         } => {
@@ -1310,6 +1350,7 @@ mod tests {
         let parsed = parse(source);
         check_program(
             &parsed.program,
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),

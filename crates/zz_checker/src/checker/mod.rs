@@ -1,5 +1,6 @@
 //! Type checker: HM-lite inference, generics, patterns, exhaustiveness.
 
+pub mod aliases;
 pub mod diagnostics;
 pub mod funcs;
 pub mod http_lint;
@@ -11,7 +12,7 @@ pub mod type_check;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use zz_frontend::ast::{Program, Stmt};
+use zz_frontend::ast::{Program, Stmt, Ty};
 use zz_frontend::diag::RawDiag;
 use zz_frontend::span::Span;
 
@@ -83,6 +84,15 @@ pub struct StructSig {
     pub fields: Vec<(String, Type)>,
 }
 
+/// A registered type alias: type parameters and the target type with
+/// parameters as `Type::Named` (e.g. `type Pair[T] = (T, T)` stores
+/// `Tuple([Named("T"), Named("T")])`). Uses resolve to the target, so
+/// aliases never appear at runtime.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AliasSig {
+    pub generics: Vec<String>,
+    pub target: Type,
+}
 /// Minimal error-conversion registration (V1, error-only — not a general trait system).
 /// Declared via `impl From { func convert_to_To(self) -> To { ... } }`.
 /// V1 rule: at most one conversion per source type (keeps runtime dispatch sound).
@@ -105,6 +115,8 @@ pub struct CheckResult {
     pub funcs: HashMap<String, FuncSig>,
     /// Top-level struct definitions.
     pub structs: HashMap<String, StructSig>,
+    /// Top-level type aliases (`type Tokens = [Token]`), resolved targets.
+    pub aliases: HashMap<String, AliasSig>,
     /// `try` site span → conversion impl span (`None` = identity).
     pub try_resolutions: HashMap<Span, Option<Span>>,
     /// `try` site span → conversion function name (`None` = identity).
@@ -123,6 +135,8 @@ pub struct CheckResult {
     pub pub_funcs: HashMap<String, FuncSig>,
     /// Only `pub` structs (for cross-module export).
     pub pub_structs: HashMap<String, StructSig>,
+    /// Only `pub` type aliases (for cross-module export).
+    pub pub_aliases: HashMap<String, AliasSig>,
 }
 
 /// Type-check a whole program, seeded with bindings/funcs/structs from prior
@@ -133,12 +147,14 @@ pub fn check_program(
     initial_bindings: HashMap<String, Type>,
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
+    initial_aliases: HashMap<String, AliasSig>,
 ) -> CheckResult {
     check_program_impl(
         program,
         initial_bindings,
         initial_funcs,
         initial_structs,
+        initial_aliases,
         HashMap::new(),
     )
     .result
@@ -151,6 +167,7 @@ pub fn check_program_with_consts(
     initial_bindings: HashMap<String, Type>,
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
+    initial_aliases: HashMap<String, AliasSig>,
     initial_consts: HashMap<String, Span>,
 ) -> CheckResult {
     check_program_impl(
@@ -158,6 +175,7 @@ pub fn check_program_with_consts(
         initial_bindings,
         initial_funcs,
         initial_structs,
+        initial_aliases,
         initial_consts,
     )
     .result
@@ -171,12 +189,14 @@ pub fn check_program_typed(
     initial_bindings: HashMap<String, Type>,
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
+    initial_aliases: HashMap<String, AliasSig>,
 ) -> (CheckResult, std::collections::HashMap<SpanKey, Type>) {
     let out = check_program_impl(
         program,
         initial_bindings,
         initial_funcs,
         initial_structs,
+        initial_aliases,
         HashMap::new(),
     );
     (out.result, out.span_types)
@@ -189,6 +209,7 @@ fn check_program_impl(
     initial_bindings: HashMap<String, Type>,
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
+    initial_aliases: HashMap<String, AliasSig>,
     initial_consts: HashMap<String, Span>,
 ) -> CheckerOutcome {
     // Resolve explicit decorators first: `@dec func f` becomes `f__inner` +
@@ -212,6 +233,7 @@ fn check_program_impl(
         initial_bindings,
         initial_funcs,
         initial_structs,
+        initial_aliases,
         initial_consts,
     );
     // Offset fresh-var ids above any `Var(id)` carried in seed signatures
@@ -249,6 +271,7 @@ fn check_program_impl(
     let mut pub_bindings_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut pub_funcs_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut pub_structs_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut pub_aliases_set: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Pass 1: register struct definitions (fields are resolved against the
     // struct registry, so structs may reference earlier structs). Structs
@@ -275,6 +298,70 @@ fn check_program_impl(
                 pub_structs_set.insert(full_name);
             }
         }
+    }
+
+    // Pass 1a: register type aliases. Raw targets are recorded first so
+    // aliases may reference structs regardless of order; conversion to
+    // resolved types happens after (nested aliases expand recursively
+    // with cycle detection in `convert_alias`).
+    let mut seen_aliases = HashMap::new();
+    for stmt in &program.stmts {
+        if let Stmt::TypeAlias {
+            name,
+            generics,
+            target,
+            span,
+            pub_,
+        } = stmt
+        {
+            let full_name = name.join(".");
+            if checker.structs.contains_key(&full_name) {
+                checker.errors.push(zz_frontend::diag::error_at(
+                    format!(
+                        "duplicate definition of `{}` (a struct with the same name exists)",
+                        full_name
+                    ),
+                    *span,
+                ));
+            }
+            if let Some(prev) = seen_aliases.insert(full_name.clone(), *span) {
+                checker.errors.push(zz_frontend::diag::error_at(
+                    format!("duplicate definition of type alias `{}`", full_name),
+                    *span,
+                ));
+                checker.errors.push(zz_frontend::diag::error_at(
+                    "previous definition here",
+                    prev,
+                ));
+            }
+            // Reject duplicate type parameters (`type P[T, T] = ...`).
+            let mut seen = std::collections::HashSet::new();
+            let mut gen_names = Vec::new();
+            for g in generics {
+                if !seen.insert(g.name.clone()) {
+                    checker.errors.push(zz_frontend::diag::error_at(
+                        format!(
+                            "duplicate type parameter `{}` in alias `{}`",
+                            g.name, full_name
+                        ),
+                        g.span,
+                    ));
+                } else {
+                    gen_names.push(g.name.clone());
+                }
+            }
+            checker
+                .alias_asts
+                .insert(full_name.clone(), (gen_names, target.clone()));
+            if *pub_ {
+                pub_aliases_set.insert(full_name);
+            }
+        }
+    }
+    // Convert raw targets now that every struct and alias name is known.
+    let alias_names: Vec<String> = checker.alias_asts.keys().cloned().collect();
+    for alias_name in alias_names {
+        checker.convert_alias(&alias_name);
     }
 
     // Pass 1b: register impl method signatures so method calls resolve.
@@ -657,6 +744,16 @@ fn check_program_impl(
             (k.clone(), sig)
         })
         .collect();
+    let pub_aliases: HashMap<String, AliasSig> = checker
+        .aliases
+        .iter()
+        .filter(|(k, _)| pub_aliases_set.contains(k.as_str()))
+        .map(|(k, v)| {
+            let mut sig = v.clone();
+            sig.target = checker.unifier.resolve_deep(&sig.target);
+            (k.clone(), sig)
+        })
+        .collect();
 
     // Deep-resolve the recorded span types now that all unification is done.
     // Skip any that still contain inference variables (unresolvable at
@@ -707,6 +804,7 @@ fn check_program_impl(
             bindings,
             funcs: checker.funcs,
             structs: checker.structs,
+            aliases: checker.aliases,
             try_resolutions: checker.try_resolutions,
             try_converts,
             link_libs: checker.link_libs,
@@ -714,6 +812,7 @@ fn check_program_impl(
             pub_bindings,
             pub_funcs,
             pub_structs,
+            pub_aliases,
         },
         span_types,
     }
@@ -731,6 +830,15 @@ pub(crate) struct Checker {
     pub(crate) errors: Vec<zz_frontend::diag::RawDiag>,
     pub(crate) funcs: HashMap<String, FuncSig>,
     pub(crate) structs: HashMap<String, StructSig>,
+    /// Type aliases (`type Tokens = [Token]`): exported, resolved targets.
+    pub(crate) aliases: HashMap<String, AliasSig>,
+    /// Raw alias targets (this program only), converted to `aliases`
+    /// after all structs are collected so targets may reference any
+    /// struct regardless of order. Not exported.
+    pub(crate) alias_asts: HashMap<String, (Vec<String>, Ty)>,
+    /// Alias expansion stack for cycle detection (`type A = B`,
+    /// `type B = A` reports instead of recursing forever).
+    pub(crate) alias_expanding: Vec<String>,
     /// Extension methods (separate table): (TypeName, method) → (sig, def span).
     /// Holds `impl` on builtins and cross-type extensions. Lookup priority:
     /// inherent (`funcs`) → extension (here) → stdlib namespace.
@@ -806,6 +914,7 @@ impl Checker {
         initial_bindings: HashMap<String, Type>,
         funcs: HashMap<String, FuncSig>,
         structs: HashMap<String, StructSig>,
+        aliases: HashMap<String, AliasSig>,
         initial_consts: HashMap<String, Span>,
     ) -> Self {
         let env = vec![initial_bindings];
@@ -814,6 +923,9 @@ impl Checker {
             errors: Vec::new(),
             funcs,
             structs,
+            aliases,
+            alias_asts: HashMap::new(),
+            alias_expanding: Vec::new(),
             ext_methods: HashMap::new(),
             convert_impls: Vec::new(),
             try_resolutions: HashMap::new(),
@@ -955,8 +1067,13 @@ mod span_scope_tests {
             stmts,
             span: Span::new(0, 0),
         };
-        let (res, types) =
-            check_program_typed(&merged, HashMap::new(), HashMap::new(), HashMap::new());
+        let (res, types) = check_program_typed(
+            &merged,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
         assert!(res.errors.is_empty(), "check: {:?}", res.errors);
         let key = Span::new(28, 32);
         assert_eq!(types.get(&SpanKey::new("f", key)), Some(&Type::Int));

@@ -1,0 +1,110 @@
+// Pure-ZZ map helpers — compiled once, shared by VM and AOT.
+// Module: std.map
+//
+// Dictionaries `{K: V}` stay the storage. These helpers add the
+// product-grade API compilers and servers need: safe lookup,
+// keys/values projections, merge, filtering, mapping.
+//
+// Performance note: `Dict` is insertion-ordered. All ops below are
+// O(n) scans. API is stable so a future hashed native can drop in
+// without breaking callers. For compiler symbol tables prefer
+// small scopes; split large tables per module.
+
+// ── Safe lookup ──────────────────────────────────────────────────────────
+
+func map.has(d: {str: int}, key: str) -> bool {
+    for k, v in d {
+        if k == key {
+            return true
+        }
+    }
+    false
+}
+
+func map.get_or(d: {str: int}, key: str, default: int) -> int {
+    for k, v in d {
+        if k == key {
+            return v
+        }
+    }
+    default
+}
+
+func map.get_str(d: {str: str}, key: str, default: str) -> str {
+    for k, v in d {
+        if k == key {
+            return v
+        }
+    }
+    default
+}
+
+// ── Projections ──────────────────────────────────────────────────────────
+
+func map.keys(d: {str: int}) -> [str] {
+    out: [str] = []
+    for k, v in d {
+        out = vec.push(out, k)
+    }
+    out
+}
+
+func map.keys_str(d: {str: str}) -> [str] {
+    out: [str] = []
+    for k, v in d {
+        out = vec.push(out, k)
+    }
+    out
+}
+
+func map.values(d: {str: int}) -> [int] {
+    out: [int] = []
+    for k, v in d {
+        out = vec.push(out, v)
+    }
+    out
+}
+
+func map.values_str(d: {str: str}) -> [str] {
+    out: [str] = []
+    for k, v in d {
+        out = vec.push(out, v)
+    }
+    out
+}
+
+func map.len(d: {str: int}) -> int {
+    len(d)
+}
+
+func map.is_empty(d: {str: int}) -> bool {
+    len(d) == 0
+}
+
+// ── Transforms ───────────────────────────────────────────────────────────
+
+func map.merge(a: {str: int}, b: {str: int}) -> {str: int} {
+    out := a
+    for k, v in b {
+        out[k] = v
+    }
+    out
+}
+
+func map.merge_str(a: {str: str}, b: {str: str}) -> {str: str} {
+    out := a
+    for k, v in b {
+        out[k] = v
+    }
+    out
+}
+
+func map.remove(d: {str: int}, key: str) -> {str: int} {
+    out: {str: int} = {}
+    for k, v in d {
+        if k != key {
+            out[k] = v
+        }
+    }
+    out
+}

@@ -67,6 +67,7 @@ fn stmt_has_decorators(stmt: &Stmt) -> bool {
         Stmt::Expr(expr) => expr_has_decorators(expr),
         Stmt::Import { .. }
         | Stmt::Struct { .. }
+        | Stmt::TypeAlias { .. }
         | Stmt::Break { .. }
         | Stmt::Continue { .. }
         | Stmt::ExternBlock { .. }

@@ -67,6 +67,8 @@ impl<'a> Parser<'a> {
                         self.parse_impl(false)
                     }
                     TokenKind::Import => self.parse_import(true),
+                    // `pub type X = ...` — contextual alias (see parse_stmt).
+                    TokenKind::Ident if self.at_type_alias_start() => self.parse_type_alias(true),
                     // `pub const x = expr` / `pub const x: type = expr`
                     TokenKind::Const => self.parse_const_decl(true),
                     // `pub x := expr` or `pub x: type = expr`
@@ -109,6 +111,10 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Import => self.parse_import(false),
             TokenKind::Func => self.parse_func(false),
+            // `type X = ...` — contextual type alias. `type` stays a plain
+            // identifier everywhere else (`json.type(x)`, `type := 1` keep
+            // working); only `type` + name + `=`/`<>` declares an alias.
+            TokenKind::Ident if self.at_type_alias_start() => self.parse_type_alias(false),
             TokenKind::Return => {
                 let ret_tok = self.advance();
                 let value = if self.at(TokenKind::StmtEnd)
@@ -804,6 +810,49 @@ impl<'a> Parser<'a> {
             i += 2;
         }
         pairs > 0 && self.peek_kind_at(i) == TokenKind::ColonEq
+    }
+
+    /// True when the upcoming tokens declare a type alias: `type` +
+    /// name. `type` is contextual — anywhere else it lexes and parses
+    /// as a plain identifier (`json.type(x)`, `type := 1`, struct
+    /// fields named `type` all keep working). Two adjacent identifiers
+    /// never form a valid statement, so every `type Name` parses as an
+    /// alias; a missing `=` reports from `parse_type_alias` instead of
+    /// a bare "expected end of statement".
+    pub(crate) fn at_type_alias_start(&self) -> bool {
+        if self.peek_kind_at(0) != TokenKind::Ident {
+            return false;
+        }
+        let is_type = self
+            .toks
+            .get(self.pos)
+            .map(|t| &*t.text == "type")
+            .unwrap_or(false);
+        if !is_type {
+            return false;
+        }
+        self.peek_kind_at(1) == TokenKind::Ident
+    }
+
+    /// Parse `type Name = Type` / `type Name<T> = Type` (dotted names
+    /// allowed, mirroring `struct shapes.Point`). Generics are plain
+    /// identifiers, same rule as structs.
+    pub(crate) fn parse_type_alias(&mut self, pub_: bool) -> Stmt {
+        let type_tok = self.advance(); // `type`
+        let name = self.parse_dotted_ident();
+        let generics = self.parse_struct_generics();
+        if !self.eat(TokenKind::Assign) {
+            self.error_here("expected `=` after type alias name (e.g. `type Tokens = [Token]`)");
+        }
+        let target = self.parse_type();
+        let span = type_tok.span.join(target.span);
+        Stmt::TypeAlias {
+            name,
+            generics,
+            target,
+            span,
+            pub_,
+        }
     }
 
     /// Parse `a, b := expr` — bare tuple destructuring declaration.

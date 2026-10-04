@@ -1,0 +1,7 @@
+// ERROR: duplicate type alias definitions must report.
+type Tokens = [str]
+type Tokens = [int]
+
+func main() {
+    println("unreachable")
+}

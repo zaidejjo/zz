@@ -83,6 +83,24 @@ pi: float = 3.14
 scores: [int] = [1, 2, 3]
 ```
 
+### Type Aliases
+
+```zz
+type Tokens = [Token]
+type Pair<T> = (T, T)
+
+toks: Tokens = ["a"]
+p: Pair<int> = (1, 2)
+```
+
+Aliases erase at check time: uses resolve to the target type, so there
+is no runtime cost and both engines behave identically. Generic aliases
+take plain parameters and name their arguments at use sites
+(`Pair<int>`), exactly like generic structs. `type` is contextual —
+`json.type(x)` and variables named `type` keep working. Aliases export
+across modules with `pub type` and import qualified
+(`shapes.Tokens`) or selective (`import shapes(Tokens)`).
+
 ## Functions
 
 ### Basic Function
@@ -653,6 +671,21 @@ match .some(.ok(2)) {
 match x {
     .some(_) => println("has value"),
     _        => println("nothing"),
+}
+```
+
+### Statement Arms
+
+Arms accept statements as well as expressions — assignment, `:=`
+declarations, `return`, `defer` — wrapped as if braced. `break` and
+`continue` keep their expression form so divergence checking is
+unchanged.
+
+```zz
+y := 0
+match x {
+    .some(v) => y = v,
+    .none    => y = 0 - 1,
 }
 ```
 

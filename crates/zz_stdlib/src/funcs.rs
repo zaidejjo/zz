@@ -3171,6 +3171,320 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("d", Type::Int)], Type::Int),
     );
     m.insert("time.sleep".into(), sig(vec![("d", Type::Int)], Type::Unit));
+    // Pure-ZZ calendar dates (zz/time date section): dict-based Date
+    // `{year,month,day,hour,min,sec}` so no struct export needed.
+    {
+        let dict_si = Type::Dict(Box::new(Type::Str), Box::new(Type::Int));
+        for (name, params, ret) in [
+            (
+                "make_date",
+                vec![
+                    ("y", Type::Int),
+                    ("mo", Type::Int),
+                    ("d", Type::Int),
+                    ("h", Type::Int),
+                    ("mi", Type::Int),
+                    ("se", Type::Int),
+                ],
+                dict_si.clone(),
+            ),
+            ("epoch_fallback", vec![], dict_si.clone()),
+            ("is_leap", vec![("y", Type::Int)], Type::Bool),
+            (
+                "days_in_month",
+                vec![("y", Type::Int), ("m", Type::Int)],
+                Type::Int,
+            ),
+            (
+                "date_valid",
+                vec![("y", Type::Int), ("m", Type::Int), ("d", Type::Int)],
+                Type::Bool,
+            ),
+            (
+                "days_from_civil",
+                vec![("y", Type::Int), ("m", Type::Int), ("d", Type::Int)],
+                Type::Int,
+            ),
+            ("civil_from_days", vec![("z", Type::Int)], dict_si.clone()),
+            ("parse_rfc3339", vec![("s", Type::Str)], dict_si.clone()),
+            ("pad2", vec![("n", Type::Int)], Type::Str),
+            ("format_rfc3339", vec![("d", dict_si.clone())], Type::Str),
+            ("to_epoch_days", vec![("d", dict_si.clone())], Type::Int),
+            ("from_epoch_days", vec![("z", Type::Int)], dict_si.clone()),
+            (
+                "add_days",
+                vec![("d", dict_si.clone()), ("n", Type::Int)],
+                dict_si.clone(),
+            ),
+            (
+                "diff_days",
+                vec![("a", dict_si.clone()), ("b", dict_si.clone())],
+                Type::Int,
+            ),
+        ] {
+            let s = sig(params, ret);
+            m.insert(format!("std.time.{name}"), s.clone());
+            m.insert(format!("time.{name}"), s);
+        }
+    }
+
+    // std.map — pure-ZZ dict helpers (zz/collections/map.zz).
+    {
+        let dict_si = Type::Dict(Box::new(Type::Str), Box::new(Type::Int));
+        let dict_ss = Type::Dict(Box::new(Type::Str), Box::new(Type::Str));
+        let arr_str = Type::Array(Box::new(Type::Str));
+        let arr_int = Type::Array(Box::new(Type::Int));
+        for (name, params, ret) in [
+            (
+                "has",
+                vec![("d", dict_si.clone()), ("key", Type::Str)],
+                Type::Bool,
+            ),
+            (
+                "get_or",
+                vec![
+                    ("d", dict_si.clone()),
+                    ("key", Type::Str),
+                    ("default", Type::Int),
+                ],
+                Type::Int,
+            ),
+            (
+                "get_str",
+                vec![
+                    ("d", dict_ss.clone()),
+                    ("key", Type::Str),
+                    ("default", Type::Str),
+                ],
+                Type::Str,
+            ),
+            ("keys", vec![("d", dict_si.clone())], arr_str.clone()),
+            ("keys_str", vec![("d", dict_ss.clone())], arr_str.clone()),
+            ("values", vec![("d", dict_si.clone())], arr_int.clone()),
+            ("values_str", vec![("d", dict_ss.clone())], arr_str.clone()),
+            ("len", vec![("d", dict_si.clone())], Type::Int),
+            ("is_empty", vec![("d", dict_si.clone())], Type::Bool),
+            (
+                "merge",
+                vec![("a", dict_si.clone()), ("b", dict_si.clone())],
+                dict_si.clone(),
+            ),
+            (
+                "merge_str",
+                vec![("a", dict_ss.clone()), ("b", dict_ss.clone())],
+                dict_ss.clone(),
+            ),
+            (
+                "remove",
+                vec![("d", dict_si.clone()), ("key", Type::Str)],
+                dict_si.clone(),
+            ),
+        ] {
+            let s = sig(params, ret);
+            m.insert(format!("std.map.{name}"), s.clone());
+            m.insert(format!("map.{name}"), s);
+        }
+    }
+
+    // std.set — pure-ZZ set helpers on arrays (zz/collections/set.zz).
+    {
+        let arr_str = Type::Array(Box::new(Type::Str));
+        let arr_int = Type::Array(Box::new(Type::Int));
+        for (name, params, ret) in [
+            (
+                "has",
+                vec![("s", arr_str.clone()), ("x", Type::Str)],
+                Type::Bool,
+            ),
+            (
+                "has_int",
+                vec![("s", arr_int.clone()), ("x", Type::Int)],
+                Type::Bool,
+            ),
+            (
+                "insert",
+                vec![("s", arr_str.clone()), ("x", Type::Str)],
+                arr_str.clone(),
+            ),
+            (
+                "insert_int",
+                vec![("s", arr_int.clone()), ("x", Type::Int)],
+                arr_int.clone(),
+            ),
+            (
+                "remove",
+                vec![("s", arr_str.clone()), ("x", Type::Str)],
+                arr_str.clone(),
+            ),
+            (
+                "remove_int",
+                vec![("s", arr_int.clone()), ("x", Type::Int)],
+                arr_int.clone(),
+            ),
+            (
+                "union",
+                vec![("a", arr_str.clone()), ("b", arr_str.clone())],
+                arr_str.clone(),
+            ),
+            (
+                "union_int",
+                vec![("a", arr_int.clone()), ("b", arr_int.clone())],
+                arr_int.clone(),
+            ),
+            (
+                "intersect",
+                vec![("a", arr_str.clone()), ("b", arr_str.clone())],
+                arr_str.clone(),
+            ),
+            (
+                "intersect_int",
+                vec![("a", arr_int.clone()), ("b", arr_int.clone())],
+                arr_int.clone(),
+            ),
+            (
+                "diff",
+                vec![("a", arr_str.clone()), ("b", arr_str.clone())],
+                arr_str.clone(),
+            ),
+            ("len", vec![("s", arr_str.clone())], Type::Int),
+            ("is_empty", vec![("s", arr_str.clone())], Type::Bool),
+        ] {
+            let s = sig(params, ret);
+            m.insert(format!("std.set.{name}"), s.clone());
+            m.insert(format!("set.{name}"), s);
+        }
+    }
+
+    // std.dec — exact decimal math on strings (zz/dec/mod.zz).
+    {
+        for (name, params, ret) in [
+            ("is_valid", vec![("s", Type::Str)], Type::Bool),
+            ("scale_of", vec![("s", Type::Str)], Type::Int),
+            ("pow10", vec![("n", Type::Int)], Type::Int),
+            (
+                "to_scaled",
+                vec![("s", Type::Str), ("scale", Type::Int)],
+                Type::Int,
+            ),
+            (
+                "from_scaled",
+                vec![("v", Type::Int), ("scale", Type::Int)],
+                Type::Str,
+            ),
+            ("trim_zeros", vec![("s", Type::Str)], Type::Str),
+            ("add", vec![("a", Type::Str), ("b", Type::Str)], Type::Str),
+            ("sub", vec![("a", Type::Str), ("b", Type::Str)], Type::Str),
+            ("mul", vec![("a", Type::Str), ("b", Type::Str)], Type::Str),
+            ("cmp", vec![("a", Type::Str), ("b", Type::Str)], Type::Int),
+            ("eq", vec![("a", Type::Str), ("b", Type::Str)], Type::Bool),
+            ("lt", vec![("a", Type::Str), ("b", Type::Str)], Type::Bool),
+            ("gt", vec![("a", Type::Str), ("b", Type::Str)], Type::Bool),
+            (
+                "format",
+                vec![("s", Type::Str), ("places", Type::Int)],
+                Type::Str,
+            ),
+        ] {
+            let s = sig(params, ret);
+            m.insert(format!("std.dec.{name}"), s.clone());
+            m.insert(format!("dec.{name}"), s);
+        }
+    }
+
+    // External packages (NOT stdlib): TOML lives at ~/Projects/toml
+    // as a versioned package. No `std.toml` / `toml.*` signatures here.
+
+    // std.bytes + str.builder — linear builders (zz/bytes/mod.zz).
+    {
+        let arr_str = Type::Array(Box::new(Type::Str));
+        let arr_int = Type::Array(Box::new(Type::Int));
+        for (name, params, ret) in [
+            ("builder", vec![], arr_str.clone()),
+            (
+                "push_part",
+                vec![("b", arr_str.clone()), ("s", Type::Str)],
+                arr_str.clone(),
+            ),
+            ("finish", vec![("b", arr_str.clone())], Type::Str),
+            ("builder_len", vec![("b", arr_str.clone())], Type::Int),
+            (
+                "join_parts",
+                vec![("parts", arr_str.clone()), ("sep", Type::Str)],
+                Type::Str,
+            ),
+        ] {
+            let s = sig(params, ret);
+            m.insert(format!("str.{name}"), s.clone());
+            m.insert(format!("std.str.{name}"), s);
+        }
+        for (name, params, ret) in [
+            ("builder", vec![], arr_int.clone()),
+            (
+                "push_byte",
+                vec![("b", arr_int.clone()), ("v", Type::Int)],
+                arr_int.clone(),
+            ),
+            (
+                "extend",
+                vec![("b", arr_int.clone()), ("vs", arr_int.clone())],
+                arr_int.clone(),
+            ),
+            ("len_of", vec![("vs", arr_int.clone())], Type::Int),
+            ("from_ints", vec![("vs", arr_int.clone())], arr_int.clone()),
+        ] {
+            let s = sig(params, ret);
+            m.insert(format!("bytes.{name}"), s.clone());
+            m.insert(format!("std.bytes.{name}"), s);
+        }
+    }
+
+    // std.csv — RFC4180 subset (zz/csv/mod.zz).
+    {
+        let arr_str = Type::Array(Box::new(Type::Str));
+        let rows_t = Type::Array(Box::new(arr_str.clone()));
+        let json_t = Type::Json;
+        for (name, params, ret) in [
+            ("delim_first", vec![("delimiter", Type::Str)], Type::Str),
+            ("json_escape", vec![("s", Type::Str)], Type::Str),
+            ("parse", vec![("src", Type::Str)], rows_t.clone()),
+            (
+                "parse_delim",
+                vec![("src", Type::Str), ("delimiter", Type::Str)],
+                rows_t.clone(),
+            ),
+            (
+                "needs_quote",
+                vec![("cell", Type::Str), ("d", Type::Str)],
+                Type::Bool,
+            ),
+            ("escape_cell", vec![("cell", Type::Str)], Type::Str),
+            ("stringify", vec![("rows", rows_t.clone())], Type::Str),
+            (
+                "stringify_delim",
+                vec![("rows", rows_t.clone()), ("delimiter", Type::Str)],
+                Type::Str,
+            ),
+            ("header", vec![("rows", rows_t.clone())], arr_str.clone()),
+            ("records", vec![("rows", rows_t.clone())], rows_t.clone()),
+            ("len", vec![("rows", rows_t.clone())], Type::Int),
+            (
+                "get_cell",
+                vec![
+                    ("rows", rows_t.clone()),
+                    ("r", Type::Int),
+                    ("c", Type::Int),
+                    ("default", Type::Str),
+                ],
+                Type::Str,
+            ),
+            ("validate", vec![("src", Type::Str)], Type::Bool),
+            ("to_json", vec![("rows", rows_t.clone())], json_t.clone()),
+        ] {
+            let s = sig(params, ret);
+            m.insert(format!("std.csv.{name}"), s.clone());
+            m.insert(format!("csv.{name}"), s);
+        }
+    }
 
     // std.colors — pure-ZZ ANSI styling (zz/colors/mod.zz). Every wrapper
     // takes the text first so it composes with `|>` pipelines. Both
@@ -3790,7 +4104,50 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 724);
+        // New pure-ZZ modules (map, set, dec, bytes, csv, time dates).
+        for name in [
+            "std.map.has",
+            "map.has",
+            "std.map.get_or",
+            "map.get_or",
+            "std.map.merge",
+            "map.merge",
+            "std.map.keys",
+            "map.keys",
+            "std.set.has",
+            "set.has",
+            "std.set.union",
+            "set.union",
+            "std.set.intersect",
+            "set.intersect",
+            "std.dec.add",
+            "dec.add",
+            "std.dec.cmp",
+            "dec.cmp",
+            "std.dec.format",
+            "dec.format",
+            "str.builder",
+            "std.str.builder",
+            "str.finish",
+            "bytes.builder",
+            "std.bytes.builder",
+            "bytes.push_byte",
+            "std.csv.parse",
+            "csv.parse",
+            "std.csv.stringify",
+            "csv.stringify",
+            "std.csv.to_json",
+            "csv.to_json",
+            "std.time.parse_rfc3339",
+            "time.parse_rfc3339",
+            "std.time.format_rfc3339",
+            "time.format_rfc3339",
+            "std.time.add_days",
+            "time.add_days",
+        ] {
+            assert!(funcs.contains_key(name), "missing {name}");
+        }
+        assert_eq!(funcs.len(), 878);
     }
 
     #[test]

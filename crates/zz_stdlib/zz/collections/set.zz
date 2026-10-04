@@ -1,0 +1,111 @@
+// Pure-ZZ set helpers — compiled once, shared by VM and AOT.
+// Module: std.set
+//
+// Sets are `[T]` arrays with uniqueness enforced by helpers.
+// O(n) membership; API stable for a future hashed native.
+
+func set.has(s: [str], x: str) -> bool {
+    for v in s {
+        if v == x {
+            return true
+        }
+    }
+    false
+}
+
+func set.has_int(s: [int], x: int) -> bool {
+    for v in s {
+        if v == x {
+            return true
+        }
+    }
+    false
+}
+
+func set.insert(s: [str], x: str) -> [str] {
+    if set.has(s, x) {
+        return s
+    }
+    vec.push(s, x)
+}
+
+func set.insert_int(s: [int], x: int) -> [int] {
+    if set.has_int(s, x) {
+        return s
+    }
+    vec.push(s, x)
+}
+
+func set.remove(s: [str], x: str) -> [str] {
+    out: [str] = []
+    for v in s {
+        if v != x {
+            out = vec.push(out, v)
+        }
+    }
+    out
+}
+
+func set.remove_int(s: [int], x: int) -> [int] {
+    out: [int] = []
+    for v in s {
+        if v != x {
+            out = vec.push(out, v)
+        }
+    }
+    out
+}
+
+func set.union(a: [str], b: [str]) -> [str] {
+    out := a
+    for v in b {
+        out = set.insert(out, v)
+    }
+    out
+}
+
+func set.union_int(a: [int], b: [int]) -> [int] {
+    out := a
+    for v in b {
+        out = set.insert_int(out, v)
+    }
+    out
+}
+
+func set.intersect(a: [str], b: [str]) -> [str] {
+    out: [str] = []
+    for v in a {
+        if set.has(b, v) {
+            out = vec.push(out, v)
+        }
+    }
+    out
+}
+
+func set.intersect_int(a: [int], b: [int]) -> [int] {
+    out: [int] = []
+    for v in a {
+        if set.has_int(b, v) {
+            out = vec.push(out, v)
+        }
+    }
+    out
+}
+
+func set.diff(a: [str], b: [str]) -> [str] {
+    out: [str] = []
+    for v in a {
+        if set.has(b, v) == false {
+            out = vec.push(out, v)
+        }
+    }
+    out
+}
+
+func set.len(s: [str]) -> int {
+    vec.len(s)
+}
+
+func set.is_empty(s: [str]) -> bool {
+    vec.len(s) == 0
+}

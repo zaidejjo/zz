@@ -758,6 +758,7 @@ fn run_file(
         std::collections::HashMap::new(),
         loaded.funcs,
         loaded.structs,
+        std::collections::HashMap::new(),
     );
     let types = std::sync::Arc::new(typed.program.types);
     let structs = typed.program.structs;

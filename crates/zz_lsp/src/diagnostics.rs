@@ -27,7 +27,7 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
         ),
         None => return,
     };
-    let (init_bindings, init_funcs, init_structs) = state.checker_seed();
+    let (init_bindings, init_funcs, init_structs, init_aliases) = state.checker_seed();
 
     let client_clone = client.clone();
     let state_clone = state.clone();
@@ -42,7 +42,13 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
         }
 
         let program = program?;
-        let checked = check_program(&program, init_bindings, init_funcs, init_structs);
+        let checked = check_program(
+            &program,
+            init_bindings,
+            init_funcs,
+            init_structs,
+            init_aliases,
+        );
         Some(checked)
     })
     .await;
