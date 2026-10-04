@@ -41,6 +41,14 @@ pub struct LoweredC {
     /// archive (`-u`), since the C dispatcher references them weakly and
     /// weak refs alone never pull archive members.
     pub needs_pg_link: bool,
+    /// True when reachable natives lower to curl-backed C client calls:
+    /// the link must add `-lcurl`. Server/route-only programs skip it.
+    pub needs_curl: bool,
+    /// True when reachable natives lower to sqlite-backed C calls: the
+    /// link must add `-lsqlite3`. Programs that never query skip it
+    /// (previously every binary carried the dependency via the
+    /// single-TU archive + `--as-needed` ordering).
+    pub needs_sqlite: bool,
 }
 
 /// Mangle a zz qualified name to a C identifier.
@@ -533,6 +541,8 @@ impl Lowerer {
             source,
             needs_native_rt,
             needs_pg_link: crate::ffi::needs_pg_link(&expanded_natives),
+            needs_curl: crate::ffi::needs_curl_link(&expanded_natives),
+            needs_sqlite: crate::ffi::needs_sqlite_link(&expanded_natives),
         }
     }
 

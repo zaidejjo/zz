@@ -259,3 +259,37 @@ fn inline_block_comment_preserved() {
     let out = zz_fmt::format_source(src, &config).unwrap();
     assert!(out.contains("/* hi */"));
 }
+
+#[test]
+fn inline_import_alias_with_items_round_trips() {
+    // Regression: the IR emitter printed `import path(items) as alias`
+    // but the parser only accepts `import path as alias(items)`, so any
+    // selective import with a module alias failed verify ("expected end
+    // of statement, found `as`"). Alias must precede the item list.
+    let config = zz_fmt::FmtConfig::default();
+    for (src, has_alias) in [
+        ("import support.alias_shapes as shapes(Tokens)\n", true),
+        ("import foo as bar(Baz, Qux)\n", true),
+        ("import foo as bar(*)\n", true),
+        ("import foo as bar\n", true),
+        ("import foo(Bar, Baz)\n", false),
+    ] {
+        let out = zz_fmt::format_source(src, &config)
+            .unwrap_or_else(|e| panic!("format failed for {src:?}: {e}"));
+        if has_alias {
+            assert!(
+                out.contains(" as "),
+                "alias must survive formatting for {src:?}, got {out:?}"
+            );
+        }
+        let twice = zz_fmt::format_source(&out, &config)
+            .unwrap_or_else(|e| panic!("re-parse failed for {out:?}: {e}"));
+        assert_eq!(out, twice, "not idempotent for {src:?}");
+    }
+    // Canonical order: alias before items.
+    let out = zz_fmt::format_source("import foo as bar(Baz)\n", &config).unwrap();
+    assert!(
+        out.starts_with("import foo as bar(Baz)"),
+        "alias must precede items, got {out:?}"
+    );
+}

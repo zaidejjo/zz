@@ -71,7 +71,13 @@ requires `clang` (18+) or `zig` on PATH. (`zz run` without `--native` is
 the only VM path.)
 
 ```bash
-# Static (default): self-contained -O3 -flto=thin, stripped, DCE
+# Static (default): self-contained -O3 -flto=thin, stripped, DCE.
+# System libs link conditionally: programs that never fetch skip
+# libcurl, programs that never query skip libsqlite3 (no phantom
+# DT_NEEDED). A program needing neither links fully static with no
+# static syslibs required; fetch/query programs need libcurl.a /
+# libsqlite3.a for explicit `--static`, otherwise the default build
+# downgrades to dynamic with a note.
 zz build main.zz
 
 # Release: native Clang -O3 -flto=thin, stripped, dynamic, cached under ~/.zz/cache

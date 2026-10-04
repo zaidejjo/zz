@@ -231,6 +231,170 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("time.to_secs", "pure ZZ; lowered as ZZ fn"),
     ("time.to_nanos", "pure ZZ; lowered as ZZ fn"),
     ("time.sleep", "pure ZZ; lowered as ZZ fn"),
+    // Pure-ZZ map/set/dec/bytes/csv/str-builder/time-date batch —
+    // compiled from zz/<mod>/mod.zz and merged into AOT builds as ZZ
+    // functions (no C/FFI native needed).
+    // zz/bytes
+    ("std.bytes.builder", "pure ZZ; lowered as ZZ fn"),
+    ("std.bytes.extend", "pure ZZ; lowered as ZZ fn"),
+    ("std.bytes.from_ints", "pure ZZ; lowered as ZZ fn"),
+    ("std.bytes.len_of", "pure ZZ; lowered as ZZ fn"),
+    ("std.bytes.push_byte", "pure ZZ; lowered as ZZ fn"),
+    ("bytes.builder", "pure ZZ alias"),
+    ("bytes.extend", "pure ZZ alias"),
+    ("bytes.from_ints", "pure ZZ alias"),
+    ("bytes.len_of", "pure ZZ alias"),
+    ("bytes.push_byte", "pure ZZ alias"),
+    // zz/csv
+    ("std.csv.delim_first", "pure ZZ; lowered as ZZ fn"),
+    ("std.csv.escape_cell", "pure ZZ; lowered as ZZ fn"),
+    ("std.csv.get_cell", "pure ZZ; lowered as ZZ fn"),
+    ("std.csv.header", "pure ZZ; lowered as ZZ fn"),
+    ("std.csv.json_escape", "pure ZZ; lowered as ZZ fn"),
+    ("std.csv.len", "pure ZZ; lowered as ZZ fn"),
+    ("std.csv.needs_quote", "pure ZZ; lowered as ZZ fn"),
+    ("std.csv.parse", "pure ZZ; lowered as ZZ fn"),
+    ("std.csv.parse_delim", "pure ZZ; lowered as ZZ fn"),
+    ("std.csv.records", "pure ZZ; lowered as ZZ fn"),
+    ("std.csv.stringify", "pure ZZ; lowered as ZZ fn"),
+    ("std.csv.stringify_delim", "pure ZZ; lowered as ZZ fn"),
+    ("std.csv.to_json", "pure ZZ; lowered as ZZ fn"),
+    ("std.csv.validate", "pure ZZ; lowered as ZZ fn"),
+    ("csv.delim_first", "pure ZZ alias"),
+    ("csv.escape_cell", "pure ZZ alias"),
+    ("csv.get_cell", "pure ZZ alias"),
+    ("csv.header", "pure ZZ alias"),
+    ("csv.json_escape", "pure ZZ alias"),
+    ("csv.len", "pure ZZ alias"),
+    ("csv.needs_quote", "pure ZZ alias"),
+    ("csv.parse", "pure ZZ alias"),
+    ("csv.parse_delim", "pure ZZ alias"),
+    ("csv.records", "pure ZZ alias"),
+    ("csv.stringify", "pure ZZ alias"),
+    ("csv.stringify_delim", "pure ZZ alias"),
+    ("csv.to_json", "pure ZZ alias"),
+    ("csv.validate", "pure ZZ alias"),
+    // zz/dec
+    ("std.dec.add", "pure ZZ; lowered as ZZ fn"),
+    ("std.dec.cmp", "pure ZZ; lowered as ZZ fn"),
+    ("std.dec.eq", "pure ZZ; lowered as ZZ fn"),
+    ("std.dec.format", "pure ZZ; lowered as ZZ fn"),
+    ("std.dec.from_scaled", "pure ZZ; lowered as ZZ fn"),
+    ("std.dec.gt", "pure ZZ; lowered as ZZ fn"),
+    ("std.dec.is_valid", "pure ZZ; lowered as ZZ fn"),
+    ("std.dec.lt", "pure ZZ; lowered as ZZ fn"),
+    ("std.dec.mul", "pure ZZ; lowered as ZZ fn"),
+    ("std.dec.pow10", "pure ZZ; lowered as ZZ fn"),
+    ("std.dec.scale_of", "pure ZZ; lowered as ZZ fn"),
+    ("std.dec.sub", "pure ZZ; lowered as ZZ fn"),
+    ("std.dec.to_scaled", "pure ZZ; lowered as ZZ fn"),
+    ("std.dec.trim_zeros", "pure ZZ; lowered as ZZ fn"),
+    ("dec.add", "pure ZZ alias"),
+    ("dec.cmp", "pure ZZ alias"),
+    ("dec.eq", "pure ZZ alias"),
+    ("dec.format", "pure ZZ alias"),
+    ("dec.from_scaled", "pure ZZ alias"),
+    ("dec.gt", "pure ZZ alias"),
+    ("dec.is_valid", "pure ZZ alias"),
+    ("dec.lt", "pure ZZ alias"),
+    ("dec.mul", "pure ZZ alias"),
+    ("dec.pow10", "pure ZZ alias"),
+    ("dec.scale_of", "pure ZZ alias"),
+    ("dec.sub", "pure ZZ alias"),
+    ("dec.to_scaled", "pure ZZ alias"),
+    ("dec.trim_zeros", "pure ZZ alias"),
+    // zz/map
+    ("std.map.get_or", "pure ZZ; lowered as ZZ fn"),
+    ("std.map.get_str", "pure ZZ; lowered as ZZ fn"),
+    ("std.map.has", "pure ZZ; lowered as ZZ fn"),
+    ("std.map.is_empty", "pure ZZ; lowered as ZZ fn"),
+    ("std.map.keys", "pure ZZ; lowered as ZZ fn"),
+    ("std.map.keys_str", "pure ZZ; lowered as ZZ fn"),
+    ("std.map.len", "pure ZZ; lowered as ZZ fn"),
+    ("std.map.merge", "pure ZZ; lowered as ZZ fn"),
+    ("std.map.merge_str", "pure ZZ; lowered as ZZ fn"),
+    ("std.map.remove", "pure ZZ; lowered as ZZ fn"),
+    ("std.map.values", "pure ZZ; lowered as ZZ fn"),
+    ("std.map.values_str", "pure ZZ; lowered as ZZ fn"),
+    ("map.get_or", "pure ZZ alias"),
+    ("map.get_str", "pure ZZ alias"),
+    ("map.has", "pure ZZ alias"),
+    ("map.is_empty", "pure ZZ alias"),
+    ("map.keys", "pure ZZ alias"),
+    ("map.keys_str", "pure ZZ alias"),
+    ("map.len", "pure ZZ alias"),
+    ("map.merge", "pure ZZ alias"),
+    ("map.merge_str", "pure ZZ alias"),
+    ("map.remove", "pure ZZ alias"),
+    ("map.values", "pure ZZ alias"),
+    ("map.values_str", "pure ZZ alias"),
+    // zz/set
+    ("std.set.diff", "pure ZZ; lowered as ZZ fn"),
+    ("std.set.has", "pure ZZ; lowered as ZZ fn"),
+    ("std.set.has_int", "pure ZZ; lowered as ZZ fn"),
+    ("std.set.insert", "pure ZZ; lowered as ZZ fn"),
+    ("std.set.insert_int", "pure ZZ; lowered as ZZ fn"),
+    ("std.set.intersect", "pure ZZ; lowered as ZZ fn"),
+    ("std.set.intersect_int", "pure ZZ; lowered as ZZ fn"),
+    ("std.set.is_empty", "pure ZZ; lowered as ZZ fn"),
+    ("std.set.len", "pure ZZ; lowered as ZZ fn"),
+    ("std.set.remove", "pure ZZ; lowered as ZZ fn"),
+    ("std.set.remove_int", "pure ZZ; lowered as ZZ fn"),
+    ("std.set.union", "pure ZZ; lowered as ZZ fn"),
+    ("std.set.union_int", "pure ZZ; lowered as ZZ fn"),
+    ("set.diff", "pure ZZ alias"),
+    ("set.has", "pure ZZ alias"),
+    ("set.has_int", "pure ZZ alias"),
+    ("set.insert", "pure ZZ alias"),
+    ("set.insert_int", "pure ZZ alias"),
+    ("set.intersect", "pure ZZ alias"),
+    ("set.intersect_int", "pure ZZ alias"),
+    ("set.is_empty", "pure ZZ alias"),
+    ("set.len", "pure ZZ alias"),
+    ("set.remove", "pure ZZ alias"),
+    ("set.remove_int", "pure ZZ alias"),
+    ("set.union", "pure ZZ alias"),
+    ("set.union_int", "pure ZZ alias"),
+    // zz/str
+    ("std.str.builder", "pure ZZ; lowered as ZZ fn"),
+    ("std.str.builder_len", "pure ZZ; lowered as ZZ fn"),
+    ("std.str.finish", "pure ZZ; lowered as ZZ fn"),
+    ("std.str.join_parts", "pure ZZ; lowered as ZZ fn"),
+    ("std.str.push_part", "pure ZZ; lowered as ZZ fn"),
+    ("str.builder", "pure ZZ alias"),
+    ("str.builder_len", "pure ZZ alias"),
+    ("str.finish", "pure ZZ alias"),
+    ("str.join_parts", "pure ZZ alias"),
+    ("str.push_part", "pure ZZ alias"),
+    // zz/time
+    ("std.time.add_days", "pure ZZ; lowered as ZZ fn"),
+    ("std.time.civil_from_days", "pure ZZ; lowered as ZZ fn"),
+    ("std.time.date_valid", "pure ZZ; lowered as ZZ fn"),
+    ("std.time.days_from_civil", "pure ZZ; lowered as ZZ fn"),
+    ("std.time.days_in_month", "pure ZZ; lowered as ZZ fn"),
+    ("std.time.diff_days", "pure ZZ; lowered as ZZ fn"),
+    ("std.time.epoch_fallback", "pure ZZ; lowered as ZZ fn"),
+    ("std.time.format_rfc3339", "pure ZZ; lowered as ZZ fn"),
+    ("std.time.from_epoch_days", "pure ZZ; lowered as ZZ fn"),
+    ("std.time.is_leap", "pure ZZ; lowered as ZZ fn"),
+    ("std.time.make_date", "pure ZZ; lowered as ZZ fn"),
+    ("std.time.pad2", "pure ZZ; lowered as ZZ fn"),
+    ("std.time.parse_rfc3339", "pure ZZ; lowered as ZZ fn"),
+    ("std.time.to_epoch_days", "pure ZZ; lowered as ZZ fn"),
+    ("time.add_days", "pure ZZ alias"),
+    ("time.civil_from_days", "pure ZZ alias"),
+    ("time.date_valid", "pure ZZ alias"),
+    ("time.days_from_civil", "pure ZZ alias"),
+    ("time.days_in_month", "pure ZZ alias"),
+    ("time.diff_days", "pure ZZ alias"),
+    ("time.epoch_fallback", "pure ZZ alias"),
+    ("time.format_rfc3339", "pure ZZ alias"),
+    ("time.from_epoch_days", "pure ZZ alias"),
+    ("time.is_leap", "pure ZZ alias"),
+    ("time.make_date", "pure ZZ alias"),
+    ("time.pad2", "pure ZZ alias"),
+    ("time.parse_rfc3339", "pure ZZ alias"),
+    ("time.to_epoch_days", "pure ZZ alias"),
     // Pure-ZZ color helpers — compiled from zz/colors/mod.zz, same deal.
     ("std.colors.black", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.red", "pure ZZ; lowered as ZZ fn"),
@@ -1398,4 +1562,95 @@ fn borrow_args_skip_clone_for_pure_readers() {
     );
     let (_, out) = native_run(src);
     assert_eq!(out, "5\n");
+}
+
+/// Read `DT_NEEDED` entries via readelf (Linux-only; other platforms skip).
+#[cfg(target_os = "linux")]
+fn needed_libs(bin: &std::path::Path) -> Vec<String> {
+    let out = std::process::Command::new("readelf")
+        .arg("-d")
+        .arg(bin)
+        .output()
+        .expect("readelf -d");
+    assert!(out.status.success(), "readelf failed");
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .filter_map(|l| {
+            l.find("Shared library: [").map(|i| {
+                l[i + "Shared library: [".len()..]
+                    .trim_end_matches(']')
+                    .to_string()
+            })
+        })
+        .collect()
+}
+
+/// Build `src` to a temp binary and return its path (caller cleans up).
+fn build_temp_bin(src: &str) -> (PathBuf, PathBuf) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let (pruned, reach) = build_reachable(src);
+    let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tmp = std::env::temp_dir().join(format!("zz-link-{}-{uniq}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let bin = tmp.join("zz_out");
+    build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
+        .unwrap_or_else(|e| panic!("build failed: {e}"));
+    (tmp, bin)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn plain_program_links_no_curl_no_sqlite() {
+    // Regression: every binary used to carry `DT_NEEDED libsqlite3`
+    // (single-TU archive defeated `--as-needed`). Plain programs must
+    // link neither heavy lib.
+    let (tmp, bin) = build_temp_bin("func main() {\n    println(\"hi\")\n}\n");
+    let needed = needed_libs(&bin);
+    assert!(
+        !needed.iter().any(|l| l.contains("sqlite3")),
+        "plain program must not need sqlite3, got: {needed:?}"
+    );
+    assert!(
+        !needed.iter().any(|l| l.contains("curl")),
+        "plain program must not need curl, got: {needed:?}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn fetch_program_links_curl_not_sqlite() {
+    // Refused loopback port: exercises link + arg plumbing with no network.
+    let src = "import std.http\nfunc main() {\n    match http.fetch(\"http://127.0.0.1:9/nope\") {\n        .ok(_r) => println(\"unexpected\"),\n        .err(_e) => println(\"fetch_err_ok\"),\n    }\n}\n";
+    let (tmp, bin) = build_temp_bin(src);
+    let needed = needed_libs(&bin);
+    assert!(
+        needed.iter().any(|l| l.contains("curl")),
+        "fetch program must need curl, got: {needed:?}"
+    );
+    assert!(
+        !needed.iter().any(|l| l.contains("sqlite3")),
+        "fetch program must not need sqlite3, got: {needed:?}"
+    );
+    let (_, out) = compile::run_binary(&bin, &[]).unwrap();
+    assert_eq!(out, "fetch_err_ok\n");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sql_program_links_sqlite_not_curl() {
+    let src = "import std.sqlz\nmydb := sqlz.open(\":memory:\")\nmydb.exec(\"\"\"CREATE TABLE t (x INTEGER)\"\"\")\nprint(\"db_ok\")\n";
+    let (tmp, bin) = build_temp_bin(src);
+    let needed = needed_libs(&bin);
+    assert!(
+        needed.iter().any(|l| l.contains("sqlite3")),
+        "sql program must need sqlite3, got: {needed:?}"
+    );
+    assert!(
+        !needed.iter().any(|l| l.contains("curl")),
+        "sql program must not need curl, got: {needed:?}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
 }
