@@ -1393,3 +1393,94 @@ fn borrow_args_skip_clone_for_pure_readers() {
     let (_, out) = native_run(src);
     assert_eq!(out, "5\n");
 }
+
+/// Read `DT_NEEDED` entries via readelf (Linux-only; other platforms skip).
+#[cfg(target_os = "linux")]
+fn needed_libs(bin: &std::path::Path) -> Vec<String> {
+    let out = std::process::Command::new("readelf")
+        .arg("-d")
+        .arg(bin)
+        .output()
+        .expect("readelf -d");
+    assert!(out.status.success(), "readelf failed");
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .filter_map(|l| {
+            l.find("Shared library: [").map(|i| {
+                l[i + "Shared library: [".len()..]
+                    .trim_end_matches(']')
+                    .to_string()
+            })
+        })
+        .collect()
+}
+
+/// Build `src` to a temp binary and return its path (caller cleans up).
+fn build_temp_bin(src: &str) -> (PathBuf, PathBuf) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let (pruned, reach) = build_reachable(src);
+    let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tmp = std::env::temp_dir().join(format!("zz-link-{}-{uniq}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let bin = tmp.join("zz_out");
+    build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
+        .unwrap_or_else(|e| panic!("build failed: {e}"));
+    (tmp, bin)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn plain_program_links_no_curl_no_sqlite() {
+    // Regression: every binary used to carry `DT_NEEDED libsqlite3`
+    // (single-TU archive defeated `--as-needed`). Plain programs must
+    // link neither heavy lib.
+    let (tmp, bin) = build_temp_bin("func main() {\n    println(\"hi\")\n}\n");
+    let needed = needed_libs(&bin);
+    assert!(
+        !needed.iter().any(|l| l.contains("sqlite3")),
+        "plain program must not need sqlite3, got: {needed:?}"
+    );
+    assert!(
+        !needed.iter().any(|l| l.contains("curl")),
+        "plain program must not need curl, got: {needed:?}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn fetch_program_links_curl_not_sqlite() {
+    // Refused loopback port: exercises link + arg plumbing with no network.
+    let src = "import std.http\nfunc main() {\n    match http.fetch(\"http://127.0.0.1:9/nope\") {\n        .ok(_r) => println(\"unexpected\"),\n        .err(_e) => println(\"fetch_err_ok\"),\n    }\n}\n";
+    let (tmp, bin) = build_temp_bin(src);
+    let needed = needed_libs(&bin);
+    assert!(
+        needed.iter().any(|l| l.contains("curl")),
+        "fetch program must need curl, got: {needed:?}"
+    );
+    assert!(
+        !needed.iter().any(|l| l.contains("sqlite3")),
+        "fetch program must not need sqlite3, got: {needed:?}"
+    );
+    let (_, out) = compile::run_binary(&bin, &[]).unwrap();
+    assert_eq!(out, "fetch_err_ok\n");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sql_program_links_sqlite_not_curl() {
+    let src = "import std.sqlz\nmydb := sqlz.open(\":memory:\")\nmydb.exec(\"\"\"CREATE TABLE t (x INTEGER)\"\"\")\nprint(\"db_ok\")\n";
+    let (tmp, bin) = build_temp_bin(src);
+    let needed = needed_libs(&bin);
+    assert!(
+        needed.iter().any(|l| l.contains("sqlite3")),
+        "sql program must need sqlite3, got: {needed:?}"
+    );
+    assert!(
+        !needed.iter().any(|l| l.contains("curl")),
+        "sql program must not need curl, got: {needed:?}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}

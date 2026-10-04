@@ -996,24 +996,41 @@ pub fn build_release(
         Some(c) => c,
         None => {
             let lowered = zz_codegen::lower_only(&pruned, &reach, &main_key);
+            let mut script_opts = opts.clone();
+            script_opts.curl_link = script_opts.curl_link || lowered.needs_curl;
+            script_opts.sqlite_link = script_opts.sqlite_link || lowered.needs_sqlite;
             let dir = bin_dir_for(path);
-            let _ = zz_codegen::emit_c_plus_script(&lowered.source, &dir, target, &opts);
+            let _ = zz_codegen::emit_c_plus_script(&lowered.source, &dir, target, &script_opts);
             return Err(zz_codegen::BuildError::NoClang.to_string());
         }
     };
-    // Default-static fallback for missing static system libraries: the
-    // single-TU runtime archive needs libcurl.a + libsqlite3.a on every
-    // static link, even for programs that never fetch or query. Probe
-    // once (cached per provider); downgrade to dynamic with a note
-    // instead of failing the default build. Explicit `--static` skips
-    // this (allow_static_downgrade false) and keeps the linker's error.
+    // Seed system-lib needs from reachability before the static-syslibs
+    // probe: with conditional linking, programs that neither fetch nor
+    // query need no static syslibs, so the probe must not downgrade them.
+    // The final `build_native` ORs the same flags again from lowering.
+    opts.curl_link = opts.curl_link || zz_codegen::ffi::needs_curl_link(&reach.natives);
+    opts.sqlite_link = opts.sqlite_link || zz_codegen::ffi::needs_sqlite_link(&reach.natives);
+    // Default-static fallback for missing static system libraries: only
+    // the libraries the program actually needs are probed (cached per
+    // provider + lib set). Downgrade to dynamic with a note instead of
+    // failing the default build. Explicit `--static` skips this
+    // (allow_static_downgrade false) and keeps the linker's error.
     if opts.static_link
         && opts.allow_static_downgrade
-        && !zz_codegen::compile::static_syslibs_available(&clang)
+        && !zz_codegen::compile::static_syslibs_available_for(
+            &clang,
+            opts.curl_link,
+            opts.sqlite_link,
+        )
     {
         opts.static_link = false;
-        static_note =
-            Some("static system libraries (libcurl.a, libsqlite3.a) not found; building dynamic");
+        static_note = if opts.curl_link && opts.sqlite_link {
+            Some("static system libraries (libcurl.a, libsqlite3.a) not found; building dynamic")
+        } else if opts.curl_link {
+            Some("static system library (libcurl.a) not found; building dynamic")
+        } else {
+            Some("static system library (libsqlite3.a) not found; building dynamic")
+        };
     }
     if rel.verbose {
         eprintln!(

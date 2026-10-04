@@ -100,18 +100,29 @@ pub struct Clang {
 }
 
 /// Probe whether fully-static linking works with `clang` (static
-/// `libcurl`/`libsqlite3` present). The precompiled runtime archive is a
-/// single TU, so every static link needs both system libraries even when
-/// the program never fetches or opens a database. Used to downgrade a
-/// *default* static build to dynamic with a note instead of failing it
-/// on machines without the static system libraries. Results are cached
-/// per provider; a probe that cannot run fails open (proceed static —
-/// the real link surfaces any problem).
+/// `libcurl`/`libsqlite3` present). Only the libraries the program
+/// actually needs are probed: with conditional linking, programs that
+/// neither fetch nor query need no static syslibs at all. Used to
+/// downgrade a *default* static build to dynamic with a note instead of
+/// failing it on machines without the static system libraries. Results
+/// are cached per provider + lib set; a probe that cannot run fails open
+/// (proceed static — the real link surfaces any problem).
 pub fn static_syslibs_available(clang: &Clang) -> bool {
+    static_syslibs_available_for(clang, true, true)
+}
+
+/// [`static_syslibs_available`] scoped to the program's actual needs.
+/// `need_curl`/`need_sqlite` come from lowering (`curl_link`/
+/// `sqlite_link`); when neither is needed the probe trivially passes.
+pub fn static_syslibs_available_for(clang: &Clang, need_curl: bool, need_sqlite: bool) -> bool {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-    let key = format!("{}:{}", clang.path.display(), clang.zig);
+    let key = format!(
+        "{}:{}:{need_curl}:{need_sqlite}",
+        clang.path.display(),
+        clang.zig
+    );
     if let Some(hit) = CACHE
         .get_or_init(Mutex::default)
         .lock()
@@ -120,14 +131,17 @@ pub fn static_syslibs_available(clang: &Clang) -> bool {
     {
         return hit;
     }
-    let ok = static_syslibs_probe(clang);
+    let ok = static_syslibs_probe(clang, need_curl, need_sqlite);
     if let Some(mut m) = CACHE.get().and_then(|c| c.lock().ok()) {
         m.insert(key, ok);
     }
     ok
 }
 
-fn static_syslibs_probe(clang: &Clang) -> bool {
+fn static_syslibs_probe(clang: &Clang, need_curl: bool, need_sqlite: bool) -> bool {
+    if !need_curl && !need_sqlite {
+        return true;
+    }
     let dir = std::env::temp_dir().join(format!("zz-static-probe-{}", std::process::id()));
     if std::fs::create_dir_all(&dir).is_err() {
         return true;
@@ -137,12 +151,16 @@ fn static_syslibs_probe(clang: &Clang) -> bool {
     if clang.zig {
         cmd.arg("cc");
     }
-    // Empty TU + `-static` + both system libs: succeeds only when the
+    // Empty TU + `-static` + needed system libs: succeeds only when the
     // static archives exist in the linker search path.
+    cmd.arg("-static");
+    if need_curl {
+        cmd.arg("-lcurl");
+    }
+    if need_sqlite {
+        cmd.arg("-lsqlite3");
+    }
     let r = cmd
-        .arg("-static")
-        .arg("-lcurl")
-        .arg("-lsqlite3")
         .arg("-o")
         .arg(&out)
         .arg("-x")
@@ -357,6 +375,13 @@ pub struct BuildOptions {
     /// Set automatically alongside `native_rt` when sqlz/pg natives are
     /// reachable (the C dispatcher's weak refs never pull members alone).
     pub pg_link: bool,
+    /// Link libcurl (outbound `http.get/post/fetch` client). Set
+    /// automatically from the lowered program; programs that never fetch
+    /// omit `-lcurl` entirely so no `DT_NEEDED` entry is emitted.
+    pub curl_link: bool,
+    /// Link libsqlite3 (`sqlz`/`db` queries). Set automatically from the
+    /// lowered program; programs that never query omit `-lsqlite3`.
+    pub sqlite_link: bool,
     /// Allow silently downgrading `static_link` to dynamic when static is
     /// impossible (macOS target, or the program needs the Rust native
     /// runtime). Set by the CLI only when static came from the *default*,
@@ -393,6 +418,8 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            curl_link: false,
+            sqlite_link: false,
             allow_static_downgrade: false,
             full_lto: false,
             plugin_artifacts: Vec::new(),
@@ -413,6 +440,8 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            curl_link: false,
+            sqlite_link: false,
             allow_static_downgrade: false,
             full_lto: false,
             plugin_artifacts: Vec::new(),
@@ -433,6 +462,8 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            curl_link: false,
+            sqlite_link: false,
             allow_static_downgrade: false,
             full_lto: false,
             plugin_artifacts: Vec::new(),
@@ -453,6 +484,8 @@ impl BuildOptions {
             pgo: PgoMode::Generate,
             native_rt: false,
             pg_link: false,
+            curl_link: false,
+            sqlite_link: false,
             allow_static_downgrade: false,
             full_lto: false,
             plugin_artifacts: Vec::new(),
@@ -474,6 +507,8 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            curl_link: false,
+            sqlite_link: false,
             allow_static_downgrade: false,
             full_lto: true,
             plugin_artifacts: Vec::new(),
@@ -494,6 +529,8 @@ impl BuildOptions {
             pgo: PgoMode::Use,
             native_rt: false,
             pg_link: false,
+            curl_link: false,
+            sqlite_link: false,
             allow_static_downgrade: false,
             full_lto: true,
             plugin_artifacts: Vec::new(),
@@ -514,6 +551,8 @@ impl BuildOptions {
             pgo: PgoMode::Use,
             native_rt: false,
             pg_link: false,
+            curl_link: false,
+            sqlite_link: false,
             allow_static_downgrade: false,
             full_lto: false,
             plugin_artifacts: Vec::new(),
@@ -544,6 +583,8 @@ impl BuildOptions {
         self.pgo.hash(&mut h);
         self.native_rt.hash(&mut h);
         self.pg_link.hash(&mut h);
+        self.curl_link.hash(&mut h);
+        self.sqlite_link.hash(&mut h);
         self.allow_static_downgrade.hash(&mut h);
         self.full_lto.hash(&mut h);
         // Hash plugin artifact paths so cache invalidates when plugins change.
@@ -794,14 +835,24 @@ pub fn build_with(
     // ~1 MB of constructors at load. Placed after the runtime archive
     // (and every staticlib/plugin) so genuinely-needed refs keep them.
     // libm stays unconditional above (position-independent for shared).
-    // KNOWN WART: libsqlite3 currently survives even with zero SQL refs
-    // (single-TU archive granularity defeats section GC for it; curl
-    // drops fine). Costs ~100-300 KB RSS. True fix = split core.c by
-    // feature so db/fetch live in their own archive members.
-    cmd.arg("-Wl,--as-needed");
-    cmd.arg("-lcurl");
-    cmd.arg("-lsqlite3");
-    cmd.arg("-Wl,--no-as-needed");
+    // Conditional link (fix/link-hygiene): `-lcurl`/`-lsqlite3` are added
+    // only when reachable natives need them (`curl_link`/`sqlite_link`
+    // from lowering). Previously both were unconditional, and the
+    // single-TU runtime archive defeated `--as-needed` for sqlite: the
+    // whole TU's undefined refs (including `sqlite3_*`) were visible at
+    // the `--as-needed` decision point, so `DT_NEEDED libsqlite3` stuck
+    // even when `--gc-sections` later removed every `zz_db_*` section.
+    // Omitting the flag entirely leaves no NEEDED entry and links fine.
+    if opts.curl_link || opts.sqlite_link {
+        cmd.arg("-Wl,--as-needed");
+        if opts.curl_link {
+            cmd.arg("-lcurl");
+        }
+        if opts.sqlite_link {
+            cmd.arg("-lsqlite3");
+        }
+        cmd.arg("-Wl,--no-as-needed");
+    }
 
     let out = cmd.output().map_err(BuildError::Io)?;
     if !out.status.success() {
@@ -860,11 +911,25 @@ pub fn emit_c_plus_script(
         }
     };
 
+    // Conditional system libs: mirror `build_with` so manual builds link
+    // exactly what the real build links (no phantom sqlite/curl NEEDED).
+    let mut syslibs = String::new();
+    if opts.curl_link || opts.sqlite_link {
+        syslibs.push_str(" -Wl,--as-needed");
+        if opts.curl_link {
+            syslibs.push_str(" -lcurl");
+        }
+        if opts.sqlite_link {
+            syslibs.push_str(" -lsqlite3");
+        }
+        syslibs.push_str(" -Wl,--no-as-needed");
+    }
+
     let sh = dir.join("build.sh");
     std::fs::write(
         &sh,
         format!(
-            "#!/bin/sh\n# Generated by `zz build`. Requires clang 18+ (or: replace `clang` with `zig cc -target <triple>`).\nset -e\ncd \"$(dirname \"$0\")\"\nclang {flag_str} -o {target_out} app.c{extra_inputs} -lm -Wl,--as-needed -lcurl -lsqlite3 -Wl,--no-as-needed -DZZ_HAS_SQLITE3\n"
+            "#!/bin/sh\n# Generated by `zz build`. Requires clang 18+ (or: replace `clang` with `zig cc -target <triple>`).\nset -e\ncd \"$(dirname \"$0\")\"\nclang {flag_str} -o {target_out} app.c{extra_inputs} -lm{syslibs} -DZZ_HAS_SQLITE3\n"
         ),
     )?;
     #[cfg(unix)]
@@ -881,7 +946,7 @@ pub fn emit_c_plus_script(
     std::fs::write(
         &bat,
         format!(
-            "@echo off\r\nREM Generated by `zz build`. Requires clang (LLVM) on PATH.\r\ncd /d %~dp0\r\nclang {flag_str} -o {target_out} app.c{extra_inputs} -lm -Wl,--as-needed -lcurl -lsqlite3 -Wl,--no-as-needed -DZZ_HAS_SQLITE3\r\n"
+            "@echo off\r\nREM Generated by `zz build`. Requires clang (LLVM) on PATH.\r\ncd /d %~dp0\r\nclang {flag_str} -o {target_out} app.c{extra_inputs} -lm{syslibs} -DZZ_HAS_SQLITE3\r\n"
         ),
     )?;
     Ok((app_c, sh, bat))

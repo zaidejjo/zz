@@ -91,6 +91,8 @@ pub fn build_native(
     let mut opts = opts;
     opts.native_rt = opts.native_rt || lowered.needs_native_rt;
     opts.pg_link = opts.pg_link || lowered.needs_pg_link;
+    opts.curl_link = opts.curl_link || lowered.needs_curl;
+    opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
     if opts.static_link && opts.native_rt && opts.allow_static_downgrade {
         // Default-static only: the program needs the Rust native runtime,
         // which fully-static binaries cannot link (shared libstd). Fall
@@ -126,6 +128,8 @@ pub fn build_native_with(
     let mut opts = opts;
     opts.native_rt = opts.native_rt || lowered.needs_native_rt;
     opts.pg_link = opts.pg_link || lowered.needs_pg_link;
+    opts.curl_link = opts.curl_link || lowered.needs_curl;
+    opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
     if opts.static_link && opts.native_rt && opts.allow_static_downgrade {
         // Same default-static fallback as `build_native` (see above).
         opts.static_link = false;
