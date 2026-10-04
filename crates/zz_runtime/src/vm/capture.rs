@@ -256,6 +256,8 @@ pub(crate) fn scan_stmt_captured(
             }
         }
         Stmt::Struct { .. } => {}
+        // Aliases bind no runtime names and their targets hold no values.
+        Stmt::TypeAlias { .. } => {}
         Stmt::Impl { methods, .. } => {
             for method in methods {
                 scan_stmt_captured(method, defined, free, nested);

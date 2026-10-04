@@ -278,6 +278,7 @@ fn walk_stmt_for_graph(tp: &TypedProgram, stmt: &Stmt, caller: &str, cg: &mut Ca
         Stmt::Destructure { value, .. } => walk_expr_for_graph(tp, value, caller, cg),
         Stmt::Expr(e) => walk_expr_for_graph(tp, e, caller, cg),
         Stmt::Struct { .. }
+        | Stmt::TypeAlias { .. }
         | Stmt::Import { .. }
         | Stmt::Break { .. }
         | Stmt::Continue { .. }
@@ -660,6 +661,8 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
                     stmts.push(stmt.clone());
                 }
             }
+            // Aliases erase at check time: no code to keep.
+            Stmt::TypeAlias { .. } => {}
             Stmt::Impl {
                 name,
                 generics,

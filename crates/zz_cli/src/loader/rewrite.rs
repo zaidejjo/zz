@@ -119,6 +119,25 @@ impl<'a> Rewriter<'a> {
                     self.rewrite_ty(fty);
                 }
             }
+            Stmt::TypeAlias {
+                name,
+                generics,
+                target,
+                ..
+            } => {
+                let already_qualified = name.len() > 1 && name[0] == self.ns;
+                if self.top.contains(&name.join(".")) && !already_qualified {
+                    name[0] = format!("{}.{}", self.ns, name[0]);
+                }
+                // Generic parameters shadow module names inside the
+                // target (`type Pair[T] = (T, T)` keeps `T` local).
+                self.push_scope();
+                for g in generics {
+                    self.declare(&g.name);
+                }
+                self.rewrite_ty(target);
+                self.pop_scope();
+            }
             Stmt::Impl { name, methods, .. } => {
                 let already_qualified = name.len() > 1 && name[0] == self.ns;
                 if self.top.contains(&name.join(".")) && !already_qualified {

@@ -227,6 +227,27 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
             }
             out.push_str("}]");
         }
+        Stmt::TypeAlias {
+            name,
+            generics,
+            target,
+            ..
+        } => {
+            out.push_str("TypeAlias-kw[");
+            for p in name {
+                out.push_str(p);
+                out.push('.');
+            }
+            out.push('<');
+            for g in generics {
+                out.push_str(&g.name);
+                out.push(',');
+            }
+            out.push('>');
+            out.push('=');
+            fp_ty(target, out);
+            out.push_str("}]");
+        }
         Stmt::Impl {
             name,
             generics,

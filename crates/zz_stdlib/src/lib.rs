@@ -87,6 +87,11 @@ pub const STDLIB_MODULES: &[&str] = &[
     "colors",
     "term",
     "test",
+    "map",
+    "set",
+    "dec",
+    "bytes",
+    "csv",
 ];
 
 /// Resolve a module name to its canonical backing module.

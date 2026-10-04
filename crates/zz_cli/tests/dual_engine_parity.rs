@@ -937,6 +937,9 @@ parity_known_failure!(
 
 // Error fixtures (both must error)
 parity_strict_error!(parity_err_type_mismatch, "type_mismatch.zz");
+parity_strict_error!(parity_err_alias_cycle, "alias_cycle.zz");
+parity_strict_error!(parity_err_alias_dup, "alias_dup.zz");
+parity_strict_error!(parity_err_alias_arity, "alias_arity.zz");
 parity_strict_error!(parity_err_undefined_var, "undefined_var.zz");
 parity_strict_error!(parity_err_arity, "arity.zz");
 parity_strict_error!(parity_err_parse_error, "parse_error.zz");
@@ -955,6 +958,7 @@ parity_strict_error!(parity_err_int_float_cmp, "int_float_cmp.zz");
 
 // --- Match and return_in_loops: fixed by box_scalar_operand + __tail scoping ---
 parity_strict!(parity_syntax_match, "syntax", "match.zz");
+parity_strict!(parity_syntax_match_assign, "syntax", "match_assign.zz");
 parity_strict!(
     parity_syntax_return_in_loops,
     "syntax",
@@ -966,6 +970,8 @@ parity_strict!(parity_syntax_control_flow, "syntax", "control_flow.zz");
 
 // --- Fixed: nested field access boxing ---
 parity_strict!(parity_types_structs, "types", "structs.zz");
+parity_strict!(parity_types_aliases, "types", "aliases.zz");
+parity_strict!(parity_types_alias_import, "types", "alias_import.zz");
 // --- Fixed: nested variant patterns + if-let desugaring ---
 parity_strict!(parity_types_variants, "types", "variants.zz");
 
@@ -983,6 +989,11 @@ parity_strict!(parity_stdlib_math_ops, "stdlib", "math_ops.zz");
 parity_strict!(parity_stdlib_math_consts, "stdlib", "math_consts.zz");
 parity_strict!(parity_stdlib_enumerate_loop, "stdlib", "enumerate_loop.zz");
 parity_strict!(parity_stdlib_path_join, "stdlib", "path_join.zz");
+parity_strict!(parity_stdlib_map_set, "stdlib", "map_set.zz");
+parity_strict!(parity_stdlib_dec_ops, "stdlib", "dec_ops.zz");
+parity_strict!(parity_stdlib_csv_test, "stdlib", "csv_test.zz");
+parity_strict!(parity_stdlib_builders, "stdlib", "builders.zz");
+parity_strict!(parity_stdlib_time_date, "stdlib", "time_date.zz");
 parity_known_failure!(
     parity_stdlib_math_extended,
     "stdlib",

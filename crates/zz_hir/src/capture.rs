@@ -122,6 +122,7 @@ impl<'a> Walk<'a> {
                 self.scopes.pop();
             }
             Stmt::Struct { .. }
+            | Stmt::TypeAlias { .. }
             | Stmt::Import { .. }
             | Stmt::ExternBlock { .. }
             | Stmt::Link { .. } => {}

@@ -117,7 +117,14 @@ fn has_errors(diags: &[zz_frontend::diag::RawDiag]) -> bool {
 #[test]
 fn resolves_basic_types() {
     let src = "x := 42\ns := \"hello\"\nb := true\nf := 3.5\n";
-    let res = build_source(src, HashMap::new(), HashMap::new(), HashMap::new()).unwrap();
+    let res = build_source(
+        src,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    )
+    .unwrap();
     assert!(
         !has_errors(&res.diagnostics),
         "unexpected diags: {:?}",
@@ -159,7 +166,14 @@ fn resolves_basic_types() {
 #[test]
 fn resolves_binary_and_call_types() {
     let src = "a := 1 + 2 * 3\nb := a > 5\n";
-    let res = build_source(src, HashMap::new(), HashMap::new(), HashMap::new()).unwrap();
+    let res = build_source(
+        src,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    )
+    .unwrap();
     let tp = &res.program;
     let mut saw_call_none = false;
     walk_exprs(tp, &mut |te| {
@@ -188,7 +202,14 @@ fn resolves_binary_and_call_types() {
 #[test]
 fn single_node_per_span_map_lookup() {
     let src = "y := 10\ny + 1\n";
-    let res = build_source(src, HashMap::new(), HashMap::new(), HashMap::new()).unwrap();
+    let res = build_source(
+        src,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    )
+    .unwrap();
     let tp = &res.program;
     let mut bin = None;
     walk_exprs(tp, &mut |te| {
@@ -220,7 +241,14 @@ fn dynamic_type_classification() {
 #[test]
 fn struct_and_options_resolve() {
     let src = "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\nq := .some(5)\n";
-    let res = build_source(src, HashMap::new(), HashMap::new(), HashMap::new()).unwrap();
+    let res = build_source(
+        src,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    )
+    .unwrap();
     assert!(
         !has_errors(&res.diagnostics),
         "unexpected diags: {:?}",
@@ -252,7 +280,14 @@ for i in 0..10 {
 }
 fib(5)
 "#;
-    let res = build_source(src, HashMap::new(), HashMap::new(), HashMap::new()).unwrap();
+    let res = build_source(
+        src,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    )
+    .unwrap();
     let tp = &res.program;
     // Count how many nodes got typed.
     let mut typed = 0usize;
@@ -271,7 +306,14 @@ fib(5)
 // ---------------- call-graph & DCE tests ----------------
 
 fn build_with_stdlib(src: &str) -> crate::TypedResult {
-    build_source(src, HashMap::new(), seed_stdlib(), HashMap::new()).unwrap()
+    build_source(
+        src,
+        HashMap::new(),
+        seed_stdlib(),
+        HashMap::new(),
+        HashMap::new(),
+    )
+    .unwrap()
 }
 
 #[test]

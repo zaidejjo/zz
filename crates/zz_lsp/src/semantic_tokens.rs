@@ -161,6 +161,20 @@ fn collect_stmt_tokens(stmt: &Stmt, source: &str, out: &mut Vec<RawToken>) {
                 collect_type_tokens(fty, source, out);
             }
         }
+        Stmt::TypeAlias {
+            name,
+            generics,
+            target,
+            ..
+        } => {
+            // `type` is contextual (lexes as Ident): highlight by span.
+            push_keyword_token(stmt.span(), "type", source, out);
+            push_name_tokens(name, TokenType::Struct, source, out);
+            for g in generics {
+                push_ident_token(&g.name, g.span, TokenType::Type, source, out);
+            }
+            collect_type_tokens(target, source, out);
+        }
         Stmt::Impl { name, methods, .. } => {
             push_keyword_token(stmt.span(), "impl", source, out);
             push_name_tokens(name, TokenType::Struct, source, out);

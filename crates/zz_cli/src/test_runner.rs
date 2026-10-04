@@ -1716,6 +1716,7 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
         std::collections::HashMap::new(),
         loaded.funcs,
         loaded.structs,
+        std::collections::HashMap::new(),
     );
     let types = Arc::new(typed.program.types);
     let structs = typed.program.structs;

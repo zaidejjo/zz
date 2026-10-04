@@ -360,3 +360,65 @@ fn plain_struct_has_no_generics() {
         other => panic!("unexpected: {other:?}"),
     }
 }
+
+#[test]
+fn parses_type_alias() {
+    let p = parse_ok("type Tokens = [Token]");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::TypeAlias {
+            name,
+            generics,
+            target,
+            ..
+        } => {
+            assert_eq!(name, &vec!["Tokens".to_string()]);
+            assert!(generics.is_empty());
+            assert!(
+                matches!(&target.kind, TyKind::Array(t) if matches!(&t.kind, TyKind::Named(n, a) if n == "Token" && a.is_empty()))
+            );
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_generic_type_alias() {
+    let p = parse_ok("type Pair<T> = (T, T)");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::TypeAlias {
+            name,
+            generics,
+            target,
+            ..
+        } => {
+            assert_eq!(name, &vec!["Pair".to_string()]);
+            assert_eq!(
+                generics.iter().map(|g| g.name.clone()).collect::<Vec<_>>(),
+                vec!["T".to_string()]
+            );
+            assert!(matches!(&target.kind, TyKind::Tuple(_)));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn type_alias_needs_equals() {
+    let parsed = zz_frontend::parse("type Tokens [Token]");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("expected `=`")),
+        "expected `=` error, got {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
+fn type_stays_identifier_elsewhere() {
+    // `type` is contextual: field access, calls, and plain variables
+    // named `type` keep parsing as identifiers.
+    let p = parse_ok("x := json.type(j)\ntype := 1\nprintln(type)");
+    assert_eq!(p.stmts.len(), 3);
+}

@@ -102,6 +102,8 @@ impl Interp {
                 );
                 Ok(Flow::Value(Value::Unit))
             }
+            // Aliases erase at check time: nothing to register at runtime.
+            Stmt::TypeAlias { .. } => Ok(Flow::Value(Value::Unit)),
             Stmt::Impl { name, methods, .. } => {
                 let type_name = name.join(".");
                 for method in methods {

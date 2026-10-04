@@ -1181,7 +1181,13 @@ fn typo_suggestion_variable() {
         "parse errors: {:?}",
         parsed.errors
     );
-    let r = check_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
+    let r = check_program(
+        &parsed.program,
+        HashMap::new(),
+        funcs,
+        HashMap::new(),
+        HashMap::new(),
+    );
     let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
     let msgs: Vec<_> = r.errors.iter().map(|e| e.message.as_str()).collect();
     assert!(
@@ -1272,6 +1278,7 @@ fn print_bare_function_is_call_hint() {
         HashMap::new(),
         print_test_funcs(),
         HashMap::new(),
+        HashMap::new(),
     );
     let msgs: Vec<_> = r.errors.iter().map(|e| e.message.as_str()).collect();
     assert!(
@@ -1298,6 +1305,7 @@ fn typo_suggestion_dotted_path() {
         &parsed.program,
         HashMap::new(),
         print_test_funcs(),
+        HashMap::new(),
         HashMap::new(),
     );
     let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();

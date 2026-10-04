@@ -170,6 +170,18 @@ pub enum Stmt {
         span: Span,
         pub_: bool,
     },
+    /// `type Tokens = [Token]` — a named type alias. Generic aliases
+    /// take plain parameters (`type Pair[T] = (T, T)`); use sites name
+    /// their arguments (`Pair[int]`), exactly like generic structs.
+    /// Aliases erase at check time (uses resolve to the target type),
+    /// so the runtime, VM, and native codegen never see them.
+    TypeAlias {
+        name: Vec<String>,
+        generics: Vec<Ident>,
+        target: Ty,
+        span: Span,
+        pub_: bool,
+    },
     /// `for x in xs { ... }` or `for k, v in dict { ... }` — iterate an
     /// array, range, or dictionary.
     For {
@@ -232,6 +244,7 @@ impl Stmt {
             | Stmt::Return { span, .. }
             | Stmt::Import { span, .. }
             | Stmt::Struct { span, .. }
+            | Stmt::TypeAlias { span, .. }
             | Stmt::For { span, .. }
             | Stmt::Break { span }
             | Stmt::Continue { span }

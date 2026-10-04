@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-pub use zz_checker::{check_program_typed, FuncSig, SpanKey, StructSig, Type, TOP_SCOPE};
+pub use zz_checker::{check_program_typed, AliasSig, FuncSig, SpanKey, StructSig, Type, TOP_SCOPE};
 pub use zz_frontend::ast::{Block, Expr, Program, Stmt};
 pub use zz_frontend::span::Span;
 
@@ -66,13 +66,19 @@ pub fn build_program(
     initial_bindings: HashMap<String, Type>,
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
+    initial_aliases: HashMap<String, AliasSig>,
 ) -> TypedResult {
     // Expand decorators before checking so the typed program (consumed by
     // codegen) contains the lowered `__inner` + wrapper functions. The
     // checker re-expands idempotently; diagnostics merge in order.
     let (expanded, mut diags) = zz_frontend::decorators::expand_program(program);
-    let (checked, span_types) =
-        check_program_typed(&expanded, initial_bindings, initial_funcs, initial_structs);
+    let (checked, span_types) = check_program_typed(
+        &expanded,
+        initial_bindings,
+        initial_funcs,
+        initial_structs,
+        initial_aliases,
+    );
     // Move (never clone) the result maps: each is freshly built per compile
     // (notably `funcs`, one entry per function) and used exactly once here.
     diags.extend(checked.errors);
@@ -122,6 +128,7 @@ pub fn build_source(
     initial_bindings: HashMap<String, Type>,
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
+    initial_aliases: HashMap<String, AliasSig>,
 ) -> Option<TypedResult> {
     let parsed = zz_frontend::parse(source);
     if !parsed.errors.is_empty() {
@@ -132,6 +139,7 @@ pub fn build_source(
         initial_bindings,
         initial_funcs,
         initial_structs,
+        initial_aliases,
     ))
 }
 

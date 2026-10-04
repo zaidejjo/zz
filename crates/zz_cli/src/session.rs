@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use zz_checker::{check_program_with_consts, FuncSig, StructSig, Type};
+use zz_checker::{check_program_with_consts, AliasSig, FuncSig, StructSig, Type};
 use zz_frontend::diag::{error_at, render_to_string, Files, RawDiag};
 use zz_frontend::parse;
 use zz_runtime::{EvalError, Interp, Value};
@@ -36,6 +36,8 @@ pub struct Session {
     funcs: HashMap<String, FuncSig>,
     /// Struct definitions from previous snippets (checker seed).
     structs: HashMap<String, StructSig>,
+    /// Type alias definitions from previous snippets (checker seed).
+    aliases: HashMap<String, AliasSig>,
     files: Files,
     file_id: usize,
     name: String,
@@ -87,6 +89,7 @@ impl Session {
             consts: HashMap::new(),
             funcs,
             structs: HashMap::new(),
+            aliases: HashMap::new(),
             files,
             file_id,
             name,
@@ -119,6 +122,12 @@ impl Session {
     #[allow(dead_code)]
     pub fn structs(&self) -> &std::collections::HashMap<String, StructSig> {
         &self.structs
+    }
+
+    /// Get all type alias definitions.
+    #[allow(dead_code)]
+    pub fn aliases(&self) -> &std::collections::HashMap<String, AliasSig> {
+        &self.aliases
     }
 
     /// Get the runtime environment reference (for completion queries).
@@ -263,6 +272,7 @@ impl Session {
             self.bindings.clone(),
             self.funcs.clone(),
             self.structs.clone(),
+            self.aliases.clone(),
             self.consts.clone(),
         );
         let has_errors = checked
@@ -294,6 +304,7 @@ impl Session {
                 );
                 self.funcs.extend(checked.funcs);
                 self.structs.extend(checked.structs);
+                self.aliases.extend(checked.aliases);
                 EvalOutput {
                     output: display_value(&v),
                     errors: None,

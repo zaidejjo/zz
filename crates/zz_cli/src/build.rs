@@ -853,7 +853,13 @@ fn typed_program_for(
         span: merged_span,
     };
 
-    let res = zz_hir::build_program(&merged, HashMap::new(), loaded.funcs, loaded.structs);
+    let res = zz_hir::build_program(
+        &merged,
+        HashMap::new(),
+        loaded.funcs,
+        loaded.structs,
+        HashMap::new(),
+    );
     if !res.diagnostics.is_empty() {
         for d in &res.diagnostics {
             if d.severity == zz_frontend::diag::Severity::Error {

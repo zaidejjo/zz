@@ -1659,6 +1659,8 @@ impl Compiler {
                 });
                 StmtValue::Discard
             }
+            // Aliases erase at check time: no ops to emit.
+            Stmt::TypeAlias { .. } => StmtValue::Discard,
             Stmt::Impl { name, methods, .. } => {
                 let type_name = name.join(".");
                 for method in methods {

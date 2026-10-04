@@ -241,7 +241,11 @@ fn count_stmt_refs(s: &Stmt, name: &str) -> usize {
         }
         Stmt::Return { value, .. } => value.as_ref().map_or(0, |v| count_refs(v, name)),
         Stmt::Expr(e) => count_refs(e, name),
-        Stmt::Func { .. } | Stmt::Struct { .. } | Stmt::Impl { .. } | Stmt::Import { .. } => 0,
+        Stmt::Func { .. }
+        | Stmt::Struct { .. }
+        | Stmt::TypeAlias { .. }
+        | Stmt::Impl { .. }
+        | Stmt::Import { .. } => 0,
         Stmt::For { iter, body, .. } => count_refs(iter, name) + count_block_refs(body, name),
         Stmt::Break { .. } | Stmt::Continue { .. } => 0,
         Stmt::Defer { expr, .. } => count_refs(expr, name),

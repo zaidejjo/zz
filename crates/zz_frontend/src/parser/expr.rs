@@ -1,6 +1,6 @@
 //! Expression parsing.
 
-use crate::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, UnOp};
+use crate::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, Stmt, UnOp};
 use crate::diag::error_at;
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
@@ -1246,24 +1246,33 @@ impl<'a> Parser<'a> {
             if !self.eat(TokenKind::Arrow) {
                 self.error_here("expected `=>` after match pattern");
             }
-            // A bare `return` reads naturally as an arm body but is a
-            // statement, not an expression. Recover by wrapping the
-            // single statement in a block — identical AST to the braced
-            // form, so the checker and both runtimes need no changes.
+            // Arm bodies accept any statement (`y = v`, `x := 1`,
+            // `return`, `defer f()`) as well as expressions. A bare
+            // `return` reads naturally as an arm body but is a
+            // statement, not an expression — and so is assignment
+            // (`whole = v`), which previously died with a confusing
+            // "expected `,` or `}` after match arm". Recover by
+            // wrapping the single statement in a block — identical AST
+            // to the braced form, so the checker and both runtimes
+            // need no changes.
             // (`break`/`continue` are already expressions via
             // `parse_primary`, with diverge handling in `check_match` —
-            // they must keep parsing as expressions, not blocks.)
+            // they must keep parsing as expressions, not blocks, so
+            // convert the statement forms back.)
             // Anything else parses as an expression as before.
             let start_span = pat.span();
-            let body = if self.peek_kind() == TokenKind::Return {
-                let stmt = self.parse_stmt();
-                let span = start_span.join(stmt.span());
-                Expr::Block(Block {
-                    stmts: vec![stmt],
-                    span,
-                })
-            } else {
-                self.parse_expr()
+            let stmt = self.parse_stmt();
+            let body = match stmt {
+                Stmt::Expr(e) => e,
+                Stmt::Break { span } => Expr::Break { span },
+                Stmt::Continue { span } => Expr::Continue { span },
+                other => {
+                    let span = start_span.join(other.span());
+                    Expr::Block(Block {
+                        stmts: vec![other],
+                        span,
+                    })
+                }
             };
             let end_span = body.span();
             let span = start_span.join(end_span);
