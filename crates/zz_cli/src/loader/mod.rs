@@ -91,6 +91,18 @@ struct Loader {
     funcs: HashMap<String, FuncSig>,
     bindings: HashMap<String, Type>,
     structs: HashMap<String, StructSig>,
+    /// Keys currently owned by the seed maps above (stdlib + plugin + prior
+    /// modules' pubs). Lets each module's seed maps MOVE into the checker
+    /// and come back via key-set restore instead of O(seed) clones per
+    /// module (quadratic → linear across modules). Key maintenance is O(new
+    /// pubs) total; values are never cloned on the seed path.
+    seed_func_keys: HashSet<String>,
+    seed_struct_keys: HashSet<String>,
+    /// Whether the seed tables have been contributed to `all_*` yet.
+    /// `all_*` must contain the seeds (stdlib!) exactly once: the first
+    /// succeeding module contributes them (prior modules all errored, so
+    /// seeds are still just stdlib/plugins). One O(seed) clone total.
+    contributed_seeds: bool,
     /// All items (pub + private) for the entry file / runtime.
     all_funcs: HashMap<String, FuncSig>,
     all_bindings: HashMap<String, Type>,
@@ -135,6 +147,8 @@ pub fn load_program_with_plugins(
             main_path.display()
         )
     })?;
+    let std_funcs = stdlib_funcs();
+    let seed_func_keys = std_funcs.keys().cloned().collect();
     let mut loader = Loader {
         sources: HashMap::new(),
         programs: HashMap::new(),
@@ -142,9 +156,12 @@ pub fn load_program_with_plugins(
         visiting: HashSet::new(),
         done: HashSet::new(),
         errors: Vec::new(),
-        funcs: stdlib_funcs(),
+        funcs: std_funcs,
         bindings: HashMap::new(),
         structs: HashMap::new(),
+        seed_func_keys,
+        seed_struct_keys: HashSet::new(),
+        contributed_seeds: false,
         all_funcs: HashMap::new(),
         all_bindings: HashMap::new(),
         all_structs: HashMap::new(),
@@ -159,6 +176,7 @@ pub fn load_program_with_plugins(
     // Merge plugin manifest function signatures into the checker's function table.
     for (name, sig) in plugin_funcs {
         loader.funcs.insert(name.clone(), sig.clone());
+        loader.seed_func_keys.insert(name.clone());
     }
     loader.load_file(main_path, None)?;
     Ok(loader.finish())
@@ -1158,16 +1176,42 @@ impl Loader {
                 }
             }
 
-            let checked = check_program(
+            // Move (never clone) the seed maps into the checker: it stores
+            // them in its tables untouched (seed entries are only read;
+            // module items insert alongside) and they come back below via
+            // key-set restore. Per-module seed cost drops from O(seed)
+            // clones to zero (quadratic to linear across modules).
+            // Bindings seeds stay cloned: the checker drops its seed env
+            // (only new bindings are returned), so they are unrecoverable;
+            // top-level bindings are rare, so the term is noise.
+            let mut checked = check_program(
                 &program,
                 self.bindings.clone(),
-                self.funcs.clone(),
-                self.structs.clone(),
+                std::mem::take(&mut self.funcs),
+                std::mem::take(&mut self.structs),
             );
             let has_errors = checked
                 .errors
                 .iter()
                 .any(|e| e.severity == zz_frontend::diag::Severity::Error);
+            // Restore seeds BEFORE error enrichment (it reads the seeds).
+            // Each checked table splits into seed-owned entries (keys known
+            // before the check — move back untouched) and module-owned
+            // entries. On error the module contributes nothing, exactly as
+            // before (seeds were never mutated: registration is insert-only
+            // under namespace-qualified keys).
+            let (seeded_funcs, own_funcs): (HashMap<String, FuncSig>, HashMap<String, FuncSig>) =
+                std::mem::take(&mut checked.funcs)
+                    .into_iter()
+                    .partition(|(k, _)| self.seed_func_keys.contains(k));
+            let (seeded_structs, own_structs): (
+                HashMap<String, StructSig>,
+                HashMap<String, StructSig>,
+            ) = std::mem::take(&mut checked.structs)
+                .into_iter()
+                .partition(|(k, _)| self.seed_struct_keys.contains(k));
+            self.funcs = seeded_funcs;
+            self.structs = seeded_structs;
             let mut diags = checked.errors;
             if has_errors {
                 // Upgrade generic "undefined variable / unknown struct / no
@@ -1209,13 +1253,33 @@ impl Loader {
                     });
                 }
                 // Only propagate pub items to the cross-module seed.
-                self.bindings.extend(checked.pub_bindings.clone());
-                self.funcs.extend(checked.pub_funcs.clone());
-                self.structs.extend(checked.pub_structs.clone());
+                // Resolved pub versions move over the seeds (was `.clone()`);
+                // key sets grow by exactly the new pubs (O(pubs) total).
+                self.seed_func_keys
+                    .extend(checked.pub_funcs.keys().cloned());
+                self.seed_struct_keys
+                    .extend(checked.pub_structs.keys().cloned());
                 // Track all items for the entry file / runtime.
+                // Seeds are contributed here once (first success only —
+                // prior modules all errored, so seeds are still just
+                // stdlib/plugins): one O(seed) clone total instead of one
+                // per module. Runs BEFORE pubs extend the seeds below.
+                if !self.contributed_seeds {
+                    self.contributed_seeds = true;
+                    self.all_funcs
+                        .extend(self.funcs.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    self.all_structs
+                        .extend(self.structs.iter().map(|(k, v)| (k.clone(), v.clone())));
+                }
+                self.bindings.extend(checked.pub_bindings);
+                self.funcs.extend(checked.pub_funcs);
+                self.structs.extend(checked.pub_structs);
+                // `own_*` (module pubs + privates) move into `all_*` after
+                // the seeds, so overlapping keys overwrite with the same
+                // (unresolved) values as the old `checked.funcs` move.
                 self.all_bindings.extend(checked.bindings);
-                self.all_funcs.extend(checked.funcs);
-                self.all_structs.extend(checked.structs);
+                self.all_funcs.extend(own_funcs);
+                self.all_structs.extend(own_structs);
 
                 // Handle `pub import` re-exports: for each `pub import ns` in
                 // this module, copy the re-exported namespace's pub functions
