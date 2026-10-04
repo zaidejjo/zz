@@ -883,6 +883,27 @@ zz_value zz_match_some(zz_value v) {
     if (v.tag == ZZ_OPTION_SOME && v.payload) return zz_clone(*v.payload);
     return zz_unit();
 }
+
+// User-enum tag test for generated `match` guards: true only for boxed
+// objects whose qualified type name matches exactly (`Token.IntLit`).
+// Everything else (scalars, options, results, other objects) is false.
+int zz_enum_is(const zz_value *v, const char *qualified) {
+    if (!v || !qualified || v->tag != ZZ_OBJECT || !v->obj || !v->obj->type_name) return 0;
+    return strcmp(v->obj->type_name, qualified) == 0;
+}
+
+// Display shape test for user-enum variant values: a dotted type name
+// with no fields (unit variant) or exactly one `value` field (payload
+// variant). Mirrors the VM's Display rule so `println` agrees on both
+// engines. (A single-field-`value` struct shares the payload shape and
+// prints in constructor form — cosmetic only.)
+int zz_object_is_enum_shape(const zz_object *o) {
+    if (!o || !o->type_name || !strchr(o->type_name, '.')) return 0;
+    if (o->len == 0) return 1;
+    if (o->len != 1) return 0;
+    const zz_value *fname = &o->fields[0];
+    return fname->tag == ZZ_STR && fname->s && strcmp(zz_str_cptr(fname->s), "value") == 0;
+}
 zz_value zz_range_build(zz_value start, zz_value end) {
     (void)end;
     // Represent a range inline; used in `for`. Return an int start marker

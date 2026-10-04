@@ -216,6 +216,38 @@ impl<'a> FmtCtx<'a> {
                 self.write_str(" = ");
                 self.fmt_ty(target, source);
             }
+            Stmt::Enum {
+                name,
+                variants,
+                pub_,
+                ..
+            } => {
+                self.write_indent();
+                if *pub_ {
+                    self.write_str("pub ");
+                }
+                self.write_str("enum ");
+                self.write_str(&name.join("."));
+                self.write_str(" {");
+                if variants.is_empty() {
+                    self.write_str("}");
+                } else {
+                    self.write_line();
+                    for (vname, payload) in variants {
+                        self.write_indent();
+                        self.write_str(&vname.name);
+                        if let Some(pty) = payload {
+                            self.write_str("(");
+                            self.fmt_ty(pty, source);
+                            self.write_str(")");
+                        }
+                        self.write_str(",");
+                        self.write_line();
+                    }
+                    self.write_indent();
+                    self.write_str("}");
+                }
+            }
             Stmt::Decl {
                 ty,
                 name,

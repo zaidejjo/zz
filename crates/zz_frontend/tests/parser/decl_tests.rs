@@ -422,3 +422,76 @@ fn type_stays_identifier_elsewhere() {
     let p = parse_ok("x := json.type(j)\ntype := 1\nprintln(type)");
     assert_eq!(p.stmts.len(), 3);
 }
+
+#[test]
+fn parses_enum() {
+    let p = parse_ok("enum Token { Eof, IntLit(int) }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Enum { name, variants, .. } => {
+            assert_eq!(name, &vec!["Token".to_string()]);
+            assert_eq!(variants.len(), 2);
+            assert_eq!(variants[0].0.name, "Eof");
+            assert!(variants[0].1.is_none());
+            assert_eq!(variants[1].0.name, "IntLit");
+            assert!(variants[1].1.is_some());
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_multiline_enum() {
+    let p = parse_ok("enum Color {\n    Red,\n    Green,\n    Custom(str),\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Enum { variants, .. } => {
+            assert_eq!(variants.len(), 3);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn duplicate_enum_variant_errors() {
+    let parsed = zz_frontend::parse("enum Token { Eof, Eof }");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("duplicate variant")),
+        "expected duplicate variant error, got {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
+fn empty_enum_errors() {
+    let parsed = zz_frontend::parse("enum Token { }");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("at least one variant")),
+        "expected empty-enum error, got {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
+fn generic_enum_errors() {
+    let parsed = zz_frontend::parse("enum Box<T> { V(T) }");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("generic enums")),
+        "expected generic-enum error, got {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
+fn enum_stays_identifier_elsewhere() {
+    // `enum` is contextual: plain variables named `enum` keep working.
+    let p = parse_ok("enum := 1\nprintln(enum)");
+    assert_eq!(p.stmts.len(), 2);
+}

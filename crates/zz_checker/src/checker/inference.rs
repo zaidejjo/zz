@@ -195,6 +195,28 @@ impl Checker {
                             self.used_names.insert(name.clone());
                         }
                         self.expand_alias(&cname, args, generics, ty.span)
+                    } else if self.enums.contains_key(name)
+                        || self
+                            .import_aliases
+                            .get(name)
+                            .is_some_and(|q| self.enums.contains_key(q))
+                    {
+                        // User enums name their type directly (`t: Token`).
+                        // V1 enums take no type arguments.
+                        let cname = self.canonical_enum_name(name);
+                        if cname != *name {
+                            self.used_names.insert(name.clone());
+                        }
+                        if !args.is_empty() {
+                            self.errors.push(error_at(
+                                format!(
+                                    "enum `{name}` takes no type arguments but {} given",
+                                    args.len(),
+                                ),
+                                ty.span,
+                            ));
+                        }
+                        Type::Enum(cname)
                     } else if self.structs.contains_key(name) {
                         // Canonicalize selective imports, mirroring
                         // StructInit: `Product` → `product.Product`.

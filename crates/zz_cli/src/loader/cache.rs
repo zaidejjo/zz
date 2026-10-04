@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
-use zz_checker::{AliasSig, FuncSig, StructSig, Type};
+use zz_checker::{AliasSig, EnumSig, FuncSig, StructSig, Type};
 use zz_frontend::diag::RawDiag;
 
 /// What one module contributes on a cache hit: everything `finish()` needs
@@ -46,6 +46,12 @@ pub struct CachedModule<'a> {
     /// Resolved pub aliases (== `CheckResult.pub_aliases`).
     #[serde(borrow)]
     pub pub_aliases: std::borrow::Cow<'a, HashMap<String, AliasSig>>,
+    /// Module's own enums (== `CheckResult.enums`).
+    #[serde(borrow)]
+    pub enums: std::borrow::Cow<'a, HashMap<String, EnumSig>>,
+    /// Resolved pub enums (== `CheckResult.pub_enums`).
+    #[serde(borrow)]
+    pub pub_enums: std::borrow::Cow<'a, HashMap<String, EnumSig>>,
     /// Module's new bindings (== `CheckResult.bindings`).
     #[serde(borrow)]
     pub bindings: std::borrow::Cow<'a, HashMap<String, Type>>,
@@ -63,7 +69,7 @@ fn genesis(plugin_names: &[String]) -> String {
     let mut names = plugin_names.to_vec();
     names.sort();
     format!(
-        "zz-check-cache-v2|cli={}|plugins={}",
+        "zz-check-cache-v3|cli={}|plugins={}",
         env!("CARGO_PKG_VERSION"),
         names.join(","),
     )
@@ -181,6 +187,8 @@ impl<'a> CachedModule<'a> {
             pub_structs: std::borrow::Cow::Owned(self.pub_structs.into_owned()),
             aliases: std::borrow::Cow::Owned(self.aliases.into_owned()),
             pub_aliases: std::borrow::Cow::Owned(self.pub_aliases.into_owned()),
+            enums: std::borrow::Cow::Owned(self.enums.into_owned()),
+            pub_enums: std::borrow::Cow::Owned(self.pub_enums.into_owned()),
             bindings: std::borrow::Cow::Owned(self.bindings.into_owned()),
             pub_bindings: std::borrow::Cow::Owned(self.pub_bindings.into_owned()),
             diags: self.diags,
@@ -265,6 +273,8 @@ mod tests {
                 pub_structs: Cow::Owned(HashMap::new()),
                 aliases: Cow::Owned(HashMap::new()),
                 pub_aliases: Cow::Owned(HashMap::new()),
+                enums: Cow::Owned(HashMap::new()),
+                pub_enums: Cow::Owned(HashMap::new()),
                 bindings: Cow::Owned(HashMap::new()),
                 pub_bindings: Cow::Owned(HashMap::new()),
                 diags: Vec::new(),

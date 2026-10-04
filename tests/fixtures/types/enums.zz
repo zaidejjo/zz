@@ -1,0 +1,61 @@
+// E2E: user enums — declaration, construction, matching, methods,
+// equality, nested payloads.
+enum Token {
+    Eof,
+    IntLit(int),
+    Name(str),
+    Pair((int, int)),
+}
+
+impl Token {
+    func is_eof(self) -> bool {
+        match self {
+            .Eof => true
+            _ => false
+        }
+    }
+    func tag(self) -> str {
+        match self {
+            .Eof => "eof"
+            .IntLit(_) => "int"
+            .Name(_) => "name"
+            .Pair(_) => "pair"
+        }
+    }
+}
+
+func describe(t: Token) -> str {
+    match t {
+        .Eof => "eof"
+        .IntLit(_v) => "int"
+        .Name(_s) => _s
+        .Pair((_a, _b)) => "pair"
+    }
+}
+
+func main() {
+    a := Token.Eof
+    println(a)
+    b := Token.IntLit(42)
+    println(b)
+    println(describe(b))
+    println(describe(Token.Name("hi")))
+    println(describe(Token.Pair((1, 2))))
+    // Equality is structural.
+    println(b == Token.IntLit(42))
+    println(b == a)
+    // Methods on values and inline constructions.
+    println(a.is_eof())
+    println(Token.Eof.is_eof())
+    println(Token.IntLit(1).is_eof())
+    println(b.tag())
+    // Enum in a collection.
+    toks:[Token] = [Token.Eof, Token.IntLit(1)]
+    println(toks[0].is_eof())
+    println(toks[1].tag())
+    // if-let works on enum patterns.
+    if let .IntLit(v) = b {
+        println(v)
+    }
+    println("enums_ok")
+}

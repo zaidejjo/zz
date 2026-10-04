@@ -101,6 +101,36 @@ take plain parameters and name their arguments at use sites
 across modules with `pub type` and import qualified
 (`shapes.Tokens`) or selective (`import shapes(Tokens)`).
 
+### User Enums
+
+```zz
+enum Token {
+    Eof,
+    IntLit(int),
+    Name(str),
+}
+
+t := Token.IntLit(42)   // construction is qualified
+match t {
+    .Eof => "eof",      // patterns name the variant short
+    .IntLit(v) => "int",
+    .Name(s) => s,
+}
+```
+
+Enums erase to qualified objects at runtime, so construction, matching,
+equality, and `impl` methods behave identically on both engines. Matches
+are exhaustiveness-checked (missing variants report, or add a `_` arm).
+Variants hold at most one payload — use a tuple for more
+(`Pair((int, int))`). `enum` is contextual, like `type`. Enums export
+with `pub enum` and chain unit-variant methods inline
+(`Token.Eof.is_eof()`); payload construction can't chain — bind first.
+
+Known V1 limits: no generic enums (use concrete payload types), no
+`impl` dispatch on payload construction chains (bind first), and match
+guards in native builds can't reference payload bindings yet (the VM
+accepts them; guarded matches over plain bindings work everywhere).
+
 ## Functions
 
 ### Basic Function

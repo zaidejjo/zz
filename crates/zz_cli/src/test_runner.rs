@@ -1716,10 +1716,12 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
         std::collections::HashMap::new(),
         loaded.funcs,
         loaded.structs,
-        std::collections::HashMap::new(),
+        loaded.aliases,
+        loaded.enums,
     );
     let types = Arc::new(typed.program.types);
     let structs = typed.program.structs;
+    let enums = typed.program.enums;
 
     let mut interp = Interp::with_natives(natives);
 
@@ -1741,6 +1743,7 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
             &zz_prog.program,
             Arc::new(zz_prog.types.clone()),
             zz_prog.structs.clone(),
+            zz_prog.enums.clone(),
         ) {
             return Err(format!("stdlib init error: {e:?}"));
         }
@@ -1769,7 +1772,7 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
     }
 
     for (i, program) in loaded.programs.iter().enumerate() {
-        if let Err(e) = interp.run_typed(program, types.clone(), structs.clone()) {
+        if let Err(e) = interp.run_typed(program, types.clone(), structs.clone(), enums.clone()) {
             return Err(format!("module error: {e:?}"));
         }
         if i == test.module_index {

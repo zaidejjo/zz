@@ -24,6 +24,7 @@ pub(super) fn run(src: &str) -> Result<Value, String> {
         funcs,
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
     );
     let has_errors = checked
         .errors

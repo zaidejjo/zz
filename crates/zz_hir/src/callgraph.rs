@@ -194,6 +194,11 @@ pub fn build_callgraph(tp: &TypedProgram) -> CallGraph {
             Stmt::Struct { name, .. } => {
                 program_defined.insert(name.join("."));
             }
+            // Enum type names count as program-defined (like structs);
+            // variant construction references them.
+            Stmt::Enum { name, .. } => {
+                program_defined.insert(name.join("."));
+            }
             _ => {}
         }
     }
@@ -279,6 +284,7 @@ fn walk_stmt_for_graph(tp: &TypedProgram, stmt: &Stmt, caller: &str, cg: &mut Ca
         Stmt::Expr(e) => walk_expr_for_graph(tp, e, caller, cg),
         Stmt::Struct { .. }
         | Stmt::TypeAlias { .. }
+        | Stmt::Enum { .. }
         | Stmt::Import { .. }
         | Stmt::Break { .. }
         | Stmt::Continue { .. }
@@ -663,6 +669,12 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
             }
             // Aliases erase at check time: no code to keep.
             Stmt::TypeAlias { .. } => {}
+            // Enums register their variants at runtime (all engines read
+            // the declaration to resolve `Enum.Variant` construction), so
+            // they are always kept — declarations are cheap, one per type.
+            Stmt::Enum { .. } => {
+                stmts.push(stmt.clone());
+            }
             Stmt::Impl {
                 name,
                 generics,
@@ -730,6 +742,7 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
         bindings: tp.bindings.clone(),
         funcs: tp.funcs.clone(),
         structs: tp.structs.clone(),
+        enums: tp.enums.clone(),
         try_converts: tp.try_converts.clone(),
     }
 }

@@ -256,6 +256,9 @@ pub(crate) fn scan_stmt_captured(
             }
         }
         Stmt::Struct { .. } => {}
+        // Enums bind no runtime names and their payload types hold no
+        // values (construction goes through calls, not captures).
+        Stmt::Enum { .. } => {}
         // Aliases bind no runtime names and their targets hold no values.
         Stmt::TypeAlias { .. } => {}
         Stmt::Impl { methods, .. } => {

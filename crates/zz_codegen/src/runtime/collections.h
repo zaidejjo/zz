@@ -213,6 +213,15 @@ zz_value zz_object_get_field(zz_value *obj, const char *name);
 // Release helper for boxed objects (called by the ARC dispatcher).
 void zz_release_object(zz_value *v);
 
+// ---- user enum helpers ------------------------------------------------
+// True when `v` is a boxed object whose qualified type name equals
+// `qualified` (`Token.IntLit`). Used for `.Variant` pattern guards in
+// generated `match` code.
+int zz_enum_is(const zz_value *v, const char *qualified);
+// True for user-enum variant values (unit or single-`value`-payload
+// objects with a dotted type name). See `zz_object_is_enum_shape`.
+int zz_object_is_enum_shape(const struct zz_object *o);
+
 // ---- match extraction helpers ------------------------------------------
 // Returns the payload of a variant, or unit if tag doesn't match.
 zz_value zz_match_ok(zz_value v);

@@ -63,6 +63,11 @@ pub enum Type {
     /// (`Box[int]` from `struct Box[T]`); non-generic structs use `[]`.
     /// Arguments are erased at runtime (values only store the name).
     Struct(String, Vec<Type>),
+    /// A user enum: `Token` from `enum Token { ... }`. V1 enums are
+    /// non-generic, so only the (qualified) name is stored. Values
+    /// erase to `Object`s named `Enum.Variant` at runtime — the type
+    /// itself never appears past checking.
+    Enum(String),
     /// `a..b` — an integer range (used by `for` loops).
     Range(Box<Type>),
     /// Inference variable.
@@ -164,6 +169,7 @@ impl fmt::Display for Type {
                 Ok(())
             }
             Type::Range(t) => write!(f, "{t}.."),
+            Type::Enum(n) => write!(f, "{n}"),
             Type::Var(_) => write!(f, "_"),
             Type::Named(n) => write!(f, "{n}"),
             Type::Error => write!(f, "<error>"),

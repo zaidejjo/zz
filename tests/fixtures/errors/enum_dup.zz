@@ -1,0 +1,12 @@
+// ERROR: duplicate enum definitions must report.
+enum Token {
+    Eof,
+}
+
+enum Token {
+    Eof,
+}
+
+func main() {
+    println("unreachable")
+}

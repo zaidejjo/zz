@@ -182,6 +182,19 @@ pub enum Stmt {
         span: Span,
         pub_: bool,
     },
+    /// `enum Token { IntLit(int), Eof }` — a user-defined tagged union.
+    /// Each variant holds an optional single payload type (any type,
+    /// including tuples for multi-value payloads). V1: no generics
+    /// (rejected by the parser with a hint). Values are constructed
+    /// qualified (`Token.IntLit(1)`), matched by short name
+    /// (`.IntLit(v)`), and erase to qualified `Object` values
+    /// (`Token.IntLit`) so all engines share struct machinery.
+    Enum {
+        name: Vec<String>,
+        variants: Vec<(Ident, Option<Ty>)>,
+        span: Span,
+        pub_: bool,
+    },
     /// `for x in xs { ... }` or `for k, v in dict { ... }` — iterate an
     /// array, range, or dictionary.
     For {
@@ -245,6 +258,7 @@ impl Stmt {
             | Stmt::Import { span, .. }
             | Stmt::Struct { span, .. }
             | Stmt::TypeAlias { span, .. }
+            | Stmt::Enum { span, .. }
             | Stmt::For { span, .. }
             | Stmt::Break { span }
             | Stmt::Continue { span }

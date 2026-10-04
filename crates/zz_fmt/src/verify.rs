@@ -248,6 +248,24 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
             fp_ty(target, out);
             out.push_str("}]");
         }
+        Stmt::Enum { name, variants, .. } => {
+            out.push_str("Enum-kw[");
+            for p in name {
+                out.push_str(p);
+                out.push('.');
+            }
+            out.push('{');
+            for (v, p) in variants {
+                out.push_str(&v.name);
+                out.push('(');
+                if let Some(t) = p {
+                    fp_ty(t, out);
+                }
+                out.push(')');
+                out.push(',');
+            }
+            out.push_str("}]");
+        }
         Stmt::Impl {
             name,
             generics,

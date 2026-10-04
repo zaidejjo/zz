@@ -140,6 +140,7 @@ impl Unifier {
                         .all(|(x, y)| self.eq_resolved(x, y))
             }
             (Type::Opaque(x), Type::Opaque(y)) => x == y,
+            (Type::Enum(x), Type::Enum(y)) => x == y,
             (Type::Tuple(xs), Type::Tuple(ys)) => {
                 xs.len() == ys.len()
                     && xs
@@ -338,6 +339,7 @@ impl Unifier {
             // surviving arm instead (join(Never, T) = T).
             (Type::Never, _) | (_, Type::Never) => Ok(()),
             (Type::Named(a), Type::Named(b)) if a == b => Ok(()),
+            (Type::Enum(a), Type::Enum(b)) if a == b => Ok(()),
             (Type::Struct(a, aa), Type::Struct(b, bb)) if a == b => {
                 if aa.len() != bb.len() {
                     return Err(UnifyError {

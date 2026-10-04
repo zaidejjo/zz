@@ -858,7 +858,8 @@ fn typed_program_for(
         HashMap::new(),
         loaded.funcs,
         loaded.structs,
-        HashMap::new(),
+        loaded.aliases,
+        loaded.enums,
     );
     if !res.diagnostics.is_empty() {
         for d in &res.diagnostics {

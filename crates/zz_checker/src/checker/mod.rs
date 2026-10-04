@@ -2,6 +2,7 @@
 
 pub mod aliases;
 pub mod diagnostics;
+pub mod enums;
 pub mod funcs;
 pub mod http_lint;
 pub mod inference;
@@ -93,6 +94,16 @@ pub struct AliasSig {
     pub generics: Vec<String>,
     pub target: Type,
 }
+/// A registered user enum: variant names and optional payload types
+/// (`enum Token { IntLit(int), Eof }` stores
+/// `[("IntLit", Some(Int)), ("Eof", None)]`). Payloads are resolved at
+/// collection (no generics in V1). Construction (`Token.IntLit(1)`)
+/// and patterns (`.IntLit(v)`) resolve against this table; values
+/// erase to `Object`s at runtime.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EnumSig {
+    pub variants: Vec<(String, Option<Type>)>,
+}
 /// Minimal error-conversion registration (V1, error-only — not a general trait system).
 /// Declared via `impl From { func convert_to_To(self) -> To { ... } }`.
 /// V1 rule: at most one conversion per source type (keeps runtime dispatch sound).
@@ -117,6 +128,8 @@ pub struct CheckResult {
     pub structs: HashMap<String, StructSig>,
     /// Top-level type aliases (`type Tokens = [Token]`), resolved targets.
     pub aliases: HashMap<String, AliasSig>,
+    /// Top-level user enums (`enum Token { ... }`).
+    pub enums: HashMap<String, EnumSig>,
     /// `try` site span → conversion impl span (`None` = identity).
     pub try_resolutions: HashMap<Span, Option<Span>>,
     /// `try` site span → conversion function name (`None` = identity).
@@ -137,6 +150,8 @@ pub struct CheckResult {
     pub pub_structs: HashMap<String, StructSig>,
     /// Only `pub` type aliases (for cross-module export).
     pub pub_aliases: HashMap<String, AliasSig>,
+    /// Only `pub` user enums (for cross-module export).
+    pub pub_enums: HashMap<String, EnumSig>,
 }
 
 /// Type-check a whole program, seeded with bindings/funcs/structs from prior
@@ -148,6 +163,7 @@ pub fn check_program(
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
     initial_aliases: HashMap<String, AliasSig>,
+    initial_enums: HashMap<String, EnumSig>,
 ) -> CheckResult {
     check_program_impl(
         program,
@@ -155,6 +171,7 @@ pub fn check_program(
         initial_funcs,
         initial_structs,
         initial_aliases,
+        initial_enums,
         HashMap::new(),
     )
     .result
@@ -168,6 +185,7 @@ pub fn check_program_with_consts(
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
     initial_aliases: HashMap<String, AliasSig>,
+    initial_enums: HashMap<String, EnumSig>,
     initial_consts: HashMap<String, Span>,
 ) -> CheckResult {
     check_program_impl(
@@ -176,6 +194,7 @@ pub fn check_program_with_consts(
         initial_funcs,
         initial_structs,
         initial_aliases,
+        initial_enums,
         initial_consts,
     )
     .result
@@ -190,6 +209,7 @@ pub fn check_program_typed(
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
     initial_aliases: HashMap<String, AliasSig>,
+    initial_enums: HashMap<String, EnumSig>,
 ) -> (CheckResult, std::collections::HashMap<SpanKey, Type>) {
     let out = check_program_impl(
         program,
@@ -197,6 +217,7 @@ pub fn check_program_typed(
         initial_funcs,
         initial_structs,
         initial_aliases,
+        initial_enums,
         HashMap::new(),
     );
     (out.result, out.span_types)
@@ -210,6 +231,7 @@ fn check_program_impl(
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
     initial_aliases: HashMap<String, AliasSig>,
+    initial_enums: HashMap<String, EnumSig>,
     initial_consts: HashMap<String, Span>,
 ) -> CheckerOutcome {
     // Resolve explicit decorators first: `@dec func f` becomes `f__inner` +
@@ -234,6 +256,7 @@ fn check_program_impl(
         initial_funcs,
         initial_structs,
         initial_aliases,
+        initial_enums,
         initial_consts,
     );
     // Offset fresh-var ids above any `Var(id)` carried in seed signatures
@@ -359,6 +382,64 @@ fn check_program_impl(
         }
     }
     // Convert raw targets now that every struct and alias name is known.
+    // (Moved after enum collection below: alias targets may name enums,
+    // and enum payloads may name aliases — both tables must be complete
+    // before either resolves. Conversion is lazy-safe regardless.)
+    // Pass 1b: register user enums. Payload types resolve against the
+    // struct and alias tables (already collected); alias conversion
+    // runs after so targets may also reference enums.
+    let mut seen_enums = HashMap::new();
+    let mut pub_enums_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for stmt in &program.stmts {
+        if let Stmt::Enum {
+            name,
+            variants,
+            span,
+            pub_,
+        } = stmt
+        {
+            let full_name = name.join(".");
+            if checker.structs.contains_key(&full_name) {
+                checker.errors.push(zz_frontend::diag::error_at(
+                    format!(
+                        "duplicate definition of `{}` (a struct with the same name exists)",
+                        full_name
+                    ),
+                    *span,
+                ));
+            }
+            if checker.alias_asts.contains_key(&full_name) {
+                checker.errors.push(zz_frontend::diag::error_at(
+                    format!(
+                        "duplicate definition of `{}` (a type alias with the same name exists)",
+                        full_name
+                    ),
+                    *span,
+                ));
+            }
+            if let Some(prev) = seen_enums.insert(full_name.clone(), *span) {
+                checker.errors.push(zz_frontend::diag::error_at(
+                    format!("duplicate definition of enum `{}`", full_name),
+                    *span,
+                ));
+                checker.errors.push(zz_frontend::diag::error_at(
+                    "previous definition here",
+                    prev,
+                ));
+            }
+            let mut resolved = Vec::new();
+            for (vname, payload) in variants {
+                let pty = payload.as_ref().map(|t| checker.ast_to_type_inner(t, &[]));
+                resolved.push((vname.name.clone(), pty));
+            }
+            checker
+                .enums
+                .insert(full_name.clone(), EnumSig { variants: resolved });
+            if *pub_ {
+                pub_enums_set.insert(full_name);
+            }
+        }
+    }
     let alias_names: Vec<String> = checker.alias_asts.keys().cloned().collect();
     for alias_name in alias_names {
         checker.convert_alias(&alias_name);
@@ -381,8 +462,13 @@ fn check_program_impl(
         {
             let type_name = name.join(".");
             let is_known_struct = checker.structs.contains_key(&type_name);
+            // `impl` on a known enum is inherent, exactly like structs:
+            // methods land in `funcs[Enum.method]` with historical
+            // last-wins (re-checks of the same program stay idempotent
+            // instead of tripping the extension orphan rule).
+            let is_known_enum = checker.enums.contains_key(&type_name);
             let builtin_key = Checker::builtin_ext_key(&type_name);
-            let is_extension = builtin_key.is_some() || !is_known_struct;
+            let is_extension = builtin_key.is_some() || !(is_known_struct || is_known_enum);
             let type_key = builtin_key.unwrap_or_else(|| type_name.clone());
             // Generic structs need a matching generic impl (`impl Box[T]`);
             // the parameters scope over every method below.
@@ -476,13 +562,18 @@ fn check_program_impl(
                     // Build params, replacing `self` with the receiver type
                     // (builtin mapped, else struct by name — generic structs
                     // keep their parameters as `Named` so calls instantiate
-                    // them from the receiver).
-                    let self_ty = Checker::self_type_for_impl(
-                        &type_name,
-                        &type_key,
-                        &impl_gen_names,
-                        &mut checker.unifier,
-                    );
+                    // them from the receiver). Enums erase to objects but
+                    // keep their identity: `self` is `Type::Enum`.
+                    let self_ty = if checker.enums.contains_key(&type_name) {
+                        Type::Enum(type_name.clone())
+                    } else {
+                        Checker::self_type_for_impl(
+                            &type_name,
+                            &type_key,
+                            &impl_gen_names,
+                            &mut checker.unifier,
+                        )
+                    };
                     let sig_params: Vec<(String, Type)> = params
                         .iter()
                         .enumerate()
@@ -698,6 +789,8 @@ fn check_program_impl(
     checker.pub_names = pub_bindings_set
         .union(&pub_funcs_set)
         .chain(pub_structs_set.iter())
+        .chain(pub_aliases_set.iter())
+        .chain(pub_enums_set.iter())
         .cloned()
         .collect();
 
@@ -798,6 +891,13 @@ fn check_program_impl(
         try_converts.insert(*span, func_name);
     }
 
+    // Enum payloads are resolved concrete at collection (no inference
+    // variables can appear), so `pub` enums export as-is.
+    let pub_enums: HashMap<String, EnumSig> = pub_enums_set
+        .iter()
+        .filter_map(|k| checker.enums.get(k).cloned().map(|v| (k.clone(), v)))
+        .collect();
+
     CheckerOutcome {
         result: CheckResult {
             errors: checker.errors,
@@ -805,6 +905,7 @@ fn check_program_impl(
             funcs: checker.funcs,
             structs: checker.structs,
             aliases: checker.aliases,
+            enums: checker.enums,
             try_resolutions: checker.try_resolutions,
             try_converts,
             link_libs: checker.link_libs,
@@ -813,6 +914,7 @@ fn check_program_impl(
             pub_funcs,
             pub_structs,
             pub_aliases,
+            pub_enums,
         },
         span_types,
     }
@@ -839,6 +941,8 @@ pub(crate) struct Checker {
     /// Alias expansion stack for cycle detection (`type A = B`,
     /// `type B = A` reports instead of recursing forever).
     pub(crate) alias_expanding: Vec<String>,
+    /// User enums (`enum Token { ... }`): exported, resolved payloads.
+    pub(crate) enums: HashMap<String, EnumSig>,
     /// Extension methods (separate table): (TypeName, method) → (sig, def span).
     /// Holds `impl` on builtins and cross-type extensions. Lookup priority:
     /// inherent (`funcs`) → extension (here) → stdlib namespace.
@@ -915,6 +1019,7 @@ impl Checker {
         funcs: HashMap<String, FuncSig>,
         structs: HashMap<String, StructSig>,
         aliases: HashMap<String, AliasSig>,
+        enums: HashMap<String, EnumSig>,
         initial_consts: HashMap<String, Span>,
     ) -> Self {
         let env = vec![initial_bindings];
@@ -926,6 +1031,7 @@ impl Checker {
             aliases,
             alias_asts: HashMap::new(),
             alias_expanding: Vec::new(),
+            enums,
             ext_methods: HashMap::new(),
             convert_impls: Vec::new(),
             try_resolutions: HashMap::new(),
@@ -1069,6 +1175,7 @@ mod span_scope_tests {
         };
         let (res, types) = check_program_typed(
             &merged,
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),

@@ -47,6 +47,7 @@ fn native_run(src: &str) -> (i32, String) {
         funcs,
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
     );
     let tp = res.program;
     let (pruned, reach) = zz_hir::dce(&tp, "main");

@@ -9,7 +9,7 @@ pub mod unify;
 
 pub use checker::{
     check_program, check_program_typed, check_program_with_consts, AliasSig, CheckResult,
-    ConvertImpl, FuncSig, SpanKey, StructSig, TOP_SCOPE,
+    ConvertImpl, EnumSig, FuncSig, SpanKey, StructSig, TOP_SCOPE,
 };
 pub use type_::Type;
 pub use unify::{Unifier, UnifyError};

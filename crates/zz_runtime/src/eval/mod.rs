@@ -29,6 +29,12 @@ pub struct Interp {
     /// writes use `Rc::make_mut` (clones only on actual sharing) while
     /// every spawn/read pays a single atomic inc — or nothing at all.
     pub structs: Arc<HashMap<String, Vec<String>>>,
+    /// User enum variants (`enum Token { ... }` → `Token` → variant
+    /// names with payload presence), same copy-on-write discipline as
+    /// [`Interp::structs`]. Construction (`Token.IntLit(1)`) and pattern
+    /// matching resolve against this table; values themselves are plain
+    /// `Object`s.
+    pub enums: Arc<HashMap<String, Vec<(String, bool)>>>,
     pub args: Vec<String>,
     pub defer_stacks: Vec<Vec<Value>>,
     /// Mutation counter for [`Interp::funcs`], bumped on every insert.
@@ -100,6 +106,7 @@ impl Interp {
             funcs: HashMap::new(),
             natives: Arc::new(HashMap::new()),
             structs: Arc::new(HashMap::new()),
+            enums: Arc::new(HashMap::new()),
             args: Vec::new(),
             defer_stacks: Vec::new(),
             funcs_version: 0,
@@ -117,6 +124,7 @@ impl Interp {
             funcs: HashMap::new(),
             natives: Arc::new(natives),
             structs: Arc::new(HashMap::new()),
+            enums: Arc::new(HashMap::new()),
             args: Vec::new(),
             defer_stacks: Vec::new(),
             funcs_version: 0,
@@ -137,6 +145,7 @@ impl Interp {
             funcs: HashMap::new(),
             natives,
             structs: Arc::new(HashMap::new()),
+            enums: Arc::new(HashMap::new()),
             args: Vec::new(),
             defer_stacks: Vec::new(),
             funcs_version: 0,
@@ -204,6 +213,7 @@ impl Interp {
         program: &Program,
         types: Arc<HashMap<zz_checker::SpanKey, zz_checker::Type>>,
         structs: HashMap<String, zz_checker::StructSig>,
+        enums: HashMap<String, zz_checker::EnumSig>,
     ) -> Result<Value, EvalError> {
         let native_names: Arc<std::collections::HashSet<String>> =
             Arc::new(self.natives.keys().cloned().collect());
@@ -211,6 +221,7 @@ impl Interp {
             program,
             types,
             structs,
+            enums,
             native_names,
         ));
         let mut vm = crate::vm::Vm::new();

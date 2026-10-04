@@ -104,6 +104,19 @@ impl Interp {
             }
             // Aliases erase at check time: nothing to register at runtime.
             Stmt::TypeAlias { .. } => Ok(Flow::Value(Value::Unit)),
+            // Enums register their variant names so qualified
+            // construction (`Token.IntLit(1)`) resolves. Values are
+            // plain `Object`s — no other runtime state needed.
+            Stmt::Enum { name, variants, .. } => {
+                Arc::make_mut(&mut self.enums).insert(
+                    name.join("."),
+                    variants
+                        .iter()
+                        .map(|(n, p)| (n.name.clone(), p.is_some()))
+                        .collect(),
+                );
+                Ok(Flow::Value(Value::Unit))
+            }
             Stmt::Impl { name, methods, .. } => {
                 let type_name = name.join(".");
                 for method in methods {
@@ -609,6 +622,80 @@ impl Interp {
         })
     }
 
+    /// Canonical enum name: a selectively-imported bare name resolves
+    /// to its qualified form (`Token` → `shapes.Token`), mirroring the
+    /// struct miss-only fallback in [`Interp::build_struct_value`].
+    pub(crate) fn canonical_enum_name(&self, name: &str) -> String {
+        if self.enums.contains_key(name) {
+            return name.to_string();
+        }
+        if let Some(qualified) = self.import_aliases.get(name) {
+            if self.enums.contains_key(qualified) {
+                return qualified.clone();
+            }
+        }
+        name.to_string()
+    }
+
+    /// Build an enum variant value (`Token.IntLit(1)` → qualified
+    /// `Object`). The checker guarantees arity; a defensive error
+    /// remains for hand-built ASTs (REPL paths that skip checking).
+    pub(crate) fn eval_enum_construction(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        args: &[Expr],
+        named: &[(String, Expr)],
+        span: Span,
+    ) -> Result<Value, EvalError> {
+        let variants = self.enums.get(enum_name).cloned().unwrap_or_default();
+        let has_payload = match variants.iter().find(|(v, _)| v == variant) {
+            Some((_, has)) => *has,
+            None => {
+                return Err(EvalError::new(
+                    format!("unknown variant `{variant}` for enum `{enum_name}`"),
+                    span,
+                ));
+            }
+        };
+        // Arity is a checker error; the runtime keeps a defensive gate
+        // so unchecked paths never silently build a wrong-shaped value.
+        if has_payload && args.is_empty() && named.is_empty() {
+            return Err(EvalError::new(
+                format!(
+                    "variant `{enum_name}.{variant}` holds a value: construct it as `{enum_name}.{variant}(...)`"
+                ),
+                span,
+            ));
+        }
+        if !has_payload && (!args.is_empty() || !named.is_empty()) {
+            return Err(EvalError::new(
+                format!("variant `{enum_name}.{variant}` takes no arguments"),
+                span,
+            ));
+        }
+        // Payload presence is structural: 0 args = unit variant, 1 arg =
+        // payload variant. Arity mismatches are checker errors; here a
+        // second positional is never silently dropped.
+        let fields = match args {
+            [] => Vec::new(),
+            [payload] => vec![("value".to_string(), self.eval(payload)?.into_value()?)],
+            _ => {
+                return Err(EvalError::new(
+                    format!(
+                        "variant `{enum_name}.{variant}` takes at most 1 argument but {} given",
+                        args.len(),
+                    ),
+                    span,
+                ));
+            }
+        };
+        Ok(Value::Object(Box::new(ObjectValue {
+            name: format!("{enum_name}.{variant}"),
+            fields,
+        })))
+    }
+
     pub(crate) fn resolve_path_value(
         &self,
         parts: &[String],
@@ -888,7 +975,25 @@ impl Interp {
                 }
                 Ok(Flow::Value(Value::Str(out.into())))
             }
-            Expr::Path { parts, span } => self.resolve_path_value(parts, *span).map(Flow::Value),
+            Expr::Path { parts, span } => {
+                // Unit-variant value (`Token.Eof`): resolve against the
+                // enum table before the value lookup (which would report
+                // "undefined variable" for a type name).
+                if parts.len() >= 2 {
+                    let enum_head = parts[..parts.len() - 1].join(".");
+                    let canonical_head = self.canonical_enum_name(&enum_head);
+                    // Miss-only: a shadowing value keeps its meaning.
+                    let head_is_value =
+                        self.env.get(&enum_head).is_some() || self.funcs.contains_key(&enum_head);
+                    if !head_is_value && self.enums.contains_key(&canonical_head) {
+                        let variant = parts.last().cloned().unwrap_or_default();
+                        return self
+                            .eval_enum_construction(&canonical_head, &variant, &[], &[], *span)
+                            .map(Flow::Value);
+                    }
+                }
+                self.resolve_path_value(parts, *span).map(Flow::Value)
+            }
             Expr::Paren { expr, .. } => self.eval(expr),
             Expr::Unary { op, expr, span } => {
                 let v = self.eval(expr)?.into_value()?;
@@ -953,6 +1058,71 @@ impl Interp {
                         let is_direct = self.env.get(&joined).is_some()
                             || self.funcs.contains_key(&joined)
                             || self.natives.contains_key(&joined);
+                        // Enum construction (`Token.IntLit(1)`) builds a
+                        // qualified `Object` value — no function involved.
+                        // Yields to real functions/values on collision
+                        // (mirrors the checker's miss-only rule: a local
+                        // or function shadowing the head keeps its meaning,
+                        // so checked and unchecked engines agree).
+                        let enum_head = parts[..parts.len() - 1].join(".");
+                        let canonical_head = self.canonical_enum_name(&enum_head);
+                        let head_is_value = self.env.get(&enum_head).is_some()
+                            || self.funcs.contains_key(&enum_head);
+                        if !is_direct && !head_is_value && self.enums.contains_key(&canonical_head)
+                        {
+                            let variant = parts.last().cloned().unwrap_or_default();
+                            return self
+                                .eval_enum_construction(
+                                    &canonical_head,
+                                    &variant,
+                                    args,
+                                    named,
+                                    *span,
+                                )
+                                .map(Flow::Value);
+                        }
+                        // Method on an inline unit variant
+                        // (`Token.Eof.is_eof()`): construct the receiver,
+                        // then dispatch as a method call. Payload variants
+                        // can't chain (ambiguous) — the checker rejects
+                        // them with a bind-first hint.
+                        if !is_direct && parts.len() >= 3 {
+                            let enum_head2 = parts[..parts.len() - 2].join(".");
+                            let canonical_head2 = self.canonical_enum_name(&enum_head2);
+                            // Same shadowing rule as construction above.
+                            let head2_is_value = self.env.get(&enum_head2).is_some()
+                                || self.funcs.contains_key(&enum_head2);
+                            if !head2_is_value
+                                && self.enums.contains_key(&canonical_head2)
+                                && self.resolve_path_value(parts, *pspan).is_err()
+                            {
+                                let variant2 = parts[parts.len() - 2].clone();
+                                let method = parts.last().cloned().unwrap_or_default();
+                                let is_unit = self
+                                    .enums
+                                    .get(&canonical_head2)
+                                    .and_then(|vs| {
+                                        vs.iter().find(|(v, _)| v == &variant2).map(|(_, h)| *h)
+                                    })
+                                    .is_some_and(|has| !has);
+                                if is_unit {
+                                    let recv = self.eval_enum_construction(
+                                        &canonical_head2,
+                                        &variant2,
+                                        &[],
+                                        &[],
+                                        *pspan,
+                                    )?;
+                                    let (f, recv) =
+                                        self.lookup_method_recv(&recv, &method, *span)?;
+                                    let mut arg_vals = vec![recv];
+                                    for a in args {
+                                        arg_vals.push(self.eval(a)?.into_value()?);
+                                    }
+                                    return self.call(f, arg_vals, *span).map(Flow::Value);
+                                }
+                            }
+                        }
                         if !is_direct && self.resolve_path_value(parts, *pspan).is_err() {
                             let method = parts.last().unwrap();
                             let recv =
@@ -1367,6 +1537,19 @@ impl Interp {
                         Err(e) => Some(e),
                         Ok(_) => None,
                     },
+                    // User enums erase to qualified `Object`s
+                    // (`Token.IntLit`): the pattern names the variant
+                    // short (`.IntLit(v)`), so match on the trailing
+                    // segment. Cross-enum confusion is impossible —
+                    // the checker guarantees the scrutinee's type.
+                    (vname, Value::Object(obj))
+                        if obj.name.rsplit('.').next().unwrap_or("") == vname =>
+                    {
+                        obj.fields
+                            .iter()
+                            .find(|(k, _)| k == "value")
+                            .map(|(_, v)| v)
+                    }
                     _ => return false,
                 };
                 match (arg.as_deref(), inner) {

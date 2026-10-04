@@ -1,0 +1,12 @@
+// ERROR: non-exhaustive match on a user enum must report.
+enum Token {
+    Eof,
+    IntLit(int),
+}
+
+func main() {
+    t := Token.Eof
+    match t {
+        .Eof => println("eof"),
+    }
+}

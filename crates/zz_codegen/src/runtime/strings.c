@@ -368,6 +368,26 @@ static void zz_print_double(FILE *out, double x) {
 static void zz_print_value_depth(FILE *out, const zz_value *v, int depth);
 static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth);
 
+// User-enum constructor form: qualified name minus the module
+// namespace + `(payload, ...)` (`Token.IntLit(5)`, `Token.Eof`),
+// matching the VM's Display. `display_inner` selects the Display vs
+// Debug recursion for payload values, matching the caller.
+static void zz_print_enum_shape(FILE *out, const zz_object *o, int depth, int display_inner) {
+    const char *t = o->type_name;
+    const char *dot = strchr(t, '.');
+    fputs(dot ? dot + 1 : t, out);
+    fputc('(', out);
+    for (size_t i = 0; i < o->len; i++) {
+        if (i > 0) fputs(", ", out);
+        if (display_inner) {
+            zz_print_value_display_depth(out, &o->fields[i * 2 + 1], depth + 1);
+        } else {
+            zz_print_value_depth(out, &o->fields[i * 2 + 1], depth + 1);
+        }
+    }
+    fputc(')', out);
+}
+
 void zz_print_value(FILE *out, const zz_value *v) {
     zz_print_value_depth(out, v, 0);
 }
@@ -491,6 +511,10 @@ static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
             break;
         }
         const zz_object *o = v->obj;
+        if (zz_object_is_enum_shape(o)) {
+            zz_print_enum_shape(out, o, depth, 0);
+            break;
+        }
         fputs(zz_object_display_name(o), out);
         fputc('{', out);
         for (size_t i = 0; i < o->len; i++) {
@@ -641,6 +665,10 @@ static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth
             break;
         }
         const zz_object *o = v->obj;
+        if (zz_object_is_enum_shape(o)) {
+            zz_print_enum_shape(out, o, depth, 1);
+            break;
+        }
         fputs(zz_object_display_name(o), out);
         fputc('{', out);
         for (size_t i = 0; i < o->len; i++) {
@@ -739,6 +767,29 @@ static void zz_append_double(strbuf *sb, double x) {
 }
 
 static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth);
+static void zz_value_to_display_strbuf_depth(strbuf *sb, const zz_value *v, int depth);
+
+// `strbuf` twin of `zz_print_enum_shape` for `str()` and interpolation.
+static void zz_print_enum_shape_sb(
+    strbuf *sb,
+    const zz_object *o,
+    int depth,
+    int display_inner
+) {
+    const char *t = o->type_name;
+    const char *dot = strchr(t, '.');
+    sb_append_str(sb, dot ? dot + 1 : t);
+    sb_append_c(sb, '(');
+    for (size_t i = 0; i < o->len; i++) {
+        if (i > 0) sb_append_str(sb, ", ");
+        if (display_inner) {
+            zz_value_to_display_strbuf_depth(sb, &o->fields[i * 2 + 1], depth + 1);
+        } else {
+            zz_value_to_strbuf_depth(sb, &o->fields[i * 2 + 1], depth + 1);
+        }
+    }
+    sb_append_c(sb, ')');
+}
 
 static void zz_value_to_strbuf(strbuf *sb, const zz_value *v) {
     zz_value_to_strbuf_depth(sb, v, 0);
@@ -862,6 +913,10 @@ static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth) {
             break;
         }
         const zz_object *o = v->obj;
+        if (zz_object_is_enum_shape(o)) {
+            zz_print_enum_shape_sb(sb, o, depth, 0);
+            break;
+        }
         sb_append_str(sb, zz_object_display_name(o));
         sb_append_c(sb, '{');
         for (size_t i = 0; i < o->len; i++) {
@@ -1036,6 +1091,10 @@ static void zz_value_to_display_strbuf_depth(strbuf *sb, const zz_value *v, int 
             break;
         }
         const zz_object *o = v->obj;
+        if (zz_object_is_enum_shape(o)) {
+            zz_print_enum_shape_sb(sb, o, depth, 1);
+            break;
+        }
         sb_append_str(sb, zz_object_display_name(o));
         sb_append_c(sb, '{');
         for (size_t i = 0; i < o->len; i++) {

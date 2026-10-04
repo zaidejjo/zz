@@ -263,6 +263,9 @@ impl Checker {
             // Aliases are collected and resolved in pass 1a; checking
             // the declaration itself is a no-op (uses resolve on demand).
             Stmt::TypeAlias { .. } => Type::Unit,
+            // Enums are collected in pass 1b; the declaration itself is
+            // a no-op (construction and patterns resolve on demand).
+            Stmt::Enum { .. } => Type::Unit,
             Stmt::For {
                 vars,
                 iter,
@@ -745,7 +748,37 @@ impl Checker {
             Expr::Str { .. } => Type::Str,
             Expr::Bool { .. } => Type::Bool,
             Expr::Ident { name, span } => self.lookup(name, *span),
-            Expr::Path { parts, span } => self.lookup_path(parts, *span),
+            Expr::Path { parts, span } => {
+                // Unit-variant value (`Token.Eof`, no parens): a path, not
+                // a call. Resolves against the enum table; payload
+                // variants must use call form (`Token.IntLit(1)`).
+                if parts.len() >= 2 {
+                    let enum_head = parts[..parts.len() - 1].join(".");
+                    let canonical_head = self.canonical_enum_name(&enum_head);
+                    if self.enums.contains_key(&canonical_head)
+                        && !self.funcs.contains_key(&parts.join("."))
+                        && self.lookup_opt(&enum_head).is_none()
+                    {
+                        let variant = parts.last().cloned().unwrap_or_default();
+                        if self
+                            .enum_variant_payload(&canonical_head, &variant, *span)
+                            .is_some_and(|p| p.is_some())
+                        {
+                            self.errors.push(error_at(
+                                format!(
+                                    "variant `{canonical_head}.{variant}` holds a value: construct it as `{canonical_head}.{variant}(...)`"
+                                ),
+                                *span,
+                            ));
+                        }
+                        if canonical_head.contains('.') {
+                            self.used_names.insert(canonical_head.clone());
+                        }
+                        return Type::Enum(canonical_head);
+                    }
+                }
+                self.lookup_path(parts, *span)
+            }
             Expr::Field { obj, name, span } => {
                 let ot = self.check_expr(obj);
                 let ot = self.unifier.resolve(&ot);
@@ -1753,6 +1786,16 @@ impl Checker {
                                 }
                             }
                         }
+                        // Enum values erase to `Object`s, so `impl Enum`
+                        // methods dispatch exactly like struct methods.
+                        Type::Enum(ename) => {
+                            sig = self.funcs.get(&format!("{ename}.{method}")).cloned();
+                            if sig.is_none() {
+                                if let Some((ns, _)) = ename.rsplit_once('.') {
+                                    sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -2028,6 +2071,67 @@ impl Checker {
                 // (e.g. module-level closure `ns.f`). If so, treat it as
                 // a regular call, not a method call.
                 let joined = parts.join(".");
+                // Enum construction (`Token.IntLit(1)`) reads as a call
+                // but builds a value, not a function invocation. Takes
+                // priority over method dispatch (no receiver exists) but
+                // yields to real functions and locals: an exact `funcs`
+                // entry or a shadowing value keeps its meaning.
+                let enum_head = parts[..parts.len() - 1].join(".");
+                let canonical_head = self.canonical_enum_name(&enum_head);
+                if self.enums.contains_key(&canonical_head)
+                    && !self.funcs.contains_key(&joined)
+                    && self.lookup_opt(&enum_head).is_none()
+                {
+                    let variant = parts.last().cloned().unwrap_or_default();
+                    if let Some(t) =
+                        self.check_enum_construction(&canonical_head, &variant, args, named, span)
+                    {
+                        return t;
+                    }
+                }
+                // Method on a constructed unit variant (`Token.Eof.is_eof()`
+                // parses as a 3+-part path): delegate to the Field branch
+                // with a synthetic receiver. Payload variants can't chain
+                // (`Token.IntLit(1).m()` is ambiguous — bind first).
+                if parts.len() >= 3 {
+                    let enum_head2 = parts[..parts.len() - 2].join(".");
+                    let canonical_head2 = self.canonical_enum_name(&enum_head2);
+                    if self.enums.contains_key(&canonical_head2)
+                        && !self.funcs.contains_key(&joined)
+                        && self.lookup_opt(&enum_head2).is_none()
+                    {
+                        let variant2 = parts[parts.len() - 2].clone();
+                        let _pv = self.enum_variant_payload(&canonical_head2, &variant2, *pspan);
+                        match _pv {
+                            Some(Some(_)) => {
+                                self.errors.push(error_at(
+                                    format!(
+                                        "cannot chain a call off `{canonical_head2}.{variant2}(...)`: bind the value first (e.g. `t := {canonical_head2}.{variant2}(...)` then `t.{}()`)",
+                                        parts.last().cloned().unwrap_or_default(),
+                                    ),
+                                    span,
+                                ));
+                                return Type::Enum(canonical_head2);
+                            }
+                            Some(None) => {
+                                let recv = Expr::Path {
+                                    parts: parts[..parts.len() - 1].to_vec(),
+                                    span: *pspan,
+                                };
+                                let field_callee = Expr::Field {
+                                    obj: Box::new(recv),
+                                    name: parts.last().cloned().unwrap_or_default(),
+                                    span: *pspan,
+                                };
+                                return self.check_call(&field_callee, args, named, span);
+                            }
+                            // Unknown variant: already reported inside.
+                            None => {
+                                return Type::Enum(canonical_head2);
+                            }
+                        }
+                    }
+                }
                 // A `head.method` call on a genuine local value reads as
                 // a method call when the free-function reading is already
                 // impossible (see `method_shadow_call`) — e.g. `db.exec`
@@ -2158,6 +2262,16 @@ impl Checker {
                             if sig.is_none() {
                                 // Try namespace.method (cross-module)
                                 if let Some((ns, _)) = sname.rsplit_once('.') {
+                                    sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                                }
+                            }
+                        }
+                        // Enum values erase to `Object`s, so `impl Enum`
+                        // methods dispatch exactly like struct methods.
+                        Type::Enum(ename) => {
+                            sig = self.funcs.get(&format!("{ename}.{method}")).cloned();
+                            if sig.is_none() {
+                                if let Some((ns, _)) = ename.rsplit_once('.') {
                                     sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
                                 }
                             }
@@ -2951,6 +3065,36 @@ impl Checker {
                     (Type::Result(_, e), "err") => {
                         arg.as_ref().map(|p| (p.as_ref().clone(), (**e).clone()))
                     }
+                    (Type::Enum(ename), vname) => {
+                        match self.enum_variant_payload(ename, vname, *span) {
+                            Some(Some(pty)) => match arg {
+                                Some(p) => Some((p.as_ref().clone(), pty)),
+                                None => {
+                                    self.errors.push(error_at(
+                                        format!(
+                                            "`.{vname}` pattern requires an argument (variant `{ename}.{vname}` holds a value)"
+                                        ),
+                                        *span,
+                                    ));
+                                    None
+                                }
+                            },
+                            Some(None) => {
+                                if arg.is_some() {
+                                    self.errors.push(error_at(
+                                        format!(
+                                            "`.{vname}` pattern takes no argument (variant `{ename}.{vname}` holds no value)"
+                                        ),
+                                        *span,
+                                    ));
+                                }
+                                None
+                            }
+                            // Unknown variant: already reported; bind
+                            // nothing to suppress cascades.
+                            None => None,
+                        }
+                    }
                     (Type::Var(_), _) => arg
                         .as_ref()
                         .map(|p| (p.as_ref().clone(), self.unifier.fresh_var())),
@@ -3069,6 +3213,38 @@ impl Checker {
             }
         }
         if arms.iter().any(|a| pat_is_wildcard(&a.pat)) {
+            return;
+        }
+        // Enum exhaustiveness needs owned names (the signature table
+        // can't lend `&str`s past the borrow), so enums take a separate
+        // path from the static `&str` tables above.
+        if let Type::Enum(ename) = st {
+            let needs: Vec<String> = self
+                .enums
+                .get(ename)
+                .map(|s| s.variants.iter().map(|(v, _)| v.clone()).collect())
+                .unwrap_or_default();
+            if needs.is_empty() {
+                // Unknown enum (no registered signature): can't verify,
+                // don't cascade.
+                return;
+            }
+            let mut have: Vec<String> = Vec::new();
+            for a in arms {
+                pat_tags(&a.pat, &mut have);
+            }
+            let missing: Vec<&String> = needs.iter().filter(|n| !have.contains(n)).collect();
+            if !missing.is_empty() {
+                let missing = missing
+                    .iter()
+                    .map(|m| format!("`.{m}`"))
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                self.errors.push(error_at(
+                    format!("non-exhaustive match: missing {missing} (or add a `_` arm)"),
+                    span,
+                ));
+            }
             return;
         }
         let needs: Option<Vec<&str>> = match st {

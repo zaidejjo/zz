@@ -122,6 +122,33 @@ fn collect_stmt_defs(stmt: &Stmt, source: &str, defs: &mut HashMap<u32, Definiti
                 );
             }
         }
+        // Enums define a named type plus variant constructors: register
+        // the enum like structs, and each variant as a func (callable
+        // `Enum.Variant(...)` takes you to its declaration).
+        Stmt::Enum { name, variants, .. } => {
+            let joined = name.join(".");
+            if let Some(span) = find_name_in_source(source, &joined) {
+                defs.insert(
+                    span.start,
+                    Definition {
+                        name: joined.clone(),
+                        span,
+                        kind: DefKind::Struct,
+                    },
+                );
+            }
+            for (vname, _) in variants {
+                let full = format!("{joined}.{}", vname.name);
+                defs.insert(
+                    vname.span.start,
+                    Definition {
+                        name: full,
+                        span: vname.span,
+                        kind: DefKind::Func,
+                    },
+                );
+            }
+        }
         Stmt::Decl { name, value, .. } => {
             defs.insert(
                 name.span.start,
@@ -388,6 +415,21 @@ fn walk_stmt<'a>(stmt: &'a Stmt, source: &str, offset: u32, result: &mut NodeAtO
                 if offset >= name_span.start && offset < name_span.end {
                     result.name = Some(joined);
                     result.name_span = Some(name_span);
+                }
+            }
+        }
+        Stmt::Enum { name, variants, .. } => {
+            let joined = name.join(".");
+            if let Some(name_span) = find_name_in_source(source, &joined) {
+                if offset >= name_span.start && offset < name_span.end {
+                    result.name = Some(joined.clone());
+                    result.name_span = Some(name_span);
+                }
+            }
+            for (vname, _) in variants {
+                if offset >= vname.span.start && offset < vname.span.end {
+                    result.name = Some(format!("{joined}.{}", vname.name));
+                    result.name_span = Some(vname.span);
                 }
             }
         }
@@ -873,9 +915,10 @@ fn collect_name_refs_in_stmt(stmt: &Stmt, name: &str, refs: &mut Vec<Reference>)
                 }
             }
         }
-        // Alias declaration names need no source walk here: the
-        // definition itself is recorded via `collect_definitions`,
-        // and type-position usages aren't tracked (same as structs).
+        // Alias and enum declaration names need no source walk here:
+        // definitions are recorded via `collect_definitions`, and
+        // type-position usages aren't tracked (same as structs).
+        Stmt::Enum { .. } => {}
         Stmt::TypeAlias { .. } => {}
         Stmt::Decl {
             name: ident, value, ..
@@ -1146,6 +1189,17 @@ fn collect_hl_stmt(stmt: &Stmt, name: &str, source: &str, out: &mut Vec<Highligh
                 }
             }
         }
+        Stmt::Enum { name: ename, .. } => {
+            let joined = ename.join(".");
+            if joined == name {
+                if let Some(span) = find_name_in_source(source, &joined) {
+                    out.push(Highlight {
+                        span,
+                        kind: HighlightKind::Write,
+                    });
+                }
+            }
+        }
         Stmt::Decl {
             name: ident, value, ..
         } => {
@@ -1350,6 +1404,7 @@ mod tests {
         let parsed = parse(source);
         check_program(
             &parsed.program,
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),

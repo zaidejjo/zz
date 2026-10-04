@@ -125,6 +125,24 @@ pub enum Op {
     },
     /// Register a struct definition (name -> ordered field names).
     RegisterStruct { name: String, fields: Vec<String> },
+    /// Register a user enum (name -> variant names). Values are plain
+    /// `Object`s; this table lets the VM resolve qualified construction
+    /// (`Token.IntLit(1)`) without type information.
+    RegisterEnum {
+        name: String,
+        variants: Vec<(String, bool)>,
+    },
+    /// Build a user-enum variant value: pops `argc` payload values
+    /// (0 or 1 after checking) and pushes the qualified `Object`
+    /// (`Token.IntLit`). The head resolves at runtime (direct hit or
+    /// selective-import alias, mirroring `MakeStruct`), so untyped
+    /// compiles need no seed tables.
+    MakeEnum {
+        enum_name: String,
+        variant: String,
+        argc: u16,
+        span: Span,
+    },
 
     // ---- typed arithmetic (unboxed, int-only) ----
     /// Pop two ints, push `a + b` (wrapping in release, checked in debug).

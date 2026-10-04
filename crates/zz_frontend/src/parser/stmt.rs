@@ -69,6 +69,8 @@ impl<'a> Parser<'a> {
                     TokenKind::Import => self.parse_import(true),
                     // `pub type X = ...` — contextual alias (see parse_stmt).
                     TokenKind::Ident if self.at_type_alias_start() => self.parse_type_alias(true),
+                    // `pub enum X { ... }` — contextual enum (see parse_stmt).
+                    TokenKind::Ident if self.at_enum_start() => self.parse_enum(true),
                     // `pub const x = expr` / `pub const x: type = expr`
                     TokenKind::Const => self.parse_const_decl(true),
                     // `pub x := expr` or `pub x: type = expr`
@@ -115,6 +117,9 @@ impl<'a> Parser<'a> {
             // identifier everywhere else (`json.type(x)`, `type := 1` keep
             // working); only `type` + name + `=`/`<>` declares an alias.
             TokenKind::Ident if self.at_type_alias_start() => self.parse_type_alias(false),
+            // `enum X { ... }` — contextual user enum. Same rule as
+            // aliases: `enum` stays a plain identifier everywhere else.
+            TokenKind::Ident if self.at_enum_start() => self.parse_enum(false),
             TokenKind::Return => {
                 let ret_tok = self.advance();
                 let value = if self.at(TokenKind::StmtEnd)
@@ -850,6 +855,123 @@ impl<'a> Parser<'a> {
             name,
             generics,
             target,
+            span,
+            pub_,
+        }
+    }
+
+    /// True when the upcoming tokens declare a user enum: `enum` + name.
+    /// Same contextual rule as type aliases — anywhere else `enum`
+    /// lexes and parses as a plain identifier.
+    pub(crate) fn at_enum_start(&self) -> bool {
+        if self.peek_kind_at(0) != TokenKind::Ident {
+            return false;
+        }
+        let is_enum = self
+            .toks
+            .get(self.pos)
+            .map(|t| &*t.text == "enum")
+            .unwrap_or(false);
+        if !is_enum {
+            return false;
+        }
+        self.peek_kind_at(1) == TokenKind::Ident
+    }
+
+    /// Parse `enum Name { Variant, Other(Payload) }` (dotted names
+    /// allowed, mirroring structs). Variants are comma- or
+    /// newline-separated; each takes an optional single parenthesized
+    /// payload type. V1 has no generic enums (`enum Box<T>` reports
+    /// with a hint); use a payload type parameter at the variant
+    /// instead (`enum Box { Int(int) }` per concrete type).
+    pub(crate) fn parse_enum(&mut self, pub_: bool) -> Stmt {
+        let enum_tok = self.advance(); // `enum`
+        let name = self.parse_dotted_ident();
+        if self.at(TokenKind::Lt) {
+            let lt = self.advance();
+            self.errors.push(error_at(
+                "generic enums are not supported yet\n\
+                 hint: put the concrete type in the variant payload (e.g. `enum Box { Int(int) }`)",
+                lt.span,
+            ));
+            // Skip to `{` so parsing below still terminates.
+            while !self.at(TokenKind::LBrace) && !self.at(TokenKind::Eof) {
+                self.advance();
+            }
+        }
+        if !self.eat(TokenKind::LBrace) {
+            self.error_here(
+                "expected `{` to start enum body (e.g. `enum Token { Eof, IntLit(int) }`)",
+            );
+            self.skip_to_rbrace();
+        }
+        let mut variants = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            let start_pos = self.pos;
+            self.skip_stmt_ends();
+            if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
+                break;
+            }
+            let Some(vname) = self.expect_ident() else {
+                self.skip_to_stmt_end();
+                continue;
+            };
+            // Duplicate variant names report here (clearer than a
+            // checker "already defined" — the enum is the context).
+            // Compare names only: `Ident` equality includes spans.
+            if variants
+                .iter()
+                .any(|(v, _): &(Ident, _)| v.name == vname.name)
+            {
+                self.errors.push(error_at(
+                    format!(
+                        "duplicate variant `{}` in enum `{}`",
+                        vname.name,
+                        name.join(".")
+                    ),
+                    vname.span,
+                ));
+            }
+            let payload = if self.eat(TokenKind::LParen) {
+                let ty = self.parse_type();
+                if !self.eat(TokenKind::RParen) {
+                    self.error_here(format!(
+                        "expected `)` after payload type of variant `{}`",
+                        vname.name
+                    ));
+                }
+                Some(ty)
+            } else {
+                None
+            };
+            variants.push((vname, payload));
+            if self.eat(TokenKind::Comma) {
+                continue;
+            }
+            self.skip_stmt_ends();
+            if !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                self.error_here("expected `,` or `}` after variant");
+            }
+            if self.pos == start_pos {
+                self.advance();
+            }
+        }
+        if variants.is_empty() {
+            self.errors.push(error_at(
+                "enum must declare at least one variant (e.g. `enum Token { Eof }`)",
+                enum_tok.span,
+            ));
+        }
+        let end = if self.eat(TokenKind::RBrace) {
+            self.previous().span
+        } else {
+            self.error_here("expected `}` to close enum body");
+            self.peek().span
+        };
+        let span = enum_tok.span.join(end);
+        Stmt::Enum {
+            name,
+            variants,
             span,
             pub_,
         }

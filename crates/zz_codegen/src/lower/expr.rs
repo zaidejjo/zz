@@ -149,8 +149,10 @@ fn mentions_stmt(s: &Stmt, name: &str) -> bool {
                 || decorators.iter().any(|d| mentions_decorator(d, name))
         }
         Stmt::Return { value, .. } => value.as_ref().is_some_and(|v| mentions_ident(v, name)),
-        // Struct shapes and aliases carry types only.
-        Stmt::Struct { .. } | Stmt::TypeAlias { .. } => false,
+        // Struct shapes, aliases, and enums carry types only (enum
+        // payloads are types, but mentioning a type never forces a
+        // value into a closure — same rule as struct fields).
+        Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => false,
         Stmt::Impl { methods, .. } => methods.iter().any(|m| mentions_stmt(m, name)),
         Stmt::For { iter, body, .. } => mentions_ident(iter, name) || mentions_block(body, name),
         Stmt::Defer { expr, .. } => mentions_ident(expr, name),
@@ -351,7 +353,19 @@ impl Lowerer {
                     "zz_unit()".to_string()
                 }
             },
-            Expr::Path { parts, .. } => {
+            Expr::Path { parts, span } => {
+                // Unit-variant value (`Token.Eof`, no parens): the HIR
+                // type proves the path is an enum, not a variable.
+                // (Checked programs never reach the `zz_unit()` fallback
+                // below with an enum type.)
+                if parts.len() >= 2 {
+                    if let Some(zz_checker::Type::Enum(enum_name)) =
+                        self.ty_at(names, *span).cloned()
+                    {
+                        let variant = parts.last().cloned().unwrap_or_default();
+                        return format!("zz_object_new(\"{enum_name}.{variant}\", NULL, 0)");
+                    }
+                }
                 // Handle struct field access (e.g., p.x or r.origin.x)
                 if parts.len() == 2 {
                     if let Some(base_name) = names.lookup(&parts[0]) {
@@ -739,8 +753,29 @@ impl Lowerer {
                 callee,
                 args,
                 named,
-                ..
-            } => self.emit_call(callee, args, named, names, out, stmt_direct),
+                span,
+            } => {
+                // Enum construction (`Token.IntLit(1)`) builds a boxed
+                // object, not a call. Type-driven via the HIR: no name
+                // tables needed, and untyped paths keep old behavior.
+                if let Expr::Path { parts, .. } = callee.as_ref() {
+                    if parts.len() >= 2 {
+                        if let Some(zz_checker::Type::Enum(enum_name)) =
+                            self.ty_at(names, *span).cloned()
+                        {
+                            return self.emit_enum_construction(
+                                &enum_name,
+                                parts.last().cloned().unwrap_or_default(),
+                                args,
+                                named,
+                                names,
+                                out,
+                            );
+                        }
+                    }
+                }
+                self.emit_call(callee, args, named, names, out, stmt_direct)
+            }
             Expr::While {
                 cond, body, span, ..
             } => {
@@ -2206,7 +2241,60 @@ impl Lowerer {
                 //     (longest matching local first) to find the local
                 //     and uses its struct type to look up
                 //     `<StructType>.<method>` in funcs.
-                if parts.len() >= 2 {
+                //   - `Token.Eof.is_eof()` — receiver is an inline unit
+                //     variant (no local exists); resolved against the HIR
+                //     enum table and emitted as a synthetic Path receiver
+                //     (which lowers to the variant object).
+                // Inline unit-variant receiver (`Token.Eof.is_eof()`):
+                // resolved against the HIR enum table; the synthetic Path
+                // receiver lowers to the variant object via the Path arm.
+                // `None` falls through to the regular dispatch below.
+                let inline_enum_recv: Option<(String, Expr)> = if parts.len() >= 3 {
+                    let head2 = parts[..parts.len() - 2].join(".");
+                    let resolved_head: &str = if let Some(q) = self.import_fn_aliases.get(&head2) {
+                        if self.tp.enums.contains_key(q) {
+                            q
+                        } else {
+                            &head2
+                        }
+                    } else {
+                        &head2
+                    };
+                    // Owned copy: `resolved_head` may borrow `head2`.
+                    let resolved_head = resolved_head.to_string();
+                    match self.tp.enums.get(&resolved_head) {
+                        Some(sig)
+                            if sig
+                                .variants
+                                .iter()
+                                .any(|(v, p)| v == &parts[parts.len() - 2] && p.is_none()) =>
+                        {
+                            let target = format!(
+                                "{resolved_head}.{}",
+                                parts.last().cloned().unwrap_or_default()
+                            );
+                            if self.reachable_funcs.contains(&target)
+                                || self.tp.funcs.contains_key(&target)
+                            {
+                                Some((
+                                    target,
+                                    Expr::Path {
+                                        parts: parts[..parts.len() - 1].to_vec(),
+                                        span: callee.span(),
+                                    },
+                                ))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some((target, recv_expr)) = inline_enum_recv {
+                    (target, Some(recv_expr))
+                } else if parts.len() >= 2 {
                     // Same collision rule as the 2-part arm above: an exact
                     // user-function match is a direct call even when a local
                     // shares the head segment.
@@ -3351,6 +3439,54 @@ impl Lowerer {
         box_scalar_operand(e, names, &v)
     }
 
+    /// Lower a user-enum construction (`Token.IntLit(1)`) to a boxed
+    /// object named `Enum.Variant` with a single `value` field (or no
+    /// fields for unit variants) — the same runtime shape the VM and
+    /// tree-walker build, so all engines agree on representation.
+    /// `enum_name` arrives canonicalized from the HIR type.
+    pub(super) fn emit_enum_construction(
+        &self,
+        enum_name: &str,
+        variant: String,
+        args: &[Expr],
+        named: &[(String, Expr)],
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        let qualified = format!("{enum_name}.{variant}");
+        let obj_tmp = names.fresh("__enum");
+        if args.is_empty() && named.is_empty() {
+            out.push_str(&format!(
+                "    zz_value {obj_tmp} = zz_object_new(\"{qualified}\", NULL, 0);\n",
+            ));
+        } else {
+            // The checker enforces ≤1 positional and no named args; emit
+            // positionally in order so nothing is silently dropped.
+            let payload_expr: &Expr = args
+                .first()
+                .or_else(|| named.first().map(|(_, v)| v))
+                .expect("enum payload expr");
+            let raw = self.emit_expr(payload_expr, names, out);
+            // Box scalars AND unboxed structs (a struct payload lowers to
+            // a raw C struct — same two-step boxing as struct fields and
+            // binop operands).
+            let boxed = box_scalar_operand(payload_expr, names, &raw);
+            let boxed = self.box_struct_operand(payload_expr, boxed, &raw, names, out);
+            let names_arr_tmp = names.fresh("__enum_fields");
+            out.push_str(&format!("    zz_value {names_arr_tmp}[1];\n"));
+            out.push_str(&format!(
+                "    {names_arr_tmp}[0] = zz_str_static(\"value\");\n",
+            ));
+            out.push_str(&format!(
+                "    zz_value {obj_tmp} = zz_object_new(\"{qualified}\", {names_arr_tmp}, 1);\n",
+            ));
+            out.push_str(&format!(
+                "    zz_object_set_field(&{obj_tmp}, \"value\", {boxed});\n",
+            ));
+        }
+        obj_tmp
+    }
+
     /// Lower a struct literal, distributing flattened (promoted) fields
     /// into embedded sub-objects (`User{id: 1, age: 2}` fills `Base.id`).
     /// Literals without flattened fields keep the historical emission
@@ -4422,6 +4558,43 @@ impl Lowerer {
                 0
             }
             Pattern::Variant { name, arg, .. } => {
+                // User-enum variants (anything outside the builtins)
+                // resolve to qualified object names via the HIR enum
+                // table; ambiguous short names chain `||` over every
+                // candidate (the checker already proved exactly one can
+                // match a well-typed scrutinee).
+                if !matches!(name.as_str(), "ok" | "err" | "some" | "none") {
+                    let cands = self.enum_candidates(name);
+                    if cands.is_empty() {
+                        return 0;
+                    }
+                    let cond = cands
+                        .iter()
+                        .map(|q| format!("zz_enum_is(&{scrut}, \"{q}\")"))
+                        .collect::<Vec<_>>()
+                        .join(" || ");
+                    out.push_str(&format!("        if ({cond}) {{\n"));
+                    let inner_open = if let Some(inner) = arg {
+                        let payload_tmp: String = if self.green_active() {
+                            let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                            out.push_str(&format!(
+                                "            {deref} = zz_object_get_field(&{scrut}, \"value\");\n"
+                            ));
+                            deref
+                        } else {
+                            let payload_tmp = names.fresh("_payload");
+                            out.push_str(&format!(
+                                "            zz_value {payload_tmp} = zz_object_get_field(&{scrut}, \"value\");\n"
+                            ));
+                            payload_tmp
+                        };
+                        self.emit_pattern_bind(inner, &payload_tmp, names, out)
+                    } else {
+                        0
+                    };
+                    // Don't close this block yet — the arm body must be inside it.
+                    return 1 + inner_open;
+                }
                 let tag_check = match name.as_str() {
                     "ok" => "ZZ_RESULT_OK",
                     "err" => "ZZ_RESULT_ERR",
@@ -4457,6 +4630,21 @@ impl Lowerer {
             }
             _ => 0,
         }
+    }
+
+    /// Qualified enum names (`Enum.Variant`) holding a variant `short`
+    /// (`.Variant` patterns name it short). Sorted for deterministic
+    /// codegen; usually exactly one candidate.
+    fn enum_candidates(&self, short: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .tp
+            .enums
+            .iter()
+            .filter(|(_, sig)| sig.variants.iter().any(|(v, _)| v == short))
+            .map(|(ename, _)| format!("{ename}.{short}"))
+            .collect();
+        out.sort();
+        out
     }
 
     pub(super) fn emit_match(
@@ -4574,6 +4762,59 @@ impl Lowerer {
                     // Lexical scope for arm bindings (same push/pop_scope
                     // discipline as value blocks).
                     names.push_scope();
+                    // User-enum variant: qualified object-name test (see
+                    // `emit_pattern_bind` for the nested-shape twin).
+                    if !matches!(name.as_str(), "ok" | "err" | "some" | "none") {
+                        let cands = self.enum_candidates(name);
+                        if cands.is_empty() {
+                            names.pop_scope();
+                            continue;
+                        }
+                        let cond = cands
+                            .iter()
+                            .map(|q| format!("zz_enum_is(&{scrut_tmp}, \"{q}\")"))
+                            .collect::<Vec<_>>()
+                            .join(" || ");
+                        let full_cond = if let Some(guard_expr) = &arm.guard {
+                            let guard_c =
+                                emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
+                            format!("{cond} && zz_truthy({guard_c})")
+                        } else {
+                            cond
+                        };
+                        if arm_needs_else_prefix {
+                            out.push_str(&format!("    }} else if ({full_cond}) {{\n"));
+                        } else {
+                            out.push_str(&format!("    if ({full_cond}) {{\n"));
+                        }
+                        let mut inner_open = 0;
+                        if let Some(arg_pat) = arg {
+                            let payload_tmp: String = if self.green_active() {
+                                let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                                out.push_str(&format!(
+                                    "        {deref} = zz_object_get_field(&{scrut_tmp}, \"value\");\n"
+                                ));
+                                deref
+                            } else {
+                                let payload_tmp = names.fresh("_payload");
+                                out.push_str(&format!(
+                                    "        zz_value {payload_tmp} = zz_object_get_field(&{scrut_tmp}, \"value\");\n"
+                                ));
+                                payload_tmp
+                            };
+                            inner_open = self.emit_pattern_bind(arg_pat, &payload_tmp, names, out);
+                        }
+                        let arm_val = self.emit_tail_value(&arm.body, names, out);
+                        out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
+                        for _ in 0..inner_open {
+                            out.push_str("        }\n");
+                        }
+                        names.pop_scope();
+                        if arm_closes_block {
+                            out.push_str("    }\n");
+                        }
+                        continue;
+                    }
                     let tag_check = match name.as_str() {
                         "ok" => "ZZ_RESULT_OK",
                         "err" => "ZZ_RESULT_ERR",
@@ -4587,7 +4828,6 @@ impl Lowerer {
                         "some" => "zz_match_some",
                         _ => "",
                     };
-
                     let cond = format!("{scrut_tmp}.tag == {tag_check}");
                     let full_cond = if let Some(guard_expr) = &arm.guard {
                         let guard_c = emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);

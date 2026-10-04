@@ -1187,6 +1187,7 @@ fn typo_suggestion_variable() {
         funcs,
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
     );
     let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
     let msgs: Vec<_> = r.errors.iter().map(|e| e.message.as_str()).collect();
@@ -1279,6 +1280,7 @@ fn print_bare_function_is_call_hint() {
         print_test_funcs(),
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
     );
     let msgs: Vec<_> = r.errors.iter().map(|e| e.message.as_str()).collect();
     assert!(
@@ -1305,6 +1307,7 @@ fn typo_suggestion_dotted_path() {
         &parsed.program,
         HashMap::new(),
         print_test_funcs(),
+        HashMap::new(),
         HashMap::new(),
         HashMap::new(),
     );
@@ -2147,5 +2150,67 @@ fn local_db_method_call_reads_as_method() {
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     let explicit = "func main.main() {\n    db := sqlz.open(\":memory:\")\n    n := db.exec(db, \"SELECT 1\")\n    println(\"exec={n}\")\n}";
     let r = check_src_with_funcs(explicit, seed);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn enum_construction_and_match() {
+    let r = check_src_with_funcs(
+        "enum Token { Eof, IntLit(int) }\nfunc f(t: Token) -> str {\n    match t {\n        .Eof => \"eof\",\n        .IntLit(_v) => \"int\",\n    }\n}\nfunc main() {\n    t := Token.IntLit(1)\n    println(f(t))\n    println(f(Token.Eof))\n}\n",
+        print_test_funcs(),
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn enum_nonexhaustive_reports() {
+    errors_contain(
+        "enum Token { Eof, IntLit(int) }\nfunc f(t: Token) -> str {\n    match t {\n        .Eof => \"eof\",\n    }\n}\n",
+        "non-exhaustive match",
+    );
+}
+
+#[test]
+fn enum_unknown_variant_reports() {
+    errors_contain(
+        "enum Token { Eof }\nfunc main() {\n    t := Token.Num\n    println(t)\n}\n",
+        "unknown variant `Num`",
+    );
+}
+
+#[test]
+fn enum_payload_arity_reports() {
+    errors_contain(
+        "enum Token { Eof, IntLit(int) }\nfunc main() {\n    t := Token.Eof(1)\n    println(t)\n}\n",
+        "takes no arguments",
+    );
+    errors_contain(
+        "enum Token { Eof, IntLit(int) }\nfunc main() {\n    t: Token = Token.IntLit\n    println(t)\n}\n",
+        "holds a value",
+    );
+}
+
+#[test]
+fn enum_payload_type_mismatch_reports() {
+    errors_contain(
+        "enum Token { IntLit(int) }\nfunc main() {\n    t := Token.IntLit(\"s\")\n    println(t)\n}\n",
+        "mismatch",
+    );
+}
+
+#[test]
+fn enum_duplicate_reports() {
+    errors_contain(
+        "enum Token { Eof }\nenum Token { Eof }\nfunc main() {\n    println(\"x\")\n}\n",
+        "duplicate definition of enum",
+    );
+}
+
+#[test]
+fn enum_impl_method_resolves() {
+    let r = check_src_with_funcs(
+        "enum Token { Eof, IntLit(int) }\nimpl Token {\n    func is_eof(self) -> bool {\n        match self {\n            .Eof => true,\n            _ => false,\n        }\n    }\n}\nfunc main() {\n    _b := Token.Eof.is_eof()\n}\n",
+        print_test_funcs(),
+    );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
