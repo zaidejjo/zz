@@ -1152,3 +1152,131 @@ fn container_struct_temp_is_released_after_append() {
         appends[0]
     );
 }
+
+#[test]
+fn native_first_class_func_ref() {
+    // `f := add` boxes the static function as a callable value instead
+    // of lowering to unit (generics/externs/methods keep their existing
+    // behavior by design).
+    let src = r#"
+func add(a: int, b: int) -> int {
+    a + b
+}
+func main() {
+    f := add
+    println(f(1, 2))
+    g := add
+    println(g(20, 22))
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "3\n42\n");
+}
+
+#[test]
+fn native_indexed_struct_method_receiver() {
+    // Indexed receivers (`arr[0].method()`) once dropped `self` in AOT
+    // lowering (`method(NULL, 0)` — C arity error), and impl-method call
+    // sites misaligned explicit args against `self` (first user arg boxed
+    // as the struct). Both now lower like the VM.
+    let src = r#"
+struct Box { v: int }
+impl Box {
+    func inc(self, n: int) -> Box {
+        Box{ v: self.v + n }
+    }
+    func get(self) -> int {
+        self.v
+    }
+}
+func main() {
+    arr := [Box{ v: 1 }]
+    arr[0] = arr[0].inc(41)
+    println(arr[0].get())
+    b := Box{ v: 1 }
+    c := b.inc(41)
+    println(c.get())
+    println(b.inc(1).get())
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "42\n42\n2\n");
+}
+
+#[test]
+fn native_flush_reaches_reader_before_blocking_read() {
+    // `print()` alone never flushes (documented contract); `term.flush()`
+    // must push the C-stdio bytes out even when no newline follows. The
+    // Rust-only flush once left TTY prompts stranded in the C buffer
+    // while `read_key` blocked — zero output, deadlock-looking hang.
+    // Spawns the binary with stdin held open: the prompt must arrive
+    // before any input is sent.
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let src = r#"
+import std.term
+func main() {
+    print("PROMPT>")
+    term.flush()
+    name := input("")
+    println("hi {name}")
+}
+"#;
+    let (pruned, reach) = build_reachable(src);
+    let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tmp = std::env::temp_dir().join(format!("zz-test-flush-{uniq}-{}-out", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let bin = tmp.join("zz_out");
+    build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
+        .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
+    let mut child = std::process::Command::new(&bin)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn flushed prompter");
+    // Piped stdout is block-buffered in C: only an explicit flush
+    // delivers "PROMPT>" while the child still blocks on stdin.
+    let mut out = child.stdout.take().expect("stdout pipe");
+    // The reader stays alive for the whole run (dropping the pipe
+    // before the answer line would SIGPIPE the child). It reports the
+    // prompt bytes separately so the test can assert they arrived
+    // while the child still blocked on stdin.
+    let reader = std::thread::spawn(move || {
+        let mut prompt = [0u8; 7];
+        let mut got = 0;
+        let start = std::time::Instant::now();
+        while got < prompt.len() && start.elapsed() < std::time::Duration::from_secs(10) {
+            match out.read(&mut prompt[got..]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        let mut rest = Vec::new();
+        let _ = out.read_to_end(&mut rest);
+        (got, prompt, rest)
+    });
+    child
+        .stdin
+        .take()
+        .expect("stdin pipe")
+        .write_all(b"ada\n")
+        .expect("answer the prompt");
+    let (got, prompt, rest) = reader.join().expect("output reader");
+    assert_eq!(
+        got, 7,
+        "prompt bytes never arrived while child blocked on input (flush broken)"
+    );
+    assert_eq!(&prompt, b"PROMPT>");
+    let done = child.wait().expect("wait prompter");
+    assert!(done.success(), "prompter failed: status={done:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&rest),
+        "hi ada\n",
+        "answer line mismatch"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}

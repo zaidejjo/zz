@@ -885,3 +885,35 @@ fn vm_generic_struct_erases_like_monomorphic() {
     let mono = "struct BoxInt { v: int }\nfunc main() {\n b := BoxInt{ v: 42 }\n b.v\n}";
     assert_eq!(opcodes(generic), opcodes(mono));
 }
+
+#[test]
+fn vm_default_args_match_tree_walker() {
+    // Omitted trailing defaults must evaluate (checker contract) on both
+    // engines — same program (compiler inline fill) and across programs
+    // (runtime fill from `FuncValue` defaults, which the per-program
+    // compiler never saw).
+    for src in [
+        "func g(a: int, b: int = 5) -> int { a + b }\ng(1)",
+        "func g(a: int, b: int = 5) -> int { a + b }\ng(1, 2)",
+        "func g(a: int, b: int = 5, c: int = 7) -> int { a + b + c }\ng(1)",
+        "func g(a: int, b: int = 5, c: int = 7) -> int { a + b + c }\ng(1, 2)",
+    ] {
+        assert_same(src);
+    }
+    assert_eq!(
+        run_src("func g(a: int, b: int = 5) -> int { a + b }\ng(1)").unwrap(),
+        Value::Int(6)
+    );
+    // Cross-program: `g` is defined in one program, called with an omitted
+    // default in another (mirrors multi-file `import m` load order).
+    let dep = parse("func g(a: int, b: int = 5) -> int { a + b }");
+    assert!(dep.errors.is_empty());
+    let main = parse("g(1)");
+    assert!(main.errors.is_empty());
+    let mut interp = Interp::new();
+    interp.run(&dep.program).unwrap();
+    assert_eq!(interp.run(&main.program).unwrap(), Value::Int(6));
+    let mut tree = Interp::new();
+    tree.run_tree_walker(&dep.program).unwrap();
+    assert_eq!(tree.run_tree_walker(&main.program).unwrap(), Value::Int(6));
+}

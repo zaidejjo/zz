@@ -478,6 +478,25 @@ zz_value zz_closure_make_ex(zz_dispatch_fn f, void **cells, size_t nenv) {
     return zz_closure_make_ex_typed(f, cells, NULL, NULL, nenv);
 }
 
+// Adapter: call a plain ZZ function through the closure dispatch
+// convention. The target lives in env[0] (see `zz_func_of_static`).
+// Function-pointer ↔ data-pointer conversion is implementation-defined
+// but universal on the supported targets (required by POSIX dlsym).
+static zz_value zz_static_thunk(zz_value *args, size_t argc, void **env, size_t nenv) {
+    (void)nenv;
+    zz_native_fn f = (zz_native_fn)(env[0]);
+    return f(args, argc);
+}
+
+zz_value zz_func_of_static(zz_native_fn f) {
+    void **slot = (void **)malloc(sizeof(void *));
+    if (!slot) return zz_unit();
+    slot[0] = (void *)f;
+    static const unsigned char kinds[1] = { ZZ_CELL_RAW };
+    static const size_t sizes[1] = { sizeof(void *) };
+    return zz_closure_make_ex_typed(zz_static_thunk, slot, kinds, sizes, 1);
+}
+
 zz_value zz_closure_make_ex_typed(
     zz_dispatch_fn f,
     void **cells,
@@ -3530,7 +3549,21 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
             }
             zz_value val;
             switch (sqlite3_column_type(st, i)) {
-            case SQLITE_INTEGER: val = zz_int(sqlite3_column_int64(st, i)); break;
+            case SQLITE_INTEGER: {
+                long long iv = sqlite3_column_int64(st, i);
+                /* Declared booleans (`BIT`/`BOOL`/`BOOLEAN`) read as
+                   ZZ booleans — SQLite has no boolean storage class,
+                   so 0 is false and anything else is true. Mirrors the
+                   rusqlite mapping (see `sqlite_bool_decl`). */
+                const char *dt = sqlite3_column_decltype(st, i);
+                if (dt && (strcasecmp(dt, "BIT") == 0 || strcasecmp(dt, "BOOL") == 0
+                           || strcasecmp(dt, "BOOLEAN") == 0)) {
+                    val = zz_bool(iv != 0);
+                } else {
+                    val = zz_int(iv);
+                }
+                break;
+            }
             case SQLITE_FLOAT: val = zz_float(sqlite3_column_double(st, i)); break;
             case SQLITE_TEXT: {
                 const unsigned char *t = sqlite3_column_text(st, i);

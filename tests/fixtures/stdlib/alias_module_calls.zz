@@ -1,0 +1,7 @@
+// E2E: qualified calls through a module alias resolve on every engine,
+// including pure-ZZ functions (bodies live under canonical names).
+import std.path as fspath
+
+println(fspath.join("/a", "b"))
+println(fspath.dirname("/a/b/c.txt"))
+println("alias_module_calls_ok")

@@ -109,6 +109,11 @@ pub struct CallGraph {
     pub struct_uses: HashMap<String, Vec<String>>,
     /// caller → function names used as values (first-class funcs).
     pub value_uses: HashMap<String, Vec<String>>,
+    /// Import alias head → dotted module path (`fspath` → `std.path`,
+    /// from `import std.path as fspath`). Used to edge qualified alias
+    /// calls (`fspath.join`) to their canonical definitions, which is
+    /// where function bodies actually live.
+    pub import_aliases: HashMap<String, String>,
     /// All function/method names defined by this program (incl. stdlib
     /// seeded into `tp.funcs`).
     pub defined: HashSet<String>,
@@ -138,6 +143,31 @@ pub struct ReachableSet {
     pub structs: HashSet<String>,
     /// Reachable stdlib native names (`std.str.length`-style qualified).
     pub natives: HashSet<String>,
+}
+
+/// Canonical targets for a call through an import alias head
+/// (`fspath.join` with `fspath` → `std.path`): the full dotted form plus
+/// the `std.`-stripped form, filtered to names that actually define a
+/// body. Bodies live under canonical names (seed copies under the alias
+/// have none), so edging these retains the real definition. Filtering
+/// to definitions (not just signatures) matters: edging a signature-only
+/// name would misclassify it as a native downstream.
+fn alias_canonical_targets(cg: &CallGraph, parts: &[String]) -> Vec<String> {
+    if parts.len() < 2 {
+        return Vec::new();
+    }
+    let Some(head) = cg.import_aliases.get(&parts[0]) else {
+        return Vec::new();
+    };
+    let method = &parts[parts.len() - 1];
+    let mut cands = vec![format!("{head}.{method}")];
+    if let Some(stripped) = head.strip_prefix("std.") {
+        cands.push(format!("{stripped}.{method}"));
+    }
+    cands
+        .into_iter()
+        .filter(|c| cg.program_defined.contains(c))
+        .collect()
 }
 
 /// Build the call graph for a typed program.
@@ -176,6 +206,23 @@ pub fn build_callgraph(tp: &TypedProgram) -> CallGraph {
         cg.defined_structs.insert(name.clone());
     }
     cg.program_defined = program_defined;
+
+    // Import alias heads (`fspath` from `import std.path as fspath`):
+    // qualified calls through them (`fspath.join`) resolve against
+    // seed copies, but bodies live under canonical names — record the
+    // mapping so call/value edges can also retain the canonical target.
+    for stmt in tp.stmts() {
+        if let Stmt::Import {
+            path,
+            alias: Some(a),
+            ..
+        } = stmt
+        {
+            cg.import_aliases
+                .entry(a.clone())
+                .or_insert_with(|| path.join("."));
+        }
+    }
 
     // Walk all top-level statements, with TOP as the initial caller.
     for stmt in tp.stmts() {
@@ -279,6 +326,12 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
                         for c in candidates {
                             cg.edge(caller, &c);
                         }
+                    }
+                    // Qualified alias calls (`fspath.join`) edge only the
+                    // alias spelling above, whose seed copy has no body —
+                    // also edge the canonical definition so it survives.
+                    for c in alias_canonical_targets(cg, parts) {
+                        cg.edge(caller, &c);
                     }
                 }
                 Expr::Field { obj, name, .. } => {
@@ -418,12 +471,27 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
         }
         Expr::Ident { name, .. } => {
             // A function used as a value (first-class): if it names a known
-            // function, mark it reachable conservatively.
+            // function, mark it reachable conservatively. Bare selective
+            // names (`join` for `path.join`) additionally retain their
+            // canonical definitions, which is where bodies live.
             if tp.funcs.contains_key(name) {
                 cg.value_uses
                     .entry(caller.to_string())
                     .or_default()
                     .push(name.clone());
+                if !name.contains('.') && !cg.program_defined.contains(name) {
+                    let suffix = format!(".{name}");
+                    let mut hits: Vec<String> = cg
+                        .program_defined
+                        .iter()
+                        .filter(|pd| pd.ends_with(suffix.as_str()))
+                        .cloned()
+                        .collect();
+                    hits.sort();
+                    for h in hits {
+                        cg.value_uses.entry(caller.to_string()).or_default().push(h);
+                    }
+                }
             }
         }
         Expr::Path { parts, .. } => {
@@ -433,6 +501,11 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
                     .entry(caller.to_string())
                     .or_default()
                     .push(joined);
+            }
+            // Same canonical retention as calls above (the use site
+            // itself still lowers through the value path).
+            for c in alias_canonical_targets(cg, parts) {
+                cg.value_uses.entry(caller.to_string()).or_default().push(c);
             }
         }
         Expr::Int { .. }

@@ -61,7 +61,7 @@ fn build_dev_produces_runnable_binary() {
     if !require_native() {
         return;
     }
-    // Default build is a fast native debug binary (-O0 -g) in bin/.
+    // Default build is a static self-contained binary in bin/.
     let dir = std::env::temp_dir().join(format!("zz-cli-test-{}", std::process::id()));
     let f = write_fixture(&dir, "app.zz", HELLO);
     let (code, out) = run_zz(&["build", f.to_str().unwrap()]);

@@ -71,12 +71,17 @@ requires `clang` (18+) or `zig` on PATH. (`zz run` without `--native` is
 the only VM path.)
 
 ```bash
-# Debug (default): fast native build -O0 -g, no LTO
+# Static (default): self-contained -O3 -flto=thin, stripped, DCE
 zz build main.zz
 
-# Release: native Clang -O3 -flto=thin, stripped, cached under ~/.zz/cache
+# Release: native Clang -O3 -flto=thin, stripped, dynamic, cached under ~/.zz/cache
 zz build -p main.zz
-zz build --static main.zz        # self-contained (not on macOS)
+# Max optimization: full LTO (-O3, DCE, stripped); with `-- <args>` adds a PGO training run
+zz build -p --full main.zz
+zz build -p --full main.zz -- fast representative workload
+zz build --static main.zz        # self-contained, explicit (not on macOS)
+zz build --dynamic main.zz       # fast dynamic debug build -O0 -g
+zz build -o server main.zz       # name the output binary (bin/server)
 zz build --pgo main.zz           # profile-guided, native host only
 zz build --target aarch64-unknown-linux-gnu main.zz   # cross (implies -p)
 zz build -p --cc zig main.zz     # use `zig cc` as the provider
@@ -107,7 +112,8 @@ manual builds include the same tables.
 All artifacts live in `bin/` next to the source: `bin/app`,
 `bin/app.exe` (Windows), or `bin/app-<triple>[.exe]` for `--target`
 builds, plus `bin/app.c`, `bin/build.sh`, `bin/build.bat` (reproducible
-manual build with a single clang line).
+manual build with a single clang line). `-o <name>` renames the binary
+(a bare name stays in `bin/`, a path is used as-is, go-like).
 
 Cross-compilation rules:
 

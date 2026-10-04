@@ -1,14 +1,17 @@
 //! Build-system integration tests for the single-Clang-backend `zz build`.
 //!
-//! `zz build` always produces a native binary: default flags are `-O0 -g`
-//! (fast debug), `-p` upgrades to `-O3 -flto=thin`.
+//! `zz build` always produces a native binary: static self-contained by
+//! default, `-p` for dynamic optimized, `--full` for max optimization
+//! (full LTO, plus PGO with `-- <train args>`), `--dynamic` for the
+//! fast dynamic debug build, `-o` to rename the output.
 //!
-//! - dev default (`zz build`): builds `bin/<stem>`, executes it, checks
-//!   output (requires Clang on PATH).
+//! - static default (`zz build`): builds `bin/<stem>`, executes it,
+//!   checks output (requires Clang on PATH).
 //! - without Clang (dev or release): emits `bin/app.c` + `build.sh`/
 //!   `build.bat`, exits 1 with the no-clang error.
 //! - guard rails: `--pgo` + foreign `--target` and `--static` on macOS
-//!   triples fail with the exact CLI-contract errors.
+//!   triples fail with the exact CLI-contract errors; bad `--full`
+//!   combos (`--static`, `--dynamic`, `--pgo`) fail with hints.
 //! - removed `--dev` flag is rejected with a hint.
 
 use std::path::{Path, PathBuf};
@@ -47,30 +50,44 @@ fn run(dir: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, S
 }
 
 #[test]
-fn dev_default_builds_native_binary() {
+fn static_default_builds_native_binary() {
     let dir = temp_project();
     let (code, stdout, stderr) = run(&dir, &["build", "hello.zz"], &[]);
-    if !stdout.contains("(dev,") && stderr.contains("no clang found") {
-        eprintln!("SKIP: no clang on PATH, cannot run dev happy path");
+    if !stdout.contains("(static,") && stderr.contains("no clang found") {
+        eprintln!("SKIP: no clang on PATH, cannot run static happy path");
         let _ = std::fs::remove_dir_all(&dir);
         return;
     }
     assert_eq!(
         code, 0,
-        "dev build must pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "default (static) build must pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    // Build chatter (including the `(dev, …)` mode marker) goes to
+    // Build chatter (including the `(static, …)` mode marker) goes to
     // stderr by design — see `ui.rs` ("progress/chatter goes to
     // stderr") — so assert on stderr, not stdout.
     assert!(
-        stderr.contains("(dev,"),
-        "dev marker missing.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        stderr.contains("(static,"),
+        "static marker missing.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     let bin = dir.join("bin/hello");
     assert!(bin.is_file(), "bin/hello missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dynamic_flag_builds_dynamic_dev_binary() {
+    let dir = temp_project();
+    let (code, _stdout, stderr) = run(&dir, &["build", "--dynamic", "hello.zz"], &[]);
+    assert_eq!(code, 0, "dynamic build must pass.\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("(dev,"),
+        "dev marker missing for --dynamic.\nstderr:\n{stderr}"
+    );
+    let bin = dir.join("bin/hello");
+    assert!(bin.is_file(), "bin/hello missing");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -325,4 +342,100 @@ commit = "abc123def456789abc123def456789abc123def"
     // Clean up
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&zz_home);
+}
+
+fn has_llvm_profdata() -> bool {
+    std::process::Command::new("llvm-profdata")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn full_builds_max_opt_binary() {
+    let dir = temp_project();
+    let (code, _stdout, stderr) = run(&dir, &["build", "--full", "hello.zz"], &[]);
+    if code != 0 && stderr.contains("no clang found") {
+        eprintln!("SKIP: no clang on PATH");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    assert_eq!(code, 0, "full build must pass.\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("(full,"),
+        "full marker missing.\nstderr:\n{stderr}"
+    );
+    let bin = dir.join("bin/hello");
+    assert!(bin.is_file(), "bin/hello missing");
+    let out = Command::new(&bin).output().expect("run binary");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn full_flag_conflicts_error_with_hints() {
+    let dir = temp_project();
+    for flags in [
+        vec!["build", "--full", "--static", "hello.zz"],
+        vec!["build", "--full", "--dynamic", "hello.zz"],
+        vec!["build", "--full", "--pgo", "hello.zz"],
+    ] {
+        let (code, _stdout, stderr) = run(&dir, &flags, &[]);
+        assert_eq!(code, 1, "conflicting flags must fail: {flags:?}");
+        assert!(
+            stderr.contains("cannot combine"),
+            "conflict hint missing for {flags:?}:\n{stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn output_flag_names_binary() {
+    let dir = temp_project();
+    let (code, _stdout, stderr) = run(&dir, &["build", "-o", "myapp", "hello.zz"], &[]);
+    if code != 0 && stderr.contains("no clang found") {
+        eprintln!("SKIP: no clang on PATH");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    assert_eq!(code, 0, "build -o must pass.\nstderr:\n{stderr}");
+    let bin = dir.join("bin/myapp");
+    assert!(bin.is_file(), "bin/myapp missing");
+    let out = Command::new(&bin).output().expect("run binary");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");
+    // Path-like -o is used as-is relative to the project dir.
+    let (code, _stdout, stderr) = run(&dir, &["build", "-o", "sub/dir/app", "hello.zz"], &[]);
+    assert_eq!(code, 0, "build -o path must pass.\nstderr:\n{stderr}");
+    let bin = dir.join("sub/dir/app");
+    assert!(bin.is_file(), "sub/dir/app missing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn full_pgo_flow_trains_and_optimizes() {
+    if !has_llvm_profdata() {
+        eprintln!("SKIP: llvm-profdata not on PATH");
+        return;
+    }
+    let dir = temp_project();
+    // Bare `--`: trains with no workload args (valid — program exits 0).
+    let (code, _stdout, stderr) = run(&dir, &["build", "--full", "hello.zz", "--"], &[]);
+    if code != 0 && stderr.contains("no clang found") {
+        eprintln!("SKIP: no clang on PATH");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    assert_eq!(code, 0, "full PGO flow must pass.\nstderr:\n{stderr}");
+    assert!(
+        !dir.join("default.profdata").exists(),
+        "profdata must be cleaned up on success"
+    );
+    let bin = dir.join("bin/hello");
+    assert!(bin.is_file(), "bin/hello missing");
+    let out = Command::new(&bin).output().expect("run binary");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");
+    let _ = std::fs::remove_dir_all(&dir);
 }

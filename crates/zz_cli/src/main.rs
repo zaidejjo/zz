@@ -93,9 +93,11 @@ PACKAGE MANAGER:
     zz doctor [--fix]              audit the toolchain (binary, clang, shell, git, registry)
 
 BUILD MODES (single Clang backend, always a native binary):
-     zz build <file.zz>           debug build (-O0 -g, fast, dynamic) — the default
+     zz build <file.zz>           static build (ThinLTO, DCE, stripped) — the default
+     zz build --dynamic <file.zz> debug build (-O0 -g, fast, dynamic)
      zz build -p <file.zz>        release build (-O3 -flto=thin, dynamic, stripped)
-     zz build --static <file.zz>  static build (ThinLTO, DCE, self-contained; not on macOS)
+     zz build -p --full <file.zz> max optimization (full LTO + DCE + strip); with `-- <args>` adds PGO training
+     zz build --static <file.zz>  static build, explicit (same as the default; errors where static is impossible)
      zz build --pgo <file.zz>     PGO build (profile-guided, native host only)
      zz profile <file.zz> [-- args]
                                   PGO end to end: instrument → train → optimize
@@ -113,7 +115,10 @@ FLAGS:
     --embed <dir>      with run/build, serve (VM) or bake (native) a static asset
                        directory, readable at runtime via `fs.embedfs()`
     -p, --release      with build, full optimization (-O3 -flto=thin, dynamic, stripped)
-    --static           with build, static self-contained binary (ThinLTO, DCE; rejected on macOS)
+    --static           with build, static self-contained binary (the default; explicit use errors where static is impossible)
+    --dynamic          with build, dynamic debug build (-O0 -g, fast); falls back automatically where static is impossible
+    --full             with build, max optimization: full LTO (-O3, DCE, stripped); with `-- <args>` runs PGO training first
+    -o, --output <name> with build, name the output binary (bare name stays in bin/, path is used as-is)
     --pgo              with build, profile-guided optimization build (native host only)
     --target <triple>  with build, cross-compile via clang --target= (same flags as without -p, minus -march=native)
     --cc <clang|zig>   with build, select the Clang provider
@@ -173,7 +178,7 @@ EXAMPLES:
     zz fmt --stdin < file.zz         format a single file via stdin/stdout
     zz build hello.zz                dev build (dynamic)
     zz build -p hello.zz             release build (dynamic, optimized)
-    zz build --static hello.zz       static build (self-contained)
+    zz build --static hello.zz       static build, explicit (self-contained)
 ";
 
 fn main() -> ExitCode {
@@ -971,40 +976,88 @@ fn run_native(
 
 /// `zz build [FLAGS] <file>`: always a native Clang binary.
 ///
-/// Default (`zz build`): fast native debug build (`-O0 -g`, no LTO).
-/// `-p/--release/-O3` upgrades to the optimized build (`-O3 -flto=thin`).
+/// Default (`zz build`): static self-contained binary (ThinLTO, DCE,
+/// stripped). Falls back to dynamic with a note where static is
+/// impossible (macOS targets, programs needing the Rust native
+/// runtime); explicit `--static` errors there instead.
+/// `-p/--release/-O3` selects the dynamic optimized build; `--dynamic`
+/// selects the fast dynamic debug build (`-O0 -g`).
 /// Both paths are real binaries in `bin/` — never VM execution.
 /// (`zz run` is the only command that executes through the VM.)
 fn build_cmd(args: &[String]) -> Result<(), String> {
-    if args.iter().any(|a| a == "--dev") {
+    // Training args for `--full -- <program args>`: everything after the
+    // first `--` belongs to the training run, never to flag parsing —
+    // so the split happens before any flag is read. A bare `--` still
+    // triggers the PGO pipeline (training with no args is valid).
+    let dashdash = args.iter().position(|a| a == "--");
+    let (flag_args, train_args) = split_train_args(args);
+    let flag_args: Vec<String> = flag_args.to_vec();
+    if flag_args.iter().any(|a| a == "--dev") {
         return Err(
-            "`--dev` was removed: `zz build` is a debug build by default\n\
-             hint: drop --dev (use -p/--release for the optimized build)"
+            "`--dev` was removed: use `--dynamic` for the fast dynamic debug build\n\
+             hint: drop --dev (default is static; -p/--release optimizes)"
                 .to_string(),
         );
     }
-    let release = args
+    let release = flag_args
         .iter()
         .any(|a| a == "-p" || a == "--release" || a == "-O3");
-    let is_static = args.iter().any(|a| a == "--static");
-    let is_pgo = args.iter().any(|a| a == "--pgo");
-    let verbose = args.iter().any(|a| a == "--verbose");
-    let allow_source_builds = args.iter().any(|a| a == "--allow-source-builds");
-    let allow_hooks = args.iter().any(|a| a == "--allow-hooks");
-    let target = parse_flag_value(args, "--target");
-    let cc = parse_flag_value(args, "--cc");
-    let embed = parse_flag_value(args, "--embed").map(std::path::PathBuf::from);
+    let is_static = flag_args.iter().any(|a| a == "--static");
+    let is_dynamic = flag_args.iter().any(|a| a == "--dynamic");
+    let is_full = flag_args.iter().any(|a| a == "--full");
+    if is_static && is_dynamic {
+        return Err("cannot combine `--static` and `--dynamic`\n\
+             hint: drop one flag (default is static where possible)"
+            .to_string());
+    }
+    if is_full && is_static {
+        return Err("cannot combine `--full` and `--static`\n\
+             hint: --full needs a dynamic link (full LTO + profile runtime); drop --static"
+            .to_string());
+    }
+    if is_full && is_dynamic {
+        return Err("cannot combine `--full` and `--dynamic`\n\
+             hint: --full implies an optimized base; drop --dynamic"
+            .to_string());
+    }
+    let is_pgo = flag_args.iter().any(|a| a == "--pgo");
+    if is_full && is_pgo {
+        return Err("cannot combine `--full` and `--pgo`\n\
+             hint: --full runs its own instrument-train-optimize pipeline; pass training args after `--` instead"
+            .to_string());
+    }
+    let verbose = flag_args.iter().any(|a| a == "--verbose");
+    let allow_source_builds = flag_args.iter().any(|a| a == "--allow-source-builds");
+    let allow_hooks = flag_args.iter().any(|a| a == "--allow-hooks");
+    let target = parse_flag_value(&flag_args, "--target");
+    let cc = parse_flag_value(&flag_args, "--cc");
+    let embed = parse_flag_value(&flag_args, "--embed").map(std::path::PathBuf::from);
+    let output = parse_flag_value(&flag_args, "--output")
+        .or_else(|| parse_flag_value(&flag_args, "-o"))
+        .map(std::path::PathBuf::from);
+    if !train_args.is_empty() && !is_full {
+        return Err("training args need `--full`\n\
+             usage: zz build --release --full <file.zz> -- <program args>\n\
+             hint: args after `--` run the PGO training workload"
+            .to_string());
+    }
     // Positional path: first non-flag arg, skipping values consumed by
-    // `--target <triple>` / `--cc <name>` / `--embed <dir>` (space form).
+    // `--target <triple>` / `--cc <name>` / `--embed <dir>` /
+    // `-o <name>` (space form).
     let mut skip_next = false;
-    let path = args
+    let path = flag_args
         .iter()
         .find(|a| {
             if skip_next {
                 skip_next = false;
                 return false;
             }
-            if a.as_str() == "--target" || a.as_str() == "--cc" || a.as_str() == "--embed" {
+            if a.as_str() == "--target"
+                || a.as_str() == "--cc"
+                || a.as_str() == "--embed"
+                || a.as_str() == "-o"
+                || a.as_str() == "--output"
+            {
                 skip_next = true;
                 return false;
             }
@@ -1012,7 +1065,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         })
         .ok_or_else(|| {
             "missing file argument\n\n\
-             usage: zz build [-p|--release|-O3|--static|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] <file.zz>\n\
+             usage: zz build [-p|--release|-O3|--static|--dynamic|--full|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] [-o <name>] <file.zz>\n\
              hint: provide the path to a .zz file to build"
                 .to_string()
         })?;
@@ -1021,18 +1074,28 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     crate::enforce_project_zz(p)?;
 
-    // Default (no flags) is a fast native debug build; -p upgrades to
-    // optimized. --static/--pgo select their own option sets. Guards
-    // (PGO-cross, static-macOS) in validate() apply uniformly.
+    // Default (no flags) is a static self-contained build; `--full`
+    // selects max optimization (full LTO; plus PGO when training args
+    // follow `--`); -p is the dynamic optimized build, --dynamic the
+    // fast dynamic debug build. --static/--pgo select their own option
+    // sets. Guards (PGO-cross, explicit-static-macOS) in validate()
+    // apply uniformly; default-static downgrade paths (macOS, Rust
+    // native runtime, missing static syslibs) fall back to dynamic
+    // with a note instead.
     let mode = if is_pgo {
         build::BuildMode::Pgo
     } else if is_static {
         build::BuildMode::Static
+    } else if is_full {
+        build::BuildMode::Full
     } else if release {
         build::BuildMode::Release
-    } else {
+    } else if is_dynamic {
         build::BuildMode::Dev
+    } else {
+        build::BuildMode::Static
     };
+    let allow_downgrade = mode == build::BuildMode::Static && !is_static;
     let provider = match cc.as_deref() {
         None => zz_codegen::ClangProvider::Any,
         Some(name) => zz_codegen::ClangProvider::parse(name).ok_or_else(|| {
@@ -1049,13 +1112,23 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         embed,
         allow_source_builds,
         allow_hooks,
+        allow_static_downgrade: allow_downgrade,
+        output: output.clone(),
     };
     let mode_str = match mode {
         build::BuildMode::Dev => "dev",
         build::BuildMode::Release => "release",
         build::BuildMode::Static => "static",
         build::BuildMode::Pgo | build::BuildMode::PgoUse => "pgo",
+        build::BuildMode::Full | build::BuildMode::FullPgo => "full",
     };
+    // `--full -- <train args>`: max optimization with PGO —
+    // instrument, train, merge, rebuild optimized (mirrors `zz profile`
+    // phases but lands full-LTO output). Without train args the single
+    // Full build below is the whole story.
+    if is_full && dashdash.is_some() {
+        return build_full_with_training(path, &rel, &train_args);
+    }
     crate::ui::header(&format!("building {path} ({mode_str})"));
     // The clang link step can run for minutes with no output — spin with
     // elapsed time so a big build never looks frozen. Cache hits finish
@@ -1080,12 +1153,126 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `zz profile <file.zz> [-- args]`: PGO end to end.
-///
-/// Phase 1 instruments (`-fprofile-generate`), the training run executes
-/// with the given args, `llvm-profdata` merges coverage, and phase 2
-/// rebuilds optimized (`-fprofile-use`). Profile files are cleaned up on
-/// success; on failure they are left in place with a hint.
+/// `zz build --release --full <file.zz> -- <program args>`: max
+/// optimization with PGO — instrument, train, merge, rebuild optimized
+/// with full LTO. Mirrors the `zz profile` phases below (same
+/// training-run contract and `default.profdata` handling) but lands
+/// `FullPgo` output instead of plain `PgoUse`.
+fn build_full_with_training(
+    path: &str,
+    rel: &build::ReleaseOptions,
+    train_args: &[String],
+) -> Result<(), String> {
+    // Fail fast: merging needs llvm-profdata, and there is no point
+    // spending a full instrumented build without it.
+    if std::process::Command::new("llvm-profdata")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        return Err("llvm-profdata not found\n\
+            hint: install LLVM tools (apt: llvm, brew: llvm) to use `--full -- <args>`"
+            .to_string());
+    }
+    let p = std::path::Path::new(path);
+    crate::enforce_project_zz(p)?;
+
+    crate::ui::header(&format!("building {path} (full+profile)"));
+    crate::ui::step(1, 4, "Instrumented build");
+    let spinner = crate::ui::Spinner::start("Compiling (instrumented)");
+    let instrumented = match build::build_release(p, build::BuildMode::Pgo, rel) {
+        Ok(bin) => {
+            spinner.finish("instrumented build done");
+            bin
+        }
+        Err(e) => {
+            drop(spinner);
+            return Err(e);
+        }
+    };
+
+    crate::ui::step(2, 4, "Training run");
+    let prof_dir = std::env::temp_dir().join(format!("zz-full-profile-{}", std::process::id()));
+    if prof_dir.exists() {
+        let _ = std::fs::remove_dir_all(&prof_dir);
+    }
+    std::fs::create_dir_all(&prof_dir).map_err(|e| format!("cannot create profile dir: {e}"))?;
+    let profraw = prof_dir.join("zz.profraw");
+    let status = std::process::Command::new(&instrumented)
+        .args(train_args)
+        .env("LLVM_PROFILE_FILE", &profraw)
+        .status()
+        .map_err(|e| format!("cannot run training binary: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(&prof_dir);
+        return Err(format!(
+            "training run failed (exit {})\n\
+              hint: the workload must succeed for profile data to be valid",
+            status.code().unwrap_or(-1)
+        ));
+    }
+
+    crate::ui::step(3, 4, "Merging profile");
+    let mut raw_files: Vec<std::path::PathBuf> = std::fs::read_dir(&prof_dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("profraw"))
+                .collect()
+        })
+        .unwrap_or_default();
+    raw_files.sort();
+    if raw_files.is_empty() {
+        let _ = std::fs::remove_dir_all(&prof_dir);
+        return Err("no profile data collected\n\
+            hint: the training run must execute instrumented code (check its args)"
+            .to_string());
+    }
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
+    let profdata = cwd.join("default.profdata");
+    let merge = std::process::Command::new("llvm-profdata")
+        .arg("merge")
+        .arg("-o")
+        .arg(&profdata)
+        .args(&raw_files)
+        .output()
+        .map_err(|e| format!("cannot run llvm-profdata: {e}"))?;
+    let _ = std::fs::remove_dir_all(&prof_dir);
+    if !merge.status.success() {
+        return Err(format!(
+            "llvm-profdata merge failed: {}\n\
+              hint: inspect {} and retry",
+            String::from_utf8_lossy(&merge.stderr).trim(),
+            profdata.display()
+        ));
+    }
+
+    crate::ui::step(4, 4, "Optimized build (full LTO + PGO)");
+    let spinner = crate::ui::Spinner::start("Compiling (full+profile)");
+    let dest = match build::build_release(p, build::BuildMode::FullPgo, rel) {
+        Ok(dest) => {
+            let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+            spinner.finish(&format!(
+                "built {} (full, {})",
+                dest.display(),
+                crate::ui::human_bytes(meta)
+            ));
+            dest
+        }
+        Err(e) => {
+            drop(spinner);
+            return Err(format!(
+                "{e}\nhint: {} left in place — fix and re-run to retry phase 2",
+                profdata.display()
+            ));
+        }
+    };
+    let _ = std::fs::remove_file(&profdata);
+    println!("built {}", dest.display());
+    Ok(())
+}
+
 /// Split `profile` args at `--`: `(flag side, training args)`.
 fn split_train_args(args: &[String]) -> (&[String], Vec<String>) {
     match args.iter().position(|a| a == "--") {

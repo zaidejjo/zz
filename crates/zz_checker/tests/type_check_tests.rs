@@ -2047,3 +2047,97 @@ fn plain_struct_unaffected_by_generics() {
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["p"], Type::Struct("Point".into(), vec![]));
 }
+
+#[test]
+fn cross_module_inferred_ret_resolves_on_export() {
+    // Regression: `pub func ping()` with no return annotation exported its
+    // return type as a bare `Var(0)`. The importing module's fresh unifier
+    // then reused id 0 for an unrelated local (e.g. an empty `[]` element
+    // var), unifying `unit` with `str` and rejecting a valid program.
+    // Export now deep-resolves (ret becomes `unit`) and the importer
+    // offsets fresh ids above seeded ones.
+    let dep = check_src("pub func ping() {}");
+    assert!(!has_errors(&dep), "errors: {:?}", dep.errors);
+    let ping = dep.pub_funcs.get("ping").expect("pub ping").clone();
+    assert_eq!(ping.ret, Type::Unit, "exported ret must resolve to unit");
+    let mut seed = HashMap::new();
+    seed.insert("n.ping".to_string(), ping);
+    let main = "func main() -> [str] {\n    stop := false\n    if stop {\n        n.ping()\n    }\n    []\n}";
+    let r = check_src_with_funcs(main, seed);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn cross_module_nonunit_block_still_rejected() {
+    // A single-branch `if` whose body yields a non-unit value is still an
+    // error — including for cross-module calls. Only the spurious
+    // var-collision failure above was fixed.
+    let dep = check_src("pub func zstr() -> str { \"s\" }");
+    assert!(!has_errors(&dep), "errors: {:?}", dep.errors);
+    let zstr = dep.pub_funcs.get("zstr").expect("pub zstr").clone();
+    let mut seed = HashMap::new();
+    seed.insert("o.zstr".to_string(), zstr);
+    let main = "func main() -> [str] {\n    out: [str] = []\n    stop := false\n    if stop {\n        o.zstr()\n    }\n    out\n}";
+    let r = check_src_with_funcs(main, seed);
+    let errs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        errs.iter().any(|e| e.contains("type mismatch")),
+        "expected a type-mismatch error, got: {errs:?}"
+    );
+}
+
+fn db_exec_seed() -> HashMap<String, FuncSig> {
+    let mut funcs = HashMap::new();
+    let exec = FuncSig {
+        generics: vec![],
+        bounds: vec![],
+        params: vec![("db".to_string(), Type::Db), ("sql".to_string(), Type::Str)],
+        has_default: vec![false, false],
+        ret: Type::Int,
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    funcs.insert("sqlz.exec".to_string(), exec.clone());
+    funcs.insert("db.exec".to_string(), exec);
+    funcs.insert(
+        "sqlz.open".to_string(),
+        FuncSig {
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("path".to_string(), Type::Str)],
+            has_default: vec![false],
+            ret: Type::Db,
+            is_extern: false,
+            extern_c_symbol: None,
+        },
+    );
+    funcs.insert(
+        "println".to_string(),
+        FuncSig {
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("v".to_string(), Type::Str)],
+            has_default: vec![false],
+            ret: Type::Unit,
+            is_extern: false,
+            extern_c_symbol: None,
+        },
+    );
+    funcs
+}
+
+#[test]
+fn local_db_method_call_reads_as_method() {
+    // `db.exec(sql)` with a *local* `db` is a method call even though
+    // `db.exec` also names a seeded free function: the free-function
+    // reading (full arity) is already impossible, and the method reading
+    // fits with a matching receiver. A top-level `db` keeps working,
+    // as does the explicit static form.
+    let seed = db_exec_seed();
+    let local = "func main.main() {\n    db := sqlz.open(\":memory:\")\n    n := db.exec(\"CREATE TABLE t(v INTEGER)\")\n    println(\"exec={n}\")\n}";
+    let r = check_src_with_funcs(local, seed.clone());
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    let explicit = "func main.main() {\n    db := sqlz.open(\":memory:\")\n    n := db.exec(db, \"SELECT 1\")\n    println(\"exec={n}\")\n}";
+    let r = check_src_with_funcs(explicit, seed);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}

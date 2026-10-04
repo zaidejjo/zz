@@ -257,6 +257,27 @@ pub(crate) fn contains_var(t: &Type) -> bool {
     }
 }
 
+/// Largest inference-variable id inside a type (`None` when var-free).
+/// Used to offset a fresh checker's unifier above ids imported from
+/// already-checked modules (see `Unifier::reserve_vars_above`).
+pub(crate) fn max_var_id(t: &Type) -> Option<u32> {
+    match t {
+        Type::Var(id) => Some(*id),
+        Type::Void => None,
+        Type::Tuple(ts) => ts.iter().filter_map(max_var_id).max(),
+        Type::Option(x) => max_var_id(x),
+        Type::Result(a, b) => max_var_id(a).into_iter().chain(max_var_id(b)).max(),
+        Type::Func(ps, r) => ps.iter().filter_map(max_var_id).chain(max_var_id(r)).max(),
+        Type::Array(x) => max_var_id(x),
+        Type::Dict(k, v) => max_var_id(k).into_iter().chain(max_var_id(v)).max(),
+        Type::Struct(_, args) => args.iter().filter_map(max_var_id).max(),
+        Type::Union(ts) => ts.iter().filter_map(max_var_id).max(),
+        Type::Range(x) => max_var_id(x),
+        Type::Ptr { inner, .. } => max_var_id(inner),
+        _ => None,
+    }
+}
+
 /// Replace unresolved type variables inside `Option`/`Result` with `unit`
 /// so `.none`/`.ok`/`.err` bindings type-check without annotations.
 pub(crate) fn default_variant_vars(t: &mut Type) {

@@ -37,6 +37,13 @@ pub enum BuildMode {
     /// PGO phase 2: optimize with collected profile data (`zz profile`).
     /// Same flags as the instrumented build, plus `-fprofile-use`.
     PgoUse,
+    /// Max optimization (`zz build --release --full`): release base with
+    /// full LTO (deeper cross-TU optimization/elimination than ThinLTO).
+    Full,
+    /// Max optimization with PGO (`--full -- <train args>`): profile-use
+    /// plus full LTO. Instrumented leg reuses plain `Pgo` (same profile
+    /// quality, faster instrumented build).
+    FullPgo,
 }
 
 /// Release-build knobs: cross target, provider selection, verbosity.
@@ -57,6 +64,17 @@ pub struct ReleaseOptions {
     /// `--allow-hooks`: permit legacy `build = "..."` hooks (direct
     /// deps only; transitive hooks always error).
     pub allow_hooks: bool,
+    /// Internal: static came from the `zz build` default (not an explicit
+    /// `--static`), so impossible-static falls back to dynamic with a
+    /// note instead of erroring. Set by `build_cmd`; everything else
+    /// leaves the default `false` (strict).
+    pub allow_static_downgrade: bool,
+    /// `-o <name>`: publish the binary under this name instead of
+    /// `bin/<stem>`. A bare file name stays inside `bin/`; a value with
+    /// a path separator is used as-is relative to the current
+    /// directory (go-like). Excluded from the cache key: the same
+    /// cached binary is published under any name.
+    pub output: Option<PathBuf>,
 }
 
 impl ReleaseOptions {
@@ -302,6 +320,8 @@ fn opts_for(mode: BuildMode) -> BuildOptions {
         BuildMode::Static => BuildOptions::static_lto(),
         BuildMode::Pgo => BuildOptions::pgo_generate(),
         BuildMode::PgoUse => BuildOptions::pgo_use(),
+        BuildMode::Full => BuildOptions::full(),
+        BuildMode::FullPgo => BuildOptions::full_pgo_use(),
     }
 }
 
@@ -924,7 +944,24 @@ pub fn build_release(
         .unwrap_or_default();
     let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
     let mut opts = opts_for(mode);
+    opts.allow_static_downgrade = rel.allow_static_downgrade;
     let target = rel.target_opt();
+    // Default-static fallback for macOS (static linking is rejected
+    // there): downgrade to dynamic with a note instead of failing the
+    // default build. Explicit `--static` keeps the hard error in
+    // `validate` below. The note prints only on a real build, after the
+    // cache check, so cache hits stay silent.
+    let mut static_note: Option<&str> = None;
+    if opts.static_link && opts.allow_static_downgrade {
+        let macos = match target {
+            Some(t) => zz_codegen::is_macos_target(t),
+            None => cfg!(target_os = "macos"),
+        };
+        if macos {
+            opts.static_link = false;
+            static_note = Some("macOS targets cannot statically link; building dynamic");
+        }
+    }
 
     // Discover and build plugin native artifacts (compiled .o / .a files
     // plus dependency link flags from each package's ldflags.txt).
@@ -969,6 +1006,20 @@ pub fn build_release(
             return Err(zz_codegen::BuildError::NoClang.to_string());
         }
     };
+    // Default-static fallback for missing static system libraries: the
+    // single-TU runtime archive needs libcurl.a + libsqlite3.a on every
+    // static link, even for programs that never fetch or query. Probe
+    // once (cached per provider); downgrade to dynamic with a note
+    // instead of failing the default build. Explicit `--static` skips
+    // this (allow_static_downgrade false) and keeps the linker's error.
+    if opts.static_link
+        && opts.allow_static_downgrade
+        && !zz_codegen::compile::static_syslibs_available(&clang)
+    {
+        opts.static_link = false;
+        static_note =
+            Some("static system libraries (libcurl.a, libsqlite3.a) not found; building dynamic");
+    }
     if rel.verbose {
         eprintln!(
             "zz: {} {}",
@@ -977,6 +1028,10 @@ pub fn build_release(
         );
     }
 
+    // `-o` renames at publish time only (excluded from the cache key:
+    // identical source + options reuse one cached binary under any name).
+    // Captured before `opts` moves into the clang build below.
+    let output = rel.output.clone();
     // Cache: reuse when the same source + build options + target were
     // built before.
     let dir = cache_dir();
@@ -994,11 +1049,14 @@ pub fn build_release(
 
     if is_usable_cache_binary(&cached) {
         // Reuse the cached binary.
-        return publish_to_bin(&cached, path, target);
+        return publish_to_bin(&cached, path, target, output.as_deref());
     }
     // Stale artifact (interrupted build, missing exec bit, empty file):
     // drop it so the fresh build below replaces it.
     let _ = std::fs::remove_file(&cached);
+    if let Some(note) = static_note {
+        eprintln!("zz: note: {note}");
+    }
 
     // Build to a unique temp path in the same directory, then atomically
     // rename into place. Concurrent builds of the same key (parallel tests,
@@ -1037,7 +1095,7 @@ pub fn build_release(
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("cannot publish cache entry: {e}"));
     }
-    publish_to_bin(&cached, path, target)
+    publish_to_bin(&cached, path, target, output.as_deref())
 }
 
 /// Copy a cached binary into `bin/` next to the source with the
@@ -1047,16 +1105,48 @@ pub fn build_release(
 /// atomic rename: parallel `zz run --native` / `zz build` invocations for
 /// the same fixture (e.g. `cargo test --all` running several test binaries
 /// at once) must never observe — or execute — a half-written binary.
-fn publish_to_bin(cached: &Path, src: &Path, target: Option<&str>) -> Result<PathBuf, String> {
-    let stem = src
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "app".to_string());
-    let dir = bin_dir_for(src);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create bin dir: {e}"))?;
-    let dest = dir.join(bin_name(&stem, target));
+fn publish_to_bin(
+    cached: &Path,
+    src: &Path,
+    target: Option<&str>,
+    output: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let dest = match output {
+        Some(o) if o.components().count() > 1 => {
+            // Path-like `-o` (contains a separator): exact destination
+            // relative to the current directory (go-like).
+            let mut dest = o.to_path_buf();
+            let windows = match target {
+                Some(t) => zz_codegen::is_windows_target(t),
+                None => cfg!(windows),
+            };
+            if windows && dest.extension().is_none() {
+                dest.set_extension("exe");
+            }
+            dest
+        }
+        Some(o) => {
+            // Bare `-o` name: keep the `bin/` convention.
+            let stem = o.to_string_lossy().into_owned();
+            bin_dir_for(src).join(bin_name(&stem, target))
+        }
+        None => {
+            let stem = src
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "app".to_string());
+            bin_dir_for(src).join(bin_name(&stem, target))
+        }
+    };
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create output dir: {e}"))?;
+        }
+    }
     static PUBLISH_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let tmp = dir.join(format!(
+    let tmp_dir = dest.parent().filter(|p| !p.as_os_str().is_empty());
+    let tmp = tmp_dir.unwrap_or(std::path::Path::new(".")).join(format!(
         ".{}.publish-{}.{}.tmp",
         dest.file_name().unwrap_or_default().to_string_lossy(),
         std::process::id(),

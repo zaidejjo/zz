@@ -415,3 +415,397 @@ impl<'a> Rewriter<'a> {
         }
     }
 }
+
+/// Build bare-name → canonical-path rewrites for a module's selective
+/// imports (`import std.path(join)` → `join` → `["path", "join"]`),
+/// keeping ONLY spellings present in the checker seed (`seed`). The
+/// canonical namespace mirrors the loader's own seed rules (statement
+/// alias when present, else the last import segment), so the rewrite
+/// can never produce an unresolvable name — worst case it leaves the
+/// bare call as-is (today's behavior).
+///
+/// Why: bare selective calls (`join(...)`) resolve through a synthetic
+/// runtime binding (`join := path.join`) that has no native equivalent,
+/// so AOT lowers them to `unit`. The canonical spelling (`path.join`)
+/// resolves statically on every engine (checker, VM, native).
+pub(crate) fn selective_rewrites(
+    stmts: &[Stmt],
+    seed: &std::collections::HashMap<String, zz_checker::FuncSig>,
+) -> std::collections::HashMap<String, Vec<String>> {
+    use zz_frontend::ast::ImportItem;
+    let mut map = std::collections::HashMap::new();
+    for stmt in stmts {
+        let Stmt::Import {
+            path, alias, items, ..
+        } = stmt
+        else {
+            continue;
+        };
+        if items.is_empty() {
+            continue;
+        }
+        if path.first().map(String::as_str) == Some("std") && path.len() < 2 {
+            continue;
+        }
+        let last = path.last().cloned().unwrap_or_default();
+        let head = path.join(".");
+        // Candidate namespaces, most-specific first: the statement alias
+        // (registry deps seed under it), the last segment (local files
+        // and stdlib), then the full dotted head.
+        let mut nss = vec![alias.clone().unwrap_or_else(|| last.clone())];
+        if last != nss[0] {
+            nss.push(last.clone());
+        }
+        if head != last && Some(&head) != alias.as_ref() {
+            nss.push(head.clone());
+        }
+        for item in items {
+            match item {
+                ImportItem::Wildcard { .. } => {
+                    // Expand like the loader: every seed key under each
+                    // candidate namespace with a bare (dot-free) leaf.
+                    for ns in &nss {
+                        let prefix = format!("{ns}.");
+                        let mut keys: Vec<&String> =
+                            seed.keys().filter(|k| k.starts_with(&prefix)).collect();
+                        keys.sort();
+                        for k in keys {
+                            let bare = &k[prefix.len()..];
+                            if !bare.is_empty() && !bare.contains('.') {
+                                map.entry(bare.to_string())
+                                    .or_insert_with(|| k.split('.').map(str::to_string).collect());
+                            }
+                        }
+                    }
+                }
+                ImportItem::Named {
+                    name,
+                    alias: item_alias,
+                    ..
+                } => {
+                    let target = item_alias.as_ref().unwrap_or(name);
+                    for ns in &nss {
+                        let key = format!("{ns}.{name}");
+                        if seed.contains_key(&key) {
+                            map.entry(target.clone())
+                                .or_insert_with(|| key.split('.').map(str::to_string).collect());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Rewrite bare selective-import *call* callees to their canonical paths
+/// (see [`selective_rewrites`]). Value positions are untouched
+/// (first-class function values stay on the runtime-binding path), as
+/// are struct literals (never `Call` callees). Shadowing is detected
+/// coarsely: any binding of the name anywhere in the module disables
+/// its rewrite — conservative (falls back to today's behavior), never
+/// wrong. Synthetic import decls (`target := ns.sym`) are aliases, not
+/// shadowing, and are skipped by the binder scan (a user-written decl
+/// of the identical shape targets the same function, so rewriting
+/// there stays equivalent too).
+pub(crate) fn rewrite_selective_calls(
+    program: &mut zz_frontend::ast::Program,
+    map: &std::collections::HashMap<String, Vec<String>>,
+) {
+    let mut bound = HashSet::new();
+    for stmt in &program.stmts {
+        collect_binds(stmt, &mut bound, map, true);
+    }
+    for stmt in &mut program.stmts {
+        rewrite_calls(stmt, map, &bound);
+    }
+}
+
+/// Collect bound names; top-level synthetic import decls (whose value is
+/// exactly their mapped canonical path) are skipped — they alias.
+fn collect_binds(
+    stmt: &Stmt,
+    bound: &mut HashSet<String>,
+    map: &std::collections::HashMap<String, Vec<String>>,
+    is_top: bool,
+) {
+    match stmt {
+        Stmt::Decl { name, value, .. } => {
+            let synthetic = is_top
+                && matches!(value, Expr::Path { parts, .. } if map.get(&name.name).is_some_and(|c| c == parts));
+            if !synthetic {
+                bound.insert(name.name.clone());
+            }
+            walk_expr_binds(value, bound);
+        }
+        Stmt::Func {
+            name, params, body, ..
+        } => {
+            // A nested `func` shadows its own name within its body only;
+            // the coarse scan records it module-wide (safe direction).
+            if name.len() == 1 {
+                bound.insert(name.join("."));
+            }
+            for p in params {
+                bound.insert(p.name.name.clone());
+            }
+            walk_block_binds(body, bound);
+        }
+        Stmt::For { vars, body, .. } => {
+            for v in vars {
+                bound.insert(v.name.clone());
+            }
+            walk_block_binds(body, bound);
+        }
+        Stmt::Destructure { pat, value, .. } => {
+            Rewriter::declare_pattern(pat, &mut |n| {
+                bound.insert(n.to_string());
+            });
+            walk_expr_binds(value, bound);
+        }
+        Stmt::Impl { methods, .. } => {
+            for m in methods {
+                collect_binds(m, bound, map, false);
+            }
+        }
+        Stmt::Return { value: Some(v), .. } => {
+            walk_expr_binds(v, bound);
+        }
+        Stmt::Return { .. } => {}
+        Stmt::Expr(e) => walk_expr_binds(e, bound),
+        Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
+            walk_expr_binds(target, bound);
+            walk_expr_binds(value, bound);
+        }
+        _ => {}
+    }
+}
+
+fn walk_block_binds(block: &Block, bound: &mut HashSet<String>) {
+    for stmt in &block.stmts {
+        collect_binds(stmt, bound, &std::collections::HashMap::new(), false);
+    }
+}
+
+fn walk_expr_binds(expr: &Expr, bound: &mut HashSet<String>) {
+    match expr {
+        Expr::Closure { params, body, .. } => {
+            for p in params {
+                bound.insert(p.name.name.clone());
+            }
+            walk_expr_binds(body, bound);
+        }
+        Expr::ListComp { var, .. } => {
+            bound.insert(var.name.clone());
+        }
+        Expr::Match { arms, .. } => {
+            for arm in arms {
+                Rewriter::declare_pattern(&arm.pat, &mut |n| {
+                    bound.insert(n.to_string());
+                });
+                walk_expr_binds(&arm.body, bound);
+            }
+        }
+        Expr::IfLet { pat, .. } => {
+            Rewriter::declare_pattern(pat, &mut |n| {
+                bound.insert(n.to_string());
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Replace bare selective call callees (`join(...)` → `path.join(...)`)
+/// unless the name is bound anywhere in the module. Missed positions
+/// keep today's behavior — the walk is best-effort by design.
+fn rewrite_calls(
+    stmt: &mut Stmt,
+    map: &std::collections::HashMap<String, Vec<String>>,
+    bound: &HashSet<String>,
+) {
+    match stmt {
+        Stmt::Decl { value, .. } => rewrite_call_expr(value, map, bound),
+        Stmt::Func { body, .. } => {
+            for s in &mut body.stmts {
+                rewrite_calls(s, map, bound);
+            }
+        }
+        Stmt::Return { value: Some(v), .. } => {
+            rewrite_call_expr(v, map, bound);
+        }
+        Stmt::Return { .. } => {}
+        Stmt::Expr(e) => rewrite_call_expr(e, map, bound),
+        Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
+            rewrite_call_expr(target, map, bound);
+            rewrite_call_expr(value, map, bound);
+        }
+        Stmt::For { iter, body, .. } => {
+            rewrite_call_expr(iter, map, bound);
+            for s in &mut body.stmts {
+                rewrite_calls(s, map, bound);
+            }
+        }
+        Stmt::Destructure { value, .. } => rewrite_call_expr(value, map, bound),
+        Stmt::Impl { methods, .. } => {
+            for m in methods {
+                rewrite_calls(m, map, bound);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_call_expr(
+    expr: &mut Expr,
+    map: &std::collections::HashMap<String, Vec<String>>,
+    bound: &HashSet<String>,
+) {
+    match expr {
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            if let Expr::Ident { name, span } = callee.as_mut() {
+                if !bound.contains(name) {
+                    if let Some(path) = map.get(name) {
+                        **callee = Expr::Path {
+                            parts: path.clone(),
+                            span: *span,
+                        };
+                    }
+                }
+            }
+            rewrite_call_expr(callee, map, bound);
+            for a in args.iter_mut() {
+                rewrite_call_expr(a, map, bound);
+            }
+            for (_, v) in named.iter_mut() {
+                rewrite_call_expr(v, map, bound);
+            }
+        }
+        Expr::Paren { expr: inner, .. } | Expr::Unary { expr: inner, .. } => {
+            rewrite_call_expr(inner, map, bound)
+        }
+        Expr::Binary { left, right, .. } => {
+            rewrite_call_expr(left, map, bound);
+            rewrite_call_expr(right, map, bound);
+        }
+        Expr::Closure { body, .. } => rewrite_call_expr(body, map, bound),
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            rewrite_call_expr(cond, map, bound);
+            for s in &mut then.stmts {
+                rewrite_calls(s, map, bound);
+            }
+            if let Some(e) = els {
+                rewrite_call_expr(e, map, bound);
+            }
+        }
+        Expr::While { cond, body, .. } => {
+            rewrite_call_expr(cond, map, bound);
+            for s in &mut body.stmts {
+                rewrite_calls(s, map, bound);
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            rewrite_call_expr(scrutinee, map, bound);
+            for arm in arms {
+                rewrite_call_expr(&mut arm.body, map, bound);
+            }
+        }
+        Expr::IfLet {
+            value, then, els, ..
+        } => {
+            rewrite_call_expr(value, map, bound);
+            for s in &mut then.stmts {
+                rewrite_calls(s, map, bound);
+            }
+            if let Some(e) = els {
+                rewrite_call_expr(e, map, bound);
+            }
+        }
+        Expr::Try { expr: inner, .. } => rewrite_call_expr(inner, map, bound),
+        Expr::Block(b) => {
+            for s in &mut b.stmts {
+                rewrite_calls(s, map, bound);
+            }
+        }
+        Expr::Array { elems, .. } => {
+            for e in elems {
+                rewrite_call_expr(e, map, bound);
+            }
+        }
+        Expr::Tuple { items, .. } => {
+            for e in items {
+                rewrite_call_expr(e, map, bound);
+            }
+        }
+        Expr::Field { obj, .. } => rewrite_call_expr(obj, map, bound),
+        Expr::Index { obj, index, .. } => {
+            rewrite_call_expr(obj, map, bound);
+            rewrite_call_expr(index, map, bound);
+        }
+        Expr::Fmt { parts, .. } => {
+            for part in parts {
+                if let FmtPart::Expr(e, _) = part {
+                    rewrite_call_expr(e, map, bound);
+                }
+            }
+        }
+        Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                rewrite_call_expr(k, map, bound);
+                rewrite_call_expr(v, map, bound);
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            rewrite_call_expr(start, map, bound);
+            rewrite_call_expr(end, map, bound);
+        }
+        Expr::Slice {
+            obj, start, end, ..
+        } => {
+            rewrite_call_expr(obj, map, bound);
+            if let Some(x) = start {
+                rewrite_call_expr(x, map, bound);
+            }
+            if let Some(x) = end {
+                rewrite_call_expr(x, map, bound);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            // Field VALUES only: the struct type name is never a call.
+            for (_, v) in fields {
+                rewrite_call_expr(v, map, bound);
+            }
+        }
+        Expr::ListComp {
+            body, iter, filter, ..
+        } => {
+            rewrite_call_expr(iter, map, bound);
+            rewrite_call_expr(body, map, bound);
+            if let Some(f) = filter {
+                rewrite_call_expr(f, map, bound);
+            }
+        }
+        Expr::Variant { arg, .. } => {
+            if let Some(a) = arg {
+                rewrite_call_expr(a, map, bound);
+            }
+        }
+        Expr::Path { .. }
+        | Expr::Ident { .. }
+        | Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Str { .. }
+        | Expr::Bool { .. }
+        | Expr::Break { .. }
+        | Expr::Continue { .. } => {}
+    }
+}
