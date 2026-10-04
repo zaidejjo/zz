@@ -192,8 +192,19 @@ fn check_program_impl(
     // a same-signature wrapper, so all downstream passes see ordinary
     // functions and calls. Idempotent — already-expanded programs pass
     // through unchanged.
-    let (expanded, mut decorator_errors) = zz_frontend::decorators::expand_program(program);
-    let program = &expanded;
+    //
+    // Skip fast path: decorator-free programs (the common case) check
+    // in place with zero cloning. HIR already expanded once upstream, so
+    // without this every compile paid a second full-program deep clone
+    // for a no-op re-expansion.
+    let mut owned: Option<Program> = None;
+    let mut decorator_errors = Vec::new();
+    if zz_frontend::decorators::has_any_decorators(program) {
+        let (expanded, errs) = zz_frontend::decorators::expand_program(program);
+        decorator_errors = errs;
+        owned = Some(expanded);
+    }
+    let program: &Program = owned.as_ref().map_or(program, |o| o);
     let mut checker = Checker::new(
         initial_bindings,
         initial_funcs,

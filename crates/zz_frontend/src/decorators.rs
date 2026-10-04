@@ -27,10 +27,138 @@
 
 use std::collections::HashSet;
 
-use crate::ast::{Block, Decorator, Expr, Program, Stmt};
+use crate::ast::{Block, Decorator, Expr, FmtPart, Program, Stmt};
 use crate::diag::{error_at, RawDiag};
 use crate::span::Span;
 use crate::test_attr as test_attr_mod;
+
+/// True when any function definition carries decorators — top-level, methods,
+/// or nested in blocks. Callers use this to skip [`expand_program`] on the
+/// common decorator-free path (expansion would only deep-clone).
+///
+/// Over-approximates: any doubt returns `true` (a wasted clone, never a
+/// missed expansion). Matches are exhaustive with no wildcard arm, so a new
+/// AST variant fails compile here and forces the scanner to stay sound.
+pub fn has_any_decorators(program: &Program) -> bool {
+    program.stmts.iter().any(stmt_has_decorators)
+}
+
+fn block_has_decorators(block: &Block) -> bool {
+    block.stmts.iter().any(stmt_has_decorators)
+}
+
+fn stmt_has_decorators(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Func {
+            decorators, body, ..
+        } => !decorators.is_empty() || block_has_decorators(body),
+        Stmt::Impl { methods, .. } => methods.iter().any(stmt_has_decorators),
+        Stmt::Decl { value, .. } => expr_has_decorators(value),
+        Stmt::Return { value, .. } => value.as_ref().is_some_and(expr_has_decorators),
+        Stmt::For { iter, body, .. } => expr_has_decorators(iter) || block_has_decorators(body),
+        Stmt::Defer { expr, .. } => expr_has_decorators(expr),
+        Stmt::Assign { target, value, .. } => {
+            expr_has_decorators(target) || expr_has_decorators(value)
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
+            expr_has_decorators(target) || expr_has_decorators(value)
+        }
+        Stmt::Destructure { value, .. } => expr_has_decorators(value),
+        Stmt::Expr(expr) => expr_has_decorators(expr),
+        Stmt::Import { .. }
+        | Stmt::Struct { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::ExternBlock { .. }
+        | Stmt::Link { .. } => false,
+    }
+}
+
+fn expr_has_decorators(expr: &Expr) -> bool {
+    match expr {
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Str { .. }
+        | Expr::Bool { .. }
+        | Expr::Ident { .. }
+        | Expr::Path { .. }
+        | Expr::Break { .. }
+        | Expr::Continue { .. } => false,
+        Expr::Fmt { parts, .. } => parts.iter().any(|p| match p {
+            FmtPart::Text(_) => false,
+            FmtPart::Expr(e, _) => expr_has_decorators(e),
+        }),
+        Expr::Paren { expr, .. }
+        | Expr::Unary { expr, .. }
+        | Expr::Try { expr, .. }
+        | Expr::Closure { body: expr, .. }
+        | Expr::Field { obj: expr, .. } => expr_has_decorators(expr),
+        Expr::Tuple { items, .. } | Expr::Array { elems: items, .. } => {
+            items.iter().any(expr_has_decorators)
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Range {
+            start: left,
+            end: right,
+            ..
+        } => expr_has_decorators(left) || expr_has_decorators(right),
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            expr_has_decorators(callee)
+                || args.iter().any(expr_has_decorators)
+                || named.iter().any(|(_, e)| expr_has_decorators(e))
+        }
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            expr_has_decorators(cond)
+                || block_has_decorators(then)
+                || els.as_ref().is_some_and(|e| expr_has_decorators(e))
+        }
+        Expr::IfLet {
+            value, then, els, ..
+        } => {
+            expr_has_decorators(value)
+                || block_has_decorators(then)
+                || els.as_ref().is_some_and(|e| expr_has_decorators(e))
+        }
+        Expr::While { cond, body, .. } => expr_has_decorators(cond) || block_has_decorators(body),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            expr_has_decorators(scrutinee)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(expr_has_decorators)
+                        || expr_has_decorators(&a.body)
+                })
+        }
+        Expr::Block(block) => block_has_decorators(block),
+        Expr::Variant { arg, .. } => arg.as_ref().is_some_and(|e| expr_has_decorators(e)),
+        Expr::Dict { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| expr_has_decorators(k) || expr_has_decorators(v)),
+        Expr::StructInit { fields, .. } => fields.iter().any(|(_, e)| expr_has_decorators(e)),
+        Expr::Index { obj, index, .. } => expr_has_decorators(obj) || expr_has_decorators(index),
+        Expr::Slice {
+            obj, start, end, ..
+        } => {
+            expr_has_decorators(obj)
+                || start.as_ref().is_some_and(|e| expr_has_decorators(e))
+                || end.as_ref().is_some_and(|e| expr_has_decorators(e))
+        }
+        Expr::ListComp {
+            body, iter, filter, ..
+        } => {
+            expr_has_decorators(body)
+                || expr_has_decorators(iter)
+                || filter.as_ref().is_some_and(|e| expr_has_decorators(e))
+        }
+    }
+}
 
 /// Expand all decorated functions in `program`.
 ///
