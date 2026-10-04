@@ -57,6 +57,11 @@ pub struct ReleaseOptions {
     /// `--allow-hooks`: permit legacy `build = "..."` hooks (direct
     /// deps only; transitive hooks always error).
     pub allow_hooks: bool,
+    /// Internal: static came from the `zz build` default (not an explicit
+    /// `--static`), so impossible-static falls back to dynamic with a
+    /// note instead of erroring. Set by `build_cmd`; everything else
+    /// leaves the default `false` (strict).
+    pub allow_static_downgrade: bool,
 }
 
 impl ReleaseOptions {
@@ -924,7 +929,24 @@ pub fn build_release(
         .unwrap_or_default();
     let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
     let mut opts = opts_for(mode);
+    opts.allow_static_downgrade = rel.allow_static_downgrade;
     let target = rel.target_opt();
+    // Default-static fallback for macOS (static linking is rejected
+    // there): downgrade to dynamic with a note instead of failing the
+    // default build. Explicit `--static` keeps the hard error in
+    // `validate` below. The note prints only on a real build, after the
+    // cache check, so cache hits stay silent.
+    let mut static_note: Option<&str> = None;
+    if opts.static_link && opts.allow_static_downgrade {
+        let macos = match target {
+            Some(t) => zz_codegen::is_macos_target(t),
+            None => cfg!(target_os = "macos"),
+        };
+        if macos {
+            opts.static_link = false;
+            static_note = Some("macOS targets cannot statically link; building dynamic");
+        }
+    }
 
     // Discover and build plugin native artifacts (compiled .o / .a files
     // plus dependency link flags from each package's ldflags.txt).
@@ -969,6 +991,20 @@ pub fn build_release(
             return Err(zz_codegen::BuildError::NoClang.to_string());
         }
     };
+    // Default-static fallback for missing static system libraries: the
+    // single-TU runtime archive needs libcurl.a + libsqlite3.a on every
+    // static link, even for programs that never fetch or query. Probe
+    // once (cached per provider); downgrade to dynamic with a note
+    // instead of failing the default build. Explicit `--static` skips
+    // this (allow_static_downgrade false) and keeps the linker's error.
+    if opts.static_link
+        && opts.allow_static_downgrade
+        && !zz_codegen::compile::static_syslibs_available(&clang)
+    {
+        opts.static_link = false;
+        static_note =
+            Some("static system libraries (libcurl.a, libsqlite3.a) not found; building dynamic");
+    }
     if rel.verbose {
         eprintln!(
             "zz: {} {}",
@@ -999,6 +1035,9 @@ pub fn build_release(
     // Stale artifact (interrupted build, missing exec bit, empty file):
     // drop it so the fresh build below replaces it.
     let _ = std::fs::remove_file(&cached);
+    if let Some(note) = static_note {
+        eprintln!("zz: note: {note}");
+    }
 
     // Build to a unique temp path in the same directory, then atomically
     // rename into place. Concurrent builds of the same key (parallel tests,

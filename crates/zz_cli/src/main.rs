@@ -93,9 +93,10 @@ PACKAGE MANAGER:
     zz doctor [--fix]              audit the toolchain (binary, clang, shell, git, registry)
 
 BUILD MODES (single Clang backend, always a native binary):
-     zz build <file.zz>           debug build (-O0 -g, fast, dynamic) — the default
+     zz build <file.zz>           static build (ThinLTO, DCE, stripped) — the default
+     zz build --dynamic <file.zz> debug build (-O0 -g, fast, dynamic)
      zz build -p <file.zz>        release build (-O3 -flto=thin, dynamic, stripped)
-     zz build --static <file.zz>  static build (ThinLTO, DCE, self-contained; not on macOS)
+     zz build --static <file.zz>  static build, explicit (same as the default; errors where static is impossible)
      zz build --pgo <file.zz>     PGO build (profile-guided, native host only)
      zz profile <file.zz> [-- args]
                                   PGO end to end: instrument → train → optimize
@@ -113,7 +114,8 @@ FLAGS:
     --embed <dir>      with run/build, serve (VM) or bake (native) a static asset
                        directory, readable at runtime via `fs.embedfs()`
     -p, --release      with build, full optimization (-O3 -flto=thin, dynamic, stripped)
-    --static           with build, static self-contained binary (ThinLTO, DCE; rejected on macOS)
+    --static           with build, static self-contained binary (the default; explicit use errors where static is impossible)
+    --dynamic          with build, dynamic debug build (-O0 -g, fast); falls back automatically where static is impossible
     --pgo              with build, profile-guided optimization build (native host only)
     --target <triple>  with build, cross-compile via clang --target= (same flags as without -p, minus -march=native)
     --cc <clang|zig>   with build, select the Clang provider
@@ -173,7 +175,7 @@ EXAMPLES:
     zz fmt --stdin < file.zz         format a single file via stdin/stdout
     zz build hello.zz                dev build (dynamic)
     zz build -p hello.zz             release build (dynamic, optimized)
-    zz build --static hello.zz       static build (self-contained)
+    zz build --static hello.zz       static build, explicit (self-contained)
 ";
 
 fn main() -> ExitCode {
@@ -971,8 +973,12 @@ fn run_native(
 
 /// `zz build [FLAGS] <file>`: always a native Clang binary.
 ///
-/// Default (`zz build`): fast native debug build (`-O0 -g`, no LTO).
-/// `-p/--release/-O3` upgrades to the optimized build (`-O3 -flto=thin`).
+/// Default (`zz build`): static self-contained binary (ThinLTO, DCE,
+/// stripped). Falls back to dynamic with a note where static is
+/// impossible (macOS targets, programs needing the Rust native
+/// runtime); explicit `--static` errors there instead.
+/// `-p/--release/-O3` selects the dynamic optimized build; `--dynamic`
+/// selects the fast dynamic debug build (`-O0 -g`).
 /// Both paths are real binaries in `bin/` — never VM execution.
 /// (`zz run` is the only command that executes through the VM.)
 fn build_cmd(args: &[String]) -> Result<(), String> {
@@ -987,6 +993,12 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         .iter()
         .any(|a| a == "-p" || a == "--release" || a == "-O3");
     let is_static = args.iter().any(|a| a == "--static");
+    let is_dynamic = args.iter().any(|a| a == "--dynamic");
+    if is_static && is_dynamic {
+        return Err("cannot combine `--static` and `--dynamic`\n\
+             hint: drop one flag (default is static where possible)"
+            .to_string());
+    }
     let is_pgo = args.iter().any(|a| a == "--pgo");
     let verbose = args.iter().any(|a| a == "--verbose");
     let allow_source_builds = args.iter().any(|a| a == "--allow-source-builds");
@@ -1012,7 +1024,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         })
         .ok_or_else(|| {
             "missing file argument\n\n\
-             usage: zz build [-p|--release|-O3|--static|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] <file.zz>\n\
+             usage: zz build [-p|--release|-O3|--static|--dynamic|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] <file.zz>\n\
              hint: provide the path to a .zz file to build"
                 .to_string()
         })?;
@@ -1021,18 +1033,24 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     crate::enforce_project_zz(p)?;
 
-    // Default (no flags) is a fast native debug build; -p upgrades to
-    // optimized. --static/--pgo select their own option sets. Guards
-    // (PGO-cross, static-macOS) in validate() apply uniformly.
+    // Default (no flags) is a static self-contained build; -p upgrades
+    // to the dynamic optimized build, --dynamic to the fast dynamic
+    // debug build. --static/--pgo select their own option sets. Guards
+    // (PGO-cross, explicit-static-macOS) in validate() apply uniformly;
+    // default-static downgrades silently-marked paths (macOS, Rust
+    // native runtime) fall back to dynamic with a note instead.
     let mode = if is_pgo {
         build::BuildMode::Pgo
     } else if is_static {
         build::BuildMode::Static
     } else if release {
         build::BuildMode::Release
-    } else {
+    } else if is_dynamic {
         build::BuildMode::Dev
+    } else {
+        build::BuildMode::Static
     };
+    let allow_downgrade = mode == build::BuildMode::Static && !is_static;
     let provider = match cc.as_deref() {
         None => zz_codegen::ClangProvider::Any,
         Some(name) => zz_codegen::ClangProvider::parse(name).ok_or_else(|| {
@@ -1049,6 +1067,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         embed,
         allow_source_builds,
         allow_hooks,
+        allow_static_downgrade: allow_downgrade,
     };
     let mode_str = match mode {
         build::BuildMode::Dev => "dev",

@@ -199,6 +199,16 @@ pub fn get_size() -> Result<(i64, i64), String> {
 pub fn flush() {
     use std::io::Write as _;
     let _ = std::io::stdout().flush();
+    // AOT programs print through C stdio (`fputs`), which owns a separate
+    // buffer from Rust's stdout in the same process: a Rust-only flush
+    // leaves prompts stranded in the C buffer while `read_key` blocks
+    // (invisible prompt on a TTY, deadlock-looking hang). Flushing all C
+    // output streams closes the gap on both engines.
+    //
+    // SAFETY: `fflush(NULL)` flushes all C output streams; always safe.
+    unsafe {
+        libc::fflush(std::ptr::null_mut());
+    }
 }
 
 fn ok_unit() -> CValue {

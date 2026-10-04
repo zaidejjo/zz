@@ -99,6 +99,63 @@ pub struct Clang {
     pub label: &'static str,
 }
 
+/// Probe whether fully-static linking works with `clang` (static
+/// `libcurl`/`libsqlite3` present). The precompiled runtime archive is a
+/// single TU, so every static link needs both system libraries even when
+/// the program never fetches or opens a database. Used to downgrade a
+/// *default* static build to dynamic with a note instead of failing it
+/// on machines without the static system libraries. Results are cached
+/// per provider; a probe that cannot run fails open (proceed static —
+/// the real link surfaces any problem).
+pub fn static_syslibs_available(clang: &Clang) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let key = format!("{}:{}", clang.path.display(), clang.zig);
+    if let Some(hit) = CACHE
+        .get_or_init(Mutex::default)
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&key).copied())
+    {
+        return hit;
+    }
+    let ok = static_syslibs_probe(clang);
+    if let Some(mut m) = CACHE.get().and_then(|c| c.lock().ok()) {
+        m.insert(key, ok);
+    }
+    ok
+}
+
+fn static_syslibs_probe(clang: &Clang) -> bool {
+    let dir = std::env::temp_dir().join(format!("zz-static-probe-{}", std::process::id()));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return true;
+    }
+    let out = dir.join("probe");
+    let mut cmd = std::process::Command::new(&clang.path);
+    if clang.zig {
+        cmd.arg("cc");
+    }
+    // Empty TU + `-static` + both system libs: succeeds only when the
+    // static archives exist in the linker search path.
+    let r = cmd
+        .arg("-static")
+        .arg("-lcurl")
+        .arg("-lsqlite3")
+        .arg("-o")
+        .arg(&out)
+        .arg("-x")
+        .arg("c")
+        .arg("/dev/null")
+        .output();
+    let _ = std::fs::remove_dir_all(&dir);
+    match r {
+        Ok(o) => o.status.success(),
+        Err(_) => true,
+    }
+}
+
 /// Probe PATH for a Clang provider.
 ///
 /// Order: `clang`, `clang-22`, `zig`. Test hook: when the environment
@@ -300,6 +357,12 @@ pub struct BuildOptions {
     /// Set automatically alongside `native_rt` when sqlz/pg natives are
     /// reachable (the C dispatcher's weak refs never pull members alone).
     pub pg_link: bool,
+    /// Allow silently downgrading `static_link` to dynamic when static is
+    /// impossible (macOS target, or the program needs the Rust native
+    /// runtime). Set by the CLI only when static came from the *default*,
+    /// never from an explicit `--static` (which keeps today's hard error).
+    /// Part of the cache fingerprint: downgraded output differs.
+    pub allow_static_downgrade: bool,
     /// Extra object files / static libraries from plugin packages to link
     /// into the final binary. Each entry is a path to a `.o` or `.a` file
     /// produced by a plugin's build hook.
@@ -315,7 +378,7 @@ pub struct BuildOptions {
 
 impl BuildOptions {
     /// Debug build: fast native compile (`-O0 -g`, no LTO).
-    /// Default for `zz build` without flags.
+    /// Used for `zz build --dynamic` and parity sweeps (`ZZ_NATIVE_DEV=1`).
     pub fn dev() -> Self {
         BuildOptions {
             optimize: false,
@@ -326,6 +389,7 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            allow_static_downgrade: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -344,6 +408,7 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            allow_static_downgrade: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -362,6 +427,7 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            allow_static_downgrade: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -380,6 +446,7 @@ impl BuildOptions {
             pgo: PgoMode::Generate,
             native_rt: false,
             pg_link: false,
+            allow_static_downgrade: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -398,6 +465,7 @@ impl BuildOptions {
             pgo: PgoMode::Use,
             native_rt: false,
             pg_link: false,
+            allow_static_downgrade: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -426,6 +494,7 @@ impl BuildOptions {
         self.pgo.hash(&mut h);
         self.native_rt.hash(&mut h);
         self.pg_link.hash(&mut h);
+        self.allow_static_downgrade.hash(&mut h);
         // Hash plugin artifact paths so cache invalidates when plugins change.
         for p in &self.plugin_artifacts {
             p.hash(&mut h);

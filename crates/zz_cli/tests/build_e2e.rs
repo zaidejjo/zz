@@ -47,30 +47,44 @@ fn run(dir: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, S
 }
 
 #[test]
-fn dev_default_builds_native_binary() {
+fn static_default_builds_native_binary() {
     let dir = temp_project();
     let (code, stdout, stderr) = run(&dir, &["build", "hello.zz"], &[]);
-    if !stdout.contains("(dev,") && stderr.contains("no clang found") {
-        eprintln!("SKIP: no clang on PATH, cannot run dev happy path");
+    if !stdout.contains("(static,") && stderr.contains("no clang found") {
+        eprintln!("SKIP: no clang on PATH, cannot run static happy path");
         let _ = std::fs::remove_dir_all(&dir);
         return;
     }
     assert_eq!(
         code, 0,
-        "dev build must pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "default (static) build must pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    // Build chatter (including the `(dev, …)` mode marker) goes to
+    // Build chatter (including the `(static, …)` mode marker) goes to
     // stderr by design — see `ui.rs` ("progress/chatter goes to
     // stderr") — so assert on stderr, not stdout.
     assert!(
-        stderr.contains("(dev,"),
-        "dev marker missing.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        stderr.contains("(static,"),
+        "static marker missing.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     let bin = dir.join("bin/hello");
     assert!(bin.is_file(), "bin/hello missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dynamic_flag_builds_dynamic_dev_binary() {
+    let dir = temp_project();
+    let (code, _stdout, stderr) = run(&dir, &["build", "--dynamic", "hello.zz"], &[]);
+    assert_eq!(code, 0, "dynamic build must pass.\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("(dev,"),
+        "dev marker missing for --dynamic.\nstderr:\n{stderr}"
+    );
+    let bin = dir.join("bin/hello");
+    assert!(bin.is_file(), "bin/hello missing");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
