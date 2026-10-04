@@ -598,6 +598,11 @@ impl Lowerer {
                             self.stmt_direct.set(true);
                         }
                         let val = self.emit_expr(e, names, out);
+                        // Box raw scalars for the `zz_value` temp: tail
+                        // calls to specialized functions (and scalar
+                        // temporaries generally) lower raw. Idempotent —
+                        // already-boxed values pass through unchanged.
+                        let val = box_scalar_operand(e, names, &val);
                         out.push_str(&format!("    zz_value {tmp} = {val};\n"));
                         names
                             .stack
@@ -645,10 +650,15 @@ impl Lowerer {
             Stmt::Return { value, .. } => match value {
                 Some(v) => {
                     let val = self.emit_expr(v, names, out);
-                    let val = box_scalar_operand(v, names, &val);
-                    out.push_str(&format!("    return {val};\n"));
+                    if let Some(expected) = *self.unboxed_ret.borrow() {
+                        let val = self.unbox_for_return(v, val, names, expected);
+                        out.push_str(&format!("    return {val};\n"));
+                    } else {
+                        let val = box_scalar_operand(v, names, &val);
+                        out.push_str(&format!("    return {val};\n"));
+                    }
                 }
-                None => out.push_str("    return zz_unit();\n"),
+                None => out.push_str(&format!("    return {};\n", self.ret_unit())),
             },
             Stmt::For {
                 vars,
@@ -1553,11 +1563,13 @@ impl Lowerer {
             }
             // Tail call/compound was captured into __tail by emit_block.
             if let Some(tmp) = names.stack.get("__tail").and_then(|s| s.last()).cloned() {
-                out.push_str(&format!("    return {};\n", tmp.0));
+                let ret = self.ret_unbox(tmp.0);
+                out.push_str(&format!("    return {ret};\n"));
                 return Some(());
             }
             // Pure leaf tail: emit directly (rarely reached).
             let val = self.emit_tail_value(e, names, out);
+            let val = self.ret_unbox(val);
             out.push_str(&format!("    return {val};\n"));
             return Some(());
         }
@@ -1565,6 +1577,7 @@ impl Lowerer {
         if let Some(Stmt::Decl { name, .. }) = block.stmts.last() {
             let n = name.name.clone();
             if let Some(val) = self.decl_tail_value(&n, names, out) {
+                let val = self.ret_unbox(val);
                 out.push_str(&format!("    return {val};\n"));
                 return Some(());
             }
@@ -1600,25 +1613,32 @@ impl Lowerer {
             }
             Some(Stmt::Expr(e)) => {
                 let val = self.emit_tail_value(e, names, out);
+                let val = self.ret_unbox(val);
                 out.push_str(&format!("        return {val};\n"));
             }
             Some(Stmt::Return { value, .. }) => match value {
                 Some(v) => {
                     let val = self.emit_expr(v, names, out);
-                    let val = box_scalar_operand(v, names, &val);
-                    out.push_str(&format!("        return {val};\n"));
+                    if let Some(expected) = *self.unboxed_ret.borrow() {
+                        let val = self.unbox_for_return(v, val, names, expected);
+                        out.push_str(&format!("        return {val};\n"));
+                    } else {
+                        let val = box_scalar_operand(v, names, &val);
+                        out.push_str(&format!("        return {val};\n"));
+                    }
                 }
-                None => out.push_str("        return zz_unit();\n"),
+                None => out.push_str(&format!("        return {};\n", self.ret_unit())),
             },
             Some(Stmt::Decl { name, .. }) => {
                 if let Some(val) = self.decl_tail_value(&name.name, names, out) {
+                    let val = self.ret_unbox(val);
                     out.push_str(&format!("        return {val};\n"));
                 } else {
-                    out.push_str("        return zz_unit();\n");
+                    out.push_str(&format!("        return {};\n", self.ret_unit()));
                 }
             }
             _ => {
-                out.push_str("        return zz_unit();\n");
+                out.push_str(&format!("        return {};\n", self.ret_unit()));
             }
         }
         names.pop_scope();
@@ -1644,12 +1664,13 @@ impl Lowerer {
                         other => self.emit_tail_expr(other, names, out),
                     }
                 } else {
-                    out.push_str("        return zz_unit();\n");
+                    out.push_str(&format!("        return {};\n", self.ret_unit()));
                 }
                 out.push_str("    }\n");
             }
             _ => {
                 let val = self.emit_tail_value(e, names, out);
+                let val = self.ret_unbox(val);
                 out.push_str(&format!("    return {val};\n"));
             }
         }

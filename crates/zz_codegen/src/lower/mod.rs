@@ -234,6 +234,7 @@ impl Lowerer {
         // globals. Top-level Decl assigns into its global (no local redecl).
         let mut names = NameCtx::new();
         self.seed_globals(&mut names);
+        self.seed_scalar_fns(&mut names);
         let mut global_init_done: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
@@ -441,6 +442,27 @@ impl Lowerer {
                 ),
             };
             forward_decls.push_str(&proto);
+            // Scalar-specialized functions also get an unboxed prototype
+            // so callers earlier in the TU can route to `_u` directly.
+            if self.specialized.contains(fname) {
+                if let Some(sig) = self.tp.funcs.get(fname) {
+                    let ret = Self::scalar_ctype(&sig.ret).unwrap_or("zz_value");
+                    let params: Vec<String> = sig
+                        .params
+                        .iter()
+                        .map(|(_, t)| Self::scalar_ctype(t).unwrap_or("zz_value").to_string())
+                        .collect();
+                    let psig = if params.is_empty() {
+                        "void".to_string()
+                    } else {
+                        params.join(", ")
+                    };
+                    forward_decls.push_str(&format!(
+                        "static {ret} zz_fn_{}_u({psig});\n",
+                        mangle(fname)
+                    ));
+                }
+            }
         }
 
         let closure_fwd = self.closure_forward_decls.borrow().join("");

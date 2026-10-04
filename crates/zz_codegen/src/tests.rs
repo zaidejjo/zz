@@ -1654,3 +1654,78 @@ fn sql_program_links_sqlite_not_curl() {
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn scalar_fn_specializes_and_runs() {
+    // fib(int) -> int must gain an unboxed variant; native output must
+    // match the VM exactly (differential check on scalar recursion).
+    let src = "func fib(n: int) -> int {\n    if n < 2 {\n        return n\n    }\n    return fib(n - 1) + fib(n - 2)\n}\nfunc main() {\n    println(fib(20))\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::lower::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".to_string(),
+        pruned.clone(),
+    );
+    assert!(
+        lowerer.specialized.contains("main.fib") || lowerer.specialized.contains("fib"),
+        "fib should specialize, got: {:?}",
+        lowerer.specialized
+    );
+    // The unboxed variant must exist in the generated C with raw scalars.
+    let lowered = lower_only(&pruned, &reach, "main");
+    assert!(
+        lowered.source.contains("_u(int64_t"),
+        "expected an unboxed fib variant"
+    );
+    let (_, out) = native_run(src);
+    assert_eq!(out, "6765\n");
+}
+
+#[test]
+fn scalar_comparisons_and_floats_match_vm() {
+    // Differential: comparisons, float arithmetic, and bool returns in
+    // `_u` bodies must match the VM bit-for-bit (including int/float
+    // promotion and comparison chaining through calls).
+    let src = "func max2(a: int, b: int) -> int {\n    if a > b {\n        return a\n    }\n    return b\n}\nfunc fadd(x: float, y: float) -> float {\n    return x + y * 2.0\n}\nfunc is_pos(n: int) -> bool {\n    return n > 0\n}\nfunc main() {\n    println(max2(3, 7))\n    println(max2(9, 2))\n    println(fadd(1.5, 2.0))\n    println(is_pos(-4))\n    println(is_pos(4))\n    println(fib_sum(10))\n}\nfunc fib_sum(n: int) -> int {\n    total := 0\n    for i in 0..n {\n        total = total + i\n    }\n    return total\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::lower::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".to_string(),
+        pruned.clone(),
+    );
+    for f in ["max2", "fadd", "is_pos", "fib_sum"] {
+        let key = if lowerer.specialized.contains(f) {
+            f.to_string()
+        } else {
+            format!("main.{f}")
+        };
+        assert!(lowerer.specialized.contains(&key), "{f} should specialize");
+    }
+    let (_, out) = native_run(src);
+    assert_eq!(out, "7\n9\n5.5\nfalse\ntrue\n45\n");
+}
+
+#[test]
+fn scalar_fn_with_capturing_closure_matches_vm() {
+    // Regression: `_u` bodies initially skipped capture analysis, so
+    // nested closures lost captured locals (NULL env) and hung or
+    // miscomputed. The closure itself stays boxed; only the enclosing
+    // scalar function specializes.
+    let src = "func with_cap(n: int) -> int {\n    m := n + 1\n    f := |x| x + m\n    return f(10)\n}\nfunc main() {\n    println(with_cap(5))\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::lower::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".to_string(),
+        pruned.clone(),
+    );
+    assert!(
+        lowerer.specialized.contains("with_cap"),
+        "with_cap should specialize, got: {:?}",
+        lowerer.specialized
+    );
+    let (_, out) = native_run(src);
+    assert_eq!(out, "16\n");
+}

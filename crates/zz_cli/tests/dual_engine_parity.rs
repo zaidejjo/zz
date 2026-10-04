@@ -269,7 +269,9 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
     let stem = file.file_stem()?.to_str()?;
     match stem {
         // --- C codegen compile errors (scalar boxing class) ---
-        "frame_slots" => Some("C codegen: raw zz_value in scalar comparison `(v0 > 0)`"),
+        // NOTE: `frame_slots` was listed here (raw zz_value in scalar
+        // comparison `(v0 > 0)`) but the unboxed-calls work now emits
+        // verifiably-raw comparisons, so it runs as strict parity.
         "struct_impl" => {
             Some("C codegen: unboxed struct returned/fielded as zz_value and vice versa")
         }
