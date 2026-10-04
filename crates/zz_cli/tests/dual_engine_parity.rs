@@ -955,6 +955,7 @@ parity_strict_error!(parity_err_int_float_cmp, "int_float_cmp.zz");
 
 // --- Match and return_in_loops: fixed by box_scalar_operand + __tail scoping ---
 parity_strict!(parity_syntax_match, "syntax", "match.zz");
+parity_strict!(parity_syntax_match_assign, "syntax", "match_assign.zz");
 parity_strict!(
     parity_syntax_return_in_loops,
     "syntax",
@@ -983,6 +984,11 @@ parity_strict!(parity_stdlib_math_ops, "stdlib", "math_ops.zz");
 parity_strict!(parity_stdlib_math_consts, "stdlib", "math_consts.zz");
 parity_strict!(parity_stdlib_enumerate_loop, "stdlib", "enumerate_loop.zz");
 parity_strict!(parity_stdlib_path_join, "stdlib", "path_join.zz");
+parity_strict!(parity_stdlib_map_set, "stdlib", "map_set.zz");
+parity_strict!(parity_stdlib_dec_ops, "stdlib", "dec_ops.zz");
+parity_strict!(parity_stdlib_csv_test, "stdlib", "csv_test.zz");
+parity_strict!(parity_stdlib_builders, "stdlib", "builders.zz");
+parity_strict!(parity_stdlib_time_date, "stdlib", "time_date.zz");
 parity_known_failure!(
     parity_stdlib_math_extended,
     "stdlib",

@@ -1,0 +1,35 @@
+// E2E: std.csv RFC4180 subset.
+import std.csv
+import std.json
+
+func main() {
+    rows := csv.parse("a,b,c\n1,2,3\n")
+    println(csv.len(rows))
+    println(csv.header(rows))
+    println(csv.get_cell(rows, 1, 0, "?"))
+    println(csv.get_cell(rows, 9, 9, "dflt"))
+
+    q := csv.parse("a,\"b,c\",d\n")
+    println(csv.get_cell(q, 0, 1, "?"))
+    println(csv.len(q))
+
+    esc := csv.parse("a,\"b\"\"q\",c\n")
+    println(csv.get_cell(esc, 0, 1, "?"))
+
+    println(csv.stringify(rows))
+    r := csv.parse(csv.stringify(rows))
+    println(csv.len(r))
+    println(csv.get_cell(r, 1, 2, "?"))
+
+    semi := csv.parse_delim("a;b\n1;2\n", ";")
+    println(csv.get_cell(semi, 1, 1, "?"))
+    println(csv.stringify_delim(semi, ";"))
+
+    println(csv.header(csv.parse("")))
+    println(csv.records(rows))
+    println(csv.validate("a,b\n1,2\n"))
+    println(csv.validate(""))
+    j := csv.to_json(rows)
+    println(json.stringify(j))
+    println("csv_ok")
+}

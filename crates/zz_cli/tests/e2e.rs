@@ -191,6 +191,7 @@ e2e_success_test!(
 e2e_success_test!(e2e_syntax_pipelines, "syntax", "pipelines.zz");
 e2e_success_test!(e2e_syntax_hof, "syntax", "hof.zz");
 e2e_success_test!(e2e_syntax_match, "syntax", "match.zz");
+e2e_success_test!(e2e_syntax_match_assign, "syntax", "match_assign.zz");
 e2e_success_test!(
     e2e_syntax_match_bare_return,
     "syntax",
@@ -447,6 +448,11 @@ e2e_success_test!(e2e_stdlib_math_ops, "stdlib", "math_ops.zz");
 e2e_success_test!(e2e_stdlib_math_consts, "stdlib", "math_consts.zz");
 e2e_success_test!(e2e_stdlib_enumerate_loop, "stdlib", "enumerate_loop.zz");
 e2e_success_test!(e2e_stdlib_path_join, "stdlib", "path_join.zz");
+e2e_success_test!(e2e_stdlib_map_set, "stdlib", "map_set.zz");
+e2e_success_test!(e2e_stdlib_dec_ops, "stdlib", "dec_ops.zz");
+e2e_success_test!(e2e_stdlib_csv_test, "stdlib", "csv_test.zz");
+e2e_success_test!(e2e_stdlib_builders, "stdlib", "builders.zz");
+e2e_success_test!(e2e_stdlib_time_date, "stdlib", "time_date.zz");
 e2e_success_test!(e2e_stdlib_jsonmod, "stdlib", "jsonmod.zz");
 e2e_success_test!(e2e_stdlib_filesystem, "stdlib", "filesystem.zz");
 e2e_success_test!(e2e_stdlib_console, "stdlib", "console.zz");

@@ -43,3 +43,167 @@ func time.to_nanos(d: int) -> int {
 func time.sleep(d: int) {
     time.sleep_micros(d)
 }
+
+// ── Calendar dates (proleptic Gregorian, pure ZZ) ────────────────────────
+// Dates are `{str: int}` dicts `{year,month,day,hour,min,sec}` so no
+// struct definition leaks into user programs. Epoch math uses
+// Howard Hinnant's days_from_civil so leaps are exact. Parse/format
+// are UTC RFC3339 (`...Z`) only.
+
+func time.make_date(y: int, mo: int, d: int, h: int, mi: int, se: int) -> {str: int} {
+    out: {str: int} = {}
+    out["year"] = y
+    out["month"] = mo
+    out["day"] = d
+    out["hour"] = h
+    out["min"] = mi
+    out["sec"] = se
+    out
+}
+
+func time.epoch_fallback() -> {str: int} {
+    time.make_date(1970, 1, 1, 0, 0, 0)
+}
+
+func time.is_leap(y: int) -> bool {
+    if y % 4 != 0 {
+        return false
+    }
+    if y % 100 != 0 {
+        return true
+    }
+    y % 400 == 0
+}
+
+func time.days_in_month(y: int, m: int) -> int {
+    if m == 2 {
+        if time.is_leap(y) {
+            return 29
+        }
+        return 28
+    }
+    if m == 4 {
+        return 30
+    }
+    if m == 6 {
+        return 30
+    }
+    if m == 9 {
+        return 30
+    }
+    if m == 11 {
+        return 30
+    }
+    31
+}
+
+func time.date_valid(y: int, m: int, d: int) -> bool {
+    if m < 1 {
+        return false
+    }
+    if m > 12 {
+        return false
+    }
+    if d < 1 {
+        return false
+    }
+    d <= time.days_in_month(y, m)
+}
+
+func time.days_from_civil(y: int, m: int, d: int) -> int {
+    yy := y
+    mm := m
+    if mm <= 2 {
+        yy = yy - 1
+        mm = mm + 12
+    }
+    era := yy / 400
+    if yy < 0 {
+        era = (yy - 399) / 400
+    }
+    yoe := yy - era * 400
+    doy := (153 * (mm - 3) + 2) / 5 + d - 1
+    doe := yoe * 365 + yoe / 4 - yoe / 100 + doy
+    era * 146097 + doe - 719468
+}
+
+func time.civil_from_days(z: int) -> {str: int} {
+    zz := z + 719468
+    era := zz / 146097
+    if zz < 0 {
+        era = (zz - 146096) / 146097
+    }
+    doe := zz - era * 146097
+    yoe := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    y := yoe + era * 400
+    doy := doe - (365 * yoe + yoe / 4 - yoe / 100)
+    mp := (5 * doy + 2) / 153
+    d := doy - (153 * mp + 2) / 5 + 1
+    m := mp + 3
+    if mp >= 10 {
+        m = mp - 9
+        y = y + 1
+    } else {
+        m = mp + 3
+    }
+    time.make_date(y, m, d, 0, 0, 0)
+}
+
+func time.parse_rfc3339(s: str) -> {str: int} {
+    t := str.trim(s)
+    parts := str.split(t, "T")
+    if vec.len(parts) != 2 {
+        return time.epoch_fallback()
+    }
+    dp := str.split(parts[0], "-")
+    tp := str.split(parts[1], ":")
+    if vec.len(dp) != 3 {
+        return time.epoch_fallback()
+    }
+    if vec.len(tp) < 3 {
+        return time.epoch_fallback()
+    }
+    y := int(dp[0]) ?? 1970
+    mo := int(dp[1]) ?? 1
+    d := int(dp[2]) ?? 1
+    h := int(tp[0]) ?? 0
+    mi := int(tp[1]) ?? 0
+    secpart := tp[2]
+    if str.ends_with(secpart, "Z") {
+        secpart = secpart[:str.length(secpart) - 1]
+    }
+    se := int(secpart) ?? 0
+    if time.date_valid(y, mo, d) == false {
+        return time.epoch_fallback()
+    }
+    time.make_date(y, mo, d, h, mi, se)
+}
+
+func time.pad2(n: int) -> str {
+    if n < 10 {
+        return "0" + str(n)
+    }
+    str(n)
+}
+
+func time.format_rfc3339(d: {str: int}) -> str {
+    str(d["year"]) + "-" + time.pad2(d["month"]) + "-" + time.pad2(d["day"]) + "T" + time.pad2(d["hour"]) + ":" + time.pad2(d["min"]) + ":" + time.pad2(d["sec"]) + "Z"
+}
+
+func time.to_epoch_days(d: {str: int}) -> int {
+    time.days_from_civil(d["year"], d["month"], d["day"])
+}
+
+func time.from_epoch_days(z: int) -> {str: int} {
+    time.civil_from_days(z)
+}
+
+func time.add_days(d: {str: int}, n: int) -> {str: int} {
+    base := time.days_from_civil(d["year"], d["month"], d["day"]) + n
+    r := time.civil_from_days(base)
+    time.make_date(r["year"], r["month"], r["day"], d["hour"], d["min"], d["sec"])
+}
+
+func time.diff_days(a: {str: int}, b: {str: int}) -> int {
+    time.days_from_civil(a["year"], a["month"], a["day"]) - time.days_from_civil(b["year"], b["month"], b["day"])
+}

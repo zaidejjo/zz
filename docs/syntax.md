@@ -656,6 +656,21 @@ match x {
 }
 ```
 
+### Statement Arms
+
+Arms accept statements as well as expressions — assignment, `:=`
+declarations, `return`, `defer` — wrapped as if braced. `break` and
+`continue` keep their expression form so divergence checking is
+unchanged.
+
+```zz
+y := 0
+match x {
+    .some(v) => y = v,
+    .none    => y = 0 - 1,
+}
+```
+
 ## Modules and Imports
 
 ### Import Statement
