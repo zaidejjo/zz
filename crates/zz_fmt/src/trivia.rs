@@ -71,7 +71,7 @@ pub fn classify(trivia: &[Trivia], keep_spacing: bool) -> Vec<ClassifiedTrivia> 
         match t.kind {
             TriviaKind::Whitespace => {
                 if keep_spacing {
-                    if let Some(c) = classify_whitespace(&t.text) {
+                    if let Some(c) = classify_whitespace(t.text) {
                         out.push(c);
                     }
                 }
@@ -84,7 +84,7 @@ pub fn classify(trivia: &[Trivia], keep_spacing: bool) -> Vec<ClassifiedTrivia> 
                 });
             }
             TriviaKind::Comment => {
-                if let Some(c) = classify_comment(&t.text) {
+                if let Some(c) = classify_comment(t.text) {
                     out.push(ClassifiedTrivia {
                         kind: c,
                         start: t.span.start,

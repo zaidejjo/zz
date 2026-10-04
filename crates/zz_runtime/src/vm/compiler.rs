@@ -549,7 +549,7 @@ impl Compiler {
     fn type_of(&self, span: Span) -> Option<&zz_checker::Type> {
         self.types
             .as_ref()
-            .and_then(|t| t.get(&zz_checker::SpanKey::new(&self.type_scope, span)))
+            .and_then(|t| t.get(&zz_checker::SpanKey::new(self.type_scope.as_str(), span)))
     }
 
     /// Match `x = x + y` / `x = y + x` where `x` and `y` both resolve to
@@ -1934,7 +1934,10 @@ impl Compiler {
                         // leaks into anyone else's table.
                         if let Some(types) = self.types.as_mut() {
                             let table = std::sync::Arc::make_mut(types);
-                            table.insert(zz_checker::SpanKey::new(&self.type_scope, *span), ty);
+                            table.insert(
+                                zz_checker::SpanKey::new(self.type_scope.as_str(), *span),
+                                ty,
+                            );
                         }
                     }
                     let synthetic = Stmt::Assign {
