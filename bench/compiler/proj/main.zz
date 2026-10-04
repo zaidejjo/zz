@@ -1,0 +1,45 @@
+import mod00
+import mod01
+import mod02
+import mod03
+import mod04
+import mod05
+import mod06
+import mod07
+import mod08
+import mod09
+import mod10
+import mod11
+import mod12
+import mod13
+import mod14
+import mod15
+import mod16
+import mod17
+import mod18
+import mod19
+func main() -> int {
+    total := 0
+    total = total + mod00.mod00_f0(total)
+    total = total + mod01.mod01_f0(total)
+    total = total + mod02.mod02_f0(total)
+    total = total + mod03.mod03_f0(total)
+    total = total + mod04.mod04_f0(total)
+    total = total + mod05.mod05_f0(total)
+    total = total + mod06.mod06_f0(total)
+    total = total + mod07.mod07_f0(total)
+    total = total + mod08.mod08_f0(total)
+    total = total + mod09.mod09_f0(total)
+    total = total + mod10.mod10_f0(total)
+    total = total + mod11.mod11_f0(total)
+    total = total + mod12.mod12_f0(total)
+    total = total + mod13.mod13_f0(total)
+    total = total + mod14.mod14_f0(total)
+    total = total + mod15.mod15_f0(total)
+    total = total + mod16.mod16_f0(total)
+    total = total + mod17.mod17_f0(total)
+    total = total + mod18.mod18_f0(total)
+    total = total + mod19.mod19_f0(total)
+    println("{total}")
+    return total
+}
