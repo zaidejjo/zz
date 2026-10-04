@@ -73,6 +73,7 @@ pub fn parse(source: &str) -> Parsed {
         toks: lexed.tokens,
         pos: 0,
         errors: lexed.errors,
+        block_depth: 0,
         delim_stack: Vec::new(),
         pending_gt: 0,
     };
@@ -94,6 +95,9 @@ struct Parser<'a> {
     toks: Vec<Token<'a>>,
     pos: usize,
     errors: Vec<RawDiag>,
+    /// Block nesting depth: only the top-level statement list pre-sizes
+    /// from the token stream (see `parse_stmt_list`).
+    block_depth: usize,
     /// Stack of open delimiters for mismatched-delimiter diagnostics.
     delim_stack: Vec<DelimEntry>,
     /// Owed `>` closes from split `>>` tokens. Nested generic type args

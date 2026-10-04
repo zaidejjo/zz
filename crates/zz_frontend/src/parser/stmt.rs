@@ -14,7 +14,15 @@ impl<'a> Parser<'a> {
     // --- statements -------------------------------------------------------
 
     pub(crate) fn parse_stmt_list(&mut self, term: TokenKind) -> Vec<Stmt> {
-        let mut stmts = Vec::new();
+        // Top-level list pre-sizes from the token stream (~1 stmt per ~10
+        // tokens); nested blocks stay small — sizing every block from the
+        // whole stream would over-reserve gigabytes on large files.
+        let cap = if self.block_depth == 0 {
+            self.toks.len() / 10 + 4
+        } else {
+            4
+        };
+        let mut stmts = Vec::with_capacity(cap);
         loop {
             self.skip_stmt_ends();
             if self.at(term) || self.at(TokenKind::Eof) {
@@ -1075,7 +1083,9 @@ impl<'a> Parser<'a> {
         } else {
             self.push_delim(TokenKind::LBrace, lbrace.span);
         }
+        self.block_depth += 1;
         let stmts = self.parse_stmt_list(TokenKind::RBrace);
+        self.block_depth -= 1;
         let end = if self.eat(TokenKind::RBrace) {
             let rbrace = self.previous().span;
             self.pop_delim(TokenKind::RBrace, rbrace);

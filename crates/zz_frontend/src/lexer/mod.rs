@@ -76,12 +76,16 @@ struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     fn new(src: &'a str) -> Self {
+        // Pre-size from source length (Q1 arena-next): ~1 significant token
+        // per ~4 bytes measured on the bench corpus, so the token Vec never
+        // reallocs on the way up; pending trivia drains per token (small).
+        // Over-reserve is bounded and transient (freed with `Lexed`).
         Lexer {
             src,
             pos: 0,
             prev_sig: None,
-            pending: Vec::new(),
-            tokens: Vec::new(),
+            pending: Vec::with_capacity(src.len() / 64 + 8),
+            tokens: Vec::with_capacity(src.len() / 4 + 16),
             errors: Vec::new(),
             contexts: Vec::new(),
             pending_interp: false,
