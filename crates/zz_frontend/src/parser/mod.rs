@@ -90,8 +90,8 @@ struct DelimEntry {
     span: Span,
 }
 
-struct Parser {
-    toks: Vec<Token>,
+struct Parser<'a> {
+    toks: Vec<Token<'a>>,
     pos: usize,
     errors: Vec<RawDiag>,
     /// Stack of open delimiters for mismatched-delimiter diagnostics.
@@ -102,7 +102,7 @@ struct Parser {
     pending_gt: u32,
 }
 
-impl Parser {
+impl<'a> Parser<'a> {
     fn parse_program(&mut self) -> Program {
         let stmts = self.parse_stmt_list(TokenKind::Eof);
         self.check_unclosed_delims();

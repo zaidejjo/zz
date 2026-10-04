@@ -7,7 +7,7 @@ use crate::token::{Token, TokenKind};
 
 use super::Parser;
 
-impl Parser {
+impl<'a> Parser<'a> {
     // --- expressions ------------------------------------------------------
 
     pub(crate) fn parse_expr(&mut self) -> Expr {
@@ -402,7 +402,7 @@ impl Parser {
                     let span = expr.span().join(member.span);
                     expr = Expr::Field {
                         obj: Box::new(expr),
-                        name: member.text,
+                        name: member.text.into_owned(),
                         span,
                     };
                 }
@@ -507,7 +507,7 @@ impl Parser {
             let is_named = self.at(TokenKind::Ident)
                 && matches!(self.peek_kind_at(1), TokenKind::Colon | TokenKind::Assign);
             if is_named {
-                let name = self.advance().text;
+                let name = self.advance().text.into_owned();
                 self.advance(); // consume `:` or `=`
                 let value = self.parse_expr();
                 named.push((name, value));
@@ -532,7 +532,7 @@ impl Parser {
     /// Assemble an interpolated string from the token sequence produced by
     /// the lexer: `StrFmt (LBrace expr [: fmt_spec] RBrace StrFmt)* [Str]`.
     pub(crate) fn parse_fmt_string(&mut self, first: Token) -> Expr {
-        let mut parts = vec![FmtPart::Text(first.text)];
+        let mut parts = vec![FmtPart::Text(first.text.into_owned())];
         let mut end = first.span;
         loop {
             if !self.at(TokenKind::LBrace) {
@@ -580,12 +580,12 @@ impl Parser {
             match self.peek_kind() {
                 TokenKind::StrFmt => {
                     let t = self.advance();
-                    parts.push(FmtPart::Text(t.text));
+                    parts.push(FmtPart::Text(t.text.into_owned()));
                     end = t.span;
                 }
                 TokenKind::Str => {
                     let t = self.advance();
-                    parts.push(FmtPart::Text(t.text));
+                    parts.push(FmtPart::Text(t.text.into_owned()));
                     end = t.span;
                     break;
                 }
@@ -642,7 +642,7 @@ impl Parser {
             TokenKind::Str => {
                 self.advance();
                 Expr::Str {
-                    value: tok.text,
+                    value: tok.text.into_owned(),
                     span: tok.span,
                 }
             }
@@ -672,14 +672,14 @@ impl Parser {
             }
             TokenKind::Ident => {
                 self.advance();
-                let mut parts = vec![tok.text];
+                let mut parts = vec![tok.text.into_owned()];
                 let mut end = tok.span;
                 // Member access: `a.b.c` becomes a dotted path. Only chains
                 // of identifiers are supported (no arbitrary member access).
                 while self.at(TokenKind::Dot) && self.peek_kind_at(1) == TokenKind::Ident {
                     self.advance(); // `.`
                     let member = self.advance(); // identifier
-                    parts.push(member.text);
+                    parts.push(member.text.into_owned());
                     end = member.span;
                 }
                 // sqlz! macro: `sqlz!{db, """SELECT ... {x}"""}` desugars
@@ -1323,7 +1323,7 @@ impl Parser {
             .span
             .join(arg.as_ref().map(|(_, end)| *end).unwrap_or(name_tok.span));
         Expr::Variant {
-            name: name_tok.text,
+            name: name_tok.text.into_owned(),
             arg: arg.map(|(e, _)| e),
             span,
         }
@@ -1359,7 +1359,7 @@ impl Parser {
                 self.advance();
                 Pattern::Binding {
                     name: Ident {
-                        name: tok.text,
+                        name: tok.text.into_owned(),
                         span: tok.span,
                     },
                 }
@@ -1385,7 +1385,7 @@ impl Parser {
             TokenKind::Str => {
                 self.advance();
                 Pattern::Literal {
-                    value: Lit::Str(tok.text),
+                    value: Lit::Str(tok.text.into_owned()),
                     span: tok.span,
                 }
             }
@@ -1427,7 +1427,7 @@ impl Parser {
                     .span
                     .join(arg.as_ref().map(|(_, end)| *end).unwrap_or(name_tok.span));
                 Pattern::Variant {
-                    name: name_tok.text,
+                    name: name_tok.text.into_owned(),
                     arg: arg.map(|(p, _)| p),
                     span,
                 }

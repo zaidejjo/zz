@@ -6,14 +6,14 @@ use crate::token::{Token, TokenKind};
 
 use super::Parser;
 
-impl Parser {
+impl<'a> Parser<'a> {
     // --- helpers ----------------------------------------------------------
 
     pub(crate) fn expect_ident(&mut self) -> Option<crate::ast::Ident> {
         if self.at(TokenKind::Ident) {
             let tok = self.advance();
             Some(crate::ast::Ident {
-                name: tok.text,
+                name: tok.text.into_owned(),
                 span: tok.span,
             })
         } else {
@@ -49,7 +49,7 @@ impl Parser {
         }
     }
 
-    pub(crate) fn peek(&self) -> &Token {
+    pub(crate) fn peek(&self) -> &Token<'a> {
         &self.toks[self.pos]
     }
 
@@ -72,15 +72,25 @@ impl Parser {
         self.peek_kind() == kind
     }
 
-    pub(crate) fn advance(&mut self) -> Token {
-        let tok = self.toks[self.pos].clone();
+    pub(crate) fn advance(&mut self) -> Token<'a> {
+        // Clone without allocating: `text` is usually a borrowed source
+        // slice (`Cow::Borrowed` clones as a pointer copy) and the parser
+        // never reads `leading` trivia, so it is dropped instead of cloned
+        // (saves one Vec allocation per consumed token).
+        let src = &self.toks[self.pos];
+        let tok = Token {
+            kind: src.kind,
+            text: src.text.clone(),
+            span: src.span,
+            leading: Vec::new(),
+        };
         if self.pos + 1 < self.toks.len() {
             self.pos += 1;
         }
         tok
     }
 
-    pub(crate) fn previous(&self) -> &Token {
+    pub(crate) fn previous(&self) -> &Token<'a> {
         &self.toks[self.pos.saturating_sub(1)]
     }
 

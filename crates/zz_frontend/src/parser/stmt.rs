@@ -10,7 +10,7 @@ use crate::token::TokenKind;
 
 use super::Parser;
 
-impl Parser {
+impl<'a> Parser<'a> {
     // --- statements -------------------------------------------------------
 
     pub(crate) fn parse_stmt_list(&mut self, term: TokenKind) -> Vec<Stmt> {
@@ -176,12 +176,12 @@ impl Parser {
                 // pattern and produce a usable Decl instead of degrading to
                 // `Stmt::Expr(Ident("int"))` which the formatter would garble.
                 if self.peek_kind_at(0) == TokenKind::Ident
-                    && !matches!(self.peek().text.as_str(), "true" | "false")
+                    && !matches!(&*self.peek().text, "true" | "false")
                     && self.peek_kind_at(1) == TokenKind::Ident
                     && self.peek_kind_at(2) == TokenKind::ColonEq
                 {
                     let type_tok = self.peek().clone();
-                    let type_name = type_tok.text.clone();
+                    let type_name = type_tok.text.clone().into_owned();
                     let is_type_kw = matches!(
                         type_name.as_str(),
                         "int" | "float" | "bool" | "str" | "Option" | "Result"
@@ -202,7 +202,7 @@ impl Parser {
                         return Stmt::Decl {
                             ty: Some(ty),
                             name: Ident {
-                                name: name.text,
+                                name: name.text.into_owned(),
                                 span: name.span,
                             },
                             value,
@@ -274,7 +274,7 @@ impl Parser {
         let lib = if self.eat(TokenKind::LParen) {
             let lib_tok = self.peek().clone();
             let lib = if self.at(TokenKind::Str) {
-                self.advance().text
+                self.advance().text.into_owned()
             } else {
                 self.error_here("expected string literal in `@link(\"lib\")`");
                 String::new()
@@ -285,7 +285,7 @@ impl Parser {
             let _ = lib_tok;
             lib
         } else if self.at(TokenKind::Str) {
-            self.advance().text
+            self.advance().text.into_owned()
         } else {
             self.error_here("expected `(\"lib\")` after `@link`");
             String::new()
@@ -301,7 +301,7 @@ impl Parser {
         let extern_tok = self.advance(); // `extern`
         let abi_tok = self.peek().clone();
         let abi = if self.at(TokenKind::Str) {
-            self.advance().text
+            self.advance().text.into_owned()
         } else {
             self.error_here("expected ABI string after `extern` (e.g. `extern \"C\"`)");
             String::new()
@@ -366,7 +366,7 @@ impl Parser {
             // Note: `=` lexes as Assign (Eq is `==`).
             let c_symbol = if self.eat(TokenKind::Assign) {
                 if self.at(TokenKind::Str) {
-                    Some(self.advance().text)
+                    Some(self.advance().text.into_owned())
                 } else {
                     self.error_here("expected string literal for C symbol name");
                     None
@@ -684,7 +684,7 @@ impl Parser {
         Stmt::Decl {
             ty: None,
             name: Ident {
-                name: name.text,
+                name: name.text.into_owned(),
                 span: name.span,
             },
             value,
@@ -713,7 +713,7 @@ impl Parser {
         Stmt::Decl {
             ty,
             name: Ident {
-                name: name.text,
+                name: name.text.into_owned(),
                 span: name.span,
             },
             value,
@@ -850,7 +850,7 @@ impl Parser {
         Some(Stmt::Decl {
             ty: Some(ty),
             name: Ident {
-                name: name.text,
+                name: name.text.into_owned(),
                 span: name.span,
             },
             value,
