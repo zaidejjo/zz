@@ -713,6 +713,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
         (parsed.program, Some(cr))
     }
@@ -730,7 +731,13 @@ mod tests {
                 &mut std::collections::HashMap::new(),
             );
         }
-        let cr = check_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
+        let cr = check_program(
+            &parsed.program,
+            HashMap::new(),
+            funcs,
+            HashMap::new(),
+            HashMap::new(),
+        );
         (parsed.program, Some(cr))
     }
 

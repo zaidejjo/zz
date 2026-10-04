@@ -1,0 +1,32 @@
+// E2E: type aliases — declaration, use, generics, nesting.
+type Tokens = [Token]
+type Token = str
+type Pair<T> = (T, T)
+type StrMap = {str: int}
+type Ints = [int]
+
+struct Point { x: int, y: int }
+type Points = [Point]
+
+func first<T>(p: Pair<T>) -> T {
+    p[0]
+}
+
+func main() {
+    t: Token = "hi"
+    println(t)
+    toks: Tokens = ["a", "b"]
+    println(toks)
+    p: Pair<int> = (1, 2)
+    println(first(p))
+    println(first((1.5, 2.5)))
+    m: StrMap = {"a": 1}
+    println(m["a"])
+    nums: Ints = [1, 2, 3]
+    println(nums)
+    pts: Points = [Point{ x: 1, y: 2 }]
+    println(pts[0].x)
+    // Alias of alias.
+    println(toks[0])
+    println("aliases_ok")
+}

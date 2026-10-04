@@ -190,6 +190,32 @@ impl<'a> FmtCtx<'a> {
                     self.write_str("}");
                 }
             }
+            Stmt::TypeAlias {
+                name,
+                generics,
+                target,
+                pub_,
+                ..
+            } => {
+                self.write_indent();
+                if *pub_ {
+                    self.write_str("pub ");
+                }
+                self.write_str("type ");
+                self.write_str(&name.join("."));
+                if !generics.is_empty() {
+                    self.write_str("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.write_str(", ");
+                        }
+                        self.write_str(&g.name);
+                    }
+                    self.write_str(">");
+                }
+                self.write_str(" = ");
+                self.fmt_ty(target, source);
+            }
             Stmt::Decl {
                 ty,
                 name,

@@ -188,7 +188,7 @@ pub fn lower_program<'src>(program: &Program, source: &'src str) -> (Doc<'src>, 
 fn is_toplevel_def(stmt: &Stmt) -> bool {
     matches!(
         stmt,
-        Stmt::Func { .. } | Stmt::Struct { .. } | Stmt::Impl { .. }
+        Stmt::Func { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Impl { .. }
     )
 }
 
@@ -634,6 +634,39 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.consecutive_nls = 1;
                     self.text("}");
                 }
+            }
+            Stmt::TypeAlias {
+                name,
+                generics,
+                target,
+                ..
+            } => {
+                if stmt_is_pub(stmt) {
+                    self.text("pub");
+                    self.space();
+                }
+                self.text("type");
+                self.space();
+                for (i, n) in name.iter().enumerate() {
+                    if i > 0 {
+                        self.text(".");
+                    }
+                    self.text(n);
+                }
+                if !generics.is_empty() {
+                    self.text("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.text(", ");
+                        }
+                        self.text(g.name.clone());
+                    }
+                    self.text(">");
+                }
+                self.space();
+                self.text("=");
+                self.space();
+                self.emit_ty(target);
             }
             Stmt::Impl {
                 name,
@@ -1510,6 +1543,7 @@ fn stmt_is_pub(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Func { pub_, .. }
         | Stmt::Struct { pub_, .. }
+        | Stmt::TypeAlias { pub_, .. }
         | Stmt::Impl { pub_, .. }
         | Stmt::Import { pub_, .. } => *pub_,
         _ => false,

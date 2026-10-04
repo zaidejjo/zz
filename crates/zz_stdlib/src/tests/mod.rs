@@ -18,7 +18,13 @@ pub(super) fn run(src: &str) -> Result<Value, String> {
         register_module_namespace(module, module, &mut funcs, &mut natives).expect("known module");
     }
 
-    let checked = check_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
+    let checked = check_program(
+        &parsed.program,
+        HashMap::new(),
+        funcs,
+        HashMap::new(),
+        HashMap::new(),
+    );
     let has_errors = checked
         .errors
         .iter()

@@ -87,6 +87,25 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
                 },
             })
         }
+        Stmt::TypeAlias {
+            name,
+            generics: _,
+            target,
+            span,
+            ..
+        } => {
+            let full_name = name.join(".");
+            Some(DocumentSymbol {
+                name: full_name,
+                detail: Some(fmt_ty(target)),
+                kind: SymbolKind::STRUCT,
+                tags: None,
+                deprecated: None,
+                range: span_to_range(source, *span),
+                selection_range: struct_name_range(name, source),
+                children: None,
+            })
+        }
         Stmt::Impl {
             name,
             methods,
@@ -359,6 +378,20 @@ fn collect_workspace_symbols(
                 });
             }
             Stmt::Struct { name, span, .. } => {
+                let full_name = name.join(".");
+                out.push(SymbolInformation {
+                    name: full_name,
+                    kind: SymbolKind::STRUCT,
+                    tags: None,
+                    deprecated: None,
+                    location: tower_lsp::lsp_types::Location {
+                        uri: uri.clone(),
+                        range: span_to_range(source, *span),
+                    },
+                    container_name: None,
+                });
+            }
+            Stmt::TypeAlias { name, span, .. } => {
                 let full_name = name.join(".");
                 out.push(SymbolInformation {
                     name: full_name,

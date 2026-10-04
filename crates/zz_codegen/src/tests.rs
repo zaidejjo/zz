@@ -21,7 +21,13 @@ fn build_reachable(src: &str) -> (TypedProgram, ReachableSet) {
         parsed.errors
     );
     let funcs = stdlib_funcs();
-    let res = zz_hir::build_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
+    let res = zz_hir::build_program(
+        &parsed.program,
+        HashMap::new(),
+        funcs,
+        HashMap::new(),
+        HashMap::new(),
+    );
     let tp = res.program;
     // DCE from main (bare name; tests avoid module namespacing).
     let (pruned, reach) = zz_hir::dce(&tp, "main");

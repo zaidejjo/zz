@@ -74,6 +74,7 @@ fn compile_one(
         initial_bindings.clone(),
         initial_funcs.clone(),
         initial_structs.clone(),
+        HashMap::new(),
     );
     let has_errors = res
         .diagnostics

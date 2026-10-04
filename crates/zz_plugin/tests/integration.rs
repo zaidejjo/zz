@@ -63,6 +63,7 @@ extern "C" {
         HashMap::new(),
         initial_funcs,
         HashMap::new(),
+        HashMap::new(),
     );
 
     let has_errors = checked

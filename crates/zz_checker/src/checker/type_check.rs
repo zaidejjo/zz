@@ -260,6 +260,9 @@ impl Checker {
             }
             Stmt::Expr(e) => self.check_expr(e),
             Stmt::Struct { .. } => Type::Unit,
+            // Aliases are collected and resolved in pass 1a; checking
+            // the declaration itself is a no-op (uses resolve on demand).
+            Stmt::TypeAlias { .. } => Type::Unit,
             Stmt::For {
                 vars,
                 iter,

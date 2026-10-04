@@ -773,6 +773,7 @@ fn vm_compound_assign_fuses_like_plain_assign() {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
         let chunk = super::Compiler::compile_program_typed(
             &parsed.program,
@@ -868,6 +869,7 @@ fn vm_generic_struct_erases_like_monomorphic() {
         );
         let (_res, types) = zz_checker::check_program_typed(
             &parsed.program,
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),

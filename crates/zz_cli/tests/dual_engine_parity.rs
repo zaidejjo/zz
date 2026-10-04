@@ -937,6 +937,9 @@ parity_known_failure!(
 
 // Error fixtures (both must error)
 parity_strict_error!(parity_err_type_mismatch, "type_mismatch.zz");
+parity_strict_error!(parity_err_alias_cycle, "alias_cycle.zz");
+parity_strict_error!(parity_err_alias_dup, "alias_dup.zz");
+parity_strict_error!(parity_err_alias_arity, "alias_arity.zz");
 parity_strict_error!(parity_err_undefined_var, "undefined_var.zz");
 parity_strict_error!(parity_err_arity, "arity.zz");
 parity_strict_error!(parity_err_parse_error, "parse_error.zz");
@@ -967,6 +970,8 @@ parity_strict!(parity_syntax_control_flow, "syntax", "control_flow.zz");
 
 // --- Fixed: nested field access boxing ---
 parity_strict!(parity_types_structs, "types", "structs.zz");
+parity_strict!(parity_types_aliases, "types", "aliases.zz");
+parity_strict!(parity_types_alias_import, "types", "alias_import.zz");
 // --- Fixed: nested variant patterns + if-let desugaring ---
 parity_strict!(parity_types_variants, "types", "variants.zz");
 

@@ -13,7 +13,7 @@ use crate::convert::LineIndex;
 use crate::cross_file::ModuleIndex;
 use dashmap::DashMap;
 use tower_lsp::lsp_types::Url;
-use zz_checker::{CheckResult, FuncSig, StructSig, Type};
+use zz_checker::{AliasSig, CheckResult, FuncSig, StructSig, Type};
 use zz_frontend::ast::Program;
 use zz_frontend::diag::RawDiag;
 use zz_stdlib::stdlib_funcs;
@@ -27,6 +27,7 @@ pub struct FileDefs {
     pub bindings: Vec<String>,
     pub funcs: Vec<String>,
     pub structs: Vec<String>,
+    pub aliases: Vec<String>,
 }
 
 impl FileDefs {
@@ -36,12 +37,16 @@ impl FileDefs {
             bindings: cr.bindings.keys().cloned().collect(),
             funcs: cr.funcs.keys().cloned().collect(),
             structs: cr.structs.keys().cloned().collect(),
+            aliases: cr.aliases.keys().cloned().collect(),
         }
     }
 
     /// Is this empty (file defines nothing)?
     pub fn is_empty(&self) -> bool {
-        self.bindings.is_empty() && self.funcs.is_empty() && self.structs.is_empty()
+        self.bindings.is_empty()
+            && self.funcs.is_empty()
+            && self.structs.is_empty()
+            && self.aliases.is_empty()
     }
 }
 
@@ -75,6 +80,8 @@ pub struct GlobalState {
     pub funcs: std::sync::RwLock<HashMap<String, FuncSig>>,
     /// Accumulated struct definitions.
     pub structs: std::sync::RwLock<HashMap<String, StructSig>>,
+    /// Accumulated type alias definitions.
+    pub aliases: std::sync::RwLock<HashMap<String, AliasSig>>,
     /// Workspace root path.
     pub root: std::sync::RwLock<Option<PathBuf>>,
     /// Change sequence counter for debounce.
@@ -102,6 +109,7 @@ impl GlobalState {
             bindings: std::sync::RwLock::new(HashMap::new()),
             funcs: std::sync::RwLock::new(stdlib_funcs()),
             structs: std::sync::RwLock::new(HashMap::new()),
+            aliases: std::sync::RwLock::new(HashMap::new()),
             root: std::sync::RwLock::new(None),
             sequence: AtomicU32::new(0),
             module_index: std::sync::RwLock::new(ModuleIndex::default()),
@@ -157,17 +165,20 @@ impl GlobalState {
     }
 
     /// Produce the checker seed from accumulated definitions.
+    #[allow(clippy::type_complexity)]
     pub fn checker_seed(
         &self,
     ) -> (
         HashMap<String, Type>,
         HashMap<String, FuncSig>,
         HashMap<String, StructSig>,
+        HashMap<String, AliasSig>,
     ) {
         (
             self.bindings.read().unwrap().clone(),
             self.funcs.read().unwrap().clone(),
             self.structs.read().unwrap().clone(),
+            self.aliases.read().unwrap().clone(),
         )
     }
 
@@ -191,6 +202,12 @@ impl GlobalState {
                 structs.remove(name);
             }
         }
+        if !defs.aliases.is_empty() {
+            let mut aliases = self.aliases.write().unwrap();
+            for name in &defs.aliases {
+                aliases.remove(name);
+            }
+        }
     }
 
     /// Merge checker results back into the accumulated seed and store
@@ -211,6 +228,7 @@ impl GlobalState {
             .extend(result.bindings.clone());
         self.funcs.write().unwrap().extend(result.funcs.clone());
         self.structs.write().unwrap().extend(result.structs.clone());
+        self.aliases.write().unwrap().extend(result.aliases.clone());
     }
 
     /// Set the workspace root.
@@ -310,6 +328,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
         let defs = FileDefs::from_check_result(&cr);
         assert!(defs.bindings.contains(&"x".to_string()));
@@ -346,6 +365,7 @@ mod tests {
             bindings: vec!["x".to_string()],
             funcs: vec!["add".to_string()],
             structs: vec![],
+            aliases: vec![],
         };
         state.prune_defs(&defs);
         // x should be gone, y should remain.
@@ -371,6 +391,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
         state.absorb_result(&uri, &cr);
 
@@ -393,6 +414,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
         state.absorb_result(&uri, &cr);
 
@@ -412,6 +434,7 @@ mod tests {
         let parsed = parse("a := 1\n");
         let cr = check_program(
             &parsed.program,
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
@@ -439,6 +462,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
         state.absorb_result(&uri, &cr);
         assert!(state.bindings.read().unwrap().contains_key("x"));
@@ -462,6 +486,7 @@ mod tests {
         let parsed = parse("w := 99\n");
         let cr = check_program(
             &parsed.program,
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),

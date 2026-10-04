@@ -626,7 +626,13 @@ mod tests {
                 ret: unit,
             },
         );
-        let res = crate::build_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
+        let res = crate::build_program(
+            &parsed.program,
+            HashMap::new(),
+            funcs,
+            HashMap::new(),
+            HashMap::new(),
+        );
         res.program
     }
 

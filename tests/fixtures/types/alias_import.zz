@@ -1,0 +1,12 @@
+// E2E: cross-module `pub type` aliases (qualified + selective).
+import support.alias_shapes as shapes(Tokens)
+
+func main() {
+    a: shapes.Tokens = shapes.make()
+    println(a)
+    b: Tokens = ["x"]
+    println(b)
+    p: shapes.Points = [shapes.Point{ x: 1, y: 2 }]
+    println(p[0].x)
+    println("alias_import_ok")
+}

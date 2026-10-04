@@ -427,6 +427,8 @@ e2e_success_test!(e2e_syntax_generic_structs, "syntax", "generic_structs.zz");
 
 // Type fixtures
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
+e2e_success_test!(e2e_types_aliases, "types", "aliases.zz");
+e2e_success_test!(e2e_types_alias_import, "types", "alias_import.zz");
 e2e_success_test!(e2e_types_struct_embedding, "types", "struct_embedding.zz");
 e2e_success_test!(e2e_types_generics, "types", "generics.zz");
 e2e_success_test!(e2e_types_generic_bounds, "types", "generic_bounds.zz");
@@ -665,6 +667,9 @@ macro_rules! e2e_error_test {
 }
 
 e2e_error_test!(e2e_err_type_mismatch, "type_mismatch.zz");
+e2e_error_test!(e2e_err_alias_cycle, "alias_cycle.zz");
+e2e_error_test!(e2e_err_alias_dup, "alias_dup.zz");
+e2e_error_test!(e2e_err_alias_arity, "alias_arity.zz");
 e2e_error_test!(
     e2e_err_return_fallthrough_mismatch,
     "return_fallthrough_mismatch.zz"
