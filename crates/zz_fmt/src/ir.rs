@@ -436,6 +436,12 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     }
                     self.text(p);
                 }
+                if let Some(a) = alias {
+                    self.space();
+                    self.text("as");
+                    self.space();
+                    self.text(a.clone());
+                }
                 if !items.is_empty() {
                     self.text("(");
                     for (i, item) in items.iter().enumerate() {
@@ -456,12 +462,6 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         }
                     }
                     self.text(")");
-                }
-                if let Some(a) = alias {
-                    self.space();
-                    self.text("as");
-                    self.space();
-                    self.text(a.clone());
                 }
             }
             Stmt::Func {
