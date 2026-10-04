@@ -54,6 +54,12 @@ enum LexContext {
         /// current triple-quoted string. On close, all segments are dedented
         /// together based on the closing delimiter's indentation.
         segs: Vec<usize>,
+        /// True when the accumulated `value` is byte-identical to the source
+        /// slice (no escapes processed, no interpolation split). Clean
+        /// single-line segments borrow the source instead of allocating.
+        /// Set at context creation; any escape clears it. Triple-quoted
+        /// strings are never clean (post-hoc dedent rewrites them).
+        clean: bool,
     },
     /// Inside an interpolation `{ expr }`. `depth` counts nested braces
     /// beyond the interpolation's own opening brace (dicts, blocks, ...).
@@ -579,6 +585,10 @@ impl<'a> Lexer<'a> {
             is_nested,
             triple,
             segs: Vec::new(),
+            // Fresh strings are clean until an escape proves otherwise.
+            // Triple-quoted strings are never clean: post-hoc dedent
+            // rewrites their text, so they always take the owned path.
+            clean: !triple,
         });
     }
 
@@ -587,16 +597,17 @@ impl<'a> Lexer<'a> {
     fn lex_string_cont(&mut self) {
         // Pop the current string context; continuation arms re-push it with
         // the updated value.
-        let (start, value, is_nested) = match self.contexts.pop() {
+        let (start, value, is_nested, clean) = match self.contexts.pop() {
             Some(LexContext::Str {
                 start,
                 value,
                 is_nested,
                 triple: false,
                 segs,
+                clean,
             }) => {
                 debug_assert!(segs.is_empty());
-                (start, value, is_nested)
+                (start, value, is_nested, clean)
             }
             Some(LexContext::Str { triple: true, .. }) => {
                 unreachable!("triple-quoted string dispatched to lex_string_cont")
@@ -616,7 +627,11 @@ impl<'a> Lexer<'a> {
                 // a continuation segment — emit StrFmt and keep the Str
                 // context alive for text after `}`.
                 if is_nested {
-                    self.push_token(TokenKind::Str, span, Cow::Owned(value));
+                    self.push_token(
+                        TokenKind::Str,
+                        span,
+                        clean_str_token(self.src, start, end, value, clean),
+                    );
                 } else if self
                     .contexts
                     .iter()
@@ -629,10 +644,16 @@ impl<'a> Lexer<'a> {
                         is_nested: false,
                         triple: false,
                         segs: Vec::new(),
+                        // Continuation segment (no opening quote at `start`).
+                        clean: false,
                     });
                 } else {
                     // Final closing quote — emit Str (complete string).
-                    self.push_token(TokenKind::Str, span, Cow::Owned(value));
+                    self.push_token(
+                        TokenKind::Str,
+                        span,
+                        clean_str_token(self.src, start, end, value, clean),
+                    );
                 }
             }
             // String interpolation: `{ident...` starts an embedded expression.
@@ -642,13 +663,28 @@ impl<'a> Lexer<'a> {
             // back into string mode for the continuation.
             Some('{') if self.peek_char_at(1).is_some_and(is_ident_start) => {
                 let span = Span::new(start as u32, self.pos as u32);
-                self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
+                // Clean prefix (unbroken from the opening quote, no escapes)
+                // borrows `src[start+1..pos]`; anything else keeps the
+                // accumulated owned text.
+                let src = self.src;
+                if clean {
+                    debug_assert_eq!(value, src[start + 1..self.pos]);
+                    self.push_token(
+                        TokenKind::StrFmt,
+                        span,
+                        Cow::Borrowed(&src[start + 1..self.pos]),
+                    );
+                } else {
+                    self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
+                }
                 self.contexts.push(LexContext::Str {
                     start: self.pos,
                     value: String::new(),
                     is_nested,
                     triple: false,
                     segs: Vec::new(),
+                    // Post-`{` continuation: no opening quote at `start`.
+                    clean: false,
                 });
                 self.pending_interp = true;
             }
@@ -737,6 +773,8 @@ impl<'a> Lexer<'a> {
                     is_nested,
                     triple: false,
                     segs: Vec::new(),
+                    // Any `\` escape rewrites text: never borrow afterwards.
+                    clean: false,
                 });
             }
             Some(c) => {
@@ -749,6 +787,8 @@ impl<'a> Lexer<'a> {
                     is_nested,
                     triple: false,
                     segs: Vec::new(),
+                    // Verbatim char: cleanliness unchanged.
+                    clean,
                 });
             }
             None => {
@@ -777,6 +817,8 @@ impl<'a> Lexer<'a> {
                 is_nested,
                 triple: true,
                 segs,
+                // Triple strings never borrow (dedent rewrites); ignored.
+                clean: _,
             }) => (start, value, is_nested, segs),
             Some(LexContext::Str { triple: false, .. }) => {
                 unreachable!("single-line string dispatched to lex_triple_cont")
@@ -810,6 +852,8 @@ impl<'a> Lexer<'a> {
                     is_nested: false,
                     triple: true,
                     segs: next_segs,
+                    // Triple strings never borrow (dedent rewrites).
+                    clean: false,
                 });
             } else {
                 let idx = self.tokens.len();
@@ -833,6 +877,8 @@ impl<'a> Lexer<'a> {
                     is_nested,
                     triple: true,
                     segs: next_segs,
+                    // Triple strings never borrow (dedent rewrites).
+                    clean: false,
                 });
                 self.pending_interp = true;
             }
@@ -921,6 +967,8 @@ impl<'a> Lexer<'a> {
                     is_nested,
                     triple: true,
                     segs,
+                    // Triple strings never borrow (dedent rewrites).
+                    clean: false,
                 });
             }
             Some(c) => {
@@ -933,6 +981,8 @@ impl<'a> Lexer<'a> {
                     is_nested,
                     triple: true,
                     segs,
+                    // Triple strings never borrow (dedent rewrites).
+                    clean: false,
                 });
             }
             None => {
@@ -1148,6 +1198,28 @@ fn strip_up_to_indent(line: &str, n: usize) -> String {
 
 fn is_ident_continue(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Token text for a closed single-line string segment `[start, end)`.
+///
+/// When `clean` (unbroken from the opening quote, zero escapes), the value
+/// is byte-identical to `src[start+1..end-1]` (quotes stripped) and borrows
+/// it — one fewer allocation per plain string literal. Otherwise the
+/// accumulated owned text is used. The debug assert self-verifies the
+/// cleanliness invariant wherever tests exercise strings.
+fn clean_str_token<'a>(
+    src: &'a str,
+    start: usize,
+    end: usize,
+    value: String,
+    clean: bool,
+) -> std::borrow::Cow<'a, str> {
+    if clean {
+        debug_assert_eq!(value, src[start + 1..end - 1]);
+        std::borrow::Cow::Borrowed(&src[start + 1..end - 1])
+    } else {
+        std::borrow::Cow::Owned(value)
+    }
 }
 
 #[cfg(test)]

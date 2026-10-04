@@ -1603,7 +1603,7 @@ fn check_or_fix_path(
         let source =
             std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path_str}`: {e}"))?;
 
-        let loaded = loader::load_program(path)?;
+        let loaded = loader::load_program_check(path)?;
 
         // Classify fixits by safety.
         let mut safe_fixits: Vec<zz_frontend::diag::FixIt> = Vec::new();

@@ -3561,6 +3561,8 @@ version = "0.1.6"
 name = "zz_checker"
 version = "0.1.6"
 dependencies = [
+ "serde",
+ "serde_json",
  "zz_frontend",
 ]
 
@@ -3573,7 +3575,9 @@ dependencies = [
  "dirs",
  "nu-ansi-term",
  "reedline",
+ "serde",
  "serde_json",
+ "sha2",
  "toml",
  "ureq",
  "zz_checker",

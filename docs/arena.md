@@ -61,3 +61,17 @@ Scoreboard: debug 305ms → 270ms (~11%); release large.zz 68ms → 53ms (~22%),
 - loom test for freeze/share path (needs `loom` dev-dep).
 - CI bench gate: fail on >10% `bench-compiler.sh` regression
   (repo CI is currently TODO per AGENTS.md).
+
+## Follow-up: arena-next (in `dev` via PR #200, #201)
+
+- Q0 multi-file corpus (`bench/compiler/proj`, `single_4k`,
+  `heavyproj`) + bench rows.
+- Q1 lexer/parser pre-sizing (`block_depth`-gated; mechanism-gated).
+- Q2 mimalloc A/B rejected by RSS gate (+50% RSS; zero code kept).
+- Q3 loader seeds move into checker (proj 187ms → 147ms, −21%).
+- Q4a entry-point seed moves (`zz run` proj 395ms → 320ms).
+- Q5 interning parked (trigger never fired).
+- S3 clean-string borrows in lexer (debug self-verified).
+- S1 dep-aware check cache (`zz check` only): warm proj −16%,
+  heavyproj −35%, touch-1-leaf == warm (precision-tested).
+- S2 shared signature maps de-scoped (transient-only duplication).
