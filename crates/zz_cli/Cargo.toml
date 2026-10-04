@@ -21,8 +21,11 @@ zz_plugin = { path = "../zz_plugin" }
 codespan-reporting = "0.11"
 reedline = "0.51"
 dirs = "6"
+sha2 = { workspace = true }
 nu-ansi-term = "0.50"
 toml = "0.8"
 serde_json = { workspace = true }
+# S1 arena-scale: check-cache derives.
+serde = { workspace = true }
 base64 = { workspace = true }
 ureq = { workspace = true }

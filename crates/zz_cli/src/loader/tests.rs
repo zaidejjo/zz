@@ -1292,3 +1292,153 @@ fn method_call_not_rewritten_when_free_fn_collides() {
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
 }
+
+// --- S1 check-cache tests -------------------------------------------------
+
+fn load_check(path: &std::path::Path) -> LoadResult {
+    super::load_program_check(path).expect("load_program_check")
+}
+
+fn cache_key_lines(result: &LoadResult) -> Vec<String> {
+    // Canonical outcome fingerprint: sorted errors + sorted bindings.
+    let mut errs: Vec<String> = diag_texts(result);
+    errs.sort();
+    let mut binds: Vec<String> = result
+        .bindings
+        .iter()
+        .map(|(k, v)| format!("{k}={v:?}"))
+        .collect();
+    binds.sort();
+    errs.extend(binds);
+    errs
+}
+
+#[test]
+fn check_cache_hit_matches_miss() {
+    super::cache::with_isolated_cache(|| {
+        // First load populates (miss), second serves from cache (hit):
+        // outcomes must be identical, including bindings and funcs.
+        let dir = temp_project(&[
+            ("main.zz", "import math.utils\nx := utils.double(21)"),
+            ("math/utils.zz", "pub func double(n: int) -> int { n * 2 }"),
+        ]);
+        let main = dir.join("main.zz");
+        // Isolated dir starts empty: growth proves the cold load stored.
+        let before = super::cache::entry_count();
+        let cold = load_check(&main);
+        assert!(no_errors(&cold), "cold errors: {:?}", cold.errors);
+        assert!(
+            super::cache::entry_count() > before,
+            "cold load stored nothing"
+        );
+        let warm = load_check(&main);
+        assert!(no_errors(&warm), "warm errors: {:?}", warm.errors);
+        assert_eq!(cache_key_lines(&cold), cache_key_lines(&warm));
+        assert_eq!(cold.bindings, warm.bindings);
+        let mut cold_keys: Vec<_> = cold.funcs.keys().collect();
+        let mut warm_keys: Vec<_> = warm.funcs.keys().collect();
+        cold_keys.sort();
+        warm_keys.sort();
+        assert_eq!(cold_keys, warm_keys);
+    });
+}
+
+#[test]
+fn check_cache_invalidates_on_edit() {
+    super::cache::with_isolated_cache(|| {
+        // Touching one module re-checks it; the error must appear on the
+        // very next load (no stale clean hit).
+        let dir = temp_project(&[
+            ("main.zz", "import config\nx := config.base + 1"),
+            ("config.zz", "pub base := 41"),
+        ]);
+        let main = dir.join("main.zz");
+        let ok = load_check(&main);
+        assert!(no_errors(&ok));
+        std::fs::write(dir.join("config.zz"), "pub base := \"not an int\"\n").unwrap();
+        let broken = load_check(&main);
+        assert!(
+            !no_errors(&broken),
+            "expected type error after edit, got clean"
+        );
+        // And reverting restores the clean outcome (old key still valid).
+        std::fs::write(dir.join("config.zz"), "pub base := 41").unwrap();
+        let fixed = load_check(&main);
+        assert!(no_errors(&fixed), "errors: {:?}", fixed.errors);
+    });
+}
+
+#[test]
+fn check_cache_replays_errors() {
+    super::cache::with_isolated_cache(|| {
+        // Error outcomes replay identically from cache (no error loss).
+        let dir = temp_project(&[
+            ("main.zz", "import config\nx := config.base + 1"),
+            ("config.zz", "pub base := \"not an int\"\n"),
+        ]);
+        let main = dir.join("main.zz");
+        let first = load_check(&main);
+        assert!(!no_errors(&first));
+        let second = load_check(&main);
+        assert_eq!(cache_key_lines(&first), cache_key_lines(&second));
+    });
+}
+
+#[test]
+fn check_cache_rechecks_only_dependents() {
+    super::cache::with_isolated_cache(|| {
+        // Dep-aware keys: touching ANY single leaf rechecks exactly the
+        // leaf + main (2 modules), regardless of load position. A
+        // load-order chain would recheck 21 for mod00 and 2 for mod19.
+        let mut owned: Vec<(String, String)> = vec![(
+            "main.zz".to_string(),
+            (0..4)
+                .map(|m| format!("import mod{m:02}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\nx := mod00.mod00_f0(1) + mod03.mod03_f0(2)\n",
+        )];
+        for m in 0..4 {
+            owned.push((
+                format!("mod{m:02}.zz"),
+                format!("pub func mod{m:02}_f0(x: int) -> int {{ x + {m} }}"),
+            ));
+        }
+        let refs: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let dir = temp_project(&refs);
+        let main = dir.join("main.zz");
+        let cold = load_check(&main);
+        assert!(no_errors(&cold), "cold errors: {:?}", cold.errors);
+        let base = super::cache::entry_count();
+        // Touch the FIRST module: only it + main recheck (2 new entries).
+        std::fs::write(
+            dir.join("mod00.zz"),
+            "pub func mod00_f0(x: int) -> int { x + 100 }\n",
+        )
+        .unwrap();
+        let edited = load_check(&main);
+        assert!(no_errors(&edited), "errors: {:?}", edited.errors);
+        assert_eq!(
+            super::cache::entry_count(),
+            base + 2,
+            "editing mod00 must recheck exactly mod00 + main"
+        );
+    });
+}
+
+#[test]
+fn check_cache_disabled_via_env() {
+    super::cache::with_isolated_cache(|| {
+        // ZZ_CHECK_CACHE=0 forces fresh checks (restored by the helper).
+        std::env::set_var("ZZ_CHECK_CACHE", "0");
+        let dir = temp_project(&[
+            ("main.zz", "import config\nx := config.base + 1"),
+            ("config.zz", "pub base := 41"),
+        ]);
+        let result = load_check(&dir.join("main.zz"));
+        assert!(no_errors(&result), "errors: {:?}", result.errors);
+    });
+}

@@ -48,7 +48,7 @@ impl SpanKey {
 }
 
 /// A registered function signature.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FuncSig {
     pub generics: Vec<String>,
     /// Trait bounds per generic parameter name (e.g. `T` → `[Num, Ord]`).
@@ -77,7 +77,7 @@ impl FuncSig {
 
 /// A registered struct definition: type parameters and field types
 /// (which may reference the parameters as `Type::Named`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StructSig {
     pub generics: Vec<String>,
     pub fields: Vec<(String, Type)>,
@@ -961,5 +961,54 @@ mod span_scope_tests {
         let key = Span::new(28, 32);
         assert_eq!(types.get(&SpanKey::new("f", key)), Some(&Type::Int));
         assert_eq!(types.get(&SpanKey::new("g", key)), Some(&Type::Bool));
+    }
+}
+
+#[cfg(test)]
+mod cache_serde_tests {
+    // S1 arena-scale: pub signatures must survive a JSON roundtrip exactly
+    // (module check-cache stores these on disk).
+    use super::*;
+    use crate::type_::Type;
+
+    #[test]
+    fn func_sig_roundtrips() {
+        let sig = FuncSig {
+            generics: vec!["T".to_string()],
+            bounds: vec![("T".to_string(), vec![zz_frontend::ast::TraitBound::Display])],
+            params: vec![
+                ("x".to_string(), Type::Int),
+                (
+                    "ys".to_string(),
+                    Type::Array(Box::new(Type::Option(Box::new(Type::Named(
+                        "T".to_string(),
+                    ))))),
+                ),
+            ],
+            has_default: vec![false, true],
+            ret: Type::Result(Box::new(Type::Named("T".to_string())), Box::new(Type::Str)),
+            is_extern: false,
+            extern_c_symbol: None,
+        };
+        let json = serde_json::to_string(&sig).expect("serialize FuncSig");
+        let back: FuncSig = serde_json::from_str(&json).expect("deserialize FuncSig");
+        assert_eq!(format!("{sig:?}"), format!("{back:?}"));
+    }
+
+    #[test]
+    fn struct_sig_and_type_roundtrip() {
+        let sig = StructSig {
+            generics: vec![],
+            fields: vec![
+                ("x".to_string(), Type::Int),
+                (
+                    "f".to_string(),
+                    Type::Func(vec![Type::Int], Box::new(Type::Bool)),
+                ),
+            ],
+        };
+        let json = serde_json::to_string(&sig).expect("serialize StructSig");
+        let back: StructSig = serde_json::from_str(&json).expect("deserialize StructSig");
+        assert_eq!(format!("{sig:?}"), format!("{back:?}"));
     }
 }

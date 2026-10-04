@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use zz_checker::{check_program, FuncSig, StructSig, Type};
+use zz_checker::{check_program, CheckResult, FuncSig, StructSig, Type};
 use zz_frontend::ast::{Expr, ImportItem, Program, Stmt};
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
@@ -28,6 +28,7 @@ use zz_stdlib::{
     stdlib_funcs, stdlib_natives, STDLIB_MODULES,
 };
 
+mod cache;
 mod rewrite;
 
 #[cfg(test)]
@@ -98,6 +99,17 @@ struct Loader {
     /// pubs) total; values are never cloned on the seed path.
     seed_func_keys: HashSet<String>,
     seed_struct_keys: HashSet<String>,
+    /// Whether the per-module check cache is active (S1 arena-scale).
+    /// Only the `zz check` entry point enables it: `run`/`build` need
+    /// span types and codegen inputs the cache does not store.
+    use_cache: bool,
+    /// Plugin function names, for the cache genesis hash.
+    plugin_names: Vec<String>,
+    /// File dependency edges (importer → imported canonical paths) for S1
+    /// dep-aware cache keys. Recorded during discovery, which already
+    /// resolves every import; key resolution follows true dependencies
+    /// instead of load order.
+    dep_edges: HashMap<PathBuf, Vec<PathBuf>>,
     /// Whether the seed tables have been contributed to `all_*` yet.
     /// `all_*` must contain the seeds (stdlib!) exactly once: the first
     /// succeeding module contributes them (prior modules all errored, so
@@ -130,6 +142,14 @@ pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
     load_program_with_plugins(main_path, &[])
 }
 
+/// Load an entry file for `zz check`, with the per-module check cache
+/// enabled (S1 arena-scale): unchanged modules skip re-checking via a
+/// content-addressed on-disk cache. `run`/`build` must use `load_program`
+/// (they need span types and codegen inputs the cache does not store).
+pub fn load_program_check(main_path: &Path) -> Result<LoadResult, String> {
+    load_program_impl(main_path, &[], true)
+}
+
 /// Load an entry file and all of its imports, merging additional function
 /// signatures from plugin manifests.
 ///
@@ -139,6 +159,14 @@ pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
 pub fn load_program_with_plugins(
     main_path: &Path,
     plugin_funcs: &[(String, FuncSig)],
+) -> Result<LoadResult, String> {
+    load_program_impl(main_path, plugin_funcs, false)
+}
+
+fn load_program_impl(
+    main_path: &Path,
+    plugin_funcs: &[(String, FuncSig)],
+    use_cache: bool,
 ) -> Result<LoadResult, String> {
     let entry = main_path.canonicalize().map_err(|e| {
         format!(
@@ -162,6 +190,9 @@ pub fn load_program_with_plugins(
         seed_func_keys,
         seed_struct_keys: HashSet::new(),
         contributed_seeds: false,
+        use_cache,
+        plugin_names: Vec::new(),
+        dep_edges: HashMap::new(),
         all_funcs: HashMap::new(),
         all_bindings: HashMap::new(),
         all_structs: HashMap::new(),
@@ -177,6 +208,7 @@ pub fn load_program_with_plugins(
     for (name, sig) in plugin_funcs {
         loader.funcs.insert(name.clone(), sig.clone());
         loader.seed_func_keys.insert(name.clone());
+        loader.plugin_names.push(name.clone());
     }
     loader.load_file(main_path, None)?;
     Ok(loader.finish())
@@ -324,7 +356,49 @@ fn push_private_note(d: &mut RawDiag, name: &str, template: &str) {
     d.notes.push(template.replace("{}", last));
 }
 
+/// Resolve one module's S1 cache key over in-memory sources (no IO):
+/// `H(genesis, source, sorted(dep path, dep key)...)`, memoized.
+/// Returns `None` when unresolvable (missing source, cycle) — the caller
+/// treats it as a cache miss and checks normally.
+fn resolve_module_key(
+    genesis: &str,
+    sources: &HashMap<PathBuf, String>,
+    edges: &HashMap<PathBuf, Vec<PathBuf>>,
+    path: &Path,
+    memo: &mut HashMap<PathBuf, String>,
+    stack: &mut Vec<PathBuf>,
+) -> Option<String> {
+    if let Some(key) = memo.get(path) {
+        return Some(key.clone());
+    }
+    if stack.contains(&path.to_path_buf()) {
+        return None;
+    }
+    let source = sources.get(path)?;
+    stack.push(path.to_path_buf());
+    let mut deps = Vec::new();
+    if let Some(edge_list) = edges.get(path) {
+        for dep in edge_list {
+            let dep_key = resolve_module_key(genesis, sources, edges, dep, memo, stack)?;
+            deps.push((dep.display().to_string(), dep_key));
+        }
+    }
+    stack.pop();
+    let key = cache::module_key(genesis, source, &deps);
+    memo.insert(path.to_path_buf(), key.clone());
+    Some(key)
+}
+
 impl Loader {
+    /// Record an importer → imported edge (deduped). Small vecs; linear
+    /// scan is cheaper than a second map.
+    fn record_edge(edges: &mut HashMap<PathBuf, Vec<PathBuf>>, importer: &Path, dep: &Path) {
+        let entry = edges.entry(importer.to_path_buf()).or_default();
+        if !entry.contains(&dep.to_path_buf()) {
+            entry.push(dep.to_path_buf());
+        }
+    }
+
     /// Parse a file and recursively load its imports (DFS post-order, so
     /// dependencies land in `order` before their dependents).
     fn load_file(&mut self, path: &Path, alias: Option<&str>) -> Result<(), String> {
@@ -500,6 +574,12 @@ impl Loader {
                     if let Some(entry) = resolved {
                         let alias = imp_alias.clone().unwrap_or_else(|| imp[0].clone());
                         self.load_file(&entry, Some(alias.as_str()))?;
+                        // S1 dep edge (registry package file).
+                        Self::record_edge(
+                            &mut self.dep_edges,
+                            &canon,
+                            &entry.canonicalize().unwrap_or(entry.clone()),
+                        );
                         if is_selective {
                             // Deferred to finish(): seed holds `alias.sym`,
                             // so record the effective namespace, not the
@@ -562,6 +642,11 @@ impl Loader {
                 }
             }
             self.load_file(&rel, imp_alias.as_deref())?;
+            // S1 dep edge (local file). `rel_canon` was verified above;
+            // re-canonicalize defensively (filesystem cache hot).
+            if let Ok(dep) = rel.canonicalize() {
+                Self::record_edge(&mut self.dep_edges, &canon, &dep);
+            }
             if is_selective {
                 // Store for processing in finish() when all modules are loaded.
                 self.selective_imports
@@ -763,6 +848,26 @@ impl Loader {
     fn finish(mut self) -> LoadResult {
         let mut files = Vec::with_capacity(self.order.len());
         let mut programs = Vec::with_capacity(self.order.len());
+        // S1 dep-aware check-cache keys, resolved up front (sources still
+        // intact): each module's key covers its source plus its transitive
+        // deps' keys. Only true dependents recheck on an edit; anything
+        // unresolvable (deleted file, cycle) misses and checks normally.
+        let genesis = cache::genesis_key(&self.plugin_names);
+        let mut key_memo: HashMap<PathBuf, String> = HashMap::new();
+        let mut module_keys: HashMap<PathBuf, String> = HashMap::new();
+        for path in &self.order {
+            let mut stack = Vec::new();
+            if let Some(key) = resolve_module_key(
+                &genesis,
+                &self.sources,
+                &self.dep_edges,
+                path,
+                &mut key_memo,
+                &mut stack,
+            ) {
+                module_keys.insert(path.clone(), key);
+            }
+        }
 
         for path in &self.order {
             let name = path.display().to_string();
@@ -1184,12 +1289,75 @@ impl Loader {
             // Bindings seeds stay cloned: the checker drops its seed env
             // (only new bindings are returned), so they are unrecoverable;
             // top-level bindings are rare, so the term is noise.
-            let mut checked = check_program(
-                &program,
-                self.bindings.clone(),
-                std::mem::take(&mut self.funcs),
-                std::mem::take(&mut self.structs),
-            );
+            //
+            // S1 check-cache: on a hit the outcome is synthesized from
+            // disk (seeds move out and back so the shared tail below sees
+            // the exact same shapes as a fresh check); on a miss the fresh
+            // outcome runs the shared tail and is stored afterwards from
+            // own-only maps (never seeds — entries stay ~30KB, not 460KB).
+            // Parse/selective/namespace work above always runs and feeds
+            // both paths identically.
+            let (mut checked, pending_key): (CheckResult, Option<String>) = if self.use_cache {
+                // Dep-aware hit: the precomputed key covers source + true
+                // transitive deps. Absent key (unresolvable) misses.
+                let pending = module_keys.get(path).cloned();
+                match pending {
+                    Some(key) => match cache::read_cached(&key) {
+                        Some(cached) => {
+                            let mut funcs = std::mem::take(&mut self.funcs);
+                            funcs.extend(cached.funcs.into_owned());
+                            let mut structs = std::mem::take(&mut self.structs);
+                            structs.extend(cached.structs.into_owned());
+                            (
+                                CheckResult {
+                                    errors: cached.diags,
+                                    bindings: cached.bindings.into_owned(),
+                                    funcs,
+                                    structs,
+                                    try_resolutions: HashMap::new(),
+                                    try_converts: HashMap::new(),
+                                    link_libs: Vec::new(),
+                                    const_bindings: HashMap::new(),
+                                    pub_bindings: cached.pub_bindings.into_owned(),
+                                    pub_funcs: cached.pub_funcs.into_owned(),
+                                    pub_structs: cached.pub_structs.into_owned(),
+                                },
+                                None,
+                            )
+                        }
+                        None => (
+                            check_program(
+                                &program,
+                                self.bindings.clone(),
+                                std::mem::take(&mut self.funcs),
+                                std::mem::take(&mut self.structs),
+                            ),
+                            Some(key),
+                        ),
+                    },
+                    // Unresolvable key (missing source, cycle): check without
+                    // storing (nothing to key the entry by).
+                    None => (
+                        check_program(
+                            &program,
+                            self.bindings.clone(),
+                            std::mem::take(&mut self.funcs),
+                            std::mem::take(&mut self.structs),
+                        ),
+                        None,
+                    ),
+                }
+            } else {
+                (
+                    check_program(
+                        &program,
+                        self.bindings.clone(),
+                        std::mem::take(&mut self.funcs),
+                        std::mem::take(&mut self.structs),
+                    ),
+                    None,
+                )
+            };
             let has_errors = checked
                 .errors
                 .iter()
@@ -1212,6 +1380,22 @@ impl Loader {
                 .partition(|(k, _)| self.seed_struct_keys.contains(k));
             self.funcs = seeded_funcs;
             self.structs = seeded_structs;
+            // Store the miss (own-only maps + pubs + diags, all borrowed —
+            // zero copy before the tail moves them below).
+            if let Some(key) = pending_key.as_deref() {
+                cache::write_cached(
+                    key,
+                    &cache::CachedModule {
+                        funcs: std::borrow::Cow::Borrowed(&own_funcs),
+                        pub_funcs: std::borrow::Cow::Borrowed(&checked.pub_funcs),
+                        structs: std::borrow::Cow::Borrowed(&own_structs),
+                        pub_structs: std::borrow::Cow::Borrowed(&checked.pub_structs),
+                        bindings: std::borrow::Cow::Borrowed(&checked.bindings),
+                        pub_bindings: std::borrow::Cow::Borrowed(&checked.pub_bindings),
+                        diags: checked.errors.clone(),
+                    },
+                );
+            }
             let mut diags = checked.errors;
             if has_errors {
                 // Upgrade generic "undefined variable / unknown struct / no

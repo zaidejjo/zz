@@ -1,0 +1,25 @@
+import hmod00
+import hmod01
+import hmod02
+import hmod03
+import hmod04
+import hmod05
+import hmod06
+import hmod07
+import hmod08
+import hmod09
+func main() -> int {
+    total := 0
+    total = total + hmod00.hmod00_f0(total)
+    total = total + hmod01.hmod01_f0(total)
+    total = total + hmod02.hmod02_f0(total)
+    total = total + hmod03.hmod03_f0(total)
+    total = total + hmod04.hmod04_f0(total)
+    total = total + hmod05.hmod05_f0(total)
+    total = total + hmod06.hmod06_f0(total)
+    total = total + hmod07.hmod07_f0(total)
+    total = total + hmod08.hmod08_f0(total)
+    total = total + hmod09.hmod09_f0(total)
+    println("{total}")
+    return total
+}
