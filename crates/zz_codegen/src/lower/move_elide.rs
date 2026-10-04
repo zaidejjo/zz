@@ -197,6 +197,7 @@ impl Lowerer {
             "    {{ int {err} = 0; {cid} = zz_vec_push_take({mv}, {elem_boxed}, &{err}); }}\n"
         ));
         names.invalidate_array_len(var);
+        names.invalidate_stack_array_elems(var);
         true
     }
 
@@ -361,6 +362,7 @@ impl Lowerer {
         // retain either — the call result's share transfers to the slot.
         out.push_str(&format!("    {cid} = {call_c};\n"));
         names.invalidate_array_len(var);
+        names.invalidate_stack_array_elems(var);
         true
     }
 }

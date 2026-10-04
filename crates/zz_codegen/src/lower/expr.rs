@@ -18,7 +18,7 @@ fn closure_ignores_param(params: &[Param], body: &Expr) -> bool {
     !mentions_ident(body, &p.name.name)
 }
 
-fn mentions_ident(e: &Expr, name: &str) -> bool {
+pub(super) fn mentions_ident(e: &Expr, name: &str) -> bool {
     match e {
         Expr::Int { .. }
         | Expr::Float { .. }
@@ -770,8 +770,9 @@ impl Lowerer {
                 // Cooperative safepoint at the loop top (mirrors the VM's
                 // `Op::Safepoint`): budget-guarded `zz_safepoint()` yields
                 // the OS thread on quantum expiry so sibling AOT task
-                // threads get scheduled.
-                out.push_str("        zz_safepoint();\n");
+                // threads get scheduled. Elided for concurrency-free
+                // programs (see `needs_safepoint`).
+                self.emit_safepoint(out, "        ");
                 let c = self.emit_expr(cond, names, out);
                 let c = box_scalar_operand(cond, names, &c);
                 out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
@@ -854,6 +855,26 @@ impl Lowerer {
             }
             Expr::Index { obj, index, .. } => {
                 // `obj[idx]` — runtime-dispatched read (arrays/dicts).
+                // Stack-literal forwarding (SROA): `arr[lit]` where `arr`
+                // is bound to a pure-scalar literal in straight-line code
+                // reads the element's raw C expression directly — no
+                // `zz_index_get` call, no bounds-check temp. Returned
+                // pre-boxed (`zz_int(…)` etc.) so the boxed `zz_value`
+                // contract holds at every use site; scalar contexts
+                // re-derive the raw text through the classifier arms
+                // (which stay raw end to end, e.g. in `a + arr[0]`).
+                if let (Expr::Ident { name, .. }, Expr::Int { value, .. }) =
+                    (obj.as_ref(), index.as_ref())
+                {
+                    if let Some((raw, t)) = names.stack_array_elem(name, *value) {
+                        let ctor = match t {
+                            "double" => "zz_float",
+                            "bool" => "zz_bool",
+                            _ => "zz_int",
+                        };
+                        return format!("{ctor}({raw})");
+                    }
+                }
                 // Two fast-paths over the naive
                 // `zz_call_native2(zz_index_get, zz_clone(o), boxed_i)`:
                 //   1. Plain Ident receivers pass borrowed: zz_index_get
@@ -1394,6 +1415,10 @@ impl Lowerer {
         let globals = self.global_name_set();
         let mut caps: Vec<(String, String, String, Option<zz_checker::Type>)> = Vec::new();
         for fv in zz_hir::closure_free_vars(&param_names, body, &globals) {
+            // A captured name may be mutated through the shared cell
+            // after this point: drop index forwarding for it (plus any
+            // literal mentioning it) so later reads stay truthful.
+            names.invalidate_stack_array_elems(&fv);
             let Some(ptr) = names.cell_ptr(&fv) else {
                 continue;
             };
@@ -2333,16 +2358,22 @@ impl Lowerer {
         }
         // Any other call may mutate or retain its array arguments — drop
         // literal-length knowledge for every variable passed in (including
-        // the method receiver, e.g. `arr.push(4)`).
+        // the method receiver, e.g. `arr.push(4)`). Same for index
+        // forwarding (a store through the call would stale the texts).
         if let Some(Expr::Ident { name, .. }) = &method_receiver {
             names.invalidate_array_len(name);
+            names.invalidate_stack_array_elems(name);
         }
         for a in args {
             match a {
-                Expr::Ident { name, .. } => names.invalidate_array_len(name),
+                Expr::Ident { name, .. } => {
+                    names.invalidate_array_len(name);
+                    names.invalidate_stack_array_elems(name);
+                }
                 Expr::Path { parts, .. } => {
                     let joined = parts.join(".");
                     names.invalidate_array_len(&joined);
+                    names.invalidate_stack_array_elems(&joined);
                 }
                 _ => {}
             }

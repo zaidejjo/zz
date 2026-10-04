@@ -143,9 +143,15 @@ impl Lowerer {
                     }
                     out.push_str(&format!("    {ctype} {cid} = {final_val};\n"));
                 }
-                // Track array literals so `len(v)` can fold to the arity.
+                // Track array literals so `len(v)` can fold to the arity,
+                // and record pure-scalar literals for index forwarding
+                // (`arr[lit]` reads lower to the element's raw C expr).
+                // Any other RHS drops a shadowed literal binding.
                 if let Expr::Array { elems, .. } = value {
                     names.set_array_len(&name.name, elems.len());
+                    self.record_array_elems(&name.name, elems, names);
+                } else {
+                    names.invalidate_stack_array_elems(&name.name);
                 }
             }
             Stmt::Assign { target, value, .. } => {
@@ -167,9 +173,12 @@ impl Lowerer {
                 // Anything else bails to the generic path below.
                 // Any reassignment breaks the literal-length association
                 // until proven otherwise (re-inserted below for array
-                // literals on the generic path).
+                // literals on the generic path). Same for index
+                // forwarding (plus any literal mentioning the target —
+                // the C local is reused, so stored texts would go stale).
                 if let Expr::Ident { name, .. } = target {
                     names.invalidate_array_len(name);
+                    names.invalidate_stack_array_elems(name);
                 }
                 if let Expr::Ident { name: tname, .. } = target {
                     if self.try_emit_str_append_chain(tname, value, names, out) {
@@ -250,9 +259,11 @@ impl Lowerer {
                                 out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
                             }
                             // Re-associate the target with a fresh array
-                            // literal length when the RHS is one.
+                            // literal length when the RHS is one (plus
+                            // index-forwarding elements when pure-scalar).
                             if let Expr::Array { elems, .. } = value {
                                 names.set_array_len(name, elems.len());
+                                self.record_array_elems(name, elems, names);
                             }
                         }
                     }
@@ -512,6 +523,11 @@ impl Lowerer {
                     }
                     Expr::Index { obj, index, .. } => {
                         // `obj[idx] = v` — runtime-dispatched write (arrays/dicts).
+                        // A store may change any element: drop index
+                        // forwarding for the base (plus dependents).
+                        if let Expr::Ident { name, .. } = obj.as_ref() {
+                            names.invalidate_stack_array_elems(name);
+                        }
                         let o = self.emit_expr(obj, names, out);
                         let i = self.emit_expr(index, names, out);
                         // Box a scalar index to a zz_value.
@@ -554,7 +570,11 @@ impl Lowerer {
                         // and VM): single evaluation, then read →
                         // boxed zz_binop → write. Index stores are
                         // already runtime-dispatched, so the boxed path
-                        // is always correct here.
+                        // is always correct here. The store kills index
+                        // forwarding for the base (plus dependents).
+                        if let Expr::Ident { name, .. } = obj.as_ref() {
+                            names.invalidate_stack_array_elems(name);
+                        }
                         let o = self.emit_expr(obj, names, out);
                         let i = self.emit_expr(index, names, out);
                         let i_boxed = self.box_index_arg(index, i, names);
@@ -702,6 +722,10 @@ impl Lowerer {
                 let rhs = self.emit_expr(value, names, out);
                 let tmp = names.fresh("__dtup");
                 out.push_str(&format!("    zz_value {tmp} = {rhs};\n"));
+                // Destructured bindings reuse ZZ names in the same scope:
+                // any literal association for them is stale (plus the RHS
+                // temp is not a literal at all).
+                names.clear_array_lens();
                 self.emit_destructure_pat(pat, &tmp, names, out);
             }
             Stmt::Func { .. }
@@ -1181,8 +1205,11 @@ impl Lowerer {
                     )
                 };
                 out.push_str(&s);
-                // Loop-top safepoint (mirrors the VM's `Op::Safepoint`).
-                out.push_str("    zz_safepoint();\n");
+                // Loop-top safepoint (mirrors the VM's `Op::Safepoint`),
+                // elided for concurrency-free programs (see
+                // `needs_safepoint`): the call barrier blocks clang from
+                // folding tight scalar loops to closed form.
+                self.emit_safepoint(out, "    ");
             } else {
                 // Slow path: both bounds are general expressions, use boxed loop
                 // (start must be boxed exactly like the end bound: a bare
@@ -1214,21 +1241,36 @@ impl Lowerer {
                     // run strictly before any suspend.
                     let (_, driver, _) = self.green_cell(names, "int64_t", true, out);
                     let (_, ederef, _) = self.green_cell(names, "zz_value", false, out);
+                    // Safepoint elided for concurrency-free programs (the
+                    // call barrier blocks loop folding; see
+                    // `needs_safepoint`). The literal keeps its exact
+                    // legacy spacing when enabled.
+                    let sp = if self.needs_safepoint() {
+                        "                         zz_safepoint();\n"
+                    } else {
+                        ""
+                    };
                     out.push_str(&format!(
                         "{{ zz_value _s = {sv_boxed};\n    \
                          {ederef} = {ev_boxed};\n    \
                          if (_s.tag == ZZ_INT && ({ederef}).tag == ZZ_INT) {{\n        \
                          for ({driver} = _s.i; {driver} < ({ederef}).i; {driver}++) {{\n            \
                          {cid} = {driver};\n            \
-                         zz_safepoint();\n"
+                         {sp}"
                     ));
                 } else {
+                    // Same safepoint gate as the green path above.
+                    let sp = if self.needs_safepoint() {
+                        "                     zz_safepoint();\n"
+                    } else {
+                        ""
+                    };
                     let s = format!(
                         "{{ zz_value _s = {sv_boxed}; zz_value _e = {ev_boxed};\n    \
                      if (_s.tag == ZZ_INT && _e.tag == ZZ_INT) {{\n        \
                      for (int64_t {cid}_i = _s.i; {cid}_i < _e.i; {cid}_i++) {{\n            \
                      int64_t {cid} = {cid}_i;\n            \
-                     zz_safepoint();\n"
+                     {sp}"
                     );
                     out.push_str(&s);
                 }
@@ -1365,7 +1407,7 @@ impl Lowerer {
                     (idx, len)
                 };
                 out.push_str(&format!("    for (; {idx} < {len}; {idx}++) {{\n"));
-                out.push_str("    zz_safepoint();\n");
+                self.emit_safepoint(out, "    ");
                 // Green: the item is a frame cell (assigned, never
                 // declared); plain path declares the per-iteration local.
                 if green_iter {
@@ -1458,7 +1500,7 @@ impl Lowerer {
                         "    {lderef} = ({iter_tmp}.tag == ZZ_ARRAY) ? (int64_t){iter_tmp}.arr->len : ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
                     ));
                     out.push_str(&format!("    for (; {ideref} < {lderef}; {ideref}++) {{\n"));
-                    out.push_str("    zz_safepoint();\n");
+                    self.emit_safepoint(out, "    ");
                     let (_, pederef, _) = self.green_cell(names, "int", false, out);
                     out.push_str(&format!("    {pederef} = 0;\n"));
                     let (_, pairderef, _) = self.green_cell(names, "zz_value", false, out);
@@ -1485,7 +1527,7 @@ impl Lowerer {
                         "    int64_t {len} = ({iter_tmp}.tag == ZZ_ARRAY) ? (int64_t){iter_tmp}.arr->len : ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
                     ));
                     out.push_str(&format!("    for (; {idx} < {len}; {idx}++) {{\n"));
-                    out.push_str("    zz_safepoint();\n");
+                    self.emit_safepoint(out, "    ");
                     let pe = names.fresh("_pe");
                     out.push_str(&format!("    int {pe} = 0;\n"));
                     let pair = names.fresh("_pair");
