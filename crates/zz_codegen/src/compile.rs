@@ -174,11 +174,83 @@ fn static_syslibs_probe(clang: &Clang, need_curl: bool, need_sqlite: bool) -> bo
     }
 }
 
+/// Managed Zig toolchain root: `~/.zz/toolchain` (override with
+/// `ZZ_TOOLCHAIN_ROOT`, used by hermetic tests). Layout:
+/// `versions/<semver>/` holds one extracted Zig release (the `zig`
+/// binary plus its adjacent `lib/`); a `pin` file names the active
+/// version. Written by `zz toolchain install`; read here so builds and
+/// the runtime-archive cache follow the pin.
+pub fn toolchain_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("ZZ_TOOLCHAIN_ROOT") {
+        if !root.is_empty() {
+            return PathBuf::from(root);
+        }
+    }
+    toolchain_home_dir()
+        .unwrap_or_else(|| std::env::temp_dir().join("zz"))
+        .join(".zz")
+        .join("toolchain")
+}
+
+fn toolchain_home_dir() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+    #[cfg(windows)]
+    {
+        std::env::var("USERPROFILE").ok().map(PathBuf::from)
+    }
+}
+
+/// Pinned Zig version (`versions/<pin>/`), if `zz toolchain install` (or
+/// `zz toolchain use`) recorded one. The file holds `X.Y.Z` plus a
+/// trailing newline; anything unparseable is treated as unpinned.
+pub fn toolchain_pin() -> Option<String> {
+    let pin = std::fs::read_to_string(toolchain_root().join("pin")).ok()?;
+    let pin = pin.trim().to_string();
+    if pin.is_empty()
+        || !pin.bytes().any(|b| b.is_ascii_alphanumeric())
+        || !pin.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+    {
+        return None;
+    }
+    Some(pin)
+}
+
+/// Path to the managed `zig` binary for the pinned version, when the
+/// install is present and executable. Returns `None` when unpinned,
+/// incompletely installed, or not executable (falls back to PATH probing).
+/// Honors `ZZ_TEST_HIDE_CLANG` like [`detect_clang_with`].
+pub fn managed_zig_path() -> Option<PathBuf> {
+    if std::env::var_os("ZZ_TEST_HIDE_CLANG").is_some() {
+        return None;
+    }
+    let pin = toolchain_pin()?;
+    let exe = if cfg!(windows) { "zig.exe" } else { "zig" };
+    let path = toolchain_root().join("versions").join(&pin).join(exe);
+    if !path.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(&path)
+            .map(|m| m.permissions().mode() & 0o111 == 0)
+            .unwrap_or(true)
+        {
+            return None;
+        }
+    }
+    Some(path)
+}
+
 /// Probe PATH for a Clang provider.
 ///
-/// Order: `clang`, `clang-22`, `zig`. Test hook: when the environment
-/// variable `ZZ_TEST_HIDE_CLANG` is set, detection pretends nothing is
-/// installed (used by the missing-toolchain fallback tests).
+/// Order: managed `zig` (an explicit `zz toolchain install` pin always
+/// wins), then `clang`, `clang-22`, then PATH `zig`. Test hook: when the
+/// environment variable `ZZ_TEST_HIDE_CLANG` is set, detection pretends
+/// nothing is installed (used by the missing-toolchain fallback tests).
 pub fn detect_clang() -> Option<Clang> {
     detect_clang_with(ClangProvider::Any)
 }
@@ -190,6 +262,17 @@ pub fn detect_clang_with(provider: ClangProvider) -> Option<Clang> {
     }
     let allow_clang = matches!(provider, ClangProvider::Any | ClangProvider::Clang);
     let allow_zig = matches!(provider, ClangProvider::Any | ClangProvider::Zig);
+    // Explicit opt-in wins: a pinned managed toolchain outranks everything
+    // on PATH (`--cc=clang` / `--cc=zig` still force their provider).
+    if provider == ClangProvider::Any {
+        if let Some(path) = managed_zig_path() {
+            return Some(Clang {
+                path,
+                zig: true,
+                label: "zig cc",
+            });
+        }
+    }
     if allow_clang {
         for name in ["clang", "clang-22"] {
             if let Some(path) = which(name) {
@@ -202,7 +285,7 @@ pub fn detect_clang_with(provider: ClangProvider) -> Option<Clang> {
         }
     }
     if allow_zig {
-        if let Some(path) = which("zig") {
+        if let Some(path) = managed_zig_path().or_else(|| which("zig")) {
             return Some(Clang {
                 path,
                 zig: true,
@@ -1157,5 +1240,133 @@ mod tests {
         );
         assert!(text.contains("clang"), "script must use clang: {text}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod toolchain_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Env vars are process-global: serialize every hermetic test so
+    /// parallel threads never observe (or remove) each other's root.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Hermetic toolchain root: unique temp dir + env override, restored
+    /// on drop so parallel tests never observe it afterwards. Mirrors the
+    /// existing `ZZ_TEST_HIDE_CLANG` pattern (set, assert, restore fast).
+    struct HermeticRoot {
+        dir: PathBuf,
+    }
+
+    impl HermeticRoot {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let dir =
+                std::env::temp_dir().join(format!("zz-tc-test-{}-{uniq}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_var("ZZ_TOOLCHAIN_ROOT", &dir);
+            HermeticRoot { dir }
+        }
+
+        fn pin(&self, version: &str) {
+            std::fs::write(self.dir.join("pin"), format!("{version}\n")).unwrap();
+        }
+
+        fn fake_zig(&self, version: &str) -> PathBuf {
+            let exe = if cfg!(windows) { "zig.exe" } else { "zig" };
+            let dir = self.dir.join("versions").join(version);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(exe);
+            #[cfg(unix)]
+            {
+                std::fs::write(&path, "#!/bin/sh\necho fake-zig\n").unwrap();
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            #[cfg(windows)]
+            {
+                std::fs::write(&path, "fake").unwrap();
+            }
+            path
+        }
+    }
+
+    impl Drop for HermeticRoot {
+        fn drop(&mut self) {
+            std::env::remove_var("ZZ_TOOLCHAIN_ROOT");
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn unpinned_has_no_managed_zig() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _root = HermeticRoot::new();
+        assert!(toolchain_pin().is_none());
+        assert!(managed_zig_path().is_none());
+    }
+
+    #[test]
+    fn garbage_pin_is_unpinned_not_fatal() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let root = HermeticRoot::new();
+        for bad in ["", ".", "..", "../evil", "0.17.0\nrm -rf", "v0.17.0-rc1!"] {
+            std::fs::write(root.dir.join("pin"), bad).unwrap();
+            assert!(toolchain_pin().is_none(), "bad pin must not parse: {bad:?}");
+            assert!(managed_zig_path().is_none());
+        }
+    }
+
+    #[test]
+    fn pin_without_install_is_not_managed() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let root = HermeticRoot::new();
+        root.pin("0.17.0");
+        assert_eq!(toolchain_pin().as_deref(), Some("0.17.0"));
+        assert!(managed_zig_path().is_none());
+    }
+
+    #[test]
+    fn managed_zig_wins_probe_and_hide_covers_it() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let root = HermeticRoot::new();
+        let fake = root.fake_zig("0.17.0");
+        root.pin("0.17.0");
+        assert_eq!(managed_zig_path(), Some(fake.clone()));
+        // Explicit opt-in outranks PATH.
+        let found = detect_clang_with(ClangProvider::Any).expect("managed zig must probe");
+        assert!(found.zig);
+        assert_eq!(found.path, fake);
+        // `--cc=clang` still forces the system provider.
+        if which("clang").or_else(|| which("clang-22")).is_some() {
+            let c = detect_clang_with(ClangProvider::Clang).expect("system clang present");
+            assert!(!c.zig);
+        }
+        // The test hook hides the managed toolchain too.
+        std::env::set_var("ZZ_TEST_HIDE_CLANG", "1");
+        assert!(detect_clang().is_none());
+        assert!(managed_zig_path().is_none());
+        std::env::remove_var("ZZ_TEST_HIDE_CLANG");
+    }
+
+    #[test]
+    fn cache_key_follows_the_pin() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let root = HermeticRoot::new();
+        let clang = Clang {
+            path: PathBuf::from("/usr/bin/clang"),
+            zig: false,
+            label: "clang",
+        };
+        let unpinned = crate::cache::cache_key(None, true, &clang);
+        assert!(unpinned.contains("-nopin-"), "unpinned key: {unpinned}");
+        root.pin("0.17.0");
+        let pinned = crate::cache::cache_key(None, true, &clang);
+        assert!(pinned.contains("-0.17.0-"), "pinned key: {pinned}");
+        assert_ne!(unpinned, pinned);
     }
 }

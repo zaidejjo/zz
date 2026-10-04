@@ -4,14 +4,16 @@
 //! every `zz build` / `zz run --native`. This module compiles it once into a
 //! static library (`libzz_rt.a`) keyed by:
 //!
-//!   `{target}-{mode}-{src_hash}-{clang_id}`
+//!   `{target}-{mode}-{src_hash}-{clang_id}-{pin}-{rt_version}`
 //!
+//! `pin` is the `zz toolchain` pin (`nopin` when unmanaged).
 //! Subsequent builds reuse the cached archive in ~0ms. The archive is
 //! invalidated when:
 //! - the target triple changes (cross-compilation),
 //! - the optimization mode changes (debug vs release, which gates LTO),
 //! - any runtime `.c` or `.h` source file changes (detected via hash),
 //! - the Clang binary or its version changes (bitcode compatibility).
+//! - the managed-toolchain pin changes (`zz toolchain use`).
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -68,19 +70,26 @@ fn clang_id(clang: &Clang) -> String {
 /// change to `build_compile_flags` (the key does not hash flags).
 const RT_CACHE_VERSION: &str = "rt2";
 
-/// Assemble the 5-field cache key.
+/// Assemble the 6-field cache key.
 ///
-/// Format: `{target}-{mode}-{src_hash}-{clang_id}-{rt_version}`
+/// Format: `{target}-{mode}-{src_hash}-{clang_id}-{pin}-{rt_version}`
+/// `pin` is the managed-toolchain pin (`nopin` when none): switching the
+/// `zz toolchain` pin must never reuse an archive built by another
+/// toolchain, even when the resolved `clang_id` hash collides in theory.
+/// (`clang_id` already covers provider path + version output; the pin
+/// additionally keeps cache dirs human-grepable per toolchain.)
 pub fn cache_key(target: Option<&str>, optimize: bool, clang: &Clang) -> String {
     let fallback_triple = crate::compile::host_triple();
     let triple = target.unwrap_or(&fallback_triple);
     let mode = if optimize { "rel" } else { "dev" };
+    let pin = crate::compile::toolchain_pin().unwrap_or_else(|| "nopin".to_string());
     format!(
-        "{}-{}-{}-{}-{}",
+        "{}-{}-{}-{}-{}-{}",
         triple,
         mode,
         runtime_src_hash(),
         clang_id(clang),
+        pin,
         RT_CACHE_VERSION
     )
 }

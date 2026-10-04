@@ -93,7 +93,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         None => checks.push(fail(
             "C backend",
             "no clang backend found".to_string(),
-            "install clang (or `zig cc`) — `zz build` and `zz run --native` need it",
+            "run `zz toolchain install` for a managed Zig backend, or install clang",
         )),
     }
 

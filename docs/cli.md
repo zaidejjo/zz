@@ -141,6 +141,32 @@ Clang.
 Transient release compile → execute → cleanup (uses the same Clang
 release pipeline as `zz build -p`).
 
+### `zz toolchain <install|use|uninstall|status>`
+
+Manage the Zig C backend. `zz build` needs a C backend (system `clang`
+or `zig cc`); `toolchain install` downloads a pinned Zig release into
+`~/.zz/toolchain` so builds work with no system toolchain and stay
+reproducible across machines:
+
+```bash
+zz toolchain install                  # latest stable Zig, verified + pinned
+zz toolchain install --version 0.17.0 # pin an exact release instead
+zz toolchain status                   # installed versions, pin, active backend
+zz toolchain use 0.17.0               # switch the pin among installed versions
+zz toolchain uninstall 0.17.0         # remove an installed version
+```
+
+Details:
+
+- Sources are official `ziglang.org` releases via `download/index.json`
+  (URLs are never constructed — asset naming changed between eras);
+  every download is sha256-checked against the index.
+- A pin is explicit opt-in: once present, provider probing prefers the
+  managed `zig` over everything on PATH (`--cc=clang` / `--cc=zig`
+  still force their provider), and the precompiled-runtime cache key
+  includes the pin so switching toolchains rebuilds instead of reusing.
+- Set `ZZ_TOOLCHAIN_ROOT` to relocate the toolchain dir (hermetic CI).
+
 ### `zz check [FLAGS] [PATH]`
 
 Scan files for errors and warnings:
