@@ -150,89 +150,30 @@ impl Lowerer {
             }
             Stmt::Assign { target, value, .. } => {
                 // Fast-path: `s = s + <rhs>` where `s` is a string
-                // (zz_value). Emit an in-place append shim instead of
+                // (zz_value). Emit in-place append shims instead of
                 // clone+binop+assign so the capacity-aware path in
-                // zz_str_append_* can fire. Without this, zz_clone()
-                // bumps refs and breaks the refs==1 fast path in the
-                // runtime.
+                // zz_str_append_* fires with amortized O(1) growth.
+                // Without this, zz_clone() bumps refs and breaks the
+                // refs==1 fast path in the runtime — and chained cats
+                // (`s = s + a + b + c`) lower to nested temporaries that
+                // each copy the whole accumulator (O(N^2), GB-scale).
                 //
-                // SAFETY: must only fire when both sides are strings.
+                // SAFETY: must only fire when the target and every
+                // appended term are strings.
                 //   - target type must NOT be a scalar (int64_t/double/bool).
-                //   - For non-literal RHS, the RHS must itself be string-
-                //     typed (else the runtime gets a non-zz_value arg).
+                //   - each term must be a Str literal, a string-typed
+                //     Ident/Path, or a str() conversion (owned temp that
+                //     is appended then released).
+                // Anything else bails to the generic path below.
                 // Any reassignment breaks the literal-length association
                 // until proven otherwise (re-inserted below for array
                 // literals on the generic path).
                 if let Expr::Ident { name, .. } = target {
                     names.invalidate_array_len(name);
                 }
-                if let Expr::Binary {
-                    op: zz_frontend::ast::BinOp::Add,
-                    left,
-                    right,
-                    ..
-                } = value
-                {
-                    let left_ident = match left.as_ref() {
-                        Expr::Ident { name, .. } => Some(name.clone()),
-                        _ => None,
-                    };
-                    if let (Some(lname), Expr::Ident { name: tname, .. }) = (&left_ident, target) {
-                        if lname == tname {
-                            // Skip fast-path for scalar targets: their
-                            // storage is the raw type, not a zz_value.
-                            let target_is_scalar = names
-                                .lookup_type(tname.as_str())
-                                .map(|t| matches!(t, "int64_t" | "double" | "bool"))
-                                .unwrap_or(false);
-                            if !target_is_scalar {
-                                if let Some(cid) = names.lookup(tname.as_str()) {
-                                    let cid = cid.to_string();
-                                    match right.as_ref() {
-                                        Expr::Str { value: lit, .. } => {
-                                            let lit_c = self.emit_str_literal(lit);
-                                            let inner = extract_c_literal(&lit_c);
-                                            out.push_str(&format!(
-                                                "    zz_str_append_lit(&{cid}, {inner}, sizeof({inner}) - 1);\n"
-                                            ));
-                                            return;
-                                        }
-                                        Expr::Ident { name: rname, .. } => {
-                                            let rhs_scalar = names
-                                                .lookup_type(rname)
-                                                .map(|t| matches!(t, "int64_t" | "double" | "bool"))
-                                                .unwrap_or(false);
-                                            if !rhs_scalar {
-                                                if let Some(rcid) = names.lookup(rname) {
-                                                    let rcid = rcid.to_string();
-                                                    out.push_str(&format!(
-                                                        "    zz_str_append_str(&{cid}, {rcid});\n"
-                                                    ));
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                        Expr::Path { parts, .. } => {
-                                            let joined = parts.join(".");
-                                            let rhs_scalar = names
-                                                .lookup_type(&joined)
-                                                .map(|t| matches!(t, "int64_t" | "double" | "bool"))
-                                                .unwrap_or(false);
-                                            if !rhs_scalar {
-                                                if let Some(rcid) = names.lookup(&joined) {
-                                                    let rcid = rcid.to_string();
-                                                    out.push_str(&format!(
-                                                        "    zz_str_append_str(&{cid}, {rcid});\n"
-                                                    ));
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
+                if let Expr::Ident { name: tname, .. } = target {
+                    if self.try_emit_str_append_chain(tname, value, names, out) {
+                        return;
                     }
                 }
 
@@ -765,6 +706,186 @@ impl Lowerer {
     /// wildcards bind nothing. Literal/variant/or patterns cannot appear
     /// here from the parser (only flat bindings/wildcards); anything else
     /// is skipped without binding, matching the VM's Pop behavior.
+    ///
+    /// String-accumulator fast path (`s = s + t1 + t2 + ...`).
+    ///
+    /// Flattens a left- (or right-) nested `+` chain whose leftmost leaf
+    /// is the target itself into sequential in-place appends. Each term
+    /// appends with amortized O(1) growth (2x `str_grow`) instead of
+    /// allocating one full-size temporary per `+` (O(N^2) copies and
+    /// GB-scale transient garbage on 20k-iteration builds).
+    ///
+    /// Admissible terms (anything else bails to the generic path):
+    /// - `Str` literals → `zz_str_append_lit` (no temp at all).
+    /// - string-typed `Ident`/`Path` locals → `zz_str_append_str`
+    ///   borrowing the source (no clone bump, no release needed).
+    /// - `str(x)` conversions → emitted into an owned temp, appended,
+    ///   then `zz_release`d (heap path) or no-op released (arena SSO).
+    ///
+    /// Self-append (`s = s + s`) clones through a temp so `str_grow`'s
+    /// realloc cannot free the source out from under the copy.
+    /// Green closures bail (a suspend must never observe the
+    /// half-appended buffer through the slot).
+    pub(super) fn try_emit_str_append_chain(
+        &self,
+        tname: &str,
+        value: &Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> bool {
+        if self.green_active() {
+            return false;
+        }
+        // Scalar targets store raw C values, not zz_values.
+        let target_is_scalar = names
+            .lookup_type(tname)
+            .map(|t| matches!(t, "int64_t" | "double" | "bool"))
+            .unwrap_or(false);
+        if target_is_scalar {
+            return false;
+        }
+        let cid = match names.lookup(tname).map(str::to_string) {
+            Some(c) => c,
+            None => return false,
+        };
+        // Flatten the `+` chain left-to-right.
+        fn flatten<'a>(e: &'a Expr, terms: &mut Vec<&'a Expr>) {
+            if let Expr::Binary {
+                op: zz_frontend::ast::BinOp::Add,
+                left,
+                right,
+                ..
+            } = e
+            {
+                flatten(left, terms);
+                flatten(right, terms);
+            } else {
+                terms.push(e);
+            }
+        }
+        // The RHS must itself be a `+` (single non-Add RHS like `s = t`
+        // is a plain copy, not an append).
+        if !matches!(
+            value,
+            Expr::Binary {
+                op: zz_frontend::ast::BinOp::Add,
+                ..
+            }
+        ) {
+            return false;
+        }
+        let mut terms = Vec::new();
+        flatten(value, &mut terms);
+        if terms.len() < 2 {
+            return false;
+        }
+        // Leftmost leaf must be the target itself.
+        match terms[0] {
+            Expr::Ident { name, .. } if name == tname => {}
+            _ => return false,
+        }
+        // Gate every appended term before emitting anything (all-or-nothing
+        // so we never leave a half-appended buffer on bail).
+        enum Term<'a> {
+            Lit(String),
+            Borrow(String),
+            StrCall(&'a Expr),
+        }
+        let mut plan: Vec<Term> = Vec::with_capacity(terms.len() - 1);
+        for term in &terms[1..] {
+            match term {
+                Expr::Str { value: lit, .. } => {
+                    let lit_c = self.emit_str_literal(lit);
+                    plan.push(Term::Lit(extract_c_literal(&lit_c).to_string()));
+                }
+                Expr::Ident { name: rname, .. } => {
+                    if rname == tname {
+                        // Self-append: clone through a temp (see above).
+                        plan.push(Term::StrCall(term));
+                        continue;
+                    }
+                    let rhs_scalar = names
+                        .lookup_type(rname)
+                        .map(|t| matches!(t, "int64_t" | "double" | "bool"))
+                        .unwrap_or(false);
+                    if rhs_scalar {
+                        return false;
+                    }
+                    // Must be a known string local; unknown types bail
+                    // rather than emitting a mistyped C call.
+                    let is_str = names.lookup_type(rname) == Some("string")
+                        || self.is_string_expr(term, names);
+                    if !is_str {
+                        return false;
+                    }
+                    match names.lookup(rname).map(str::to_string) {
+                        Some(rcid) => plan.push(Term::Borrow(rcid)),
+                        None => return false,
+                    }
+                }
+                Expr::Path { parts, .. } => {
+                    let joined = parts.join(".");
+                    let rhs_scalar = names
+                        .lookup_type(&joined)
+                        .map(|t| matches!(t, "int64_t" | "double" | "bool"))
+                        .unwrap_or(false);
+                    if rhs_scalar {
+                        return false;
+                    }
+                    let is_str = names.lookup_type(&joined) == Some("string")
+                        || self.is_string_expr(term, names);
+                    if !is_str {
+                        return false;
+                    }
+                    match names.lookup(&joined).map(str::to_string) {
+                        Some(rcid) => plan.push(Term::Borrow(rcid)),
+                        None => return false,
+                    }
+                }
+                Expr::Call { .. } => {
+                    // Only string-producing calls (today: str()
+                    // conversions). Other calls may return non-strings,
+                    // which append_str would silently drop.
+                    if !self.is_string_expr(term, names) {
+                        return false;
+                    }
+                    plan.push(Term::StrCall(term));
+                }
+                _ => return false,
+            }
+        }
+        // All terms admissible — emit left-to-right.
+        for step in plan {
+            match step {
+                Term::Lit(inner) => {
+                    out.push_str(&format!(
+                        "    zz_str_append_lit(&{cid}, {inner}, sizeof({inner}) - 1);\n"
+                    ));
+                }
+                Term::Borrow(rcid) => {
+                    out.push_str(&format!("    zz_str_append_str(&{cid}, {rcid});\n"));
+                }
+                Term::StrCall(term) => {
+                    // Self-append (`s = s + s`) arrives here as an Ident:
+                    // clone first so grow cannot free the source.
+                    let val = if matches!(term, Expr::Ident { .. } | Expr::Path { .. }) {
+                        let src = self.emit_expr(term, names, out);
+                        // emit_expr on an Ident already bumps (zz_clone);
+                        // use it directly as the owned temp.
+                        src
+                    } else {
+                        self.emit_expr(term, names, out)
+                    };
+                    let tmp = names.fresh("_sapp");
+                    out.push_str(&format!("    zz_value {tmp} = {val};\n"));
+                    out.push_str(&format!("    zz_str_append_str(&{cid}, {tmp});\n"));
+                    out.push_str(&format!("    zz_release(&{tmp});\n"));
+                }
+            }
+        }
+        true
+    }
+
     pub(super) fn emit_destructure_pat(
         &self,
         pat: &Pattern,
@@ -1130,9 +1251,13 @@ impl Lowerer {
                 self.loop_arenas.borrow_mut().push(name.clone());
                 *self.current_loop_arena.borrow_mut() = Some(name.clone());
             }
+            // Per-iteration scope: body-declared heap locals release at the
+            // bottom (loop_scope_end) instead of accumulating per iteration.
+            let body_scope = self.loop_scope_begin(names);
             for bstmt in &body.stmts {
                 self.emit_stmt(bstmt, names, out, false);
             }
+            self.loop_scope_end(names, out, body_scope);
             if let Some(ref name) = loop_arena {
                 self.loop_arenas.borrow_mut().pop();
                 *self.current_loop_arena.borrow_mut() = self.loop_arenas.borrow().last().cloned();
@@ -1180,7 +1305,9 @@ impl Lowerer {
                 // for x in <array|dict>: iterate array elements or dict keys.
                 // Enter a scope so redeclarations inside the body (e.g.
                 // `total := total + item`) don't leak past the loop boundary.
-                names.push_scope();
+                // The marker also drives per-iteration releases at the
+                // bottom (loop_scope_end): the item clone frees with it.
+                let item_scope = self.loop_scope_begin(names);
                 let v = &vars[0].name;
                 // Green: per-iteration item is a frame cell (fresh when a
                 // nested closure may capture it — same isolation as the
@@ -1260,13 +1387,14 @@ impl Lowerer {
                 for bstmt in &body.stmts {
                     self.emit_stmt(bstmt, names, out, false);
                 }
+                self.loop_scope_end(names, out, item_scope);
                 out.push_str("    }\n");
-                names.pop_scope();
             } else if vars.len() == 2 {
                 // for k, v in <dict> — dict entries — or
                 // for i, x in <array of pairs> (e.g. `xs.enumerate()`) —
                 // tuple elements. Runtime tag dispatch like the 1-var path.
-                names.push_scope();
+                // Marker covers both item clones for per-iteration release.
+                let pair_scope = self.loop_scope_begin(names);
                 let k_name = &vars[0].name;
                 let v_name = &vars[1].name;
                 // Green: per-iteration items are frame cells (fresh when
@@ -1386,8 +1514,8 @@ impl Lowerer {
                 for bstmt in &body.stmts {
                     self.emit_stmt(bstmt, names, out, false);
                 }
+                self.loop_scope_end(names, out, pair_scope);
                 out.push_str("    }\n");
-                names.pop_scope();
             }
         }
     }

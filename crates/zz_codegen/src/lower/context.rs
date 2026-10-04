@@ -524,6 +524,24 @@ impl Lowerer {
                 let joined = parts.join(".");
                 names.lookup_type(&joined) == Some("string")
             }
+            // A string `+` chain is only as arena-routable as its weakest
+            // link: without recursing here, `s + f(x) + t` lowers its middle
+            // cat through the heap path whose temporaries are never released
+            // (GB-scale leak in loops). Either string side suffices.
+            Expr::Binary {
+                op: zz_frontend::ast::BinOp::Add,
+                left,
+                right,
+                ..
+            } => self.is_string_expr(left, names) || self.is_string_expr(right, names),
+            // `str(x)` conversions produce fresh heap strings; routing the
+            // enclosing cat to the arena bounds the chain (the small conv
+            // temp itself still frees with its scope — see follow-up note
+            // on take-flag managed cats for zero-leak chains).
+            Expr::Call { callee, .. } => matches!(
+                callee.as_ref(),
+                Expr::Ident { name, .. } if name == "str" || name == "std.str"
+            ),
             _ => false,
         }
     }
@@ -556,6 +574,52 @@ impl Lowerer {
             return Some(arena_name.clone());
         }
         None
+    }
+
+    /// Open a loop-body scope. Returns a marker for `loop_scope_end`.
+    /// Body-declared locals retire at iteration end (see below).
+    pub(super) fn loop_scope_begin(&self, names: &mut NameCtx) -> usize {
+        names.push_scope();
+        names.counter
+    }
+
+    /// Close a loop-body scope opened by `loop_scope_begin`: release every
+    /// plain `zz_value` local the body declared, then pop the scope.
+    ///
+    /// Without this, heap values created per iteration (e.g. a 1MB string
+    /// built inside an outer passes/retry loop) accumulate without bound
+    /// (~1MB/pass measured): the C local dies each iteration but its heap
+    /// never frees. Arena/stack values need no release; scalars and raw
+    /// structs are filtered by C type; closure cells (heap-shared with
+    /// potentially outliving closures) never take this path (their C ids
+    /// are deref exprs, not plain `vN` locals).
+    ///
+    /// Soundness: stores and calls take clone/temp shares, so a body local
+    /// always keeps its own share — releasing it cannot dangle the
+    /// container. Move-convention takes reset the slot to unit (a no-op
+    /// release). Releases run in reverse creation order so LIFO sharing
+    /// balances. Skipped in green closures (frame cells cannot be freed
+    /// mid-task; a suspend must observe intact slots).
+    pub(super) fn loop_scope_end(&self, names: &mut NameCtx, out: &mut String, marker: usize) {
+        if !self.green_active() {
+            let mut doomed: Vec<(usize, String)> = Vec::new();
+            for stack_vec in names.stack.values() {
+                for (cid, ctype) in stack_vec.iter() {
+                    if ctype == "zz_value" && cid.starts_with('v') {
+                        let n = cid_counter(cid);
+                        if n >= marker {
+                            doomed.push((n, cid.clone()));
+                        }
+                    }
+                }
+            }
+            doomed.sort();
+            doomed.dedup();
+            for (_, cid) in doomed.iter().rev() {
+                out.push_str(&format!("    zz_release(&{cid});\n"));
+            }
+        }
+        names.pop_scope();
     }
 
     /// Returns the C constructor call for an array, routing through the
