@@ -2915,6 +2915,7 @@ impl Compiler {
                             } else {
                                 self.emit(Op::CallPath {
                                     parts: parts.clone(),
+                                    joined: parts.join("."),
                                     argc: argc as u16,
                                     span: *span,
                                     pspan: *pspan,
@@ -2966,6 +2967,7 @@ impl Compiler {
                         } else {
                             self.emit(Op::CallPath {
                                 parts: parts.clone(),
+                                joined: parts.join("."),
                                 argc: argc as u16,
                                 span: *span,
                                 pspan: *pspan,

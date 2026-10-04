@@ -1660,6 +1660,7 @@ impl Vm {
                 }
                 Op::CallPath {
                     parts,
+                    joined,
                     argc,
                     span,
                     pspan,
@@ -1673,10 +1674,11 @@ impl Vm {
                     }
                     args.reverse();
                     if parts.len() >= 2 {
-                        let joined = parts.join(".");
-                        let is_direct = interp.env.get(&joined).is_some()
-                            || interp.funcs.contains_key(&joined)
-                            || interp.natives.contains_key(&joined);
+                        // Precomputed at compile time (see `Op::CallPath`):
+                        // no lookup-string allocation per call.
+                        let is_direct = interp.env.get(joined).is_some()
+                            || interp.funcs.contains_key(joined)
+                            || interp.natives.contains_key(joined);
                         if !is_direct && interp.resolve_path_value(parts, pspan).is_err() {
                             let method = parts.last().unwrap();
                             let recv =
