@@ -11,7 +11,7 @@ if [ ! -x "$ZZ_BIN" ]; then
 	cargo build --release -p zz_cli
 fi
 
-for f in bench/compiler/small.zz bench/compiler/medium.zz bench/compiler/large.zz; do
+for f in bench/compiler/small.zz bench/compiler/medium.zz bench/compiler/large.zz bench/compiler/many_funcs.zz bench/compiler/proj/main.zz; do
 	echo "== $f =="
 	best=""
 	best_rss=""
