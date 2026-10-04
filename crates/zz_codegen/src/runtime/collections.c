@@ -893,21 +893,57 @@ zz_value zz_range_build(zz_value start, zz_value end) {
     return v;
 }
 
+// Release an owned temporary WITHOUT freeing variant/JSON payload boxes.
+//
+// Background: `zz_clone` on Option/Result/JSON wrappers is a shallow share
+// — it bumps the refcounted leaves but shares the payload BOX (boxes carry
+// no refcount; they are immortal while any owner lives). `zz_release` /
+// `zz_release_variant` frees the box, so clone-then-release use-after-frees
+// anyone else sharing it (e.g. `zz_elvis` cloning the winner out of `left`
+// and then releasing `left` freed the box the winner still points to).
+//
+// This helper balances the leaf refcounts (so 1MB `read_to_string`
+// payloads don't accumulate per `??`) while leaking the 16-byte boxes
+// exactly as the old never-release behavior did — strictly less leaking,
+// no new frees, no UAF.
+static void zz_release_shared(zz_value *v) {
+    switch (v->tag) {
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON:
+        if (v->payload) zz_release_shared(v->payload);
+        break;
+    default:
+        zz_release(v);
+        break;
+    }
+}
+
 // zz_elvis(left, right) — unwrap Option/Result on the left, else return right.
 // Mirrors the VM's `??` operator which unwraps .some(v) and .ok(v).
+// Consume semantics (mirrors zz_binop_cat): both inputs are owned
+// temporaries. Inputs are released via zz_release_shared (leaf-balanced,
+// box-preserving — see above), so `fs.read_to_string(p) ?? ""` no longer
+// retains the whole Result payload per evaluation (~1.5MB/pass growth).
 zz_value zz_elvis(zz_value left, zz_value right) {
+    zz_value out;
     if (left.tag == ZZ_OPTION_SOME && left.payload)
-        return zz_clone(*left.payload);
-    if (left.tag == ZZ_OPTION_NONE)
-        return zz_clone(right);
-    if (left.tag == ZZ_RESULT_OK && left.payload)
-        return zz_clone(*left.payload);
-    if (left.tag == ZZ_RESULT_ERR)
-        return zz_clone(right);
+        out = zz_clone(*left.payload);
+    else if (left.tag == ZZ_OPTION_NONE)
+        out = zz_clone(right);
+    else if (left.tag == ZZ_RESULT_OK && left.payload)
+        out = zz_clone(*left.payload);
+    else if (left.tag == ZZ_RESULT_ERR)
+        out = zz_clone(right);
     // For non-optional/result types, fall back to truthiness check.
-    if (zz_truthy(left))
-        return zz_clone(left);
-    return zz_clone(right);
+    else if (zz_truthy(left))
+        out = zz_clone(left);
+    else
+        out = zz_clone(right);
+    zz_release_shared(&left);
+    zz_release_shared(&right);
+    return out;
 }
 // =====================================================================
 //  Missing stdlib natives — bare builtins and module functions

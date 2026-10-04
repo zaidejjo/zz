@@ -524,6 +524,16 @@ fn stmt_has_non_scalar_alloc(stmt: &Stmt, tp: &TypedProgram, scope: &str) -> boo
     match stmt {
         Stmt::Decl { value, .. } => expr_has_non_scalar_alloc(value, tp, scope),
         Stmt::Expr(e) => expr_has_non_scalar_alloc(e, tp, scope),
+        // Assignments (and compound/destructure/defer payloads) allocate
+        // exactly like declarations: `s = s + lit` in a loop without this
+        // arm never gets a loop arena, and its chained heap temporaries are
+        // never released (GB-scale leak on accumulation loops). `Return`
+        // values are deliberately excluded: a returned allocation must stay
+        // valid past loop exit, which an iteration arena cannot provide.
+        Stmt::Assign { value, .. } => expr_has_non_scalar_alloc(value, tp, scope),
+        Stmt::CompoundAssign { value, .. } => expr_has_non_scalar_alloc(value, tp, scope),
+        Stmt::Destructure { value, .. } => expr_has_non_scalar_alloc(value, tp, scope),
+        Stmt::Defer { expr, .. } => expr_has_non_scalar_alloc(expr, tp, scope),
         Stmt::For { body, .. } => has_non_scalar_alloc(body, tp, scope),
         _ => false,
     }

@@ -749,12 +749,14 @@ impl Lowerer {
                 // Lexical scope for the body (same push/pop_scope
                 // discipline as for-loop bodies and value blocks):
                 // shadowing declarations must not leak past the braces.
-                names.push_scope();
+                // The marker additionally releases body-declared heap
+                // locals at the bottom of every iteration.
+                let while_scope = self.loop_scope_begin(names);
                 // Loop body is never a function tail.
                 for bstmt in &body.stmts {
                     self.emit_stmt(bstmt, names, out, false);
                 }
-                names.pop_scope();
+                self.loop_scope_end(names, out, while_scope);
                 if let Some(ref name) = loop_arena {
                     self.loop_arenas.borrow_mut().pop();
                     *self.current_loop_arena.borrow_mut() =
@@ -2834,6 +2836,33 @@ impl Lowerer {
                         _ => "zz_int(30000)".to_string(),
                     };
                     arg_items.push(pad);
+                }
+            }
+            // Borrowed-arg fast path for proven read-only natives: `zz_len`
+            // only inspects its input's tag/length and `zz_fs_write` /
+            // `zz_fs_append` only read the data bytes during the call, so
+            // passing the live local directly avoids a `zz_clone` temporary
+            // that nothing would release (one leaked share per call — a
+            // full 1MB per `len(big)` / `write(big)`). Mirrors the
+            // index-receiver borrowed fast path above. Only exact
+            // `zz_clone(barecid)` shapes are stripped (live C locals and
+            // globals, which outlive the synchronous call); complex
+            // temporaries keep their owned form.
+            if matches!(effective_name, "zz_len" | "zz_fs_write" | "zz_fs_append") {
+                for item in arg_items.iter_mut() {
+                    if let Some(inner) = item
+                        .strip_prefix("zz_clone(")
+                        .and_then(|s| s.strip_suffix(')'))
+                    {
+                        if !inner.is_empty()
+                            && inner
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                            && !inner.starts_with("zz_")
+                        {
+                            *item = inner.to_string();
+                        }
+                    }
                 }
             }
             return match arg_items.len() {

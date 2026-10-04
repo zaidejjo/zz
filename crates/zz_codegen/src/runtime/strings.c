@@ -1151,12 +1151,18 @@ zz_value zz_binop_cat(zz_value a, zz_value b) {
         // interned (we must never mutate an interned singleton) and has
         // capacity for the result. SSO strings (cap==0) are reusable when
         // the result still fits inline.
+        // Consume semantics: the caller transfers ownership of both inputs.
+        // Generated code only ever passes owned temporaries (zz_clone bumps,
+        // call results, literals) that are never read again, so releasing
+        // what we don't reuse keeps `s = s + x` chains leak-free. Releases
+        // are no-ops for interned singletons and arena strings (refs==0).
         if (a.s->refs == 1 && !a.s->interned
             && (a.s->cap >= need || (a.s->cap == 0 && need <= ZZ_SSO_MAX))) {
             out = a.s;
             memcpy(zz_str_ptr(out) + la, zz_str_ptr(b.s), lb);
             out->len = need;
             zz_str_ptr(out)[need] = '\0';
+            zz_release(&b);
             zz_value v;
             v.tag = ZZ_STR;
             v.s = out;
@@ -1165,6 +1171,8 @@ zz_value zz_binop_cat(zz_value a, zz_value b) {
         out = str_alloc(need);
         memcpy(zz_str_ptr(out), zz_str_ptr(a.s), la);
         memcpy(zz_str_ptr(out) + la, zz_str_ptr(b.s), lb);
+        zz_release(&a);
+        zz_release(&b);
         zz_value v;
         v.tag = ZZ_STR;
         v.s = out;
@@ -1177,26 +1185,39 @@ zz_value zz_binop_cat(zz_value a, zz_value b) {
 // given arena (refs=0 sentinel), so zz_release skips it and the bulk
 // arena reset reclaims everything at scope exit. Zero heap malloc for
 // the string header+data.
+// Consume semantics (mirrors zz_binop_cat): both inputs are owned
+// temporaries and are released when heap-owned. Arena/interned inputs
+// are no-ops under zz_release, so chains like
+// cat_arena(cat_arena(clone(s), lit), call) stay leak-free.
 zz_value zz_binop_cat_arena(zz_value a, zz_value b, zz_arena *arena) {
     if (a.tag == ZZ_STR && b.tag == ZZ_STR && arena) {
         size_t la = a.s->len, lb = b.s->len;
         size_t need = la + lb;
+        // Copy the payload bytes first: `a` may live in this same arena
+        // block, and the header alloc below can overflow-adopt that block.
+        // Reading la/lb bytes off the adopted (but still mapped) chunk
+        // stays valid, but copying up front keeps the logic independent
+        // of the allocator's growth strategy.
+        const char *pa = zz_str_cptr(a.s);
+        const char *pb = zz_str_cptr(b.s);
         zz_str *out = (zz_str *)zz_arena_alloc(arena, sizeof(zz_str), 8);
         out->refs = 0;      // arena sentinel
         out->interned = 0;
         out->len = need;
         if (need <= ZZ_SSO_MAX) {
             out->cap = 0;
-            memcpy(out->sso, zz_str_ptr(a.s), la);
-            memcpy(out->sso + la, zz_str_ptr(b.s), lb);
+            memcpy(out->sso, pa, la);
+            memcpy(out->sso + la, pb, lb);
             out->sso[need] = '\0';
         } else {
             out->cap = need;
             out->heap = (char *)zz_arena_alloc(arena, need + 1, 1);
-            memcpy(out->heap, zz_str_ptr(a.s), la);
-            memcpy(out->heap + la, zz_str_ptr(b.s), lb);
+            memcpy(out->heap, pa, la);
+            memcpy(out->heap + la, pb, lb);
             out->heap[need] = '\0';
         }
+        zz_release(&a);
+        zz_release(&b);
         zz_value v;
         v.tag = ZZ_STR;
         v.s = out;
@@ -1210,9 +1231,9 @@ zz_value zz_binop_cat_arena(zz_value a, zz_value b, zz_arena *arena) {
 zz_value zz_binop_cat_str(zz_value a, zz_value b) {
     char *sv = zz_value_to_display_string(&b);
     zz_value sb = zz_str_owned(sv);
-    zz_value r = zz_binop_cat(a, sb);
-    zz_release(&sb);
-    return r;
+    // zz_binop_cat consumes both inputs, so `sb` ownership transfers —
+    // no extra release here (it would double-free sb's heap buffer).
+    return zz_binop_cat(a, sb);
 }
 
 // In-place append used by loop lowerings (`s = s + literal`). Mutates *a

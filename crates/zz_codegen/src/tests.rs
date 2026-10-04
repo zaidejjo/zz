@@ -1280,3 +1280,116 @@ func main() {
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn accum_loop_chained_cats_use_loop_arena() {
+    // Regression: `s = s + a + str(i) + b` in a loop must lower to
+    // sequential in-place appends (amortized O(1) via str_grow), not
+    // nested cat temporaries. Earlier iterations of this fix routed the
+    // chain through the loop arena; the arena path is now leak-free too
+    // (cats consume their inputs), but appends avoid the O(N^2) copies
+    // entirely — 20k-iteration builds stay in the low MBs.
+    let src = "func main() {\n    st := \"\"\n    for i in 0..20000 {\n        st = st + \"item_\" + str(i) + \";\"\n    }\n    println(len(st))\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    let lowered = lower_only(&pruned, &reach, "main").source;
+    assert!(
+        lowered.contains("zz_str_append_lit"),
+        "chained accumulation must lower to in-place appends"
+    );
+    assert!(
+        lowered.contains("zz_str_append_str"),
+        "str(i) term must append through a temp"
+    );
+    // Scope the no-cat check to generated user code: the runtime prelude
+    // always defines zz_binop_cat, so a whole-source contains() would
+    // match the definition itself.
+    let body = lowered
+        .find("zz_fn_main")
+        .map(|i| &lowered[i..])
+        .unwrap_or(&lowered);
+    assert!(
+        !body.contains("zz_binop_cat"),
+        "no cat temporaries should remain on the accumulation path"
+    );
+    // End-to-end: the loop must produce the right length.
+    let (_, out) = native_run(src);
+    assert_eq!(out, "208890\n");
+}
+
+#[test]
+fn str_append_chain_single_lit_still_appends() {
+    // The original single-term fast path (`s = s + "x"`) keeps working.
+    let src = "func main() {\n    s := \"\"\n    for i in 0..5 {\n        s = s + \"x\"\n    }\n    println(s)\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    let lowered = lower_only(&pruned, &reach, "main").source;
+    assert!(
+        lowered.contains("zz_str_append_lit"),
+        "single-lit append must use the lit shim"
+    );
+    let (_, out) = native_run(src);
+    assert_eq!(out, "xxxxx\n");
+}
+
+#[test]
+fn str_cat_temps_do_not_leak() {
+    // Non-assign cats (e.g. `chunk := prefix + str(i) + ","`) consume
+    // their inputs: 20k iterations must stay flat, not grow per-iter.
+    let src = "func main() {\n    out := \"\"\n    for i in 0..20000 {\n        chunk := \"k\" + str(i) + \",\"\n        out = out + chunk\n    }\n    println(len(out))\n}\n";
+    let (_, out) = native_run(src);
+    assert_eq!(out, "128890\n");
+}
+
+#[test]
+fn elvis_consume_semantics_match() {
+    // `zz_elvis` consumes both inputs (they are owned temporaries).
+    // Exercise the Some/Ok (unwrap) and None/Err (default) paths with
+    // heap string payloads in a loop: a double-free or use-after-free
+    // here crashes, and a missing release leaks the payload per iter.
+    let src = "import std.env\nfunc main() {\n    env.set(\"ZZ_ELVIS_T\", \"hi\")\n    a := \"\"\n    b := \"\"\n    for i in 0..100 {\n        v := env.get(\"ZZ_ELVIS_T\") ?? \"dflt\"\n        a = a + v\n        m := env.get(\"ZZ_ELVIS_MISSING_XYZ\") ?? \"d\"\n        b = b + m\n    }\n    println(len(a))\n    println(len(b))\n    env.unset(\"ZZ_ELVIS_T\")\n}\n";
+    let (_, out) = native_run(src);
+    assert_eq!(out, "200\n100\n");
+}
+
+#[test]
+fn loop_body_heap_locals_release_per_iteration() {
+    // Heap locals declared in a loop body must release at the bottom of
+    // every iteration. Before the fix, the C local died each iteration
+    // while its heap lived on (~1MB/pass on outer build loops).
+    let src = "func main() {\n    total := 0\n    for p in 0..3 {\n        chunk := \"\"\n        for i in 0..100 {\n            chunk = chunk + \"x\"\n        }\n        total = total + len(chunk)\n    }\n    println(total)\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    let lowered = lower_only(&pruned, &reach, "main").source;
+    let body = lowered
+        .find("zz_fn_main")
+        .map(|i| &lowered[i..])
+        .unwrap_or(&lowered);
+    assert!(
+        body.contains("zz_release(&"),
+        "loop body must release its heap locals per iteration"
+    );
+    let (_, out) = native_run(src);
+    assert_eq!(out, "300\n");
+}
+
+#[test]
+fn borrow_args_skip_clone_for_pure_readers() {
+    // `len(x)` / `fs.write(p, x)` only read their inputs, so local args
+    // pass borrowed instead of a `zz_clone` temporary that nothing would
+    // release (one leaked share per call — 1MB per `len(big)`).
+    let src = "import std.fs\nfunc main() {\n    s := \"hello\"\n    println(len(s))\n    fs.write(\"/tmp/zz_borrow_probe.txt\", s)\n    fs.remove_file(\"/tmp/zz_borrow_probe.txt\")\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    let lowered = lower_only(&pruned, &reach, "main").source;
+    let body = lowered
+        .find("zz_fn_main")
+        .map(|i| &lowered[i..])
+        .unwrap_or(&lowered);
+    assert!(
+        body.contains("zz_call_native1(zz_len, v"),
+        "len() must pass the local borrowed, got:\n{body}"
+    );
+    assert!(
+        !body.contains("zz_call_native1(zz_len, zz_clone("),
+        "len() must not clone its argument"
+    );
+    let (_, out) = native_run(src);
+    assert_eq!(out, "5\n");
+}

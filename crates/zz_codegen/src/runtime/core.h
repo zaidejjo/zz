@@ -403,12 +403,15 @@ struct zz_task_join {
 // Thread-local: each thread maintains its own arena (no locking needed).
 //
 // Overflow chunks form a singly-linked list so that zz_arena_destroy can
-// free them all in one walk (instead of the old code that leaked or
-// free'd the primary buffer prematurely).
+// free them all in one walk. Each node ADOPTS a full primary buffer (no
+// copying): the buffer stays mapped and readable until reset/destroy, so
+// in-flight pointers (e.g. an object header allocated just before its
+// payload overflowed) remain valid. Copying instead would leave such
+// pointers dangling at freed memory (heap corruption).
 typedef struct zz_arena_chunk {
     struct zz_arena_chunk *next;
-    size_t cap;
-    char buf[];              // flexible array
+    char *buf;              // adopted overflow buffer (owned by this node)
+    size_t cap;             // capacity of buf (informational)
 } zz_arena_chunk;
 
 typedef struct zz_arena {
@@ -418,16 +421,41 @@ typedef struct zz_arena {
     zz_arena_chunk *chunks;  // linked list of overflow chunks (for destroy)
 } zz_arena;
 
-// O(1) reset: free all arena allocations at once by resetting the offset.
-// The arena's buffer is NOT freed — it is reused for the next function call.
+// O(1)-ish reset: free all arena allocations at once. Overflow chunks
+// (prior iterations' overflowed buffers) are freed; the primary block is
+// kept for reuse, so the steady state is one malloc-free reset when the
+// working set fits. Previously chunks were never released here, so any
+// loop whose per-iteration footprint exceeded the primary block leaked a
+// chunk per iteration (GBs on string-accumulation loops).
+// Contract unchanged: every live pointer into the arena (primary or
+// chunks) is dead after reset — escaping values must be healed out first
+// (see zz_str_heal_arena / zz_heal_for_move).
 static inline void zz_arena_reset(zz_arena *a) {
+    zz_arena_chunk *chunk = a->chunks;
+    while (chunk) {
+        zz_arena_chunk *next = chunk->next;
+        free(chunk->buf);
+        free(chunk);
+        chunk = next;
+    }
+    a->chunks = NULL;
     a->offset = 0;
 }
 
 // Reset the arena and hint the C allocator to return freed heap pages to
 // the OS. Slower than bare reset — call only at function-level cleanup,
-// not per-iteration in tight loops.
+// not per-iteration in tight loops. Like `zz_arena_reset`, overflows are
+// freed (otherwise a function whose working set overflowed would leak its
+// chunks at exit).
 static inline void zz_arena_reset_trim(zz_arena *a) {
+    zz_arena_chunk *chunk = a->chunks;
+    while (chunk) {
+        zz_arena_chunk *next = chunk->next;
+        free(chunk->buf);
+        free(chunk);
+        chunk = next;
+    }
+    a->chunks = NULL;
     a->offset = 0;
 #ifdef __GLIBC__
     malloc_trim(0);
