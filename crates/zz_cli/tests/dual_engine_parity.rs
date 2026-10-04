@@ -300,9 +300,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "selective_import" | "multi_selective" | "symbol_alias" | "wildcard_import" => {
             Some("native: imported const binding prints empty (call results are fine)")
         }
-        "generic_selective" => {
-            Some("native: local-module generic fn call results print empty")
-        }
 
         // --- Error fixtures where native leniency exits 0 ---
         "main_result_err" => Some("native: main returning .err exits 0 (no propagation)"),
@@ -873,6 +870,11 @@ parity_strict!(parity_types_type_inference, "types", "type_inference.zz");
 
 // Stdlib
 parity_strict!(parity_stdlib_strings, "stdlib", "strings.zz");
+parity_strict!(
+    parity_stdlib_selective_calls,
+    "stdlib",
+    "selective_calls.zz"
+);
 parity_strict!(
     parity_stdlib_str_utf8_parity,
     "stdlib",

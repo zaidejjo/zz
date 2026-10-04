@@ -292,32 +292,6 @@ pub(crate) fn db_exec(
     }
 }
 
-/// Coerce one SQLite column value into a ZZ value for a struct field.
-#[allow(dead_code)]
-fn coerce_column(
-    row: &rusqlite::Row,
-    idx: usize,
-    field: &str,
-    struct_name: &str,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let val: rusqlite::types::Value = row.get(idx).map_err(|e| {
-        EvalError::new(
-            format!("db.query: column {idx} (`{field}`) read failed in `{struct_name}`: {e}"),
-            span,
-        )
-    })?;
-    Ok(match val {
-        rusqlite::types::Value::Null => Value::Option(None),
-        rusqlite::types::Value::Integer(i) => Value::Int(i),
-        rusqlite::types::Value::Real(f) => Value::Float(f),
-        rusqlite::types::Value::Text(s) => Value::Str(s.into()),
-        rusqlite::types::Value::Blob(b) => {
-            Value::Str(String::from_utf8_lossy(&b).into_owned().into())
-        }
-    })
-}
-
 /// `sqlz.query(db, sql, ...params) -> array` — rows mapped to structs.
 ///
 /// Target struct resolution: the VM appends a trailing
@@ -353,6 +327,14 @@ pub(crate) fn db_query(
                 .map_err(|e| db_fail("std.sqlz.query", Backend::Sqlite, &sql, e, span))?;
             let col_count = stmt.column_count();
             check_arity(&fields, col_count, span)?;
+            // Declared column types drive boolean coercion below
+            // (`BIT`/`BOOL`/`BOOLEAN` read as `Bool`); collected up
+            // front so the row-map borrow below is uncontended.
+            let decltypes: Vec<Option<String>> = stmt
+                .columns()
+                .iter()
+                .map(|c| c.decl_type().map(str::to_owned))
+                .collect();
             let raw = stmt
                 .query_map(rusqlite::params_from_iter(bound.iter()), |row| {
                     (0..col_count)
@@ -364,7 +346,12 @@ pub(crate) fn db_query(
             for r in raw {
                 let cols: Vec<rusqlite::types::Value> =
                     r.map_err(|e| EvalError::new(format!("`std.sqlz.query` failed: {e}"), span))?;
-                out.push(cols.into_iter().map(sqlite_value_to_zz).collect());
+                out.push(
+                    cols.into_iter()
+                        .zip(decltypes.iter())
+                        .map(|(v, dt)| sqlite_value_to_zz_typed(v, dt.as_deref()))
+                        .collect(),
+                );
             }
             out
         }
@@ -548,7 +535,15 @@ fn pg_cell_to_zz(cell: Option<Vec<u8>>, type_oid: u32) -> Value {
     }
 }
 
-fn sqlite_value_to_zz(v: rusqlite::types::Value) -> Value {
+/// Map one SQLite value to a ZZ value, coercing `BIT`/`BOOL`/`BOOLEAN`
+/// columns to `Bool` (SQLite has no boolean storage class: 0 is false,
+/// anything else is true). Untyped expressions keep the default mapping.
+fn sqlite_value_to_zz_typed(v: rusqlite::types::Value, decltype: Option<&str>) -> Value {
+    if sqlite_bool_decl(decltype) {
+        if let rusqlite::types::Value::Integer(i) = v {
+            return Value::Bool(i != 0);
+        }
+    }
     match v {
         rusqlite::types::Value::Null => Value::Option(None),
         rusqlite::types::Value::Integer(i) => Value::Int(i),
@@ -557,6 +552,22 @@ fn sqlite_value_to_zz(v: rusqlite::types::Value) -> Value {
         rusqlite::types::Value::Blob(b) => {
             Value::Str(String::from_utf8_lossy(&b).into_owned().into())
         }
+    }
+}
+
+/// True for SQLite boolean-ish declared column types. Compared
+/// case-insensitively against the exact names (SQLite preserves the
+/// declared spelling); affinity-style substrings (`TINYINT`, `NUMERIC`)
+/// intentionally do not match — only an explicit boolean declaration
+/// opts a column into bool coercion.
+fn sqlite_bool_decl(decltype: Option<&str>) -> bool {
+    match decltype.map(str::trim) {
+        Some(t) => {
+            t.eq_ignore_ascii_case("bit")
+                || t.eq_ignore_ascii_case("bool")
+                || t.eq_ignore_ascii_case("boolean")
+        }
+        None => false,
     }
 }
 
@@ -1180,5 +1191,50 @@ mod tests {
         assert_eq!(rewrite_q_to_plain("SELECT ?10"), "SELECT ?");
         assert_eq!(rewrite_q_to_plain("no params"), "no params");
         assert_eq!(rewrite_q_to_plain("a ? b"), "a ? b");
+    }
+}
+
+#[test]
+fn sqlite_bit_columns_coerce_to_bool() {
+    // SQLite has no boolean storage class: `BIT`/`BOOL` columns come
+    // back as integers. Declared booleans must read as `Bool` so
+    // `bool`-typed struct fields hold what the checker promises
+    // (0 is false, anything else is true).
+    let mut interp = Interp::new();
+    Arc::make_mut(&mut interp.structs).insert(
+        "Task".to_string(),
+        vec!["id".to_string(), "is_done".to_string(), "nick".to_string()],
+    );
+    let span = Span::new(0, 0);
+    let mut oargs = vec![Value::Str(":memory:".to_string().into())];
+    let db = db_open(&mut interp, &mut oargs, span).unwrap();
+    for ddl in [
+        "CREATE TABLE t(id INTEGER, is_done BIT, nick TEXT)",
+        "INSERT INTO t VALUES(1, 1, 'a')",
+        "INSERT INTO t VALUES(2, 0, 'b')",
+    ] {
+        let mut eargs = vec![db.clone(), Value::Str(ddl.to_string().into())];
+        db_exec(&mut interp, &mut eargs, span).unwrap();
+    }
+    let mut qargs = vec![
+        db,
+        Value::Str("SELECT id, is_done, nick FROM t".to_string().into()),
+        Value::Str("__struct:Task".to_string().into()),
+    ];
+    let out = db_query(&mut interp, &mut qargs, span).unwrap();
+    match out {
+        Value::Array(rows) => {
+            assert_eq!(rows.len(), 2);
+            for (row, want) in rows.iter().zip([true, false]) {
+                match row {
+                    Value::Object(o) => {
+                        assert_eq!(o.fields[0].1, Value::Int(if want { 1 } else { 2 }));
+                        assert_eq!(o.fields[1].1, Value::Bool(want));
+                    }
+                    other => panic!("expected object, got {other:?}"),
+                }
+            }
+        }
+        other => panic!("expected array, got {other:?}"),
     }
 }

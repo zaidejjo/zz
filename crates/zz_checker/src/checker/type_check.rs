@@ -1571,6 +1571,72 @@ impl Checker {
         }
     }
 
+    /// True when a `head.method(args)` call must be read as a method call
+    /// even though `head.method` also names a seeded free function: the
+    /// head is a genuine local value, the direct reading is already
+    /// impossible (fewer args than its minimum), and the method reading
+    /// fits with a receiver type matching the first parameter. Because
+    /// diversion requires the direct reading to fail, previously-passing
+    /// programs are untouched by construction.
+    ///
+    /// Motivating case: `db.exec(sql)` with a *local* `db` must not match
+    /// the seeded `db.exec` free function at full arity (which rejects
+    /// the receiver-implicit form); a top-level `db` instead resolves
+    /// through the module-namespace path and is unaffected, as are all
+    /// qualified module calls (their heads never live in value scope).
+    pub(crate) fn method_shadow_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        named: &[(String, Expr)],
+    ) -> bool {
+        let Expr::Path { parts, .. } = callee else {
+            return false;
+        };
+        if parts.len() != 2 {
+            return false;
+        }
+        let Some(sig) = self.funcs.get(&parts.join(".")).cloned() else {
+            return false;
+        };
+        // The head must be a real local binding — module namespaces never
+        // live in value scope. Walk scopes directly: `lookup_opt` would
+        // also match the `joined` function entry itself.
+        if !self.env.iter().rev().any(|s| s.contains_key(&parts[0])) {
+            return false;
+        }
+        if sig.params.is_empty() {
+            return false;
+        }
+        let provided = args.len() + named.len();
+        let total = sig.params.len();
+        let direct_min = total - sig.has_default.iter().filter(|&&d| d).count();
+        // Divert only when the direct reading already fails...
+        if provided >= direct_min {
+            return false;
+        }
+        // ...and the method reading fits: within the non-receiver arity
+        // window, with a receiver type matching the first parameter.
+        // Compared structurally (no unification): binding inference vars
+        // here could leak across the two readings.
+        let method_total = total - 1;
+        if provided > method_total {
+            return false;
+        }
+        let method_min = method_total - sig.has_default.iter().skip(1).filter(|&&d| d).count();
+        if provided < method_min {
+            return false;
+        }
+        let recv_t = self
+            .env
+            .iter()
+            .rev()
+            .find_map(|s| s.get(&parts[0]).cloned())
+            .map(|t| self.unifier.resolve(&t));
+        let first_t = self.unifier.resolve(&sig.params[0].1);
+        recv_t.is_some_and(|r| r == first_t)
+    }
+
     pub(crate) fn check_call(
         &mut self,
         callee: &Expr,
@@ -1850,100 +1916,104 @@ impl Checker {
             // `check_call`, so a bare `route`/`param` reaching this point
             // is user code (e.g. a `@route` decorator) — linting it would
             // false-positive (see `syntax/decorators.zz`).
-            if let Some(sig) = self.funcs.get(name).cloned() {
-                self.used_names.insert(name.clone());
-                let (ps, ret, subs) = self.instantiate(&sig);
-                if name == "input" {
-                    if args.len() + named.len() > 1 {
-                        self.errors.push(error_at(
-                            format!(
-                                "expected 0 or 1 arguments, found {}",
-                                args.len() + named.len()
-                            ),
-                            span,
-                        ));
-                    } else if args.len() + named.len() == 1 {
-                        let arg_expr = if !args.is_empty() {
-                            &args[0]
+            if !self.method_shadow_call(callee, args, named) {
+                if let Some(sig) = self.funcs.get(name).cloned() {
+                    self.used_names.insert(name.clone());
+                    let (ps, ret, subs) = self.instantiate(&sig);
+                    if name == "input" {
+                        if args.len() + named.len() > 1 {
+                            self.errors.push(error_at(
+                                format!(
+                                    "expected 0 or 1 arguments, found {}",
+                                    args.len() + named.len()
+                                ),
+                                span,
+                            ));
+                        } else if args.len() + named.len() == 1 {
+                            let arg_expr = if !args.is_empty() {
+                                &args[0]
+                            } else {
+                                &named[0].1
+                            };
+                            let at = self.check_expr(arg_expr);
+                            if let Err(e) = self.unifier.unify(&at, &Type::Str) {
+                                self.report_mismatch(e, arg_expr.span());
+                            }
+                        }
+                        return ret;
+                    }
+                    if name == "range" {
+                        let total = args.len() + named.len();
+                        if total == 0 || total > 3 {
+                            self.errors.push(error_at(
+                                format!("range expects 1, 2, or 3 arguments, found {total}"),
+                                span,
+                            ));
                         } else {
-                            &named[0].1
-                        };
-                        let at = self.check_expr(arg_expr);
-                        if let Err(e) = self.unifier.unify(&at, &Type::Str) {
-                            self.report_mismatch(e, arg_expr.span());
+                            for arg in args {
+                                let at = self.check_expr(arg);
+                                if let Err(e) = self.unifier.unify(&at, &Type::Int) {
+                                    self.report_mismatch(e, arg.span());
+                                }
+                            }
+                            for (_, val) in named {
+                                let at = self.check_expr(val);
+                                if let Err(e) = self.unifier.unify(&at, &Type::Int) {
+                                    self.report_mismatch(e, val.span());
+                                }
+                            }
                         }
+                        return ret;
                     }
-                    return ret;
-                }
-                if name == "range" {
-                    let total = args.len() + named.len();
-                    if total == 0 || total > 3 {
-                        self.errors.push(error_at(
-                            format!("range expects 1, 2, or 3 arguments, found {total}"),
-                            span,
-                        ));
-                    } else {
-                        for arg in args {
-                            let at = self.check_expr(arg);
-                            if let Err(e) = self.unifier.unify(&at, &Type::Int) {
-                                self.report_mismatch(e, arg.span());
-                            }
-                        }
-                        for (_, val) in named {
-                            let at = self.check_expr(val);
-                            if let Err(e) = self.unifier.unify(&at, &Type::Int) {
-                                self.report_mismatch(e, val.span());
-                            }
-                        }
-                    }
-                    return ret;
-                }
-                let pnames: Vec<String> = sig.params.iter().map(|(n, _)| n.clone()).collect();
-                self.check_args_against(&pnames, &ps, &sig.has_default, args, named, span);
-                self.validate_bounds(&sig, &subs, span);
-                // A bare function value as a print argument is always a
-                // missing `()` (`println(env.os)` would print the function
-                // itself instead of calling it). Catch it here — with the
-                // name attached — rather than letting each engine render
-                // `<func>` / `<native ...>` / empty output.
-                if name == "print" || name == "println" {
-                    if let Some(first) = args.first() {
-                        // Resolve silently (lookup_opt, never check_expr:
-                        // the argument was already checked above and a
-                        // second pass would duplicate diagnostics).
-                        let (arg_t, fname) = match first {
-                            Expr::Ident { name: n, .. } => (self.lookup_opt(n), Some(n.clone())),
-                            Expr::Path { parts, .. } => {
-                                let joined = parts.join(".");
-                                (self.lookup_opt(&joined), Some(joined))
-                            }
-                            _ => (None, None),
-                        };
-                        let is_func = matches!(
-                            arg_t.as_ref().map(|t| self.unifier.resolve(t)),
-                            Some(Type::Func(_, _))
-                        ) || matches!(fname.as_deref(), Some(n)
+                    let pnames: Vec<String> = sig.params.iter().map(|(n, _)| n.clone()).collect();
+                    self.check_args_against(&pnames, &ps, &sig.has_default, args, named, span);
+                    self.validate_bounds(&sig, &subs, span);
+                    // A bare function value as a print argument is always a
+                    // missing `()` (`println(env.os)` would print the function
+                    // itself instead of calling it). Catch it here — with the
+                    // name attached — rather than letting each engine render
+                    // `<func>` / `<native ...>` / empty output.
+                    if name == "print" || name == "println" {
+                        if let Some(first) = args.first() {
+                            // Resolve silently (lookup_opt, never check_expr:
+                            // the argument was already checked above and a
+                            // second pass would duplicate diagnostics).
+                            let (arg_t, fname) = match first {
+                                Expr::Ident { name: n, .. } => {
+                                    (self.lookup_opt(n), Some(n.clone()))
+                                }
+                                Expr::Path { parts, .. } => {
+                                    let joined = parts.join(".");
+                                    (self.lookup_opt(&joined), Some(joined))
+                                }
+                                _ => (None, None),
+                            };
+                            let is_func = matches!(
+                                arg_t.as_ref().map(|t| self.unifier.resolve(t)),
+                                Some(Type::Func(_, _))
+                            ) || matches!(fname.as_deref(), Some(n)
                             if self.funcs.contains_key(n) && !Self::is_math_const(n));
-                        if is_func {
-                            if let Some(fname) = fname {
-                                let mut diag = error_at(
-                                    format!(
+                            if is_func {
+                                if let Some(fname) = fname {
+                                    let mut diag = error_at(
+                                        format!(
                                         "cannot print function `{fname}`: call it with arguments"
                                     ),
-                                    first.span(),
-                                );
-                                diag = diag.with_note(format!("did you mean `{fname}()`?"));
-                                diag = diag.with_fixit(FixIt::safe(
-                                    Span::new(first.span().end, first.span().end),
-                                    "()".to_string(),
-                                    "call function",
-                                ));
-                                self.errors.push(diag);
+                                        first.span(),
+                                    );
+                                    diag = diag.with_note(format!("did you mean `{fname}()`?"));
+                                    diag = diag.with_fixit(FixIt::safe(
+                                        Span::new(first.span().end, first.span().end),
+                                        "()".to_string(),
+                                        "call function",
+                                    ));
+                                    self.errors.push(diag);
+                                }
                             }
                         }
                     }
+                    return ret;
                 }
-                return ret;
             }
         }
         // Method call: `p.dist()` resolves to `dist(p, ...)`.
@@ -1953,54 +2023,67 @@ impl Checker {
                 // (e.g. module-level closure `ns.f`). If so, treat it as
                 // a regular call, not a method call.
                 let joined = parts.join(".");
-                if let Some(var_ty) = self.lookup_opt(&joined) {
-                    self.used_names.insert(joined.clone());
-                    let callee_t = self.unifier.resolve(&var_ty);
-                    // If the var is still an unresolved inference var, or is
-                    // already known to be a Func/Named, treat as a variable
-                    // call — not a method call on the first path component.
-                    match &callee_t {
-                        Type::Func(..) | Type::Named(..) => {
-                            let pnames: Vec<String> =
-                                (0..args.len()).map(|i| format!("_{i}")).collect();
-                            match callee_t {
-                                Type::Func(ps, ret) => {
-                                    self.check_args_against(&pnames, &ps, &[], args, named, span);
-                                    return *ret;
-                                }
-                                Type::Named(ref nname) => {
-                                    if let Some(sig) = self.funcs.get(nname).cloned() {
-                                        let (ps, ret, subs) = self.instantiate(&sig);
-                                        let pnames: Vec<String> =
-                                            sig.params.iter().map(|(n, _)| n.clone()).collect();
+                // A `head.method` call on a genuine local value reads as
+                // a method call when the free-function reading is already
+                // impossible (see `method_shadow_call`) — e.g. `db.exec`
+                // on a local `db`, never the seeded free function.
+                let shadowed = self.method_shadow_call(callee, args, named);
+                if !shadowed {
+                    if let Some(var_ty) = self.lookup_opt(&joined) {
+                        let callee_t = self.unifier.resolve(&var_ty);
+                        // If the var is still an unresolved inference var, or is
+                        // already known to be a Func/Named, treat as a variable
+                        // call — not a method call on the first path component.
+                        match &callee_t {
+                            Type::Func(..) | Type::Named(..) => {
+                                let pnames: Vec<String> =
+                                    (0..args.len()).map(|i| format!("_{i}")).collect();
+                                match callee_t {
+                                    Type::Func(ps, ret) => {
                                         self.check_args_against(
                                             &pnames,
                                             &ps,
-                                            &sig.has_default,
+                                            &[],
                                             args,
                                             named,
                                             span,
                                         );
-                                        self.validate_bounds(&sig, &subs, span);
-                                        return ret;
+                                        return *ret;
                                     }
+                                    Type::Named(ref nname) => {
+                                        if let Some(sig) = self.funcs.get(nname).cloned() {
+                                            let (ps, ret, subs) = self.instantiate(&sig);
+                                            let pnames: Vec<String> =
+                                                sig.params.iter().map(|(n, _)| n.clone()).collect();
+                                            self.check_args_against(
+                                                &pnames,
+                                                &ps,
+                                                &sig.has_default,
+                                                args,
+                                                named,
+                                                span,
+                                            );
+                                            self.validate_bounds(&sig, &subs, span);
+                                            return ret;
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
-                        }
-                        Type::Var(_) => {
-                            // Fresh var from recursive closure pre-binding.
-                            // Build a Func type from the args and unify.
-                            let arg_types: Vec<Type> =
-                                args.iter().map(|a| self.check_expr(a)).collect();
-                            let ret_var = self.unifier.fresh_var();
-                            let func_ty = Type::Func(arg_types, Box::new(ret_var.clone()));
-                            if let Err(e) = self.unifier.unify(&var_ty, &func_ty) {
-                                self.report_mismatch(e, span);
+                            Type::Var(_) => {
+                                // Fresh var from recursive closure pre-binding.
+                                // Build a Func type from the args and unify.
+                                let arg_types: Vec<Type> =
+                                    args.iter().map(|a| self.check_expr(a)).collect();
+                                let ret_var = self.unifier.fresh_var();
+                                let func_ty = Type::Func(arg_types, Box::new(ret_var.clone()));
+                                if let Err(e) = self.unifier.unify(&var_ty, &func_ty) {
+                                    self.report_mismatch(e, span);
+                                }
+                                return self.unifier.resolve(&ret_var);
                             }
-                            return self.unifier.resolve(&ret_var);
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
                 let method = parts.last().unwrap();

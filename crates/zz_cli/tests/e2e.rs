@@ -599,6 +599,7 @@ e2e_success_test!(
     "json_extended_test.zz"
 );
 e2e_success_test!(e2e_stdlib_selective_import, "stdlib", "selective_import.zz");
+e2e_success_test!(e2e_stdlib_selective_calls, "stdlib", "selective_calls.zz");
 e2e_success_test!(
     e2e_stdlib_str_selective_methods,
     "stdlib",

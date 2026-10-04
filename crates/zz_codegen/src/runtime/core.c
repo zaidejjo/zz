@@ -3530,7 +3530,21 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
             }
             zz_value val;
             switch (sqlite3_column_type(st, i)) {
-            case SQLITE_INTEGER: val = zz_int(sqlite3_column_int64(st, i)); break;
+            case SQLITE_INTEGER: {
+                long long iv = sqlite3_column_int64(st, i);
+                /* Declared booleans (`BIT`/`BOOL`/`BOOLEAN`) read as
+                   ZZ booleans — SQLite has no boolean storage class,
+                   so 0 is false and anything else is true. Mirrors the
+                   rusqlite mapping (see `sqlite_bool_decl`). */
+                const char *dt = sqlite3_column_decltype(st, i);
+                if (dt && (strcasecmp(dt, "BIT") == 0 || strcasecmp(dt, "BOOL") == 0
+                           || strcasecmp(dt, "BOOLEAN") == 0)) {
+                    val = zz_bool(iv != 0);
+                } else {
+                    val = zz_int(iv);
+                }
+                break;
+            }
             case SQLITE_FLOAT: val = zz_float(sqlite3_column_double(st, i)); break;
             case SQLITE_TEXT: {
                 const unsigned char *t = sqlite3_column_text(st, i);

@@ -1109,6 +1109,15 @@ impl Loader {
             }
             program.stmts = new_stmts;
 
+            // Selective imports (`import std.path(join)`) call bare names
+            // that resolve through a synthetic runtime binding with no
+            // native equivalent — rewrite bare *call* callees to their
+            // canonical paths (verified against the checker seed, so the
+            // spelling always resolves on every engine). Value positions
+            // keep the binding (first-class function values).
+            let selective_map = rewrite::selective_rewrites(&program.stmts, &self.funcs);
+            rewrite::rewrite_selective_calls(&mut program, &selective_map);
+
             // In the entry file, error if func main() and a top-level main()
             // call coexist — the auto-call would double-execute main().
             if *path == self.entry {

@@ -2085,3 +2085,59 @@ fn cross_module_nonunit_block_still_rejected() {
         "expected a type-mismatch error, got: {errs:?}"
     );
 }
+
+fn db_exec_seed() -> HashMap<String, FuncSig> {
+    let mut funcs = HashMap::new();
+    let exec = FuncSig {
+        generics: vec![],
+        bounds: vec![],
+        params: vec![("db".to_string(), Type::Db), ("sql".to_string(), Type::Str)],
+        has_default: vec![false, false],
+        ret: Type::Int,
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    funcs.insert("sqlz.exec".to_string(), exec.clone());
+    funcs.insert("db.exec".to_string(), exec);
+    funcs.insert(
+        "sqlz.open".to_string(),
+        FuncSig {
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("path".to_string(), Type::Str)],
+            has_default: vec![false],
+            ret: Type::Db,
+            is_extern: false,
+            extern_c_symbol: None,
+        },
+    );
+    funcs.insert(
+        "println".to_string(),
+        FuncSig {
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("v".to_string(), Type::Str)],
+            has_default: vec![false],
+            ret: Type::Unit,
+            is_extern: false,
+            extern_c_symbol: None,
+        },
+    );
+    funcs
+}
+
+#[test]
+fn local_db_method_call_reads_as_method() {
+    // `db.exec(sql)` with a *local* `db` is a method call even though
+    // `db.exec` also names a seeded free function: the free-function
+    // reading (full arity) is already impossible, and the method reading
+    // fits with a matching receiver. A top-level `db` keeps working,
+    // as does the explicit static form.
+    let seed = db_exec_seed();
+    let local = "func main.main() {\n    db := sqlz.open(\":memory:\")\n    n := db.exec(\"CREATE TABLE t(v INTEGER)\")\n    println(\"exec={n}\")\n}";
+    let r = check_src_with_funcs(local, seed.clone());
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    let explicit = "func main.main() {\n    db := sqlz.open(\":memory:\")\n    n := db.exec(db, \"SELECT 1\")\n    println(\"exec={n}\")\n}";
+    let r = check_src_with_funcs(explicit, seed);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
