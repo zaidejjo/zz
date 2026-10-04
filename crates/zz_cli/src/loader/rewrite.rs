@@ -513,9 +513,6 @@ pub(crate) fn rewrite_selective_calls(
     program: &mut zz_frontend::ast::Program,
     map: &std::collections::HashMap<String, Vec<String>>,
 ) {
-    if map.is_empty() {
-        return;
-    }
     let mut bound = HashSet::new();
     for stmt in &program.stmts {
         collect_binds(stmt, &mut bound, map, true);

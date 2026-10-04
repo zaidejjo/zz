@@ -697,6 +697,13 @@ zz_value zz_closure_make_ex_typed(
     const unsigned char *kinds,
     const size_t *sizes,
     size_t nenv);
+// Box a plain (args, argc) ZZ function as a first-class callable value
+// (`f := add`). The target rides in a RAW env cell (plain bytes — never
+// freed as an object; heap-owned so release stays sound) behind a thunk
+// adapting it to the dispatch convention. Only for regular functions:
+// methods need a receiver and externs need a C ABI, neither of which a
+// value can carry (both keep their existing behavior).
+zz_value zz_func_of_static(zz_native_fn f);
 // Extract the generated function pointer from a closure value.
 zz_dispatch_fn zz_closure_target(zz_value v);
 // Suspendable-frame (B3) constructors: like the plain makers, but the

@@ -734,6 +734,13 @@ fn my_cell_to_zz(cell: Option<Vec<u8>>, ftype: u8) -> Value {
             Value::Float(f)
         }
         MyKind::Text => {
+            // Single-byte `BIT(1)` is the conventional boolean column:
+            // read it as `Bool` (0 is false, anything else is true).
+            // Wider `BIT(N)` values are bitfields, not booleans — they
+            // stay text, mirroring the SQLite rule (explicit `BIT` only).
+            if ftype == mysql_wire::TYPE_BIT && bytes.len() == 1 {
+                return Value::Bool(bytes[0] != 0);
+            }
             let text = String::from_utf8_lossy(&bytes);
             // NUMERIC/DECIMAL arrives as text: prefer Float when numeric.
             if ftype == mysql_wire::TYPE_NEWDECIMAL || ftype == mysql_wire::TYPE_DECIMAL {
@@ -1237,4 +1244,17 @@ fn sqlite_bit_columns_coerce_to_bool() {
         }
         other => panic!("expected array, got {other:?}"),
     }
+}
+
+#[test]
+fn mysql_bit1_cells_coerce_to_bool() {
+    use mysql_wire::TYPE_BIT;
+    assert_eq!(my_cell_to_zz(Some(vec![1]), TYPE_BIT), Value::Bool(true));
+    assert_eq!(my_cell_to_zz(Some(vec![0]), TYPE_BIT), Value::Bool(false));
+    // Wider BIT values are bitfields: stay as text.
+    assert_eq!(
+        my_cell_to_zz(Some(vec![1, 0]), TYPE_BIT),
+        Value::Str("\u{1}\0".to_string().into())
+    );
+    assert_eq!(my_cell_to_zz(None, TYPE_BIT), Value::Option(None));
 }

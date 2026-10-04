@@ -1154,6 +1154,26 @@ fn container_struct_temp_is_released_after_append() {
 }
 
 #[test]
+fn native_first_class_func_ref() {
+    // `f := add` boxes the static function as a callable value instead
+    // of lowering to unit (generics/externs/methods keep their existing
+    // behavior by design).
+    let src = r#"
+func add(a: int, b: int) -> int {
+    a + b
+}
+func main() {
+    f := add
+    println(f(1, 2))
+    g := add
+    println(g(20, 22))
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "3\n42\n");
+}
+
+#[test]
 fn native_indexed_struct_method_receiver() {
     // Indexed receivers (`arr[0].method()`) once dropped `self` in AOT
     // lowering (`method(NULL, 0)` — C arity error), and impl-method call

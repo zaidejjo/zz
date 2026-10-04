@@ -478,6 +478,25 @@ zz_value zz_closure_make_ex(zz_dispatch_fn f, void **cells, size_t nenv) {
     return zz_closure_make_ex_typed(f, cells, NULL, NULL, nenv);
 }
 
+// Adapter: call a plain ZZ function through the closure dispatch
+// convention. The target lives in env[0] (see `zz_func_of_static`).
+// Function-pointer ↔ data-pointer conversion is implementation-defined
+// but universal on the supported targets (required by POSIX dlsym).
+static zz_value zz_static_thunk(zz_value *args, size_t argc, void **env, size_t nenv) {
+    (void)nenv;
+    zz_native_fn f = (zz_native_fn)(env[0]);
+    return f(args, argc);
+}
+
+zz_value zz_func_of_static(zz_native_fn f) {
+    void **slot = (void **)malloc(sizeof(void *));
+    if (!slot) return zz_unit();
+    slot[0] = (void *)f;
+    static const unsigned char kinds[1] = { ZZ_CELL_RAW };
+    static const size_t sizes[1] = { sizeof(void *) };
+    return zz_closure_make_ex_typed(zz_static_thunk, slot, kinds, sizes, 1);
+}
+
 zz_value zz_closure_make_ex_typed(
     zz_dispatch_fn f,
     void **cells,

@@ -339,7 +339,17 @@ impl Lowerer {
                         format!("zz_clone({cid})")
                     }
                 }
-                None => "zz_unit()".to_string(),
+                None => {
+                    // First-class reference to a named function
+                    // (`f := add`): box the static function when it
+                    // resolves (selective-import canonical first, then
+                    // the bare spelling). Anything else unknown stays
+                    // unit (the checker rejects it upstream).
+                    if let Some(v) = self.static_func_value_ident(name) {
+                        return v;
+                    }
+                    "zz_unit()".to_string()
+                }
             },
             Expr::Path { parts, .. } => {
                 // Handle struct field access (e.g., p.x or r.origin.x)
@@ -461,8 +471,13 @@ impl Lowerer {
                 } else {
                     // Math constants (`math.PI`, `std.math.PI`) lower to
                     // float literals — the checker rejects calls, so value
-                    // position is the only valid use. Anything else unknown
-                    // stays unit (the checker rejects it upstream).
+                    // position is the only valid use. Named function
+                    // references (`f := path.join`) box the static
+                    // function the same way. Anything else unknown stays
+                    // unit (the checker rejects it upstream).
+                    if let Some(v) = self.static_func_value_path(parts) {
+                        return v;
+                    }
                     super::math_const_c_literal(&joined).unwrap_or_else(|| "zz_unit()".to_string())
                 }
             }
@@ -1742,8 +1757,28 @@ impl Lowerer {
                         match self.import_ns_aliases.get(obj_name) {
                             Some(head) => {
                                 let resolved = format!("{head}.{method}");
-                                if !native_supported(&joined) && native_supported(&resolved) {
-                                    resolved
+                                // Bodies live under canonical names (seed
+                                // copies under the alias have none): when
+                                // the alias spelling has neither a native
+                                // impl nor a definition but a canonical
+                                // spelling does, call the canonical one.
+                                // The `std.`-stripped form covers stdlib
+                                // definitions (`std.path.join` is defined
+                                // as `path.join`).
+                                let mut cands = vec![resolved.clone()];
+                                if let Some(stripped) = resolved.strip_prefix("std.") {
+                                    cands.push(stripped.to_string());
+                                }
+                                let joined_ok = native_supported(&joined)
+                                    || self.find_func_def(&joined).is_some();
+                                if !joined_ok {
+                                    if let Some(hit) = cands.into_iter().find(|c| {
+                                        native_supported(c) || self.find_func_def(c).is_some()
+                                    }) {
+                                        hit
+                                    } else {
+                                        joined
+                                    }
                                 } else {
                                     joined
                                 }
@@ -3483,6 +3518,61 @@ impl Lowerer {
             return Some(method.to_string());
         }
         None
+    }
+
+    /// Box a resolved plain function as a first-class value, or `None`.
+    /// Only non-generic, non-extern, non-method functions with an emitted
+    /// definition qualify: generics are rejected by the checker, externs
+    /// need a C ABI and methods need a receiver, neither of which a value
+    /// can carry (both keep their existing behavior).
+    fn static_func_value(&self, name: &str) -> Option<String> {
+        let sig = self.tp.funcs.get(name)?;
+        if !sig.generics.is_empty() || sig.is_extern {
+            return None;
+        }
+        if self.is_impl_method(name) {
+            return None;
+        }
+        self.find_func_def(name)?;
+        Some(format!("zz_func_of_static(&zz_fn_{})", mangle(name)))
+    }
+
+    /// Resolve a bare function reference (`f := join`): selective-import
+    /// canonical first (plus its `std.`-stripped form, which is where
+    /// stdlib bodies live), then the bare spelling itself. First
+    /// body-backed hit wins.
+    fn static_func_value_ident(&self, name: &str) -> Option<String> {
+        let mut cands = Vec::new();
+        if let Some(canon) = self.import_fn_aliases.get(name) {
+            cands.push(canon.clone());
+            if let Some(stripped) = canon.strip_prefix("std.") {
+                cands.push(stripped.to_string());
+            }
+        }
+        cands.push(name.to_string());
+        cands.into_iter().find_map(|c| self.static_func_value(&c))
+    }
+
+    /// Resolve a path function reference (`f := ns.func`): the spelling
+    /// itself, then import-alias and `std.`-stripped canonicals — the
+    /// same candidate rule as call lowering (values have no receiver,
+    /// so no method dispatch applies). First body-backed hit wins.
+    fn static_func_value_path(&self, parts: &[String]) -> Option<String> {
+        let joined = parts.join(".");
+        let mut cands = vec![joined.clone()];
+        if parts.len() >= 2 {
+            if let Some(head) = self.import_ns_aliases.get(&parts[0]) {
+                let resolved = format!("{head}.{}", parts[1..].join("."));
+                cands.push(resolved.clone());
+                if let Some(stripped) = resolved.strip_prefix("std.") {
+                    cands.push(stripped.to_string());
+                }
+            }
+            if let Some(stripped) = joined.strip_prefix("std.") {
+                cands.push(stripped.to_string());
+            }
+        }
+        cands.into_iter().find_map(|c| self.static_func_value(&c))
     }
 
     /// Box a struct field value for `zz_object_set_field` given the field

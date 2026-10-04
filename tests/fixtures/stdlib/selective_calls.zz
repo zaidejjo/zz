@@ -6,4 +6,6 @@ import std.str(trim as t)
 println(join("/a", "b"))
 println(dirname("/a/b/c.txt"))
 println(t("  padded  "))
+j := join
+println(j("/x", "y"))
 println("selective_calls_ok")

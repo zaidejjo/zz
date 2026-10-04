@@ -876,6 +876,11 @@ parity_strict!(
     "selective_calls.zz"
 );
 parity_strict!(
+    parity_stdlib_alias_module_calls,
+    "stdlib",
+    "alias_module_calls.zz"
+);
+parity_strict!(
     parity_stdlib_str_utf8_parity,
     "stdlib",
     "str_utf8_parity.zz"
