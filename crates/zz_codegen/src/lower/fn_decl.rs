@@ -242,6 +242,13 @@ impl Lowerer {
         names.current_scope = fname.to_string();
         self.seed_globals(&mut names);
         self.seed_scalar_fns(&mut names);
+        // Captured locals (not params — those exclude specialization)
+        // need shared heap cells exactly like the boxed path, or nested
+        // closures silently lose their environment (NULL env).
+        {
+            let param_names: Vec<String> = params.iter().map(|p| p.name.name.clone()).collect();
+            names.capture_set = self.body_capture_set(&param_names, block);
+        }
         for (i, p) in params.iter().enumerate() {
             let ctype = ptypes.get(i).copied().unwrap_or("zz_value");
             if let Some((_, pt)) = sig.params.get(i) {

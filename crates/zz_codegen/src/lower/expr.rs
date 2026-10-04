@@ -1482,8 +1482,14 @@ impl Lowerer {
         if green {
             *self.current_loop_arena.borrow_mut() = None;
         }
+        // Closures are always boxed (`zz_closure_N` returns `zz_value`),
+        // even when nested inside a `_u` body: suspend the unboxed-return
+        // flag across the inner lowering so tail returns stay boxed.
+        let saved_unboxed = *self.unboxed_ret.borrow();
+        *self.unboxed_ret.borrow_mut() = None;
         let scope = outer_names.current_scope.clone();
         let mut o = self.emit_closure_inner(params, body, cid, caps, green, &scope);
+        *self.unboxed_ret.borrow_mut() = saved_unboxed;
         if green {
             self.green_finish(&mut o);
             *self.current_loop_arena.borrow_mut() = saved_arena;

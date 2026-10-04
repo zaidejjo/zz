@@ -598,14 +598,11 @@ impl Lowerer {
                             self.stmt_direct.set(true);
                         }
                         let val = self.emit_expr(e, names, out);
-                        // In `_u` bodies the tail may be a raw scalar (an
-                        // unboxed call or scalar local): box it for the
-                        // `zz_value` temp (unboxed on `return`).
-                        let val = if self.unboxed_ret.borrow().is_some() {
-                            box_scalar_operand(e, names, &val)
-                        } else {
-                            val
-                        };
+                        // Box raw scalars for the `zz_value` temp: tail
+                        // calls to specialized functions (and scalar
+                        // temporaries generally) lower raw. Idempotent —
+                        // already-boxed values pass through unchanged.
+                        let val = box_scalar_operand(e, names, &val);
                         out.push_str(&format!("    zz_value {tmp} = {val};\n"));
                         names
                             .stack

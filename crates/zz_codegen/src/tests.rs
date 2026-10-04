@@ -1706,3 +1706,26 @@ fn scalar_comparisons_and_floats_match_vm() {
     let (_, out) = native_run(src);
     assert_eq!(out, "7\n9\n5.5\nfalse\ntrue\n45\n");
 }
+
+#[test]
+fn scalar_fn_with_capturing_closure_matches_vm() {
+    // Regression: `_u` bodies initially skipped capture analysis, so
+    // nested closures lost captured locals (NULL env) and hung or
+    // miscomputed. The closure itself stays boxed; only the enclosing
+    // scalar function specializes.
+    let src = "func with_cap(n: int) -> int {\n    m := n + 1\n    f := |x| x + m\n    return f(10)\n}\nfunc main() {\n    println(with_cap(5))\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::lower::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".to_string(),
+        pruned.clone(),
+    );
+    assert!(
+        lowerer.specialized.contains("with_cap"),
+        "with_cap should specialize, got: {:?}",
+        lowerer.specialized
+    );
+    let (_, out) = native_run(src);
+    assert_eq!(out, "16\n");
+}
