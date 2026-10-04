@@ -363,6 +363,10 @@ pub struct BuildOptions {
     /// never from an explicit `--static` (which keeps today's hard error).
     /// Part of the cache fingerprint: downgraded output differs.
     pub allow_static_downgrade: bool,
+    /// Full LTO (`-flto=full` instead of thin) for `--full` max-opt
+    /// builds: deeper cross-TU optimization and elimination at the cost
+    /// of slower links. Only meaningful with `optimize` (release base).
+    pub full_lto: bool,
     /// Extra object files / static libraries from plugin packages to link
     /// into the final binary. Each entry is a path to a `.o` or `.a` file
     /// produced by a plugin's build hook.
@@ -390,6 +394,7 @@ impl BuildOptions {
             native_rt: false,
             pg_link: false,
             allow_static_downgrade: false,
+            full_lto: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -409,6 +414,7 @@ impl BuildOptions {
             native_rt: false,
             pg_link: false,
             allow_static_downgrade: false,
+            full_lto: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -428,6 +434,7 @@ impl BuildOptions {
             native_rt: false,
             pg_link: false,
             allow_static_downgrade: false,
+            full_lto: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -447,6 +454,48 @@ impl BuildOptions {
             native_rt: false,
             pg_link: false,
             allow_static_downgrade: false,
+            full_lto: false,
+            plugin_artifacts: Vec::new(),
+            plugin_link_args: Vec::new(),
+            embed_assets: Vec::new(),
+        }
+    }
+
+    /// Max optimization (`--full`): release base with full LTO —
+    /// whole-program optimization and elimination, dynamic link,
+    /// stripped. Slower links than ThinLTO release.
+    pub fn full() -> Self {
+        BuildOptions {
+            optimize: true,
+            strip: true,
+            static_link: false,
+            gc_sections: true,
+            thin_lto: true,
+            pgo: PgoMode::None,
+            native_rt: false,
+            pg_link: false,
+            allow_static_downgrade: false,
+            full_lto: true,
+            plugin_artifacts: Vec::new(),
+            plugin_link_args: Vec::new(),
+            embed_assets: Vec::new(),
+        }
+    }
+
+    /// Max optimization with PGO (`--full -- <train args>`): profile-use
+    /// plus full LTO. The instrumented leg uses plain `pgo_generate()`.
+    pub fn full_pgo_use() -> Self {
+        BuildOptions {
+            optimize: true,
+            strip: true,
+            static_link: false,
+            gc_sections: true,
+            thin_lto: true,
+            pgo: PgoMode::Use,
+            native_rt: false,
+            pg_link: false,
+            allow_static_downgrade: false,
+            full_lto: true,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -466,6 +515,7 @@ impl BuildOptions {
             native_rt: false,
             pg_link: false,
             allow_static_downgrade: false,
+            full_lto: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -495,6 +545,7 @@ impl BuildOptions {
         self.native_rt.hash(&mut h);
         self.pg_link.hash(&mut h);
         self.allow_static_downgrade.hash(&mut h);
+        self.full_lto.hash(&mut h);
         // Hash plugin artifact paths so cache invalidates when plugins change.
         for p in &self.plugin_artifacts {
             p.hash(&mut h);
@@ -564,9 +615,15 @@ pub fn embed_c(assets: &[EmbedAsset]) -> String {
 pub fn clang_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String> {
     let mut flags: Vec<String> = Vec::new();
     if opts.optimize {
-        // ThinLTO unconditionally: Clang is the only backend.
         flags.push("-O3".to_string());
-        flags.push("-flto=thin".to_string());
+        if opts.full_lto {
+            // Max-opt (`--full`): whole-program LTO. Slower links, better
+            // cross-TU inlining and elimination than ThinLTO.
+            flags.push("-flto=full".to_string());
+        } else {
+            // ThinLTO unconditionally otherwise: Clang is the only backend.
+            flags.push("-flto=thin".to_string());
+        }
         // Host-only: reads the build machine's CPU; illegal on other targets.
         if target.is_none() {
             flags.push("-march=native".to_string());
