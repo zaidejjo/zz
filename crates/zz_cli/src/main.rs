@@ -17,6 +17,7 @@ mod repl;
 mod session;
 mod setup;
 mod test_runner;
+mod toolchain;
 mod ui;
 mod upgrade;
 
@@ -88,6 +89,8 @@ PACKAGE MANAGER:
     zz cache clean                clear build cache
     zz setup [--yes]              create ~/.zz/bin, wire PATH + completions
     zz setup --check              verify shell integration (no changes)
+    zz toolchain install          download a pinned Zig C backend into ~/.zz/toolchain
+    zz toolchain status           installed versions, pin, active backend
     zz completion [shell]         print shell completion (bash|zsh|fish|powershell)
     zz upgrade [--check]           self-update from GitHub releases
     zz doctor [--fix]              audit the toolchain (binary, clang, shell, git, registry)
@@ -436,6 +439,13 @@ fn main() -> ExitCode {
             }
         },
         Some("doctor") => match doctor::run(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("toolchain") => match toolchain::run(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("zz: {msg}");
