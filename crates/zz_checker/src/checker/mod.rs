@@ -9,6 +9,7 @@ pub mod structs;
 pub mod type_check;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use zz_frontend::ast::{Program, Stmt};
 use zz_frontend::diag::RawDiag;
@@ -30,13 +31,15 @@ pub const TOP_SCOPE: &str = "<top>";
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SpanKey {
     /// Enclosing top-level function (`Type.method` for methods,
-    /// [`TOP_SCOPE`] otherwise).
-    pub func: String,
+    /// [`TOP_SCOPE`] otherwise). Shared (`Arc`, not `String`): one key is
+    /// built per checked expression, and (atomic) refcounting kills an allocation
+    /// per node with zero hashing cost change.
+    pub func: Arc<str>,
     pub span: Span,
 }
 
 impl SpanKey {
-    pub fn new(func: impl Into<String>, span: Span) -> Self {
+    pub fn new(func: impl Into<Arc<str>>, span: Span) -> Self {
         SpanKey {
             func: func.into(),
             span,
@@ -192,8 +195,19 @@ fn check_program_impl(
     // a same-signature wrapper, so all downstream passes see ordinary
     // functions and calls. Idempotent — already-expanded programs pass
     // through unchanged.
-    let (expanded, mut decorator_errors) = zz_frontend::decorators::expand_program(program);
-    let program = &expanded;
+    //
+    // Skip fast path: decorator-free programs (the common case) check
+    // in place with zero cloning. HIR already expanded once upstream, so
+    // without this every compile paid a second full-program deep clone
+    // for a no-op re-expansion.
+    let mut owned: Option<Program> = None;
+    let mut decorator_errors = Vec::new();
+    if zz_frontend::decorators::has_any_decorators(program) {
+        let (expanded, errs) = zz_frontend::decorators::expand_program(program);
+        decorator_errors = errs;
+        owned = Some(expanded);
+    }
+    let program: &Program = owned.as_ref().map_or(program, |o| o);
     let mut checker = Checker::new(
         initial_bindings,
         initial_funcs,
@@ -574,7 +588,7 @@ fn check_program_impl(
         }
         let scoped = !matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. });
         if scoped {
-            checker.scope.push(TOP_SCOPE.to_string());
+            checker.scope.push(Arc::from(TOP_SCOPE));
         }
         checker.check_stmt(stmt);
         if scoped {
@@ -773,7 +787,7 @@ pub(crate) struct Checker {
     /// Enclosing-item scope stack for [`SpanKey`] recording. Holds the
     /// top-level function (or `Type.method`) whose body is being checked;
     /// empty at top level (keys then use [`TOP_SCOPE`]).
-    pub(crate) scope: Vec<String>,
+    pub(crate) scope: Vec<Arc<str>>,
 }
 
 impl Checker {
@@ -784,7 +798,7 @@ impl Checker {
             self.scope
                 .last()
                 .cloned()
-                .unwrap_or_else(|| TOP_SCOPE.to_string()),
+                .unwrap_or_else(|| Arc::from(TOP_SCOPE)),
             span,
         )
     }

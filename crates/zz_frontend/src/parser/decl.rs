@@ -7,7 +7,7 @@ use crate::token::TokenKind;
 
 use super::Parser;
 
-impl Parser {
+impl<'a> Parser<'a> {
     // --- types ------------------------------------------------------------
 
     pub(crate) fn parse_type(&mut self) -> Ty {
@@ -90,7 +90,7 @@ impl Parser {
             TokenKind::Ident => {
                 self.advance();
                 // Consume dotted type names: `shapes.Point`, `a.b.c`, etc.
-                let mut full_name = tok.text.clone();
+                let mut full_name = tok.text.clone().into_owned();
                 let mut end_span = tok.span;
                 while self.eat(TokenKind::Dot) {
                     if let Some(id) = self.expect_ident() {

@@ -318,6 +318,9 @@ pub enum Op {
     /// (`p.dist()`) with receiver-first semantics.
     CallPath {
         parts: Vec<String>,
+        /// `parts` pre-joined (`a.b.c`): computed once at compile time so
+        /// the hot dispatch loop never allocates a lookup string per call.
+        joined: String,
         argc: u16,
         span: Span,
         pspan: Span,

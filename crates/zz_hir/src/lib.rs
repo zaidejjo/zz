@@ -73,11 +73,13 @@ pub fn build_program(
     let (expanded, mut diags) = zz_frontend::decorators::expand_program(program);
     let (checked, span_types) =
         check_program_typed(&expanded, initial_bindings, initial_funcs, initial_structs);
-    diags.extend(checked.errors.clone());
-    let bindings = checked.bindings.clone();
-    let funcs = checked.funcs.clone();
-    let structs = checked.structs.clone();
-    let try_converts = checked.try_converts.clone();
+    // Move (never clone) the result maps: each is freshly built per compile
+    // (notably `funcs`, one entry per function) and used exactly once here.
+    diags.extend(checked.errors);
+    let bindings = checked.bindings;
+    let funcs = checked.funcs;
+    let structs = checked.structs;
+    let try_converts = checked.try_converts;
     TypedResult {
         program: TypedProgram {
             program: expanded,

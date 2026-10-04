@@ -12,16 +12,18 @@
 
 pub mod cursor;
 
+use std::borrow::Cow;
+
 use crate::diag::{error_at, RawDiag};
 use crate::span::Span;
 use crate::token::{Token, TokenKind, Trivia, TriviaKind};
 
-pub struct Lexed {
-    pub tokens: Vec<Token>,
+pub struct Lexed<'a> {
+    pub tokens: Vec<Token<'a>>,
     pub errors: Vec<RawDiag>,
 }
 
-pub fn lex(source: &str) -> Lexed {
+pub fn lex(source: &str) -> Lexed<'_> {
     Lexer::new(source).run()
 }
 
@@ -63,8 +65,8 @@ struct Lexer<'a> {
     src: &'a str,
     pos: usize,
     prev_sig: Option<TokenKind>,
-    pending: Vec<Trivia>,
-    tokens: Vec<Token>,
+    pending: Vec<Trivia<'a>>,
+    tokens: Vec<Token<'a>>,
     errors: Vec<RawDiag>,
     contexts: Vec<LexContext>,
     /// True when the previous string segment ended right before an
@@ -86,7 +88,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn run(mut self) -> Lexed {
+    fn run(mut self) -> Lexed<'a> {
         while self.pos < self.src.len() {
             let c = self.peek_char().unwrap();
             // Inside a string literal (including a continuation segment after
@@ -280,7 +282,7 @@ impl<'a> Lexer<'a> {
         }
         self.tokens.push(Token {
             kind: TokenKind::Eof,
-            text: String::new(),
+            text: Cow::Borrowed(""),
             span: Span::new(self.src.len() as u32, self.src.len() as u32),
             leading: Vec::new(),
         });
@@ -294,11 +296,13 @@ impl<'a> Lexer<'a> {
 
     fn push_trivia(&mut self, kind: TriviaKind) {
         let start = self.pos;
-        let c = self.bump_char();
+        self.bump_char();
         let span = Span::new(start as u32, self.pos as u32);
+        // Borrow the source slice — trivia is never rewritten.
+        let src = self.src;
         self.pending.push(Trivia {
             kind,
-            text: c.to_string(),
+            text: &src[span.to_range()],
             span,
         });
     }
@@ -312,9 +316,10 @@ impl<'a> Lexer<'a> {
             self.bump_char();
         }
         let span = Span::new(start as u32, self.pos as u32);
+        let src = self.src;
         self.pending.push(Trivia {
             kind: TriviaKind::Comment,
-            text: self.src[span.to_range()].to_string(),
+            text: &src[span.to_range()],
             span,
         });
     }
@@ -349,9 +354,10 @@ impl<'a> Lexer<'a> {
             }
         }
         let span = Span::new(start as u32, self.pos as u32);
+        let src = self.src;
         self.pending.push(Trivia {
             kind: TriviaKind::Comment,
-            text: self.src[span.to_range()].to_string(),
+            text: &src[span.to_range()],
             span,
         });
     }
@@ -435,12 +441,13 @@ impl<'a> Lexer<'a> {
 
     fn emit_significant(&mut self, kind: TokenKind, start: usize, end: usize) {
         let span = Span::new(start as u32, end as u32);
-        let text = self.src[span.to_range()].to_string();
+        let src = self.src;
+        let text = Cow::Borrowed(&src[span.to_range()]);
         self.pos = end;
         self.push_token(kind, span, text);
     }
 
-    fn push_token(&mut self, kind: TokenKind, span: Span, text: String) {
+    fn push_token(&mut self, kind: TokenKind, span: Span, text: Cow<'a, str>) {
         self.prev_sig = Some(kind);
         self.tokens.push(Token {
             kind,
@@ -460,8 +467,9 @@ impl<'a> Lexer<'a> {
             }
         }
         let span = Span::new(start as u32, self.pos as u32);
-        let text = self.src[span.to_range()].to_string();
-        let kind = match text.as_str() {
+        let src = self.src;
+        let text = Cow::Borrowed(&src[span.to_range()]);
+        let kind = match &*text {
             "import" => TokenKind::Import,
             "as" => TokenKind::As,
             "func" => TokenKind::Func,
@@ -537,7 +545,8 @@ impl<'a> Lexer<'a> {
             return;
         }
         let span = Span::new(start as u32, self.pos as u32);
-        let text = self.src[span.to_range()].to_string();
+        let src = self.src;
+        let text = Cow::Borrowed(&src[span.to_range()]);
         let kind = if is_float {
             TokenKind::Float
         } else {
@@ -603,13 +612,13 @@ impl<'a> Lexer<'a> {
                 // a continuation segment — emit StrFmt and keep the Str
                 // context alive for text after `}`.
                 if is_nested {
-                    self.push_token(TokenKind::Str, span, value);
+                    self.push_token(TokenKind::Str, span, Cow::Owned(value));
                 } else if self
                     .contexts
                     .iter()
                     .any(|c| matches!(c, LexContext::Interp { .. }))
                 {
-                    self.push_token(TokenKind::StrFmt, span, value);
+                    self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
                     self.contexts.push(LexContext::Str {
                         start: self.pos,
                         value: String::new(),
@@ -619,7 +628,7 @@ impl<'a> Lexer<'a> {
                     });
                 } else {
                     // Final closing quote — emit Str (complete string).
-                    self.push_token(TokenKind::Str, span, value);
+                    self.push_token(TokenKind::Str, span, Cow::Owned(value));
                 }
             }
             // String interpolation: `{ident...` starts an embedded expression.
@@ -629,7 +638,7 @@ impl<'a> Lexer<'a> {
             // back into string mode for the continuation.
             Some('{') if self.peek_char_at(1).is_some_and(is_ident_start) => {
                 let span = Span::new(start as u32, self.pos as u32);
-                self.push_token(TokenKind::StrFmt, span, value);
+                self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
                 self.contexts.push(LexContext::Str {
                     start: self.pos,
                     value: String::new(),
@@ -777,7 +786,7 @@ impl<'a> Lexer<'a> {
             let span = Span::new(start as u32, self.pos as u32);
             if is_nested {
                 let idx = self.tokens.len();
-                self.push_token(TokenKind::Str, span, value);
+                self.push_token(TokenKind::Str, span, Cow::Owned(value));
                 self.dedent_triple_segments(&segs, idx, indent);
             } else if self
                 .contexts
@@ -785,7 +794,7 @@ impl<'a> Lexer<'a> {
                 .any(|c| matches!(c, LexContext::Interp { .. }))
             {
                 let idx = self.tokens.len();
-                self.push_token(TokenKind::StrFmt, span, value);
+                self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
                 let mut next_segs = segs;
                 next_segs.push(idx);
                 // Dedent will run when the final `"""` closes; segments stay
@@ -800,7 +809,7 @@ impl<'a> Lexer<'a> {
                 });
             } else {
                 let idx = self.tokens.len();
-                self.push_token(TokenKind::Str, span, value);
+                self.push_token(TokenKind::Str, span, Cow::Owned(value));
                 self.dedent_triple_segments(&segs, idx, indent);
             }
             return;
@@ -811,7 +820,7 @@ impl<'a> Lexer<'a> {
             Some('{') if is_triple_interp_start(self.peek_char_at(1)) => {
                 let span = Span::new(start as u32, self.pos as u32);
                 let idx = self.tokens.len();
-                self.push_token(TokenKind::StrFmt, span, value);
+                self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
                 let mut next_segs = segs;
                 next_segs.push(idx);
                 self.contexts.push(LexContext::Str {
@@ -964,7 +973,10 @@ impl<'a> Lexer<'a> {
         }
         let mut idxs: Vec<usize> = segs.to_vec();
         idxs.push(final_idx);
-        let mut texts: Vec<String> = idxs.iter().map(|&i| self.tokens[i].text.clone()).collect();
+        let mut texts: Vec<String> = idxs
+            .iter()
+            .map(|&i| self.tokens[i].text.clone().into_owned())
+            .collect();
         if texts.is_empty() {
             return;
         }
@@ -1022,7 +1034,7 @@ impl<'a> Lexer<'a> {
             *text = out;
         }
         for (tok_idx, new_text) in idxs.iter().zip(texts) {
-            self.tokens[*tok_idx].text = new_text;
+            self.tokens[*tok_idx].text = Cow::Owned(new_text);
         }
     }
 
@@ -1214,7 +1226,7 @@ mod tests {
             .tokens
             .into_iter()
             .filter(|t| !matches!(t.kind, TokenKind::StmtEnd | TokenKind::Eof))
-            .map(|t| (t.kind, t.text))
+            .map(|t| (t.kind, t.text.into_owned()))
             .collect()
     }
 

@@ -1,5 +1,7 @@
 //! Core type-checking logic: statements, expressions, patterns.
 
+use std::sync::Arc;
+
 use crate::checker::inference::{contains_var, default_variant_vars};
 use crate::checker::Checker;
 use crate::type_::Type;
@@ -195,7 +197,7 @@ impl Checker {
                 }
                 // Scope span recording to this function: spans repeat
                 // across modules, so the typed map keys (scope, span).
-                self.scope.push(fname);
+                self.scope.push(Arc::from(fname));
                 self.check_func_body(stmt, &sig);
                 self.scope.pop();
                 Type::Unit
@@ -217,7 +219,7 @@ impl Checker {
                         let method_name = Self::func_name(method);
                         let full_name = format!("{}.{}", type_name, method_name);
                         let sig = self.funcs.get(&full_name).unwrap().clone();
-                        self.scope.push(full_name);
+                        self.scope.push(Arc::from(full_name));
                         self.check_func_body(method, &sig);
                         self.scope.pop();
                     }
