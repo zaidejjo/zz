@@ -1714,8 +1714,8 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
     let typed = zz_hir::build_program(
         &merged,
         std::collections::HashMap::new(),
-        loaded.funcs.clone(),
-        loaded.structs.clone(),
+        loaded.funcs,
+        loaded.structs,
     );
     let types = Arc::new(typed.program.types);
     let structs = typed.program.structs;
