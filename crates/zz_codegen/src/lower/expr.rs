@@ -579,6 +579,14 @@ impl Lowerer {
                         // through the boxed `zz_binop` path.
                         let left_type = scalar_operand_type(left, names);
                         let right_type = scalar_operand_type(right, names);
+                        // Verified raw texts: classification alone can
+                        // disagree with the emission (a specialized call
+                        // that fell back to boxed still classifies
+                        // scalar). Raw C operators must only see
+                        // genuinely-raw operands — anything else routes
+                        // through the boxing paths below.
+                        let left_raw = crate::lower::context::raw_scalar_text(left, &l, names);
+                        let right_raw = crate::lower::context::raw_scalar_text(right, &r, names);
 
                         // Both operands are scalars of compatible type:
                         // emit a raw C arithmetic op instead of going
@@ -615,9 +623,14 @@ impl Lowerer {
                                 let boxed_l = box_scalar_operand(left, names, &l);
                                 let boxed_r = box_scalar_operand(right, names, &r);
                                 format!("zz_binop_cat_arena({boxed_l}, {boxed_r}, &{arena})")
-                            } else if left_type == Some("int64_t") && right_type == Some("int64_t")
-                            {
-                                // Both sides are int64 — emit raw C arith.
+                            } else if matches!(
+                                (&left_raw, &right_raw),
+                                (Some((_, "int64_t")), Some((_, "int64_t")),)
+                            ) {
+                                let (lc, rc) = match (&left_raw, &right_raw) {
+                                    (Some((lc, _)), Some((rc, _))) => (lc.clone(), rc.clone()),
+                                    _ => unreachable!(),
+                                };
                                 let c_op = match op {
                                     zz_frontend::ast::BinOp::Add => "+",
                                     zz_frontend::ast::BinOp::Sub => "-",
@@ -629,9 +642,6 @@ impl Lowerer {
                                     zz_frontend::ast::BinOp::BitXor => "^",
                                     _ => "+",
                                 };
-                                let lc = scalar_operand_c(left, names).unwrap_or_else(|| l.clone());
-                                let rc =
-                                    scalar_operand_c(right, names).unwrap_or_else(|| r.clone());
                                 // Literal-zero divisor guard: a `*int` local
                                 // can't be statically proven nonzero, but a
                                 // literal zero would divide-by-zero at -O3.
@@ -644,7 +654,14 @@ impl Lowerer {
                                 } else {
                                     format!("(int64_t)({lc} {c_op} {rc})")
                                 }
-                            } else if left_type == Some("double") && right_type == Some("double") {
+                            } else if matches!(
+                                (&left_raw, &right_raw),
+                                (Some((_, "double")), Some((_, "double")),)
+                            ) {
+                                let (lc, rc) = match (&left_raw, &right_raw) {
+                                    (Some((lc, _)), Some((rc, _))) => (lc.clone(), rc.clone()),
+                                    _ => unreachable!(),
+                                };
                                 let c_op = match op {
                                     zz_frontend::ast::BinOp::Add => "+",
                                     zz_frontend::ast::BinOp::Sub => "-",
@@ -652,9 +669,6 @@ impl Lowerer {
                                     zz_frontend::ast::BinOp::Div => "/",
                                     _ => "+",
                                 };
-                                let lc = scalar_operand_c(left, names).unwrap_or_else(|| l.clone());
-                                let rc =
-                                    scalar_operand_c(right, names).unwrap_or_else(|| r.clone());
                                 if matches!(op, zz_frontend::ast::BinOp::Rem) {
                                     format!("(double)(fmod({l}, {r}))")
                                 } else {
@@ -697,6 +711,21 @@ impl Lowerer {
                             // scalars, plus raw unboxed structs (e.g.
                             // `Pt{...} == p`, `p == q`) which box to
                             // runtime objects for `zz_binop`.
+                            //
+                            // `_u` fast path: numeric comparisons with
+                            // verifiably-raw operands emit raw C directly
+                            // (`(bool)(a < b)`). IEEE semantics match the
+                            // runtime (`zz_binop` compares doubles the
+                            // same way); strings/structs never classify
+                            // raw, so content equality keeps the boxed
+                            // path. Gated to `_u` bodies so existing
+                            // generated C stays byte-identical.
+                            if self.unboxed_ret.borrow().is_some() {
+                                if let Some(raw) = self.emit_raw_cmp(op, left, right, &l, &r, names)
+                                {
+                                    return raw;
+                                }
+                            }
                             let boxed_l = box_scalar_operand(left, names, &l);
                             let boxed_l = self.box_struct_operand(left, boxed_l, &l, names, out);
                             let boxed_r = box_scalar_operand(right, names, &r);
@@ -777,10 +806,26 @@ impl Lowerer {
                 // Chained `else if` arrives as a bare If — recurse so
                 // nested branches emit instead of collapsing to unit.
                 let c = self.emit_expr(cond, names, out);
-                let c = box_scalar_operand(cond, names, &c);
+                // `_u` fast path: a raw scalar condition tests directly
+                // (`zz_truthy` on `int`/`float` is `!= 0`, matching the
+                // runtime). Boxed mode keeps `zz_truthy` byte-identical.
+                let c = if self.unboxed_ret.borrow().is_some() {
+                    match crate::lower::context::raw_scalar_text(cond, &c, names) {
+                        Some((raw, "bool")) => raw,
+                        Some((raw, "double")) => format!("({raw} != 0.0)"),
+                        Some((raw, _)) => format!("({raw} != 0)"),
+                        None => {
+                            let c = box_scalar_operand(cond, names, &c);
+                            format!("zz_truthy({c})")
+                        }
+                    }
+                } else {
+                    let c = box_scalar_operand(cond, names, &c);
+                    format!("zz_truthy({c})")
+                };
                 let tmp = names.fresh("_ifv");
                 out.push_str(&format!("    zz_value {tmp} = zz_unit();\n"));
-                out.push_str(&format!("    if (zz_truthy({c})) {{\n"));
+                out.push_str(&format!("    if ({c}) {{\n"));
                 let tv = self.emit_block_value(then, names, out);
                 out.push_str(&format!("        {tmp} = {tv};\n"));
                 if let Some(el) = els {
@@ -1460,6 +1505,7 @@ impl Lowerer {
         // scope so typed lookups hit the right entries.
         names.current_scope = scope.to_string();
         self.seed_globals(&mut names);
+        self.seed_scalar_fns(&mut names);
         for (i, (name, _, ctype, checker)) in caps.iter().enumerate() {
             let ptr = format!("env[{i}]");
             let deref = NameCtx::cap_deref_of(&ptr, ctype);
@@ -1703,6 +1749,45 @@ impl Lowerer {
                 res_tmp
             }
         }
+    }
+
+    /// Raw comparison for `_u` bodies: `Eq/Ne/Lt/Gt/Le/Ge` with
+    /// verifiably-raw numeric operands emits `(bool)(a <op> b)`.
+    /// Returns `None` when the boxed `zz_binop` path must stay (pow,
+    /// non-numeric operands, mixed bool/numeric whose runtime semantics
+    /// differ from C promotion). The `(bool)` marker keeps downstream
+    /// classifiers (boxing, returns, conds) honest.
+    pub(super) fn emit_raw_cmp(
+        &self,
+        op: &zz_frontend::ast::BinOp,
+        left: &Expr,
+        right: &Expr,
+        l: &str,
+        r: &str,
+        names: &NameCtx,
+    ) -> Option<String> {
+        use zz_frontend::ast::BinOp::{Eq, Ge, Gt, Le, Lt, Ne};
+        let c_op = match op {
+            Eq => "==",
+            Ne => "!=",
+            Lt => "<",
+            Gt => ">",
+            Le => "<=",
+            Ge => ">=",
+            _ => return None,
+        };
+        let lraw = crate::lower::context::raw_scalar_text(left, l, names)?;
+        let rraw = crate::lower::context::raw_scalar_text(right, r, names)?;
+        // Same-type numerics, plus int/float promotion (the runtime
+        // promotes the same way). Mixed bool/numeric stays boxed: C
+        // promotion (`true == 1`) disagrees with tag-dispatched `zz_binop`.
+        let pair = (lraw.1, rraw.1);
+        match pair {
+            ("int64_t", "int64_t") | ("double", "double") | ("bool", "bool") => {}
+            ("int64_t", "double") | ("double", "int64_t") => {}
+            _ => return None,
+        }
+        Some(format!("(bool)({} {c_op} {})", lraw.0, rraw.0))
     }
 
     pub(super) fn emit_call(
@@ -2706,7 +2791,13 @@ impl Lowerer {
                 });
                 auto_box(&emitted, ctype.as_deref())
             } else {
-                emitted
+                // Anything else (notably calls): box raw scalars. Plain
+                // calls historically emitted boxed `zz_value`s, but calls
+                // to scalar-specialized functions emit raw C scalars
+                // (`(int64_t)cf_u(...)`) that native `zz_value` params
+                // would reject. `box_scalar_operand` passes boxed
+                // emissions through unchanged.
+                box_scalar_operand(a, names, &emitted)
             };
             arg_items.push(boxed);
         }
@@ -3066,6 +3157,41 @@ impl Lowerer {
                 }
                 // No receiver (shouldn't happen for impl methods but
                 // fall through to the regular path defensively).
+            }
+            // Unboxed fast path: scalar-specialized callee, receiver-free,
+            // all args raw-provable. Emits `(ctype)cf_u(raw, ...)` with a
+            // cast marker so downstream classifiers (binary folds, return
+            // unboxing, tail temps) treat the result as a raw scalar.
+            // Anything else keeps the boxed convention below.
+            if method_receiver.is_none() && named.is_empty() {
+                if let Some(ret_c) = self.specialized_ret(&cname_for_native) {
+                    let arity = self
+                        .tp
+                        .funcs
+                        .get(&cname_for_native)
+                        .map(|sig| sig.params.len())
+                        .unwrap_or(usize::MAX);
+                    if ordered_args.len() == arity {
+                        let mut raws: Vec<String> = Vec::with_capacity(ordered_args.len());
+                        let mut all_raw = true;
+                        for (a, emitted) in ordered_args.iter().zip(arg_items.iter()) {
+                            match crate::lower::context::raw_scalar_text(a, emitted, names) {
+                                Some((raw, _)) => raws.push(raw),
+                                None => {
+                                    all_raw = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if all_raw {
+                            let args_s = raws.join(", ");
+                            if raws.is_empty() {
+                                return format!("({ret_c})({cf}_u())");
+                            }
+                            return format!("({ret_c})({cf}_u({args_s}))");
+                        }
+                    }
+                }
             }
             if arg_items.is_empty() {
                 return format!("{cf}(NULL, 0)");

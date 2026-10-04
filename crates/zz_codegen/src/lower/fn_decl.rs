@@ -42,11 +42,27 @@ impl Lowerer {
         // Module-level globals are visible inside every function.
         // Locals (params + body decls) shadow them via the stack.
         self.seed_globals(&mut names);
+        // Scalar-specialized callees lower to raw C calls anywhere in
+        // this body (including top-level code and closures).
+        self.seed_scalar_fns(&mut names);
         // Bindings captured by a nested closure literal become shared heap
         // cells (match VM by-reference capture semantics).
         {
             let param_names: Vec<String> = params.iter().map(|p| p.name.name.clone()).collect();
             names.capture_set = self.body_capture_set(&param_names, block);
+        }
+        // Unboxed `_u` variant: scalar params/return alongside the boxed
+        // entry point. Capture analysis ran in `compute_specialized`, so a
+        // member here provably has plain scalar params.
+        if self.specialized.contains(fname) {
+            debug_assert!(
+                !names
+                    .capture_set
+                    .iter()
+                    .any(|c| params.iter().any(|p| &p.name.name == c)),
+                "specialized {fname} must not capture params"
+            );
+            return self.emit_specialized_pair(fname, params, block);
         }
         // Look up the function's parameter types from the type checker.
         // Used to register each param under its actual C type so
@@ -114,35 +130,146 @@ impl Lowerer {
         }
         // Bit of per-function state for `defer` support: a fixed-size array
         // of registered defer-site indices + LIFO counter.
+        self.emit_body_tail(block, &mut names, &mut o, "zz_unit()");
+        o
+    }
+
+    /// Emit the shared function-body tail: per-function `defer` state,
+    /// the body block, the LIFO defer runner, and the implicit return.
+    /// `unit_ret` is the implicit tail value when the body yields none
+    /// (`zz_unit()` for boxed functions, scalar zero for `_u` ones).
+    pub(super) fn emit_body_tail(
+        &self,
+        block: &Block,
+        names: &mut NameCtx,
+        o: &mut String,
+        unit_ret: &str,
+    ) {
         o.push_str("    int __defers[32];\n");
         o.push_str("    int __defer_n = 0;\n");
         let mut body_out = String::new();
-        self.emit_func_block(block, &mut names, &mut body_out);
+        self.emit_func_block(block, names, &mut body_out);
         o.push_str(&body_out);
+        self.emit_defer_runner(o);
+        // Implicit return: last statement expression is the function value.
+        if self.last_stmt_value(block, names, o).is_none() {
+            o.push_str(&format!("    return {unit_ret};\n"));
+        }
+        o.push_str("}\n\n");
+    }
+
+    /// Emit the LIFO defer runner for snippets registered in
+    /// `defer_slots` (drains the shared list).
+    pub(super) fn emit_defer_runner(&self, o: &mut String) {
         // Defer runner: executes registered deferred expressions in LIFO
         // order at function scope exit (before the implicit return + arena
         // reset below).
-        {
-            let mut slots = self.defer_slots.borrow_mut();
-            if !slots.is_empty() {
-                o.push_str("    for (int __dk = __defer_n - 1; __dk >= 0; __dk--) {\n");
-                o.push_str("        switch (__defers[__dk]) {\n");
-                let snap: Vec<String> = std::mem::take(&mut *slots);
-                for (idx, snippet) in snap.iter().enumerate() {
-                    o.push_str(&format!("        case {idx}:\n"));
-                    o.push_str(snippet);
-                    o.push_str("\n            break;\n");
-                }
-                o.push_str("        default: break;\n");
-                o.push_str("        }\n");
-                o.push_str("    }\n");
+        let mut slots = self.defer_slots.borrow_mut();
+        if !slots.is_empty() {
+            o.push_str("    for (int __dk = __defer_n - 1; __dk >= 0; __dk--) {\n");
+            o.push_str("        switch (__defers[__dk]) {\n");
+            let snap: Vec<String> = std::mem::take(&mut *slots);
+            for (idx, snippet) in snap.iter().enumerate() {
+                o.push_str(&format!("        case {idx}:\n"));
+                o.push_str(snippet);
+                o.push_str("\n            break;\n");
             }
+            o.push_str("        default: break;\n");
+            o.push_str("        }\n");
+            o.push_str("    }\n");
         }
-        // Implicit return: last statement expression is the function value.
-        if self.last_stmt_value(block, &mut names, &mut o).is_none() {
-            o.push_str("    return zz_unit();\n");
+    }
+
+    /// Emit a scalar-specialized pair: the unboxed `zz_fn_<m>_u` variant
+    /// (raw C scalar params/return, same body) plus the boxed entry point
+    /// delegating to it (unbox args → call → box result). Callers with
+    /// scalar-provable args route to `_u` directly; first-class values,
+    /// indirect calls, and the entry stub keep using the boxed symbol.
+    pub(super) fn emit_specialized_pair(
+        &self,
+        fname: &str,
+        params: &[Param],
+        block: &Block,
+    ) -> String {
+        let cname = format!("zz_fn_{}", mangle(fname));
+        let sig = self
+            .tp
+            .funcs
+            .get(fname)
+            .cloned()
+            .unwrap_or_else(|| zz_checker::FuncSig {
+                generics: Vec::new(),
+                bounds: Vec::new(),
+                params: Vec::new(),
+                has_default: Vec::new(),
+                ret: zz_checker::Type::Unit,
+                is_extern: false,
+                extern_c_symbol: None,
+            });
+        // Eligibility was proven in `compute_specialized`: every param and
+        // the return map to a C scalar type here.
+        let ret_c = Self::scalar_ctype(&sig.ret).unwrap_or("zz_value");
+        let ptypes: Vec<&'static str> = sig
+            .params
+            .iter()
+            .map(|(_, t)| Self::scalar_ctype(t).unwrap_or("zz_value"))
+            .collect();
+        let box_ctor = |c: &str| match c {
+            "double" => "zz_float",
+            "bool" => "zz_bool",
+            _ => "zz_int",
+        };
+        let zero = match ret_c {
+            "double" => "0.0",
+            "bool" => "false",
+            _ => "0",
+        };
+
+        // --- `_u` variant: scalar params, scalar return, same body. ---
+        let mut o = String::new();
+        let pdecls: Vec<String> = ptypes
+            .iter()
+            .enumerate()
+            .map(|(i, t)| format!("{t} __p{i}"))
+            .collect();
+        let psig = if pdecls.is_empty() {
+            "void".to_string()
+        } else {
+            pdecls.join(", ")
+        };
+        o.push_str(&format!("static {ret_c} {cname}_u({psig}) {{\n"));
+        let mut names = NameCtx::new();
+        names.current_scope = fname.to_string();
+        self.seed_globals(&mut names);
+        self.seed_scalar_fns(&mut names);
+        for (i, p) in params.iter().enumerate() {
+            let ctype = ptypes.get(i).copied().unwrap_or("zz_value");
+            if let Some((_, pt)) = sig.params.get(i) {
+                names.checker_types.insert(p.name.name.clone(), pt.clone());
+            }
+            let cid = names.enter_with_type(&p.name.name, ctype);
+            o.push_str(&format!("    {ctype} {cid} = __p{i};\n"));
         }
-        o.push_str("}\n\n");
+        *self.unboxed_ret.borrow_mut() = Some(ret_c);
+        self.emit_body_tail(block, &mut names, &mut o, zero);
+        *self.unboxed_ret.borrow_mut() = None;
+
+        // --- Boxed entry point: unbox args, delegate, box result. ---
+        o.push_str(&format!(
+            "static zz_value {cname}(zz_value *args, size_t argc) {{\n"
+        ));
+        o.push_str("    (void)argc;\n");
+        let unboxes: Vec<String> = ptypes
+            .iter()
+            .enumerate()
+            .map(|(i, t)| format!("(args[{i}]).{}", Self::scalar_field(t)))
+            .collect();
+        let call = if unboxes.is_empty() {
+            format!("{cname}_u()")
+        } else {
+            format!("{cname}_u({})", unboxes.join(", "))
+        };
+        o.push_str(&format!("    return {}({call});\n}}\n\n", box_ctor(ret_c)));
         o
     }
 

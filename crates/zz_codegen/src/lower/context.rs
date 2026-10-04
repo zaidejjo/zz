@@ -85,6 +85,13 @@ pub struct NameCtx {
     /// `Type.method`, or `<top>`): scopes typed-AST lookups so same-span
     /// nodes in different functions never share types.
     pub(crate) current_scope: String,
+    /// User-function name → (C return type, arity) for scalar-specialized
+    /// functions (`zz_fn_f_u` variants taking/returning raw C scalars).
+    /// Seeded from `Lowerer::specialized` into every fresh `NameCtx` so the
+    /// free `scalar_operand_type` classifier recognizes specialized calls
+    /// (and their nested arithmetic) without a signature change. Never
+    /// cleared by push/pop_scope: it is program-global.
+    pub(crate) scalar_fn_sigs: HashMap<String, (&'static str, usize)>,
 }
 
 impl NameCtx {
@@ -101,6 +108,7 @@ impl NameCtx {
             array_lens: HashMap::new(),
             checker_types: HashMap::new(),
             current_scope: zz_checker::TOP_SCOPE.to_string(),
+            scalar_fn_sigs: HashMap::new(),
         }
     }
 
@@ -394,6 +402,16 @@ pub struct Lowerer {
     /// Module head aliases: `f` → `std.fs` from `import std.fs as f`, so
     /// `f.read_to_string(...)` lowers canonically.
     pub(crate) import_ns_aliases: std::collections::HashMap<String, String>,
+    /// Scalar-specialized user functions: ZZ names whose params and return
+    /// are all plain scalars (`int`/`float`/`bool`, no defaults/generics,
+    /// no captured params). Each gets an unboxed `zz_fn_<m>_u` C variant
+    /// taking/returning raw C scalars alongside the boxed entry point;
+    /// scalar-provable call sites route to it. Computed once in `new`.
+    pub(crate) specialized: std::collections::HashSet<String>,
+    /// Expected C return type while lowering a `_u` body (`None` in boxed
+    /// functions). `Return` and tail-value emitters consult it to emit raw
+    /// scalar returns instead of boxed `zz_value`s.
+    pub(crate) unboxed_ret: std::cell::RefCell<Option<&'static str>>,
 }
 
 impl Lowerer {
@@ -405,7 +423,7 @@ impl Lowerer {
     ) -> Self {
         let escape = zz_hir::escape_analyze(&tp);
         let (import_fn_aliases, import_ns_aliases) = Self::collect_import_aliases(&tp);
-        Lowerer {
+        let mut lowerer = Lowerer {
             reachable_funcs,
             reachable_natives,
             entry_main,
@@ -413,6 +431,8 @@ impl Lowerer {
             escape,
             import_fn_aliases,
             import_ns_aliases,
+            specialized: std::collections::HashSet::new(),
+            unboxed_ret: std::cell::RefCell::new(None),
             loop_arenas: std::cell::RefCell::new(Vec::new()),
             defer_slots: std::cell::RefCell::new(Vec::new()),
             closure_defs: std::cell::RefCell::new(Vec::new()),
@@ -423,7 +443,9 @@ impl Lowerer {
             stmt_direct: std::cell::Cell::new(false),
             green: std::cell::RefCell::new(None),
             precompiled: false,
-        }
+        };
+        lowerer.specialized = lowerer.compute_specialized();
+        lowerer
     }
 
     /// Enable precompiled runtime mode: the generated C omits `RUNTIME_C`
@@ -431,6 +453,173 @@ impl Lowerer {
     /// runtime is linked from a precompiled `libzz_rt.a` instead.
     pub fn set_precompiled(&mut self, v: bool) {
         self.precompiled = v;
+    }
+
+    /// C scalar type for a plain ZZ scalar (`int`/`float`/`bool`).
+    /// Anything else (strings, containers, options, structs, …) is boxed.
+    pub(super) fn scalar_ctype(ty: &zz_checker::Type) -> Option<&'static str> {
+        match ty {
+            zz_checker::Type::Int => Some("int64_t"),
+            zz_checker::Type::Float => Some("double"),
+            zz_checker::Type::Bool => Some("bool"),
+            _ => None,
+        }
+    }
+
+    /// Find a top-level function body by ZZ name (impl methods live under
+    /// `Impl` items and are never specialized, so only `Func` items count).
+    fn find_body(
+        &self,
+        fname: &str,
+    ) -> Option<(&[zz_frontend::ast::Param], &zz_frontend::ast::Block)> {
+        for stmt in self.tp.stmts() {
+            if let Stmt::Func {
+                name, params, body, ..
+            } = stmt
+            {
+                if name.join(".") == fname {
+                    return Some((params, body));
+                }
+            }
+        }
+        None
+    }
+
+    /// Compute the scalar-specialized set: reachable user functions whose
+    /// params and return are all plain scalars, with no defaults/generics,
+    /// non-extern, non-method, and no params captured by nested closures
+    /// (captured params live in heap cells — the `_u` fast path needs
+    /// plain scalar locals).
+    fn compute_specialized(&self) -> HashSet<String> {
+        let mut out = HashSet::new();
+        // Sort for deterministic behavior across runs/platforms.
+        let mut names: Vec<&String> = self.reachable_funcs.iter().collect();
+        names.sort();
+        for fname in names {
+            let Some(sig) = self.tp.funcs.get(fname) else {
+                continue;
+            };
+            if sig.is_extern || !sig.generics.is_empty() {
+                continue;
+            }
+            if sig.has_default.iter().any(|d| *d) {
+                continue;
+            }
+            if self.is_impl_method(fname) {
+                continue;
+            }
+            let mut ctypes = Vec::with_capacity(sig.params.len());
+            let mut ok = true;
+            for (_, t) in &sig.params {
+                match Self::scalar_ctype(t) {
+                    Some(c) => ctypes.push(c),
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok || Self::scalar_ctype(&sig.ret).is_none() {
+                continue;
+            }
+            // Captured params would need heap cells: boxed path only.
+            // (The set may also name the function itself on recursion or
+            // globals — only captures of actual params matter here.)
+            if let Some((params, body)) = self.find_body(fname) {
+                let param_names: Vec<String> = params.iter().map(|p| p.name.name.clone()).collect();
+                let caps = self.body_capture_set(&param_names, body);
+                if caps.iter().any(|c| param_names.contains(c)) {
+                    continue;
+                }
+            } else {
+                // No ZZ body (should not happen for reachable user funcs):
+                // stay boxed rather than emitting a dangling `_u` decl.
+                continue;
+            }
+            out.insert(fname.clone());
+        }
+        out
+    }
+
+    /// Seed a fresh `NameCtx` with the scalar-specialized signatures so
+    /// `scalar_operand_type` recognizes specialized calls anywhere
+    /// (function bodies, top-level code, closures).
+    pub(super) fn seed_scalar_fns(&self, names: &mut NameCtx) {
+        for fname in &self.specialized {
+            if let Some(sig) = self.tp.funcs.get(fname) {
+                if let Some(ret) = Self::scalar_ctype(&sig.ret) {
+                    names
+                        .scalar_fn_sigs
+                        .insert(fname.clone(), (ret, sig.params.len()));
+                }
+            }
+        }
+    }
+
+    /// C return type of a specialized function, or `None`.
+    pub(super) fn specialized_ret(&self, fname: &str) -> Option<&'static str> {
+        if !self.specialized.contains(fname) {
+            return None;
+        }
+        self.tp
+            .funcs
+            .get(fname)
+            .and_then(|sig| Self::scalar_ctype(&sig.ret))
+    }
+
+    /// Field accessor unboxing a boxed `zz_value` of C scalar type `ctype`
+    /// (`int64_t` → `.i`, `double` → `.f`, `bool` → `.b`).
+    pub(super) fn scalar_field(ctype: &str) -> &'static str {
+        match ctype {
+            "double" => "f",
+            "bool" => "b",
+            _ => "i",
+        }
+    }
+
+    /// Emit `val` (already-lowered C for `e`) as a raw scalar of C type
+    /// `expected`: raw scalars pass through (with a cast on a known type
+    /// mismatch), boxed values unbox through the matching union field.
+    /// Mirrors the `Decl` scalar-initializer discipline.
+    pub(super) fn unbox_for_return(
+        &self,
+        e: &Expr,
+        val: String,
+        names: &NameCtx,
+        expected: &'static str,
+    ) -> String {
+        if let Some((raw, t)) = crate::lower::context::raw_scalar_text(e, &val, names) {
+            // Known type mismatch (mixed int/float functions): convert
+            // explicitly rather than returning the wrong C type.
+            if t != expected {
+                return format!("({expected})({raw})");
+            }
+            return raw;
+        }
+        format!("({val}).{}", Self::scalar_field(expected))
+    }
+
+    /// Implicit tail value when a body yields none: `zz_unit()` boxed,
+    /// scalar zero in `_u` functions (which must return a C scalar).
+    pub(super) fn ret_unit(&self) -> &'static str {
+        match *self.unboxed_ret.borrow() {
+            Some("double") => "0.0",
+            Some("bool") => "false",
+            Some(_) => "0",
+            None => "zz_unit()",
+        }
+    }
+
+    /// Wrap an already-boxed `zz_value` C expression for an unboxed return
+    /// of the active `_u` type (used where the source expression is gone,
+    /// e.g. the `__tail` temp): direct union-field read, no call.
+    /// Passes through unchanged outside `_u` bodies.
+    pub(super) fn ret_unbox(&self, boxed: String) -> String {
+        let expected = (*self.unboxed_ret.borrow()).unwrap_or("zz_value");
+        if expected == "zz_value" {
+            return boxed;
+        }
+        format!("({boxed}).{}", Self::scalar_field(expected))
     }
 
     /// Build the selective/module import alias maps from the program's
@@ -1625,6 +1814,23 @@ pub(crate) fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static 
             }
         }
         Expr::Paren { expr, .. } => scalar_operand_type(expr, names),
+        Expr::Call { callee, args, .. } => {
+            // Calls to scalar-specialized user functions (`zz_fn_f_u`
+            // variants) yield raw C scalars. Only direct `Ident` callees:
+            // shadowing locals hold closure values (indirect dispatch),
+            // and Path/method callees keep the boxed path. Arity must
+            // match exactly (specialized functions take no defaults).
+            if let Expr::Ident { name, .. } = callee.as_ref() {
+                if names.lookup(name).is_none() {
+                    if let Some(&(ret, arity)) = names.scalar_fn_sigs.get(name) {
+                        if arity == args.len() {
+                            return Some(ret);
+                        }
+                    }
+                }
+            }
+            None
+        }
         Expr::Binary {
             op, left, right, ..
         } => {
@@ -1656,6 +1862,45 @@ pub(crate) fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static 
     }
 }
 
+/// Raw C text plus C scalar type for an already-lowered expression, or
+/// `None` when the emission is boxed (or of unknown shape).
+///
+/// Sources, in order:
+/// 1. `scalar_operand_c` — classifier-derived raw text (literals, scalar
+///    locals, negation, folds). Trusted as-is, mirroring historical use.
+/// 2. Cast markers (`(int64_t)(…)` …) on the emitted text — produced by
+///    raw binary folds and unboxed `_u` calls. The marker encodes the type.
+///
+/// A scalar-typed expression whose emission is NEITHER (e.g. a
+/// specialized call that fell back to the boxed convention) yields
+/// `None`: callers must not wrap it again (that double-boxes) and must
+/// not feed it to raw C operators (that miscompiles). This agreement —
+/// classify scalar ⟺ emit raw — is what keeps the unboxed paths sound.
+pub(crate) fn raw_scalar_text(
+    e: &Expr,
+    emitted: &str,
+    names: &NameCtx,
+) -> Option<(String, &'static str)> {
+    if let (Some(raw), Some(t)) = (scalar_operand_c(e, names), scalar_operand_type(e, names)) {
+        return Some((raw, t));
+    }
+    let ident = match e {
+        Expr::Ident { name, .. } => Some(name.as_str()),
+        _ => None,
+    };
+    if emitted_is_raw_scalar(emitted, names, ident) {
+        let t = if emitted.starts_with("(double)(") {
+            "double"
+        } else if emitted.starts_with("(bool)(") {
+            "bool"
+        } else {
+            "int64_t"
+        };
+        return Some((emitted.to_string(), t));
+    }
+    None
+}
+
 /// Return the unboxed C scalar expression for a binary operand. Used
 /// after `scalar_operand_type` returns Some to build a raw C arithmetic
 /// expression without going through `zz_binop`.
@@ -1677,83 +1922,84 @@ pub(crate) fn is_simple_ident(s: &str) -> bool {
 }
 
 pub(crate) fn box_scalar_operand(e: &Expr, names: &NameCtx, emitted: &str) -> String {
-    match scalar_operand_type(e, names) {
-        Some("int64_t") => {
-            let raw = scalar_operand_c(e, names).unwrap_or_else(|| emitted.to_string());
-            format!("zz_int({raw})")
-        }
-        Some("double") => {
-            let raw = scalar_operand_c(e, names).unwrap_or_else(|| emitted.to_string());
-            format!("zz_float({raw})")
-        }
-        Some("bool") => {
-            let raw = scalar_operand_c(e, names).unwrap_or_else(|| emitted.to_string());
-            format!("zz_bool({raw})")
-        }
-        _ => {
-            // Not a recognized scalar shape directly, but the emitted
-            // expression may still be a raw C scalar (e.g., a nested
-            // binary op lowered to `(int64_t)(a * b)`).
-            if emitted.starts_with("(double)(") {
-                format!("zz_float({emitted})")
-            } else if emitted.starts_with("(int64_t)(") {
-                format!("zz_int({emitted})")
-            } else if emitted.starts_with("(bool)(") {
-                format!("zz_bool({emitted})")
-            } else {
-                // Last-resort fallback: if the emitted expression is a
-                // simple C identifier (e.g., "v0") whose name maps to a
-                // scalar-typed local in NameCtx, box it accordingly.
-                // Without this, an int64_t local gets passed unboxed to
-                // `zz_binop` and the C compiler rejects the call with
-                // "incompatible type for argument".
-                //
-                // `names.lookup_type` takes the original ZZ name, but we
-                // only have the emitted C identifier here. The emitted
-                // identifier is unique, so we scan the scope for any entry
-                // whose C identifier matches `emitted` and whose type is
-                // a scalar. Cell derefs (`(*_cellN)`, `(*(T*)env[i])`) are
-                // matched the same way so captured scalars box correctly.
-                if is_simple_ident(emitted)
-                    || emitted.starts_with("zz_global_")
-                    || emitted.starts_with("(*")
-                {
-                    for entries in names.stack.values() {
-                        if let Some((cid, ty)) = entries.last() {
-                            if cid == emitted {
-                                match ty.as_str() {
-                                    "int64_t" => return format!("zz_int({emitted})"),
-                                    "double" => return format!("zz_float({emitted})"),
-                                    "bool" => return format!("zz_bool({emitted})"),
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    for (cid, ty) in names.globals.values() {
-                        if cid == emitted {
-                            match ty.as_str() {
-                                "int64_t" => return format!("zz_int({emitted})"),
-                                "double" => return format!("zz_float({emitted})"),
-                                "bool" => return format!("zz_bool({emitted})"),
-                                _ => {}
-                            }
-                        }
-                    }
-                    for (cid, ty) in names.cap_deref.values() {
-                        if cid == emitted {
-                            match ty.as_str() {
-                                "int64_t" => return format!("zz_int({emitted})"),
-                                "double" => return format!("zz_float({emitted})"),
-                                "bool" => return format!("zz_bool({emitted})"),
-                                _ => {}
-                            }
+    // `raw_scalar_text` (not bare classification): a scalar-typed
+    // expression whose emission is already boxed — e.g. a specialized
+    // call that fell back to the boxed convention — must pass through.
+    // Wrapping it again double-boxes (`zz_int(zz_fn_…(…))`).
+    match raw_scalar_text(e, emitted, names) {
+        Some((raw, "double")) => format!("zz_float({raw})"),
+        Some((raw, "bool")) => format!("zz_bool({raw})"),
+        Some((raw, _)) => format!("zz_int({raw})"),
+        None => raw_fallback_box(e, names, emitted),
+    }
+}
+
+/// Legacy fallbacks for expressions the classifier does not recognize:
+/// cast markers, then C-identifier scope scans. Split out of
+/// `box_scalar_operand` so the classified arms above stay a pure
+/// `raw_scalar_text` decision.
+pub(crate) fn raw_fallback_box(_e: &Expr, names: &NameCtx, emitted: &str) -> String {
+    // Not a recognized scalar shape directly, but the emitted
+    // expression may still be a raw C scalar (e.g., a nested
+    // binary op lowered to `(int64_t)(a * b)`).
+    if emitted.starts_with("(double)(") {
+        format!("zz_float({emitted})")
+    } else if emitted.starts_with("(int64_t)(") {
+        format!("zz_int({emitted})")
+    } else if emitted.starts_with("(bool)(") {
+        format!("zz_bool({emitted})")
+    } else {
+        // Last-resort fallback: if the emitted expression is a
+        // simple C identifier (e.g., "v0") whose name maps to a
+        // scalar-typed local in NameCtx, box it accordingly.
+        // Without this, an int64_t local gets passed unboxed to
+        // `zz_binop` and the C compiler rejects the call with
+        // "incompatible type for argument".
+        //
+        // `names.lookup_type` takes the original ZZ name, but we
+        // only have the emitted C identifier here. The emitted
+        // identifier is unique, so we scan the scope for any entry
+        // whose C identifier matches `emitted` and whose type is
+        // a scalar. Cell derefs (`(*_cellN)`, `(*(T*)env[i])`) are
+        // matched the same way so captured scalars box correctly.
+        if is_simple_ident(emitted)
+            || emitted.starts_with("zz_global_")
+            || emitted.starts_with("(*")
+        {
+            for entries in names.stack.values() {
+                if let Some((cid, ty)) = entries.last() {
+                    if cid == emitted {
+                        match ty.as_str() {
+                            "int64_t" => return format!("zz_int({emitted})"),
+                            "double" => return format!("zz_float({emitted})"),
+                            "bool" => return format!("zz_bool({emitted})"),
+                            _ => {}
                         }
                     }
                 }
-                emitted.to_string()
+            }
+            for (cid, ty) in names.globals.values() {
+                if cid == emitted {
+                    match ty.as_str() {
+                        "int64_t" => return format!("zz_int({emitted})"),
+                        "double" => return format!("zz_float({emitted})"),
+                        "bool" => return format!("zz_bool({emitted})"),
+                        _ => {}
+                    }
+                }
+            }
+            for (cid, ty) in names.cap_deref.values() {
+                if cid == emitted {
+                    match ty.as_str() {
+                        "int64_t" => return format!("zz_int({emitted})"),
+                        "double" => return format!("zz_float({emitted})"),
+                        "bool" => return format!("zz_bool({emitted})"),
+                        _ => {}
+                    }
+                }
             }
         }
+        emitted.to_string()
     }
 }
 
