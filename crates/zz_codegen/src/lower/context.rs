@@ -42,6 +42,28 @@ fn cid_counter(cid: &str) -> usize {
     usize::MAX
 }
 
+/// A straight-line binding of a ZZ name to a pure-scalar array literal:
+/// the source element expressions plus their eagerly-resolved raw C
+/// scalar texts and C types. Lets `arr[i]` with a literal in-bounds
+/// index forward directly to the element's raw C expression (SROA):
+/// `arr := [i, i + 1, i + 2]; a = a + arr[0] + arr[2]` lowers to
+/// `(int64_t)((v18 + v20) + (v20 + 2))` with no `zz_index_get` call,
+/// matching what Rust does for stack arrays.
+///
+/// Soundness: entries die on any reassignment of the name, on any
+/// reassignment of a name mentioned by an element, on any call taking
+/// the name (possible mutation/retention), on closure capture of the
+/// name, and at every scope pop — so a forwarded text always denotes
+/// the live value of the same iteration and scope.
+#[derive(Clone)]
+pub(crate) struct StackArrayEntry {
+    /// Source element expressions (for mention-based invalidation).
+    pub(crate) elems: Vec<Expr>,
+    /// Eagerly-resolved `(raw C text, C scalar type)` per element,
+    /// resolved at record time so later scope changes cannot skew them.
+    pub(crate) raw: Vec<(String, &'static str)>,
+}
+
 /// Scope-aware C identifier allocator (handles shadowing).
 #[derive(Default, Clone)]
 pub struct NameCtx {
@@ -77,6 +99,12 @@ pub struct NameCtx {
     /// most recently bound to (straight-line code only). Used to fold
     /// `len(v)` to a constant so tight loops lower to raw scalar arith.
     pub(crate) array_lens: HashMap<String, usize>,
+    /// zz var name → pure-scalar array literal elements it was most
+    /// recently bound to (straight-line code only). Used to forward
+    /// `arr[lit]` reads to the element's raw C expression, eliminating
+    /// the per-iteration `zz_index_get` call plus boxing. See
+    /// [`StackArrayEntry`] for the invalidation contract.
+    pub(crate) stack_array_elems: HashMap<String, StackArrayEntry>,
     /// zz var name → checker type from the type system. Used by method
     /// dispatch to select the correct namespace (e.g., `"str"` for strings
     /// vs `"vec"` for arrays) when multiple natives share a method name.
@@ -106,6 +134,7 @@ impl NameCtx {
             capture_set: HashSet::new(),
             scope_markers: Vec::new(),
             array_lens: HashMap::new(),
+            stack_array_elems: HashMap::new(),
             checker_types: HashMap::new(),
             current_scope: zz_checker::TOP_SCOPE.to_string(),
             scalar_fn_sigs: HashMap::new(),
@@ -306,6 +335,10 @@ impl NameCtx {
     /// Captures (`cap_deref`) and globals survive: environments outlive
     /// inner scopes.
     pub(super) fn pop_scope(&mut self) {
+        // Forwarded element texts embed C identifiers that die with the
+        // scope — drop all of them (missed opt past the boundary, never
+        // a stale read). `array_lens` survives (bare counts need no ids).
+        self.stack_array_elems.clear();
         if let Some(marker) = self.scope_markers.pop() {
             for vec in self.stack.values_mut() {
                 vec.retain(|(cid, _)| cid_counter(cid) < marker);
@@ -339,6 +372,44 @@ impl NameCtx {
     /// merged path could have changed.
     pub(super) fn clear_array_lens(&mut self) {
         self.array_lens.clear();
+        self.stack_array_elems.clear();
+    }
+
+    /// Record that `name` currently holds a pure-scalar array literal:
+    /// source element expressions plus their resolved raw C texts/types.
+    pub(super) fn set_stack_array_elems(
+        &mut self,
+        name: &str,
+        elems: Vec<Expr>,
+        raw: Vec<(String, &'static str)>,
+    ) {
+        self.stack_array_elems
+            .insert(name.to_string(), StackArrayEntry { elems, raw });
+    }
+
+    /// Raw `(C text, C type)` for element `idx` of the literal most
+    /// recently bound to `name`, or `None` when unknown/out of bounds.
+    /// Literal indices only: a dynamic index cannot be statically forwarded.
+    pub(super) fn stack_array_elem(&self, name: &str, idx: i64) -> Option<(String, &'static str)> {
+        if idx < 0 {
+            return None;
+        }
+        let entry = self.stack_array_elems.get(name)?;
+        entry.raw.get(idx as usize).cloned()
+    }
+
+    /// Forget forwarded elements for `name` AND for every binding whose
+    /// element expressions mention `name` (reassigning a mentioned name
+    /// changes the denoted value). Called on reassignment, on calls
+    /// taking the name, and on closure capture of the name.
+    pub(super) fn invalidate_stack_array_elems(&mut self, name: &str) {
+        self.stack_array_elems.remove(name);
+        self.stack_array_elems.retain(|_, entry| {
+            !entry
+                .elems
+                .iter()
+                .any(|e| super::expr::mentions_ident(e, name))
+        });
     }
 }
 
@@ -453,6 +524,67 @@ impl Lowerer {
     /// runtime is linked from a precompiled `libzz_rt.a` instead.
     pub fn set_precompiled(&mut self, v: bool) {
         self.precompiled = v;
+    }
+
+    /// True when the program may run task threads: loop-top
+    /// `zz_safepoint()` courtesy yields exist so sibling AOT task
+    /// threads get scheduled on quantum expiry. Programs without
+    /// concurrency skip them entirely, letting clang see a pure loop
+    /// and fold tight scalar reductions to closed form (Rust parity
+    /// on `sum 0..N`). Omission is always *correct* — the safepoint
+    /// never suspends the C frame, it only yields the OS thread —
+    /// so the gate is deliberately broad (any task/chan/spawn use).
+    pub(crate) fn needs_safepoint(&self) -> bool {
+        self.reachable_natives
+            .iter()
+            .any(|n| n.contains("task") || n.contains("chan") || n.contains("spawn"))
+    }
+
+    /// Emit a loop-top cooperative safepoint when the program uses
+    /// concurrency; otherwise emit nothing (see [`Self::needs_safepoint`]).
+    pub(super) fn emit_safepoint(&self, out: &mut String, indent: &str) {
+        if self.needs_safepoint() {
+            out.push_str(&format!("{indent}zz_safepoint();\n"));
+        }
+    }
+
+    /// Record a straight-line `name := [e0, e1, …]` / `name = […]`
+    /// binding for index forwarding when every element resolves to a
+    /// raw C scalar in the current scope. Drops the entry (plus any
+    /// entries mentioning the name) otherwise, so a later read never
+    /// forwards through a non-scalar or out-of-scope element.
+    ///
+    /// Skipped in green closures (frame-cell lifetimes + resume labels
+    /// are out of scope for this opt) and for captured names (a nested
+    /// closure may mutate them between record and read).
+    pub(super) fn record_array_elems(&self, name: &str, elems: &[Expr], names: &mut NameCtx) {
+        names.invalidate_stack_array_elems(name);
+        if self.green_active() {
+            return;
+        }
+        if names.capture_set.contains(name) {
+            return;
+        }
+        let mut raw = Vec::with_capacity(elems.len());
+        for e in elems {
+            // Totality: forwarding re-executes the element per read, so
+            // potentially-trapping divisions must stay with the array
+            // construction (which always executes). Non-trapping
+            // literals and pure arithmetic forward freely.
+            if !elem_is_total(e) {
+                return;
+            }
+            let t = match scalar_operand_type(e, names) {
+                Some(t) if t == "int64_t" || t == "double" || t == "bool" => t,
+                _ => return,
+            };
+            let c = match scalar_operand_c(e, names) {
+                Some(c) => c,
+                _ => return,
+            };
+            raw.push((c, t));
+        }
+        names.set_stack_array_elems(name, elems.to_vec(), raw);
     }
 
     /// C scalar type for a plain ZZ scalar (`int`/`float`/`bool`).
@@ -1750,6 +1882,43 @@ pub(crate) fn binop_runtime_op(op: &zz_frontend::ast::BinOp) -> &'static str {
     }
 }
 
+/// True when an array-literal element is safe to re-execute at each
+/// forwarded read: no calls, no indexing, and no division/remainder
+/// except by a statically-nonzero literal divisor. Forwarding a
+/// trapping `x / y` would move the trap from construction (always
+/// executed) to the read (possibly dead or conditional) — a behavior
+/// change in crashing programs. Everything else here is total.
+pub(crate) fn elem_is_total(e: &Expr) -> bool {
+    match e {
+        Expr::Int { .. } | Expr::Float { .. } | Expr::Bool { .. } | Expr::Str { .. } => true,
+        Expr::Ident { .. } | Expr::Path { .. } => true,
+        Expr::Paren { expr, .. } => elem_is_total(expr),
+        Expr::Unary { expr, .. } => elem_is_total(expr),
+        Expr::Binary {
+            op, left, right, ..
+        } => {
+            use zz_frontend::ast::BinOp::{Div, Rem};
+            if matches!(op, Div | Rem) && !is_nonzero_lit(right) {
+                return false;
+            }
+            elem_is_total(left) && elem_is_total(right)
+        }
+        Expr::Index { obj, index, .. } => elem_is_total(obj) && elem_is_total(index),
+        _ => false,
+    }
+}
+
+/// True for a literal divisor that cannot trap: nonzero int, or finite
+/// nonzero float.
+fn is_nonzero_lit(e: &Expr) -> bool {
+    match e {
+        Expr::Int { value, .. } => *value != 0,
+        Expr::Float { value, .. } => *value != 0.0 && value.is_finite(),
+        Expr::Paren { expr, .. } => is_nonzero_lit(expr),
+        _ => false,
+    }
+}
+
 /// Classify a binary operand as a recognized scalar shape, returning its C
 /// type (`"int64_t"` / `"double"`) if so. Recognized shapes:
 ///   - Int literal  → `"int64_t"`
@@ -1857,6 +2026,21 @@ pub(crate) fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static 
                 }
                 _ => None,
             }
+        }
+        Expr::Index { obj, index, .. } => {
+            // Stack-array element forwarding (SROA): `arr[lit]` where
+            // `arr` is bound to a pure-scalar literal in straight-line
+            // code classifies as the element's scalar type, so
+            // arithmetic over it stays raw end to end. Dynamic indices
+            // and non-recorded bases keep the boxed `zz_index_get` path.
+            let Expr::Ident { name, .. } = obj.as_ref() else {
+                return None;
+            };
+            let Expr::Int { value, .. } = index.as_ref() else {
+                return None;
+            };
+            let (_, t) = names.stack_array_elem(name, *value)?;
+            Some(t)
         }
         _ => None,
     }
@@ -2179,6 +2363,18 @@ pub(crate) fn scalar_operand_c(e: &Expr, names: &NameCtx) -> Option<String> {
                 _ => return None,
             };
             Some(format!("({l} {c_op} {r})"))
+        }
+        Expr::Index { obj, index, .. } => {
+            // Forwarding counterpart of the `scalar_operand_type`
+            // Index arm: the element's eagerly-resolved raw C text.
+            let Expr::Ident { name, .. } = obj.as_ref() else {
+                return None;
+            };
+            let Expr::Int { value, .. } = index.as_ref() else {
+                return None;
+            };
+            let (raw, _) = names.stack_array_elem(name, *value)?;
+            Some(raw)
         }
         _ => None,
     }

@@ -1729,3 +1729,74 @@ fn scalar_fn_with_capturing_closure_matches_vm() {
     let (_, out) = native_run(src);
     assert_eq!(out, "16\n");
 }
+
+#[test]
+fn safepoint_elided_without_concurrency() {
+    // Loop-top `zz_safepoint()` calls are a codegen barrier: clang
+    // cannot fold the loop while the opaque call sits at the top.
+    // Concurrency-free programs must not emit any (the declaration in
+    // the runtime prelude is not a call — filter on the call suffix).
+    let src = "func main() {\n    s := 0\n    for i in 0..5000000 {\n        s = s + i\n    }\n    println(s)\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    assert!(
+        !reach.natives.iter().any(|n| n.contains("task")),
+        "bench-shaped program must not pull task natives"
+    );
+    let c = lower_only(&pruned, &reach, "main").source;
+    let calls: Vec<&str> = c
+        .lines()
+        .filter(|l| l.contains("zz_safepoint();"))
+        .collect();
+    assert!(
+        calls.is_empty(),
+        "expected no safepoint calls, found: {calls:?}"
+    );
+}
+
+#[test]
+fn safepoint_kept_with_concurrency() {
+    // Programs that spawn tasks keep the courtesy yield so sibling
+    // threads get scheduled inside tight loops.
+    let src = "import std.task\nfunc main() {\n    h := task.spawn(|_| {\n        42\n    })\n    s := 0\n    for i in 0..100 {\n        s = s + i\n    }\n    println(\"{task.join(h)} {s}\")\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    assert!(
+        reach.natives.iter().any(|n| n.contains("task")),
+        "spawn program must pull task natives, got: {:?}",
+        reach.natives
+    );
+    let c = lower_only(&pruned, &reach, "main").source;
+    assert!(
+        c.lines().any(|l| l.contains("zz_safepoint();")),
+        "spawn program must keep loop safepoints"
+    );
+}
+
+#[test]
+fn stack_array_index_forwards_to_raw_arith() {
+    // `arr := [i, i + 1, i + 2]; a = a + arr[0] + arr[2]` must lower
+    // to raw scalar arithmetic with no `zz_index_get` call in user
+    // code (SROA, matching Rust's stack-array folding).
+    let src = "func main() {\n    a := 0\n    for i in 0..100 {\n        arr := [i, i + 1, i + 2]\n        a = a + arr[0] + arr[2]\n    }\n    println(a)\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    let c = lower_only(&pruned, &reach, "main").source;
+    let user = c.split("// ---- generated code ----").nth(1).unwrap_or("");
+    assert!(
+        !user.contains("zz_index_get("),
+        "forwarded reads must not call zz_index_get:\n{user}"
+    );
+    assert!(
+        user.contains("(int64_t)("),
+        "accumulation must stay raw scalar arith:\n{user}"
+    );
+    let (_, out) = native_run(src);
+    assert_eq!(out, "10100\n");
+}
+
+#[test]
+fn stack_array_forwarding_killed_by_store_and_push() {
+    // Stores and mutating calls must kill forwarding: the read after
+    // must observe the mutation, not the construction-time element.
+    let src = "func main() {\n    arr := [1, 2, 3]\n    arr[0] = 99\n    println(arr[0])\n    b := [10, 20]\n    b.push(30)\n    println(\"{b[0]} {len(b)}\")\n}\n";
+    let (_, out) = native_run(src);
+    assert_eq!(out, "99\n10 3\n");
+}
