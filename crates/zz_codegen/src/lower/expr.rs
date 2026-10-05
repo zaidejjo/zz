@@ -4993,10 +4993,20 @@ impl Lowerer {
                 // Tuples erase to arrays on every engine: check the tag
                 // and length, then bind element-wise (recursively, so
                 // nested enums inside tuples keep working).
-                conds.push(format!(
+                //
+                // Extraction is guarded by the same tag+len test inline:
+                // flatten output runs up front for every arm (before any
+                // arm condition is tested), so an unguarded `zz_array_get`
+                // would dereference a non-array payload when the arm
+                // doesn't match (native SIGSEGV — e.g. `describe(IntLit)`
+                // running the `.Pair((a,b))` arm's unpack). The ternary
+                // only calls into the array when the guard holds;
+                // otherwise the temp is unit and the arm's conds fail.
+                let guard = format!(
                     "({scrut}.tag == ZZ_ARRAY && zz_array_len({scrut}.arr) == {})",
                     pats.len()
-                ));
+                );
+                conds.push(guard.clone());
                 for (idx, p) in pats.iter().enumerate() {
                     // Element temps back bindings (read in the body), so
                     // they live in frame cells under green.
@@ -5004,7 +5014,7 @@ impl Lowerer {
                         let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
                         let err_tmp = names.fresh("_e");
                         out.push_str(&format!(
-                            "        int {err_tmp} = 0;\n        {deref} = zz_array_get({scrut}.arr, (zz_value){{ZZ_INT, {{.i = {idx}}}}}, &{err_tmp});\n"
+                            "        int {err_tmp} = 0;\n        {deref} = ({guard} ? zz_array_get({scrut}.arr, (zz_value){{ZZ_INT, {{.i = {idx}}}}}, &{err_tmp}) : zz_unit());\n"
                         ));
                         deref
                     } else {
@@ -5012,7 +5022,7 @@ impl Lowerer {
                         let err_tmp = names.fresh("_e");
                         out.push_str(&format!("        int {err_tmp} = 0;\n"));
                         out.push_str(&format!(
-                            "        zz_value {elem_tmp} = zz_array_get({scrut}.arr, (zz_value){{ZZ_INT, {{.i = {idx}}}}}, &{err_tmp});\n"
+                            "        zz_value {elem_tmp} = ({guard} ? zz_array_get({scrut}.arr, (zz_value){{ZZ_INT, {{.i = {idx}}}}}, &{err_tmp}) : zz_unit());\n"
                         ));
                         elem_tmp
                     };
