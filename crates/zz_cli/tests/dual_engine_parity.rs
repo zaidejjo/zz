@@ -1643,10 +1643,10 @@ fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
                 );
             }
             if q.nat_dev.is_some() && q.nat_rel.is_some() {
-                for (name, leg) in [
-                    ("nat_dev", q.nat_dev.as_ref().unwrap()),
-                    ("nat_rel", q.nat_rel.as_ref().unwrap()),
-                ] {
+                let (Some(nd), Some(nr)) = (&q.nat_dev, &q.nat_rel) else {
+                    unreachable!()
+                };
+                for (name, leg) in [("nat_dev", nd), ("nat_rel", nr)] {
                     assert_eq!(leg.0, 0, "{name} should exit 0:\n{}", fmt_quad(file, q));
                     assert!(
                         leg.1.lines().any(|l| l.trim() == "log=[1, 2]"),
