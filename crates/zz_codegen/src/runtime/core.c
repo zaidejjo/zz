@@ -6051,6 +6051,19 @@ int zz_run(void) {
     return main_err;
 }
 
+// Map `main()`'s return value to a process exit code: `.err(e)` prints
+// `e` (Display form, like the VM) to stderr and exits 1; anything else
+// (`.ok(v)`, unit, …) exits 0.
+int zz_main_result_code(zz_value r) {
+    if (r.tag == ZZ_RESULT_ERR && r.payload) {
+        char *msg = zz_value_to_display_string(r.payload);
+        fprintf(stderr, "%s\n", msg ? msg : "<error>");
+        free(msg);
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     zz_g_argc = argc;
     zz_g_argv = argv;

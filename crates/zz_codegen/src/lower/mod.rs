@@ -382,8 +382,9 @@ impl Lowerer {
         }
 
         let main_decl = if self.reachable_funcs.contains(&self.entry_main) {
-            // main exists: call its stub from zz_call_main.
-            "zz_call_into_main();".to_string()
+            // main exists: its return value decides the exit code
+            // (`zz_main_result_code`: `.err` prints + exits 1).
+            "return zz_call_into_main();".to_string()
         } else {
             String::new()
         };
@@ -509,8 +510,14 @@ impl Lowerer {
         } else {
             crate::RUNTIME_C
         };
+        let main_tail = if self.reachable_funcs.contains(&self.entry_main) {
+            // main() exists: its stub returns the exit code already.
+            String::new()
+        } else {
+            "    return 0;".to_string()
+        };
         let source = format!(
-            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals ----\n{globals_decl}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n{body}}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
+            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals ----\n{globals_decl}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n{body}}}\n\nint zz_call_main(void) {{\n    {main_decl}\n{main_tail}\n}}\n",
             runtime_h = crate::RUNTIME_H,
             runtime_c = runtime_c,
             struct_preamble = struct_preamble,
@@ -545,11 +552,11 @@ impl Lowerer {
                 .unwrap_or(false);
             if takes_argv {
                 format!(
-                    "\nstatic void zz_call_into_main(void);\nstatic void zz_call_into_main(void) {{ int _e = 0; zz_value _cli = zz_env_args(zz_unit(), &_e); zz_value _r = {m}(&_cli, 1); (void)_r; }}\n"
+                    "\nstatic int zz_call_into_main(void);\nstatic int zz_call_into_main(void) {{ int _e = 0; zz_value _cli = zz_env_args(zz_unit(), &_e); zz_value _r = {m}(&_cli, 1); return zz_main_result_code(_r); }}\n"
                 )
             } else {
                 format!(
-                    "\nstatic void zz_call_into_main(void);\nstatic void zz_call_into_main(void) {{ zz_value _r = {m}(NULL, 0); (void)_r; }}\n"
+                    "\nstatic int zz_call_into_main(void);\nstatic int zz_call_into_main(void) {{ zz_value _r = {m}(NULL, 0); return zz_main_result_code(_r); }}\n"
                 )
             }
         } else {

@@ -318,7 +318,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         }
 
         // --- Error fixtures where native leniency exits 0 ---
-        "main_result_err" => Some("native: main returning .err exits 0 (no propagation)"),
         "pg_connect_refused" => {
             Some("native: refused connect yields a null handle and exits 0 (AOT leniency, documented)")
         }

@@ -1,5 +1,6 @@
-// features: comparison, error-case, func-call, known-divergence, option-result, string-literal
-// `func main() -> Result<T, E>` failure path — Err prints to stderr, exit 1.
+// features: comparison, error-case, func-call, option-result, string-literal
+// `func main() -> Result<T, E>` failure path — Err prints to stderr, exit 1
+// (native propagates via zz_main_result_code, like the VM).
 func main() -> Result<int, str> {
     .err("boom from main")
 }

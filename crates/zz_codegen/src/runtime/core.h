@@ -1024,6 +1024,9 @@ zz_value zz_result_expect(zz_value res, zz_value msg, int *err);
 // Generated code calls zz_main (top-level statements) then zz_call_main.
 int zz_run(void);
 
+// Maps `main()`'s return value to a process exit code (`.err` → 1).
+int zz_main_result_code(zz_value r);
+
 // Externs defined by generated code:
 extern void zz_main(void);
 extern int zz_call_main(void);
