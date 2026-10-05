@@ -1,3 +1,4 @@
+// features: closures, comparison, imports, locals, match, nondeterministic, option-result, print, std-http, string-literal
 // tests/fixtures/stdlib/http_client_test.zz — HTTP server + dispatch
 import std.http
 

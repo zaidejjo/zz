@@ -1,0 +1,8 @@
+// features: arrays, casts, indexing, known-divergence, print, string-literal, string-ops
+// E2E: edge — chained index store. DIVERGENCE: VM drops the write into a
+// temp clone (reads back old value), native writes through. M1 value
+// model must decide. Known native failure.
+m := [[1, 2], [3, 4]]
+m[0][0] = 99
+println("m00=" + str(m[0][0]))
+println("edge_chained_store_ok")

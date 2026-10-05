@@ -1,3 +1,4 @@
+// features: float-arith, imports, locals, print, std-math, string-literal
 // E2E: std.math — math functions
 import std.math
 

@@ -1,3 +1,4 @@
+// features: comparison, func-call, int-arith, locals, match, option-result, print, string-literal, try-question
 // E2E: prefix `try` sugar + `?` — same error type (identity conversion).
 func fetch() -> Result<int, str> {
     .ok(42)

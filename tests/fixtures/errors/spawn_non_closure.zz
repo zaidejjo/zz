@@ -1,3 +1,4 @@
+// features: error-case, func-call, imports, locals, print, std-task, string-literal
 // E2E-ERROR: spawning a non-closure is a static type error.
 import std.task
 

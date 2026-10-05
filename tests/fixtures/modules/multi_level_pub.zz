@@ -1,3 +1,4 @@
+// features: comparison, func-call, int-arith, locals, print, pub-visibility
 // Test: pub re-export chain pattern.
 // Full multi-file test is in loader/tests.rs (pub_reexport_chain).
 

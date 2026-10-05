@@ -1,3 +1,4 @@
+// features: comparison, error-case, func-call, locals, option-result, try-question
 // Redundant double-unwrap is a compile error: `?` binds first (postfix is
 // tighter), so `try fetch()?` is `try(fetch()?)` — the outer `try` sees the
 // already-unwrapped `int`, not a `Result`.

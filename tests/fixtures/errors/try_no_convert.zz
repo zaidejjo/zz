@@ -1,3 +1,4 @@
+// features: comparison, error-case, func-call, locals, option-result, structs, try-question
 // Mismatched error types with no Convert impl is a compile error.
 struct ErrA { msg: str }
 struct ErrB { msg: str }

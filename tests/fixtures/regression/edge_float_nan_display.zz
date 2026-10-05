@@ -1,0 +1,5 @@
+// features: float-arith, known-divergence, print
+// E2E: edge — NaN display. DIVERGENCE: VM prints `NaN`, native `nan`
+// (C printf). M1 spec must pick one spelling. Known native failure.
+println(0.0 / 0.0)
+println("edge_float_nan_display_ok")

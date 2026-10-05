@@ -1,3 +1,4 @@
+// features: comparison, float-arith, func-call, int-arith, locals, print, pub-visibility, string-literal, structs
 // Test: pub items should not emit unused variable warnings.
 pub PI := 3.14
 pub func add(a: int, b: int) -> int {

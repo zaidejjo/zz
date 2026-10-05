@@ -1,2 +1,3 @@
+// features: error-case, string-literal
 // E2E: Type mismatch error
 x:int = "hello"

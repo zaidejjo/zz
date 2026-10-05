@@ -1,3 +1,4 @@
+// features: arrays, comparison, func-call, indexing, int-arith, locals, methods, print, string-literal, structs
 // Chained / non-local method receivers: `origin().bump()` must lower
 // exactly like `bump(origin())` (Bug 8b regression: the AOT Field-callee
 // arm dropped the receiver for anything but bare locals, and the extra

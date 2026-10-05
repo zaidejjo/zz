@@ -1,3 +1,4 @@
+// features: comparison, elvis, func-call, imports, locals, match, option-result, print, selective-import, std-env, std-fs, std-process, string-literal
 // E2E: Result/Option stdout presentation — `println(.ok(v))` prints `v`
 // and `println(.some(v))` prints `v` directly (no wrappers) in both
 // engines. Bare `.none` prints `none`. A bare printed `.err` throws a

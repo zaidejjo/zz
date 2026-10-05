@@ -1,3 +1,4 @@
+// features: arrays, bool-logic, comparison, dicts, elvis, imports, locals, match, option-result, print, std-json, string-literal
 // tests/fixtures/stdlib/json_test.zz — json E2E test
 import std.json
 

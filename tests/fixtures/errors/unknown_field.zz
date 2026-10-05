@@ -1,3 +1,4 @@
+// features: error-case, locals, print, structs
 // E2E: Unknown struct field access
 struct Point {x: int, y: int}
 

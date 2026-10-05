@@ -1,3 +1,4 @@
+// features: arrays, bool-logic, dicts, float-arith, int-arith, locals, print, string-literal, type-inference
 // E2E: Type inference — short vs explicit declarations
 // short declarations (inferred)
 x := 42

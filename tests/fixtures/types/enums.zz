@@ -1,3 +1,4 @@
+// features: arrays, bool-logic, comparison, enums, func-call, if-else, if-let, indexing, int-arith, locals, match, methods, print, string-literal, struct-methods
 // E2E: user enums — declaration, construction, matching, methods,
 // equality, nested payloads.
 enum Token {

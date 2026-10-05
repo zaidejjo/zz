@@ -1,3 +1,4 @@
+// features: closures, for-loop, func-call, imports, int-arith, locals, print, ranges, std-chan, std-task, string-literal
 // E2E: relay cascade — 10 tasks chained by channels, each hop +1.
 // Exercises handoff chaining past any inline nesting budget.
 import std.task

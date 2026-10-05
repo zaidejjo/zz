@@ -1,3 +1,4 @@
+// features: aliases, arrays, comparison, dicts, float-arith, func-call, generics, indexing, print, string-literal, structs
 // E2E: type aliases — declaration, use, generics, nesting.
 type Tokens = [Token]
 type Token = str

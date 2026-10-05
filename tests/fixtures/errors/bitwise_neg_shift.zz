@@ -1,2 +1,3 @@
+// features: bitwise, comparison, error-case, locals
 // E2E: Runtime error — negative shift count.
 x := 1 << -1

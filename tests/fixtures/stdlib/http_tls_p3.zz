@@ -1,3 +1,4 @@
+// features: assert, break-continue, closures, comparison, func-call, imports, int-arith, locals, match, option-result, print, std-http, std-task, std-time, string-literal, vm-only, while-loop
 // tests/fixtures/stdlib/http_tls_p3.zz — Phase 3 TLS listener
 // Self-signed localhost cert: 200 over HTTPS + HSTS injection.
 import std.http

@@ -1,3 +1,4 @@
+// features: comparison, func-call, int-arith, known-divergence, locals, methods, print, string-literal, struct-methods, structs
 // Struct impl block tests
 struct Point {x: int, y: int}
 

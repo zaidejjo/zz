@@ -1,3 +1,4 @@
+// features: arrays, if-else, locals, print, string-literal
 // Top-level elif chains over globals (no `func main` wrapper).
 // Regression: top-level `else if` branches compiled to empty else.
 brothers := ["mohammad", "youssef", "firas"]

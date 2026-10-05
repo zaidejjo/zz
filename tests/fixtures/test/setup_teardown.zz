@@ -1,3 +1,4 @@
+// features: assert, comparison, decorators, func-call, locals, print, string-literal, zz-test
 // E2E: @setup and @teardown run before/after each test
 setup_counter := 0
 

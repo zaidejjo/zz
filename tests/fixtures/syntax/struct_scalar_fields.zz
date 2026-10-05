@@ -1,3 +1,4 @@
+// features: bool-logic, comparison, float-arith, func-call, locals, print, pub-visibility, string-literal, structs
 // Struct scalar fields from params, locals, and literals: already-boxed
 // values must pass through, raw scalars get wrapped once. (Used to emit
 // `zz_bool(boxed)` — a C type error — for bool params.)

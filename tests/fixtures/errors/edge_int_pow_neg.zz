@@ -1,0 +1,4 @@
+// features: error-case, int-arith, known-divergence
+// E2E: edge — negative integer exponent. DIVERGENCE: VM errors, native
+// prints 0 (C dpow loop). M1 spec must pick one. Known native failure.
+println(2 ** -1)

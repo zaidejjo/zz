@@ -1,3 +1,4 @@
+// features: error-case, import-alias, imports, locals, print, string-literal
 // E2E: my.connect to a closed port must fail cleanly (no live server needed).
 import std.sqlz.mysql as my
 

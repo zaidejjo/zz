@@ -1,3 +1,4 @@
+// features: arrays, comparison, float-arith, imports, known-divergence, locals, match, option-result, print, std-math, string-literal
 // E2E: std.math — extended math functions
 import std.math
 

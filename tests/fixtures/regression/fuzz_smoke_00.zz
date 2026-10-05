@@ -1,3 +1,4 @@
+// features: bool-logic, closures, comparison, destructuring, for-loop, func-call, if-else, int-arith, locals, print, ranges, return, string-literal, tuples
 // Fuzz smoke (fixed seed): differential VM-vs-native program.
 // Regenerate with tests/fuzz/gen.py; screen with tests/fuzz/run.sh.
 (a1, b2) := (42, 39)

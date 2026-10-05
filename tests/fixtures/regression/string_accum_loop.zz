@@ -1,3 +1,4 @@
+// features: arrays, casts, comparison, for-loop, func-call, if-else, imports, indexing, int-arith, locals, print, ranges, return, short-circuit, std-vec, string-literal, string-ops, structs, vec-push
 // Regression: string accumulators over loops must match on both engines.
 // Native placed `out = out + ...` results in the per-iteration loop arena
 // and reset it at the iteration end, so the accumulator read back NUL

@@ -1,3 +1,4 @@
+// features: comparison, elvis, imports, locals, match, option-result, print, selective-import, std-env, std-fs, std-process, string-literal
 // E2E: std.fs — read_to_string, write, exists, remove_file.
 // Scratch path is per (process, sweep task) so parallel runners never
 // share it.

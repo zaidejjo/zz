@@ -1,3 +1,4 @@
+// features: arrays, casts, for-loop, func-call, imports, int-arith, locals, nondeterministic, print, ranges, std-time, string-literal, string-ops
 // Benchmark: arena-allocated short-lived objects in a tight loop.
 // E2E: stdlib bench_memory_arena
 import std.time

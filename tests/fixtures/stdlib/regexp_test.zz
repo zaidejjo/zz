@@ -1,3 +1,4 @@
+// features: comparison, imports, locals, match, option-result, print, std-regexp, string-literal, string-ops
 // E2E: std.regexp — compile, match, find, replace, captures, email
 import std.regexp
 

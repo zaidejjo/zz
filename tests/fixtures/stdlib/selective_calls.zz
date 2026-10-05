@@ -1,3 +1,4 @@
+// features: casts, import-alias, imports, locals, print, selective-import, std-path, std-str, string-literal
 // E2E: selective imports of pure-ZZ functions resolve on every engine.
 // Bare calls rewrite to their canonical paths (no synthetic binding).
 import std.path(join, dirname)

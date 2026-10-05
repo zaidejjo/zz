@@ -1,3 +1,4 @@
+// features: aliases, error-case, func-call, print
 // ERROR: cyclic type aliases must report, not hang.
 type A = B
 type B = A

@@ -1,3 +1,4 @@
+// features: arrays, for-loop, func-call, hof, imports, indexing, locals, print, std-vec, string-literal, structs, vec-push
 // tests/fixtures/stdlib/vec_nested_str_parity.zz — nested [[str]] parity.
 // Covers plain-local pushes, struct-field pushes, and loop-built inner
 // arrays (the loop + struct shape used to corrupt the first inner element

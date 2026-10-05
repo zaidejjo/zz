@@ -1,3 +1,4 @@
+// features: comparison, dicts, func-call, imports, int-arith, locals, option-result, print, std-env, std-fs, std-http, string-literal, vm-only
 // tests/fixtures/stdlib/http_static_p2.zz — Phase 2 hardened static files
 // 200 + MIME, 404, traversal 403, ETag 304, Range 206/416 via test_req.
 import std.http

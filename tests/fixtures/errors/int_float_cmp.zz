@@ -1,3 +1,4 @@
+// features: comparison, error-case, float-arith, if-else, locals, print, string-literal
 // E2E: Int/float mixed comparisons must be type errors.
 x := 1
 y := 1.0

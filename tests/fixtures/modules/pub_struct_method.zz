@@ -1,3 +1,4 @@
+// features: comparison, func-call, int-arith, locals, print, pub-visibility, structs
 // Test: pub struct and method together.
 pub struct Point {x: int, y: int}
 

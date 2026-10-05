@@ -1,3 +1,4 @@
+// features: comparison, error-case, func-call, pub-visibility, struct-methods, structs
 // E2E: `pub` is not allowed before `impl` — impl methods are always public.
 struct Point { x: int, y: int }
 

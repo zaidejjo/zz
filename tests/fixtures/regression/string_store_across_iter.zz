@@ -1,3 +1,4 @@
+// features: arrays, bool-logic, casts, comparison, dicts, for-loop, func-call, if-else, imports, indexing, int-arith, locals, print, ranges, return, std-vec, string-literal, string-ops, structs, vec-push
 // Regression: every retaining store must heal loop-arena strings to heap
 // (variable copies, array/dict/object slots, push, return). Sibling of
 // string_accum_loop: those shapes aliased arena memory past the reset.

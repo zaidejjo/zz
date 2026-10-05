@@ -1,3 +1,4 @@
+// features: comparison, func-call, int-arith, locals, pub-visibility, return
 // Helper module for selective import tests.
 pub func double(x: int) -> int {
     x * 2

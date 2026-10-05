@@ -1,3 +1,4 @@
+// features: comparison, func-call, int-arith, locals, methods, print, string-literal, string-ops, structs
 // Free-function method syntax: `p.bump()` must lower exactly like
 // `bump(p)` (Bug 8 regression: the AOT backend used to drop the receiver,
 // so the callee read `args[0]` out of bounds — garbage output, hangs,

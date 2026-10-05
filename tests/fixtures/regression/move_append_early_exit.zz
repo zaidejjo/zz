@@ -1,3 +1,4 @@
+// features: arrays, closures, comparison, func-call, if-else, int-arith, locals, match, option-result, print, return, string-literal, vec-push
 // Move-append early exit: `?` unwraps before any take, so a failing
 // lookup leaves no moved-from slot behind and the error propagates.
 func pick(i: int) -> Result<int, str> {

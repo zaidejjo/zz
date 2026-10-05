@@ -1,3 +1,4 @@
+// features: comparison, enums, error-case, func-call, locals, match, print, string-literal
 // ERROR: non-exhaustive match on a user enum must report.
 enum Token {
     Eof,

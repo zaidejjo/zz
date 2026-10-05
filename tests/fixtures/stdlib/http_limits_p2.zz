@@ -1,3 +1,4 @@
+// features: assert, bool-logic, break-continue, bytes, closures, comparison, dicts, func-call, if-else, imports, int-arith, locals, match, option-result, print, short-circuit, std-http, std-net, std-task, std-time, string-literal, vm-only, while-loop
 // tests/fixtures/stdlib/http_limits_p2.zz — Phase 2 listen_cfg over live TCP
 // Single server (one blocking listen): max_body_bytes 413 vs 200 echo,
 // max_reqs_conn close-after-N — all reconnections explicit.

@@ -1,3 +1,4 @@
+// features: comparison, func-call, int-arith, locals, print, pub-visibility
 // Test: local variable shadowing with pub bindings.
 PI := 314
 pub func double(x: int) -> int {

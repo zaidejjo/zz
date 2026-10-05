@@ -1,3 +1,4 @@
+// features: elvis, int-arith, locals, print, string-literal
 // E2E: ? and ?? operators handle newlines correctly.
 // The newline after ?? must NOT eat the next statement.
 // ?? multiline continuation (operator spans lines) must still work.

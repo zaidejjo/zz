@@ -1,3 +1,4 @@
+// features: comparison, imports, locals, nondeterministic, print, std-time, string-literal
 // E2E: std.time — time operations
 import std.time
 

@@ -1,3 +1,4 @@
+// features: comparison, error-case, generics, structs
 // E2E: Generic struct mismatch is a type error.
 struct Box<T> { v: T }
 s: Box<str> = Box{ v: 1 }

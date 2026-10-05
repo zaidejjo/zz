@@ -1,3 +1,4 @@
+// features: arrays, bytes, func-call, imports, int-arith, locals, print, std-bytes, std-str, string-literal
 // E2E: str/bytes builders (linear assembly).
 import std.str
 import std.bytes

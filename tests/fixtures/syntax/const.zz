@@ -1,3 +1,4 @@
+// features: const, float-arith, int-arith, locals, print, string-literal
 // E2E: const (immutable) variables — inferred and explicit types
 const x = 10
 const y:int = 20

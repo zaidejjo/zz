@@ -1,2 +1,3 @@
+// features: error-case, locals
 // E2E: Parse error — missing expression
 x := 1 +

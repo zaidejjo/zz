@@ -1,3 +1,4 @@
+// features: arrays, assert, comparison, for-loop, indexing, int-arith, locals, print, ranges, string-literal, structs, vec-push
 // Move-append elision on struct fields: `s.f = vec.push(s.f, e)` must
 // grow the field in place with identical values.
 struct Wrap {

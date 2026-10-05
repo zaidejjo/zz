@@ -1,3 +1,4 @@
+// features: arrays, imports, locals, print, std-vec, string-literal, vec-push
 // E2E: std.vec — array operations
 import std.vec
 

@@ -1,3 +1,4 @@
+// features: aliases, arrays, comparison, func-call, pub-visibility, string-literal, structs
 // Support module for alias_import.zz: cross-module `pub type` aliases.
 pub type Tokens = [str]
 

@@ -1,3 +1,4 @@
+// features: comparison, locals, print, string-literal, structs
 // E2E: Structs — definition, init, field access, mutation
 struct Point {x: int, y: int}
 

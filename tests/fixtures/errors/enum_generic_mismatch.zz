@@ -1,3 +1,4 @@
+// features: comparison, enums, error-case, func-call, generics, locals, print, string-literal
 // ERROR: different generic instantiations are distinct types.
 enum Box<T> {
     V(T),

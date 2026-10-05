@@ -1,3 +1,4 @@
+// features: comparison, func-call, import-alias, imports, match, print, selective-import, string-literal
 // E2E: cross-module `pub enum` (qualified + selective).
 import support.enum_shapes as shapes(Color)
 

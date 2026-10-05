@@ -1,3 +1,4 @@
+// features: error-case, locals
 // E2E: Compound assignment cannot chain.
 x := 1
 y := 2

@@ -1,3 +1,4 @@
+// features: bytes, closures, comparison, elvis, func-call, imports, locals, match, option-result, print, selective-import, std-env, std-fs, std-process, std-task, string-literal, vec-push
 // E2E: std.fs comprehensive — non-blocking filesystem across VM + AOT.
 //
 // Covers: write/read_to_string, read_bytes, append, copy, move,

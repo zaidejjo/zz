@@ -1,3 +1,4 @@
+// features: assert, bool-logic, func-call, print, string-literal, zz-test
 // E2E: @test(retry) attribute is accepted without errors
 // Retry is tested by verifying the framework doesn't crash when retry is set.
 

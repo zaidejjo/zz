@@ -1,3 +1,4 @@
+// features: comparison, func-call, int-arith, locals, match, option-result, print, string-literal, struct-methods, structs, try-question
 // E2E: `try` across error types via explicit `convert_to_` impl.
 struct MyErr { msg: str }
 struct OtherErr { msg: str }

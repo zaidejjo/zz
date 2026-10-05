@@ -1,3 +1,4 @@
+// features: comparison, embed, func-call, imports, match, option-result, print, std-fs, string-literal
 // E2E (custom harness only): `zz run --embed <dir>` serves static assets
 // through `fs.embedfs()`. NOT registered as a plain success fixture —
 // without `--embed` the reads are (correctly) not_found.

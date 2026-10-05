@@ -1,3 +1,4 @@
+// features: closures, comparison, func-call, if-else, imports, int-arith, locals, match, print, std-chan, std-task, std-time, string-literal
 // E2E: match-binding across suspend — a guarded binding arm's value
 // must survive a channel wait inside the arm.
 import std.task

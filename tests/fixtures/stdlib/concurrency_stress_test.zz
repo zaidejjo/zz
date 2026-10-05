@@ -1,3 +1,4 @@
+// features: closures, for-loop, func-call, imports, int-arith, locals, print, ranges, std-task, string-literal
 // E2E: task stress — 50 spawn+join iterations, all correct.
 // Deterministic: accumulator checked at the end.
 import std.task
