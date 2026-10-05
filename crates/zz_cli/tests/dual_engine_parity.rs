@@ -287,13 +287,13 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // comparison `(v0 > 0)`) but the unboxed-calls work now emits
         // verifiably-raw comparisons, so it runs as strict parity.
         "struct_impl" => {
-            Some("C codegen: unboxed struct returned/fielded as zz_value and vice versa")
+            Some("DEFERRED to HIR->IR lowering (duplicated AOT-lowering bug): unboxed struct returned/fielded as zz_value and vice versa")
         }
         // NOTE: `destructuring` was listed here (top-level tuple values
         // printed empty natively) but the sweep now reports FIXED — native
         // matches the VM, so it runs as strict parity (verified 2026-10-03).
         "struct_embedding" => {
-            Some("C codegen: global unboxed struct passed raw (zz_struct_*) to display builtins (println/fmt/str_cast) instead of its debug_string; verified pre-existing on origin/dev without the method-dispatch fix")
+            Some("DEFERRED to HIR->IR lowering (duplicated AOT-lowering bug): global unboxed struct passed raw (zz_struct_*) to display builtins (println/fmt/str_cast) instead of its debug_string; verified pre-existing on origin/dev without the method-dispatch fix")
         }
 
         // --- Output differences (native runs but output differs) ---
@@ -303,12 +303,12 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "concurrency_panic_test" => Some("native: panic/fail inside task closures lowers to unit (no err plumbing through zz_call_closure); VM yields .err"),
         "encoding_test" => Some("native: different error message format for bad base64/hex/url"),
         "math_extended_test" => Some("native: float precision + error message differences"),
-        "decorators" => Some("native: only the final marker prints; decorator wrapper output missing"),
+        "decorators" => Some("DEFERRED to HIR->IR lowering: only the final marker prints; decorator wrapper output missing"),
         "extension_methods" => {
-            Some("native: extension-method call results missing + spurious conflict diagnostics on stderr")
+            Some("DEFERRED to HIR->IR lowering: extension-method call results missing + spurious conflict diagnostics on stderr")
         }
         "selective_import" | "multi_selective" | "symbol_alias" | "wildcard_import" => {
-            Some("native: imported const binding prints empty (call results are fine)")
+            Some("DEFERRED to HIR->IR lowering: imported const binding prints empty (call results are fine)")
         }
 
         // NOTE: `http_tls_cert`, `main_result_err`, and
