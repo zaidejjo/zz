@@ -322,9 +322,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
 
         // --- Error fixtures where native leniency exits 0 ---
         "main_result_err" => Some("native: main returning .err exits 0 (no propagation)"),
-        "edge_int_pow_neg" => Some(
-            "M0: negative int exponent — VM errors / native prints 0 (C dpow loop)",
-        ),
         "edge_index_oob" => Some(
             "M0: OOB array index — VM errors exit 1 / native yields unit (empty line) exit 0",
         ),
@@ -880,7 +877,7 @@ parity_strict!(
 );
 parity_strict_error!(parity_err_edge_min_div_neg1, "edge_int_min_div_neg1.zz");
 parity_strict_error!(parity_err_edge_min_rem_neg1, "edge_int_min_rem_neg1.zz");
-parity_known_error_failure!(parity_err_edge_pow_neg, "edge_int_pow_neg.zz");
+parity_strict_error!(parity_err_edge_pow_neg, "edge_int_pow_neg.zz");
 parity_known_error_failure!(parity_err_edge_index_oob, "edge_index_oob.zz");
 // Modules fixtures: standalone-runnable files must match on both engines
 // (`import_alias.zz` excluded — broken on the VM itself, see
@@ -1577,26 +1574,6 @@ fn assert_quad_all_fail(file: &Path, q: &QuadLegs) {
 fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
     let natives = q.nat_dev.is_some() && q.nat_rel.is_some();
     match stem {
-        // Negative int exponent: both VM legs error unconditionally
-        // (explicit check, not profile-gated); natives print 0.
-        // M1 decision: trap (spec change; fixture becomes strict error).
-        "edge_int_pow_neg" => {
-            assert_ne!(q.vm_dbg.0, 0, "vm_dbg should error:\n{}", fmt_quad(file, q));
-            assert_ne!(q.vm_rel.0, 0, "vm_rel should error:\n{}", fmt_quad(file, q));
-            if natives {
-                for (name, leg) in [
-                    ("nat_dev", q.nat_dev.as_ref().unwrap()),
-                    ("nat_rel", q.nat_rel.as_ref().unwrap()),
-                ] {
-                    assert_eq!(leg.0, 0, "{name} should exit 0:\n{}", fmt_quad(file, q));
-                    assert!(
-                        leg.1.trim() == "0",
-                        "{name} should print 0, got:\n{}",
-                        fmt_quad(file, q)
-                    );
-                }
-            }
-        }
         // OOB index: both VM legs trap; natives yield unit and exit 0.
         // M1 decision: trap (AOT needs a bounds check).
         "edge_index_oob" => {
@@ -1680,8 +1657,7 @@ fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
 fn quad_split_stem(stem: &str) -> bool {
     matches!(
         stem,
-        "edge_int_pow_neg"
-            | "edge_index_oob"
+        "edge_index_oob"
             | "edge_float_nan_display"
             | "scalar_global_copy"
             | "move_append_struct_copy"

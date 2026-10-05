@@ -213,6 +213,12 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
             }
             return zz_int(a.i % b.i);
         case ZZOP_POW:
+            // Integer power traps on negative exponents (VM parity);
+            // float pow handles them as reciprocals below.
+            if (b.i < 0) {
+                fprintf(stderr, "zz error: negative exponent for integer power\n");
+                exit(1);
+            }
             return zz_int((int64_t)dpow((double)a.i, (double)b.i));
         case ZZOP_EQ:
             return zz_bool(a.i == b.i);
