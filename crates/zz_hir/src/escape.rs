@@ -632,6 +632,7 @@ mod tests {
             funcs,
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
         res.program
     }

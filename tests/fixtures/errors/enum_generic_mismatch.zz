@@ -1,0 +1,10 @@
+// ERROR: different generic instantiations are distinct types.
+enum Box<T> {
+    V(T),
+}
+
+func main() {
+    a := Box.V(1)
+    s := Box.V("hi")
+    println(a == s)
+}

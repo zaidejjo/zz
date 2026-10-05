@@ -246,6 +246,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
         inlay_hints(&parsed.program, source, Some(&cr), None)
     }

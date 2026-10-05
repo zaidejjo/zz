@@ -101,6 +101,47 @@ take plain parameters and name their arguments at use sites
 across modules with `pub type` and import qualified
 (`shapes.Tokens`) or selective (`import shapes(Tokens)`).
 
+### User Enums
+
+```zz
+enum Token {
+    Eof,
+    IntLit(int),
+    Name(str),
+}
+
+t := Token.IntLit(42)   // construction is qualified
+match t {
+    .Eof => "eof",      // patterns name the variant short
+    .IntLit(v) => "int",
+    .Name(s) => s,
+}
+```
+
+Enums erase to qualified objects at runtime, so construction, matching,
+equality, and `impl` methods behave identically on both engines. Matches
+are exhaustiveness-checked (missing variants report, or add a `_` arm).
+Variants hold at most one payload — use a tuple for more
+(`Pair((int, int))`). `enum` is contextual, like `type`. Enums export
+across modules with `pub enum` and chain methods inline, including off
+payload construction (`Token.IntLit(1).add(2)` fills the payload with
+`1`, calls `add` with `2`).
+
+Generic enums take plain parameters and name their arguments at use
+sites (`Box[int]`), exactly like generic structs:
+
+```zz
+enum Box<T> {
+    V(T),
+    E,
+}
+
+b: Box<int> = Box.E
+```
+
+Known V1 limits: match guards in native builds only see scalar
+payloads and outer bindings (the VM is fully general).
+
 ## Functions
 
 ### Basic Function

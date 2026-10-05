@@ -34,6 +34,7 @@ fn env_args_returns_script_args() {
         funcs,
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
     );
     let has_errors = checked
         .errors

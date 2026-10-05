@@ -175,6 +175,17 @@ fn collect_stmt_tokens(stmt: &Stmt, source: &str, out: &mut Vec<RawToken>) {
             }
             collect_type_tokens(target, source, out);
         }
+        Stmt::Enum { name, variants, .. } => {
+            // `enum` is contextual (lexes as Ident): highlight by span.
+            push_keyword_token(stmt.span(), "enum", source, out);
+            push_name_tokens(name, TokenType::Struct, source, out);
+            for (vname, payload) in variants {
+                push_ident_token(&vname.name, vname.span, TokenType::Function, source, out);
+                if let Some(pty) = payload {
+                    collect_type_tokens(pty, source, out);
+                }
+            }
+        }
         Stmt::Impl { name, methods, .. } => {
             push_keyword_token(stmt.span(), "impl", source, out);
             push_name_tokens(name, TokenType::Struct, source, out);

@@ -1,0 +1,14 @@
+// Support module for enum_import.zz: cross-module `pub enum`.
+pub enum Color {
+    Red,
+    Green,
+    Blue,
+    Custom(str),
+}
+
+pub func is_red(c: Color) -> bool {
+    match c {
+        .Red => true,
+        _ => false,
+    }
+}

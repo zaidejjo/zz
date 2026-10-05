@@ -1,0 +1,10 @@
+// ERROR: unknown variant must report with candidates.
+enum Token {
+    Eof,
+    IntLit(int),
+}
+
+func main() {
+    t := Token.Num(1)
+    println(t)
+}

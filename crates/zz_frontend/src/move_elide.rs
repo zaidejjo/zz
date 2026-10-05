@@ -244,6 +244,7 @@ fn count_stmt_refs(s: &Stmt, name: &str) -> usize {
         Stmt::Func { .. }
         | Stmt::Struct { .. }
         | Stmt::TypeAlias { .. }
+        | Stmt::Enum { .. }
         | Stmt::Impl { .. }
         | Stmt::Import { .. } => 0,
         Stmt::For { iter, body, .. } => count_refs(iter, name) + count_block_refs(body, name),

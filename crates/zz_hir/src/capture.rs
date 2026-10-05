@@ -123,6 +123,7 @@ impl<'a> Walk<'a> {
             }
             Stmt::Struct { .. }
             | Stmt::TypeAlias { .. }
+            | Stmt::Enum { .. }
             | Stmt::Import { .. }
             | Stmt::ExternBlock { .. }
             | Stmt::Link { .. } => {}

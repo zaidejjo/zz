@@ -195,6 +195,61 @@ impl Checker {
                             self.used_names.insert(name.clone());
                         }
                         self.expand_alias(&cname, args, generics, ty.span)
+                    } else if self.enums.contains_key(name)
+                        || self
+                            .import_aliases
+                            .get(name)
+                            .is_some_and(|q| self.enums.contains_key(q))
+                    {
+                        // User enums name their type directly (`t: Token`);
+                        // generic enums name their arguments (`Box[int]`),
+                        // exactly like generic structs.
+                        let cname = self.canonical_enum_name(name);
+                        if cname != *name {
+                            self.used_names.insert(name.clone());
+                        }
+                        let want = self
+                            .enums
+                            .get(&cname)
+                            .map(|s| s.generics.len())
+                            .unwrap_or(0);
+                        if args.is_empty() && want > 0 {
+                            // Mirror generic structs: name the arguments
+                            // (`Box[int]`). Inference still flows from
+                            // construction (`Box.V(1)` unifies on its own).
+                            self.errors.push(error_at(
+                                format!(
+                                    "enum `{name}` takes {want} type argument{} (e.g. `{name}<{}>`)",
+                                    if want == 1 { "" } else { "s" },
+                                    vec!["T"; want].join(", "),
+                                ),
+                                ty.span,
+                            ));
+                            return Type::Enum(
+                                cname,
+                                (0..want).map(|_| self.unifier.fresh_var()).collect(),
+                            );
+                        }
+                        if args.len() != want {
+                            self.errors.push(error_at(
+                                format!(
+                                    "enum `{name}` takes {want} type argument{} but {} given",
+                                    if want == 1 { "" } else { "s" },
+                                    args.len(),
+                                ),
+                                ty.span,
+                            ));
+                            return Type::Enum(
+                                cname,
+                                (0..want).map(|_| self.unifier.fresh_var()).collect(),
+                            );
+                        }
+                        Type::Enum(
+                            cname,
+                            args.iter()
+                                .map(|a| self.ast_to_type_inner(a, generics))
+                                .collect(),
+                        )
                     } else if self.structs.contains_key(name) {
                         // Canonicalize selective imports, mirroring
                         // StructInit: `Product` → `product.Product`.
@@ -280,6 +335,7 @@ pub(crate) fn contains_var(t: &Type) -> bool {
         Type::Array(x) => contains_var(x),
         Type::Dict(k, v) => contains_var(k) || contains_var(v),
         Type::Struct(_, args) => args.iter().any(contains_var),
+        Type::Enum(_, args) => args.iter().any(contains_var),
         Type::Union(ts) => ts.iter().any(contains_var),
         Type::Range(x) => contains_var(x),
         Type::Ptr { inner, .. } => contains_var(inner),
@@ -301,6 +357,7 @@ pub(crate) fn max_var_id(t: &Type) -> Option<u32> {
         Type::Array(x) => max_var_id(x),
         Type::Dict(k, v) => max_var_id(k).into_iter().chain(max_var_id(v)).max(),
         Type::Struct(_, args) => args.iter().filter_map(max_var_id).max(),
+        Type::Enum(_, args) => args.iter().filter_map(max_var_id).max(),
         Type::Union(ts) => ts.iter().filter_map(max_var_id).max(),
         Type::Range(x) => max_var_id(x),
         Type::Ptr { inner, .. } => max_var_id(inner),
@@ -334,12 +391,24 @@ pub(crate) fn default_variant_vars(t: &mut Type) {
                 }
             }
         }
+        Type::Enum(_, args) => {
+            // Unconstrained enum parameters default like `Option`'s
+            // (bare `Box.Empty` with nothing to infer from is `Box[unit]`).
+            for a in args {
+                if contains_var(a) {
+                    default_variant_vars(a);
+                    if contains_var(a) {
+                        *a = Type::Unit;
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
 
 /// Substitute generic type parameters in a type.
-pub(crate) fn subst(t: &Type, subs: &std::collections::HashMap<String, Type>) -> Type {
+pub fn subst(t: &Type, subs: &std::collections::HashMap<String, Type>) -> Type {
     match t {
         Type::Named(name) => subs
             .get(name)
@@ -357,6 +426,7 @@ pub(crate) fn subst(t: &Type, subs: &std::collections::HashMap<String, Type>) ->
         Type::Struct(n, args) => {
             Type::Struct(n.clone(), args.iter().map(|x| subst(x, subs)).collect())
         }
+        Type::Enum(n, args) => Type::Enum(n.clone(), args.iter().map(|x| subst(x, subs)).collect()),
         Type::Union(ts) => Type::Union(ts.iter().map(|x| subst(x, subs)).collect()),
         Type::Range(x) => Type::Range(Box::new(subst(x, subs))),
         Type::Ptr { mutable, inner } => Type::Ptr {

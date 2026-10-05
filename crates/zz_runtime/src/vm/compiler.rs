@@ -282,10 +282,15 @@ impl Compiler {
     /// type map and struct definitions from the HIR into the compiler and all
     /// sub-compilers (functions, closures). The type map enables type-driven
     /// optimizations in future phases.
+    /// Compile with HIR type info. `enums` is accepted for call-shape
+    /// uniformity with `run_typed` (the typed enum paths resolve through
+    /// `types`, and untyped paths through the runtime table, so the seed
+    /// itself is intentionally unused).
     pub fn compile_program_typed(
         program: &Program,
         types: Arc<HashMap<zz_checker::SpanKey, zz_checker::Type>>,
         structs: HashMap<String, zz_checker::StructSig>,
+        _enums: HashMap<String, zz_checker::EnumSig>,
         native_names: Arc<std::collections::HashSet<String>>,
     ) -> Chunk {
         let mut c = Compiler::new();
@@ -446,7 +451,10 @@ impl Compiler {
             Op::SlotAddIntImm { .. } => 0,
             Op::SlotLessIntSlot { .. } | Op::SlotLessIntImm { .. } => 1,
             Op::SlotBinaryInt { .. } | Op::SlotBinaryIntImm { .. } => 0,
-            Op::MakeFunc { .. } | Op::RegisterStruct { .. } | Op::MakeClosure { .. } => 1,
+            Op::MakeFunc { .. }
+            | Op::RegisterStruct { .. }
+            | Op::RegisterEnum { .. }
+            | Op::MakeClosure { .. } => 1,
             Op::SpawnClosure { .. } => 1,
             Op::IntAdd(..) | Op::IntSub(..) | Op::IntMul(..) | Op::IntDiv(..) | Op::IntRem(..) => {
                 -1
@@ -474,6 +482,7 @@ impl Compiler {
             Op::SliceOp(_) => -2,
             Op::MakeRange(_) => -1,
             Op::MakeStruct { field_names, .. } => 1 - field_names.len() as i64,
+            Op::MakeEnum { argc, .. } => 1 - (*argc as i64),
             Op::GetField(..) | Op::GetFieldIdx(..) => 0,
             Op::SetField(..) | Op::SetFieldIdx(..) => -1,
             Op::CompoundFieldOp { .. } => -1,
@@ -1661,6 +1670,19 @@ impl Compiler {
             }
             // Aliases erase at check time: no ops to emit.
             Stmt::TypeAlias { .. } => StmtValue::Discard,
+            // Enums register their variant names so qualified
+            // construction (`Token.IntLit(1)`) resolves at runtime.
+            // Values are plain `Object`s — no other state needed.
+            Stmt::Enum { name, variants, .. } => {
+                self.emit(Op::RegisterEnum {
+                    name: name.join("."),
+                    variants: variants
+                        .iter()
+                        .map(|(n, p)| (n.name.clone(), p.is_some()))
+                        .collect(),
+                });
+                StmtValue::Discard
+            }
             Stmt::Impl { name, methods, .. } => {
                 let type_name = name.join(".");
                 for method in methods {
@@ -2706,6 +2728,40 @@ impl Compiler {
             } => match callee.as_ref() {
                 Expr::Path { parts, span: pspan } => {
                     let func_name = parts.join(".");
+                    // Enum construction (`Token.IntLit(1)`) builds a
+                    // qualified `Object`, not a call. Type-driven: the
+                    // checker resolved this call to `Type::Enum`, so no
+                    // name tables are needed — and real functions keep
+                    // working when types are absent (untyped REPL path
+                    // falls through to the generic call below).
+                    if parts.len() >= 2 {
+                        if let Some(zz_checker::Type::Enum(enum_name, _)) =
+                            self.type_of(*span).cloned()
+                        {
+                            let variant = parts.last().cloned().unwrap_or_default();
+                            for a in args {
+                                self.compile_expr(a);
+                            }
+                            // Named args are a checker error; compile
+                            // positionally so codegen never drops values
+                            // silently on unchecked paths.
+                            for (_, v) in named {
+                                self.compile_expr(v);
+                            }
+                            self.emit(Op::MakeEnum {
+                                enum_name,
+                                variant,
+                                argc: (args.len() + named.len()) as u16,
+                                span: *span,
+                            });
+                            return;
+                        }
+                    }
+                    // Untyped compiles intentionally fall through to the
+                    // generic call below: the runtime `CallPath` fallback
+                    // resolves enums with full environment visibility
+                    // (locals and globals shadow type names — the compiler
+                    // cannot see env bindings, so it must not decide).
                     // Fused spawn: `task.spawn(|params| body)` with a
                     // closure literal compiles to a single SpawnClosure
                     // op — no FuncValue box, no args Vec, no native
@@ -3407,10 +3463,15 @@ impl Compiler {
                     }
                     let error_pos = self.chunk.code.len();
                     self.emit(Op::MatchError(*span));
-                    // Patch arm jumps
+                    // Patch arm jumps. A pattern miss must reload the
+                    // scrutinee: every arm starts with `LoadVar` (at
+                    // `pos - 1`), and `MatchArm` pops on test (restore is
+                    // false on this path) — jumping straight to the next
+                    // `MatchArm` would test a stale stack slot instead.
+                    // (Guard misses already target the reload; see below.)
                     for (i, pos) in arm_positions.iter().enumerate() {
                         let next = if i + 1 < arms.len() {
-                            arm_positions[i + 1]
+                            arm_positions[i + 1] - 1
                         } else {
                             error_pos
                         };
@@ -3506,7 +3567,12 @@ impl Compiler {
                 }
                 let j = self.emit_jump(JumpKind::Always);
                 let els_pos = self.chunk.code.len();
-                self.stack_height = pre;
+                // Both paths converge with exactly one value on the stack
+                // (the body result, or the else value): the miss path
+                // re-pushes the scrutinee before jumping here, so height
+                // is pre+1, not pre (the Pop below consumes the pushed
+                // scrutinee, and the else arm pushes its own value).
+                self.stack_height = pre + 1;
                 self.emit(Op::Pop);
                 match els {
                     Some(e) => self.compile_expr(e),

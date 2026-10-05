@@ -768,10 +768,12 @@ fn run_file(
         std::collections::HashMap::new(),
         loaded.funcs,
         loaded.structs,
-        std::collections::HashMap::new(),
+        loaded.aliases,
+        loaded.enums,
     );
     let types = std::sync::Arc::new(typed.program.types);
     let structs = typed.program.structs;
+    let enums = typed.program.enums;
 
     let mut interp = Interp::with_natives(natives);
     interp.args = script_args.to_vec();
@@ -824,6 +826,7 @@ fn run_file(
             &zz_prog.program,
             std::sync::Arc::new(zz_prog.types.clone()),
             zz_prog.structs.clone(),
+            zz_prog.enums.clone(),
         ) {
             eprintln!("zz: pure-ZZ stdlib error: {e:?}");
             return Err("stdlib initialization failed".to_string());
@@ -857,7 +860,7 @@ fn run_file(
 
     let mut last = Value::Unit;
     for (i, program) in loaded.programs.iter().enumerate() {
-        match interp.run_typed(program, types.clone(), structs.clone()) {
+        match interp.run_typed(program, types.clone(), structs.clone(), enums.clone()) {
             Ok(v) => last = v,
             Err(e) => {
                 let (name, source) = loaded

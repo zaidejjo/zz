@@ -750,6 +750,7 @@ impl Lowerer {
             Stmt::Func { .. }
             | Stmt::Struct { .. }
             | Stmt::TypeAlias { .. }
+            | Stmt::Enum { .. }
             | Stmt::Impl { .. }
             | Stmt::Import { .. } => {}
             // Top-level only: emitted in the preamble by `Lowerer::lower`.

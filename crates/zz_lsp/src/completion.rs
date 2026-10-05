@@ -714,6 +714,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
         (parsed.program, Some(cr))
     }
@@ -735,6 +736,7 @@ mod tests {
             &parsed.program,
             HashMap::new(),
             funcs,
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
         );

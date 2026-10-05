@@ -774,10 +774,12 @@ fn vm_compound_assign_fuses_like_plain_assign() {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
         let chunk = super::Compiler::compile_program_typed(
             &parsed.program,
             Arc::new(types),
+            HashMap::new(),
             HashMap::new(),
             Arc::new(HashSet::new()),
         );
@@ -873,10 +875,12 @@ fn vm_generic_struct_erases_like_monomorphic() {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
         let chunk = super::Compiler::compile_program_typed(
             &parsed.program,
             Arc::new(types),
+            HashMap::new(),
             HashMap::new(),
             Arc::new(HashSet::new()),
         );
@@ -918,4 +922,127 @@ fn vm_default_args_match_tree_walker() {
     let mut tree = Interp::new();
     tree.run_tree_walker(&dep.program).unwrap();
     assert_eq!(tree.run_tree_walker(&main.program).unwrap(), Value::Int(6));
+}
+
+#[test]
+fn vm_guarded_match_arm_miss_reloads_scrutinee() {
+    // Regression: on the guarded-match path a pattern miss popped the
+    // scrutinee (restore:false) but jumped straight to the next
+    // `MatchArm`, skipping that arm's `LoadVar` reload — the next arm
+    // tested a stale stack slot instead of the scrutinee (a trailing
+    // unit arm like `.none` could never match). Every `MatchArm.next`
+    // must target the next arm's `LoadVar` (or the trailing
+    // `MatchError` for the last arm).
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    let src = "func f(o: Option<int>) -> int {\n    limit := 10\n    match o {\n        .some(n) if limit > 5 => n,\n        .some(n) => 0,\n        .none => -1,\n    }\n}\n";
+    let parsed = parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let (_res, types) = zz_checker::check_program_typed(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let chunk = super::Compiler::compile_program_typed(
+        &parsed.program,
+        Arc::new(types),
+        HashMap::new(),
+        HashMap::new(),
+        Arc::new(HashSet::new()),
+    );
+    // Descend into function bodies: the match lives in `f`'s chunk.
+    fn chunks_in(chunk: &super::Chunk) -> Vec<&super::Chunk> {
+        let mut out = vec![chunk];
+        for op in &chunk.code {
+            if let Op::MakeFunc { chunk: inner, .. } = op {
+                out.extend(chunks_in(inner));
+            }
+        }
+        out
+    }
+    let mut arm_nexts = Vec::new();
+    for chunk in chunks_in(&chunk) {
+        // Locate MatchArm ops and the LoadVar positions per chunk
+        // (jump targets are chunk-relative).
+        let mut loads = std::collections::HashSet::new();
+        for (i, op) in chunk.code.iter().enumerate() {
+            if matches!(op, Op::LoadVar(..)) {
+                loads.insert(i);
+            }
+        }
+        for op in &chunk.code {
+            if let Op::MatchArm { next, .. } = op {
+                arm_nexts.push((*next, loads.contains(next)));
+            }
+        }
+    }
+    assert!(!arm_nexts.is_empty(), "expected guarded match arms");
+    // Every non-terminal arm must jump to a LoadVar reload. The last
+    // arm targets the trailing `MatchError`, which is not a LoadVar.
+    for (next, is_load) in &arm_nexts[..arm_nexts.len().saturating_sub(1)] {
+        assert!(
+            is_load,
+            "MatchArm miss jumps to {next}, which is not a LoadVar reload"
+        );
+    }
+}
+
+#[test]
+fn vm_if_let_result_does_not_alias_later_slots() {
+    // Regression: `if let` left the stack-height fiction one low (the
+    // result value was not counted), so the next declaration reused its
+    // slot — a later match read the if-let's value instead of its own
+    // scrutinee (`.some(7)` tested as `.some(42)`). Needs the typed
+    // pipeline (slot promotion); the untyped path keeps everything in
+    // the environment and never collides.
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let src = "func main() -> int {\n    b := .some(42)\n    x := if let .some(v) = b { v } else { 0 }\n    o := .some(7)\n    match o {\n        .some(n) => n,\n        _ => 0,\n    }\n}\n";
+    let parsed = parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let (checked, span_types) = zz_checker::check_program_typed(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    assert!(
+        checked
+            .errors
+            .iter()
+            .all(|e| e.severity != zz_frontend::diag::Severity::Error),
+        "check errors: {:?}",
+        checked.errors
+    );
+    let mut interp = Interp::with_natives(HashMap::new());
+    let v = interp
+        .run_typed(
+            &parsed.program,
+            Arc::new(span_types),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .expect("run");
+    // `main` returns its last value... via explicit call below.
+    let _ = v;
+    let f = interp.funcs.get("main").cloned().expect("main registered");
+    let out = interp
+        .call(Value::Func(Box::new(f)), Vec::new(), Span::new(0, 0))
+        .expect("call main");
+    assert_eq!(out, Value::Int(7));
 }

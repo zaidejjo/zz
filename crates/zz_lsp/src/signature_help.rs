@@ -198,6 +198,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
         (parsed.program, Some(cr))
     }

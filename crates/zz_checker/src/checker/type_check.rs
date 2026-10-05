@@ -52,6 +52,18 @@ fn check_sql_static(text: &str) -> Option<String> {
     None
 }
 
+/// A method invocation: resolved signature plus receiver, args, and span.
+pub(crate) struct MethodCall<'a> {
+    pub sig: &'a super::FuncSig,
+    pub recv_t: &'a Type,
+    /// Embedded-promoted receiver (struct embedding only), if any.
+    pub promoted_recv: Option<Type>,
+    pub method: &'a str,
+    pub args: &'a [Expr],
+    pub named: &'a [(String, Expr)],
+    pub span: Span,
+}
+
 impl Checker {
     // --- statements -------------------------------------------------------
 
@@ -263,6 +275,9 @@ impl Checker {
             // Aliases are collected and resolved in pass 1a; checking
             // the declaration itself is a no-op (uses resolve on demand).
             Stmt::TypeAlias { .. } => Type::Unit,
+            // Enums are collected in pass 1b; the declaration itself is
+            // a no-op (construction and patterns resolve on demand).
+            Stmt::Enum { .. } => Type::Unit,
             Stmt::For {
                 vars,
                 iter,
@@ -745,7 +760,40 @@ impl Checker {
             Expr::Str { .. } => Type::Str,
             Expr::Bool { .. } => Type::Bool,
             Expr::Ident { name, span } => self.lookup(name, *span),
-            Expr::Path { parts, span } => self.lookup_path(parts, *span),
+            Expr::Path { parts, span } => {
+                // Unit-variant value (`Token.Eof`, no parens): a path, not
+                // a call. Resolves against the enum table; payload
+                // variants must use call form (`Token.IntLit(1)`).
+                if parts.len() >= 2 {
+                    let enum_head = parts[..parts.len() - 1].join(".");
+                    let canonical_head = self.canonical_enum_name(&enum_head);
+                    if self.enums.contains_key(&canonical_head)
+                        && !self.funcs.contains_key(&parts.join("."))
+                        && self.lookup_opt(&enum_head).is_none()
+                    {
+                        let variant = parts.last().cloned().unwrap_or_default();
+                        if self
+                            .enum_variant_payload(&canonical_head, &variant, *span)
+                            .is_some_and(|p| p.is_some())
+                        {
+                            self.errors.push(error_at(
+                                format!(
+                                    "variant `{canonical_head}.{variant}` holds a value: construct it as `{canonical_head}.{variant}(...)`"
+                                ),
+                                *span,
+                            ));
+                        }
+                        if canonical_head.contains('.') {
+                            self.used_names.insert(canonical_head.clone());
+                        }
+                        // Generic parameters stay inference variables
+                        // (defaulted like `Option` when never constrained).
+                        let (gen_vars, _) = self.fresh_enum_vars(&canonical_head);
+                        return Type::Enum(canonical_head, gen_vars);
+                    }
+                }
+                self.lookup_path(parts, *span)
+            }
             Expr::Field { obj, name, span } => {
                 let ot = self.check_expr(obj);
                 let ot = self.unifier.resolve(&ot);
@@ -1753,6 +1801,16 @@ impl Checker {
                                 }
                             }
                         }
+                        // Enum values erase to `Object`s, so `impl Enum`
+                        // methods dispatch exactly like struct methods.
+                        Type::Enum(ename, _) => {
+                            sig = self.funcs.get(&format!("{ename}.{method}")).cloned();
+                            if sig.is_none() {
+                                if let Some((ns, _)) = ename.rsplit_once('.') {
+                                    sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1774,34 +1832,15 @@ impl Checker {
                     }
                 }
                 if let Some(sig) = sig {
-                    let (ps, ret, subs) = self.instantiate(&sig);
-                    if ps.is_empty() {
-                        self.errors.push(error_at(
-                            format!("method `{method}` takes no arguments"),
-                            span,
-                        ));
-                        return Type::Unit;
-                    }
-                    if let Some(promoted) = promoted_recv {
-                        if let Err(e) = self.unifier.unify(&promoted, &ps[0]) {
-                            self.report_mismatch(e, span);
-                        }
-                    } else if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
-                        self.report_mismatch(e, span);
-                    }
-                    self.check_args_against(
-                        &sig.params[1..]
-                            .iter()
-                            .map(|(n, _)| n.clone())
-                            .collect::<Vec<_>>(),
-                        &ps[1..],
-                        &[],
+                    return self.check_method_call(&MethodCall {
+                        sig: &sig,
+                        recv_t: &recv_t,
+                        promoted_recv,
+                        method: &method,
                         args,
                         named,
                         span,
-                    );
-                    self.validate_bounds(&sig, &subs, span);
-                    return ret;
+                    });
                 }
                 None
             }
@@ -2028,6 +2067,117 @@ impl Checker {
                 // (e.g. module-level closure `ns.f`). If so, treat it as
                 // a regular call, not a method call.
                 let joined = parts.join(".");
+                // Enum construction (`Token.IntLit(1)`) reads as a call
+                // but builds a value, not a function invocation. Takes
+                // priority over method dispatch (no receiver exists) but
+                // yields to real functions and locals: an exact `funcs`
+                // entry or a shadowing value keeps its meaning.
+                let enum_head = parts[..parts.len() - 1].join(".");
+                let canonical_head = self.canonical_enum_name(&enum_head);
+                if self.enums.contains_key(&canonical_head)
+                    && !self.funcs.contains_key(&joined)
+                    && self.lookup_opt(&enum_head).is_none()
+                {
+                    let variant = parts.last().cloned().unwrap_or_default();
+                    if let Some(t) =
+                        self.check_enum_construction(&canonical_head, &variant, args, named, span)
+                    {
+                        return t;
+                    }
+                }
+                // Method on a constructed variant (`Token.Eof.is_eof()`
+                // parses as a 3+-part path): the call arguments split —
+                // the first fills a payload variant, the rest go to the
+                // method (`Token.IntLit(1).add(2)` constructs with `1`,
+                // calls `add` with `2`). Unit variants delegate to the
+                // Field branch with a synthetic receiver.
+                if parts.len() >= 3 {
+                    let enum_head2 = parts[..parts.len() - 2].join(".");
+                    let canonical_head2 = self.canonical_enum_name(&enum_head2);
+                    if self.enums.contains_key(&canonical_head2)
+                        && !self.funcs.contains_key(&joined)
+                        && self.lookup_opt(&enum_head2).is_none()
+                    {
+                        let variant2 = parts[parts.len() - 2].clone();
+                        let method2 = parts.last().cloned().unwrap_or_default();
+                        let _pv = self.enum_variant_payload(&canonical_head2, &variant2, *pspan);
+                        match _pv {
+                            Some(Some(pty)) => {
+                                if args.is_empty() {
+                                    self.errors.push(error_at(
+                                        format!(
+                                            "variant `{canonical_head2}.{variant2}` holds a value: pass it before the method arguments (e.g. `{canonical_head2}.{variant2}(v).{method2}(...)`)"
+                                        ),
+                                        span,
+                                    ));
+                                    let (gen_vars, _) = self.fresh_enum_vars(&canonical_head2);
+                                    return Type::Enum(canonical_head2, gen_vars);
+                                }
+                                // First argument fills the payload; the
+                                // rest are the method's. Generic parameters
+                                // instantiate fresh, as in construction.
+                                let (gen_vars, gen_map) = self.fresh_enum_vars(&canonical_head2);
+                                let at = self.check_expr(&args[0]);
+                                let exp = super::inference::subst(&pty, &gen_map);
+                                if let Err(e) = self.unifier.unify(&at, &exp) {
+                                    self.report_mismatch(e, args[0].span());
+                                }
+                                let recv_args: Vec<Type> = gen_vars
+                                    .iter()
+                                    .map(|v| self.unifier.resolve_deep(v))
+                                    .collect();
+                                let recv_t = Type::Enum(canonical_head2.clone(), recv_args);
+                                let mut sig = self
+                                    .funcs
+                                    .get(&format!("{canonical_head2}.{method2}"))
+                                    .cloned();
+                                if sig.is_none() {
+                                    if let Some((ns, _)) = canonical_head2.rsplit_once('.') {
+                                        sig = self.funcs.get(&format!("{ns}.{method2}")).cloned();
+                                    }
+                                }
+                                if let Some(sig) = sig {
+                                    self.used_names
+                                        .insert(format!("{canonical_head2}.{method2}"));
+                                    return self.check_method_call(&MethodCall {
+                                        sig: &sig,
+                                        recv_t: &recv_t,
+                                        promoted_recv: None,
+                                        method: &method2,
+                                        args: &args[1..],
+                                        named,
+                                        span,
+                                    });
+                                }
+                                self.errors.push(error_at(
+                                    format!(
+                                        "unknown method `{method2}` for enum `{canonical_head2}`"
+                                    ),
+                                    span,
+                                ));
+                                let (gen_vars, _) = self.fresh_enum_vars(&canonical_head2);
+                                return Type::Enum(canonical_head2, gen_vars);
+                            }
+                            Some(None) => {
+                                let recv = Expr::Path {
+                                    parts: parts[..parts.len() - 1].to_vec(),
+                                    span: *pspan,
+                                };
+                                let field_callee = Expr::Field {
+                                    obj: Box::new(recv),
+                                    name: parts.last().cloned().unwrap_or_default(),
+                                    span: *pspan,
+                                };
+                                return self.check_call(&field_callee, args, named, span);
+                            }
+                            // Unknown variant: already reported inside.
+                            None => {
+                                let (gen_vars, _) = self.fresh_enum_vars(&canonical_head2);
+                                return Type::Enum(canonical_head2, gen_vars);
+                            }
+                        }
+                    }
+                }
                 // A `head.method` call on a genuine local value reads as
                 // a method call when the free-function reading is already
                 // impossible (see `method_shadow_call`) — e.g. `db.exec`
@@ -2158,6 +2308,16 @@ impl Checker {
                             if sig.is_none() {
                                 // Try namespace.method (cross-module)
                                 if let Some((ns, _)) = sname.rsplit_once('.') {
+                                    sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                                }
+                            }
+                        }
+                        // Enum values erase to `Object`s, so `impl Enum`
+                        // methods dispatch exactly like struct methods.
+                        Type::Enum(ename, _) => {
+                            sig = self.funcs.get(&format!("{ename}.{method}")).cloned();
+                            if sig.is_none() {
+                                if let Some((ns, _)) = ename.rsplit_once('.') {
                                     sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
                                 }
                             }
@@ -2325,6 +2485,37 @@ impl Checker {
     /// Check that the given positional and named arguments match the parameter
     /// types.  `has_default` indicates which trailing parameters have defaults;
     /// callers may omit those.
+    pub(crate) fn check_method_call(&mut self, call: &MethodCall<'_>) -> Type {
+        let (ps, ret, subs) = self.instantiate(call.sig);
+        if ps.is_empty() {
+            self.errors.push(error_at(
+                format!("method `{}` takes no arguments", call.method),
+                call.span,
+            ));
+            return Type::Unit;
+        }
+        if let Some(promoted) = &call.promoted_recv {
+            if let Err(e) = self.unifier.unify(promoted, &ps[0]) {
+                self.report_mismatch(e, call.span);
+            }
+        } else if let Err(e) = self.unifier.unify(call.recv_t, &ps[0]) {
+            self.report_mismatch(e, call.span);
+        }
+        self.check_args_against(
+            &call.sig.params[1..]
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>(),
+            &ps[1..],
+            &[],
+            call.args,
+            call.named,
+            call.span,
+        );
+        self.validate_bounds(call.sig, &subs, call.span);
+        ret
+    }
+
     pub(crate) fn check_args_against(
         &mut self,
         param_names: &[String],
@@ -2951,6 +3142,43 @@ impl Checker {
                     (Type::Result(_, e), "err") => {
                         arg.as_ref().map(|p| (p.as_ref().clone(), (**e).clone()))
                     }
+                    (Type::Enum(ename, eargs), vname) => {
+                        match self.enum_variant_payload(ename, vname, *span) {
+                            Some(Some(pty)) => {
+                                // Substitute the scrutinee's arguments for
+                                // the enum's parameters (`Box[int]` + `T`
+                                // → `int`), exactly like generic struct
+                                // field access.
+                                let inner = self.subst_enum_payload(ename, eargs, &pty);
+                                match arg {
+                                    Some(p) => Some((p.as_ref().clone(), inner)),
+                                    None => {
+                                        self.errors.push(error_at(
+                                            format!(
+                                                "`.{vname}` pattern requires an argument (variant `{ename}.{vname}` holds a value)"
+                                            ),
+                                            *span,
+                                        ));
+                                        None
+                                    }
+                                }
+                            }
+                            Some(None) => {
+                                if arg.is_some() {
+                                    self.errors.push(error_at(
+                                        format!(
+                                            "`.{vname}` pattern takes no argument (variant `{ename}.{vname}` holds no value)"
+                                        ),
+                                        *span,
+                                    ));
+                                }
+                                None
+                            }
+                            // Unknown variant: already reported; bind
+                            // nothing to suppress cascades.
+                            None => None,
+                        }
+                    }
                     (Type::Var(_), _) => arg
                         .as_ref()
                         .map(|p| (p.as_ref().clone(), self.unifier.fresh_var())),
@@ -3069,6 +3297,38 @@ impl Checker {
             }
         }
         if arms.iter().any(|a| pat_is_wildcard(&a.pat)) {
+            return;
+        }
+        // Enum exhaustiveness needs owned names (the signature table
+        // can't lend `&str`s past the borrow), so enums take a separate
+        // path from the static `&str` tables above.
+        if let Type::Enum(ename, _) = st {
+            let needs: Vec<String> = self
+                .enums
+                .get(ename)
+                .map(|s| s.variants.iter().map(|(v, _)| v.clone()).collect())
+                .unwrap_or_default();
+            if needs.is_empty() {
+                // Unknown enum (no registered signature): can't verify,
+                // don't cascade.
+                return;
+            }
+            let mut have: Vec<String> = Vec::new();
+            for a in arms {
+                pat_tags(&a.pat, &mut have);
+            }
+            let missing: Vec<&String> = needs.iter().filter(|n| !have.contains(n)).collect();
+            if !missing.is_empty() {
+                let missing = missing
+                    .iter()
+                    .map(|m| format!("`.{m}`"))
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                self.errors.push(error_at(
+                    format!("non-exhaustive match: missing {missing} (or add a `_` arm)"),
+                    span,
+                ));
+            }
             return;
         }
         let needs: Option<Vec<&str>> = match st {

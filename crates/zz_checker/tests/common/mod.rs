@@ -17,6 +17,7 @@ pub fn check_src(src: &str) -> CheckResult {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
     )
 }
 
@@ -58,6 +59,7 @@ pub fn check_src_with_funcs(src: &str, funcs: HashMap<String, FuncSig>) -> Check
         funcs,
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
     )
 }
 
@@ -79,6 +81,7 @@ pub fn check_src_with_funcs_and_structs(
         HashMap::new(),
         funcs,
         structs,
+        HashMap::new(),
         HashMap::new(),
     )
 }

@@ -429,6 +429,9 @@ e2e_success_test!(e2e_syntax_generic_structs, "syntax", "generic_structs.zz");
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
 e2e_success_test!(e2e_types_aliases, "types", "aliases.zz");
 e2e_success_test!(e2e_types_alias_import, "types", "alias_import.zz");
+e2e_success_test!(e2e_types_enums, "types", "enums.zz");
+e2e_success_test!(e2e_types_enum_import, "types", "enum_import.zz");
+e2e_success_test!(e2e_types_enum_generics, "types", "enum_generics.zz");
 e2e_success_test!(e2e_types_struct_embedding, "types", "struct_embedding.zz");
 e2e_success_test!(e2e_types_generics, "types", "generics.zz");
 e2e_success_test!(e2e_types_generic_bounds, "types", "generic_bounds.zz");
@@ -670,6 +673,12 @@ e2e_error_test!(e2e_err_type_mismatch, "type_mismatch.zz");
 e2e_error_test!(e2e_err_alias_cycle, "alias_cycle.zz");
 e2e_error_test!(e2e_err_alias_dup, "alias_dup.zz");
 e2e_error_test!(e2e_err_alias_arity, "alias_arity.zz");
+e2e_error_test!(e2e_err_enum_nonexhaustive, "enum_nonexhaustive.zz");
+e2e_error_test!(e2e_err_enum_unknown_variant, "enum_unknown_variant.zz");
+e2e_error_test!(e2e_err_enum_missing_payload, "enum_missing_payload.zz");
+e2e_error_test!(e2e_err_enum_extra_arg, "enum_extra_arg.zz");
+e2e_error_test!(e2e_err_enum_dup, "enum_dup.zz");
+e2e_error_test!(e2e_err_enum_generic_mismatch, "enum_generic_mismatch.zz");
 e2e_error_test!(
     e2e_err_return_fallthrough_mismatch,
     "return_fallthrough_mismatch.zz"

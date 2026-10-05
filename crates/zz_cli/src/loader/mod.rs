@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use zz_checker::{check_program, AliasSig, CheckResult, FuncSig, StructSig, Type};
+use zz_checker::{check_program, AliasSig, CheckResult, EnumSig, FuncSig, StructSig, Type};
 use zz_frontend::ast::{Expr, ImportItem, Program, Stmt};
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
@@ -64,6 +64,9 @@ pub struct LoadResult {
     /// Type alias definitions from all modules.
     #[allow(dead_code)]
     pub aliases: HashMap<String, AliasSig>,
+    /// User enum definitions from all modules.
+    #[allow(dead_code)]
+    pub enums: HashMap<String, EnumSig>,
     /// Native implementations (stdlib + namespaced copies), for the
     /// interpreter.
     pub natives: HashMap<String, NativeEntry>,
@@ -97,6 +100,8 @@ struct Loader {
     structs: HashMap<String, StructSig>,
     /// Cross-module seed: `pub type` aliases from previously loaded modules.
     aliases: HashMap<String, AliasSig>,
+    /// Cross-module seed: `pub enum` definitions from previously loaded modules.
+    enums: HashMap<String, EnumSig>,
     /// Keys currently owned by the seed maps above (stdlib + plugin + prior
     /// modules' pubs). Lets each module's seed maps MOVE into the checker
     /// and come back via key-set restore instead of O(seed) clones per
@@ -105,6 +110,7 @@ struct Loader {
     seed_func_keys: HashSet<String>,
     seed_struct_keys: HashSet<String>,
     seed_alias_keys: HashSet<String>,
+    seed_enum_keys: HashSet<String>,
     /// Whether the per-module check cache is active (S1 arena-scale).
     /// Only the `zz check` entry point enables it: `run`/`build` need
     /// span types and codegen inputs the cache does not store.
@@ -126,6 +132,7 @@ struct Loader {
     all_bindings: HashMap<String, Type>,
     all_structs: HashMap<String, StructSig>,
     all_aliases: HashMap<String, AliasSig>,
+    all_enums: HashMap<String, EnumSig>,
     natives: HashMap<String, NativeEntry>,
     /// Namespace → canonical path of the module (or `std:<module>` for the
     /// standard library) that owns it.
@@ -195,9 +202,11 @@ fn load_program_impl(
         bindings: HashMap::new(),
         structs: HashMap::new(),
         aliases: HashMap::new(),
+        enums: HashMap::new(),
         seed_func_keys,
         seed_struct_keys: HashSet::new(),
         seed_alias_keys: HashSet::new(),
+        seed_enum_keys: HashSet::new(),
         contributed_seeds: false,
         use_cache,
         plugin_names: Vec::new(),
@@ -206,6 +215,7 @@ fn load_program_impl(
         all_bindings: HashMap::new(),
         all_structs: HashMap::new(),
         all_aliases: HashMap::new(),
+        all_enums: HashMap::new(),
         natives: stdlib_natives(),
         namespaces: HashMap::new(),
         ns_of: HashMap::new(),
@@ -1026,6 +1036,11 @@ impl Loader {
                                     self.all_aliases.insert(target.clone(), sig);
                                     found = true;
                                 }
+                                if let Some(sig) = self.enums.get(&full).cloned() {
+                                    self.enums.insert(target.clone(), sig.clone());
+                                    self.all_enums.insert(target.clone(), sig);
+                                    found = true;
+                                }
                                 if !found {
                                     self.errors.push(LoadError {
                                         name: name.clone(),
@@ -1101,6 +1116,19 @@ impl Loader {
                                     if let Some(sig) = self.aliases.get(&key).cloned() {
                                         self.aliases.insert(bare.clone(), sig.clone());
                                         self.all_aliases.insert(bare, sig);
+                                    }
+                                }
+                                let ekeys: Vec<String> = self
+                                    .enums
+                                    .keys()
+                                    .filter(|k| k.starts_with(&prefix))
+                                    .cloned()
+                                    .collect();
+                                for key in ekeys {
+                                    let bare = key[prefix.len()..].to_string();
+                                    if let Some(sig) = self.enums.get(&key).cloned() {
+                                        self.enums.insert(bare.clone(), sig.clone());
+                                        self.all_enums.insert(bare, sig);
                                     }
                                 }
                             }
@@ -1190,6 +1218,10 @@ impl Loader {
                                         // a type name ("undefined variable
                                         // `ns.Name`").
                                         let is_alias = self.aliases.contains_key(&qualified);
+                                        // Enums are types, not values: same
+                                        // skip (variant construction is a
+                                        // call, resolved via the enum table).
+                                        let is_enum = self.enums.contains_key(&qualified);
                                         let is_value = self
                                             .funcs
                                             .get(&qualified)
@@ -1197,7 +1229,7 @@ impl Loader {
                                             .unwrap_or(false)
                                             || self.natives.contains_key(&qualified)
                                             || self.bindings.contains_key(&qualified);
-                                        if (is_struct || is_alias) && !is_value {
+                                        if (is_struct || is_alias || is_enum) && !is_value {
                                             continue;
                                         }
                                         let parts = vec![ns.to_string(), sym_name.clone()];
@@ -1353,6 +1385,8 @@ impl Loader {
                             structs.extend(cached.structs.into_owned());
                             let mut aliases = std::mem::take(&mut self.aliases);
                             aliases.extend(cached.aliases.into_owned());
+                            let mut enums = std::mem::take(&mut self.enums);
+                            enums.extend(cached.enums.into_owned());
                             (
                                 CheckResult {
                                     errors: cached.diags,
@@ -1360,6 +1394,7 @@ impl Loader {
                                     funcs,
                                     structs,
                                     aliases,
+                                    enums,
                                     try_resolutions: HashMap::new(),
                                     try_converts: HashMap::new(),
                                     link_libs: Vec::new(),
@@ -1368,6 +1403,7 @@ impl Loader {
                                     pub_funcs: cached.pub_funcs.into_owned(),
                                     pub_structs: cached.pub_structs.into_owned(),
                                     pub_aliases: cached.pub_aliases.into_owned(),
+                                    pub_enums: cached.pub_enums.into_owned(),
                                 },
                                 None,
                             )
@@ -1379,6 +1415,7 @@ impl Loader {
                                 std::mem::take(&mut self.funcs),
                                 std::mem::take(&mut self.structs),
                                 std::mem::take(&mut self.aliases),
+                                std::mem::take(&mut self.enums),
                             ),
                             Some(key),
                         ),
@@ -1392,6 +1429,7 @@ impl Loader {
                             std::mem::take(&mut self.funcs),
                             std::mem::take(&mut self.structs),
                             std::mem::take(&mut self.aliases),
+                            std::mem::take(&mut self.enums),
                         ),
                         None,
                     ),
@@ -1404,6 +1442,7 @@ impl Loader {
                         std::mem::take(&mut self.funcs),
                         std::mem::take(&mut self.structs),
                         std::mem::take(&mut self.aliases),
+                        std::mem::take(&mut self.enums),
                     ),
                     None,
                 )
@@ -1434,9 +1473,14 @@ impl Loader {
             ) = std::mem::take(&mut checked.aliases)
                 .into_iter()
                 .partition(|(k, _)| self.seed_alias_keys.contains(k));
+            let (seeded_enums, own_enums): (HashMap<String, EnumSig>, HashMap<String, EnumSig>) =
+                std::mem::take(&mut checked.enums)
+                    .into_iter()
+                    .partition(|(k, _)| self.seed_enum_keys.contains(k));
             self.funcs = seeded_funcs;
             self.structs = seeded_structs;
             self.aliases = seeded_aliases;
+            self.enums = seeded_enums;
             // Store the miss (own-only maps + pubs + diags, all borrowed —
             // zero copy before the tail moves them below).
             if let Some(key) = pending_key.as_deref() {
@@ -1449,6 +1493,8 @@ impl Loader {
                         pub_structs: std::borrow::Cow::Borrowed(&checked.pub_structs),
                         aliases: std::borrow::Cow::Borrowed(&own_aliases),
                         pub_aliases: std::borrow::Cow::Borrowed(&checked.pub_aliases),
+                        enums: std::borrow::Cow::Borrowed(&own_enums),
+                        pub_enums: std::borrow::Cow::Borrowed(&checked.pub_enums),
                         bindings: std::borrow::Cow::Borrowed(&checked.bindings),
                         pub_bindings: std::borrow::Cow::Borrowed(&checked.pub_bindings),
                         diags: checked.errors.clone(),
@@ -1504,6 +1550,8 @@ impl Loader {
                     .extend(checked.pub_structs.keys().cloned());
                 self.seed_alias_keys
                     .extend(checked.pub_aliases.keys().cloned());
+                self.seed_enum_keys
+                    .extend(checked.pub_enums.keys().cloned());
                 // Track all items for the entry file / runtime.
                 // Seeds are contributed here once (first success only —
                 // prior modules all errored, so seeds are still just
@@ -1517,11 +1565,14 @@ impl Loader {
                         .extend(self.structs.iter().map(|(k, v)| (k.clone(), v.clone())));
                     self.all_aliases
                         .extend(self.aliases.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    self.all_enums
+                        .extend(self.enums.iter().map(|(k, v)| (k.clone(), v.clone())));
                 }
                 self.bindings.extend(checked.pub_bindings);
                 self.funcs.extend(checked.pub_funcs);
                 self.structs.extend(checked.pub_structs);
                 self.aliases.extend(checked.pub_aliases);
+                self.enums.extend(checked.pub_enums);
                 // `own_*` (module pubs + privates) move into `all_*` after
                 // the seeds, so overlapping keys overwrite with the same
                 // (unresolved) values as the old `checked.funcs` move.
@@ -1529,6 +1580,7 @@ impl Loader {
                 self.all_funcs.extend(own_funcs);
                 self.all_structs.extend(own_structs);
                 self.all_aliases.extend(own_aliases);
+                self.all_enums.extend(own_enums);
 
                 // Handle `pub import` re-exports: for each `pub import ns` in
                 // this module, copy the re-exported namespace's pub functions
@@ -1586,6 +1638,7 @@ impl Loader {
             bindings: self.all_bindings,
             structs: self.all_structs,
             aliases: self.all_aliases,
+            enums: self.all_enums,
             natives: self.natives,
             consts: self.selected_consts,
             errors: self.errors,
@@ -1659,7 +1712,10 @@ fn namespace_program(program: &mut Program, ns: &str) {
     let mut top = HashSet::new();
     for stmt in &program.stmts {
         match stmt {
-            Stmt::Func { name, .. } | Stmt::Struct { name, .. } | Stmt::TypeAlias { name, .. } => {
+            Stmt::Func { name, .. }
+            | Stmt::Struct { name, .. }
+            | Stmt::TypeAlias { name, .. }
+            | Stmt::Enum { name, .. } => {
                 top.insert(name.join("."));
             }
             Stmt::Decl { name, .. } => {

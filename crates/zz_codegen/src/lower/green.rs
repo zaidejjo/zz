@@ -305,7 +305,7 @@ impl Prescan {
                 self.tainted = true;
             }
             // Nested named items are separate units (never green).
-            Stmt::Func { .. } | Stmt::Struct { .. } | Stmt::Impl { .. } => {}
+            Stmt::Func { .. } | Stmt::Struct { .. } | Stmt::Enum { .. } | Stmt::Impl { .. } => {}
             _ => {}
         }
     }

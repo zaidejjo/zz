@@ -446,8 +446,56 @@ impl Vm {
                     self.stack.push(v);
                 }
                 Op::LoadPath(parts, span) => {
-                    let v = interp.resolve_path_value(parts, *span)?;
-                    self.stack.push(v);
+                    // Unit-variant value (`Token.Eof`): resolve against
+                    // the enum table before the value lookup (which
+                    // would report "undefined variable" for a type name).
+                    // Yields to real values on collision.
+                    let v = if parts.len() >= 2 {
+                        let head = parts[..parts.len() - 1].join(".");
+                        // Miss-only: a shadowing value keeps its meaning.
+                        let head_is_value =
+                            interp.env.get(&head).is_some() || interp.funcs.contains_key(&head);
+                        let canonical = if head_is_value {
+                            String::new()
+                        } else if interp.enums.contains_key(&head) {
+                            head.clone()
+                        } else {
+                            interp
+                                .import_aliases
+                                .get(&head)
+                                .filter(|q| interp.enums.contains_key(q.as_str()))
+                                .cloned()
+                                .unwrap_or_default()
+                        };
+                        if !canonical.is_empty() {
+                            let variant = parts.last().cloned().unwrap_or_default();
+                            match interp.enums.get(&canonical).and_then(|vs| {
+                                vs.iter().find(|(v, _)| v == &variant).map(|(_, has)| *has)
+                            }) {
+                                // Payload variants need call form; fall
+                                // through to the value lookup so the error
+                                // names the path, not the enum.
+                                Some(true) | None => None,
+                                Some(false) => {
+                                    Some(Value::Object(Box::new(crate::value::ObjectValue {
+                                        name: format!("{canonical}.{variant}"),
+                                        fields: Vec::new(),
+                                    })))
+                                }
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    match v {
+                        Some(v) => self.stack.push(v),
+                        None => {
+                            let v = interp.resolve_path_value(parts, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
                 }
                 Op::DefineVar(name) => {
                     let v = self.stack.pop().unwrap();
@@ -725,6 +773,71 @@ impl Vm {
                     // Copy-on-write (see tree-walker `Stmt::Struct`).
                     Arc::make_mut(&mut interp.structs).insert(name.clone(), fields.clone());
                     self.stack.push(Value::Unit);
+                }
+                Op::RegisterEnum { name, variants } => {
+                    Arc::make_mut(&mut interp.enums).insert(name.clone(), variants.clone());
+                    self.stack.push(Value::Unit);
+                }
+                Op::MakeEnum {
+                    enum_name,
+                    variant,
+                    argc,
+                    span,
+                } => {
+                    // Miss-only alias fallback (mirrors `MakeStruct`):
+                    // bare `Token` from `import m(Token)` resolves to
+                    // `m.Token`. Seed entries take precedence.
+                    let resolved;
+                    let lookup = if interp.enums.contains_key(enum_name) {
+                        enum_name
+                    } else if let Some(qualified) = interp.import_aliases.get(enum_name) {
+                        resolved = qualified.clone();
+                        &resolved
+                    } else {
+                        return Err(self.error(format!("unknown enum `{enum_name}`"), *span));
+                    };
+                    let Some(variants) = interp.enums.get(lookup).cloned() else {
+                        return Err(self.error(format!("unknown enum `{enum_name}`"), *span));
+                    };
+                    let has_payload = match variants.iter().find(|(v, _)| v == variant) {
+                        Some((_, has)) => *has,
+                        None => {
+                            return Err(self.error(
+                                format!("unknown variant `{variant}` for enum `{lookup}`"),
+                                *span,
+                            ));
+                        }
+                    };
+                    let mut vals = Vec::with_capacity(*argc as usize);
+                    for _ in 0..*argc {
+                        vals.push(self.stack.pop().unwrap());
+                    }
+                    vals.reverse();
+                    // Arity is a checker error; the runtime keeps a
+                    // defensive gate so unchecked paths never silently
+                    // build a wrong-shaped value.
+                    let fields = match (has_payload, vals.len()) {
+                        (false, 0) => Vec::new(),
+                        (true, 1) => {
+                            vec![("value".to_string(), vals.into_iter().next().unwrap())]
+                        }
+                        _ => {
+                            return Err(self.error(
+                                format!(
+                                    "variant `{lookup}.{variant}` takes {} argument{} but {} given",
+                                    if has_payload { 1 } else { 0 },
+                                    if has_payload { "" } else { "s" },
+                                    vals.len(),
+                                ),
+                                *span,
+                            ));
+                        }
+                    };
+                    self.stack
+                        .push(Value::Object(Box::new(crate::value::ObjectValue {
+                            name: format!("{lookup}.{variant}"),
+                            fields,
+                        })));
                 }
                 Op::BinOp(op, span) => {
                     let r = self.stack.pop().unwrap();
@@ -1679,6 +1792,118 @@ impl Vm {
                         let is_direct = interp.env.get(joined).is_some()
                             || interp.funcs.contains_key(joined)
                             || interp.natives.contains_key(joined);
+                        // Enum construction fallback (untyped compiles,
+                        // cross-snippet REPL): the head names an enum and
+                        // resolves to no value — build the variant object
+                        // directly instead of failing the path lookup.
+                        // Miss-only: a shadowing value keeps its
+                        // meaning (mirrors the checker and tree-walker).
+                        let head_shadowed = parts.len() >= 2
+                            && (interp
+                                .env
+                                .get(&parts[..parts.len() - 1].join("."))
+                                .is_some()
+                                || interp
+                                    .funcs
+                                    .contains_key(&parts[..parts.len() - 1].join(".")));
+                        if !is_direct && !head_shadowed && parts.len() >= 2 {
+                            let head = parts[..parts.len() - 1].join(".");
+                            let canonical = if interp.enums.contains_key(&head) {
+                                Some(head.clone())
+                            } else {
+                                interp
+                                    .import_aliases
+                                    .get(&head)
+                                    .filter(|q| interp.enums.contains_key(q.as_str()))
+                                    .cloned()
+                            };
+                            if let Some(ename) = canonical {
+                                if interp
+                                    .resolve_path_value(&parts[..parts.len() - 1], pspan)
+                                    .is_err()
+                                {
+                                    let variant = parts.last().cloned().unwrap_or_default();
+                                    let has = interp.enums.get(&ename).and_then(|vs| {
+                                        vs.iter().find(|(v, _)| v == &variant).map(|(_, h)| *h)
+                                    });
+                                    match has {
+                                        Some(has_payload) if has_payload == (args.len() == 1) => {
+                                            let fields = if has_payload {
+                                                vec![(
+                                                    "value".to_string(),
+                                                    args.into_iter().next().unwrap(),
+                                                )]
+                                            } else {
+                                                Vec::new()
+                                            };
+                                            self.stack.push(Value::Object(Box::new(
+                                                crate::value::ObjectValue {
+                                                    name: format!("{ename}.{variant}"),
+                                                    fields,
+                                                },
+                                            )));
+                                            continue;
+                                        }
+                                        // Wrong arity or unknown variant:
+                                        // fall through to the method path
+                                        // so the error names the real cause.
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        // Method on an inline unit variant (`E.V.m()`):
+                        // same resolution as above, then method dispatch
+                        // on the constructed receiver. Payload variants
+                        // can't chain (checker rejects with bind-first).
+                        let head2_shadowed = parts.len() >= 3
+                            && (interp
+                                .env
+                                .get(&parts[..parts.len() - 2].join("."))
+                                .is_some()
+                                || interp
+                                    .funcs
+                                    .contains_key(&parts[..parts.len() - 2].join(".")));
+                        if !is_direct && !head2_shadowed && parts.len() >= 3 {
+                            let head2 = parts[..parts.len() - 2].join(".");
+                            let canonical2 = if interp.enums.contains_key(&head2) {
+                                Some(head2.clone())
+                            } else {
+                                interp
+                                    .import_aliases
+                                    .get(&head2)
+                                    .filter(|q| interp.enums.contains_key(q.as_str()))
+                                    .cloned()
+                            };
+                            if let Some(ename) = canonical2 {
+                                let variant = parts[parts.len() - 2].clone();
+                                let method = parts.last().cloned().unwrap_or_default();
+                                let is_unit = interp
+                                    .enums
+                                    .get(&ename)
+                                    .and_then(|vs| {
+                                        vs.iter().find(|(v, _)| v == &variant).map(|(_, h)| *h)
+                                    })
+                                    .is_some_and(|has| !has);
+                                if is_unit {
+                                    let recv = Value::Object(Box::new(crate::value::ObjectValue {
+                                        name: format!("{ename}.{variant}"),
+                                        fields: Vec::new(),
+                                    }));
+                                    if let Ok((f, recv)) =
+                                        interp.lookup_method_recv(&recv, &method, span)
+                                    {
+                                        let mut arg_vals = vec![recv];
+                                        arg_vals.extend(args);
+                                        self.frames.last_mut().unwrap().ip = ip;
+                                        self.call_value(f, arg_vals, span, interp)?;
+                                        re_cache!();
+                                        yield_check!();
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         if !is_direct && interp.resolve_path_value(parts, pspan).is_err() {
                             let method = parts.last().unwrap();
                             let recv =

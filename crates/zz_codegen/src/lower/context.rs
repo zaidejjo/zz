@@ -257,6 +257,17 @@ impl NameCtx {
         ));
     }
 
+    /// Enter a pre-minted C identifier for `name` (no counter bump).
+    /// Used for guard-hoisted payload bindings, whose declaration text
+    /// is emitted before the arm chain (so every arm condition sees it)
+    /// while registration happens per-arm, just before its guard.
+    pub(super) fn bind_existing(&mut self, name: &str, cid: String, ctype: &str) {
+        self.stack
+            .entry(name.to_string())
+            .or_default()
+            .push((cid, ctype.to_string()));
+    }
+
     /// Pop one owner-cell record for `name` (mirrors a manual [`leave`](Self::leave)).
     pub(super) fn pop_cell(&mut self, name: &str) {
         if let Some(vec) = self.cell_ptrs.get_mut(name) {
@@ -1480,6 +1491,44 @@ impl Lowerer {
             }
         }
         self.checker_struct_of(names, obj_name, Some(obj_span))
+    }
+
+    /// Un-mangled enum name for method dispatch on a local: enum
+    /// values always erase to boxed `zz_value`, so resolution goes
+    /// through the checker's type map. `None` when the local is not an
+    /// enum value.
+    pub(super) fn checker_enum_of(
+        &self,
+        names: &NameCtx,
+        obj_name: &str,
+        obj_span: Option<zz_frontend::span::Span>,
+    ) -> Option<String> {
+        if let Some(zz_checker::Type::Enum(s, _)) = names.checker_types.get(obj_name) {
+            return Some(s.clone());
+        }
+        if let Some(span) = obj_span {
+            if let Some(zz_checker::Type::Enum(s, _)) = self.ty_at(names, span) {
+                return Some(s.clone());
+            }
+        }
+        None
+    }
+
+    /// Resolve `<Enum>.<method>` for dispatch: direct hit, else the
+    /// module-namespace fallback (mirrors the checker's canonical
+    /// method lookup for selectively-imported enums).
+    pub(super) fn enum_method_target(&self, ename: &str, method: &str) -> Option<String> {
+        let direct = format!("{ename}.{method}");
+        if self.reachable_funcs.contains(&direct) || self.tp.funcs.contains_key(&direct) {
+            return Some(direct);
+        }
+        if let Some((ns, _)) = ename.rsplit_once('.') {
+            let cand = format!("{ns}.{method}");
+            if self.reachable_funcs.contains(&cand) || self.tp.funcs.contains_key(&cand) {
+                return Some(cand);
+            }
+        }
+        None
     }
 
     /// Resolve `<Struct>.<method>` for dispatch: direct hit, else promoted

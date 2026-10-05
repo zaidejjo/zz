@@ -668,6 +668,56 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.space();
                 self.emit_ty(target);
             }
+            Stmt::Enum {
+                name,
+                generics,
+                variants,
+                ..
+            } => {
+                if stmt_is_pub(stmt) {
+                    self.text("pub");
+                    self.space();
+                }
+                self.text("enum");
+                self.space();
+                for (i, n) in name.iter().enumerate() {
+                    if i > 0 {
+                        self.text(".");
+                    }
+                    self.text(n);
+                }
+                if !generics.is_empty() {
+                    self.text("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.text(", ");
+                        }
+                        self.text(g.name.clone());
+                    }
+                    self.text(">");
+                }
+                self.space();
+                self.text("{");
+                let saved = std::mem::take(&mut self.out);
+                for (vname, payload) in variants.iter() {
+                    self.out.push(Doc::hard_line());
+                    self.consecutive_nls = 1;
+                    self.text(vname.name.clone());
+                    if let Some(pty) = payload {
+                        self.text("(");
+                        self.emit_ty(pty);
+                        self.text(")");
+                    }
+                    self.text(",");
+                }
+                let body = std::mem::replace(&mut self.out, saved);
+                self.out.push(Doc::Indent {
+                    contents: Box::new(Doc::Concat(body)),
+                });
+                self.out.push(Doc::hard_line());
+                self.consecutive_nls = 1;
+                self.text("}");
+            }
             Stmt::Impl {
                 name,
                 generics,
@@ -1544,6 +1594,7 @@ fn stmt_is_pub(stmt: &Stmt) -> bool {
         Stmt::Func { pub_, .. }
         | Stmt::Struct { pub_, .. }
         | Stmt::TypeAlias { pub_, .. }
+        | Stmt::Enum { pub_, .. }
         | Stmt::Impl { pub_, .. }
         | Stmt::Import { pub_, .. } => *pub_,
         _ => false,

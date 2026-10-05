@@ -12,7 +12,9 @@
 
 use std::collections::HashMap;
 
-pub use zz_checker::{check_program_typed, AliasSig, FuncSig, SpanKey, StructSig, Type, TOP_SCOPE};
+pub use zz_checker::{
+    check_program_typed, AliasSig, EnumSig, FuncSig, SpanKey, StructSig, Type, TOP_SCOPE,
+};
 pub use zz_frontend::ast::{Block, Expr, Program, Stmt};
 pub use zz_frontend::span::Span;
 
@@ -45,6 +47,8 @@ pub struct TypedProgram {
     pub funcs: HashMap<String, FuncSig>,
     /// Top-level struct signatures.
     pub structs: HashMap<String, StructSig>,
+    /// Top-level user enum signatures (for VM construction detection).
+    pub enums: HashMap<String, EnumSig>,
     /// `try` site span → conversion function name (`None` = identity).
     /// Mirrors the checker's `try_converts`; consulted by native codegen
     /// to emit error-conversion calls on early return.
@@ -67,6 +71,7 @@ pub fn build_program(
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
     initial_aliases: HashMap<String, AliasSig>,
+    initial_enums: HashMap<String, EnumSig>,
 ) -> TypedResult {
     // Expand decorators before checking so the typed program (consumed by
     // codegen) contains the lowered `__inner` + wrapper functions. The
@@ -78,6 +83,7 @@ pub fn build_program(
         initial_funcs,
         initial_structs,
         initial_aliases,
+        initial_enums,
     );
     // Move (never clone) the result maps: each is freshly built per compile
     // (notably `funcs`, one entry per function) and used exactly once here.
@@ -85,6 +91,7 @@ pub fn build_program(
     let bindings = checked.bindings;
     let funcs = checked.funcs;
     let structs = checked.structs;
+    let enums = checked.enums;
     let try_converts = checked.try_converts;
     TypedResult {
         program: TypedProgram {
@@ -93,6 +100,7 @@ pub fn build_program(
             bindings,
             funcs,
             structs,
+            enums,
             try_converts,
         },
         diagnostics: diags,
@@ -129,6 +137,7 @@ pub fn build_source(
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
     initial_aliases: HashMap<String, AliasSig>,
+    initial_enums: HashMap<String, EnumSig>,
 ) -> Option<TypedResult> {
     let parsed = zz_frontend::parse(source);
     if !parsed.errors.is_empty() {
@@ -140,6 +149,7 @@ pub fn build_source(
         initial_funcs,
         initial_structs,
         initial_aliases,
+        initial_enums,
     ))
 }
 

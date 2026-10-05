@@ -138,6 +138,19 @@ impl<'a> Rewriter<'a> {
                 self.rewrite_ty(target);
                 self.pop_scope();
             }
+            Stmt::Enum { name, variants, .. } => {
+                let already_qualified = name.len() > 1 && name[0] == self.ns;
+                if self.top.contains(&name.join(".")) && !already_qualified {
+                    name[0] = format!("{}.{}", self.ns, name[0]);
+                }
+                // Payload types reference sibling types by name; they
+                // need the same namespacing as struct fields.
+                for (_, payload) in variants {
+                    if let Some(pty) = payload {
+                        self.rewrite_ty(pty);
+                    }
+                }
+            }
             Stmt::Impl { name, methods, .. } => {
                 let already_qualified = name.len() > 1 && name[0] == self.ns;
                 if self.top.contains(&name.join(".")) && !already_qualified {

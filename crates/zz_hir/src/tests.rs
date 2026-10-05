@@ -123,6 +123,7 @@ fn resolves_basic_types() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
     )
     .unwrap();
     assert!(
@@ -172,6 +173,7 @@ fn resolves_binary_and_call_types() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
     )
     .unwrap();
     let tp = &res.program;
@@ -204,6 +206,7 @@ fn single_node_per_span_map_lookup() {
     let src = "y := 10\ny + 1\n";
     let res = build_source(
         src,
+        HashMap::new(),
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
@@ -247,6 +250,7 @@ fn struct_and_options_resolve() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
     )
     .unwrap();
     assert!(
@@ -286,6 +290,7 @@ fib(5)
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
     )
     .unwrap();
     let tp = &res.program;
@@ -310,6 +315,7 @@ fn build_with_stdlib(src: &str) -> crate::TypedResult {
         src,
         HashMap::new(),
         seed_stdlib(),
+        HashMap::new(),
         HashMap::new(),
         HashMap::new(),
     )

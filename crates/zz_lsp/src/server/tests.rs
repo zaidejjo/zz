@@ -15,11 +15,11 @@ fn setup() -> (tower_lsp::LspService<Backend>, Arc<GlobalState>) {
 
 fn open_and_check(state: &GlobalState, uri: &Url, source: &str) {
     state.update_document(uri.clone(), 1, source.to_string());
-    let (ib, ifunc, is, ia) = state.checker_seed();
+    let (ib, ifunc, is, ia, ie) = state.checker_seed();
     let cr = {
         let doc = state.documents.get(uri).unwrap();
         let program = doc.program.as_ref().unwrap().clone();
-        zz_checker::check_program(&program, ib, ifunc, is, ia)
+        zz_checker::check_program(&program, ib, ifunc, is, ia, ie)
     };
     if let Some(mut doc) = state.documents.get_mut(uri) {
         doc.check_result = Some(cr.clone());
