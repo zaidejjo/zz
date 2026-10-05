@@ -834,6 +834,32 @@ parity_strict!(
     "regression",
     "edge_int_neg_min.zz"
 );
+// Write-through family: strict on all legs (see above).
+parity_strict!(
+    parity_regression_edge_array_alias,
+    "regression",
+    "edge_array_alias.zz"
+);
+parity_strict!(
+    parity_regression_edge_dict_alias,
+    "regression",
+    "edge_dict_alias.zz"
+);
+parity_strict!(
+    parity_regression_edge_temp_index_drop,
+    "regression",
+    "edge_temp_index_drop.zz"
+);
+parity_strict!(
+    parity_regression_edge_field_index_store,
+    "regression",
+    "edge_field_index_store.zz"
+);
+parity_strict!(
+    parity_regression_edge_struct_path_store,
+    "regression",
+    "edge_struct_path_store.zz"
+);
 parity_strict!(
     parity_regression_edge_cast_float_int,
     "regression",

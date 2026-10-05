@@ -442,6 +442,33 @@ e2e_success_test!(
     "regression",
     "edge_int_neg_min.zz"
 );
+// Write-through family (value semantics for stores through clones,
+// nested bases, temps, and struct paths).
+e2e_success_test!(
+    e2e_regression_edge_array_alias,
+    "regression",
+    "edge_array_alias.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_dict_alias,
+    "regression",
+    "edge_dict_alias.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_temp_index_drop,
+    "regression",
+    "edge_temp_index_drop.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_field_index_store,
+    "regression",
+    "edge_field_index_store.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_struct_path_store,
+    "regression",
+    "edge_struct_path_store.zz"
+);
 e2e_success_test!(e2e_syntax_main_entrypoint, "syntax", "main_entrypoint.zz");
 e2e_success_test!(e2e_syntax_match_guards, "syntax", "match_guards.zz");
 e2e_success_test!(

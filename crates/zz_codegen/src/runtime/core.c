@@ -3600,13 +3600,13 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
                adopts the value (move convention), so the second
                insert needs its own reference. */
             zz_value alias_val = zz_clone(val);
-            zz_index_set(row, k, val, &derr);
+            zz_index_set(&row, k, val, &derr);
             char poskey[32];
             snprintf(poskey, sizeof poskey, "c%d", i);
             if (strcmp(poskey, cname) != 0) {
                 zz_value ka = zz_str_owned(copy_cstr(poskey, strlen(poskey)));
                 int aerr2 = 0;
-                zz_index_set(row, ka, alias_val, &aerr2);
+                zz_index_set(&row, ka, alias_val, &aerr2);
                 (void)aerr2;
             } else {
                 zz_release(&alias_val);

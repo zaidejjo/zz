@@ -101,6 +101,12 @@ a divergence carry `known-divergence` (or land in `errors/` with a
 
 - `edge_shift_mask`: `<<` / `>>` with counts >= width (both mask `& 63`).
 - `edge_chained_store`: chained index stores write through (fixed VM bug).
+- Write-through family (all strict): `edge_array_alias`,
+  `edge_dict_alias` (stores through clones), `edge_temp_index_drop`
+  (call-temp stores drop without leaking into globals),
+  `edge_field_index_store` (field store through an index, shared and
+  unshared), `edge_struct_path_store` (index store through a
+  struct-field path).
 - `edge_cast_float_nan`: int(NaN) saturates to 0 (strict since the
   flag cleanup: no `-ffast-math`, explicit `isnan` guard).
 - `edge_slice_clamp`: out-of-range slice ends clamp (strict everywhere).

@@ -1286,7 +1286,7 @@ impl Lowerer {
                     let key = box_scalar_operand(k, names, &raw_key);
                     let val = box_scalar_operand(v, names, &raw_val);
                     out.push_str(&format!(
-                        "    {{ int _de = 0; zz_index_set({dv}, {key}, {val}, &_de); }}\n"
+                        "    {{ int _de = 0; zz_index_set(&{dv}, {key}, {val}, &_de); }}\n"
                     ));
                 }
                 dv

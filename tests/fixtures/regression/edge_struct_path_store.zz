@@ -1,0 +1,9 @@
+// features: arrays, indexing, locals, print, string-literal, structs
+// E2E: edge — index store through a struct-field path writes through
+// to the root (was dropped natively).
+struct H { arr: [int] }
+struct NS { h: H }
+ns := NS{h: H{arr: [1, 2]}}
+ns.h.arr[0] = 9
+println("v={ns.h.arr[0]}")
+println("edge_struct_path_store_ok")

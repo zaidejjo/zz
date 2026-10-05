@@ -6,6 +6,134 @@ use zz_frontend::ast::{Block, Expr, Pattern, Stmt};
 use super::*;
 
 impl Lowerer {
+    /// Addressable container home for an index store: a C lvalue holding
+    /// the container, so `zz_index_set` can detach-and-reseat in place.
+    /// Plain locals / module vars qualify; struct-field spellings and
+    /// computed bases need the temp + write-back triple instead.
+    fn index_store_home(&self, obj: &Expr, names: &NameCtx) -> Option<String> {
+        match obj {
+            Expr::Ident { name, .. } => names.lookup(name).map(str::to_string),
+            Expr::Path { parts, .. } => {
+                let joined = parts.join(".");
+                match names.lookup(&joined) {
+                    Some(cid)
+                        if !matches!(
+                            names.checker_types.get(&parts[0]),
+                            Some(zz_checker::Type::Struct(_, _))
+                        ) =>
+                    {
+                        Some(cid.to_string())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Write an owned container temp back into an assign-target home.
+    /// Consumes `tmp` on every path. Homes: direct bindings assign;
+    /// Index/Field homes recurse (necessarily cloning the base — the
+    /// temp triple always owns its shares, so assign+release balances
+    /// without alias analysis); anything else releases (temp-drop,
+    /// matching the VM).
+    fn emit_store_writeback(
+        &self,
+        target: &Expr,
+        tmp: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) {
+        match target {
+            Expr::Ident { name, .. } => {
+                if let Some(cid) = names.lookup(name).map(str::to_string) {
+                    out.push_str(&format!("    zz_assign(&{cid}, {tmp});\n"));
+                }
+                out.push_str(&format!("    zz_release(&{tmp});\n"));
+            }
+            Expr::Path { parts, .. } => {
+                let joined = parts.join(".");
+                let base_is_struct = parts.len() >= 2
+                    && matches!(
+                        names.checker_types.get(&parts[0]),
+                        Some(zz_checker::Type::Struct(_, _))
+                    );
+                match names.lookup(&joined) {
+                    // Direct binding (module vars, promoted slots):
+                    // store straight through, unless it spells a
+                    // struct-field walk (handled by the peel below).
+                    Some(cid) if !base_is_struct => {
+                        let cid = cid.to_string();
+                        out.push_str(&format!("    zz_assign(&{cid}, {tmp});\n"));
+                        out.push_str(&format!("    zz_release(&{tmp});\n"));
+                    }
+                    _ if base_is_struct => {
+                        // Struct-field home: peel the last segment into a
+                        // field store on the parent prefix, then recurse.
+                        // The prefix is strictly shorter, so this ends at
+                        // a direct home (or a drop) above.
+                        let prefix = Expr::Path {
+                            parts: parts[..parts.len() - 1].to_vec(),
+                            span: zz_frontend::span::Span { start: 0, end: 0 },
+                        };
+                        let leaf = parts.last().cloned().unwrap_or_default();
+                        let tmp_p = names.fresh("_wbpp");
+                        let emitted_prefix = self.emit_expr(&prefix, names, out);
+                        out.push_str(&format!("    zz_value {tmp_p} = {emitted_prefix};\n"));
+                        out.push_str(&format!(
+                            "    zz_object_set_field(&{tmp_p}, \"{leaf}\", {tmp});\n"
+                        ));
+                        out.push_str(&format!("    zz_release(&{tmp});\n"));
+                        self.emit_store_writeback(&prefix, &tmp_p, names, out);
+                    }
+                    _ => {
+                        out.push_str(&format!("    zz_release(&{tmp});\n"));
+                    }
+                }
+            }
+            Expr::Index {
+                obj, index, span, ..
+            } => {
+                // Nested index home: store the temp into an owned copy
+                // of the base, then write that base back (recursion
+                // bottoms at a direct home or a drop). The base copy is
+                // an owned clone, so the inner set detaches exactly when
+                // truly shared and the outer assign+release balances.
+                let base = self.emit_expr(obj, names, out);
+                let idx = self.emit_expr(index, names, out);
+                let idx_boxed = self.box_index_arg(index, idx, names);
+                let base_tmp = names.fresh("_wbb");
+                let e = names.fresh("_wbe");
+                out.push_str(&format!("    zz_value {base_tmp} = zz_clone({base});\n"));
+                out.push_str(&format!("    int {e} = 0;\n"));
+                out.push_str(&format!(
+                    "    zz_index_set(&{base_tmp}, {idx_boxed}, {tmp}, &{e});\n"
+                ));
+                out.push_str(&format!(
+                    "    if ({e}) {{ fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); }}\n"
+                ));
+                let _ = span;
+                self.emit_store_writeback(obj, &base_tmp, names, out);
+            }
+            Expr::Field { obj, name, .. } => {
+                // Field home: store into an owned copy of the receiver,
+                // then write the receiver back (set_field detaches shared
+                // headers internally).
+                let recv = self.emit_expr(obj, names, out);
+                let recv_tmp = names.fresh("_wbr");
+                out.push_str(&format!("    zz_value {recv_tmp} = zz_clone({recv});\n"));
+                out.push_str(&format!(
+                    "    zz_object_set_field(&{recv_tmp}, \"{name}\", {tmp});\n"
+                ));
+                out.push_str(&format!("    zz_release(&{tmp});\n"));
+                self.emit_store_writeback(obj, &recv_tmp, names, out);
+            }
+            _ => {
+                out.push_str(&format!("    zz_release(&{tmp});\n"));
+            }
+        }
+    }
+
     pub(super) fn emit_stmt(
         &self,
         stmt: &Stmt,
@@ -547,14 +675,56 @@ impl Lowerer {
                         if let Expr::Ident { name, .. } = obj.as_ref() {
                             names.invalidate_stack_array_elems(name);
                         }
-                        let o = self.emit_expr(obj, names, out);
-                        let i = self.emit_expr(index, names, out);
-                        // Box a scalar index to a zz_value.
-                        let i_boxed = self.box_index_arg(index, i, names);
                         let boxed_val = self.box_index_store_value(value, val.clone(), names);
+                        if let Some(home) = self.index_store_home(obj, names) {
+                            let i = self.emit_expr(index, names, out);
+                            // Box a scalar index to a zz_value.
+                            let i_boxed = self.box_index_arg(index, i, names);
+                            // Direct home: detach-on-write inside
+                            // zz_index_set handles sharing with zero
+                            // copies in the unique case.
+                            out.push_str(&format!(
+                                "    {{ int _e = 0; zz_index_set(&{home}, {i_boxed}, {boxed_val}, &_e);\n"
+                            ));
+                            out.push_str(
+                                "      if (_e) { fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); } }\n",
+                            );
+                        } else {
+                            // Computed base: owned temp, store, write back
+                            // (VM shape — plain reads would alias).
+                            let o = self.emit_expr(obj, names, out);
+                            let i = self.emit_expr(index, names, out);
+                            // Box a scalar index to a zz_value.
+                            let i_boxed = self.box_index_arg(index, i, names);
+                            let wb = names.fresh("_wbs");
+                            out.push_str(&format!(
+                                "    {{ int _e = 0; zz_value {wb} = zz_clone({o});\n"
+                            ));
+                            out.push_str(&format!(
+                                "      zz_index_set(&{wb}, {i_boxed}, {boxed_val}, &_e);\n"
+                            ));
+                            out.push_str(
+                                "      if (_e) { fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); }\n",
+                            );
+                            self.emit_store_writeback(obj, &wb, names, out);
+                            out.push_str("    }\n");
+                        }
+                    }
+                    Expr::Field { obj, name, .. } => {
+                        // `obj.field = v` with a computed receiver (plain
+                        // Ident/Path receivers go through their own arms
+                        // above): temp + set + write back (VM shape).
+                        // `zz_object_set_field` detaches shared headers
+                        // internally; the write-back lands the result.
+                        let o = self.emit_expr(obj, names, out);
+                        let boxed_val = self.box_index_store_value(value, val.clone(), names);
+                        let tmp = names.fresh("_wbf");
+                        out.push_str(&format!("    {{ zz_value {tmp} = zz_clone({o});\n"));
                         out.push_str(&format!(
-                            "    {{ int _e = 0; zz_index_set({o}, {i_boxed}, {boxed_val}, &_e); }}\n"
+                            "      zz_object_set_field(&{tmp}, \"{name}\", {boxed_val});\n"
                         ));
+                        self.emit_store_writeback(obj, &tmp, names, out);
+                        out.push_str("    }\n");
                     }
                     _ => {}
                 }
@@ -587,37 +757,70 @@ impl Lowerer {
                     Expr::Index { obj, index, .. } => {
                         // Receiver first (same order as the tree-walker
                         // and VM): single evaluation, then read →
-                        // boxed zz_binop → write. Index stores are
-                        // already runtime-dispatched, so the boxed path
-                        // is always correct here. The store kills index
+                        // boxed zz_binop → write. The store kills index
                         // forwarding for the base (plus dependents).
                         if let Expr::Ident { name, .. } = obj.as_ref() {
                             names.invalidate_stack_array_elems(name);
                         }
-                        let o = self.emit_expr(obj, names, out);
-                        let i = self.emit_expr(index, names, out);
-                        let i_boxed = self.box_index_arg(index, i, names);
                         let rhs = self.emit_expr(value, names, out);
                         let rhs_boxed = self.box_index_store_value(value, rhs, names);
                         let cop = binop_runtime_op(op);
-                        out.push_str(&format!(
-                            "    {{ int _e = 0; zz_value _co = {o}; zz_value _ci = {i_boxed};\n"
-                        ));
-                        out.push_str("      zz_value _cc = zz_index_get(_co, _ci, &_e);\n");
-                        out.push_str(&format!(
-                            "      zz_value _cr = zz_binop({cop}, _cc, {rhs_boxed});\n"
-                        ));
-                        out.push_str("      zz_index_set(_co, _ci, _cr, &_e); }\n");
+                        if let Some(home) = self.index_store_home(obj, names) {
+                            let i = self.emit_expr(index, names, out);
+                            let i_boxed = self.box_index_arg(index, i, names);
+                            out.push_str(&format!(
+                                "    {{ int _e = 0; zz_value _cc = zz_index_get({home}, {i_boxed}, &_e);\n"
+                            ));
+                            out.push_str(
+                                "      if (_e) { fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); }\n",
+                            );
+                            out.push_str(&format!(
+                                "      zz_value _cr = zz_binop({cop}, _cc, {rhs_boxed});\n"
+                            ));
+                            out.push_str(&format!(
+                                "      zz_index_set(&{home}, {i_boxed}, _cr, &_e);\n"
+                            ));
+                            out.push_str(
+                                "      if (_e) { fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); } }\n",
+                            );
+                        } else {
+                            let o = self.emit_expr(obj, names, out);
+                            let i = self.emit_expr(index, names, out);
+                            let i_boxed = self.box_index_arg(index, i, names);
+                            out.push_str(&format!(
+                                "    {{ int _e = 0; zz_value _co = zz_clone({o}); zz_value _ci = {i_boxed};\n"
+                            ));
+                            out.push_str("      zz_value _cc = zz_index_get(_co, _ci, &_e);\n");
+                            out.push_str(
+                                "      if (_e) { fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); }\n",
+                            );
+                            out.push_str(&format!(
+                                "      zz_value _cr = zz_binop({cop}, _cc, {rhs_boxed});\n"
+                            ));
+                            out.push_str("      zz_index_set(&_co, _ci, _cr, &_e);\n");
+                            out.push_str(
+                                "      if (_e) { fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); }\n",
+                            );
+                            self.emit_store_writeback(obj, "_co", names, out);
+                            out.push_str("    }\n");
+                        }
                     }
-                    Expr::Field { obj, .. } => {
-                        // Mirror plain `=` (which drops the store for
-                        // non-trivial receivers) but still evaluate both
-                        // sides exactly once, receiver first, so side
-                        // effects are preserved, matching the VM.
-                        let o = self.emit_expr(obj, names, out);
-                        let rhs = self.emit_expr(value, names, out);
-                        let rhs_boxed = box_scalar_operand(value, names, &rhs);
-                        out.push_str(&format!("    (void)({o}); (void)({rhs_boxed});\n"));
+                    Expr::Field { .. } => {
+                        // Delegate to the plain `=` Field arm (temp +
+                        // set + write back) with `target = target OP
+                        // value`, like Ident/Path above. The plain arm
+                        // evaluates each side once, receiver first.
+                        let synthetic = Stmt::Assign {
+                            target: target.clone(),
+                            value: Expr::Binary {
+                                op: *op,
+                                left: Box::new(target.clone()),
+                                right: Box::new(value.clone()),
+                                span: *span,
+                            },
+                            span: *span,
+                        };
+                        self.emit_stmt(&synthetic, names, out, is_tail);
                     }
                     _ => {}
                 }
