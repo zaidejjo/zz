@@ -62,6 +62,13 @@ pub(crate) struct StackArrayEntry {
     /// Eagerly-resolved `(raw C text, C scalar type)` per element,
     /// resolved at record time so later scope changes cannot skew them.
     pub(crate) raw: Vec<(String, &'static str)>,
+    /// The binding's C local at record time (for release elision).
+    pub(crate) declared_cvar: String,
+    /// True when the RHS took the stack-promotion path (header + items
+    /// on the C stack, scalar elements ⇒ nothing to release). Lets
+    /// `loop_scope_end` skip the `zz_release`, which is both a no-op
+    /// and a codegen barrier pinning the dead construction.
+    pub(crate) promoted: bool,
 }
 
 /// Scope-aware C identifier allocator (handles shadowing).
@@ -105,6 +112,12 @@ pub struct NameCtx {
     /// the per-iteration `zz_index_get` call plus boxing. See
     /// [`StackArrayEntry`] for the invalidation contract.
     pub(crate) stack_array_elems: HashMap<String, StackArrayEntry>,
+    /// C var most recently emitted by the stack-promotion path (`_vN`),
+    /// if any. Consumed by the very next array-binding record (which
+    /// checks it against the emitted RHS); stale values are harmless
+    /// because the equality check fails and promotion reads false.
+    /// Cleared with scopes (see `pop_scope`).
+    pub(crate) last_promoted_array: Option<String>,
     /// zz var name → checker type from the type system. Used by method
     /// dispatch to select the correct namespace (e.g., `"str"` for strings
     /// vs `"vec"` for arrays) when multiple natives share a method name.
@@ -135,6 +148,7 @@ impl NameCtx {
             scope_markers: Vec::new(),
             array_lens: HashMap::new(),
             stack_array_elems: HashMap::new(),
+            last_promoted_array: None,
             checker_types: HashMap::new(),
             current_scope: zz_checker::TOP_SCOPE.to_string(),
             scalar_fn_sigs: HashMap::new(),
@@ -339,6 +353,7 @@ impl NameCtx {
         // scope — drop all of them (missed opt past the boundary, never
         // a stale read). `array_lens` survives (bare counts need no ids).
         self.stack_array_elems.clear();
+        self.last_promoted_array = None;
         if let Some(marker) = self.scope_markers.pop() {
             for vec in self.stack.values_mut() {
                 vec.retain(|(cid, _)| cid_counter(cid) < marker);
@@ -354,7 +369,6 @@ impl NameCtx {
     pub(super) fn set_array_len(&mut self, name: &str, n: usize) {
         self.array_lens.insert(name.to_string(), n);
     }
-
     /// Forget any statically-known literal length for `name`. Called when
     /// `name` is reassigned with a non-literal value or aliased into a call.
     pub(super) fn invalidate_array_len(&mut self, name: &str) {
@@ -373,6 +387,7 @@ impl NameCtx {
     pub(super) fn clear_array_lens(&mut self) {
         self.array_lens.clear();
         self.stack_array_elems.clear();
+        self.last_promoted_array = None;
     }
 
     /// Record that `name` currently holds a pure-scalar array literal:
@@ -382,9 +397,30 @@ impl NameCtx {
         name: &str,
         elems: Vec<Expr>,
         raw: Vec<(String, &'static str)>,
+        declared_cvar: String,
+        promoted: bool,
     ) {
-        self.stack_array_elems
-            .insert(name.to_string(), StackArrayEntry { elems, raw });
+        self.stack_array_elems.insert(
+            name.to_string(),
+            StackArrayEntry {
+                elems,
+                raw,
+                declared_cvar,
+                promoted,
+            },
+        );
+    }
+
+    /// C var most recently emitted by the stack-promotion path is tracked
+    /// via this slot (see field on [`NameCtx`]); consumed by the next
+    /// array-binding record.
+    pub(super) fn take_promoted_array(&mut self, cvar: &str) -> bool {
+        if self.last_promoted_array.as_deref() == Some(cvar) {
+            self.last_promoted_array = None;
+            true
+        } else {
+            false
+        }
     }
 
     /// Raw `(C text, C type)` for element `idx` of the literal most
@@ -557,7 +593,13 @@ impl Lowerer {
     /// Skipped in green closures (frame-cell lifetimes + resume labels
     /// are out of scope for this opt) and for captured names (a nested
     /// closure may mutate them between record and read).
-    pub(super) fn record_array_elems(&self, name: &str, elems: &[Expr], names: &mut NameCtx) {
+    pub(super) fn record_array_elems(
+        &self,
+        name: &str,
+        elems: &[Expr],
+        emitted_val: &str,
+        names: &mut NameCtx,
+    ) {
         names.invalidate_stack_array_elems(name);
         if self.green_active() {
             return;
@@ -584,7 +626,14 @@ impl Lowerer {
             };
             raw.push((c, t));
         }
-        names.set_stack_array_elems(name, elems.to_vec(), raw);
+        // The binding's live C local (for release elision) plus whether
+        // the RHS took the stack-promotion path (matched against the
+        // emitted var, so heap/arena literals read unpromoted).
+        let Some(declared) = names.lookup(name).map(|s| s.to_string()) else {
+            return;
+        };
+        let promoted = names.take_promoted_array(emitted_val);
+        names.set_stack_array_elems(name, elems.to_vec(), raw, declared, promoted);
     }
 
     /// C scalar type for a plain ZZ scalar (`int`/`float`/`bool`).
@@ -936,7 +985,21 @@ impl Lowerer {
             }
             doomed.sort();
             doomed.dedup();
+            // Stack-promoted arrays with a live entry were never
+            // mutated, aliased into a call, or captured (any of those
+            // drops the entry): header + scalar items live on the C
+            // stack, so `zz_release` is a proven no-op. Skipping it
+            // also unpins the dead construction for clang's DCE.
+            let mut skip: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for entry in names.stack_array_elems.values() {
+                if entry.promoted {
+                    skip.insert(entry.declared_cvar.as_str());
+                }
+            }
             for (_, cid) in doomed.iter().rev() {
+                if skip.contains(cid.as_str()) {
+                    continue;
+                }
                 out.push_str(&format!("    zz_release(&{cid});\n"));
             }
         }
@@ -1662,6 +1725,10 @@ impl Lowerer {
         out.push_str(&format!(
             "    zz_value {v_var} = (zz_value){{ZZ_ARRAY, {{.arr = &{arr_var}}}}};\n"
         ));
+        // Remember the promoted var for the binding record: the very
+        // next array `:=` / `=` matches it against its emitted RHS to
+        // mark the entry release-elidable (see `take_promoted_array`).
+        names.last_promoted_array = Some(v_var.clone());
         Some(v_var)
     }
 
