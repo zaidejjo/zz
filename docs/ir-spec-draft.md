@@ -38,13 +38,24 @@ backend still drops these (tracked native bug, same class).
 1.5. Strings and bytes are immutable values. No operation mutates a
 string in place; concatenation builds a new value.
 
-1.6. Closures: evaluating a closure literal creates fresh cells
-initialized from the current bindings. Copies of a closure value share
-those cells (matches the `Rc<RefCell>` VM implementation). Escape into
-threads snapshots values (deep copy), never cells. *Provisional — the
-M1 implementation MUST confirm with differential probes; if the
-tree-walker disagrees anywhere, the spec bends to the VM-after-fix,
-never the reverse.*
+1.6. Closures capture **by reference to the variable**, not by value.
+A closure and its defining scope observe each other's assignments to a
+captured mutable variable. Each loop iteration creates a fresh binding
+of the loop variable; closures created in different iterations capture
+different variables.
+
+1.7. Representation is unspecified but observably equivalent to cells:
+captured `const` or never-reassigned variables MAY be copied by value;
+captured, reassigned variables of non-escaping closures MAY live in a
+stack slot accessed by reference; captured, reassigned variables of
+escaping closures use a shared reference-counted cell. Annotations
+selecting a representation are hints — removing them MUST NOT change
+program output (quad runs with `--strip-annotations` in M1 impl).
+
+1.8. `spawn` moves or copies captured variables into the new task at
+spawn time. No mutable cell is implicitly shared across tasks;
+cross-task sharing requires an explicit shared type (channels and
+future shared handles, §1.7 of the pre-M1 report scope).
 
 1.7. Explicitly shared handles (channels, task joins, DB connections,
 opaque native handles) are the ONLY aliasing exceptions. Their sharing
