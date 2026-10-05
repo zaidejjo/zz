@@ -89,6 +89,9 @@ impl Lowerer {
                     Some(ref sname) => self.emit_boxed_value(sname, value, names, out),
                     None => self.emit_expr(value, names, out),
                 };
+                // Snapshot the emitted RHS for the array record below
+                // (`final_val` moves `val` for boxed types).
+                let emitted_val = val.clone();
 
                 // NOW enter the new scope entry with the correct C type.
                 // For scalars, use enter_with_type so that any subsequent code
@@ -146,12 +149,19 @@ impl Lowerer {
                 // Track array literals so `len(v)` can fold to the arity,
                 // and record pure-scalar literals for index forwarding
                 // (`arr[lit]` reads lower to the element's raw C expr).
-                // Any other RHS drops a shadowed literal binding.
+                // Any other RHS drops a shadowed literal binding; an
+                // Ident RHS aliases it (the new binding may mutate the
+                // shared buffer, so the source's forwarding dies too).
                 if let Expr::Array { elems, .. } = value {
                     names.set_array_len(&name.name, elems.len());
-                    self.record_array_elems(&name.name, elems, names);
+                    self.record_array_elems(&name.name, elems, &emitted_val, names);
                 } else {
                     names.invalidate_stack_array_elems(&name.name);
+                    if let Expr::Ident { name: src, .. } = value {
+                        if names.stack_array_elems.contains_key(src) {
+                            names.invalidate_stack_array_elems(src);
+                        }
+                    }
                 }
             }
             Stmt::Assign { target, value, .. } => {
@@ -179,6 +189,15 @@ impl Lowerer {
                 if let Expr::Ident { name, .. } = target {
                     names.invalidate_array_len(name);
                     names.invalidate_stack_array_elems(name);
+                }
+                // `x = arr` aliases the array: the target may mutate the
+                // shared buffer, so the source's forwarding dies too.
+                // (Runs before the early-return paths below so moves and
+                // append-chains inherit it.)
+                if let Expr::Ident { name: src, .. } = value {
+                    if names.stack_array_elems.contains_key(src) {
+                        names.invalidate_stack_array_elems(src);
+                    }
                 }
                 if let Expr::Ident { name: tname, .. } = target {
                     if self.try_emit_str_append_chain(tname, value, names, out) {
@@ -263,7 +282,7 @@ impl Lowerer {
                             // index-forwarding elements when pure-scalar).
                             if let Expr::Array { elems, .. } = value {
                                 names.set_array_len(name, elems.len());
-                                self.record_array_elems(name, elems, names);
+                                self.record_array_elems(name, elems, &val, names);
                             }
                         }
                     }
@@ -828,6 +847,9 @@ impl Lowerer {
             Lit(String),
             Borrow(String),
             StrCall(&'a Expr),
+            /// `str(x)` of a raw scalar int/bool: append the formatted
+            /// value directly (C type, raw C text). No temp, no release.
+            AppendScalar(&'static str, String),
         }
         let mut plan: Vec<Term> = Vec::with_capacity(terms.len() - 1);
         for term in &terms[1..] {
@@ -880,7 +902,35 @@ impl Lowerer {
                         None => return false,
                     }
                 }
-                Expr::Call { .. } => {
+                Expr::Call {
+                    callee,
+                    args,
+                    named,
+                    ..
+                } => {
+                    // Fast path: `str(x)` of a raw scalar int/bool
+                    // appends the formatted value directly — no temp
+                    // `zz_value`, no arena staging, no release. Only
+                    // single positional args (named args keep the
+                    // generic path); other string calls (e.g. `chr`)
+                    // must NOT take this path (different semantics).
+                    if named.is_empty() {
+                        if let [arg] = args.as_slice() {
+                            if matches!(
+                                callee.as_ref(),
+                                Expr::Ident { name, .. } if name == "str" || name == "std.str"
+                            ) {
+                                if let Some(t) = scalar_operand_type(arg, names) {
+                                    if t == "int64_t" || t == "bool" {
+                                        if let Some(raw) = scalar_operand_c(arg, names) {
+                                            plan.push(Term::AppendScalar(t, raw));
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // Only string-producing calls (today: str()
                     // conversions). Other calls may return non-strings,
                     // which append_str would silently drop.
@@ -902,6 +952,18 @@ impl Lowerer {
                 }
                 Term::Borrow(rcid) => {
                     out.push_str(&format!("    zz_str_append_str(&{cid}, {rcid});\n"));
+                }
+                Term::AppendScalar(t, raw) => {
+                    // `str(int)` / `str(bool)` in append position: format
+                    // straight into the buffer (float keeps the generic
+                    // path — its `%.1f` vs `zz_print_double` fork must
+                    // match the cast exactly).
+                    let helper = if t == "bool" {
+                        "zz_str_append_bool"
+                    } else {
+                        "zz_str_append_int"
+                    };
+                    out.push_str(&format!("    {helper}(&{cid}, {raw});\n"));
                 }
                 Term::StrCall(term) => {
                     // Self-append (`s = s + s`) arrives here as an Ident:

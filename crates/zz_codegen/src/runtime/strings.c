@@ -1592,6 +1592,23 @@ zz_value zz_str_from_int(int64_t n) {
     return zz_str_new(p, len);
 }
 
+// Append a formatted int directly into the string buffer: one grow +
+// memcpy, no zz_value temp, no arena staging, no release. Used by the
+// `s = s + ... + str(i) + ...` append-chain fast path.
+void zz_str_append_int(zz_value *a, int64_t n) {
+    char buf[24];
+    size_t len;
+    const char *p = zz_fmt_i64(buf + sizeof buf, n, &len);
+    zz_str_append_lit(a, p, len);
+}
+
+// Append a bool in display form (`true`/`false`, matching
+// zz_print_value_display and the VM).
+void zz_str_append_bool(zz_value *a, bool b) {
+    if (b) zz_str_append_lit(a, "true", 4);
+    else zz_str_append_lit(a, "false", 5);
+}
+
 // typeof(v) — return type name as string.
 // zz_str(v) — cast to string (display semantics: unwraps Option).
 zz_value zz_str_cast(zz_value v, int *err) {

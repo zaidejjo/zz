@@ -1800,3 +1800,57 @@ fn stack_array_forwarding_killed_by_store_and_push() {
     let (_, out) = native_run(src);
     assert_eq!(out, "99\n10 3\n");
 }
+
+#[test]
+fn str_append_chain_inlines_int_and_bool_casts() {
+    // `s = s + "item_" + str(i) + ";"` must format directly into the
+    // buffer: one `zz_str_append_int` call, no cast temp, no release.
+    let src = "func main() {\n    st := \"\"\n    for i in 0..5 {\n        st = st + \"item_\" + str(i) + \";\"\n    }\n    println(st)\n    s2 := \"\"\n    b := true\n    s2 = s2 + \"v:\" + str(b) + \"!\"\n    println(s2)\n    s3 := \"\"\n    s3 = s3 + str(1.5)\n    println(s3)\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    let c = lower_only(&pruned, &reach, "main").source;
+    let user = c.split("// ---- generated code ----").nth(1).unwrap_or("");
+    assert!(
+        user.contains("zz_str_append_int("),
+        "int casts must append directly:\n{user}"
+    );
+    assert!(
+        user.contains("zz_str_append_bool("),
+        "bool casts must append directly:\n{user}"
+    );
+    // No per-iteration cast temp for the int loop.
+    assert!(
+        !user.contains("zz_str_cast_arena("),
+        "int loop must not stage through a cast temp:\n{user}"
+    );
+    let (_, out) = native_run(src);
+    assert_eq!(out, "item_0;item_1;item_2;item_3;item_4;\nv:true!\n1.5\n");
+}
+
+#[test]
+fn promoted_array_release_is_elided_in_loops() {
+    // A loop-local stack-promoted array that is only read through
+    // forwarded indices needs no `zz_release`: the header and scalar
+    // items live on the C stack. Eliding the opaque call also lets
+    // clang DCE the whole dead construction.
+    let src = "func main() {\n    a := 0\n    for i in 0..10 {\n        arr := [i, i + 1]\n        a = a + arr[0] + arr[1]\n    }\n    println(a)\n}\n";
+    let (pruned, reach) = build_reachable(src);
+    let c = lower_only(&pruned, &reach, "main").source;
+    let user = c.split("// ---- generated code ----").nth(1).unwrap_or("");
+    assert!(
+        !user.contains("zz_release("),
+        "dead stack array must not be released:\n{user}"
+    );
+    let (_, out) = native_run(src);
+    assert_eq!(out, "100\n");
+}
+
+#[test]
+fn array_alias_kill_keeps_push_correct() {
+    // `d := c` aliases the buffer: later reads of `c` must not forward
+    // through construction-time texts (a push through the alias may
+    // have reallocated). Push has value semantics (both engines agree
+    // the source is unaffected) — this guards the kill logic.
+    let src = "func main() {\n    c := [10, 20]\n    d := c\n    d.push(30)\n    println(\"{c[0]} {len(c)} {len(d)}\")\n}\n";
+    let (_, out) = native_run(src);
+    assert_eq!(out, "10 2 3\n");
+}
