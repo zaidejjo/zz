@@ -532,17 +532,74 @@ zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err) {
     }
 }
 
-void zz_index_set(zz_value obj, zz_value idx, zz_value item, int *err) {
-    switch (obj.tag) {
+// Duplicate a dict with an INDEPENDENT entries buffer (shallow value
+// clone, like `zz_array_dup`): callers may mutate the result without
+// affecting the original. Arena-owned keys/values heal to heap via
+// `zz_dict_set`'s own conventions (keys bumped-or-healed, values
+// adopted from a prior `zz_clone`), so each side owns exactly one
+// share of everything stored.
+zz_value zz_dict_dup_value(const zz_dict *d) {
+    if (!d) return zz_unit();
+    zz_value out = zz_dict_new_sized(d->len);
+    if (!out.dict) return zz_unit();
+    for (size_t i = 0; i < d->len; i++) {
+        if (!d->entries[i].key) continue; // corrupt entry: skip, never crash
+        zz_value k;
+        k.tag = ZZ_STR;
+        k.s = d->entries[i].key;
+        zz_value v = zz_clone(d->entries[i].val);
+        zz_dict_set(out.dict, k, v);
+    }
+    return out;
+}
+
+void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
+    if (!obj) {
+        if (err) *err = 1;
+        return;
+    }
+    // Detach shared/sentinel buffers so the write below cannot leak
+    // into co-owners (`a2 := a; a2[0] = x` leaves `a` untouched),
+    // literals, or arenas. Uniquely-owned heap buffers (`refs == 1`,
+    // the only exact state) write in place with zero copies;
+    // arena/sentinel buffers heal to heap; shared heap buffers dup.
+    if (obj->tag == ZZ_ARRAY && obj->arr && obj->arr->refs != 1) {
+        zz_value fresh;
+        if (zz_array_is_arena(obj->arr)) {
+            fresh = zz_heal_for_move((zz_value){ZZ_ARRAY, {.arr = obj->arr}});
+        } else {
+            fresh = zz_array_dup(obj->arr);
+        }
+        if (!fresh.arr) {
+            if (err) *err = 1;
+            return;
+        }
+        zz_release_array(obj->arr);
+        obj->arr = fresh.arr;
+    } else if (obj->tag == ZZ_DICT && obj->dict && obj->dict->refs != 1) {
+        zz_value fresh;
+        if (zz_dict_is_arena(obj->dict)) {
+            fresh = zz_heal_for_move((zz_value){ZZ_DICT, {.dict = obj->dict}});
+        } else {
+            fresh = zz_dict_dup_value(obj->dict);
+        }
+        if (!fresh.dict) {
+            if (err) *err = 1;
+            return;
+        }
+        zz_release_dict(obj->dict);
+        obj->dict = fresh.dict;
+    }
+    switch (obj->tag) {
     case ZZ_ARRAY:
-        zz_array_set(obj.arr, idx, item, err);
+        zz_array_set(obj->arr, idx, item, err);
         return;
     case ZZ_DICT:
-        zz_dict_set(obj.dict, idx, item);
-        *err = 0;
+        zz_dict_set(obj->dict, idx, item);
+        if (err) *err = 0;
         return;
     default:
-        *err = 1;
+        if (err) *err = 1;
     }
 }
 

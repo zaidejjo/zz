@@ -150,7 +150,16 @@ static inline zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
         return zz_unit();
     }
 }
-void zz_index_set(zz_value obj, zz_value idx, zz_value item, int *err);
+// Duplicate a dict with an INDEPENDENT entries buffer (shallow value
+// clone, like `zz_array_dup`): callers may mutate the result without
+// affecting the original. Arena-owned keys/values heal to heap.
+zz_value zz_dict_dup_value(const zz_dict *d);
+
+// Detach-on-mutation for index stores (value semantics): when the
+// container buffer is shared (or a non-owned sentinel), replace this
+// slot's buffer with a private dup first. Uniquely-owned buffers
+// (`refs == 1`) write in place with zero copies.
+void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err);
 
 // Slice expression (`obj[a:b]`): arrays (items) and strings (bytes).
 zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err);
