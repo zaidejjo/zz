@@ -112,6 +112,13 @@ a divergence carry `known-divergence` (or land in `errors/` with a
 - `edge_slice_clamp`: out-of-range slice ends clamp (strict everywhere).
 - `edge_negative_index`: negative indices normalize from the end
   (arrays and strings, strict everywhere).
+- `edge_eval_order`: operand/call-arg evaluation is left-to-right
+  (strict everywhere).
+- `edge_compound_index_eval`: compound index stores evaluate each side
+  exactly once (strict everywhere).
+- `edge_index_store_order` (known-divergence + quad-split): plain
+  index-store side-effect order — VM value-first, native source-order.
+  Spec: source order canonical; VM changes post-M1.
 - `edge_float_format`: float Display conformance (spec §4.1) — exact
   in-fixture pins for `0.1`, `0.1+0.2`, `1.0`, `-0.0`, `1e21`, `1e-7`,
   `5e-324`, MAX, `NaN`, `inf`, `-inf`, strict on all legs.

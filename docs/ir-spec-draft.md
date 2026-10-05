@@ -179,9 +179,14 @@ its own number rendering on both engines; float→int saturation is §5.
 
 - Operands evaluate left-to-right. Call: callee, then args
   left-to-right. `&&`/`||` short-circuit; Elvis/`??`/`?` evaluate the
-  RHS at most once, exactly once iff needed. *The M1 implementation
-  MUST prove this against both engines with probes — no divergence is
-  known, but none was ever tested either.*
+  RHS at most once, exactly once iff needed. Probed and agreed on both
+  engines (`edge_eval_order` strict).
+- Stores evaluate source order: base, index, value — each side exactly
+  once (compound stores read-then-write through one index evaluation,
+  `edge_compound_index_eval` strict). KNOWN DEVIATION: the VM's plain
+  index/field store evaluates value-first today (implementation
+  artifact, `edge_index_store_order` quad-split); the VM path changes
+  post-M1, no engine changes in M1.
 - Code is basic blocks with explicit `JMP`/`JMP_TRUE`/`JMP_FALSE`.
   Every block records its entry stack depth; every join MUST agree
   (verifier-enforced). Loops are blocks + back-edges with a `SAFEPOINT`
@@ -235,7 +240,9 @@ stderr (VM shape today; AOT adopts it, replacing bare
 | neg `**` exp | VM errors / native 0 | trap `Domain` | stays error; native gains check |
 | OOB index | VM traps / native unit+exit 0 | trap `Bounds` | stays error; native gains check |
 | chained stores | VM dropped (fixed) / native through | through | `edge_chained_store` strict (done) |
-| field-of-index store | both drop | through | new native bug filed; probe added in M6 |
+| field-of-index store | both drop (fixed this batch) | through | write-through family strict |
+| plain index-store order | VM value-first / native source-order | source order | `edge_index_store_order` quad-split; VM changes post-M1 |
+| compound index eval | VM once / native twice (regression) | exactly once | `edge_compound_index_eval` strict after AOT fix |
 | NaN display | `NaN` vs `nan` | `NaN` (+owned formatting) | `edge_float_nan_display` strict after C fix |
 | int(NaN) under -O3 | 0 or MIN (UB) | saturate → 0 | `edge_cast_float_nan` strict after `-ffast-math` removal |
 | conditions | truthy soup | bool-only | checker already guarantees; verifier enforces |
