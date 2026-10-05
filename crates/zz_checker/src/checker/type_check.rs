@@ -52,6 +52,18 @@ fn check_sql_static(text: &str) -> Option<String> {
     None
 }
 
+/// A method invocation: resolved signature plus receiver, args, and span.
+pub(crate) struct MethodCall<'a> {
+    pub sig: &'a super::FuncSig,
+    pub recv_t: &'a Type,
+    /// Embedded-promoted receiver (struct embedding only), if any.
+    pub promoted_recv: Option<Type>,
+    pub method: &'a str,
+    pub args: &'a [Expr],
+    pub named: &'a [(String, Expr)],
+    pub span: Span,
+}
+
 impl Checker {
     // --- statements -------------------------------------------------------
 
@@ -774,7 +786,10 @@ impl Checker {
                         if canonical_head.contains('.') {
                             self.used_names.insert(canonical_head.clone());
                         }
-                        return Type::Enum(canonical_head);
+                        // Generic parameters stay inference variables
+                        // (defaulted like `Option` when never constrained).
+                        let (gen_vars, _) = self.fresh_enum_vars(&canonical_head);
+                        return Type::Enum(canonical_head, gen_vars);
                     }
                 }
                 self.lookup_path(parts, *span)
@@ -1788,7 +1803,7 @@ impl Checker {
                         }
                         // Enum values erase to `Object`s, so `impl Enum`
                         // methods dispatch exactly like struct methods.
-                        Type::Enum(ename) => {
+                        Type::Enum(ename, _) => {
                             sig = self.funcs.get(&format!("{ename}.{method}")).cloned();
                             if sig.is_none() {
                                 if let Some((ns, _)) = ename.rsplit_once('.') {
@@ -1817,34 +1832,15 @@ impl Checker {
                     }
                 }
                 if let Some(sig) = sig {
-                    let (ps, ret, subs) = self.instantiate(&sig);
-                    if ps.is_empty() {
-                        self.errors.push(error_at(
-                            format!("method `{method}` takes no arguments"),
-                            span,
-                        ));
-                        return Type::Unit;
-                    }
-                    if let Some(promoted) = promoted_recv {
-                        if let Err(e) = self.unifier.unify(&promoted, &ps[0]) {
-                            self.report_mismatch(e, span);
-                        }
-                    } else if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
-                        self.report_mismatch(e, span);
-                    }
-                    self.check_args_against(
-                        &sig.params[1..]
-                            .iter()
-                            .map(|(n, _)| n.clone())
-                            .collect::<Vec<_>>(),
-                        &ps[1..],
-                        &[],
+                    return self.check_method_call(&MethodCall {
+                        sig: &sig,
+                        recv_t: &recv_t,
+                        promoted_recv,
+                        method: &method,
                         args,
                         named,
                         span,
-                    );
-                    self.validate_bounds(&sig, &subs, span);
-                    return ret;
+                    });
                 }
                 None
             }
@@ -2089,10 +2085,12 @@ impl Checker {
                         return t;
                     }
                 }
-                // Method on a constructed unit variant (`Token.Eof.is_eof()`
-                // parses as a 3+-part path): delegate to the Field branch
-                // with a synthetic receiver. Payload variants can't chain
-                // (`Token.IntLit(1).m()` is ambiguous — bind first).
+                // Method on a constructed variant (`Token.Eof.is_eof()`
+                // parses as a 3+-part path): the call arguments split —
+                // the first fills a payload variant, the rest go to the
+                // method (`Token.IntLit(1).add(2)` constructs with `1`,
+                // calls `add` with `2`). Unit variants delegate to the
+                // Field branch with a synthetic receiver.
                 if parts.len() >= 3 {
                     let enum_head2 = parts[..parts.len() - 2].join(".");
                     let canonical_head2 = self.canonical_enum_name(&enum_head2);
@@ -2101,17 +2099,64 @@ impl Checker {
                         && self.lookup_opt(&enum_head2).is_none()
                     {
                         let variant2 = parts[parts.len() - 2].clone();
+                        let method2 = parts.last().cloned().unwrap_or_default();
                         let _pv = self.enum_variant_payload(&canonical_head2, &variant2, *pspan);
                         match _pv {
-                            Some(Some(_)) => {
+                            Some(Some(pty)) => {
+                                if args.is_empty() {
+                                    self.errors.push(error_at(
+                                        format!(
+                                            "variant `{canonical_head2}.{variant2}` holds a value: pass it before the method arguments (e.g. `{canonical_head2}.{variant2}(v).{method2}(...)`)"
+                                        ),
+                                        span,
+                                    ));
+                                    let (gen_vars, _) = self.fresh_enum_vars(&canonical_head2);
+                                    return Type::Enum(canonical_head2, gen_vars);
+                                }
+                                // First argument fills the payload; the
+                                // rest are the method's. Generic parameters
+                                // instantiate fresh, as in construction.
+                                let (gen_vars, gen_map) = self.fresh_enum_vars(&canonical_head2);
+                                let at = self.check_expr(&args[0]);
+                                let exp = super::inference::subst(&pty, &gen_map);
+                                if let Err(e) = self.unifier.unify(&at, &exp) {
+                                    self.report_mismatch(e, args[0].span());
+                                }
+                                let recv_args: Vec<Type> = gen_vars
+                                    .iter()
+                                    .map(|v| self.unifier.resolve_deep(v))
+                                    .collect();
+                                let recv_t = Type::Enum(canonical_head2.clone(), recv_args);
+                                let mut sig = self
+                                    .funcs
+                                    .get(&format!("{canonical_head2}.{method2}"))
+                                    .cloned();
+                                if sig.is_none() {
+                                    if let Some((ns, _)) = canonical_head2.rsplit_once('.') {
+                                        sig = self.funcs.get(&format!("{ns}.{method2}")).cloned();
+                                    }
+                                }
+                                if let Some(sig) = sig {
+                                    self.used_names
+                                        .insert(format!("{canonical_head2}.{method2}"));
+                                    return self.check_method_call(&MethodCall {
+                                        sig: &sig,
+                                        recv_t: &recv_t,
+                                        promoted_recv: None,
+                                        method: &method2,
+                                        args: &args[1..],
+                                        named,
+                                        span,
+                                    });
+                                }
                                 self.errors.push(error_at(
                                     format!(
-                                        "cannot chain a call off `{canonical_head2}.{variant2}(...)`: bind the value first (e.g. `t := {canonical_head2}.{variant2}(...)` then `t.{}()`)",
-                                        parts.last().cloned().unwrap_or_default(),
+                                        "unknown method `{method2}` for enum `{canonical_head2}`"
                                     ),
                                     span,
                                 ));
-                                return Type::Enum(canonical_head2);
+                                let (gen_vars, _) = self.fresh_enum_vars(&canonical_head2);
+                                return Type::Enum(canonical_head2, gen_vars);
                             }
                             Some(None) => {
                                 let recv = Expr::Path {
@@ -2127,7 +2172,8 @@ impl Checker {
                             }
                             // Unknown variant: already reported inside.
                             None => {
-                                return Type::Enum(canonical_head2);
+                                let (gen_vars, _) = self.fresh_enum_vars(&canonical_head2);
+                                return Type::Enum(canonical_head2, gen_vars);
                             }
                         }
                     }
@@ -2268,7 +2314,7 @@ impl Checker {
                         }
                         // Enum values erase to `Object`s, so `impl Enum`
                         // methods dispatch exactly like struct methods.
-                        Type::Enum(ename) => {
+                        Type::Enum(ename, _) => {
                             sig = self.funcs.get(&format!("{ename}.{method}")).cloned();
                             if sig.is_none() {
                                 if let Some((ns, _)) = ename.rsplit_once('.') {
@@ -2439,6 +2485,37 @@ impl Checker {
     /// Check that the given positional and named arguments match the parameter
     /// types.  `has_default` indicates which trailing parameters have defaults;
     /// callers may omit those.
+    pub(crate) fn check_method_call(&mut self, call: &MethodCall<'_>) -> Type {
+        let (ps, ret, subs) = self.instantiate(call.sig);
+        if ps.is_empty() {
+            self.errors.push(error_at(
+                format!("method `{}` takes no arguments", call.method),
+                call.span,
+            ));
+            return Type::Unit;
+        }
+        if let Some(promoted) = &call.promoted_recv {
+            if let Err(e) = self.unifier.unify(promoted, &ps[0]) {
+                self.report_mismatch(e, call.span);
+            }
+        } else if let Err(e) = self.unifier.unify(call.recv_t, &ps[0]) {
+            self.report_mismatch(e, call.span);
+        }
+        self.check_args_against(
+            &call.sig.params[1..]
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>(),
+            &ps[1..],
+            &[],
+            call.args,
+            call.named,
+            call.span,
+        );
+        self.validate_bounds(call.sig, &subs, call.span);
+        ret
+    }
+
     pub(crate) fn check_args_against(
         &mut self,
         param_names: &[String],
@@ -3065,20 +3142,27 @@ impl Checker {
                     (Type::Result(_, e), "err") => {
                         arg.as_ref().map(|p| (p.as_ref().clone(), (**e).clone()))
                     }
-                    (Type::Enum(ename), vname) => {
+                    (Type::Enum(ename, eargs), vname) => {
                         match self.enum_variant_payload(ename, vname, *span) {
-                            Some(Some(pty)) => match arg {
-                                Some(p) => Some((p.as_ref().clone(), pty)),
-                                None => {
-                                    self.errors.push(error_at(
-                                        format!(
-                                            "`.{vname}` pattern requires an argument (variant `{ename}.{vname}` holds a value)"
-                                        ),
-                                        *span,
-                                    ));
-                                    None
+                            Some(Some(pty)) => {
+                                // Substitute the scrutinee's arguments for
+                                // the enum's parameters (`Box[int]` + `T`
+                                // → `int`), exactly like generic struct
+                                // field access.
+                                let inner = self.subst_enum_payload(ename, eargs, &pty);
+                                match arg {
+                                    Some(p) => Some((p.as_ref().clone(), inner)),
+                                    None => {
+                                        self.errors.push(error_at(
+                                            format!(
+                                                "`.{vname}` pattern requires an argument (variant `{ename}.{vname}` holds a value)"
+                                            ),
+                                            *span,
+                                        ));
+                                        None
+                                    }
                                 }
-                            },
+                            }
                             Some(None) => {
                                 if arg.is_some() {
                                     self.errors.push(error_at(
@@ -3218,7 +3302,7 @@ impl Checker {
         // Enum exhaustiveness needs owned names (the signature table
         // can't lend `&str`s past the borrow), so enums take a separate
         // path from the static `&str` tables above.
-        if let Type::Enum(ename) = st {
+        if let Type::Enum(ename, _) = st {
             let needs: Vec<String> = self
                 .enums
                 .get(ename)

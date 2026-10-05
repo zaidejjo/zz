@@ -354,16 +354,49 @@ impl Lowerer {
                 }
             },
             Expr::Path { parts, span } => {
-                // Unit-variant value (`Token.Eof`, no parens): the HIR
-                // type proves the path is an enum, not a variable.
-                // (Checked programs never reach the `zz_unit()` fallback
-                // below with an enum type.)
+                // Unit-variant value (`Token.Eof`, no parens): precise via
+                // the HIR type when available, else by enum name (keeps
+                // typeless top-level scripts working). Both yield to
+                // shadowing values, mirroring the checker.
                 if parts.len() >= 2 {
-                    if let Some(zz_checker::Type::Enum(enum_name)) =
+                    // The head must BE the enum: namespaced globals
+                    // (`ns.x` of enum type) share the type but are
+                    // variable references, not construction.
+                    if let Some(zz_checker::Type::Enum(enum_name, _)) =
                         self.ty_at(names, *span).cloned()
                     {
-                        let variant = parts.last().cloned().unwrap_or_default();
-                        return format!("zz_object_new(\"{enum_name}.{variant}\", NULL, 0)");
+                        let head = parts[..parts.len() - 1].join(".");
+                        if head == enum_name {
+                            let variant = parts.last().cloned().unwrap_or_default();
+                            return format!("zz_object_new(\"{enum_name}.{variant}\", NULL, 0)");
+                        }
+                    }
+                    let head = parts[..parts.len() - 1].join(".");
+                    let variant = parts.last().cloned().unwrap_or_default();
+                    let resolved_head: &str = if let Some(q) = self.import_fn_aliases.get(&head) {
+                        if self.tp.enums.contains_key(q) {
+                            q
+                        } else {
+                            &head
+                        }
+                    } else {
+                        &head
+                    };
+                    if names.lookup(&head).is_none() {
+                        if let Some(sig) = self.tp.enums.get(resolved_head) {
+                            // Unit variants only here: payload variants
+                            // must use call form (checker-enforced).
+                            let is_unit = sig
+                                .variants
+                                .iter()
+                                .find(|(v, _)| v == &variant)
+                                .is_some_and(|(_, p)| p.is_none());
+                            if is_unit {
+                                return format!(
+                                    "zz_object_new(\"{resolved_head}.{variant}\", NULL, 0)"
+                                );
+                            }
+                        }
                     }
                 }
                 // Handle struct field access (e.g., p.x or r.origin.x)
@@ -756,21 +789,52 @@ impl Lowerer {
                 span,
             } => {
                 // Enum construction (`Token.IntLit(1)`) builds a boxed
-                // object, not a call. Type-driven via the HIR: no name
-                // tables needed, and untyped paths keep old behavior.
+                // object, not a call. Resolved two ways: precise via the
+                // HIR type when available, else by enum name from the HIR
+                // table (top-level scripts record no span types, so the
+                // name table keeps them working). Both yield to shadowing
+                // values, mirroring the checker.
                 if let Expr::Path { parts, .. } = callee.as_ref() {
                     if parts.len() >= 2 {
-                        if let Some(zz_checker::Type::Enum(enum_name)) =
+                        let head = parts[..parts.len() - 1].join(".");
+                        let variant = parts.last().cloned().unwrap_or_default();
+                        // Precise path first (head must be the enum itself;
+                        // namespaced globals share the type but are not
+                        // construction — see the Path arm).
+                        if let Some(zz_checker::Type::Enum(enum_name, _)) =
                             self.ty_at(names, *span).cloned()
                         {
-                            return self.emit_enum_construction(
-                                &enum_name,
-                                parts.last().cloned().unwrap_or_default(),
-                                args,
-                                named,
-                                names,
-                                out,
-                            );
+                            if head == enum_name {
+                                return self.emit_enum_construction(
+                                    &enum_name, variant, args, named, names, out,
+                                );
+                            }
+                        }
+                        // Name-table fallback for typeless positions.
+                        let resolved_head: &str = if let Some(q) = self.import_fn_aliases.get(&head)
+                        {
+                            if self.tp.enums.contains_key(q) {
+                                q
+                            } else {
+                                &head
+                            }
+                        } else {
+                            &head
+                        };
+                        let head_is_value = names.lookup(&head).is_some();
+                        if !head_is_value {
+                            if let Some(sig) = self.tp.enums.get(resolved_head) {
+                                if sig.variants.iter().any(|(v, _)| v == &variant) {
+                                    return self.emit_enum_construction(
+                                        resolved_head,
+                                        variant,
+                                        args,
+                                        named,
+                                        names,
+                                        out,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -1872,6 +1936,7 @@ impl Lowerer {
         // Resolve callee name — handle method dispatch for Path/Field expressions.
         // Returns (cname, method_receiver) where method_receiver is the owned Expr
         // to insert as the first argument for method calls like `x.push(4)`.
+
         let (cname, method_receiver): (String, Option<Expr>) = match callee {
             Expr::Ident { name, .. } => {
                 // Selective-import aliases (`rts` from
@@ -1988,7 +2053,22 @@ impl Lowerer {
                                     },
                                 )
                             });
+                        // Enum-typed local (always boxed erasure):
+                        // resolve `Enum.method` the same way.
+                        let enum_dispatch: Option<(String, Expr)> = self
+                            .checker_enum_of(names, obj_name, Some(first_ident_span))
+                            .and_then(|ename| {
+                                self.enum_method_target(&ename, method).map(|impl_name| {
+                                    let recv = Expr::Ident {
+                                        name: obj_name.clone(),
+                                        span: first_ident_span,
+                                    };
+                                    (impl_name, recv)
+                                })
+                            });
                         if let Some((c, r)) = struct_dispatch {
+                            (c, Some(r))
+                        } else if let Some((c, r)) = enum_dispatch {
                             (c, Some(r))
                         } else {
                             // Use the receiver's type from the type checker to
@@ -2348,6 +2428,28 @@ impl Lowerer {
                 // Look up receiver type and dispatch.
                 if let Some(zzty) = self.ty_at(names, obj.span()) {
                     match zzty {
+                        zz_checker::Type::Enum(ename, _) => {
+                            // Enum values erase to boxed objects: methods
+                            // take the boxed receiver (same convention as
+                            // boxed structs — no `&` unboxed form).
+                            let target = format!("{ename}.{method}");
+                            if self.reachable_funcs.contains(&target)
+                                || self.tp.funcs.contains_key(&target)
+                            {
+                                (target, Some(*obj.clone()))
+                            } else if let Some((ns, _)) = ename.rsplit_once('.') {
+                                let target = format!("{ns}.{method}");
+                                if self.reachable_funcs.contains(&target)
+                                    || self.tp.funcs.contains_key(&target)
+                                {
+                                    (target, Some(*obj.clone()))
+                                } else {
+                                    (method.clone(), None)
+                                }
+                            } else {
+                                (method.clone(), None)
+                            }
+                        }
                         zz_checker::Type::Struct(sname, _) => {
                             // Impl methods keep the direct-form convention
                             // (struct-pointer receiver); promotion included
@@ -4160,6 +4262,18 @@ impl Lowerer {
                 };
                 return Some((impl_name, recv_expr));
             }
+            // Enum-typed local (`zz_value` erasure): resolve `Enum.method`
+            // the same way. No promotion: variants carry no embedded values.
+            if let Some(ename) = self.checker_enum_of(names, &matched_tail, None) {
+                if let Some(impl_name) = self.enum_method_target(&ename, &method) {
+                    let span = zz_frontend::span::Span::new(0, 0);
+                    let recv_expr = Expr::Ident {
+                        name: matched_tail,
+                        span,
+                    };
+                    return Some((impl_name, recv_expr));
+                }
+            }
         }
 
         // Strategy 2: type-name-as-receiver (static form).
@@ -4647,6 +4761,272 @@ impl Lowerer {
         out
     }
 
+    /// Emit a guard-visible payload declaration and return
+    /// `(name, cid, ctype)` for per-arm registration. The declaration
+    /// text lands wherever the caller emits it (before the arm chain);
+    /// registration happens per-arm via `bind_existing`. Returns `None`
+    /// for non-`Binding` patterns and in green closures.
+    fn emit_guard_hoist_decl(
+        &self,
+        extractor: &str,
+        pat: &Pattern,
+        scalar_ctype: Option<&str>,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> Option<(String, String, String)> {
+        if self.green_active() {
+            return None;
+        }
+        let Pattern::Binding { name } = pat else {
+            return None;
+        };
+        let ctype = scalar_ctype.unwrap_or("zz_value");
+        let payload_tmp = names.fresh("_payload");
+        out.push_str(&format!("        zz_value {payload_tmp} = {extractor};\n"));
+        let cid = names.fresh("v");
+        out.push_str(&format!("        zz_value {cid} = {payload_tmp};\n"));
+        Some((name.name.clone(), cid, ctype.to_string()))
+    }
+
+    /// Per-arm guard-hoist planning (see [`Self::emit_guard_hoist_decl`]):
+    /// returns `(name, cid, ctype)` for guarded plain-`Binding` variant
+    /// arms, emitting the declaration text immediately. The caller emits
+    /// all of these BEFORE the arm chain and registers each one per-arm
+    /// (via `bind_existing`) just before its guard, so every arm
+    /// condition is in textual scope while lookup resolves the right
+    /// arm's binding.
+    fn guard_hoist_for_arm(
+        &self,
+        arm: &MatchArm,
+        scrutinee: &Expr,
+        scrut_tmp: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> Option<(String, String, String)> {
+        arm.guard.as_ref()?;
+        let arg_pat = match &arm.pat {
+            Pattern::Variant { arg: Some(a), .. } => a.as_ref(),
+            _ => return None,
+        };
+        let Pattern::Variant { name, .. } = &arm.pat else {
+            return None;
+        };
+        // Enum variant: payload type from the scrutinee's enum.
+        if !matches!(name.as_str(), "ok" | "err" | "some" | "none") {
+            if self.enum_candidates(name).is_empty() {
+                return None;
+            }
+            let scalar = self.ty_at(names, scrutinee.span()).and_then(|t| match t {
+                zz_checker::Type::Enum(ename, eargs) => self
+                    .tp
+                    .enums
+                    .get(ename)
+                    .and_then(|sig| sig.variants.iter().find(|(v, _)| v == name))
+                    .and_then(|(_, p)| p.as_ref())
+                    .map(|pty| {
+                        // Substitute the scrutinee's arguments so generic
+                        // payloads (`V(T)` under `Box[int]`) unbox.
+                        let generics = self
+                            .tp
+                            .enums
+                            .get(ename)
+                            .map(|sig| sig.generics.clone())
+                            .unwrap_or_default();
+                        if generics.len() == eargs.len() {
+                            let map: std::collections::HashMap<String, zz_checker::Type> =
+                                generics.into_iter().zip(eargs.iter().cloned()).collect();
+                            zz_checker::subst_type(pty, &map)
+                        } else {
+                            pty.clone()
+                        }
+                    })
+                    .and_then(|t| match t {
+                        zz_checker::Type::Int => Some("int64_t"),
+                        zz_checker::Type::Float => Some("double"),
+                        zz_checker::Type::Bool => Some("bool"),
+                        _ => None,
+                    }),
+                _ => None,
+            });
+            return self.emit_guard_hoist_decl(
+                &format!("zz_object_get_field(&{scrut_tmp}, \"value\")"),
+                arg_pat,
+                scalar,
+                names,
+                out,
+            );
+        }
+        // Builtin variant: payload type from the scrutinee's Option/Result.
+        let (variant, extractor) = match name.as_str() {
+            "ok" => ("ok", format!("zz_match_ok({scrut_tmp})")),
+            "err" => ("err", format!("zz_match_err({scrut_tmp})")),
+            "some" => ("some", format!("zz_match_some({scrut_tmp})")),
+            _ => return None,
+        };
+        let scalar = self
+            .ty_at(names, scrutinee.span())
+            .and_then(|t| match (t, variant) {
+                (zz_checker::Type::Option(inner), "some") => Some(inner.as_ref()),
+                (zz_checker::Type::Result(ok, _), "ok") => Some(ok.as_ref()),
+                (zz_checker::Type::Result(_, err), "err") => Some(err.as_ref()),
+                _ => None,
+            })
+            .and_then(|t| match t {
+                zz_checker::Type::Int => Some("int64_t"),
+                zz_checker::Type::Float => Some("double"),
+                zz_checker::Type::Bool => Some("bool"),
+                _ => None,
+            });
+        self.emit_guard_hoist_decl(&extractor, arg_pat, scalar, names, out)
+    }
+
+    /// Flatten a (possibly nested) match pattern into a single
+    /// `&&`-joined C condition plus ordered `(name, payload-expr)`
+    /// bindings. A nested miss must fall through to the NEXT ARM —
+    /// nested `if`s cannot express that (a miss inside would skip the
+    /// whole else-if chain and silently yield unit), so every level's
+    /// test joins the top condition. Emits pure payload-temp
+    /// declarations into `out` (call before the arm's `if`); the caller
+    /// declares each bound name over its temp inside. Returns `false`
+    /// when the pattern can never match (unknown variant) — the caller
+    /// skips the arm. Tuple patterns keep their current shape (outer
+    /// tag only); or-patterns are pre-expanded and unreachable here.
+    fn flatten_match_pat(
+        &self,
+        pat: &Pattern,
+        scrut: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+        conds: &mut Vec<String>,
+        binds: &mut Vec<(String, String)>,
+    ) -> bool {
+        match pat {
+            Pattern::Binding { name } => {
+                binds.push((name.name.clone(), scrut.to_string()));
+                true
+            }
+            Pattern::Wildcard { .. } => true,
+            Pattern::Variant { name, arg, .. } => {
+                let vname = name.as_str();
+                // Builtin tag test + extractor.
+                let builtin = match vname {
+                    "ok" => Some(("ZZ_RESULT_OK", "zz_match_ok")),
+                    "err" => Some(("ZZ_RESULT_ERR", "zz_match_err")),
+                    "some" => Some(("ZZ_OPTION_SOME", "zz_match_some")),
+                    "none" => Some(("ZZ_OPTION_NONE", "")),
+                    _ => None,
+                };
+                if let Some((tag, extractor)) = builtin {
+                    conds.push(format!("{scrut}.tag == {tag}"));
+                    if tag == "ZZ_OPTION_NONE" {
+                        // `none` carries no payload (checker-enforced).
+                        return true;
+                    }
+                    if let Some(inner) = arg {
+                        if self.green_active() {
+                            let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                            out.push_str(&format!("        {deref} = {extractor}({scrut});\n"));
+                            return self.flatten_match_pat(inner, &deref, names, out, conds, binds);
+                        }
+                        let payload_tmp = names.fresh("_payload");
+                        out.push_str(&format!(
+                            "        zz_value {payload_tmp} = {extractor}({scrut});\n"
+                        ));
+                        return self.flatten_match_pat(
+                            inner,
+                            &payload_tmp,
+                            names,
+                            out,
+                            conds,
+                            binds,
+                        );
+                    }
+                    return true;
+                }
+                // User-enum tag test (possibly multi-candidate).
+                let cands = self.enum_candidates(vname);
+                if cands.is_empty() {
+                    return false;
+                }
+                let or = cands
+                    .iter()
+                    .map(|q| format!("zz_enum_is(&{scrut}, \"{q}\")"))
+                    .collect::<Vec<_>>()
+                    .join(" || ");
+                conds.push(format!("({or})"));
+                if let Some(inner) = arg {
+                    if self.green_active() {
+                        let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                        out.push_str(&format!(
+                            "        {deref} = zz_object_get_field(&{scrut}, \"value\");\n"
+                        ));
+                        return self.flatten_match_pat(inner, &deref, names, out, conds, binds);
+                    }
+                    let payload_tmp = names.fresh("_payload");
+                    out.push_str(&format!(
+                        "        zz_value {payload_tmp} = zz_object_get_field(&{scrut}, \"value\");\n"
+                    ));
+                    return self.flatten_match_pat(inner, &payload_tmp, names, out, conds, binds);
+                }
+                true
+            }
+            Pattern::Literal { value, .. } => {
+                let lit_c = match value {
+                    zz_frontend::ast::Lit::Int(v) => format!("zz_int({v})"),
+                    zz_frontend::ast::Lit::Float(v) => {
+                        let s = if *v == v.floor() && v.abs() < 1e15 {
+                            format!("{v:.1}")
+                        } else {
+                            format!("{v}")
+                        };
+                        format!("zz_float({s})")
+                    }
+                    zz_frontend::ast::Lit::Bool(v) => {
+                        format!("zz_bool({})", if *v { "true" } else { "false" })
+                    }
+                    zz_frontend::ast::Lit::Str(v) => self.emit_str_literal(v),
+                };
+                conds.push(format!("zz_truthy(zz_binop(ZZOP_EQ, {scrut}, {lit_c}))"));
+                true
+            }
+            Pattern::Tuple { pats, .. } => {
+                // Tuples erase to arrays on every engine: check the tag
+                // and length, then bind element-wise (recursively, so
+                // nested enums inside tuples keep working).
+                conds.push(format!(
+                    "({scrut}.tag == ZZ_ARRAY && zz_array_len({scrut}.arr) == {})",
+                    pats.len()
+                ));
+                for (idx, p) in pats.iter().enumerate() {
+                    // Element temps back bindings (read in the body), so
+                    // they live in frame cells under green.
+                    let elem_tmp = if self.green_active() {
+                        let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                        let err_tmp = names.fresh("_e");
+                        out.push_str(&format!(
+                            "        int {err_tmp} = 0;\n        {deref} = zz_array_get({scrut}.arr, (zz_value){{ZZ_INT, {{.i = {idx}}}}}, &{err_tmp});\n"
+                        ));
+                        deref
+                    } else {
+                        let elem_tmp = names.fresh("_tup");
+                        let err_tmp = names.fresh("_e");
+                        out.push_str(&format!("        int {err_tmp} = 0;\n"));
+                        out.push_str(&format!(
+                            "        zz_value {elem_tmp} = zz_array_get({scrut}.arr, (zz_value){{ZZ_INT, {{.i = {idx}}}}}, &{err_tmp});\n"
+                        ));
+                        elem_tmp
+                    };
+                    if !self.flatten_match_pat(p, &elem_tmp, names, out, conds, binds) {
+                        return false;
+                    }
+                }
+                true
+            }
+            // Or-patterns are expanded before matching.
+            _ => true,
+        }
+    }
+
     pub(super) fn emit_match(
         &self,
         scrutinee: &Expr,
@@ -4747,6 +5127,52 @@ impl Lowerer {
             }
         }
 
+        // Guard-hoisted payload declarations (see helpers above):
+        // emitted here, before the arm chain, so every arm condition is
+        // in textual scope. Each arm registers its own binding just
+        // before its guard (via `bind_existing`); the scope pops after
+        // the chain.
+        names.push_scope();
+        let mut guard_hoists: Vec<Option<(String, String, String)>> =
+            Vec::with_capacity(flat.len());
+        for arm in flat.iter() {
+            guard_hoists.push(self.guard_hoist_for_arm(arm, scrutinee, &scrut_tmp, names, out));
+        }
+
+        // Flattened nested patterns (see helper): every level's test
+        // joins the arm condition so a nested miss falls through to the
+        // next arm (nested `if`s would swallow the miss). Payload temps
+        // are pure declarations, safe to emit up front; per-arm binding
+        // declarations stay inside. `skip` marks never-matching arms
+        // (unknown variant) exactly as before.
+        struct FlatPat {
+            conds: Vec<String>,
+            binds: Vec<(String, String)>,
+            skip: bool,
+        }
+        let mut flat_pats: Vec<FlatPat> = Vec::with_capacity(flat.len());
+        for arm in flat.iter() {
+            match &arm.pat {
+                Pattern::Variant { .. } => {
+                    let mut conds = Vec::new();
+                    let mut binds = Vec::new();
+                    let ok = self.flatten_match_pat(
+                        &arm.pat, &scrut_tmp, names, out, &mut conds, &mut binds,
+                    );
+                    flat_pats.push(FlatPat {
+                        conds,
+                        binds,
+                        skip: !ok,
+                    });
+                }
+                _ => flat_pats.push(FlatPat {
+                    conds: Vec::new(),
+                    binds: Vec::new(),
+                    skip: false,
+                }),
+            }
+        }
+
         for (i, arm) in flat.iter().enumerate() {
             let is_last_arm = i == flat.len() - 1;
             let arm_needs_else_prefix = i > 0;
@@ -4758,27 +5184,29 @@ impl Lowerer {
             };
 
             match &arm.pat {
-                Pattern::Variant { name, arg, .. } => {
+                Pattern::Variant { name, .. } => {
                     // Lexical scope for arm bindings (same push/pop_scope
                     // discipline as value blocks).
                     names.push_scope();
-                    // User-enum variant: qualified object-name test (see
-                    // `emit_pattern_bind` for the nested-shape twin).
+                    // Guard-hoisted payload binding for this arm (emitted
+                    // before the chain): register it so the guard below
+                    // resolves the right arm's declaration.
+                    if let Some(Some((bname, cid, ctype))) = guard_hoists.get(i) {
+                        names.bind_existing(bname, cid.clone(), ctype);
+                    }
+                    // User-enum variant: flattened conditions from the
+                    // pre-loop pass (nested misses fall through).
                     if !matches!(name.as_str(), "ok" | "err" | "some" | "none") {
-                        let cands = self.enum_candidates(name);
-                        if cands.is_empty() {
+                        let fp = &flat_pats[i];
+                        if fp.skip {
                             names.pop_scope();
                             continue;
                         }
-                        let cond = cands
-                            .iter()
-                            .map(|q| format!("zz_enum_is(&{scrut_tmp}, \"{q}\")"))
-                            .collect::<Vec<_>>()
-                            .join(" || ");
+                        let cond = fp.conds.join(" && ");
                         let full_cond = if let Some(guard_expr) = &arm.guard {
                             let guard_c =
                                 emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
-                            format!("{cond} && zz_truthy({guard_c})")
+                            format!("{cond} && ({guard_c})")
                         } else {
                             cond
                         };
@@ -4787,86 +5215,59 @@ impl Lowerer {
                         } else {
                             out.push_str(&format!("    if ({full_cond}) {{\n"));
                         }
-                        let mut inner_open = 0;
-                        if let Some(arg_pat) = arg {
-                            let payload_tmp: String = if self.green_active() {
-                                let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
-                                out.push_str(&format!(
-                                    "        {deref} = zz_object_get_field(&{scrut_tmp}, \"value\");\n"
-                                ));
-                                deref
+                        // Declare the flattened bindings over their
+                        // pre-emitted payload temps.
+                        for (bname, pexpr) in &fp.binds {
+                            if self.green_active() {
+                                let (ptr, deref, n) =
+                                    self.green_cell(names, "zz_value", false, out);
+                                out.push_str(&format!("        {deref} = {pexpr};\n"));
+                                names.enter_cell(bname, &ptr, &deref, "zz_value", n);
                             } else {
-                                let payload_tmp = names.fresh("_payload");
-                                out.push_str(&format!(
-                                    "        zz_value {payload_tmp} = zz_object_get_field(&{scrut_tmp}, \"value\");\n"
-                                ));
-                                payload_tmp
-                            };
-                            inner_open = self.emit_pattern_bind(arg_pat, &payload_tmp, names, out);
+                                let cid = names.enter(bname);
+                                out.push_str(&format!("        zz_value {cid} = {pexpr};\n"));
+                            }
                         }
                         let arm_val = self.emit_tail_value(&arm.body, names, out);
                         out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
-                        for _ in 0..inner_open {
-                            out.push_str("        }\n");
-                        }
                         names.pop_scope();
                         if arm_closes_block {
                             out.push_str("    }\n");
                         }
                         continue;
                     }
-                    let tag_check = match name.as_str() {
-                        "ok" => "ZZ_RESULT_OK",
-                        "err" => "ZZ_RESULT_ERR",
-                        "some" => "ZZ_OPTION_SOME",
-                        "none" => "ZZ_OPTION_NONE",
-                        _ => continue,
-                    };
-                    let extractor = match name.as_str() {
-                        "ok" => "zz_match_ok",
-                        "err" => "zz_match_err",
-                        "some" => "zz_match_some",
-                        _ => "",
-                    };
-                    let cond = format!("{scrut_tmp}.tag == {tag_check}");
+                    // Builtin variant: flattened conditions from the
+                    // pre-loop pass (nested misses fall through, same as
+                    // the enum arm above).
+                    let fp = &flat_pats[i];
+                    if fp.skip {
+                        names.pop_scope();
+                        continue;
+                    }
+                    let cond = fp.conds.join(" && ");
                     let full_cond = if let Some(guard_expr) = &arm.guard {
                         let guard_c = emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
-                        format!("{cond} && zz_truthy({guard_c})")
+                        format!("{cond} && ({guard_c})")
                     } else {
                         cond
                     };
-
                     if arm_needs_else_prefix {
                         out.push_str(&format!("    }} else if ({full_cond}) {{\n"));
                     } else {
                         out.push_str(&format!("    if ({full_cond}) {{\n"));
                     }
-
-                    // Extract the payload from this variant arm, then
-                    // recursively handle the inner pattern (which may be
-                    // another variant pattern for nested matching).
-                    let mut inner_open = 0;
-                    if let Some(arg_pat) = arg {
-                        let payload_tmp: String = if self.green_active() {
-                            let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
-                            out.push_str(&format!("        {deref} = {extractor}({scrut_tmp});\n"));
-                            deref
+                    for (bname, pexpr) in &fp.binds {
+                        if self.green_active() {
+                            let (ptr, deref, n) = self.green_cell(names, "zz_value", false, out);
+                            out.push_str(&format!("        {deref} = {pexpr};\n"));
+                            names.enter_cell(bname, &ptr, &deref, "zz_value", n);
                         } else {
-                            let payload_tmp = names.fresh("_payload");
-                            out.push_str(&format!(
-                                "        zz_value {payload_tmp} = {extractor}({scrut_tmp});\n"
-                            ));
-                            payload_tmp
-                        };
-                        inner_open = self.emit_pattern_bind(arg_pat, &payload_tmp, names, out);
+                            let cid = names.enter(bname);
+                            out.push_str(&format!("        zz_value {cid} = {pexpr};\n"));
+                        }
                     }
-
                     let arm_val = self.emit_tail_value(&arm.body, names, out);
                     out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
-                    // Close any nested pattern if-blocks.
-                    for _ in 0..inner_open {
-                        out.push_str("        }\n");
-                    }
                     names.pop_scope();
                     if arm_closes_block {
                         out.push_str("    }\n");
@@ -4954,7 +5355,7 @@ impl Lowerer {
                     let cond = format!("zz_truthy(zz_binop(ZZOP_EQ, {scrut_tmp}, {lit_c}))");
                     let full_cond = if let Some(guard_expr) = &arm.guard {
                         let guard_c = emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
-                        format!("{cond} && zz_truthy({guard_c})")
+                        format!("{cond} && ({guard_c})")
                     } else {
                         cond
                     };
@@ -4980,6 +5381,7 @@ impl Lowerer {
                 }
             }
         }
+        names.pop_scope();
         result_tmp
     }
 }

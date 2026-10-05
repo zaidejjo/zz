@@ -668,7 +668,12 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.space();
                 self.emit_ty(target);
             }
-            Stmt::Enum { name, variants, .. } => {
+            Stmt::Enum {
+                name,
+                generics,
+                variants,
+                ..
+            } => {
                 if stmt_is_pub(stmt) {
                     self.text("pub");
                     self.space();
@@ -680,6 +685,16 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         self.text(".");
                     }
                     self.text(n);
+                }
+                if !generics.is_empty() {
+                    self.text("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.text(", ");
+                        }
+                        self.text(g.name.clone());
+                    }
+                    self.text(">");
                 }
                 self.space();
                 self.text("{");

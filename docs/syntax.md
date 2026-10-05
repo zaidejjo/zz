@@ -123,13 +123,24 @@ equality, and `impl` methods behave identically on both engines. Matches
 are exhaustiveness-checked (missing variants report, or add a `_` arm).
 Variants hold at most one payload — use a tuple for more
 (`Pair((int, int))`). `enum` is contextual, like `type`. Enums export
-with `pub enum` and chain unit-variant methods inline
-(`Token.Eof.is_eof()`); payload construction can't chain — bind first.
+across modules with `pub enum` and chain methods inline, including off
+payload construction (`Token.IntLit(1).add(2)` fills the payload with
+`1`, calls `add` with `2`).
 
-Known V1 limits: no generic enums (use concrete payload types), no
-`impl` dispatch on payload construction chains (bind first), and match
-guards in native builds can't reference payload bindings yet (the VM
-accepts them; guarded matches over plain bindings work everywhere).
+Generic enums take plain parameters and name their arguments at use
+sites (`Box[int]`), exactly like generic structs:
+
+```zz
+enum Box<T> {
+    V(T),
+    E,
+}
+
+b: Box<int> = Box.E
+```
+
+Known V1 limits: match guards in native builds only see scalar
+payloads and outer bindings (the VM is fully general).
 
 ## Functions
 

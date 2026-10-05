@@ -373,9 +373,12 @@ static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth
 // matching the VM's Display. `display_inner` selects the Display vs
 // Debug recursion for payload values, matching the caller.
 static void zz_print_enum_shape(FILE *out, const zz_object *o, int depth, int display_inner) {
+    // Namespace strips only when really present (3+ segments), matching
+    // the VM: bare `Token.Eof` prints whole, `ns.Token.Eof` shortens.
     const char *t = o->type_name;
     const char *dot = strchr(t, '.');
-    fputs(dot ? dot + 1 : t, out);
+    const char *shown = (dot && strchr(dot + 1, '.')) ? dot + 1 : t;
+    fputs(shown, out);
     fputc('(', out);
     for (size_t i = 0; i < o->len; i++) {
         if (i > 0) fputs(", ", out);
@@ -778,7 +781,7 @@ static void zz_print_enum_shape_sb(
 ) {
     const char *t = o->type_name;
     const char *dot = strchr(t, '.');
-    sb_append_str(sb, dot ? dot + 1 : t);
+    sb_append_str(sb, (dot && strchr(dot + 1, '.')) ? dot + 1 : t);
     sb_append_c(sb, '(');
     for (size_t i = 0; i < o->len; i++) {
         if (i > 0) sb_append_str(sb, ", ");

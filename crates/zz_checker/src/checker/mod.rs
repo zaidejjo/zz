@@ -94,14 +94,14 @@ pub struct AliasSig {
     pub generics: Vec<String>,
     pub target: Type,
 }
-/// A registered user enum: variant names and optional payload types
-/// (`enum Token { IntLit(int), Eof }` stores
-/// `[("IntLit", Some(Int)), ("Eof", None)]`). Payloads are resolved at
-/// collection (no generics in V1). Construction (`Token.IntLit(1)`)
-/// and patterns (`.IntLit(v)`) resolve against this table; values
-/// erase to `Object`s at runtime.
+/// A registered user enum: type parameters and variant names with
+/// optional payload types (`enum Box[T] { V(T), E }` stores
+/// `generics: ["T"]`, `variants: [("V", Some(Named("T"))),
+/// ("E", None)]`). Construction (`Box.V(1)`) and patterns (`.V(v)`)
+/// resolve against this table; values erase to `Object`s at runtime.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EnumSig {
+    pub generics: Vec<String>,
     pub variants: Vec<(String, Option<Type>)>,
 }
 /// Minimal error-conversion registration (V1, error-only — not a general trait system).
@@ -393,6 +393,7 @@ fn check_program_impl(
     for stmt in &program.stmts {
         if let Stmt::Enum {
             name,
+            generics,
             variants,
             span,
             pub_,
@@ -427,14 +428,36 @@ fn check_program_impl(
                     prev,
                 ));
             }
+            // Reject duplicate type parameters (`enum P[T, T]`).
+            let mut seen_params = std::collections::HashSet::new();
+            let mut gen_names = Vec::new();
+            for g in generics {
+                if !seen_params.insert(g.name.clone()) {
+                    checker.errors.push(zz_frontend::diag::error_at(
+                        format!(
+                            "duplicate type parameter `{}` in enum `{}`",
+                            g.name, full_name
+                        ),
+                        g.span,
+                    ));
+                } else {
+                    gen_names.push(g.name.clone());
+                }
+            }
             let mut resolved = Vec::new();
             for (vname, payload) in variants {
-                let pty = payload.as_ref().map(|t| checker.ast_to_type_inner(t, &[]));
+                let pty = payload
+                    .as_ref()
+                    .map(|t| checker.ast_to_type_inner(t, &gen_names));
                 resolved.push((vname.name.clone(), pty));
             }
-            checker
-                .enums
-                .insert(full_name.clone(), EnumSig { variants: resolved });
+            checker.enums.insert(
+                full_name.clone(),
+                EnumSig {
+                    generics: gen_names,
+                    variants: resolved,
+                },
+            );
             if *pub_ {
                 pub_enums_set.insert(full_name);
             }
@@ -471,12 +494,19 @@ fn check_program_impl(
             let is_extension = builtin_key.is_some() || !(is_known_struct || is_known_enum);
             let type_key = builtin_key.unwrap_or_else(|| type_name.clone());
             // Generic structs need a matching generic impl (`impl Box[T]`);
-            // the parameters scope over every method below.
+            // the parameters scope over every method below. Generic
+            // enums follow the identical rule.
             let struct_generics: Vec<String> = checker
                 .structs
                 .get(&type_name)
                 .map(|s| s.generics.clone())
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    checker
+                        .enums
+                        .get(&type_name)
+                        .map(|s| s.generics.clone())
+                        .unwrap_or_default()
+                });
             let impl_gen_names: Vec<String> =
                 impl_generics.iter().map(|g| g.name.clone()).collect();
             if is_extension {
@@ -489,17 +519,23 @@ fn check_program_impl(
                     ));
                 }
             } else if struct_generics.len() != impl_gen_names.len() {
+                // Name the item kind correctly (struct vs enum).
+                let kind = if checker.enums.contains_key(&type_name) {
+                    "enum"
+                } else {
+                    "struct"
+                };
                 if struct_generics.is_empty() {
                     checker.errors.push(zz_frontend::diag::error_at(
                         format!(
-                            "struct `{type_name}` is not generic (expected `impl {type_name}` without type parameters)"
+                            "{kind} `{type_name}` is not generic (expected `impl {type_name}` without type parameters)"
                         ),
                         stmt.span(),
                     ));
                 } else {
                     checker.errors.push(zz_frontend::diag::error_at(
                         format!(
-                            "generic struct `{type_name}` takes {} type parameter{} (expected `impl {type_name}[{}]`)",
+                            "generic {kind} `{type_name}` takes {} type parameter{} (expected `impl {type_name}[{}]`)",
                             struct_generics.len(),
                             if struct_generics.len() == 1 { "" } else { "s" },
                             struct_generics.join(", "),
@@ -563,9 +599,16 @@ fn check_program_impl(
                     // (builtin mapped, else struct by name — generic structs
                     // keep their parameters as `Named` so calls instantiate
                     // them from the receiver). Enums erase to objects but
-                    // keep their identity: `self` is `Type::Enum`.
-                    let self_ty = if checker.enums.contains_key(&type_name) {
-                        Type::Enum(type_name.clone())
+                    // keep their identity: `self` is `Type::Enum`, generic
+                    // enums keeping their parameters as `Named` too.
+                    let self_ty = if let Some(esig) = checker.enums.get(&type_name) {
+                        Type::Enum(
+                            type_name.clone(),
+                            esig.generics
+                                .iter()
+                                .map(|g| Type::Named(g.clone()))
+                                .collect(),
+                        )
                     } else {
                         Checker::self_type_for_impl(
                             &type_name,

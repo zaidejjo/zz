@@ -1069,12 +1069,17 @@ impl Value {
                 if is_enum_shape {
                     // Like structs, the module namespace is shortened off
                     // (`shapes.Token.Eof` → `Token.Eof`); identity keeps
-                    // the qualified name.
-                    let short = o
-                        .name
-                        .split_once('.')
-                        .map(|(_, rest)| rest)
-                        .unwrap_or(&o.name);
+                    // the qualified name. Only with a real namespace
+                    // present (3+ segments): bare `Token.Eof` prints whole.
+                    let segs: Vec<&str> = o.name.split('.').collect();
+                    let short = if segs.len() >= 3 {
+                        o.name
+                            .split_once('.')
+                            .map(|(_, rest)| rest)
+                            .unwrap_or(&o.name)
+                    } else {
+                        &o.name
+                    };
                     out.push_str(short);
                     out.push('(');
                     for (i, (_, v)) in o.fields.iter().enumerate() {

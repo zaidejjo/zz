@@ -1,0 +1,54 @@
+// E2E: generic enums — inference, annotation, methods, nesting.
+enum Box<T> {
+    V(T),
+    E,
+}
+
+impl Box<T> {
+    func get_or(self, d: T) -> T {
+        match self {
+            .V(v) => v,
+            .E => d,
+        }
+    }
+    func is_void(self) -> bool {
+        match self {
+            .V(_) => false,
+            .E => true,
+        }
+    }
+}
+
+enum Pair<A, B> {
+    Both((A, B)),
+    First(A),
+    Second(B),
+    Neither,
+}
+
+func main() {
+    // Inference from construction.
+    a := Box.V(42)
+    println(a)
+    println(a.get_or(0))
+    // Explicit annotation.
+    b: Box<int> = Box.E
+    println(b.get_or(7))
+    println(b == Box.E)
+    println(b.is_void())
+    // A second instantiation stays distinct.
+    s := Box.V("hi")
+    println(s.get_or("dflt"))
+    // Multi-parameter enums with tuple payloads.
+    p := Pair.Both((1, "x"))
+    match p {
+        .Both((n, t)) => println(n),
+        .First(n) => println(n),
+        .Second(t) => println(t),
+        .Neither => println("neither"),
+    }
+    // Unconstrained unit variant defaults like Option.
+    e := Box.E
+    println(e.is_void())
+    println("generics_ok")
+}

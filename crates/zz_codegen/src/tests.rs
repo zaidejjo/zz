@@ -1865,3 +1865,36 @@ fn str_char_len_ascii_fast_path_matches_unicode_walk() {
     let (_, out) = native_run(src);
     assert_eq!(out, "5\n8\n0\n7\n8\n100\n");
 }
+
+#[test]
+fn native_top_level_unit_variant() {
+    // Top-level (script) statements record no span types: unit-variant
+    // construction must resolve by enum name, and namespaced globals of
+    // enum type must not be mistaken for construction.
+    let (_, out) = native_run(
+        r#"
+enum T { A, B }
+x := T.A
+println(x)
+"#,
+    );
+    assert_eq!(out, "T.A()\n");
+}
+
+#[test]
+fn native_nested_enum_miss_falls_through() {
+    // A nested miss must try the next arm (not swallow the match).
+    let (_, out) = native_run(
+        r#"
+enum Shape { Pt(int), Empty }
+enum Wrapper { S(Shape), N(int) }
+w := Wrapper.S(Shape.Empty)
+match w {
+    .S(.Pt(p)) => println(p),
+    .N(n) => println(n),
+    _ => println(-1),
+}
+"#,
+    );
+    assert_eq!(out, "-1\n");
+}

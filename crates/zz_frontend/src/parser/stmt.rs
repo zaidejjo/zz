@@ -878,27 +878,15 @@ impl<'a> Parser<'a> {
         self.peek_kind_at(1) == TokenKind::Ident
     }
 
-    /// Parse `enum Name { Variant, Other(Payload) }` (dotted names
-    /// allowed, mirroring structs). Variants are comma- or
-    /// newline-separated; each takes an optional single parenthesized
-    /// payload type. V1 has no generic enums (`enum Box<T>` reports
-    /// with a hint); use a payload type parameter at the variant
-    /// instead (`enum Box { Int(int) }` per concrete type).
+    /// Parse `enum Name { Variant, Other(Payload) }` /
+    /// `enum Name[T] { ... }` (dotted names allowed, mirroring structs).
+    /// Variants are comma- or newline-separated; each takes an optional
+    /// single parenthesized payload type. Generic parameters are plain
+    /// identifiers, same rule as structs.
     pub(crate) fn parse_enum(&mut self, pub_: bool) -> Stmt {
         let enum_tok = self.advance(); // `enum`
         let name = self.parse_dotted_ident();
-        if self.at(TokenKind::Lt) {
-            let lt = self.advance();
-            self.errors.push(error_at(
-                "generic enums are not supported yet\n\
-                 hint: put the concrete type in the variant payload (e.g. `enum Box { Int(int) }`)",
-                lt.span,
-            ));
-            // Skip to `{` so parsing below still terminates.
-            while !self.at(TokenKind::LBrace) && !self.at(TokenKind::Eof) {
-                self.advance();
-            }
-        }
+        let generics = self.parse_struct_generics();
         if !self.eat(TokenKind::LBrace) {
             self.error_here(
                 "expected `{` to start enum body (e.g. `enum Token { Eof, IntLit(int) }`)",
@@ -971,6 +959,7 @@ impl<'a> Parser<'a> {
         let span = enum_tok.span.join(end);
         Stmt::Enum {
             name,
+            generics,
             variants,
             span,
             pub_,

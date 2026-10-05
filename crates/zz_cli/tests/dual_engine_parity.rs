@@ -947,6 +947,7 @@ parity_strict_error!(parity_err_enum_unknown_variant, "enum_unknown_variant.zz")
 parity_strict_error!(parity_err_enum_missing_payload, "enum_missing_payload.zz");
 parity_strict_error!(parity_err_enum_extra_arg, "enum_extra_arg.zz");
 parity_strict_error!(parity_err_enum_dup, "enum_dup.zz");
+parity_strict_error!(parity_err_enum_generic_mismatch, "enum_generic_mismatch.zz");
 parity_strict_error!(parity_err_undefined_var, "undefined_var.zz");
 parity_strict_error!(parity_err_arity, "arity.zz");
 parity_strict_error!(parity_err_parse_error, "parse_error.zz");
@@ -981,6 +982,7 @@ parity_strict!(parity_types_aliases, "types", "aliases.zz");
 parity_strict!(parity_types_alias_import, "types", "alias_import.zz");
 parity_strict!(parity_types_enums, "types", "enums.zz");
 parity_strict!(parity_types_enum_import, "types", "enum_import.zz");
+parity_strict!(parity_types_enum_generics, "types", "enum_generics.zz");
 // --- Fixed: nested variant patterns + if-let desugaring ---
 parity_strict!(parity_types_variants, "types", "variants.zz");
 

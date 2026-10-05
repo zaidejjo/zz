@@ -4,7 +4,12 @@
 //! system tracks `Type::Enum`, but no engine allocates anything
 //! enum-specific. Construction (`Token.IntLit(1)`) is a call-shaped
 //! expression intercepted in `check_call`; patterns (`.IntLit(v)`)
-//! resolve against this table in the match checker.
+//! resolve against this table in the match checker. Generic enums
+//! (`enum Box[T]`) instantiate like generic structs: fresh variables
+//! per parameter, filled by unifying the payload, arrears defaulted
+//! like `Option`'s.
+
+use std::collections::HashMap;
 
 use zz_frontend::diag::error_at;
 use zz_frontend::span::Span;
@@ -23,6 +28,46 @@ impl Checker {
             }
         }
         name.to_string()
+    }
+
+    /// Fresh inference variables for an enum's parameters, with the
+    /// substitution map (`T` → `?0`). Mirrors generic struct
+    /// instantiation: the payload unifies against the substituted type,
+    /// so `Box.V(1)` infers `Box[int]`.
+    pub(crate) fn fresh_enum_vars(
+        &mut self,
+        enum_name: &str,
+    ) -> (Vec<Type>, HashMap<String, Type>) {
+        let generics = self
+            .enums
+            .get(enum_name)
+            .map(|s| s.generics.clone())
+            .unwrap_or_default();
+        let vars: Vec<Type> = generics.iter().map(|_| self.unifier.fresh_var()).collect();
+        let map: HashMap<String, Type> = generics.into_iter().zip(vars.iter().cloned()).collect();
+        (vars, map)
+    }
+
+    /// Substitute an enum's parameters in a payload type using the
+    /// scrutinee's arguments (`Box[int]` + `Named("T")` → `int`).
+    /// Unknown-length args (shouldn't happen post-check) leave `Named`
+    /// intact rather than mis-substituting.
+    pub(crate) fn subst_enum_payload(
+        &self,
+        enum_name: &str,
+        args: &[Type],
+        payload: &Type,
+    ) -> Type {
+        let generics = self
+            .enums
+            .get(enum_name)
+            .map(|s| s.generics.clone())
+            .unwrap_or_default();
+        if generics.len() != args.len() {
+            return payload.clone();
+        }
+        let map: HashMap<String, Type> = generics.into_iter().zip(args.iter().cloned()).collect();
+        super::inference::subst(payload, &map)
     }
 
     /// Check an enum construction `Enum.Variant(args)` where `enum_name`
@@ -46,8 +91,17 @@ impl Checker {
                 ),
                 span,
             ));
-            return Some(Type::Enum(enum_name.to_string()));
+            return Some(Type::Enum(
+                enum_name.to_string(),
+                sig.generics
+                    .iter()
+                    .map(|_| self.unifier.fresh_var())
+                    .collect(),
+            ));
         };
+        // Generic parameters instantiate to fresh variables, filled in
+        // by unifying the payload below (struct-literal rule).
+        let (gen_vars, gen_map) = self.fresh_enum_vars(enum_name);
         match payload {
             Some(pty) => {
                 if !named.is_empty() {
@@ -72,7 +126,8 @@ impl Checker {
                     }
                 } else {
                     let at = self.check_expr(&args[0]);
-                    if let Err(e) = self.unifier.unify(&at, pty) {
+                    let exp = super::inference::subst(pty, &gen_map);
+                    if let Err(e) = self.unifier.unify(&at, &exp) {
                         self.report_mismatch(e, args[0].span());
                     }
                 }
@@ -94,12 +149,19 @@ impl Checker {
         if enum_name.contains('.') {
             self.used_names.insert(enum_name.to_string());
         }
-        Some(Type::Enum(enum_name.to_string()))
+        Some(Type::Enum(
+            enum_name.to_string(),
+            gen_vars
+                .iter()
+                .map(|v| self.unifier.resolve_deep(v))
+                .collect(),
+        ))
     }
 
     /// Resolve a `.Variant` pattern against an enum scrutinee: returns
     /// the variant's payload type (`None` = unit variant, `Some` = the
     /// inner pattern must match the payload). Reports unknown variants.
+    /// Generic parameters are already substituted by the caller.
     pub(crate) fn enum_variant_payload(
         &mut self,
         enum_name: &str,

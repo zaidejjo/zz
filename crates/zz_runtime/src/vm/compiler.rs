@@ -2735,7 +2735,7 @@ impl Compiler {
                     // working when types are absent (untyped REPL path
                     // falls through to the generic call below).
                     if parts.len() >= 2 {
-                        if let Some(zz_checker::Type::Enum(enum_name)) =
+                        if let Some(zz_checker::Type::Enum(enum_name, _)) =
                             self.type_of(*span).cloned()
                         {
                             let variant = parts.last().cloned().unwrap_or_default();
@@ -3567,7 +3567,12 @@ impl Compiler {
                 }
                 let j = self.emit_jump(JumpKind::Always);
                 let els_pos = self.chunk.code.len();
-                self.stack_height = pre;
+                // Both paths converge with exactly one value on the stack
+                // (the body result, or the else value): the miss path
+                // re-pushes the scrutinee before jumping here, so height
+                // is pre+1, not pre (the Pop below consumes the pushed
+                // scrutinee, and the else arm pushes its own value).
+                self.stack_height = pre + 1;
                 self.emit(Op::Pop);
                 match els {
                     Some(e) => self.compile_expr(e),

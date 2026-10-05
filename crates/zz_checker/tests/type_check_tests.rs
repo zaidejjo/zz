@@ -2214,3 +2214,36 @@ fn enum_impl_method_resolves() {
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
+
+#[test]
+fn enum_generic_inference() {
+    let r = check_src_with_funcs(
+        "enum Box<T> { V(T), E }\nfunc main() {\n    a := Box.V(42)\n    b: Box<int> = Box.E\n    _c := (a == Box.V(42))\n    println(\"ok\")\n}\n",
+        print_test_funcs(),
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn enum_generic_pattern_binds_payload() {
+    let r = check_src(
+        "enum Box<T> { V(T), E }\nfunc f<T>(b: Box<T>) -> T {\n    match b {\n        .V(v) => v,\n        .E => f(Box.E),\n    }\n}\n",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn enum_generic_mismatch_reports() {
+    errors_contain(
+        "enum Box<T> { V(T) }\nfunc main() {\n    a := Box.V(1)\n    s := Box.V(\"hi\")\n    _c := (a == s)\n}\n",
+        "mismatch",
+    );
+}
+
+#[test]
+fn enum_generic_arity_reports() {
+    errors_contain(
+        "enum Box<T> { V(T) }\nfunc main() {\n    b: Box<int, str> = Box.V(1)\n}\n",
+        "takes 1 type argument",
+    );
+}

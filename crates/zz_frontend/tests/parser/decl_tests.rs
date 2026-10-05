@@ -477,16 +477,24 @@ fn empty_enum_errors() {
 }
 
 #[test]
-fn generic_enum_errors() {
-    let parsed = zz_frontend::parse("enum Box<T> { V(T) }");
-    assert!(
-        parsed
-            .errors
-            .iter()
-            .any(|e| e.message.contains("generic enums")),
-        "expected generic-enum error, got {:?}",
-        parsed.errors
-    );
+fn parses_generic_enum() {
+    let p = parse_ok("enum Box<T> { V(T), E }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Enum {
+            name,
+            generics,
+            variants,
+            ..
+        } => {
+            assert_eq!(name, &vec!["Box".to_string()]);
+            assert_eq!(
+                generics.iter().map(|g| g.name.clone()).collect::<Vec<_>>(),
+                vec!["T".to_string()]
+            );
+            assert_eq!(variants.len(), 2);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
 }
 
 #[test]

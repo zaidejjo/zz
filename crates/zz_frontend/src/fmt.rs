@@ -218,6 +218,7 @@ impl<'a> FmtCtx<'a> {
             }
             Stmt::Enum {
                 name,
+                generics,
                 variants,
                 pub_,
                 ..
@@ -228,6 +229,16 @@ impl<'a> FmtCtx<'a> {
                 }
                 self.write_str("enum ");
                 self.write_str(&name.join("."));
+                if !generics.is_empty() {
+                    self.write_str("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.write_str(", ");
+                        }
+                        self.write_str(&g.name);
+                    }
+                    self.write_str(">");
+                }
                 self.write_str(" {");
                 if variants.is_empty() {
                     self.write_str("}");

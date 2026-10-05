@@ -994,3 +994,55 @@ fn vm_guarded_match_arm_miss_reloads_scrutinee() {
         );
     }
 }
+
+#[test]
+fn vm_if_let_result_does_not_alias_later_slots() {
+    // Regression: `if let` left the stack-height fiction one low (the
+    // result value was not counted), so the next declaration reused its
+    // slot — a later match read the if-let's value instead of its own
+    // scrutinee (`.some(7)` tested as `.some(42)`). Needs the typed
+    // pipeline (slot promotion); the untyped path keeps everything in
+    // the environment and never collides.
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let src = "func main() -> int {\n    b := .some(42)\n    x := if let .some(v) = b { v } else { 0 }\n    o := .some(7)\n    match o {\n        .some(n) => n,\n        _ => 0,\n    }\n}\n";
+    let parsed = parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let (checked, span_types) = zz_checker::check_program_typed(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    assert!(
+        checked
+            .errors
+            .iter()
+            .all(|e| e.severity != zz_frontend::diag::Severity::Error),
+        "check errors: {:?}",
+        checked.errors
+    );
+    let mut interp = Interp::with_natives(HashMap::new());
+    let v = interp
+        .run_typed(
+            &parsed.program,
+            Arc::new(span_types),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .expect("run");
+    // `main` returns its last value... via explicit call below.
+    let _ = v;
+    let f = interp.funcs.get("main").cloned().expect("main registered");
+    let out = interp
+        .call(Value::Func(Box::new(f)), Vec::new(), Span::new(0, 0))
+        .expect("call main");
+    assert_eq!(out, Value::Int(7));
+}
