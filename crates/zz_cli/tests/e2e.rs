@@ -416,6 +416,12 @@ e2e_success_test!(
     "regression",
     "edge_float_nan_display.zz"
 );
+// Canonical float formatting (spec §4): exact-string pins on both legs.
+e2e_success_test!(
+    e2e_regression_edge_float_format,
+    "regression",
+    "edge_float_format.zz"
+);
 e2e_success_test!(
     e2e_regression_edge_slice_clamp,
     "regression",

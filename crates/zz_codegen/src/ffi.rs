@@ -230,6 +230,11 @@ pub const PG_LINK_SYMBOLS: &[&str] = &[
     "zz_pg_close_raw",
 ];
 
+/// Staticlib symbol to force-extract (`-u`) when the float-format gate
+/// fires: the C runtime references `zz_float_format_raw` weakly, and weak
+/// refs alone never pull archive members.
+pub const FLOAT_FMT_SYMBOL: &str = "zz_float_format_raw";
+
 /// `extern` declarations to inject into generated C: the handle-primitive
 /// header plus one declaration per used FFI symbol. Emits an empty string
 /// when no FFI native is reachable so existing programs generate

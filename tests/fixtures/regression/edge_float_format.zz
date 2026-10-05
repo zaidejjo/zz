@@ -1,0 +1,42 @@
+// features: float-arith, floats, imports, locals, print, std-math, string-literal
+// E2E: float Display conformance (IR spec §4) — shortest round-trip,
+// Rust Display semantics, produced by the Rust core on both engines.
+// In-fixture pins guard both legs against drift (the VM is reference,
+// but a VM change must break loudly here, not slip silently).
+// Exponent literals do not exist in ZZ: extremes come via math.pow and
+// float string parsing (which accepts exponents).
+import std.math
+mx := math.pow(2.0, 1023.0) * (2.0 - math.pow(2.0, -52.0))
+if str(0.1) != "0.1" { fail("float pin f01") }
+if str(0.1 + 0.2) != "0.30000000000000004" { fail("float pin f02") }
+if str(1.0) != "1.0" { fail("float pin f03") }
+if str(-0.0) != "-0.0" { fail("float pin f04") }
+if str(0.0 - 0.0) != "0.0" { fail("float pin f05") }
+if str(math.pow(10.0, 21.0)) != "1000000000000000000000.0" { fail("float pin f06") }
+if str(math.pow(10.0, -7.0)) != "0.0000001" { fail("float pin f07") }
+if str(2.5) != "2.5" { fail("float pin f08") }
+if str(100.0) != "100.0" { fail("float pin f09") }
+if str(123456789.0) != "123456789.0" { fail("float pin f10") }
+if str(math.NAN) != "NaN" { fail("float pin f11") }
+if str(math.INF) != "inf" { fail("float pin f12") }
+if str(0.0 - math.INF) != "-inf" { fail("float pin f13") }
+if str(mx) != "179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.0" { fail("float pin f14-max") }
+if str(float("5e-324")) != "0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005" { fail("float pin f15-tiny") }
+if str(float("1e21")) != "1000000000000000000000.0" { fail("float pin f16") }
+println(str(0.1))
+println(str(0.1 + 0.2))
+println(str(1.0))
+println(str(-0.0))
+println(str(0.0 - 0.0))
+println(str(math.pow(10.0, 21.0)))
+println(str(math.pow(10.0, -7.0)))
+println(str(2.5))
+println(str(100.0))
+println(str(123456789.0))
+println(str(math.NAN))
+println(str(math.INF))
+println(str(0.0 - math.INF))
+println(str(mx))
+println(str(float("5e-324")))
+println(str(float("1e21")))
+println("edge_float_format_ok")

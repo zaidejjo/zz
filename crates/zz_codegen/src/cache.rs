@@ -68,7 +68,7 @@ fn clang_id(clang: &Clang) -> String {
 
 /// Compile-flag generation for the cached runtime archive. Bump on ANY
 /// change to `build_compile_flags` (the key does not hash flags).
-const RT_CACHE_VERSION: &str = "rt3";
+const RT_CACHE_VERSION: &str = "rt4";
 
 /// Assemble the 6-field cache key.
 ///

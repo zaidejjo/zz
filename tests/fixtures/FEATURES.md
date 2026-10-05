@@ -112,6 +112,11 @@ a divergence carry `known-divergence` (or land in `errors/` with a
 - `edge_slice_clamp`: out-of-range slice ends clamp (strict everywhere).
 - `edge_negative_index`: negative indices normalize from the end
   (arrays and strings, strict everywhere).
+- `edge_float_format`: float Display conformance (spec §4.1) — exact
+  in-fixture pins for `0.1`, `0.1+0.2`, `1.0`, `-0.0`, `1e21`, `1e-7`,
+  `5e-324`, MAX, `NaN`, `inf`, `-inf`, strict on all legs.
+- `edge_float_nan_display`: `NaN` via `0.0/0.0` (strict since canonical
+  formatting; the native `nan` spelling is fixed).
 - `edge_cast_float_int`: float->int truncation and INF saturation.
 - `edge_cast_str_int`: str->int overflow/invalid/whitespace (`none`).
 - `edge_neg_shift_err`, `edge_rem_zero_err` (`errors/`): both engines

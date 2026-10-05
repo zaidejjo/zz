@@ -297,9 +297,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         }
 
         // --- Output differences (native runs but output differs) ---
-        "edge_float_nan_display" => Some(
-            "M0: NaN display — VM prints `NaN`, native `nan` (C printf)",
-        ),
         "concurrency_panic_test" => Some("native: panic/fail inside task closures lowers to unit (no err plumbing through zz_call_closure); VM yields .err"),
         "encoding_test" => Some("native: different error message format for bad base64/hex/url"),
         "math_extended_test" => Some("native: float precision + error message differences"),
@@ -870,12 +867,17 @@ parity_strict!(
     "regression",
     "edge_chained_store.zz"
 );
-// M0 edge corpus: known divergences (VM vs native differ; tracked in
-// `known_native_failure` above — these fail if native ever matches).
-parity_known_failure!(
+// NaN display is strict since canonical float formatting (spec §4).
+parity_strict!(
     parity_regression_edge_float_nan_display,
     "regression",
     "edge_float_nan_display.zz"
+);
+// Canonical float formatting conformance (spec §4.1): exact pins + legs.
+parity_strict!(
+    parity_regression_edge_float_format,
+    "regression",
+    "edge_float_format.zz"
 );
 // edge_cast_float_nan is strict since the flag cleanup (-ffast-math
 // removal + explicit isnan guard make int(NaN) deterministically 0).
@@ -1582,52 +1584,21 @@ fn assert_quad_all_fail(file: &Path, q: &QuadLegs) {
 }
 
 /// Documented per-fixture splits: the M1 decision list in executable form.
-/// Each arm asserts the exact leg behavior observed and decided; any leg
-/// that unexpectedly agrees (a fix!) panics with FIXED so the entry is
-/// promoted to `assert_quad_agree`.
+/// The list is currently EMPTY — every prior split (overflow, MIN/-1,
+/// pow-neg, OOB, NaN display, scalar-global) has been promoted to
+/// AllAgree/AllFail by its fix PR. New divergences gain an arm here with
+/// the exact leg behavior observed and decided; any leg that unexpectedly
+/// agrees (a fix!) panics with FIXED so the entry is promoted.
 fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
-    let natives = q.nat_dev.is_some() && q.nat_rel.is_some();
-    match stem {
-        // NaN display: all exit 0; Rust prints `NaN`, C prints `nan`.
-        // M1 decision: one canonical spelling (fixtures become strict).
-        "edge_float_nan_display" => {
-            assert!(
-                parity_match(&q.vm_dbg, &q.vm_rel),
-                "VM legs differ:\n{}",
-                fmt_quad(file, q)
-            );
-            assert!(
-                q.vm_dbg.1.contains("NaN"),
-                "VM should print NaN:\n{}",
-                fmt_quad(file, q)
-            );
-            if natives {
-                let (nd, nr) = (q.nat_dev.as_ref().unwrap(), q.nat_rel.as_ref().unwrap());
-                assert!(
-                    parity_match(nd, nr),
-                    "native legs differ:\n{}",
-                    fmt_quad(file, q)
-                );
-                assert!(
-                    nd.1.contains("nan"),
-                    "native should print nan:\n{}",
-                    fmt_quad(file, q)
-                );
-                assert!(
-                    !parity_match(&q.vm_dbg, nd),
-                    "FIXED? VM and native agree:\n{}",
-                    fmt_quad(file, q)
-                );
-            }
-        }
-        other => panic!("quad has no documented split for {other} — add AllAgree or an arm"),
-    }
+    let _ = (file, stem, q);
+    panic!("quad has no documented splits — {stem} should use AllAgree or AllFail");
 }
 
 /// Stems with a documented quad split (anything else in scope must agree
 /// on all legs, or fail on all legs for `errors/`).
 fn quad_split_stem(stem: &str) -> bool {
-    matches!(stem, "edge_float_nan_display")
+    let _ = stem;
+    false
 }
 
 /// Sorted `.zz` files directly under `dir` (non-recursive).

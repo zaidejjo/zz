@@ -1,8 +1,7 @@
 # ZZ bytecode IR spec — DRAFT for review (M1)
 
-Status: FROZEN except §4 canonical float formatting (pending
-decision — blocks only math-precision parity and the M3 formatting
-ownership; everything else is locked). Normative keywords: MUST /
+Status: FROZEN (float formatting §4 locked 2026-10-05 with recorded
+VM ground truth + conformance fixtures). Normative keywords: MUST /
 MUST NOT / SHOULD per RFC 2119.
 This spec is the single source of truth for program behavior. Where it
 conflicts with current engine behavior, the engines change (migration
@@ -96,20 +95,59 @@ statically-non-bool condition; a dynamically-non-bool condition traps
 - `POW_I64`: repeated multiplication (wrapping); negative exponent
   traps `Domain`. (`0 ** 0` is 1.)
 
-## 4. Float semantics (MUST)
+## 4. Float semantics (MUST, FROZEN)
 
-- IEEE-754 binary64. NO fast-math in parity builds: NaN quiet,
-  `1.0/0.0 = inf`, `0.0/0.0 = NaN`, signed-zero arithmetic per IEEE.
-- `REM_F64` is `fmod`. `POW_F64` is `pow` (with the integer fast path
-  only when it agrees bit-for-bit — else call `pow`).
-- Mixed `I64`/`F64` arithmetic promotes to `F64` (exactness loss
-  accepted). Mixed comparisons in checked programs are rejected by
-  the checker; the IR still defines promotion for completeness.
-- Formatting is canonical: `inf`, `-inf`, `NaN` (Rust `Display`
-  spelling; the C runtime special-cases NaN output to match).
-  Float→string conversion is owned by the Rust core (`zzrt`) so both
-  engines print identical shortest-round-trip decimals — C MUST NOT
-  use `printf %g` for user-visible floats.
+Arithmetic: IEEE-754 binary64. NO fast-math in parity builds: NaN quiet,
+`1.0/0.0 = inf`, `0.0/0.0 = NaN`, signed-zero arithmetic per IEEE.
+`REM_F64` is `fmod`. `POW_F64` is `pow` (with the integer fast path
+only when it agrees bit-for-bit — else call `pow`). Mixed `I64`/`F64`
+arithmetic promotes to `F64` (exactness loss accepted). Mixed
+comparisons in checked programs are rejected by the checker; the IR
+still defines promotion for completeness.
+
+### 4.1 Float formatting — canonical (MUST, FROZEN)
+
+Output is the shortest decimal string that round-trips to the same
+`f64` (Rust `Display` semantics), produced by the Rust runtime core
+only. No backend formats floats itself: the VM computes it inline and
+the AOT backend calls `zz_float_format_raw` (in `zz_native_rt`
+`float_fmt`) through the C ABI. C MUST NOT use `printf %g` (or any C
+float printer) for user-visible floats.
+
+The rule, arm-for-arm with the VM (`zz_runtime::value` float Display):
+
+- finite + integral (`fract() == 0`, includes `±0`): `{x:.1}`.
+- anything else: `{x}` (shortest round-trip).
+- special values fall out of Rust `Display`: `NaN`, `inf`, `-inf`.
+
+Recorded VM ground truth (2026-10-05; ZZ has no exponent literals,
+so extremes are built via `math.pow` / `float("…")` parsing, which
+accepts exponents):
+
+| value | prints |
+|---|---|
+| `0.1` | `0.1` |
+| `0.1 + 0.2` | `0.30000000000000004` |
+| `1.0` | `1.0` (integrals keep `.0`) |
+| `-0.0` (literal) | `-0.0` |
+| `0.0 - 0.0` (computes `+0`) | `0.0` |
+| `math.pow(10.0, 21.0)` (= 1e21) | `1000000000000000000000.0` (full expansion, never exponent) |
+| `math.pow(10.0, -7.0)` (= 1e-7) | `0.0000001` (positional, never exponent) |
+| `2.5`, `100.0`, `123456789.0` | as written (`.0` kept) |
+| `math.NAN` | `NaN` |
+| `math.INF` | `inf` |
+| `0.0 - math.INF` | `-inf` |
+| `f64::MAX` | 309 digits + `.0` (311 chars, no exponent) |
+| `5e-324` (min subnormal) | `0.` + 322 chars ending in `5` (326 chars, no exponent) |
+
+Conformance: `edge_float_format` pins all of the above in-fixture on
+both engines (exact strings, including the 300+ char expansions) plus
+strict quad parity; `edge_float_nan_display` pins `NaN` via `0.0/0.0`.
+The Rust-core unit tests (`float_fmt`) pin the same vectors. Do not
+change VM output: any VM Display change must break these pins loudly.
+
+Out of scope for §4 (separate paths, unchanged): JSON stringify keeps
+its own number rendering on both engines; float→int saturation is §5.
 
 ## 5. Conversions (MUST)
 

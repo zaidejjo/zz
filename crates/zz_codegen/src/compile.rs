@@ -458,6 +458,11 @@ pub struct BuildOptions {
     /// Set automatically alongside `native_rt` when sqlz/pg natives are
     /// reachable (the C dispatcher's weak refs never pull members alone).
     pub pg_link: bool,
+    /// Force-extract the float-format object (`-u zz_float_format_raw`).
+    /// Set automatically when any typed node can hold a float (float
+    /// Display routes through the Rust core per spec §4). Implies the
+    /// staticlib link like `native_rt`.
+    pub float_link: bool,
     /// Link libcurl (outbound `http.get/post/fetch` client). Set
     /// automatically from the lowered program; programs that never fetch
     /// omit `-lcurl` entirely so no `DT_NEEDED` entry is emitted.
@@ -501,6 +506,7 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            float_link: false,
             curl_link: false,
             sqlite_link: false,
             allow_static_downgrade: false,
@@ -523,6 +529,7 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            float_link: false,
             curl_link: false,
             sqlite_link: false,
             allow_static_downgrade: false,
@@ -545,6 +552,7 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            float_link: false,
             curl_link: false,
             sqlite_link: false,
             allow_static_downgrade: false,
@@ -567,6 +575,7 @@ impl BuildOptions {
             pgo: PgoMode::Generate,
             native_rt: false,
             pg_link: false,
+            float_link: false,
             curl_link: false,
             sqlite_link: false,
             allow_static_downgrade: false,
@@ -590,6 +599,7 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            float_link: false,
             curl_link: false,
             sqlite_link: false,
             allow_static_downgrade: false,
@@ -612,6 +622,7 @@ impl BuildOptions {
             pgo: PgoMode::Use,
             native_rt: false,
             pg_link: false,
+            float_link: false,
             curl_link: false,
             sqlite_link: false,
             allow_static_downgrade: false,
@@ -634,6 +645,7 @@ impl BuildOptions {
             pgo: PgoMode::Use,
             native_rt: false,
             pg_link: false,
+            float_link: false,
             curl_link: false,
             sqlite_link: false,
             allow_static_downgrade: false,
@@ -666,6 +678,7 @@ impl BuildOptions {
         self.pgo.hash(&mut h);
         self.native_rt.hash(&mut h);
         self.pg_link.hash(&mut h);
+        self.float_link.hash(&mut h);
         self.curl_link.hash(&mut h);
         self.sqlite_link.hash(&mut h);
         self.allow_static_downgrade.hash(&mut h);
@@ -883,7 +896,7 @@ pub fn build_with(
     // Unified Rust native runtime: link the static library providing FFI
     // natives. Fully-static binaries cannot use it (shared libstd), so fail
     // early with a clear message instead of a cryptic `ld` error.
-    if opts.native_rt {
+    if opts.native_rt || opts.float_link {
         if opts.static_link {
             return Err(BuildError::NativeRt {
                 reason: "fully-static builds cannot link the Rust native runtime \
@@ -902,6 +915,12 @@ pub fn build_with(
                 cmd.arg("-u");
                 cmd.arg(sym);
             }
+        }
+        // Float Display (spec §4): same weak-ref situation — pull the
+        // Rust-core formatter explicitly when the gate fired.
+        if opts.float_link {
+            cmd.arg("-u");
+            cmd.arg(crate::ffi::FLOAT_FMT_SYMBOL);
         }
         for a in &extra {
             cmd.arg(a);

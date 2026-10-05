@@ -339,27 +339,59 @@ zz_value zz_str_new_arena(const char *src, size_t len, zz_arena *arena) {
 
 // ---- io natives -----------------------------------------------------------
 
-/// Format a double to the shortest decimal string that round-trips back to
-/// the same f64.  This matches Rust's `Display for f64` which uses the
-/// Ryu/grisu shortest-representation algorithm.
-static void zz_print_double(FILE *out, double x) {
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%.17g", x);
-    // Strip trailing zeros after the decimal point to find the shortest
-    // representation that round-trips.
-    size_t len = strlen(buf);
-    while (len > 1) {
-        char saved = buf[len - 1];
-        buf[len - 1] = '\0';
-        char *endptr;
-        double parsed = strtod(buf, &endptr);
-        if (parsed != x || *endptr != '\0') {
-            buf[len - 1] = saved; // restore — this digit is needed
-            break;
-        }
-        len--;
+/// Format a double per the canonical rule (IR spec §4): shortest
+/// decimal string that round-trips, Rust `Display` semantics, never
+/// exponent notation. Produced by the Rust core (`zz_native_rt`
+/// `float_fmt`), never formatted in C — this TU must not contain its
+/// own float printer. Weak import: programs that can never hold a
+/// float-typed value link without the staticlib (the gate scans the
+/// typed program for `Float`); the guard below fails closed so a missed
+/// gate aborts loudly instead of diverging.
+#if defined(__APPLE__)
+#define ZZ_WEAK_IMPORT_FLOAT __attribute__((weak_import))
+#else
+#define ZZ_WEAK_IMPORT_FLOAT __attribute__((weak))
+#endif
+size_t zz_float_format_raw(double x, char *buf, size_t cap) ZZ_WEAK_IMPORT_FLOAT;
+
+// Stack covers every f64 Display rendering (longest observed: 5e-324
+// at 326 bytes); the heap spill below is paranoia, never hot.
+#define ZZ_FLOAT_STACK 1024
+
+// Render `x` canonically: `*out_len` bytes at the returned pointer
+// (`stack`, or malloc'd `*heap` when the core reports more than fits).
+// Callers `free(*heap)` (`free(NULL)` is a no-op).
+static const char *zz_canonical_double(double x, char *stack, char **heap, size_t *out_len) {
+    if (!zz_float_format_raw) {
+        fprintf(stderr,
+                "zz error: float formatting needs the Rust core "
+                "(float-typed program linked without libzz_native_rt; "
+                "rebuild without --static)\n");
+        exit(1);
     }
-    fputs(buf, out);
+    size_t n = zz_float_format_raw(x, stack, ZZ_FLOAT_STACK);
+    if (n < ZZ_FLOAT_STACK) {
+        *heap = NULL;
+        *out_len = n;
+        return stack;
+    }
+    *heap = (char *)malloc(n + 1);
+    if (!*heap) {
+        fprintf(stderr, "zz: out of memory (float formatting)\n");
+        exit(1);
+    }
+    *out_len = zz_float_format_raw(x, *heap, n + 1);
+    return *heap;
+}
+
+/// Print a double canonically (see above).
+static void zz_print_double(FILE *out, double x) {
+    char stack[ZZ_FLOAT_STACK];
+    char *heap = NULL;
+    size_t n = 0;
+    const char *s = zz_canonical_double(x, stack, &heap, &n);
+    fwrite(s, 1, n, out);
+    free(heap);
 }
 
 // Maximum nesting for printed values. Values are finite trees, so this is
@@ -410,18 +442,11 @@ static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
     case ZZ_INT:
         fprintf(out, "%lld", (long long)v->i);
         break;
-    case ZZ_FLOAT: {
-        double x = v->f;
-        if (x != x) { fputs("nan", out); break; }
-        if (x == 1.0/0.0) { fputs("inf", out); break; }
-        if (x == -1.0/0.0) { fputs("-inf", out); break; }
-        if (x == (int64_t)x && x < 1e15 && x > -1e15) {
-            fprintf(out, "%.1f", x);
-        } else {
-            zz_print_double(out, x);
-        }
+    case ZZ_FLOAT:
+        // Canonical rendering comes from the Rust core (spec §4):
+        // NaN/inf/-0/integrals all handled there, never in C.
+        zz_print_double(out, v->f);
         break;
-    }
     case ZZ_BOOL:
         fputs(v->b ? "true" : "false", out);
         break;
@@ -575,18 +600,11 @@ static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth
     case ZZ_INT:
         fprintf(out, "%lld", (long long)v->i);
         break;
-    case ZZ_FLOAT: {
-        double x = v->f;
-        if (x != x) { fputs("nan", out); break; }
-        if (x == 1.0/0.0) { fputs("inf", out); break; }
-        if (x == -1.0/0.0) { fputs("-inf", out); break; }
-        if (x == (int64_t)x && x < 1e15 && x > -1e15) {
-            fprintf(out, "%.1f", x);
-        } else {
-            zz_print_double(out, x);
-        }
+    case ZZ_FLOAT:
+        // Canonical rendering comes from the Rust core (spec §4):
+        // NaN/inf/-0/integrals all handled there, never in C.
+        zz_print_double(out, v->f);
         break;
-    }
     case ZZ_BOOL:
         fputs(v->b ? "true" : "false", out);
         break;
@@ -749,24 +767,14 @@ static void sb_append_c(strbuf *sb, char c) {
     sb_append(sb, &c, 1);
 }
 
-/// Format a double to the shortest decimal string that round-trips back to
-/// the same f64, appending the result to a strbuf.
+/// Append a double canonically (see `zz_canonical_double`).
 static void zz_append_double(strbuf *sb, double x) {
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%.17g", x);
-    size_t len = strlen(buf);
-    while (len > 1) {
-        char saved = buf[len - 1];
-        buf[len - 1] = '\0';
-        char *endptr;
-        double parsed = strtod(buf, &endptr);
-        if (parsed != x || *endptr != '\0') {
-            buf[len - 1] = saved;
-            break;
-        }
-        len--;
-    }
-    sb_append_str(sb, buf);
+    char stack[ZZ_FLOAT_STACK];
+    char *heap = NULL;
+    size_t n = 0;
+    const char *s = zz_canonical_double(x, stack, &heap, &n);
+    sb_append(sb, s, n);
+    free(heap);
 }
 
 static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth);
@@ -807,20 +815,10 @@ static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth) {
         snprintf(buf, sizeof buf, "%lld", (long long)v->i);
         sb_append_str(sb, buf);
         break;
-    case ZZ_FLOAT: {
-        double x = v->f;
-        if (x != x) { sb_append_str(sb, "nan"); break; }
-        if (x == 1.0/0.0) { sb_append_str(sb, "inf"); break; }
-        if (x == -1.0/0.0) { sb_append_str(sb, "-inf"); break; }
-        if (x == (int64_t)x && x < 1e15 && x > -1e15) {
-            char buf[32];
-            snprintf(buf, sizeof buf, "%.1f", x);
-            sb_append_str(sb, buf);
-        } else {
-            zz_append_double(sb, x);
-        }
+    case ZZ_FLOAT:
+        // Canonical rendering comes from the Rust core (spec §4).
+        zz_append_double(sb, v->f);
         break;
-    }
     case ZZ_BOOL:
         sb_append_str(sb, v->b ? "true" : "false");
         break;
@@ -995,20 +993,10 @@ static void zz_value_to_display_strbuf_depth(strbuf *sb, const zz_value *v, int 
         snprintf(buf, sizeof buf, "%lld", (long long)v->i);
         sb_append_str(sb, buf);
         break;
-    case ZZ_FLOAT: {
-        double x = v->f;
-        if (x != x) { sb_append_str(sb, "nan"); break; }
-        if (x == 1.0/0.0) { sb_append_str(sb, "inf"); break; }
-        if (x == -1.0/0.0) { sb_append_str(sb, "-inf"); break; }
-        if (x == (int64_t)x && x < 1e15 && x > -1e15) {
-            char fbuf[32];
-            snprintf(fbuf, sizeof fbuf, "%.1f", x);
-            sb_append_str(sb, fbuf);
-        } else {
-            zz_append_double(sb, x);
-        }
+    case ZZ_FLOAT:
+        // Canonical rendering comes from the Rust core (spec §4).
+        zz_append_double(sb, v->f);
         break;
-    }
     case ZZ_BOOL:
         sb_append_str(sb, v->b ? "true" : "false");
         break;

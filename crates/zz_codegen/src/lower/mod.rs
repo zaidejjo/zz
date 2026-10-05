@@ -41,6 +41,13 @@ pub struct LoweredC {
     /// archive (`-u`), since the C dispatcher references them weakly and
     /// weak refs alone never pull archive members.
     pub needs_pg_link: bool,
+    /// True when any typed node in the program can hold a float: float
+    /// Display (`println`, interpolation, `str()`) routes through the
+    /// Rust core (`zz_float_format_raw`), so the link must force-extract
+    /// that object (`-u`). The type scan is sound — there is no `Any` /
+    /// dynamic type, and JSON values print through their own (already
+    /// agreeing) stringify path, never float Display.
+    pub needs_float_fmt: bool,
     /// True when reachable natives lower to curl-backed C client calls:
     /// the link must add `-lcurl`. Server/route-only programs skip it.
     pub needs_curl: bool,
@@ -49,6 +56,30 @@ pub struct LoweredC {
     /// (previously every binary carried the dependency via the
     /// single-TU archive + `--as-needed` ordering).
     pub needs_sqlite: bool,
+}
+
+/// True when a resolved type can carry an `f64` to a Display site.
+/// Recursive over every compound shape (no `Any` exists, so a whole-
+/// program scan of `TypedProgram` types is a sound float-format gate).
+fn type_has_float(t: &zz_checker::Type) -> bool {
+    match t {
+        zz_checker::Type::Float => true,
+        zz_checker::Type::Tuple(ts) | zz_checker::Type::Union(ts) => ts.iter().any(type_has_float),
+        zz_checker::Type::Option(b) | zz_checker::Type::Array(b) | zz_checker::Type::Range(b) => {
+            type_has_float(b)
+        }
+        zz_checker::Type::Result(a, b) | zz_checker::Type::Dict(a, b) => {
+            type_has_float(a) || type_has_float(b)
+        }
+        zz_checker::Type::Func(params, ret) => {
+            params.iter().any(type_has_float) || type_has_float(ret)
+        }
+        zz_checker::Type::Struct(_, args) | zz_checker::Type::Enum(_, args) => {
+            args.iter().any(type_has_float)
+        }
+        zz_checker::Type::Ptr { inner, .. } => type_has_float(inner),
+        _ => false,
+    }
 }
 
 /// Mangle a zz qualified name to a C identifier.
@@ -580,6 +611,11 @@ impl Lowerer {
             source,
             needs_native_rt,
             needs_pg_link: crate::ffi::needs_pg_link(&expanded_natives),
+            needs_float_fmt: self.tp.types.values().any(type_has_float)
+                || self.tp.bindings.values().any(type_has_float)
+                || self.tp.funcs.values().any(|s| {
+                    s.params.iter().any(|(_, ty)| type_has_float(ty)) || type_has_float(&s.ret)
+                }),
             needs_curl: crate::ffi::needs_curl_link(&expanded_natives),
             needs_sqlite: crate::ffi::needs_sqlite_link(&expanded_natives),
         }
