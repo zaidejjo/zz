@@ -907,6 +907,17 @@ impl Interp {
                 set_object_field(&mut objv, name, new_value, *span)?;
                 self.write_back(obj, objv)
             }
+            Expr::Index { obj, index, span } => {
+                // Chained index store (`m[0][0] = v`): store the mutated
+                // inner container back into its home and recurse to the
+                // root binding. Re-evaluates index/obj, mirroring the
+                // bytecode compiler's write-back (receivers with side
+                // effects evaluate twice on both engines).
+                let iv = self.eval(index)?.into_value()?;
+                let mut objv = self.eval(obj)?.into_value()?;
+                set_index(&mut objv, &iv, new_value, *span)?;
+                self.write_back(obj, objv)
+            }
             _ => Ok(()),
         }
     }

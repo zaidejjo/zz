@@ -1556,6 +1556,18 @@ impl Compiler {
                 self.emit(Op::SetField(name.clone(), *span));
                 self.compile_write_back(obj);
             }
+            Expr::Index { obj, index, span } => {
+                // Chained index store (`m[0][0] = v`): the mutated inner
+                // container sits on the stack; store it back into its own
+                // home and recurse so the write reaches the root binding.
+                // Re-evaluates index/obj (same double-evaluation contract
+                // as the Field arm above — receivers with side effects
+                // evaluate twice).
+                self.compile_expr(index);
+                self.compile_expr(obj);
+                self.emit(Op::StoreIndexOp(*span));
+                self.compile_write_back(obj);
+            }
             _ => self.emit(Op::Pop),
         }
     }

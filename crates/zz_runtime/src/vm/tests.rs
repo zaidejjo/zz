@@ -70,6 +70,36 @@ fn vm_nested_path_assignment_keeps_shape() {
 }
 
 #[test]
+fn vm_chained_index_store_writes_through() {
+    // `m[0][0] = v` must reach the root binding (write-through, matching
+    // the AOT engine) instead of being dropped with the temp clone.
+    for src in [
+        "m := [[1, 2], [3, 4]]\nm[0][0] = 99\nm[0][0]",
+        "m := [[1, 2], [3, 4]]\nm[0][1] = m[0][1] + 10\nm[0][1]",
+        "m := [[1, 2], [3, 4]]\nm[0][1] += 10\nm[0][1]",
+        "a := [[[1]]]\na[0][0][0] = 7\na[0][0][0]",
+        "d := {\"a\": [1, 2]}\nd[\"a\"][1] = 9\nd[\"a\"][1]",
+        "m := [[1, 2], [3, 4]]\nm[1] = [8, 9]\nm[1][0]",
+        "a := [1, 2, 3]\na[1] = 9\na[1]",
+        "m := [[1, 2], [3, 4]]\nm[0][0] = 1\nm[1][1] = 2\nm[0][0] + m[1][1]",
+    ] {
+        assert_same(src);
+    }
+    assert_eq!(
+        run_src("m := [[1, 2], [3, 4]]\nm[0][0] = 99\nm[0][0]").unwrap(),
+        Value::Int(99)
+    );
+    assert_eq!(
+        run_src("m := [[1, 2], [3, 4]]\nm[0][1] += 10\nm[0][1]").unwrap(),
+        Value::Int(12)
+    );
+    assert_eq!(
+        run_src("a := [[[1]]]\na[0][0][0] = 7\na[0][0][0]").unwrap(),
+        Value::Int(7)
+    );
+}
+
+#[test]
 fn vm_slot_locals_match_tree_walker() {
     for src in [
         "x := 1\n{ x := 2\nx }\nx",
