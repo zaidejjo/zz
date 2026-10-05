@@ -1,7 +1,6 @@
-// features: casts, imports, nondeterministic, print, std-math, string-literal
-// E2E: edge — int(NaN). DIVERGENCE: VM and native -O0 print 0, but
-// native -O3 prints MIN (-ffast-math folds the NaN guard). M1 spec must
-// pick one canonical float->int conversion. Known native failure.
+// features: casts, imports, print, std-math, string-literal
+// E2E: edge — int(NaN) saturates to 0 on all legs (explicit isnan
+// guard; no -ffast-math to fold it).
 import std.math
 
 println(int(math.NAN))

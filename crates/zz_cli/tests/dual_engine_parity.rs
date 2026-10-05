@@ -254,10 +254,6 @@ fn native_skip_reason(file: &Path) -> Option<&'static str> {
         "log_test" => {
             Some("log output embeds unix timestamps and span durations — non-deterministic")
         }
-        // int(NaN) under -O3 is clang-UB: the `f != f` guard folds under
-        // -ffast-math and the TU shape decides between 0 and MIN. The quad
-        // matrix pins the (exit-only) contract instead.
-        "edge_cast_float_nan" => Some("int(NaN) under -O3 varies by TU shape (clang UB)"),
         _ => None,
     }
 }
@@ -868,8 +864,13 @@ parity_known_failure!(
     "regression",
     "edge_float_nan_display.zz"
 );
-// edge_cast_float_nan is skipped in dual scope (nondeterministic under
-// -O3, see native_skip_reason); the quad matrix asserts its contract.
+// edge_cast_float_nan is strict since the flag cleanup (-ffast-math
+// removal + explicit isnan guard make int(NaN) deterministically 0).
+parity_strict!(
+    parity_regression_edge_cast_float_nan,
+    "regression",
+    "edge_cast_float_nan.zz"
+);
 parity_strict!(
     parity_regression_edge_slice_clamp,
     "regression",
@@ -1610,34 +1611,6 @@ fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
                 );
             }
         }
-        // int(NaN): VM legs and -O0 print 0; -O3 output is clang-UB
-        // (observed both 0 and MIN depending on TU shape — -ffast-math
-        // folds the `f != f` guard, leaving `(int64_t)f` UB). Only exits
-        // are asserted; the dual-engine harness skips this fixture as
-        // nondeterministic for the same reason.
-        // M1 decision: canonical float->int conversion.
-        "edge_cast_float_nan" => {
-            for (name, leg) in [("vm_dbg", &q.vm_dbg), ("vm_rel", &q.vm_rel)] {
-                assert_eq!(leg.0, 0, "{name} should exit 0:\n{}", fmt_quad(file, q));
-                assert!(
-                    leg.1.lines().next().is_some_and(|l| l.trim() == "0"),
-                    "{name} should print 0, got:\n{}",
-                    fmt_quad(file, q)
-                );
-            }
-            if natives {
-                let (nd, nr) = (q.nat_dev.as_ref().unwrap(), q.nat_rel.as_ref().unwrap());
-                assert_eq!(nd.0, 0, "nat_dev should exit 0:\n{}", fmt_quad(file, q));
-                assert!(
-                    nd.1.lines().next().is_some_and(|l| l.trim() == "0"),
-                    "nat_dev should print 0, got:\n{}",
-                    fmt_quad(file, q)
-                );
-                assert_eq!(nr.0, 0, "nat_rel should exit 0:\n{}", fmt_quad(file, q));
-                // No nat_rel stdout assertion: the value is clang-UB and
-                // varies by TU shape (observed 0 and MIN).
-            }
-        }
         // Alias-model divergences: VM legs agree with each other (value
         // semantics); each native leg stays diverged — either by failing
         // (scalar_global_copy does not even compile) or by printing
@@ -1677,7 +1650,6 @@ fn quad_split_stem(stem: &str) -> bool {
             | "edge_int_pow_neg"
             | "edge_index_oob"
             | "edge_float_nan_display"
-            | "edge_cast_float_nan"
             | "scalar_global_copy"
             | "move_append_struct_copy"
     )

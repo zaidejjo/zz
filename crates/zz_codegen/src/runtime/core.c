@@ -6143,7 +6143,10 @@ zz_value zz_int_cast(zz_value v, int *err) {
         case ZZ_FLOAT: {
             double f = v.f;
             int64_t n;
-            if (f != f) n = 0; // NaN saturates to 0 (Rust `as` semantics)
+            // Explicit isnan: never folds, regardless of FP flags
+            // (-ffast-math is gone, but the guard must not depend on that).
+            // NaN saturates to 0, infinities to the ends (matches the VM).
+            if (isnan(f)) n = 0;
             else if (f >= (double)INT64_MAX) n = INT64_MAX;
             else if (f <= (double)INT64_MIN) n = INT64_MIN;
             else n = (int64_t)f;

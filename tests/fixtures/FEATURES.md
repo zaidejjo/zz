@@ -101,9 +101,8 @@ a divergence carry `known-divergence` (or land in `errors/` with a
 
 - `edge_shift_mask`: `<<` / `>>` with counts >= width (both mask `& 63`).
 - `edge_chained_store`: chained index stores write through (fixed VM bug).
-- `edge_cast_float_nan`: int(NaN) — VM and -O0 print 0; -O3 output is
-  clang-UB (0 or MIN by TU shape). Skipped in dual scope as
-  nondeterministic; the quad matrix pins exits.
+- `edge_cast_float_nan`: int(NaN) saturates to 0 (strict since the
+  flag cleanup: no `-ffast-math`, explicit `isnan` guard).
 - `edge_slice_clamp`: out-of-range slice ends clamp (strict everywhere).
 - `edge_cast_float_int`: float->int truncation and INF saturation.
 - `edge_cast_str_int`: str->int overflow/invalid/whitespace (`none`).

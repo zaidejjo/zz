@@ -68,7 +68,7 @@ fn clang_id(clang: &Clang) -> String {
 
 /// Compile-flag generation for the cached runtime archive. Bump on ANY
 /// change to `build_compile_flags` (the key does not hash flags).
-const RT_CACHE_VERSION: &str = "rt2";
+const RT_CACHE_VERSION: &str = "rt3";
 
 /// Assemble the 6-field cache key.
 ///
@@ -259,11 +259,11 @@ fn build_compile_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String>
     if opts.optimize {
         flags.push("-O3".to_string());
         flags.push("-flto=thin".to_string());
-        // Host-only: reads the build machine's CPU; illegal on cross targets.
-        if target.is_none() {
-            flags.push("-march=native".to_string());
-        }
-        flags.push("-ffast-math".to_string());
+        // Parity contract (mirrors `clang_flags`): defined wrapping and
+        // conservative aliasing; no host-specific and no unsafe-FP flags.
+        // Keep in sync with `clang_flags()` and bump RT_CACHE_VERSION.
+        flags.push("-fwrapv".to_string());
+        flags.push("-fno-strict-aliasing".to_string());
         flags.push("-funroll-loops".to_string());
         flags.push("-fomit-frame-pointer".to_string());
     } else {
