@@ -3381,18 +3381,30 @@ int64_t zz_pg_exec_raw(uint64_t id, const char *sql, size_t len, const zz_value 
 zz_value zz_pg_query_raw(uint64_t id, const char *sql, size_t len, const zz_value *binds, size_t nbinds) ZZ_WEAK_IMPORT;
 void zz_pg_close_raw(uint64_t id) ZZ_WEAK_IMPORT;
 
-// `pg.connect(conninfo)` — URL or keyword form (the driver parses both);
-// `ZZ_DB`-NULL on failure, mirroring the SQLite open leniency.
+// `pg.connect(conninfo)` — URL or keyword form (the driver parses both).
+// Connection failures trap (VM parity: `pg.connect failed`), never a
+// NULL handle: a refused/unreachable server must fail loudly. The
+// conninfo is never printed (it may carry passwords).
 zz_value zz_pg_connect(zz_value info, int *err) {
     (void)err;
-    if (info.tag != ZZ_STR || !info.s) return (zz_value){ZZ_DB, {.db = NULL}};
-    if (!zz_pg_connect_raw) return (zz_value){ZZ_DB, {.db = NULL}};
+    if (info.tag != ZZ_STR || !info.s) {
+        fprintf(stderr, "zz error: pg.connect failed: expected a connection string\n");
+        exit(1);
+    }
+    if (!zz_pg_connect_raw) {
+        fprintf(stderr, "zz error: pg.connect failed: postgres support not linked in\n");
+        exit(1);
+    }
     uint64_t id = zz_pg_connect_raw(zz_str_cptr(info.s), info.s->len);
-    if (id == 0) return (zz_value){ZZ_DB, {.db = NULL}};
+    if (id == 0) {
+        fprintf(stderr, "zz error: pg.connect failed: connection refused or unreachable\n");
+        exit(1);
+    }
     zz_db_handle *h = (zz_db_handle *)malloc(sizeof(zz_db_handle));
     if (!h) {
         zz_pg_close_raw(id);
-        return (zz_value){ZZ_DB, {.db = NULL}};
+        fprintf(stderr, "zz: out of memory (pg handle)\n");
+        exit(1);
     }
     h->backend = ZZDB_PG;
     h->pg_id = id;
@@ -3407,11 +3419,20 @@ zz_value zz_db_open(zz_value path, int *err) {
     // handle enum below records the backend so query/exec/close
     // dispatch without re-sniffing.
     if (strncmp(p, "postgres://", 11) == 0 || strncmp(p, "postgresql://", 13) == 0) {
-        if (!zz_pg_connect_raw) return (zz_value){ZZ_DB, {.db = NULL}};
+        if (!zz_pg_connect_raw) {
+            fprintf(stderr, "zz error: pg.connect failed: postgres support not linked in\n");
+            exit(1);
+        }
         uint64_t id = zz_pg_connect_raw(p, path.s->len);
-        if (id == 0) return (zz_value){ZZ_DB, {.db = NULL}};
+        if (id == 0) {
+            fprintf(stderr, "zz error: pg.connect failed: connection refused or unreachable\n");
+            exit(1);
+        }
         zz_db_handle *h = (zz_db_handle *)malloc(sizeof(zz_db_handle));
-        if (!h) return (zz_value){ZZ_DB, {.db = NULL}};
+        if (!h) {
+            fprintf(stderr, "zz: out of memory (pg handle)\n");
+            exit(1);
+        }
         h->backend = ZZDB_PG;
         h->pg_id = id;
         return (zz_value){ZZ_DB, {.db = h}};

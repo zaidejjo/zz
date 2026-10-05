@@ -317,14 +317,10 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
             Some("native: imported const binding prints empty (call results are fine)")
         }
 
-        // --- Error fixtures where native leniency exits 0 ---
-        "pg_connect_refused" => {
-            Some("native: refused connect yields a null handle and exits 0 (AOT leniency, documented)")
-        }
-        // NOTE: `http_tls_cert` used to be listed here (native exited 0
-        // via silent-unit leniency); since unimplemented natives abort,
-        // native errors like the VM and it passes as a strict error
-        // fixture.
+        // NOTE: `http_tls_cert`, `main_result_err`, and
+        // `pg_connect_refused` used to be listed here (native exited 0
+        // via silent-unit leniency); all three now fail loudly like the
+        // VM and pass as strict error fixtures.
 
         // --- Phase 2/3 HTTP: VM-only natives abort loudly on AOT ---
         // `listen_tls`, `listen_cfg`, `fetch_insecure`, `body_bytes`,
