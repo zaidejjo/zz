@@ -41,7 +41,8 @@ const TAG_OPTION_SOME: u32 = 9;
 
 extern "C" {
     fn zz_dict_new() -> CValue;
-    fn zz_index_set(obj: CValue, idx: CValue, item: CValue, err: *mut std::ffi::c_int);
+    // Takes the slot by pointer (detach-on-write reseats the buffer).
+    fn zz_index_set(obj: *mut CValue, idx: CValue, item: CValue, err: *mut std::ffi::c_int);
 }
 
 /// Build a `ZZ_FLOAT` value (payload is the f64 bits, like the C union).
@@ -64,7 +65,7 @@ fn cvalue_bool(b: bool) -> CValue {
 
 /// Insert into a `ZZ_DICT` built by [`zz_dict_new`]: the dict retains the
 /// key and adopts the value, so release the key temp afterwards.
-fn dict_insert(dict: CValue, key: &str, val: CValue) {
+fn dict_insert(mut dict: CValue, key: &str, val: CValue) {
     if dict.tag != TAG_DICT {
         return;
     }
@@ -73,7 +74,7 @@ fn dict_insert(dict: CValue, key: &str, val: CValue) {
     // SAFETY: `dict` came from a `zz_dict_new` value in this call frame;
     // `k` is released below (the dict retains its own ref).
     unsafe {
-        zz_index_set(dict, k, val, &mut err);
+        zz_index_set(&mut dict, k, val, &mut err);
         crate::cabi::zz_value_release(k);
     }
 }

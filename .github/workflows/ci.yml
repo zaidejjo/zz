@@ -37,8 +37,13 @@ jobs:
         run: cargo fmt --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: 'test (unix: full suite incl. native legs)'
-        if: runner.os != 'Windows'
+      - name: 'test (PR: fast suite — VM legs only)'
+        if: runner.os != 'Windows' && github.event_name == 'pull_request'
+        # PR signal in minutes: unit + e2e (VM) + VM-only parity.
+        # Full native/plugin legs run on merge to dev/main below.
+        run: ./scripts/test-fast.sh
+      - name: 'test (merge: full suite incl. native legs)'
+        if: runner.os != 'Windows' && github.event_name != 'pull_request'
         run: cargo test --all
       - name: 'test (windows: VM-only, native backend unsupported)'
         if: runner.os == 'Windows'
