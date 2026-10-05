@@ -1,3 +1,4 @@
+// features: error-case, indexing, locals, print, tuples
 // E2E: Tuple index out of bounds is a compile error.
 t := (1, 2)
 println(t[5])

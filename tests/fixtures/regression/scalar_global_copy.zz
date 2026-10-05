@@ -1,3 +1,4 @@
+// features: known-divergence, locals, print, string-literal
 // Known native limitation: copying one top-level int global into
 // another emits a second `.i` extraction on the already-unboxed global
 // (see tests/fuzz/known_failures.txt, class 2). VM prints 13.

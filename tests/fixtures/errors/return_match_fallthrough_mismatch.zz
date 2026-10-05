@@ -1,3 +1,4 @@
+// features: comparison, error-case, func-call, match, print, return, string-literal
 // E2E: match version — a value arm must match the return type even
 // though the other arm diverges via `return`.
 func f(x: int) -> int {

@@ -292,6 +292,12 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         }
 
         // --- Output differences (native runs but output differs) ---
+        "edge_chained_store" => Some(
+            "M0: chained index store — VM drops the write (temp clone), native writes through",
+        ),
+        "edge_float_nan_display" => Some(
+            "M0: NaN display — VM prints `NaN`, native `nan` (C printf)",
+        ),
         "concurrency_panic_test" => Some("native: panic/fail inside task closures lowers to unit (no err plumbing through zz_call_closure); VM yields .err"),
         "encoding_test" => Some("native: different error message format for bad base64/hex/url"),
         "math_extended_test" => Some("native: float precision + error message differences"),
@@ -305,6 +311,26 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
 
         // --- Error fixtures where native leniency exits 0 ---
         "main_result_err" => Some("native: main returning .err exits 0 (no propagation)"),
+        // M0 edge corpus: VM traps, native wraps/miscomputes and exits 0.
+        // The M1 IR spec must pick one overflow semantics for both engines.
+        "edge_int_overflow_add" => Some(
+            "M0: i64 add overflow — VM traps (debug) / native wraps (release VM wraps too)",
+        ),
+        "edge_int_overflow_mul" => Some(
+            "M0: i64 mul overflow — VM traps (debug) / native wraps (release VM wraps too)",
+        ),
+        "edge_int_neg_min" => Some(
+            "M0: i64::MIN negation — VM traps (debug) / native wraps",
+        ),
+        "edge_int_min_div_neg1" => Some(
+            "M0: i64::MIN / -1 — VM traps (debug) / native miscomputes 0 (C signed-overflow UB)",
+        ),
+        "edge_int_pow_neg" => Some(
+            "M0: negative int exponent — VM errors / native prints 0 (C dpow loop)",
+        ),
+        "edge_index_oob" => Some(
+            "M0: OOB array index — VM errors exit 1 / native yields unit (empty line) exit 0",
+        ),
         "pg_connect_refused" => {
             Some("native: refused connect yields a null handle and exits 0 (AOT leniency, documented)")
         }
@@ -775,6 +801,40 @@ parity_strict!(
     "regression",
     "neg_after_loop.zz"
 );
+// M0 edge corpus: strict-parity probes (both engines agree today).
+parity_strict!(
+    parity_regression_edge_shift_mask,
+    "regression",
+    "edge_shift_mask.zz"
+);
+parity_strict!(
+    parity_regression_edge_cast_float_int,
+    "regression",
+    "edge_cast_float_int.zz"
+);
+parity_strict!(
+    parity_regression_edge_cast_str_int,
+    "regression",
+    "edge_cast_str_int.zz"
+);
+// M0 edge corpus: known divergences (VM vs native differ; tracked in
+// `known_native_failure` above — these fail if native ever matches).
+parity_known_failure!(
+    parity_regression_edge_chained_store,
+    "regression",
+    "edge_chained_store.zz"
+);
+parity_known_failure!(
+    parity_regression_edge_float_nan_display,
+    "regression",
+    "edge_float_nan_display.zz"
+);
+parity_known_error_failure!(parity_err_edge_overflow_add, "edge_int_overflow_add.zz");
+parity_known_error_failure!(parity_err_edge_overflow_mul, "edge_int_overflow_mul.zz");
+parity_known_error_failure!(parity_err_edge_neg_min, "edge_int_neg_min.zz");
+parity_known_error_failure!(parity_err_edge_min_div_neg1, "edge_int_min_div_neg1.zz");
+parity_known_error_failure!(parity_err_edge_pow_neg, "edge_int_pow_neg.zz");
+parity_known_error_failure!(parity_err_edge_index_oob, "edge_index_oob.zz");
 parity_strict!(
     parity_regression_branch_call_returns,
     "regression",
@@ -952,6 +1012,10 @@ parity_strict_error!(parity_err_undefined_var, "undefined_var.zz");
 parity_strict_error!(parity_err_arity, "arity.zz");
 parity_strict_error!(parity_err_parse_error, "parse_error.zz");
 parity_strict_error!(parity_err_div_by_zero, "div_by_zero.zz");
+// M0 edge corpus: both engines fail (messages differ; error parity
+// requires failure on both sides, not identical diagnostics).
+parity_strict_error!(parity_err_edge_neg_shift, "edge_neg_shift_err.zz");
+parity_strict_error!(parity_err_edge_rem_zero, "edge_rem_zero_err.zz");
 parity_strict_error!(parity_err_unknown_field, "unknown_field.zz");
 parity_strict_error!(parity_err_struct_init_assign, "struct_init_assign_error.zz");
 parity_strict_error!(parity_err_int_float_cmp, "int_float_cmp.zz");
@@ -1218,7 +1282,12 @@ fn parity_discover_all_fixtures() {
 
     let fixtures = fixtures_dir();
     let mut tasks: Vec<SweepTask> = Vec::new();
-    for dir_name in ["syntax", "types", "stdlib"] {
+    // M0: all `zz run` fixture dirs. `modules/` stays out: most fixtures
+    // there are multi-file/import-layout cases that do not run standalone
+    // (`import_alias.zz` fails on the VM itself); they are tagged for the
+    // M6 modules milestone instead. `test/` stays out: it needs the
+    // `zz test` runner, not `zz run` (covered by e2e_test_success!).
+    for dir_name in ["syntax", "types", "stdlib", "regression"] {
         for file in zz_files_sorted(&fixtures.join(dir_name)) {
             let token = format!("t{}", tasks.len());
             tasks.push(SweepTask {

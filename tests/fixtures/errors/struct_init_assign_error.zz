@@ -1,3 +1,4 @@
+// features: error-case, func-call, locals, print, string-literal, structs
 // E2E: Struct init with `=` instead of `:` should produce clear error
 struct User { name: str, age: int }
 func main() {

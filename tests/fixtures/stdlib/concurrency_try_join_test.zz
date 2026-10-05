@@ -1,3 +1,4 @@
+// features: break-continue, closures, comparison, for-loop, func-call, if-else, if-let, imports, int-arith, locals, option-result, print, ranges, std-task, string-literal
 // E2E: task.try_join — non-blocking poll: `.none` while running,
 // `.some` once done (repeatable, non-destructive), then `join` takes.
 // Deterministic: bounded spin-poll (no sleeps, no timing dependence).

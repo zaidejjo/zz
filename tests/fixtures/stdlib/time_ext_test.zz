@@ -1,3 +1,4 @@
+// features: imports, int-arith, locals, print, std-time, string-literal
 // E2E: std.time extension — ns/us clocks, monotonic, micro sleeps, durations
 import std.time
 

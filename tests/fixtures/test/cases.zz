@@ -1,3 +1,4 @@
+// features: arrays, assert, bool-logic, comparison, func-call, int-arith, print, string-literal, zz-test
 // E2E: Parameterized test cases expand into individual tests
 
 func double(x: int) -> int {

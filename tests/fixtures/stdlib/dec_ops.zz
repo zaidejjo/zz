@@ -1,3 +1,4 @@
+// features: func-call, imports, print, std-dec, string-literal
 // E2E: std.dec exact decimal math on strings.
 import std.dec
 

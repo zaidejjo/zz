@@ -1,3 +1,4 @@
+// features: casts, float-arith, locals, option-result, print, string-literal
 // E2E: Option display semantics — interpolation / println unwrap,
 // dbg / :? preserve wrappers. Must match byte-for-byte on VM and AOT.
 opt_int := .some(42)

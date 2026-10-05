@@ -1,3 +1,4 @@
+// features: casts, comparison, imports, locals, pipe, print, selective-import, std-str, string-literal
 // E2E: selective import of method-dispatch string helpers.
 // Regression: `import std.str(trim)` used to fail with
 // "symbol `trim` not found in `std.str`" because only the `str.*`

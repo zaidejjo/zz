@@ -1,3 +1,4 @@
+// features: bool-logic, comparison, func-call, if-else, int-arith, print, string-literal
 // Regression: trailing call tails in if/else branches must yield
 // the call values on both engines (sibling of branch_call_returns).
 func g(x: int) -> int {

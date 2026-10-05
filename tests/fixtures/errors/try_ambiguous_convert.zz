@@ -1,3 +1,4 @@
+// features: comparison, error-case, func-call, struct-methods, structs
 // Ambiguous conversions (two impls from the same source) are a compile error.
 struct ErrA { msg: str }
 struct ErrB { msg: str }

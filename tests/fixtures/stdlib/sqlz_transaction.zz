@@ -1,3 +1,4 @@
+// features: arrays, closures, comparison, imports, indexing, locals, match, methods, option-result, print, std-sqlz, string-blocks, string-literal, structs
 import std.sqlz
 
 struct User { id: int, name: str }

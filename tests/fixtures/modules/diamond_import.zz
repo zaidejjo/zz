@@ -1,3 +1,4 @@
+// features: func-call, locals, print, pub-visibility
 // Test: diamond import pattern — all pub items visible.
 // A → B, A → C, B → D, C → D.
 // This test is a single-file representation of the pattern.

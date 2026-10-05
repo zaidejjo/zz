@@ -1,3 +1,4 @@
+// features: comparison, func-call, if-else, locals, match, option-result, print, return, string-literal, structs
 // Regression: trailing if-with-returns as else tail must typecheck.
 struct E { msg: str }
 func f(k: str, n: int) -> Result<int, E> {

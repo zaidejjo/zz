@@ -1,3 +1,4 @@
+// features: closures, comparison, func-call, imports, locals, nondeterministic, option-result, print, std-http, string-literal
 // tests/fixtures/stdlib/http_server_test.zz — HTTP server routes
 import std.http
 

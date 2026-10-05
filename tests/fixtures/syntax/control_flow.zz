@@ -1,3 +1,4 @@
+// features: arrays, break-continue, comparison, for-loop, if-else, int-arith, locals, print, ranges, string-literal, while-loop
 // E2E: Control flow — if/else, while, for, break, continue
 // if/else
 x := 10

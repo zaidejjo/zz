@@ -1,3 +1,4 @@
+// features: dicts, for-loop, func-call, locals, print, string-literal
 // E2E: dict iteration with `for k, v in dict` and `for k in dict`
 
 func main() {

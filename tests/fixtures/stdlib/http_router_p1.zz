@@ -1,3 +1,4 @@
+// features: closures, comparison, func-call, imports, locals, option-result, print, std-http, string-literal
 // tests/fixtures/stdlib/http_router_p1.zz — Phase 1 radix router
 // Tests: exact-beats-param precedence, :id capture, :path... tail,
 // 405 with Allow, PATCH via generic route, legacy * fallback.

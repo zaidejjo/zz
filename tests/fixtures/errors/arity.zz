@@ -1,3 +1,4 @@
+// features: comparison, error-case, func-call, int-arith, locals
 // E2E: Wrong arity error
 func add(a: int, b: int) -> int {
     a + b

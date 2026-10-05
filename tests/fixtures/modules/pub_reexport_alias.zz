@@ -1,3 +1,4 @@
+// features: comparison, func-call, int-arith, print, pub-visibility
 // Test: pub import re-export with alias.
 // Full multi-file test is in loader/tests.rs (pub_reexport_alias_with_struct).
 

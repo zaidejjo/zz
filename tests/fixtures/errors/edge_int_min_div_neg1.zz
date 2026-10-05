@@ -1,0 +1,5 @@
+// features: error-case, int-arith, known-divergence
+// E2E: edge — i64::MIN / -1. DIVERGENCE: VM traps (debug), native
+// miscomputes 0 (signed-overflow UB in C). M1 spec must pick one.
+x := -9223372036854775808 / -1
+println(x)

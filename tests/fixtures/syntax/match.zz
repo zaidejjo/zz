@@ -1,3 +1,4 @@
+// features: comparison, if-else, if-let, locals, match, option-result, print, string-literal
 // E2E: Pattern matching with match
 x := .some(42)
 match x {

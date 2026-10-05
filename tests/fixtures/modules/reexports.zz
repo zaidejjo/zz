@@ -1,3 +1,4 @@
+// features: imports, pub-visibility
 // Test: pub import re-exports
 // This file demonstrates re-exporting items from a child module.
 // The full test is in loader/tests.rs (pub_reexport_works).

@@ -1,3 +1,4 @@
+// features: imports, locals, print, std-sys, string-literal
 // E2E: std.sys — os, arch, cpu_count, hostname, memory
 import std.sys
 

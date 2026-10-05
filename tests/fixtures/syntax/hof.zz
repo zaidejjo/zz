@@ -1,3 +1,4 @@
+// features: arrays, closures, comparison, hof, int-arith, locals, pipe, print, string-literal
 // E2E: Higher-order functions — map, filter, enumerate, zip, range
 // Note: custom closures tested separately via eval
 

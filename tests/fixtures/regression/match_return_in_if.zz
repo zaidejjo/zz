@@ -1,3 +1,4 @@
+// features: comparison, func-call, if-else, int-arith, locals, match, option-result, print, return, string-literal, structs
 // Regression: match with returns inside if must typecheck like top-level match.
 struct E { msg: str }
 func inner(x: int) -> Result<int, E> {

@@ -1,3 +1,4 @@
+// features: closures, imports, locals, print, std-chan, std-task, string-literal
 // E2E: chan — thread-safe message passing
 import std.task
 import std.chan

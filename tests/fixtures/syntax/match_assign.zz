@@ -1,3 +1,4 @@
+// features: casts, comparison, func-call, int-arith, locals, match, option-result, print, string-literal
 // E2E: match arms accept statements (assignment, decl, return).
 // Regression: `=> y = v` used to die with
 // "expected `,` or `}` after match arm".

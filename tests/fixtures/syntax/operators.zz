@@ -1,3 +1,4 @@
+// features: bool-logic, comparison, elvis, int-arith, locals, option-result, print, short-circuit, string-literal, string-ops
 // E2E: Operators — arithmetic, comparison, logic, power
 // arithmetic
 println(10 + 3)

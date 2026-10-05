@@ -1,3 +1,4 @@
+// features: imports, locals, print, selective-import, string-literal
 // E2E: selective import from local file
 import helpers.math_utils(double, triple)
 

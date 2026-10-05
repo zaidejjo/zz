@@ -1,3 +1,4 @@
+// features: arrays, comparison, func-call, indexing, int-arith, locals, print, return, string-literal, structs, tuples
 // E2E: Tuples/arrays holding unboxed structs (all-scalar fields lower
 // to raw C structs) must box into zz_value containers; boxed field
 // reads of rvalues must hoist to a temp (no &rvalue).

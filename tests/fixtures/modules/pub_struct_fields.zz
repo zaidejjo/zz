@@ -1,3 +1,4 @@
+// features: func-call, int-arith, locals, print, pub-visibility, structs
 // Test: pub struct fields accessible, private items stay private.
 pub struct Vec2 {x: int, y: int}
 

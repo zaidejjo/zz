@@ -1,3 +1,4 @@
+// features: closures, comparison, dicts, func-call, imports, int-arith, locals, match, option-result, print, std-http, std-json, string-literal
 // E2E: HTTP request/response value natives (AOT Step 1).
 // Accessors run inside http.test handlers (dispatcher-built requests,
 // like production — a literal nested dict cannot satisfy the {str: str}

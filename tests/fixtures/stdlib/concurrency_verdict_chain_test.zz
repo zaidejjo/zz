@@ -1,3 +1,4 @@
+// features: break-continue, closures, for-loop, func-call, if-else, if-let, imports, int-arith, locals, option-result, print, ranges, std-chan, std-task, std-time, string-literal
 // E2E: verdict survival — a task released by handoff and re-suspended
 // must not poison the sender's completion (suspend-verdict hygiene).
 // T3 waits on chA then blocks on chB; T2's trailing send hands off to T3.

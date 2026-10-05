@@ -1,3 +1,4 @@
+// features: enums, error-case, func-call, print
 // ERROR: payload variant used without its argument must report.
 enum Token {
     Eof,

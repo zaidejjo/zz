@@ -1,3 +1,4 @@
+// features: arrays, for-loop, hof, locals, print, string-literal
 // E2E: two-variable for loops unpack `enumerate()` pairs.
 xs := ["a", "b", "c"]
 for i, x in xs.enumerate() {

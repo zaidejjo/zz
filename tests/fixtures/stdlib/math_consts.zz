@@ -1,3 +1,4 @@
+// features: comparison, float-arith, imports, int-arith, locals, print, std-math, string-literal
 // E2E: std.math numeric constants are true values (no `()` needed).
 import std.math
 

@@ -1,3 +1,4 @@
+// features: arrays, func-call, locals, print, string-literal
 // Chained method calls on call results (temporaries, not idents).
 // Regression probe for receiver-temporary lowering parity.
 func main() {

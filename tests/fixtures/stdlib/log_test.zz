@@ -1,3 +1,4 @@
+// features: elvis, if-else, imports, locals, nondeterministic, print, std-fs, std-log, std-str, std-time, string-literal
 // E2E: std.log — levels, filtering, file sink, JSON format, spans
 import std.log
 import std.fs

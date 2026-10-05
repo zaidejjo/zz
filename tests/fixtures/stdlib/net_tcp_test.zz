@@ -1,3 +1,4 @@
+// features: bytes, casts, comparison, elvis, func-call, imports, indexing, int-arith, locals, match, option-result, print, selective-import, slicing, std-env, std-fs, std-net, std-process, std-str, string-literal, string-ops
 // tests/fixtures/stdlib/net_tcp_test.zz — TCP operations on loopback.
 // Bind ports derive from (pid, sweep task) so parallel runners
 // (per-file parity tests, the discover sweep, e2e) never share them.

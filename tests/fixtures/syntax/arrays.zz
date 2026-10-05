@@ -1,3 +1,4 @@
+// features: arrays, bool-logic, comparison, for-loop, hof, if-else, indexing, int-arith, locals, print, slicing, string-literal
 // E2E: Arrays — creation, indexing, slicing, comprehensions
 // creation
 arr := [10, 20, 30, 40, 50]

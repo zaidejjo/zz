@@ -1,3 +1,4 @@
+// features: comparison, float-arith, func-call, int-arith, locals, print, return, string-blocks, string-literal
 // E2E: Multiline raw/smart strings ("""...""") with {expr} interpolation.
 // The closing delimiter's indentation is stripped (dedent).
 

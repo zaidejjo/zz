@@ -1,3 +1,4 @@
+// features: comparison, imports, locals, match, option-result, print, std-regexp, std-uuid, string-literal
 // E2E: std.uuid — v4/v7 generation, parse, validation ( shapes checked
 // with std.regexp, exercising two FFI modules in one program).
 import std.uuid

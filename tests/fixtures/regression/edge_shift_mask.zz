@@ -1,0 +1,7 @@
+// features: bitwise, print
+// E2E: edge — shifts at/above width mask like x86 (`& 63`), both engines.
+println(1 << 64)
+println(1 << 65)
+println(256 >> 70)
+println(1 << 63)
+println("edge_shift_mask_ok")

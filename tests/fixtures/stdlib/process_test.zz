@@ -1,3 +1,4 @@
+// features: arrays, comparison, imports, locals, match, option-result, print, std-process, string-literal
 // E2E: std.process — run, spawn/wait, env overlay, pid, error paths
 import std.process
 

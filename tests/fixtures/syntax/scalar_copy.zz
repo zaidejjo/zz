@@ -1,3 +1,4 @@
+// features: bool-logic, casts, comparison, float-arith, func-call, if-else, int-arith, locals, print, string-literal
 // E2E: scalar-to-scalar copies must lower to raw C on the native backend.
 // `s := sx` (Decl) and `s = sy` (Assign) between raw scalar locals once
 // miscompiled to `(v).f` on a plain double. Both engines must agree.

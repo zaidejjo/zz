@@ -1,3 +1,4 @@
+// features: error-case, import-alias, imports, known-divergence, locals, print, string-literal
 // E2E: pg.connect to a closed port must fail cleanly (no live server needed).
 import std.sqlz.postgres as pg
 

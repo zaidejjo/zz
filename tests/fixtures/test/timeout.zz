@@ -1,3 +1,4 @@
+// features: assert, bool-logic, func-call, print, string-literal, zz-test
 // E2E: @test(timeout) enforces wall-clock limit
 
 @test(timeout = 2000)

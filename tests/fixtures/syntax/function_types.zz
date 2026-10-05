@@ -1,3 +1,4 @@
+// features: arrays, closures, comparison, func-call, hof, int-arith, locals, print, string-literal
 // E2E: Function type annotations — `func(int) -> int` and `(int) -> int`
 
 // Function type in parameter declaration

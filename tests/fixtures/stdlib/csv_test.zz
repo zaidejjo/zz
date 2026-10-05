@@ -1,3 +1,4 @@
+// features: func-call, imports, locals, print, std-csv, std-json, string-literal
 // E2E: std.csv RFC4180 subset.
 import std.csv
 import std.json

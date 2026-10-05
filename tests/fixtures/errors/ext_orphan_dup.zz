@@ -1,3 +1,4 @@
+// features: comparison, error-case, func-call, methods, struct-methods
 // Duplicate extension method for the same type is a compile error (orphan rule).
 impl str {
     func shout(self) -> str {

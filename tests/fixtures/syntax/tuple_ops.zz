@@ -1,3 +1,4 @@
+// features: comparison, destructuring, func-call, indexing, locals, print, string-literal
 // E2E: Tuples — bare destructuring, indexing (incl. negative), len, writes
 func pair() -> (int, str) {
     (7, "seven")

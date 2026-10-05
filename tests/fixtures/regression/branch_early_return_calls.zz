@@ -1,3 +1,4 @@
+// features: bool-logic, comparison, func-call, if-else, int-arith, print, return, string-literal
 // Regression: early return-of-call mixed with a trailing return-of-call
 // must yield call values on both engines (sibling of
 // branch_call_returns, which covers if/else-shaped tails).

@@ -1,3 +1,4 @@
+// features: closures, comparison, func-call, locals, print, string-literal
 func helper(name: str) -> str {
     "hi {name}"
 }

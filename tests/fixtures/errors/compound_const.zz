@@ -1,3 +1,4 @@
+// features: const, error-case
 // E2E: Compound assignment respects const.
 const x = 1
 x += 2

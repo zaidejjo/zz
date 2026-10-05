@@ -1,3 +1,4 @@
+// features: closures, comparison, func-call, imports, known-divergence, locals, match, option-result, print, std-task, string-literal
 // E2E: task panic — a panicking worker resolves its join as `.err`.
 // Deterministic: no timing dependence.
 import std.task

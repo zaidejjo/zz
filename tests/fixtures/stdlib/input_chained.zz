@@ -1,3 +1,4 @@
+// features: arrays, if-else, locals, print, stdin, string-literal
 // Chained input processing over globals (family.zz essence):
 // input().to_lower() on a call result, multi-branch elif over
 // array.contains. stdin comes from input_chained.stdin in tests.

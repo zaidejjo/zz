@@ -1,3 +1,4 @@
+// features: closures, comparison, dicts, func-call, imports, locals, match, option-result, print, std-http, string-literal
 // tests/fixtures/stdlib/http_fetch_test.zz — unified client + JSON client.
 // Network-free: refused loopback port exercises arg parsing, defaults,
 // timeout plumbing and error mapping on both engines (output asserts tags

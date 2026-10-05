@@ -1,3 +1,4 @@
+// features: comparison, func-call, int-arith, locals, print, pub-visibility, structs
 // Test: pub keyword on all declaration types.
 // Single-file — no imports needed.
 pub PI := 314

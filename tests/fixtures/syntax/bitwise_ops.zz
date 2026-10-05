@@ -1,3 +1,4 @@
+// features: bitwise, bool-logic, closures, comparison, func-call, int-arith, locals, match, option-result, print, string-literal
 // E2E: Bitwise operators — &, |, ^, ~, <<, >>
 println(6 & 3)
 println(6 | 3)

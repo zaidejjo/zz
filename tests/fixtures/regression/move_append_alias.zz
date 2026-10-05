@@ -1,3 +1,4 @@
+// features: arrays, break-continue, comparison, dicts, for-loop, if-else, indexing, locals, print, ranges, string-literal, vec-push
 // Move-append aliasing: takes must never disturb live shares.
 // NOTE: values print as `name=value` (not bare numbers) so the
 // dual-engine parity harness — which strips purely-numeric lines —

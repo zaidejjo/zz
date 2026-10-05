@@ -1,3 +1,4 @@
+// features: arrays, known-divergence, locals, print, string-literal, structs, vec-push
 // Struct copies under move-append takes (VM-correct values).
 //
 // KNOWN DIVERGENCE (native): `t := s` shares struct identity on native

@@ -1,3 +1,4 @@
+// features: closures, comparison, if-else, imports, int-arith, locals, print, std-chan, std-task, string-literal
 // E2E: spawn — parallel execution across cores
 import std.task
 import std.chan

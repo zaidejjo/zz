@@ -1,3 +1,4 @@
+// features: defer, func-call, print, string-literal
 // E2E: Defer statement
 func with_defer() {
     println("start")

@@ -1,3 +1,4 @@
+// features: dicts, indexing, locals, print, string-literal
 // E2E: Dictionaries — creation, access, iteration
 d := {"a": 1, "b": 2, "c": 3}
 

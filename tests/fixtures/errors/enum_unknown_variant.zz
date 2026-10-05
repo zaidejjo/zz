@@ -1,3 +1,4 @@
+// features: enums, error-case, func-call, locals, print
 // ERROR: unknown variant must report with candidates.
 enum Token {
     Eof,
