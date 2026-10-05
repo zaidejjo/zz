@@ -322,9 +322,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
 
         // --- Error fixtures where native leniency exits 0 ---
         "main_result_err" => Some("native: main returning .err exits 0 (no propagation)"),
-        "edge_index_oob" => Some(
-            "M0: OOB array index — VM errors exit 1 / native yields unit (empty line) exit 0",
-        ),
         "pg_connect_refused" => {
             Some("native: refused connect yields a null handle and exits 0 (AOT leniency, documented)")
         }
@@ -878,7 +875,7 @@ parity_strict!(
 parity_strict_error!(parity_err_edge_min_div_neg1, "edge_int_min_div_neg1.zz");
 parity_strict_error!(parity_err_edge_min_rem_neg1, "edge_int_min_rem_neg1.zz");
 parity_strict_error!(parity_err_edge_pow_neg, "edge_int_pow_neg.zz");
-parity_known_error_failure!(parity_err_edge_index_oob, "edge_index_oob.zz");
+parity_strict_error!(parity_err_edge_index_oob, "edge_index_oob.zz");
 // Modules fixtures: standalone-runnable files must match on both engines
 // (`import_alias.zz` excluded — broken on the VM itself, see
 // `module_skip_reason`).
@@ -1574,25 +1571,6 @@ fn assert_quad_all_fail(file: &Path, q: &QuadLegs) {
 fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
     let natives = q.nat_dev.is_some() && q.nat_rel.is_some();
     match stem {
-        // OOB index: both VM legs trap; natives yield unit and exit 0.
-        // M1 decision: trap (AOT needs a bounds check).
-        "edge_index_oob" => {
-            assert_ne!(q.vm_dbg.0, 0, "vm_dbg should trap:\n{}", fmt_quad(file, q));
-            assert_ne!(q.vm_rel.0, 0, "vm_rel should trap:\n{}", fmt_quad(file, q));
-            if natives {
-                for (name, leg) in [
-                    ("nat_dev", q.nat_dev.as_ref().unwrap()),
-                    ("nat_rel", q.nat_rel.as_ref().unwrap()),
-                ] {
-                    assert_eq!(leg.0, 0, "{name} should exit 0:\n{}", fmt_quad(file, q));
-                    assert!(
-                        leg.1.trim().is_empty(),
-                        "{name} should print empty, got:\n{}",
-                        fmt_quad(file, q)
-                    );
-                }
-            }
-        }
         // NaN display: all exit 0; Rust prints `NaN`, C prints `nan`.
         // M1 decision: one canonical spelling (fixtures become strict).
         "edge_float_nan_display" => {
@@ -1657,10 +1635,7 @@ fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
 fn quad_split_stem(stem: &str) -> bool {
     matches!(
         stem,
-        "edge_index_oob"
-            | "edge_float_nan_display"
-            | "scalar_global_copy"
-            | "move_append_struct_copy"
+        "edge_float_nan_display" | "scalar_global_copy" | "move_append_struct_copy"
     )
 }
 
