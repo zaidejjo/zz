@@ -1,5 +1,0 @@
-// features: error-case, int-arith, known-divergence
-// E2E: edge — i64 multiplication overflow. DIVERGENCE: VM traps (debug) /
-// wraps (release), native wraps. M1 spec must pick one. Known failure.
-x := 9223372036854775807 * 2
-println(x)

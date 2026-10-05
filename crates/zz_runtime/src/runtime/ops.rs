@@ -435,32 +435,15 @@ pub(crate) fn slice_value(
 
 /// Evaluate an integer binary operation.
 ///
-/// In release builds, arithmetic uses wrapping semantics for speed.
-/// In debug builds, checked operations catch overflow.
+/// Wrapping (two's-complement) semantics in every profile, per the IR
+/// spec: `+ - *` never trap. Division/remainder keep their explicit
+/// zero and `MIN` checks below.
 #[inline(always)]
 pub(crate) fn eval_int_binary(op: BinOp, a: i64, b: i64, span: Span) -> Result<Value, EvalError> {
     match op {
-        #[cfg(not(debug_assertions))]
         BinOp::Add => Ok(Value::Int(a.wrapping_add(b))),
-        #[cfg(not(debug_assertions))]
         BinOp::Sub => Ok(Value::Int(a.wrapping_sub(b))),
-        #[cfg(not(debug_assertions))]
         BinOp::Mul => Ok(Value::Int(a.wrapping_mul(b))),
-        #[cfg(debug_assertions)]
-        BinOp::Add => a
-            .checked_add(b)
-            .map(Value::Int)
-            .ok_or_else(|| EvalError::new("integer overflow in addition", span)),
-        #[cfg(debug_assertions)]
-        BinOp::Sub => a
-            .checked_sub(b)
-            .map(Value::Int)
-            .ok_or_else(|| EvalError::new("integer overflow in subtraction", span)),
-        #[cfg(debug_assertions)]
-        BinOp::Mul => a
-            .checked_mul(b)
-            .map(Value::Int)
-            .ok_or_else(|| EvalError::new("integer overflow in multiplication", span)),
         BinOp::Div => {
             if b == 0 {
                 Err(EvalError::new("division by zero", span))
@@ -497,16 +480,8 @@ pub(crate) fn eval_int_binary(op: BinOp, a: i64, b: i64, span: Span) -> Result<V
             if b < 0 {
                 Err(EvalError::new("negative exponent for integer power", span))
             } else {
-                #[cfg(not(debug_assertions))]
-                {
-                    Ok(Value::Int(a.wrapping_pow(b as u32)))
-                }
-                #[cfg(debug_assertions)]
-                {
-                    a.checked_pow(b as u32)
-                        .map(Value::Int)
-                        .ok_or_else(|| EvalError::new("integer overflow in exponentiation", span))
-                }
+                // Wrapping power in every profile (IR spec).
+                Ok(Value::Int(a.wrapping_pow(b as u32)))
             }
         }
         // Bitwise ops never overflow — wrapping in all build modes
@@ -650,10 +625,8 @@ pub(crate) fn eval_unary(op: UnOp, v: Value, span: Span) -> Result<Value, EvalEr
     match op {
         UnOp::Pos => Ok(v),
         UnOp::Neg => match v {
-            Value::Int(i) => i
-                .checked_neg()
-                .map(Value::Int)
-                .ok_or_else(|| EvalError::new("integer overflow in negation", span)),
+            // Wrapping negation (IR spec): -MIN is MIN, never a trap.
+            Value::Int(i) => Ok(Value::Int(i.wrapping_neg())),
             Value::Float(f) => Ok(Value::Float(-f)),
             other => Err(EvalError::new(format!("cannot negate `{other}`"), span)),
         },

@@ -426,6 +426,22 @@ e2e_success_test!(
     "regression",
     "edge_cast_float_nan.zz"
 );
+// Wrap-spec PR: overflow now wraps on all legs (was VM-trap errors).
+e2e_success_test!(
+    e2e_regression_edge_overflow_add,
+    "regression",
+    "edge_int_overflow_add.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_overflow_mul,
+    "regression",
+    "edge_int_overflow_mul.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_neg_min,
+    "regression",
+    "edge_int_neg_min.zz"
+);
 e2e_success_test!(e2e_syntax_main_entrypoint, "syntax", "main_entrypoint.zz");
 e2e_success_test!(e2e_syntax_match_guards, "syntax", "match_guards.zz");
 e2e_success_test!(
@@ -774,11 +790,7 @@ e2e_error_test!(e2e_err_chan_send_non_chan, "chan_send_non_chan.zz");
 // requires failure on both sides).
 e2e_error_test!(e2e_err_edge_neg_shift, "edge_neg_shift_err.zz");
 e2e_error_test!(e2e_err_edge_rem_zero, "edge_rem_zero_err.zz");
-// M0 edge corpus: known divergences — VM fails, native exits 0
-// (tracked as known native failures in dual_engine_parity.rs).
-e2e_error_test!(e2e_err_edge_overflow_add, "edge_int_overflow_add.zz");
-e2e_error_test!(e2e_err_edge_overflow_mul, "edge_int_overflow_mul.zz");
-e2e_error_test!(e2e_err_edge_neg_min, "edge_int_neg_min.zz");
+// Edge error probes whose fixes land in later PRs (still VM-fail).
 e2e_error_test!(e2e_err_edge_min_div_neg1, "edge_int_min_div_neg1.zz");
 e2e_error_test!(e2e_err_edge_pow_neg, "edge_int_pow_neg.zz");
 e2e_error_test!(e2e_err_edge_index_oob, "edge_index_oob.zz");

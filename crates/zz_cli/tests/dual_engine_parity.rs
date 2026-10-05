@@ -322,17 +322,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
 
         // --- Error fixtures where native leniency exits 0 ---
         "main_result_err" => Some("native: main returning .err exits 0 (no propagation)"),
-        // M0 edge corpus: VM traps, native wraps/miscomputes and exits 0.
-        // The M1 IR spec must pick one overflow semantics for both engines.
-        "edge_int_overflow_add" => Some(
-            "M0: i64 add overflow — VM traps (debug) / native wraps (release VM wraps too)",
-        ),
-        "edge_int_overflow_mul" => Some(
-            "M0: i64 mul overflow — VM traps (debug) / native wraps (release VM wraps too)",
-        ),
-        "edge_int_neg_min" => Some(
-            "M0: i64::MIN negation — VM traps (debug) / native wraps",
-        ),
         "edge_int_min_div_neg1" => Some(
             "M0: i64::MIN / -1 — VM traps (debug) / native miscomputes 0 (C signed-overflow UB)",
         ),
@@ -841,6 +830,22 @@ parity_strict!(
     "regression",
     "edge_shift_mask.zz"
 );
+// Wrap-spec PR: overflow wraps on all legs (was VM-trap errors).
+parity_strict!(
+    parity_regression_edge_overflow_add,
+    "regression",
+    "edge_int_overflow_add.zz"
+);
+parity_strict!(
+    parity_regression_edge_overflow_mul,
+    "regression",
+    "edge_int_overflow_mul.zz"
+);
+parity_strict!(
+    parity_regression_edge_neg_min,
+    "regression",
+    "edge_int_neg_min.zz"
+);
 parity_strict!(
     parity_regression_edge_cast_float_int,
     "regression",
@@ -876,9 +881,6 @@ parity_strict!(
     "regression",
     "edge_slice_clamp.zz"
 );
-parity_known_error_failure!(parity_err_edge_overflow_add, "edge_int_overflow_add.zz");
-parity_known_error_failure!(parity_err_edge_overflow_mul, "edge_int_overflow_mul.zz");
-parity_known_error_failure!(parity_err_edge_neg_min, "edge_int_neg_min.zz");
 parity_known_error_failure!(parity_err_edge_min_div_neg1, "edge_int_min_div_neg1.zz");
 parity_known_error_failure!(parity_err_edge_pow_neg, "edge_int_pow_neg.zz");
 parity_known_error_failure!(parity_err_edge_index_oob, "edge_index_oob.zz");
@@ -1504,17 +1506,6 @@ fn assert_quad_all_fail(file: &Path, q: &QuadLegs) {
 fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
     let natives = q.nat_dev.is_some() && q.nat_rel.is_some();
     match stem {
-        // Overflow: debug VM traps; every other leg wraps and exits 0.
-        // M1 decision: wrap for + - * (spec change; fixtures become strict).
-        "edge_int_overflow_add" | "edge_int_overflow_mul" | "edge_int_neg_min" => {
-            assert_ne!(q.vm_dbg.0, 0, "vm_dbg should trap:\n{}", fmt_quad(file, q));
-            assert_eq!(q.vm_rel.0, 0, "vm_rel should wrap:\n{}", fmt_quad(file, q));
-            if natives {
-                let (nd, nr) = (q.nat_dev.as_ref().unwrap(), q.nat_rel.as_ref().unwrap());
-                assert_eq!(nd.0, 0, "nat_dev should wrap:\n{}", fmt_quad(file, q));
-                assert_eq!(nr.0, 0, "nat_rel should wrap:\n{}", fmt_quad(file, q));
-            }
-        }
         // MIN/-1: debug VM traps; release VM wraps to MIN (Rust
         // `wrapping_div`); natives print 0 (C signed-overflow UB).
         // M1 decision: trap (spec change; fixtures become strict errors).
@@ -1643,10 +1634,7 @@ fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
 fn quad_split_stem(stem: &str) -> bool {
     matches!(
         stem,
-        "edge_int_overflow_add"
-            | "edge_int_overflow_mul"
-            | "edge_int_neg_min"
-            | "edge_int_min_div_neg1"
+        "edge_int_min_div_neg1"
             | "edge_int_pow_neg"
             | "edge_index_oob"
             | "edge_float_nan_display"

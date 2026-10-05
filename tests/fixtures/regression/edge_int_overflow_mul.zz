@@ -1,0 +1,5 @@
+// features: int-arith, locals, print, string-literal
+// E2E: edge — i64 multiplication wraps two's-complement on all legs.
+x := 9223372036854775807 * 2
+println("prod={x}")
+println("edge_int_overflow_mul_ok")

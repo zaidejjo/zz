@@ -1,5 +1,0 @@
-// features: error-case, int-arith, known-divergence
-// E2E: edge — negation of i64::MIN. DIVERGENCE: VM traps (debug) / wraps
-// (release), native wraps. Known native failure.
-x := -9223372036854775808
-println(-x)

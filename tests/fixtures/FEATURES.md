@@ -108,9 +108,8 @@ a divergence carry `known-divergence` (or land in `errors/` with a
 - `edge_cast_str_int`: str->int overflow/invalid/whitespace (`none`).
 - `edge_neg_shift_err`, `edge_rem_zero_err` (`errors/`): both engines
   fail (messages differ; error parity only requires failure).
-- `edge_int_overflow_add`, `edge_int_overflow_mul`, `edge_int_neg_min`,
-  `edge_int_min_div_neg1`, `edge_int_pow_neg` (`errors/` +
-  known-failure): VM traps (debug) / native wraps or miscomputes.
+- `edge_int_overflow_add`, `edge_int_overflow_mul`, `edge_int_neg_min`:
+  wrap probes, strict on all legs (the debug-VM trap is retired).
 - `edge_index_oob` (`errors/` + known-failure): VM errors exit 1,
   native prints empty and exits 0.
 - `edge_float_nan_display` (`regression/` + known-failure): both exit 0
