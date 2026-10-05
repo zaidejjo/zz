@@ -895,17 +895,12 @@ impl Vm {
                             return Err(EvalError::new("division by zero", *span));
                         }
                         (Value::Int(a), Value::Int(b)) => {
-                            #[cfg(not(debug_assertions))]
-                            {
-                                self.stack.push(Value::Int(a.wrapping_div(*b)));
+                            // MIN/-1 traps in every profile (IR spec);
+                            // zero is rejected above.
+                            if *a == i64::MIN && *b == -1 {
+                                return Err(EvalError::new("integer overflow in division", *span));
                             }
-                            #[cfg(debug_assertions)]
-                            {
-                                let v = a.checked_div(*b).ok_or_else(|| {
-                                    EvalError::new("integer overflow in division", *span)
-                                })?;
-                                self.stack.push(Value::Int(v));
-                            }
+                            self.stack.push(Value::Int(a.wrapping_div(*b)));
                         }
                         _ => {
                             let v = eval_binary(zz_frontend::ast::BinOp::Div, l, r, *span)?;
@@ -921,17 +916,12 @@ impl Vm {
                             return Err(EvalError::new("modulo by zero", *span));
                         }
                         (Value::Int(a), Value::Int(b)) => {
-                            #[cfg(not(debug_assertions))]
-                            {
-                                self.stack.push(Value::Int(a.wrapping_rem(*b)));
+                            // MIN%-1 traps in every profile (IR spec);
+                            // zero is rejected above.
+                            if *a == i64::MIN && *b == -1 {
+                                return Err(EvalError::new("integer overflow in modulo", *span));
                             }
-                            #[cfg(debug_assertions)]
-                            {
-                                let v = a.checked_rem(*b).ok_or_else(|| {
-                                    EvalError::new("integer overflow in modulo", *span)
-                                })?;
-                                self.stack.push(Value::Int(v));
-                            }
+                            self.stack.push(Value::Int(a.wrapping_rem(*b)));
                         }
                         _ => {
                             let v = eval_binary(zz_frontend::ast::BinOp::Rem, l, r, *span)?;

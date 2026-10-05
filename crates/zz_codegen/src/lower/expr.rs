@@ -689,15 +689,23 @@ impl Lowerer {
                                     zz_frontend::ast::BinOp::BitXor => "^",
                                     _ => "+",
                                 };
-                                // Literal-zero divisor guard: a `*int` local
-                                // can't be statically proven nonzero, but a
-                                // literal zero would divide-by-zero at -O3.
+                                // Div/Rem always route through zz_binop: they can
+                                // trap (zero divisor, MIN/-1), and raw C
+                                // `/`/`%` would be UB/SIGFPE (-fwrapv does
+                                // not save division). Operands are boxed
+                                // first: scalar locals/arith emit raw C,
+                                // which zz_binop cannot take directly.
                                 if matches!(
                                     op,
                                     zz_frontend::ast::BinOp::Div | zz_frontend::ast::BinOp::Rem
-                                ) && matches!(right.as_ref(), Expr::Int { value: 0, .. })
-                                {
-                                    format!("zz_binop({cop}, {l}, {r})")
+                                ) {
+                                    let boxed_l = box_scalar_operand(left, names, &l);
+                                    let boxed_l =
+                                        self.box_struct_operand(left, boxed_l, &l, names, out);
+                                    let boxed_r = box_scalar_operand(right, names, &r);
+                                    let boxed_r =
+                                        self.box_struct_operand(right, boxed_r, &r, names, out);
+                                    format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                                 } else {
                                     format!("(int64_t)({lc} {c_op} {rc})")
                                 }

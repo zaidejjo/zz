@@ -792,6 +792,7 @@ e2e_error_test!(e2e_err_edge_neg_shift, "edge_neg_shift_err.zz");
 e2e_error_test!(e2e_err_edge_rem_zero, "edge_rem_zero_err.zz");
 // Edge error probes whose fixes land in later PRs (still VM-fail).
 e2e_error_test!(e2e_err_edge_min_div_neg1, "edge_int_min_div_neg1.zz");
+e2e_error_test!(e2e_err_edge_min_rem_neg1, "edge_int_min_rem_neg1.zz");
 e2e_error_test!(e2e_err_edge_pow_neg, "edge_int_pow_neg.zz");
 e2e_error_test!(e2e_err_edge_index_oob, "edge_index_oob.zz");
 

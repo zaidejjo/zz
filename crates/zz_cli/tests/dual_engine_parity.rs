@@ -322,9 +322,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
 
         // --- Error fixtures where native leniency exits 0 ---
         "main_result_err" => Some("native: main returning .err exits 0 (no propagation)"),
-        "edge_int_min_div_neg1" => Some(
-            "M0: i64::MIN / -1 — VM traps (debug) / native miscomputes 0 (C signed-overflow UB)",
-        ),
         "edge_int_pow_neg" => Some(
             "M0: negative int exponent — VM errors / native prints 0 (C dpow loop)",
         ),
@@ -881,7 +878,8 @@ parity_strict!(
     "regression",
     "edge_slice_clamp.zz"
 );
-parity_known_error_failure!(parity_err_edge_min_div_neg1, "edge_int_min_div_neg1.zz");
+parity_strict_error!(parity_err_edge_min_div_neg1, "edge_int_min_div_neg1.zz");
+parity_strict_error!(parity_err_edge_min_rem_neg1, "edge_int_min_rem_neg1.zz");
 parity_known_error_failure!(parity_err_edge_pow_neg, "edge_int_pow_neg.zz");
 parity_known_error_failure!(parity_err_edge_index_oob, "edge_index_oob.zz");
 // Modules fixtures: standalone-runnable files must match on both engines
@@ -1226,12 +1224,59 @@ parity_strict_error!(parity_err_missing_field, "missing_field.zz");
 // folding) are pinned before the M1 spec decides them.
 // ===========================================================================
 
+/// Source stamp for the release-VM driver: current HEAD plus the dirty
+/// state of `crates/`. The quad compares it against a stamp file next
+/// to the binary and rebuilds on mismatch — otherwise a stale release
+/// driver silently tests old code (e.g. a spec fix verified only on the
+/// debug legs while `vm_rel` still runs yesterday's binary).
+fn release_src_stamp(workspace: &Path) -> Option<String> {
+    let head = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
+    let dirty = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .arg("status")
+        .arg("--porcelain")
+        .arg("--")
+        .arg("crates/zz_runtime/src")
+        .arg("crates/zz_checker/src")
+        .arg("crates/zz_frontend/src")
+        .arg("crates/zz_hir/src")
+        .arg("crates/zz_stdlib/src")
+        .arg("crates/zz_codegen/src")
+        .arg("crates/zz_cli/src")
+        .arg("crates/zz_native_rt/src")
+        .arg("Cargo.toml")
+        .arg("Cargo.lock")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            o.stdout.hash(&mut h);
+            format!("{:x}", h.finish())
+        })
+        .unwrap_or_default();
+    Some(format!("{head}:{dirty}"))
+}
+
 /// Resolve the release-VM `zz` driver, building it once when missing.
 ///
 /// `ZZ_VM_RELEASE_BIN` overrides; otherwise
-/// `<workspace>/target/release/zz[.exe]`. Parallel tests serialize on a
-/// lock dir; a failed build panics loudly (never a silent skip — the
-/// release-VM leg is a required part of the matrix).
+/// `<workspace>/target/release/zz[.exe]`. A stamp file next to the
+/// binary records the source revision it was built from; a mismatch
+/// triggers a rebuild (a stale release driver silently testing old code
+/// is a false-signal machine). Parallel tests serialize on a lock dir;
+/// a failed build panics loudly (never a silent skip — the release-VM
+/// leg is a required part of the matrix).
 fn release_vm_bin() -> PathBuf {
     static ONCE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     ONCE.get_or_init(|| {
@@ -1241,10 +1286,20 @@ fn release_vm_bin() -> PathBuf {
             return p;
         }
         let exe = format!("zz{}", std::env::consts::EXE_SUFFIX);
-        let p = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/release")
-            .join(&exe);
-        if p.is_file() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let p = workspace.join("target/release").join(&exe);
+        let stamp_file = workspace.join("target/release/.zz-quad-src-stamp");
+        let fresh = p.is_file()
+            && match (
+                release_src_stamp(&workspace),
+                std::fs::read_to_string(&stamp_file),
+            ) {
+                (Some(cur), Ok(saved)) => cur == saved.trim(),
+                // No git info (e.g. tarball builds): trust the binary.
+                (None, _) => true,
+                _ => false,
+            };
+        if fresh {
             return p;
         }
         // Serialized one-time build: the lock dir makes concurrent test
@@ -1273,7 +1328,18 @@ fn release_vm_bin() -> PathBuf {
         }
         let built = (|| {
             if p.is_file() {
-                return true; // another waiter built it
+                // Re-check under the lock: another waiter may have built
+                // (and stamped) while we queued.
+                if let (Some(cur), Ok(saved)) = (
+                    release_src_stamp(&workspace),
+                    std::fs::read_to_string(&stamp_file),
+                ) {
+                    if cur == saved.trim() {
+                        return true;
+                    }
+                } else if release_src_stamp(&workspace).is_none() && p.is_file() {
+                    return true;
+                }
             }
             eprintln!("[quad] building release zz driver (one-time cost)...");
             let out = std::process::Command::new("cargo")
@@ -1281,10 +1347,15 @@ fn release_vm_bin() -> PathBuf {
                 .arg("--release")
                 .arg("-p")
                 .arg("zz_cli")
-                .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+                .current_dir(&workspace)
                 .output();
             match out {
-                Ok(o) if o.status.success() && p.is_file() => true,
+                Ok(o) if o.status.success() && p.is_file() => {
+                    if let Some(cur) = release_src_stamp(&workspace) {
+                        let _ = std::fs::write(&stamp_file, &cur);
+                    }
+                    true
+                }
                 Ok(o) => {
                     eprintln!(
                         "[quad] release build failed:\n{}",
@@ -1506,31 +1577,6 @@ fn assert_quad_all_fail(file: &Path, q: &QuadLegs) {
 fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
     let natives = q.nat_dev.is_some() && q.nat_rel.is_some();
     match stem {
-        // MIN/-1: debug VM traps; release VM wraps to MIN (Rust
-        // `wrapping_div`); natives print 0 (C signed-overflow UB).
-        // M1 decision: trap (spec change; fixtures become strict errors).
-        "edge_int_min_div_neg1" => {
-            assert_ne!(q.vm_dbg.0, 0, "vm_dbg should trap:\n{}", fmt_quad(file, q));
-            assert_eq!(q.vm_rel.0, 0, "vm_rel should wrap:\n{}", fmt_quad(file, q));
-            assert!(
-                q.vm_rel.1.trim() == "-9223372036854775808",
-                "vm_rel should print MIN, got:\n{}",
-                fmt_quad(file, q)
-            );
-            if natives {
-                for (name, leg) in [
-                    ("nat_dev", q.nat_dev.as_ref().unwrap()),
-                    ("nat_rel", q.nat_rel.as_ref().unwrap()),
-                ] {
-                    assert_eq!(leg.0, 0, "{name} should exit 0:\n{}", fmt_quad(file, q));
-                    assert!(
-                        leg.1.trim() == "0",
-                        "{name} should print UB 0, got:\n{}",
-                        fmt_quad(file, q)
-                    );
-                }
-            }
-        }
         // Negative int exponent: both VM legs error unconditionally
         // (explicit check, not profile-gated); natives print 0.
         // M1 decision: trap (spec change; fixture becomes strict error).
@@ -1634,8 +1680,7 @@ fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
 fn quad_split_stem(stem: &str) -> bool {
     matches!(
         stem,
-        "edge_int_min_div_neg1"
-            | "edge_int_pow_neg"
+        "edge_int_pow_neg"
             | "edge_index_oob"
             | "edge_float_nan_display"
             | "scalar_global_copy"

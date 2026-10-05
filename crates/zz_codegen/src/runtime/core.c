@@ -197,10 +197,18 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
                 fprintf(stderr, "zz error: integer division by zero\n");
                 exit(1);
             }
+            if (a.i == INT64_MIN && b.i == -1) {
+                fprintf(stderr, "zz error: integer overflow in division\n");
+                exit(1);
+            }
             return zz_int(a.i / b.i);
         case ZZOP_REM:
             if (b.i == 0) {
                 fprintf(stderr, "zz error: integer modulo by zero\n");
+                exit(1);
+            }
+            if (a.i == INT64_MIN && b.i == -1) {
+                fprintf(stderr, "zz error: integer overflow in modulo\n");
                 exit(1);
             }
             return zz_int(a.i % b.i);
