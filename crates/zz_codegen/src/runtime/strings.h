@@ -95,7 +95,46 @@ static inline size_t zz_utf8_seq_len(const unsigned char *p, size_t remain) {
 static inline size_t zz_str_char_len(const zz_str *s) {
     if (!s) return 0;
     const unsigned char *p = (const unsigned char *)zz_str_cptr(s);
-    size_t n = s->len, i = 0, count = 0;
+    size_t n = s->len;
+    // ASCII fast path: bytes without the high bit are single-byte
+    // chars, so a pure-ASCII string's char count is its byte length.
+    // Word-at-a-time high-bit test (~n/8 steps); only strings with
+    // actual multibyte sequences pay for the precise UTF-8 walk.
+    size_t i = 0;
+    const size_t WS = sizeof(size_t);
+    const size_t LO = ((size_t)-1) / (size_t)0xFF;
+    const size_t HI = LO * (size_t)0x80;
+    int ascii = 1;
+    while (i < n && (((uintptr_t)(p + i)) & (WS - 1)) != 0) {
+        if (p[i] >= 0x80) {
+            ascii = 0;
+            break;
+        }
+        i++;
+    }
+    if (ascii) {
+        for (; i + WS <= n; i += WS) {
+            size_t w;
+            memcpy(&w, p + i, WS);
+            if ((w & HI) != 0) {
+                ascii = 0;
+                break;
+            }
+        }
+    }
+    if (ascii) {
+        for (; i < n; i++) {
+            if (p[i] >= 0x80) {
+                ascii = 0;
+                break;
+            }
+        }
+    }
+    if (ascii) {
+        return n;
+    }
+    size_t count = 0;
+    i = 0;
     while (i < n) {
         i += zz_utf8_seq_len(p + i, n - i);
         count++;

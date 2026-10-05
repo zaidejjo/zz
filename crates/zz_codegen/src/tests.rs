@@ -1854,3 +1854,13 @@ fn array_alias_kill_keeps_push_correct() {
     let (_, out) = native_run(src);
     assert_eq!(out, "10 2 3\n");
 }
+
+#[test]
+fn str_char_len_ascii_fast_path_matches_unicode_walk() {
+    // The ASCII fast path in zz_str_char_len must agree with the
+    // precise UTF-8 walk on pure-ASCII, multibyte, empty, and
+    // boundary-length strings (exercises word-align prologue/epilogue).
+    let src = "func main() {\n    println(len(\"hello\"))\n    println(len(\"héllo→世界\"))\n    println(len(\"\"))\n    println(len(\"abcdefg\"))\n    println(len(\"abcdefgh\"))\n    s := \"\"\n    for i in 0..100 {\n        s = s + \"x\"\n    }\n    println(len(s))\n}";
+    let (_, out) = native_run(src);
+    assert_eq!(out, "5\n8\n0\n7\n8\n100\n");
+}
