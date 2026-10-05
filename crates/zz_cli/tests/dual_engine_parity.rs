@@ -305,9 +305,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "scalar_global_copy" => {
             Some("C codegen: top-level int global copied into another global unboxed twice (`(zz_global_v1).i` on int64_t)")
         }
-        "move_append_struct_copy" => {
-            Some("native: struct clone shares identity (`zz_clone` bumps only the object header, never field buffers), so mutating the copy's array field is visible through the source (VM prints 1/2, native 2/2)")
-        }
 
         // --- Output differences (native runs but output differs) ---
         "edge_float_nan_display" => Some(
@@ -809,7 +806,7 @@ parity_strict!(
     "regression",
     "move_append_append.zz"
 );
-parity_known_failure!(
+parity_strict!(
     parity_regression_move_append_struct_copy,
     "regression",
     "move_append_struct_copy.zz"
@@ -1642,7 +1639,7 @@ fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
         // semantics); each native leg stays diverged — either by failing
         // (scalar_global_copy does not even compile) or by printing
         // different output. M1 value model must decide (copy vs reference).
-        "scalar_global_copy" | "move_append_struct_copy" => {
+        "scalar_global_copy" => {
             assert!(
                 parity_match(&q.vm_dbg, &q.vm_rel),
                 "VM legs differ (profile-dependent copy?):\n{}",
