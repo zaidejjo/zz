@@ -17,4 +17,5 @@ struct Box {val: int}
 func main() {
     p := Point{x: 1, y: 2}
     println(PI + add(p.x, p.y))
+    println("pub_access_ok")
 }

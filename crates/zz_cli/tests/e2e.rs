@@ -416,6 +416,16 @@ e2e_success_test!(
     "regression",
     "edge_float_nan_display.zz"
 );
+e2e_success_test!(
+    e2e_regression_edge_slice_clamp,
+    "regression",
+    "edge_slice_clamp.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_cast_float_nan,
+    "regression",
+    "edge_cast_float_nan.zz"
+);
 e2e_success_test!(e2e_syntax_main_entrypoint, "syntax", "main_entrypoint.zz");
 e2e_success_test!(e2e_syntax_match_guards, "syntax", "match_guards.zz");
 e2e_success_test!(

@@ -100,6 +100,11 @@ a divergence carry `known-divergence` (or land in `errors/` with a
 `known_native_failure` entry when the VM fails and native exits 0):
 
 - `edge_shift_mask`: `<<` / `>>` with counts >= width (both mask `& 63`).
+- `edge_chained_store`: chained index stores write through (fixed VM bug).
+- `edge_cast_float_nan`: int(NaN) — VM and -O0 print 0; -O3 output is
+  clang-UB (0 or MIN by TU shape). Skipped in dual scope as
+  nondeterministic; the quad matrix pins exits.
+- `edge_slice_clamp`: out-of-range slice ends clamp (strict everywhere).
 - `edge_cast_float_int`: float->int truncation and INF saturation.
 - `edge_cast_str_int`: str->int overflow/invalid/whitespace (`none`).
 - `edge_neg_shift_err`, `edge_rem_zero_err` (`errors/`): both engines
@@ -109,5 +114,5 @@ a divergence carry `known-divergence` (or land in `errors/` with a
   known-failure): VM traps (debug) / native wraps or miscomputes.
 - `edge_index_oob` (`errors/` + known-failure): VM errors exit 1,
   native prints empty and exits 0.
-- `edge_chained_store`, `edge_float_nan_display` (`regression/` +
-  known-failure): both exit 0 with different stdout.
+- `edge_float_nan_display` (`regression/` + known-failure): both exit 0
+  with different stdout (`NaN` vs `nan`).

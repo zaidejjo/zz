@@ -9,4 +9,5 @@ func main() {
     PI := 99
     val := double(PI)
     println(val)
+    println("shadow_pub_var_ok")
 }

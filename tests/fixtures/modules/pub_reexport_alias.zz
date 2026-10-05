@@ -8,4 +8,5 @@ pub func add(a: int, b: int) -> int {
 
 func main() {
     println(add(3, 4))
+    println("pub_reexport_alias_ok")
 }

@@ -8,4 +8,5 @@ pub val := 10
 
 func main() {
     println(val)
+    println("diamond_import_ok")
 }

@@ -13,6 +13,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use zz_cli::fixture_meta;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -252,6 +254,22 @@ fn native_skip_reason(file: &Path) -> Option<&'static str> {
         "log_test" => {
             Some("log output embeds unix timestamps and span durations — non-deterministic")
         }
+        // int(NaN) under -O3 is clang-UB: the `f != f` guard folds under
+        // -ffast-math and the TU shape decides between 0 and MIN. The quad
+        // matrix pins the (exit-only) contract instead.
+        "edge_cast_float_nan" => Some("int(NaN) under -O3 varies by TU shape (clang UB)"),
+        _ => None,
+    }
+}
+
+/// Returns `Some(reason)` when a `modules/` fixture cannot run standalone.
+/// `import_alias.zz` references a missing `math/utils.zz` sibling — it
+/// fails on the VM itself. Broken-fixture triage belongs to the M6
+/// modules milestone, not to parity.
+fn module_skip_reason(file: &Path) -> Option<&'static str> {
+    let stem = file.file_stem()?.to_str()?;
+    match stem {
+        "import_alias" => Some("broken fixture: missing math/utils.zz sibling (fails on VM too)"),
         _ => None,
     }
 }
@@ -292,9 +310,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         }
 
         // --- Output differences (native runs but output differs) ---
-        "edge_chained_store" => Some(
-            "M0: chained index store — VM drops the write (temp clone), native writes through",
-        ),
         "edge_float_nan_display" => Some(
             "M0: NaN display — VM prints `NaN`, native `nan` (C printf)",
         ),
@@ -433,6 +448,27 @@ fn parity_match(vm: &(i32, String, String), native: &(i32, String, String)) -> b
         && norm_stream(&vm.2) == norm_stream(&native.2)
 }
 
+/// True when `stdout` carries comparable signal after normalization.
+/// Purely-numeric output is invisible to `norm_stream` (every line is
+/// stripped as a potential timestamp), so a fixture whose stdout is only
+/// numbers passes parity vacuously — `m00=1` vs `m00=99` must differ,
+/// but `1` vs `99` cannot. Fixtures must label numeric outputs.
+fn has_parity_signal(stdout: &str) -> bool {
+    stdout.trim().is_empty() || !norm_stream(stdout).trim().is_empty()
+}
+
+/// Assert `stdout` carries signal (see `has_parity_signal`); panics with
+/// a fix directive otherwise. Applied to every strict comparison so a
+/// blind fixture fails loudly instead of passing vacuously.
+fn assert_parity_signal(file: &Path, who: &str, stdout: &str) {
+    assert!(
+        has_parity_signal(stdout),
+        "PARITY BLIND [{0}]: {who} stdout has no signal after normalization.\n\
+         Label numeric outputs (e.g. `m00={{x}}`) so diffs stay visible.\nstdout:\n{stdout}",
+        file.display(),
+    );
+}
+
 /// Assert strict parity between VM and native output.
 fn assert_parity_strict(
     file: &Path,
@@ -472,6 +508,8 @@ fn assert_parity_strict(
         native_exit, 0,
         "[{display}]: native should exit 0 but got {native_exit}.\nnative stderr: {native_stderr}"
     );
+    assert_parity_signal(file, "VM", &vm_stdout);
+    assert_parity_signal(file, "native", &native_stdout);
 
     let vm_norm = norm_stream(&vm_stdout);
     let native_norm = norm_stream(&native_stdout);
@@ -801,7 +839,7 @@ parity_strict!(
     "regression",
     "neg_after_loop.zz"
 );
-// M0 edge corpus: strict-parity probes (both engines agree today).
+// M0 edge corpus: strict-parity probes (both engines agree).
 parity_strict!(
     parity_regression_edge_shift_mask,
     "regression",
@@ -817,17 +855,25 @@ parity_strict!(
     "regression",
     "edge_cast_str_int.zz"
 );
-// M0 edge corpus: known divergences (VM vs native differ; tracked in
-// `known_native_failure` above — these fail if native ever matches).
-parity_known_failure!(
+// Fixed VM bug (write-through chained index stores): strict since the fix.
+parity_strict!(
     parity_regression_edge_chained_store,
     "regression",
     "edge_chained_store.zz"
 );
+// M0 edge corpus: known divergences (VM vs native differ; tracked in
+// `known_native_failure` above — these fail if native ever matches).
 parity_known_failure!(
     parity_regression_edge_float_nan_display,
     "regression",
     "edge_float_nan_display.zz"
+);
+// edge_cast_float_nan is skipped in dual scope (nondeterministic under
+// -O3, see native_skip_reason); the quad matrix asserts its contract.
+parity_strict!(
+    parity_regression_edge_slice_clamp,
+    "regression",
+    "edge_slice_clamp.zz"
 );
 parity_known_error_failure!(parity_err_edge_overflow_add, "edge_int_overflow_add.zz");
 parity_known_error_failure!(parity_err_edge_overflow_mul, "edge_int_overflow_mul.zz");
@@ -835,6 +881,51 @@ parity_known_error_failure!(parity_err_edge_neg_min, "edge_int_neg_min.zz");
 parity_known_error_failure!(parity_err_edge_min_div_neg1, "edge_int_min_div_neg1.zz");
 parity_known_error_failure!(parity_err_edge_pow_neg, "edge_int_pow_neg.zz");
 parity_known_error_failure!(parity_err_edge_index_oob, "edge_index_oob.zz");
+// Modules fixtures: standalone-runnable files must match on both engines
+// (`import_alias.zz` excluded — broken on the VM itself, see
+// `module_skip_reason`).
+parity_strict!(
+    parity_modules_diamond_import,
+    "modules",
+    "diamond_import.zz"
+);
+parity_strict!(
+    parity_modules_multi_level_pub,
+    "modules",
+    "multi_level_pub.zz"
+);
+parity_strict!(
+    parity_modules_private_struct_field_access,
+    "modules",
+    "private_struct_field_access.zz"
+);
+parity_strict!(parity_modules_pub_access, "modules", "pub_access.zz");
+parity_strict!(
+    parity_modules_pub_no_unused_warning,
+    "modules",
+    "pub_no_unused_warning.zz"
+);
+parity_strict!(
+    parity_modules_pub_reexport_alias,
+    "modules",
+    "pub_reexport_alias.zz"
+);
+parity_strict!(
+    parity_modules_pub_struct_fields,
+    "modules",
+    "pub_struct_fields.zz"
+);
+parity_strict!(
+    parity_modules_pub_struct_method,
+    "modules",
+    "pub_struct_method.zz"
+);
+parity_strict!(parity_modules_reexports, "modules", "reexports.zz");
+parity_strict!(
+    parity_modules_shadow_pub_var,
+    "modules",
+    "shadow_pub_var.zz"
+);
 parity_strict!(
     parity_regression_branch_call_returns,
     "regression",
@@ -1123,12 +1214,569 @@ parity_strict_error!(parity_err_missing_field, "missing_field.zz");
 // - Str stdlib: str_extended_test (already strict — passes)
 
 // ===========================================================================
+// Quad matrix (pre-M1): VM-debug x VM-release x native-O0 x native-O3.
+//
+// The dual-engine macros above compare one VM (test-profile) against one
+// native (release flags). The quad runs every `regression/` fixture plus
+// every `errors/edge_*` probe through all four legs so profile- and
+// opt-level-only divergences (overflow wrap-vs-trap, -ffast-math NaN
+// folding) are pinned before the M1 spec decides them.
+// ===========================================================================
+
+/// Resolve the release-VM `zz` driver, building it once when missing.
+///
+/// `ZZ_VM_RELEASE_BIN` overrides; otherwise
+/// `<workspace>/target/release/zz[.exe]`. Parallel tests serialize on a
+/// lock dir; a failed build panics loudly (never a silent skip — the
+/// release-VM leg is a required part of the matrix).
+fn release_vm_bin() -> PathBuf {
+    static ONCE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        if let Some(p) = std::env::var_os("ZZ_VM_RELEASE_BIN") {
+            let p = PathBuf::from(p);
+            assert!(p.is_file(), "ZZ_VM_RELEASE_BIN missing: {}", p.display());
+            return p;
+        }
+        let exe = format!("zz{}", std::env::consts::EXE_SUFFIX);
+        let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/release")
+            .join(&exe);
+        if p.is_file() {
+            return p;
+        }
+        // Serialized one-time build: the lock dir makes concurrent test
+        // threads (and a concurrent `cargo build --release`) take turns.
+        // Stale locks (crashed builder) older than 30 minutes are reaped
+        // — otherwise one crash wedges every later run forever.
+        let lock =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/.zz-quad-release-build.lock");
+        loop {
+            match std::fs::create_dir(&lock) {
+                Ok(()) => break,
+                Err(_) => {
+                    let stale = std::fs::metadata(&lock)
+                        .and_then(|m| m.modified())
+                        .map(|t| {
+                            t.elapsed().unwrap_or_default() > std::time::Duration::from_secs(1800)
+                        })
+                        .unwrap_or(true);
+                    if stale {
+                        let _ = std::fs::remove_dir_all(&lock);
+                        continue;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+        }
+        let built = (|| {
+            if p.is_file() {
+                return true; // another waiter built it
+            }
+            eprintln!("[quad] building release zz driver (one-time cost)...");
+            let out = std::process::Command::new("cargo")
+                .arg("build")
+                .arg("--release")
+                .arg("-p")
+                .arg("zz_cli")
+                .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+                .output();
+            match out {
+                Ok(o) if o.status.success() && p.is_file() => true,
+                Ok(o) => {
+                    eprintln!(
+                        "[quad] release build failed:\n{}",
+                        String::from_utf8_lossy(&o.stderr)
+                    );
+                    false
+                }
+                Err(e) => {
+                    eprintln!("[quad] cannot run cargo: {e}");
+                    false
+                }
+            }
+        })();
+        let _ = std::fs::remove_dir(&lock);
+        assert!(
+            built,
+            "quad needs target/release/zz: run `cargo build --release -p zz_cli`"
+        );
+        p
+    })
+    .clone()
+}
+
+/// True when native legs must be skipped (Windows CI: no AOT backend).
+fn quad_skip_native() -> bool {
+    std::env::var("ZZ_SKIP_NATIVE").is_ok()
+}
+
+/// One matrix leg outcome: (exit, stdout, stderr).
+type LegOut = (i32, String, String);
+
+/// Run a fixture through one matrix leg. `driver` is the `zz` binary,
+/// `native` selects `run --native`, `dev` selects `-O0 -g` clang output
+/// (`ZZ_NATIVE_DEV=1`) instead of the default release flags.
+fn run_quad_leg(
+    driver: &Path,
+    native: bool,
+    dev: bool,
+    file: &Path,
+    input: &[u8],
+    token: &str,
+) -> LegOut {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let mut cmd = std::process::Command::new(driver);
+    cmd.arg("run");
+    if native {
+        cmd.arg("--native");
+    }
+    cmd.arg(file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    cmd.env("ZZ_SWEEP_TOKEN", token);
+    cmd.env("ZZ_CRYPTO_FAST", "1");
+    if dev {
+        cmd.env("ZZ_NATIVE_DEV", "1");
+    }
+    let mut child = cmd
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to exec quad leg {file:?}: {e}"));
+    if !input.is_empty() {
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(input);
+        }
+    }
+    drop(child.stdin.take());
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(ZZ_CHILD_TIMEOUT_SECS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let output = child.wait_with_output().expect("reap quad leg");
+                    return (
+                        ZZ_CHILD_TIMEOUT_EXIT,
+                        String::from_utf8_lossy(&output.stdout).to_string(),
+                        format!(
+                            "{}\nQUAD TIMEOUT: {} exceeded {ZZ_CHILD_TIMEOUT_SECS}s",
+                            String::from_utf8_lossy(&output.stderr),
+                            file.display()
+                        ),
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => panic!("failed to wait quad leg {file:?}: {e}"),
+        }
+    }
+    let output = child.wait_with_output().expect("wait quad leg");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+/// All four legs for one fixture: (vm_debug, vm_release, native_dev, native_release).
+struct QuadLegs {
+    vm_dbg: LegOut,
+    vm_rel: LegOut,
+    nat_dev: Option<LegOut>,
+    nat_rel: Option<LegOut>,
+}
+
+fn run_quad(file: &Path, token: &str) -> QuadLegs {
+    let debug_bin = PathBuf::from(env!("CARGO_BIN_EXE_zz"));
+    let input = stdin_for(file);
+    let vm_dbg = run_quad_leg(&debug_bin, false, false, file, &input, token);
+    let vm_rel = run_quad_leg(&release_vm_bin(), false, false, file, &input, token);
+    let (nat_dev, nat_rel) = if quad_skip_native() || vm_only() {
+        eprintln!(
+            "SKIP native legs for {} (fast/Windows mode)",
+            file.display()
+        );
+        (None, None)
+    } else {
+        (
+            Some(run_quad_leg(&debug_bin, true, true, file, &input, token)),
+            Some(run_quad_leg(&debug_bin, true, false, file, &input, token)),
+        )
+    };
+    QuadLegs {
+        vm_dbg,
+        vm_rel,
+        nat_dev,
+        nat_rel,
+    }
+}
+
+fn fmt_leg(name: &str, leg: &LegOut) -> String {
+    format!(
+        "--- {name} (exit {}) ---\nstdout:\n{}\nstderr:\n{}",
+        leg.0, leg.1, leg.2
+    )
+}
+
+fn fmt_quad(file: &Path, q: &QuadLegs) -> String {
+    let mut s = format!("QUAD DUMP [{}]:\n", file.display());
+    s.push_str(&fmt_leg("vm_dbg", &q.vm_dbg));
+    s.push('\n');
+    s.push_str(&fmt_leg("vm_rel", &q.vm_rel));
+    if let Some(l) = &q.nat_dev {
+        s.push('\n');
+        s.push_str(&fmt_leg("nat_dev", l));
+    }
+    if let Some(l) = &q.nat_rel {
+        s.push('\n');
+        s.push_str(&fmt_leg("nat_rel", l));
+    }
+    s
+}
+
+/// Assert all available legs pairwise-match (exit + normalized streams).
+fn assert_quad_agree(file: &Path, q: &QuadLegs) {
+    let mut legs: Vec<(&str, &LegOut)> = vec![("vm_dbg", &q.vm_dbg), ("vm_rel", &q.vm_rel)];
+    if let Some(l) = &q.nat_dev {
+        legs.push(("nat_dev", l));
+    }
+    if let Some(l) = &q.nat_rel {
+        legs.push(("nat_rel", l));
+    }
+    // Every leg must carry a parity signal: purely-numeric stdout is
+    // invisible to normalization (see `strip_numeric_lines`), so a
+    // fixture with no surviving signal passes vacuously. Force labeled
+    // output instead.
+    for (name, leg) in &legs {
+        if !leg.1.trim().is_empty() && norm_stream(&leg.1).trim().is_empty() {
+            panic!(
+                "QUAD BLIND [{0}]: leg {name} stdout has no parity signal after normalization.\n\
+                 Label numeric outputs (e.g. `m00={{x}}`) so diffs stay visible.\n{1}",
+                file.display(),
+                fmt_quad(file, q)
+            );
+        }
+    }
+    for (i, (an, a)) in legs.iter().enumerate() {
+        for (bn, b) in &legs[i + 1..] {
+            assert!(
+                parity_match(a, b),
+                "QUAD BUG [{0}]: legs {an} and {bn} differ.\n{1}",
+                file.display(),
+                fmt_quad(file, q)
+            );
+        }
+    }
+}
+
+/// Assert every available leg failed.
+fn assert_quad_all_fail(file: &Path, q: &QuadLegs) {
+    let legs: Vec<(&str, &LegOut)> = {
+        let mut v = vec![("vm_dbg", &q.vm_dbg), ("vm_rel", &q.vm_rel)];
+        if let Some(l) = &q.nat_dev {
+            v.push(("nat_dev", l));
+        }
+        if let Some(l) = &q.nat_rel {
+            v.push(("nat_rel", l));
+        }
+        v
+    };
+    for (name, leg) in &legs {
+        assert_ne!(
+            leg.0,
+            0,
+            "QUAD BUG [{0}]: leg {name} should fail but exited 0.\n{1}",
+            file.display(),
+            fmt_quad(file, q)
+        );
+    }
+}
+
+/// Documented per-fixture splits: the M1 decision list in executable form.
+/// Each arm asserts the exact leg behavior observed and decided; any leg
+/// that unexpectedly agrees (a fix!) panics with FIXED so the entry is
+/// promoted to `assert_quad_agree`.
+fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
+    let natives = q.nat_dev.is_some() && q.nat_rel.is_some();
+    match stem {
+        // Overflow: debug VM traps; every other leg wraps and exits 0.
+        // M1 decision: wrap for + - * (spec change; fixtures become strict).
+        "edge_int_overflow_add" | "edge_int_overflow_mul" | "edge_int_neg_min" => {
+            assert_ne!(q.vm_dbg.0, 0, "vm_dbg should trap:\n{}", fmt_quad(file, q));
+            assert_eq!(q.vm_rel.0, 0, "vm_rel should wrap:\n{}", fmt_quad(file, q));
+            if natives {
+                let (nd, nr) = (q.nat_dev.as_ref().unwrap(), q.nat_rel.as_ref().unwrap());
+                assert_eq!(nd.0, 0, "nat_dev should wrap:\n{}", fmt_quad(file, q));
+                assert_eq!(nr.0, 0, "nat_rel should wrap:\n{}", fmt_quad(file, q));
+            }
+        }
+        // MIN/-1: debug VM traps; release VM wraps to MIN (Rust
+        // `wrapping_div`); natives print 0 (C signed-overflow UB).
+        // M1 decision: trap (spec change; fixtures become strict errors).
+        "edge_int_min_div_neg1" => {
+            assert_ne!(q.vm_dbg.0, 0, "vm_dbg should trap:\n{}", fmt_quad(file, q));
+            assert_eq!(q.vm_rel.0, 0, "vm_rel should wrap:\n{}", fmt_quad(file, q));
+            assert!(
+                q.vm_rel.1.trim() == "-9223372036854775808",
+                "vm_rel should print MIN, got:\n{}",
+                fmt_quad(file, q)
+            );
+            if natives {
+                for (name, leg) in [
+                    ("nat_dev", q.nat_dev.as_ref().unwrap()),
+                    ("nat_rel", q.nat_rel.as_ref().unwrap()),
+                ] {
+                    assert_eq!(leg.0, 0, "{name} should exit 0:\n{}", fmt_quad(file, q));
+                    assert!(
+                        leg.1.trim() == "0",
+                        "{name} should print UB 0, got:\n{}",
+                        fmt_quad(file, q)
+                    );
+                }
+            }
+        }
+        // Negative int exponent: both VM legs error unconditionally
+        // (explicit check, not profile-gated); natives print 0.
+        // M1 decision: trap (spec change; fixture becomes strict error).
+        "edge_int_pow_neg" => {
+            assert_ne!(q.vm_dbg.0, 0, "vm_dbg should error:\n{}", fmt_quad(file, q));
+            assert_ne!(q.vm_rel.0, 0, "vm_rel should error:\n{}", fmt_quad(file, q));
+            if natives {
+                for (name, leg) in [
+                    ("nat_dev", q.nat_dev.as_ref().unwrap()),
+                    ("nat_rel", q.nat_rel.as_ref().unwrap()),
+                ] {
+                    assert_eq!(leg.0, 0, "{name} should exit 0:\n{}", fmt_quad(file, q));
+                    assert!(
+                        leg.1.trim() == "0",
+                        "{name} should print 0, got:\n{}",
+                        fmt_quad(file, q)
+                    );
+                }
+            }
+        }
+        // OOB index: both VM legs trap; natives yield unit and exit 0.
+        // M1 decision: trap (AOT needs a bounds check).
+        "edge_index_oob" => {
+            assert_ne!(q.vm_dbg.0, 0, "vm_dbg should trap:\n{}", fmt_quad(file, q));
+            assert_ne!(q.vm_rel.0, 0, "vm_rel should trap:\n{}", fmt_quad(file, q));
+            if natives {
+                for (name, leg) in [
+                    ("nat_dev", q.nat_dev.as_ref().unwrap()),
+                    ("nat_rel", q.nat_rel.as_ref().unwrap()),
+                ] {
+                    assert_eq!(leg.0, 0, "{name} should exit 0:\n{}", fmt_quad(file, q));
+                    assert!(
+                        leg.1.trim().is_empty(),
+                        "{name} should print empty, got:\n{}",
+                        fmt_quad(file, q)
+                    );
+                }
+            }
+        }
+        // NaN display: all exit 0; Rust prints `NaN`, C prints `nan`.
+        // M1 decision: one canonical spelling (fixtures become strict).
+        "edge_float_nan_display" => {
+            assert!(
+                parity_match(&q.vm_dbg, &q.vm_rel),
+                "VM legs differ:\n{}",
+                fmt_quad(file, q)
+            );
+            assert!(
+                q.vm_dbg.1.contains("NaN"),
+                "VM should print NaN:\n{}",
+                fmt_quad(file, q)
+            );
+            if natives {
+                let (nd, nr) = (q.nat_dev.as_ref().unwrap(), q.nat_rel.as_ref().unwrap());
+                assert!(
+                    parity_match(nd, nr),
+                    "native legs differ:\n{}",
+                    fmt_quad(file, q)
+                );
+                assert!(
+                    nd.1.contains("nan"),
+                    "native should print nan:\n{}",
+                    fmt_quad(file, q)
+                );
+                assert!(
+                    !parity_match(&q.vm_dbg, nd),
+                    "FIXED? VM and native agree:\n{}",
+                    fmt_quad(file, q)
+                );
+            }
+        }
+        // int(NaN): VM legs and -O0 print 0; -O3 output is clang-UB
+        // (observed both 0 and MIN depending on TU shape — -ffast-math
+        // folds the `f != f` guard, leaving `(int64_t)f` UB). Only exits
+        // are asserted; the dual-engine harness skips this fixture as
+        // nondeterministic for the same reason.
+        // M1 decision: canonical float->int conversion.
+        "edge_cast_float_nan" => {
+            for (name, leg) in [("vm_dbg", &q.vm_dbg), ("vm_rel", &q.vm_rel)] {
+                assert_eq!(leg.0, 0, "{name} should exit 0:\n{}", fmt_quad(file, q));
+                assert!(
+                    leg.1.lines().next().is_some_and(|l| l.trim() == "0"),
+                    "{name} should print 0, got:\n{}",
+                    fmt_quad(file, q)
+                );
+            }
+            if natives {
+                let (nd, nr) = (q.nat_dev.as_ref().unwrap(), q.nat_rel.as_ref().unwrap());
+                assert_eq!(nd.0, 0, "nat_dev should exit 0:\n{}", fmt_quad(file, q));
+                assert!(
+                    nd.1.lines().next().is_some_and(|l| l.trim() == "0"),
+                    "nat_dev should print 0, got:\n{}",
+                    fmt_quad(file, q)
+                );
+                assert_eq!(nr.0, 0, "nat_rel should exit 0:\n{}", fmt_quad(file, q));
+                // No nat_rel stdout assertion: the value is clang-UB and
+                // varies by TU shape (observed 0 and MIN).
+            }
+        }
+        // Alias-model divergences: VM legs agree with each other (value
+        // semantics); each native leg stays diverged — either by failing
+        // (scalar_global_copy does not even compile) or by printing
+        // different output. M1 value model must decide (copy vs reference).
+        "scalar_global_copy" | "move_append_struct_copy" => {
+            assert!(
+                parity_match(&q.vm_dbg, &q.vm_rel),
+                "VM legs differ (profile-dependent copy?):\n{}",
+                fmt_quad(file, q)
+            );
+            if natives {
+                for (name, leg) in [
+                    ("nat_dev", q.nat_dev.as_ref().unwrap()),
+                    ("nat_rel", q.nat_rel.as_ref().unwrap()),
+                ] {
+                    assert!(
+                        leg.0 != 0 || !parity_match(&q.vm_dbg, leg),
+                        "FIXED? {name} now matches VM:\n{}",
+                        fmt_quad(file, q)
+                    );
+                }
+            }
+        }
+        other => panic!("quad has no documented split for {other} — add AllAgree or an arm"),
+    }
+}
+
+/// Stems with a documented quad split (anything else in scope must agree
+/// on all legs, or fail on all legs for `errors/`).
+fn quad_split_stem(stem: &str) -> bool {
+    matches!(
+        stem,
+        "edge_int_overflow_add"
+            | "edge_int_overflow_mul"
+            | "edge_int_neg_min"
+            | "edge_int_min_div_neg1"
+            | "edge_int_pow_neg"
+            | "edge_index_oob"
+            | "edge_float_nan_display"
+            | "edge_cast_float_nan"
+            | "scalar_global_copy"
+            | "move_append_struct_copy"
+    )
+}
+
+/// Sorted `.zz` files directly under `dir` (non-recursive).
+fn zz_files_sorted(dir: &Path) -> Vec<PathBuf> {
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("cannot read dir {dir:?}: {e}"))
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("zz"))
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn quad_regression_and_edge_matrix() {
+    let fixtures = fixtures_dir();
+    let mut files: Vec<PathBuf> = Vec::new();
+    for f in zz_files_sorted(&fixtures.join("regression")) {
+        files.push(f);
+    }
+    for f in zz_files_sorted(&fixtures.join("errors")) {
+        if f.file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.starts_with("edge_"))
+        {
+            files.push(f);
+        }
+    }
+    files.sort();
+    assert!(!files.is_empty(), "quad found no fixtures");
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut strict = 0u32;
+    let mut split = 0u32;
+    let mut allfail = 0u32;
+    for (i, file) in files.iter().enumerate() {
+        let token = format!("q{i}");
+        let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+        let in_errors = file
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            == Some("errors");
+        let q = run_quad(file, &token);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if quad_split_stem(stem) {
+                assert_quad_split(file, stem, &q);
+            } else if in_errors {
+                assert_quad_all_fail(file, &q);
+            } else {
+                assert_quad_agree(file, &q);
+            }
+        }));
+        match r {
+            Ok(()) => {
+                if quad_split_stem(stem) {
+                    split += 1;
+                } else if in_errors {
+                    allfail += 1;
+                } else {
+                    strict += 1;
+                }
+            }
+            Err(e) => {
+                let msg = e
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "non-string panic".to_string());
+                failures.push(msg);
+            }
+        }
+    }
+    println!("\n=== Quad Matrix Summary ===");
+    println!("All-agree: {strict}");
+    println!("Documented splits: {split}");
+    println!("All-fail (errors): {allfail}");
+    println!("Failures: {}", failures.len());
+    for f in &failures {
+        println!("---\n{f}");
+    }
+    assert!(failures.is_empty(), "{} quad failure(s)", failures.len());
+}
+
+// ===========================================================================
 // Exhaustive parity sweep: EVERY fixture through BOTH engines.
 //
 // This is the strict gate — not documentation. Any `.zz` file under
-// tests/fixtures/{syntax,types,stdlib,errors} runs here with no
-// registration needed, so a new fixture (or a regression in an old one)
-// cannot slip past the per-file macros above. Stdin comes from the
+// tests/fixtures/{syntax,types,stdlib,regression,modules,errors} runs
+// here with no registration needed (modules/import_alias excluded via
+// `module_skip_reason`), so a new fixture (or a regression in an old
+// one) cannot slip past the per-file macros above. Stdin comes from the
 // `<stem>.stdin` sibling when present (see `stdin_for`), closed
 // otherwise, identically for both engines.
 //
@@ -1208,6 +1856,9 @@ fn parity_discover_all_fixtures() {
             if native_skip_reason(file).is_some() {
                 return SweepOutcome::Skipped;
             }
+            if module_skip_reason(file).is_some() {
+                return SweepOutcome::Skipped;
+            }
             if vm_only() {
                 let vm = run_zz_vm_token(file, &task.token);
                 if vm.0 != 0 {
@@ -1250,6 +1901,12 @@ fn parity_discover_all_fixtures() {
                     native.2
                 ));
             }
+            if !has_parity_signal(&vm.1) || !has_parity_signal(&native.1) {
+                return SweepOutcome::Unexpected(format!(
+                    "PARITY BLIND {}: stdout has no signal after normalization — label numeric outputs",
+                    file.display()
+                ));
+            }
             if !parity_match(&vm, &native) {
                 return SweepOutcome::Unexpected(format!(
                     "PARITY BUG {}\n--- exits vm={} native={} ---\n--- VM stdout ---\n{}\n--- NATIVE stdout ---\n{}\n--- VM stderr ---\n{}\n--- NATIVE stderr ---\n{}",
@@ -1266,20 +1923,6 @@ fn parity_discover_all_fixtures() {
         }
     }
 
-    fn zz_files_sorted(dir: &Path) -> Vec<PathBuf> {
-        if !dir.is_dir() {
-            return Vec::new();
-        }
-        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("cannot read dir {dir:?}: {e}"))
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("zz"))
-            .collect();
-        files.sort();
-        files
-    }
-
     let fixtures = fixtures_dir();
     let mut tasks: Vec<SweepTask> = Vec::new();
     // M0: all `zz run` fixture dirs. `modules/` stays out: most fixtures
@@ -1287,7 +1930,7 @@ fn parity_discover_all_fixtures() {
     // (`import_alias.zz` fails on the VM itself); they are tagged for the
     // M6 modules milestone instead. `test/` stays out: it needs the
     // `zz test` runner, not `zz run` (covered by e2e_test_success!).
-    for dir_name in ["syntax", "types", "stdlib", "regression"] {
+    for dir_name in ["syntax", "types", "stdlib", "regression", "modules"] {
         for file in zz_files_sorted(&fixtures.join(dir_name)) {
             let token = format!("t{}", tasks.len());
             tasks.push(SweepTask {
@@ -1416,5 +2059,134 @@ fn mask_scratch_paths_masks_pid_token_suffixes() {
     assert_eq!(
         mask_scratch_paths("files=6 lines=1893"),
         "files=6 lines=1893"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Normalizer audit (pre-M1 item 2): what normalization must and must not do
+// ---------------------------------------------------------------------------
+
+/// Negative tests: these pairs must NEVER compare equal. Each is a past
+/// or plausible divergence that normalization must preserve.
+#[test]
+fn norm_keeps_value_differences() {
+    // The chained-store class: labeled values differ.
+    assert!(!parity_match(
+        &(0, "m00=1\nedge_ok\n".to_string(), String::new()),
+        &(0, "m00=99\nedge_ok\n".to_string(), String::new()),
+    ));
+    // Float spelling: NaN vs nan.
+    assert!(!parity_match(
+        &(0, "NaN\nok\n".to_string(), String::new()),
+        &(0, "nan\nok\n".to_string(), String::new()),
+    ));
+    // Exit codes always matter, even with identical streams.
+    assert!(!parity_match(
+        &(1, String::new(), "error".to_string()),
+        &(0, String::new(), "error".to_string()),
+    ));
+    // stderr participates: same stdout, different diagnostics.
+    assert!(!parity_match(
+        &(0, "ok\n".to_string(), "warn a".to_string()),
+        &(0, "ok\n".to_string(), "warn b".to_string()),
+    ));
+}
+
+/// Positive tests: benign run-to-run variation must still normalize away.
+#[test]
+fn norm_still_normalizes() {
+    // Scratch paths with different pid/token runs.
+    assert!(parity_match(
+        &(
+            0,
+            "err: /tmp/zz_fs_x_123_4/missing\nok\n".to_string(),
+            String::new()
+        ),
+        &(
+            0,
+            "err: /tmp/zz_fs_x_999_t7/missing\nok\n".to_string(),
+            String::new()
+        ),
+    ));
+    // Ephemeral ports.
+    assert!(parity_match(
+        &(0, "listen 127.0.0.1:54321\nok\n".to_string(), String::new()),
+        &(0, "listen 127.0.0.1:12345\nok\n".to_string(), String::new()),
+    ));
+    // Purely numeric lines (timestamps) drop on both sides equally.
+    assert!(parity_match(
+        &(0, "1728000000000\nok\n".to_string(), String::new()),
+        &(0, "1728000000001\nok\n".to_string(), String::new()),
+    ));
+}
+
+/// The parity-signal gate: numeric-only stdout is blind and must be
+/// rejected so fixtures label their outputs.
+#[test]
+fn signal_gate_catches_numeric_only() {
+    assert!(has_parity_signal(""));
+    assert!(has_parity_signal("m00=1\nedge_ok\n"));
+    assert!(!has_parity_signal("1\n99\n"));
+    assert!(!has_parity_signal("42\n"));
+}
+
+/// Harness/tag consistency: the known-failure + skip lists and the
+/// `known-divergence` / `vm-only` / `nondeterministic` tags must agree.
+/// A divergence tracked in only one place is a lie in the other.
+#[test]
+fn known_lists_match_fixture_tags() {
+    let fixtures = fixtures_dir();
+    let mut problems = Vec::new();
+    for dir_name in [
+        "syntax",
+        "types",
+        "stdlib",
+        "regression",
+        "modules",
+        "errors",
+    ] {
+        let dir = fixtures.join(dir_name);
+        if !dir.is_dir() {
+            continue;
+        }
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect("read fixture dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("zz"))
+            .collect();
+        files.sort();
+        for file in &files {
+            let tags = fixture_meta::fixture_features(file).unwrap_or_else(|e| panic!("{e}"));
+            let known = known_native_failure(file).is_some();
+            let skipped = native_skip_reason(file).is_some() || module_skip_reason(file).is_some();
+            let tagged_diverged = tags
+                .iter()
+                .any(|t| t == "known-divergence" || t == "vm-only");
+            let tagged_nondet = tags.iter().any(|t| t == "nondeterministic");
+            if tagged_diverged && !known {
+                problems.push(format!(
+                    "{}: tagged diverged but missing from known_native_failure",
+                    file.display()
+                ));
+            }
+            if known && !tagged_diverged {
+                problems.push(format!(
+                    "{}: in known_native_failure but missing known-divergence/vm-only tag",
+                    file.display()
+                ));
+            }
+            if tagged_nondet && !skipped {
+                problems.push(format!(
+                    "{}: tagged nondeterministic but not skipped by the harness",
+                    file.display()
+                ));
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "tag/harness drift:\n{}",
+        problems.join("\n")
     );
 }

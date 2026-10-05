@@ -9,4 +9,5 @@ pub func scale(x: int) -> int {
 
 func main() {
     println(scale(5))
+    println("multi_level_pub_ok")
 }

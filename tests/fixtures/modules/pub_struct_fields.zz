@@ -8,4 +8,5 @@ secret_val := 42
 func main() {
     v := Vec2{x: 10, y: 20}
     println(v.x + v.y)
+    println("pub_struct_fields_ok")
 }

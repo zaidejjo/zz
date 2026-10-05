@@ -9,4 +9,5 @@ pub func dist(p: Point) -> int {
 func main() {
     p := Point{x: 3, y: 4}
     println(dist(p))
+    println("pub_struct_method_ok")
 }
