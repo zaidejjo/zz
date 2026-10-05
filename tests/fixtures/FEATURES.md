@@ -110,6 +110,8 @@ a divergence carry `known-divergence` (or land in `errors/` with a
 - `edge_cast_float_nan`: int(NaN) saturates to 0 (strict since the
   flag cleanup: no `-ffast-math`, explicit `isnan` guard).
 - `edge_slice_clamp`: out-of-range slice ends clamp (strict everywhere).
+- `edge_negative_index`: negative indices normalize from the end
+  (arrays and strings, strict everywhere).
 - `edge_cast_float_int`: float->int truncation and INF saturation.
 - `edge_cast_str_int`: str->int overflow/invalid/whitespace (`none`).
 - `edge_neg_shift_err`, `edge_rem_zero_err` (`errors/`): both engines

@@ -1,0 +1,9 @@
+// features: indexing, locals, print, string-literal
+// E2E: edge — negative indices normalize from the end on all legs
+// (arrays and strings).
+a := [10, 20, 30]
+println("n1={a[-1]}")
+println("n2={a[-3]}")
+s := "abc"
+println("s1={s[-1]}")
+println("edge_negative_index_ok")

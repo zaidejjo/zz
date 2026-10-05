@@ -469,6 +469,11 @@ e2e_success_test!(
     "regression",
     "edge_struct_path_store.zz"
 );
+e2e_success_test!(
+    e2e_regression_edge_negative_index,
+    "regression",
+    "edge_negative_index.zz"
+);
 e2e_success_test!(e2e_syntax_main_entrypoint, "syntax", "main_entrypoint.zz");
 e2e_success_test!(e2e_syntax_match_guards, "syntax", "match_guards.zz");
 e2e_success_test!(

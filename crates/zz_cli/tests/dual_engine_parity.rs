@@ -850,6 +850,11 @@ parity_strict!(
     "edge_struct_path_store.zz"
 );
 parity_strict!(
+    parity_regression_edge_negative_index,
+    "regression",
+    "edge_negative_index.zz"
+);
+parity_strict!(
     parity_regression_edge_cast_float_int,
     "regression",
     "edge_cast_float_int.zz"

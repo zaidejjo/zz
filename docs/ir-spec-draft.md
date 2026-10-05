@@ -1,6 +1,9 @@
 # ZZ bytecode IR spec — DRAFT for review (M1)
 
-Status: draft. Normative keywords: MUST / MUST NOT / SHOULD per RFC 2119.
+Status: FROZEN except §4 canonical float formatting (pending
+decision — blocks only math-precision parity and the M3 formatting
+ownership; everything else is locked). Normative keywords: MUST /
+MUST NOT / SHOULD per RFC 2119.
 This spec is the single source of truth for program behavior. Where it
 conflicts with current engine behavior, the engines change (migration
 table in §11), not the spec.
