@@ -1,4 +1,4 @@
-// features: float-arith, floats, imports, locals, print, std-math, string-literal
+// features: float-arith, imports, locals, print, std-math, string-literal
 // E2E: float Display conformance (IR spec §4) — shortest round-trip,
 // Rust Display semantics, produced by the Rust core on both engines.
 // In-fixture pins guard both legs against drift (the VM is reference,

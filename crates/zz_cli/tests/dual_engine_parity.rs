@@ -1054,6 +1054,22 @@ parity_strict!(
     "regression",
     "fuzz_smoke_11.zz"
 );
+// v4 fuzzer shapes (fixed seeds; all strict on both engines).
+parity_strict!(
+    parity_regression_fuzz_smoke_12,
+    "regression",
+    "fuzz_smoke_12.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_13,
+    "regression",
+    "fuzz_smoke_13.zz"
+);
+parity_strict!(
+    parity_regression_fuzz_smoke_14,
+    "regression",
+    "fuzz_smoke_14.zz"
+);
 parity_strict!(parity_types_generics, "types", "generics.zz");
 parity_strict!(parity_types_type_inference, "types", "type_inference.zz");
 

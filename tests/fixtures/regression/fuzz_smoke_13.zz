@@ -1,0 +1,12 @@
+// features: int-arith, locals, print, string-literal
+// Fuzz smoke (fixed seed 96004, v4 precedence shapes).
+// Regenerate with tests/fuzz/gen.py --shapes v4; screen with tests/fuzz/run.sh.
+pp1 := 13 / 8**2
+println("pp1={pp1}")
+pp2 := 6 - 5**3
+println("pp2={pp2}")
+pp3 := 3 + 9**2
+println("pp3={pp3}")
+pp4 := 6 + 8**2
+println("pp4={pp4}")
+println("DONE")

@@ -388,6 +388,22 @@ e2e_success_test!(
     "regression",
     "fuzz_smoke_11.zz"
 );
+// v4 fuzzer shapes (fixed seeds; all strict on both engines).
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_12,
+    "regression",
+    "fuzz_smoke_12.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_13,
+    "regression",
+    "fuzz_smoke_13.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_14,
+    "regression",
+    "fuzz_smoke_14.zz"
+);
 // M0 edge corpus: strict-parity probes (both engines agree today).
 e2e_success_test!(
     e2e_regression_edge_shift_mask,
