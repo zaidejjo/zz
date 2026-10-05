@@ -32,6 +32,77 @@ fn write(dir: &Path, rel: &str, content: &str) {
     std::fs::write(&p, content).unwrap();
 }
 
+/// Write only when content differs (stable mtimes): the shared toy
+/// scaffold below relies on this so cargo fingerprinting hits its
+/// cache across test runs instead of rebuilding zz_runtime every time.
+fn write_stable(dir: &Path, rel: &str, content: &str) {
+    let p = dir.join(rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    if std::fs::read_to_string(&p).unwrap_or_default() != content {
+        std::fs::write(&p, content).unwrap();
+    }
+}
+
+/// FNV-1a over the scaffold inputs: any change to the toy sources (or
+/// the zz_runtime they build against) wipes the shared dir so the next
+/// run exercises a genuinely fresh install instead of stale artifacts.
+fn scaffold_stamp(rt_path: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for chunk in [
+        TOY_TOML,
+        TOY_ZZI,
+        TOY_C,
+        TOY_BUILD_SH,
+        TOY_BUILD_RS,
+        TOY_LIB_RS,
+        rt_path,
+    ] {
+        for b in chunk.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("{h:016x}\n")
+}
+
+/// Shared toy scaffold under `target/` (persisted across runs, and by
+/// CI caches): the cargo dev-build of the toy native crate happens once
+/// per scaffold content, not once per test run. `ZZ_TOY_FRESH=1` forces
+/// a wipe for debugging. Returns `(toy_dir, consumer_dir)`.
+fn scaffold_shared() -> (PathBuf, PathBuf) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/zz-toy-e2e-shared");
+    if std::env::var("ZZ_TOY_FRESH").is_ok() {
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    let rt_path = zz_runtime_path();
+    let stamp = scaffold_stamp(&rt_path);
+    let stamp_path = root.join(".stamp");
+    if std::fs::read_to_string(&stamp_path).unwrap_or_default() != stamp {
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    let toy = root.join("toy");
+    write_stable(&toy, "zz.toml", TOY_TOML);
+    write_stable(&toy, "plugin.zzi", TOY_ZZI);
+    write_stable(&toy, "csrc/toy.c", TOY_C);
+    write_stable(&toy, "build.sh", TOY_BUILD_SH);
+    write_stable(&toy, "native/Cargo.toml", &toy_cargo_toml(&rt_path));
+    write_stable(&toy, "native/build.rs", TOY_BUILD_RS);
+    write_stable(&toy, "native/src/lib.rs", TOY_LIB_RS);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let sh = toy.join("build.sh");
+        let mut perms = std::fs::metadata(&sh).unwrap().permissions();
+        perms.set_mode(perms.mode() | 0o111);
+        std::fs::set_permissions(&sh, perms).unwrap();
+    }
+    let consumer = root.join("use");
+    write_stable(&consumer, "zz.toml", CONSUMER_TOML);
+    write_stable(&consumer, "src/main.zz", CONSUMER_MAIN);
+    std::fs::write(&stamp_path, &stamp).unwrap();
+    (toy, consumer)
+}
+
 fn zz_runtime_path() -> String {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest_dir)
@@ -86,15 +157,18 @@ NATIVE_DIR="$SCRIPT_DIR/native"
 mkdir -p "$BUILD_DIR"
 cc -c "$SCRIPT_DIR/csrc/toy.c" -o "$BUILD_DIR/toy.o" -Wall -Wextra -fPIC
 cd "$NATIVE_DIR"
-cargo rustc --release --lib --crate-type cdylib -- \
+# Dev profile: the test asserts AOT/VM output agreement, not optimized
+# codegen; dev rustc on these small crates is several times faster than
+# release (which also flips the dep graph to release). Artifacts land in
+# target/debug/.
+cargo rustc --lib --crate-type cdylib --crate-type staticlib -- \
 	-C link-args=-Wl,--exclude-libs,ALL \
 	-C link-args=-Wl,-z,lazy 2>&1 | tail -1
-SO_FILE=$(find "$NATIVE_DIR/target/release/deps" -maxdepth 1 -name "libtoy_native.so" 2>/dev/null | head -1)
+SO_FILE=$(find "$NATIVE_DIR/target/debug/deps" -maxdepth 1 -name "libtoy_native.so" 2>/dev/null | head -1)
 if [ -n "$SO_FILE" ]; then
 	cp "$SO_FILE" "$BUILD_DIR/"
 fi
-cargo build --release 2>&1 | tail -1
-A_FILE="$NATIVE_DIR/target/release/libtoy_native.a"
+A_FILE="$NATIVE_DIR/target/debug/libtoy_native.a"
 if [ -f "$A_FILE" ]; then
 	cp "$A_FILE" "$BUILD_DIR/"
 fi
@@ -107,6 +181,11 @@ fn toy_cargo_toml(zz_runtime: &str) -> String {
 name = "toy_native"
 version = "0.1.0"
 edition = "2021"
+
+# Detached from any enclosing workspace: the shared scaffold lives
+# under target/ (for cache persistence), where cargo would otherwise
+# claim it as a workspace member and refuse to build.
+[workspace]
 
 [lib]
 crate-type = ["cdylib", "staticlib"]
@@ -223,40 +302,14 @@ func main() {
 
 const EXPECTED: &str = "add: 42\nsw: 1\nsw2: 0\ntoy-ok\n";
 
-/// Layout: <tmp>/toy (package) + <tmp>/use (consumer with path dep).
-fn scaffold(dir: &Path) {
-    let toy = dir.join("toy");
-    write(&toy, "zz.toml", TOY_TOML);
-    write(&toy, "plugin.zzi", TOY_ZZI);
-    write(&toy, "csrc/toy.c", TOY_C);
-    write(&toy, "build.sh", TOY_BUILD_SH);
-    write(
-        &toy,
-        "native/Cargo.toml",
-        &toy_cargo_toml(&zz_runtime_path()),
-    );
-    write(&toy, "native/build.rs", TOY_BUILD_RS);
-    write(&toy, "native/src/lib.rs", TOY_LIB_RS);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let sh = toy.join("build.sh");
-        let mut perms = std::fs::metadata(&sh).unwrap().permissions();
-        perms.set_mode(perms.mode() | 0o111);
-        std::fs::set_permissions(&sh, perms).unwrap();
-    }
-
-    let consumer = dir.join("use");
-    write(&consumer, "zz.toml", CONSUMER_TOML);
-    write(&consumer, "src/main.zz", CONSUMER_MAIN);
-}
-
 #[test]
 fn toy_plugin_aot_and_vm_agree() {
-    let dir = std::env::temp_dir().join(format!("zz-toy-e2e-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    scaffold(&dir);
-    let consumer = dir.join("use");
+    // Shared content-stable scaffold: the cargo dev-build of the toy
+    // native crate runs once per scaffold content (stamp-gated), not
+    // once per test run. Consumer/bin outputs are deterministic, so
+    // reuse is sound; the hook pipeline still executes every run
+    // (cargo fingerprint check + install + clang link + both engines).
+    let (_toy, consumer) = scaffold_shared();
 
     let (code, _, stderr) = run_zz(&consumer, &["install", "--allow-hooks"]);
     assert_eq!(code, 0, "install failed: {stderr}");
@@ -272,8 +325,8 @@ fn toy_plugin_aot_and_vm_agree() {
     let (code, stdout, stderr) = run_zz(&consumer, &["run", "src/main.zz"]);
     assert_eq!(code, 0, "run failed: {stderr}");
     assert_eq!(stdout, EXPECTED);
-
-    let _ = std::fs::remove_dir_all(&dir);
+    // No cleanup: the shared scaffold persists for the next run
+    // (content-stamped; `target/` idiom).
 }
 
 // ---------------------------------------------------------------------------

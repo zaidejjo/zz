@@ -367,8 +367,6 @@ func main() {{
     println("txrows:{{len(c)}}")
     sqlz.close(db)
     println("afterclose:{{len(sqlz.query(db, "SELECT 1"))}}")
-    refused := pg.connect("host=127.0.0.1 port=1 dbname=x user=u connect_timeout=1")
-    println("refused:{{len(pg.query(refused, "SELECT 1"))}}")
     println("pg_aot_only_ok")
 }}
 "#,
@@ -386,6 +384,66 @@ func main() {{
         .expect("psql setup");
     assert!(setup.status.success(), "setup failed");
     // The good insert rolls back with the bad one: txrows 0.
-    let expected = "badexec:0\nbadquery:0\ntxbad:.err(transaction failed)\ntxrows:0\nafterclose:0\nrefused:0\npg_aot_only_ok\n";
+    // (Refused connects are NOT lenient anymore: they trap on both
+    // engines — see pg_refused_traps below and the errors/
+    // pg_connect_refused.zz fixture.)
+    let expected = "badexec:0\nbadquery:0\ntxbad:.err(transaction failed)\ntxrows:0\nafterclose:0\npg_aot_only_ok\n";
     assert_aot_only(&cl, "pgaot", &src, expected);
+}
+
+/// Refused/unreachable pg servers trap loudly on both engines (the old
+/// null-handle leniency is retired): AOT exits nonzero with the
+/// `pg.connect failed` diagnostic, matching the VM.
+#[test]
+fn pg_refused_traps() {
+    if !require_pg() {
+        return;
+    }
+    let cl = cluster();
+    let src = r#"import std.sqlz.postgres as pg
+func main() {
+    refused := pg.connect("host=127.0.0.1 port=1 dbname=x user=u connect_timeout=1")
+    println("unreachable")
+}
+"#;
+    let dir = cl.dir.clone();
+    let zz_path = dir.join("pgrefused.zz");
+    std::fs::write(&zz_path, src).expect("write case");
+    // VM leg traps first (reference behavior).
+    let run_vm = Command::new(zz_bin())
+        .arg("run")
+        .arg(&zz_path)
+        .output()
+        .expect("spawn zz run");
+    assert!(
+        !run_vm.status.success(),
+        "VM should trap refused pg.connect"
+    );
+    let vm_stderr = String::from_utf8_lossy(&run_vm.stderr);
+    assert!(
+        vm_stderr.contains("pg.connect failed"),
+        "VM stderr should name pg.connect, got:\n{vm_stderr}"
+    );
+    // AOT leg traps identically (never a null handle + exit 0).
+    let build = Command::new(zz_bin())
+        .arg("build")
+        .arg(&zz_path)
+        .output()
+        .expect("spawn zz build");
+    assert!(
+        build.status.success(),
+        "AOT build pgrefused failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let bin = dir.join("bin").join("pgrefused");
+    let run_aot = Command::new(&bin).output().expect("spawn AOT case");
+    assert!(
+        !run_aot.status.success(),
+        "AOT should trap refused pg.connect"
+    );
+    let aot_stderr = String::from_utf8_lossy(&run_aot.stderr);
+    assert!(
+        aot_stderr.contains("pg.connect failed"),
+        "AOT stderr should name pg.connect, got:\n{aot_stderr}"
+    );
 }

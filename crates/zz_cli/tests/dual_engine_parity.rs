@@ -15,6 +15,9 @@ use std::process::Command;
 
 use zz_cli::fixture_meta;
 
+#[path = "batch_lists.rs"]
+mod batch_lists;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -501,6 +504,30 @@ fn vm_only() -> bool {
     std::env::var("ZZ_PARITY_VM_ONLY").is_ok()
 }
 
+/// True when `ZZ_BATCH_NATIVE=1`: the `batched_parity` target owns
+/// native legs (same programs, same flags, demuxed per file).
+fn batch_native() -> bool {
+    std::env::var("ZZ_BATCH_NATIVE").is_ok_and(|v| v == "1")
+}
+
+/// True when this fixture's native leg is covered by a batch (only
+/// then may the individual test skip it in batch mode).
+fn batch_covered(path: &Path) -> bool {
+    let fixtures = fixtures_dir();
+    let rel = path.strip_prefix(&fixtures).unwrap_or(path);
+    let mut parts = rel.components();
+    let (Some(cat), Some(file)) = (
+        parts.next().and_then(|c| c.as_os_str().to_str()),
+        parts.next().and_then(|c| c.as_os_str().to_str()),
+    ) else {
+        return false;
+    };
+    let key = format!("{cat}/{file}");
+    batch_lists::ELIGIBLE
+        .iter()
+        .any(|(c, f, _)| format!("{c}/{f}") == key)
+}
+
 /// Generate a strict error-parity test (both engines must error).
 macro_rules! parity_strict_error {
     ($name:ident, $file:expr) => {
@@ -541,7 +568,11 @@ macro_rules! parity_strict {
             }
 
             let vm = run_zz_vm(&path);
-            if vm_only() {
+            // Batched mode (`ZZ_BATCH_NATIVE=1`): the batched_parity
+            // target owns native legs for batchable fixtures (same
+            // programs, same flags, demuxed per file). Quad, error, and
+            // known-failure natives always stay individual.
+            if vm_only() || (batch_native() && batch_covered(&path)) {
                 assert_eq!(
                     vm.0,
                     0,
@@ -1699,46 +1730,89 @@ fn quad_regression_and_edge_matrix() {
     files.sort();
     assert!(!files.is_empty(), "quad found no fixtures");
 
+    // Parallel workers: this was one sequential loop (63 fixtures × up
+    // to 4 process spawns = minutes idle cores). Each fixture runs in
+    // its own child processes with a unique sweep token, so fixtures
+    // are fully isolated and order-independent. Results fold in index
+    // order, so the summary and verdicts match the sequential run.
+    // `ZZ_QUAD_JOBS` overrides the default (kept modest: native legs
+    // spawn clang, and RAM-thin hosts swap past ~4 concurrent builds).
+    let n_workers: usize = std::env::var("ZZ_QUAD_JOBS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(4)
+        .min(files.len().max(1));
+    /// Per-fixture outcome for the ordered fold below.
+    enum Outcome {
+        StrictOk,
+        SplitOk,
+        AllFailOk,
+        Failed(String),
+    }
+    let slots: Vec<std::sync::Mutex<Option<Outcome>>> = (0..files.len())
+        .map(|_| std::sync::Mutex::new(None))
+        .collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..n_workers {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i >= files.len() {
+                    break;
+                }
+                let file = &files[i];
+                let token = format!("q{i}");
+                let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+                let in_errors = file
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    == Some("errors");
+                let split_arm = quad_split_stem(stem);
+                let q = run_quad(file, &token);
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if split_arm {
+                        assert_quad_split(file, stem, &q);
+                    } else if in_errors {
+                        assert_quad_all_fail(file, &q);
+                    } else {
+                        assert_quad_agree(file, &q);
+                    }
+                }));
+                let outcome = match r {
+                    Ok(()) => {
+                        if split_arm {
+                            Outcome::SplitOk
+                        } else if in_errors {
+                            Outcome::AllFailOk
+                        } else {
+                            Outcome::StrictOk
+                        }
+                    }
+                    Err(e) => Outcome::Failed(
+                        e.downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "non-string panic".to_string()),
+                    ),
+                };
+                *slots[i].lock().expect("quad slot") = Some(outcome);
+            });
+        }
+    });
+    // Ordered fold: identical summary and verdicts to the old loop.
     let mut failures: Vec<String> = Vec::new();
     let mut strict = 0u32;
     let mut split = 0u32;
     let mut allfail = 0u32;
-    for (i, file) in files.iter().enumerate() {
-        let token = format!("q{i}");
-        let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
-        let in_errors = file
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|s| s.to_str())
-            == Some("errors");
-        let q = run_quad(file, &token);
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if quad_split_stem(stem) {
-                assert_quad_split(file, stem, &q);
-            } else if in_errors {
-                assert_quad_all_fail(file, &q);
-            } else {
-                assert_quad_agree(file, &q);
-            }
-        }));
-        match r {
-            Ok(()) => {
-                if quad_split_stem(stem) {
-                    split += 1;
-                } else if in_errors {
-                    allfail += 1;
-                } else {
-                    strict += 1;
-                }
-            }
-            Err(e) => {
-                let msg = e
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
-                    .unwrap_or_else(|| "non-string panic".to_string());
-                failures.push(msg);
-            }
+    for slot in &slots {
+        match slot.lock().expect("quad slot").take() {
+            Some(Outcome::StrictOk) => strict += 1,
+            Some(Outcome::SplitOk) => split += 1,
+            Some(Outcome::AllFailOk) => allfail += 1,
+            Some(Outcome::Failed(msg)) => failures.push(msg),
+            None => failures.push("quad worker left fixture unrun".to_string()),
         }
     }
     println!("\n=== Quad Matrix Summary ===");
