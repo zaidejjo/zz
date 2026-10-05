@@ -297,6 +297,11 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         }
 
         // --- Output differences (native runs but output differs) ---
+        // Plain index-store side-effect order (OPEN SPEC ITEM, quad-split):
+        // VM logs value-first [2, 1], native logs source-order [1, 2].
+        "edge_index_store_order" => Some(
+            "OPEN: VM evaluates index-store value first, native source order (spec: source order; VM changes post-M1)",
+        ),
         "concurrency_panic_test" => Some("native: panic/fail inside task closures lowers to unit (no err plumbing through zz_call_closure); VM yields .err"),
         "encoding_test" => Some("native: different error message format for bad base64/hex/url"),
         "math_extended_test" => Some("native: float precision + error message differences"),
@@ -850,6 +855,23 @@ parity_strict!(
     parity_regression_edge_negative_index,
     "regression",
     "edge_negative_index.zz"
+);
+// Evaluation order (strict: both engines agree).
+parity_strict!(
+    parity_regression_edge_eval_order,
+    "regression",
+    "edge_eval_order.zz"
+);
+parity_strict!(
+    parity_regression_edge_compound_index_eval,
+    "regression",
+    "edge_compound_index_eval.zz"
+);
+// Order divergence (quad-split): VM logs [2, 1], native [1, 2].
+parity_known_failure!(
+    parity_regression_edge_index_store_order,
+    "regression",
+    "edge_index_store_order.zz"
 );
 parity_strict!(
     parity_regression_edge_cast_float_int,
@@ -1590,15 +1612,42 @@ fn assert_quad_all_fail(file: &Path, q: &QuadLegs) {
 /// the exact leg behavior observed and decided; any leg that unexpectedly
 /// agrees (a fix!) panics with FIXED so the entry is promoted.
 fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
-    let _ = (file, stem, q);
-    panic!("quad has no documented splits — {stem} should use AllAgree or AllFail");
+    match stem {
+        // Plain index-store side-effect order (OPEN SPEC ITEM): the VM
+        // evaluates value-first, native evaluates source order. Result
+        // values agree; only the effect log differs. Spec records source
+        // order as canonical; the VM path changes post-M1.
+        "edge_index_store_order" => {
+            for (name, leg) in [("vm_dbg", &q.vm_dbg), ("vm_rel", &q.vm_rel)] {
+                assert_eq!(leg.0, 0, "{name} should exit 0:\n{}", fmt_quad(file, q));
+                assert!(
+                    leg.1.lines().any(|l| l.trim() == "log=[2, 1]"),
+                    "{name} should log value-first [2, 1], got:\n{}",
+                    fmt_quad(file, q)
+                );
+            }
+            if q.nat_dev.is_some() && q.nat_rel.is_some() {
+                for (name, leg) in [
+                    ("nat_dev", q.nat_dev.as_ref().unwrap()),
+                    ("nat_rel", q.nat_rel.as_ref().unwrap()),
+                ] {
+                    assert_eq!(leg.0, 0, "{name} should exit 0:\n{}", fmt_quad(file, q));
+                    assert!(
+                        leg.1.lines().any(|l| l.trim() == "log=[1, 2]"),
+                        "{name} should log source-order [1, 2], got:\n{}",
+                        fmt_quad(file, q)
+                    );
+                }
+            }
+        }
+        other => panic!("quad has no documented split for {other} — add AllAgree or an arm"),
+    }
 }
 
 /// Stems with a documented quad split (anything else in scope must agree
 /// on all legs, or fail on all legs for `errors/`).
 fn quad_split_stem(stem: &str) -> bool {
-    let _ = stem;
-    false
+    matches!(stem, "edge_index_store_order")
 }
 
 /// Sorted `.zz` files directly under `dir` (non-recursive).

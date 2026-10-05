@@ -1,0 +1,17 @@
+// features: arrays, func-call, indexing, known-divergence, locals, print, string-literal, vec-push
+// E2E: plain index-store side-effect order — OPEN SPEC ITEM.
+// The VM evaluates value-first (log [2, 1]); native evaluates source
+// order (log [1, 2]). Result values agree; only the side-effect log
+// differs. The spec records source order (base, index, value) as
+// canonical; the VM plain-store path changes post-M1 (no engine changes
+// in M1). Quad-split until then.
+log := []
+func rec(n: int) -> int {
+    log = vec.push(log, n)
+    n
+}
+a := [10, 20, 30]
+a[rec(1)] = rec(2)
+println("a={a}")
+println("log={log}")
+println("edge_index_store_order_ok")

@@ -773,10 +773,14 @@ impl Lowerer {
                         self.emit_stmt(&synthetic, names, out, is_tail);
                     }
                     Expr::Index { obj, index, .. } => {
-                        // Receiver first (same order as the tree-walker
-                        // and VM): single evaluation, then read →
-                        // boxed zz_binop → write. The store kills index
-                        // forwarding for the root binding (plus dependents).
+                        // Single evaluation of each side, then read →
+                        // boxed zz_binop → write (index bound once in
+                        // `_ci`, never evaluated twice). The store kills
+                        // index forwarding for the root binding (plus
+                        // dependents). NOTE: side-effect order here is
+                        // source order (index, then value); the VM's
+                        // plain-store order differs (value first) — an
+                        // open spec item pinned by edge_index_store_order.
                         if let Some(root) = Self::store_root_ident(obj) {
                             let root = root.to_string();
                             names.invalidate_stack_array_elems(&root);
@@ -787,8 +791,12 @@ impl Lowerer {
                         if let Some(home) = self.index_store_home(obj, names) {
                             let i = self.emit_expr(index, names, out);
                             let i_boxed = self.box_index_arg(index, i, names);
+                            // Bind the index once: the get and the set
+                            // below must not evaluate it twice (side
+                            // effects would fire twice — observed as a
+                            // double log in differential probes).
                             out.push_str(&format!(
-                                "    {{ int _e = 0; zz_value _cc = zz_index_get({home}, {i_boxed}, &_e);\n"
+                                "    {{ int _e = 0; zz_value _ci = {i_boxed}; zz_value _cc = zz_index_get({home}, _ci, &_e);\n"
                             ));
                             out.push_str(
                                 "      if (_e) { fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); }\n",
@@ -796,9 +804,7 @@ impl Lowerer {
                             out.push_str(&format!(
                                 "      zz_value _cr = zz_binop({cop}, _cc, {rhs_boxed});\n"
                             ));
-                            out.push_str(&format!(
-                                "      zz_index_set(&{home}, {i_boxed}, _cr, &_e);\n"
-                            ));
+                            out.push_str(&format!("      zz_index_set(&{home}, _ci, _cr, &_e);\n"));
                             out.push_str(
                                 "      if (_e) { fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); } }\n",
                             );

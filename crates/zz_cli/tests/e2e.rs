@@ -480,6 +480,17 @@ e2e_success_test!(
     "regression",
     "edge_negative_index.zz"
 );
+// Evaluation order probes (call-order audit close-out).
+e2e_success_test!(
+    e2e_regression_edge_eval_order,
+    "regression",
+    "edge_eval_order.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_compound_index_eval,
+    "regression",
+    "edge_compound_index_eval.zz"
+);
 e2e_success_test!(e2e_syntax_main_entrypoint, "syntax", "main_entrypoint.zz");
 e2e_success_test!(e2e_syntax_match_guards, "syntax", "match_guards.zz");
 e2e_success_test!(
