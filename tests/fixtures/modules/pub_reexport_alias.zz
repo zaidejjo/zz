@@ -1,3 +1,4 @@
+// features: comparison, func-call, int-arith, print, pub-visibility
 // Test: pub import re-export with alias.
 // Full multi-file test is in loader/tests.rs (pub_reexport_alias_with_struct).
 
@@ -7,4 +8,5 @@ pub func add(a: int, b: int) -> int {
 
 func main() {
     println(add(3, 4))
+    println("pub_reexport_alias_ok")
 }

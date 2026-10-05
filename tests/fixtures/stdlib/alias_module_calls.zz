@@ -1,3 +1,4 @@
+// features: import-alias, imports, print, string-literal
 // E2E: qualified calls through a module alias resolve on every engine,
 // including pure-ZZ functions (bodies live under canonical names).
 import std.path as fspath

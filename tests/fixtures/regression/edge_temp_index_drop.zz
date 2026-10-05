@@ -1,0 +1,9 @@
+// features: arrays, func-call, indexing, print, string-literal
+// E2E: edge — storing into a call-result temp is dropped (matching the
+// VM): the callee's shared buffer is detached first, so no aliasing
+// leaks into globals either way.
+g := [1, 2]
+func get() -> [int] { g }
+get()[0] = 9
+println("g0={g[0]}")
+println("edge_temp_index_drop_ok")

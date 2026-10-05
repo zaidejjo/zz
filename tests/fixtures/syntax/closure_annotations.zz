@@ -1,3 +1,4 @@
+// features: casts, closures, comparison, if-else, int-arith, locals, print, string-literal
 // E2E: Closure return type annotations — `|x: int| -> int { ... }`
 
 // With return type annotation

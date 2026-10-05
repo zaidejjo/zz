@@ -1,3 +1,4 @@
+// features: arrays, cli-args, comparison, if-else, imports, locals, match, option-result, print, std-args, std-str, string-literal
 // E2E: std.args — flag parser over synthetic argv (no real CLI args,
 // so the standard e2e harness works unchanged; real-argv flow is covered
 // by args_raw_test.zz + a custom e2e test).

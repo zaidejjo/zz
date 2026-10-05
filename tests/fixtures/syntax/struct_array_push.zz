@@ -1,3 +1,4 @@
+// features: arrays, casts, for-loop, int-arith, locals, methods, print, string-literal, string-ops, structs, vec-push
 struct User {name: str, age: int}
 
 users := []

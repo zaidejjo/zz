@@ -1,3 +1,4 @@
+// features: bool-logic, closures, imports, locals, nondeterministic, option-result, print, std-http, string-literal, string-ops
 // tests/fixtures/stdlib/http_phase5b_test.zz — Phase 5B features
 // Tests: path params, query parsing, body_json, http.test
 import std.http

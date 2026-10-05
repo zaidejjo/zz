@@ -458,6 +458,11 @@ pub struct BuildOptions {
     /// Set automatically alongside `native_rt` when sqlz/pg natives are
     /// reachable (the C dispatcher's weak refs never pull members alone).
     pub pg_link: bool,
+    /// Force-extract the float-format object (`-u zz_float_format_raw`).
+    /// Set automatically when any typed node can hold a float (float
+    /// Display routes through the Rust core per spec §4). Implies the
+    /// staticlib link like `native_rt`.
+    pub float_link: bool,
     /// Link libcurl (outbound `http.get/post/fetch` client). Set
     /// automatically from the lowered program; programs that never fetch
     /// omit `-lcurl` entirely so no `DT_NEEDED` entry is emitted.
@@ -501,6 +506,7 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            float_link: false,
             curl_link: false,
             sqlite_link: false,
             allow_static_downgrade: false,
@@ -523,6 +529,7 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            float_link: false,
             curl_link: false,
             sqlite_link: false,
             allow_static_downgrade: false,
@@ -545,6 +552,7 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            float_link: false,
             curl_link: false,
             sqlite_link: false,
             allow_static_downgrade: false,
@@ -567,6 +575,7 @@ impl BuildOptions {
             pgo: PgoMode::Generate,
             native_rt: false,
             pg_link: false,
+            float_link: false,
             curl_link: false,
             sqlite_link: false,
             allow_static_downgrade: false,
@@ -590,6 +599,7 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            float_link: false,
             curl_link: false,
             sqlite_link: false,
             allow_static_downgrade: false,
@@ -612,6 +622,7 @@ impl BuildOptions {
             pgo: PgoMode::Use,
             native_rt: false,
             pg_link: false,
+            float_link: false,
             curl_link: false,
             sqlite_link: false,
             allow_static_downgrade: false,
@@ -634,6 +645,7 @@ impl BuildOptions {
             pgo: PgoMode::Use,
             native_rt: false,
             pg_link: false,
+            float_link: false,
             curl_link: false,
             sqlite_link: false,
             allow_static_downgrade: false,
@@ -666,6 +678,7 @@ impl BuildOptions {
         self.pgo.hash(&mut h);
         self.native_rt.hash(&mut h);
         self.pg_link.hash(&mut h);
+        self.float_link.hash(&mut h);
         self.curl_link.hash(&mut h);
         self.sqlite_link.hash(&mut h);
         self.allow_static_downgrade.hash(&mut h);
@@ -731,13 +744,21 @@ pub fn embed_c(assets: &[EmbedAsset]) -> String {
 
 /// The single release flag set (ThinLTO always).
 ///
-/// - `-march=native` ONLY when `target` is `None` (native host build).
-///   Cross builds drop it so Clang uses the triple's safe baseline CPU.
+/// Integer arithmetic is defined-wrapping (`-fwrapv`) and aliasing is
+/// conservative (`-fno-strict-aliasing`) in every mode: both engines
+/// specify wrap semantics and the C runtime type-puns `zz_value`, so
+/// aggressive assumptions would be miscompiles, not optimizations.
+/// There is deliberately NO `-ffast-math` (it folds NaN guards and
+/// reassociates floats — incompatible with the specified float
+/// semantics) and NO `-march=native` (host-CPU-specific codegen breaks
+/// reproducible parity and benchmarks).
+///
 /// - cross builds add `-fuse-ld=lld`; Windows triples add `-lws2_32`.
-/// - `-ffast-math` is release-only (relaxed FP reassociation; `-p`
-///   implies consent — documented in `docs/cli.md`).
 pub fn clang_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String> {
     let mut flags: Vec<String> = Vec::new();
+    // Wrapping + aliasing contract first: applies to dev and release.
+    flags.push("-fwrapv".to_string());
+    flags.push("-fno-strict-aliasing".to_string());
     if opts.optimize {
         flags.push("-O3".to_string());
         if opts.full_lto {
@@ -748,12 +769,7 @@ pub fn clang_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String> {
             // ThinLTO unconditionally otherwise: Clang is the only backend.
             flags.push("-flto=thin".to_string());
         }
-        // Host-only: reads the build machine's CPU; illegal on other targets.
-        if target.is_none() {
-            flags.push("-march=native".to_string());
-        }
-        // Release-only relaxed FP + loop/codegen tuning.
-        flags.push("-ffast-math".to_string());
+        // Loop/codegen tuning (FP-safe only: no -ffast-math, see above).
         flags.push("-funroll-loops".to_string());
         flags.push("-fomit-frame-pointer".to_string());
     } else {
@@ -880,7 +896,7 @@ pub fn build_with(
     // Unified Rust native runtime: link the static library providing FFI
     // natives. Fully-static binaries cannot use it (shared libstd), so fail
     // early with a clear message instead of a cryptic `ld` error.
-    if opts.native_rt {
+    if opts.native_rt || opts.float_link {
         if opts.static_link {
             return Err(BuildError::NativeRt {
                 reason: "fully-static builds cannot link the Rust native runtime \
@@ -899,6 +915,12 @@ pub fn build_with(
                 cmd.arg("-u");
                 cmd.arg(sym);
             }
+        }
+        // Float Display (spec §4): same weak-ref situation — pull the
+        // Rust-core formatter explicitly when the gate fired.
+        if opts.float_link {
+            cmd.arg("-u");
+            cmd.arg(crate::ffi::FLOAT_FMT_SYMBOL);
         }
         for a in &extra {
             cmd.arg(a);
@@ -1110,39 +1132,48 @@ mod tests {
     }
 
     #[test]
-    fn march_native_only_when_host() {
-        let native = clang_flags(&release_opts(), None);
-        assert!(
-            native.iter().any(|f| f == "-march=native"),
-            "native host build must carry -march=native: {native:?}"
-        );
-        // Any --target (even one spelling the host) drops it: the flag
-        // reads the build machine's CPU and is unsafe for cross output.
+    fn no_host_specific_or_unsafe_fp_flags() {
+        // Parity contract: no -march=native anywhere (host-specific
+        // codegen) and no -ffast-math anywhere (folds NaN guards,
+        // reassociates floats). Both native and cross, dev and release.
         for t in [
-            "aarch64-unknown-linux-gnu",
-            "x86_64-pc-windows-gnu",
-            "x86_64-apple-darwin",
-            host_triple().as_str(),
+            None,
+            Some("aarch64-unknown-linux-gnu"),
+            Some("x86_64-pc-windows-gnu"),
+            Some("x86_64-apple-darwin"),
         ] {
-            let cross = clang_flags(&release_opts(), Some(t));
-            assert!(
-                !cross.iter().any(|f| f == "-march=native"),
-                "cross build for {t} must not carry -march=native: {cross:?}"
-            );
+            for opts in [release_opts(), BuildOptions::dev()] {
+                let flags = clang_flags(&opts, t);
+                assert!(
+                    !flags.iter().any(|f| f == "-march=native"),
+                    "forbidden -march=native: {flags:?}"
+                );
+                assert!(
+                    !flags.iter().any(|f| f == "-ffast-math"),
+                    "forbidden -ffast-math: {flags:?}"
+                );
+            }
         }
     }
 
     #[test]
-    fn release_is_thin_lto_with_fast_math() {
+    fn release_is_thin_lto_with_wrap_contract() {
         let flags = clang_flags(&release_opts(), None);
         assert!(flags.contains(&"-O3".to_string()));
         assert!(flags.contains(&"-flto=thin".to_string()));
-        assert!(
-            flags.contains(&"-ffast-math".to_string()),
-            "release must apply -ffast-math: {flags:?}"
-        );
+        // Wrapping + aliasing contract (both modes — checked below).
+        for opts in [release_opts(), BuildOptions::dev()] {
+            let flags = clang_flags(&opts, None);
+            assert!(
+                flags.contains(&"-fwrapv".to_string()),
+                "missing -fwrapv: {flags:?}"
+            );
+            assert!(
+                flags.contains(&"-fno-strict-aliasing".to_string()),
+                "missing -fno-strict-aliasing: {flags:?}"
+            );
+        }
         let dev = clang_flags(&BuildOptions::dev(), None);
-        assert!(!dev.iter().any(|f| f == "-ffast-math"));
         assert!(dev.contains(&"-O0".to_string()));
     }
 

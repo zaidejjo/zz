@@ -1,3 +1,4 @@
+// features: arrays, assert, comparison, for-loop, func-call, int-arith, locals, print, string-literal, while-loop
 // Trailing declarations: a block ending in `:=` keeps the declared value
 // as slot storage, so cleanup pops one fewer value. Regression: the VM
 // compiler emitted PopN(n) for n stack values (subtract overflow / silent

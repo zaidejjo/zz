@@ -1,3 +1,4 @@
+// features: comparison, error-case, func-call, locals, option-result, try-question
 // `try` outside a Result-returning function is a compile error.
 func fetch() -> Result<int, str> {
     .ok(1)

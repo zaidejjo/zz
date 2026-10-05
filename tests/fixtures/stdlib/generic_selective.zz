@@ -1,3 +1,4 @@
+// features: import-alias, imports, locals, print, selective-import, string-literal
 // E2E: selective import of a generic function from a local file.
 // Generic functions have no value binding; bare calls resolve through
 // the import-alias maps (checker + runtimes).

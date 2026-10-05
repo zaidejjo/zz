@@ -1,3 +1,4 @@
+// features: arrays, func-call, import-alias, imports, indexing, print, selective-import, string-literal
 // E2E: cross-module `pub type` aliases (qualified + selective).
 import support.alias_shapes as shapes(Tokens)
 

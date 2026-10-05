@@ -1,3 +1,4 @@
+// features: cli-args, comparison, imports, locals, match, option-result, print, std-env, string-literal
 // E2E: std.env — args, var
 import std.env
 

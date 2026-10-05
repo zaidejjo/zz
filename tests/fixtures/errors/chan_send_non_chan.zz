@@ -1,3 +1,4 @@
+// features: error-case, func-call, imports, print, std-chan, string-literal
 // E2E-ERROR: sending on a non-channel is a static type error.
 import std.chan
 

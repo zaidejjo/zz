@@ -1,3 +1,4 @@
+// features: comparison, imports, int-arith, locals, pipe, print, std-colors, std-str, string-literal
 // E2E: std.colors — ANSI colors, styles, RGB/HEX, pipelines
 // 
 // Each feature prints its COLORED output (visible in a terminal) followed by

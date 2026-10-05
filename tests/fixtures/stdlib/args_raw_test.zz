@@ -1,3 +1,4 @@
+// features: cli-args, comparison, if-else, imports, locals, print, std-args, string-literal
 // E2E helper: prints the real process argv (used by a custom e2e test
 // that passes CLI args; the standard harness passes none).
 import std.args

@@ -1,3 +1,4 @@
+// features: dicts, elvis, imports, locals, print, std-json, string-literal
 // E2E: std.json — JSON parsing and serialization
 import std.json
 

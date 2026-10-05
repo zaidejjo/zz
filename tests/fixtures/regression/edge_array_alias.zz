@@ -1,0 +1,9 @@
+// features: arrays, indexing, locals, print, string-literal
+// E2E: edge — storing through a cloned array leaves the source intact
+// (value semantics; the native index_set detaches shared buffers).
+a := [1, 2, 3]
+a2 := a
+a2[0] = 9
+println("a0={a[0]}")
+println("a20={a2[0]}")
+println("edge_array_alias_ok")

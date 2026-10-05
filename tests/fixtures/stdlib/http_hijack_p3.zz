@@ -1,3 +1,4 @@
+// features: assert, bool-logic, break-continue, bytes, closures, comparison, func-call, if-else, imports, int-arith, locals, match, option-result, print, return, short-circuit, std-http, std-net, std-task, std-time, string-literal, string-ops, vm-only, while-loop
 // tests/fixtures/stdlib/http_hijack_p3.zz — Phase 3 WebSocket upgrade
 // 101 + RFC 6455 accept vector, same-path GET coexistence, handoff close.
 import std.http

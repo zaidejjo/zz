@@ -1,3 +1,4 @@
+// features: arrays, bitwise, comparison, float-arith, func-call, indexing, locals, print, string-literal, string-ops, structs
 // E2E: Compound assignment — all operators, targets, single evaluation
 struct Point {
     x: int,

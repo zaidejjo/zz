@@ -1,3 +1,4 @@
+// features: comparison, func-call, generics, locals, methods, print, string-literal, struct-methods, structs
 // E2E: Generic structs — declaration, inference, methods, nesting.
 struct Box<T> {
     v: T,

@@ -1,3 +1,4 @@
+// features: bool-logic, comparison, func-call, if-else, int-arith, print, return, string-literal
 // Regression: if/else branches returning call results must yield the
 // values on both engines (native dropped them to empty output).
 func g(x: int) -> int {

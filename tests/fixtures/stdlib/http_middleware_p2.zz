@@ -1,3 +1,4 @@
+// features: arrays, closures, comparison, dicts, func-call, imports, int-arith, locals, option-result, print, std-env, std-fs, std-http, string-literal, vm-only
 // tests/fixtures/stdlib/http_middleware_p2.zz — Phase 2 middleware kits
 // CORS allow/deny/preflight, secure headers, serve_dir_at scoping,
 // with_headers merge.

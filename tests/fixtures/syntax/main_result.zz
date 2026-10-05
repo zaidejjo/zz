@@ -1,3 +1,4 @@
+// features: comparison, func-call, option-result, print, string-literal
 // E2E: `func main() -> Result<T, E>` success path — Ok exits 0.
 // (ZZ spells `()` as `unit`; `Result<unit, E>` is the `Result<(), E>` shape.)
 func main() -> Result<int, str> {

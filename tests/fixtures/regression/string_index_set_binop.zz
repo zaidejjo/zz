@@ -1,3 +1,4 @@
+// features: arrays, comparison, func-call, indexing, int-arith, locals, print, string-literal, string-ops
 // Regression: `a[i] = s + t` (string concat RHS) must store the string,
 // not wrap it in zz_int (C type error). Found by v2 fuzz shapes.
 func cat(a: str, b: str) -> str {

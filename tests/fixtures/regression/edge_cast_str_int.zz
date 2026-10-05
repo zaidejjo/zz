@@ -1,0 +1,7 @@
+// features: casts, option-result, print, string-literal
+// E2E: edge — str->int casts: overflow/invalid yield none, whitespace ok.
+println(int("9999999999999999999999"))
+println(int("abc"))
+println(int("  -42 "))
+println(int("0"))
+println("edge_cast_str_int_ok")

@@ -1,3 +1,4 @@
+// features: arrays, assert, comparison, for-loop, indexing, int-arith, locals, print, ranges, string-literal, vec-push
 // Move-append elision: self-reassignment takes must preserve value
 // semantics, including the no-fuse aliasing case (`b` read twice).
 b := [10, 20]

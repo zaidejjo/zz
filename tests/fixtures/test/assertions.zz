@@ -1,3 +1,4 @@
+// features: assert, bool-logic, comparison, float-arith, func-call, int-arith, print, string-literal, zz-test
 // E2E: All assertion types work correctly
 
 @test

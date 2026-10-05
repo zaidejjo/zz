@@ -1,3 +1,4 @@
+// features: arrays, for-loop, indexing, int-arith, locals, print, ranges, slicing, string-literal
 // E2E: for-loops with non-literal range bounds (AOT parity: variable
 // start bounds used to emit unboxed int64_t into zz_value slots).
 lo := 2

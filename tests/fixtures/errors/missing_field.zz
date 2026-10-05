@@ -1,3 +1,4 @@
+// features: error-case, locals, structs
 // E2E: Missing struct field error
 struct Point {x: int, y: int}
 

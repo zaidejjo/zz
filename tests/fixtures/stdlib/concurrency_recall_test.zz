@@ -1,3 +1,4 @@
+// features: closures, comparison, for-loop, func-call, if-else, imports, int-arith, locals, print, ranges, std-chan, std-task, string-literal
 // E2E: recall — calling the same spawn-bearing function twice must give
 // each call its own captures. Regression: a parent-shape cache keyed on
 // allocation addresses served a stale frozen parent when the second

@@ -1,0 +1,9 @@
+// features: casts, imports, print, std-math
+// E2E: edge — float->int casts: truncation toward zero, INF saturation.
+import std.math
+
+println(int(math.INF))
+println(int(0.0 - math.INF))
+println(int(1.9))
+println(int(-1.9))
+println("edge_cast_float_int_ok")

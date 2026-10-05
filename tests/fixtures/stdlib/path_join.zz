@@ -1,3 +1,4 @@
+// features: arrays, func-call, imports, print, std-fs, std-path, string-literal
 // E2E: std.path lexical helpers (pure ZZ) + fs.join compatibility.
 // Host-style assertions (unix here; windows shapes are pinned by the
 // native `fs::path` unit tests, which the pure-ZZ port mirrors).

@@ -1,0 +1,7 @@
+// features: arrays, casts, indexing, print, string-literal, string-ops
+// E2E: edge — chained index store writes through to the root binding
+// (fixed: write used to drop into a temp clone on the VM).
+m := [[1, 2], [3, 4]]
+m[0][0] = 99
+println("m00=" + str(m[0][0]))
+println("edge_chained_store_ok")

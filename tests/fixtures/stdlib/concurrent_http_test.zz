@@ -1,3 +1,4 @@
+// features: closures, imports, locals, nondeterministic, print, std-http, std-task, string-literal
 import std.task
 import std.http
 

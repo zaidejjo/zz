@@ -1,3 +1,4 @@
+// features: bool-logic, destructuring, int-arith, locals, print, string-literal, tuples
 // Tuple destructuring
 (a, b) := (1, 2)
 println(a)

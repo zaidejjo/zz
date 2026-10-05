@@ -1,3 +1,4 @@
+// features: comparison, func-call, if-else, int-arith, print, recursion, string-literal
 // E2E: Function definitions, default params, named args
 func add(a: int, b: int) -> int {
     a + b

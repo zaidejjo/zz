@@ -125,13 +125,16 @@ Cross-compilation rules:
 
 | Rule | Behavior |
 |------|----------|
-| `--target` | Drops `-march=native`; Clang uses the triple's safe baseline CPU |
+| `--target` | Clang uses the triple's safe baseline CPU (no host-specific flags anywhere) |
 | `--pgo --target <foreign>` | Rejected: `Error: --pgo requires a native build target` |
 | `--static` on `apple-darwin` | Rejected: `Error: Static binaries are not supported on macOS targets` |
 | Cross link | Adds `-fuse-ld=lld`; Windows triples also link `-lws2_32` |
 
-Release builds apply `-ffast-math` (relaxed FP reassociation) for
-performance; `-p` implies consent. If no Clang provider is installed,
+All builds compile with `-fwrapv` (defined wrapping integer arithmetic)
+and `-fno-strict-aliasing`, and without `-ffast-math` or
+`-march=native`: VM and native binaries must agree bit-for-bit on
+integers and floats (see the IR spec). If no Clang provider is
+installed,
 the build (debug or release) fails after still emitting `bin/app.c` +
 build scripts so the program can be built manually on a machine with
 Clang.

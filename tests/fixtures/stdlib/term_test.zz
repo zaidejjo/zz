@@ -1,3 +1,4 @@
+// features: comparison, imports, locals, match, option-result, print, std-term, string-literal
 // E2E: std.term — raw mode, single-key reads, terminal size.
 //
 // Hermetic by construction: the e2e harness pipes stdin (closed pipe when

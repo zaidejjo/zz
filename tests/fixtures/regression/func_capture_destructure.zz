@@ -1,3 +1,4 @@
+// features: comparison, destructuring, func-call, int-arith, locals, print, string-literal, tuples
 // Regression: top-level destructured names must be visible to
 // functions on both engines (native module globals, not main-locals).
 (a, b) := (10, 20)

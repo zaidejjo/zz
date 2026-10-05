@@ -1,3 +1,4 @@
+// features: bool-logic, comparison, error-case, func-call, if-else, print, return, string-literal
 // E2E: divergent `return` must not mask a wrong-typed fall-through.
 // The `else` value path yields `str` in a `-> int` function.
 func f(c: bool) -> int {

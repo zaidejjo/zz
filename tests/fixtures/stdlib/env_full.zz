@@ -1,3 +1,4 @@
+// features: bool-logic, comparison, for-loop, func-call, if-else, imports, locals, match, option-result, print, std-env, string-literal
 // E2E: std.env — cross-platform environment, directories, OS identity.
 // Same output on VM and AOT (only deterministic projections are printed:
 // booleans, markers, and relative facts — never raw absolute paths or

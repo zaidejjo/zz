@@ -689,15 +689,23 @@ impl Lowerer {
                                     zz_frontend::ast::BinOp::BitXor => "^",
                                     _ => "+",
                                 };
-                                // Literal-zero divisor guard: a `*int` local
-                                // can't be statically proven nonzero, but a
-                                // literal zero would divide-by-zero at -O3.
+                                // Div/Rem always route through zz_binop: they can
+                                // trap (zero divisor, MIN/-1), and raw C
+                                // `/`/`%` would be UB/SIGFPE (-fwrapv does
+                                // not save division). Operands are boxed
+                                // first: scalar locals/arith emit raw C,
+                                // which zz_binop cannot take directly.
                                 if matches!(
                                     op,
                                     zz_frontend::ast::BinOp::Div | zz_frontend::ast::BinOp::Rem
-                                ) && matches!(right.as_ref(), Expr::Int { value: 0, .. })
-                                {
-                                    format!("zz_binop({cop}, {l}, {r})")
+                                ) {
+                                    let boxed_l = box_scalar_operand(left, names, &l);
+                                    let boxed_l =
+                                        self.box_struct_operand(left, boxed_l, &l, names, out);
+                                    let boxed_r = box_scalar_operand(right, names, &r);
+                                    let boxed_r =
+                                        self.box_struct_operand(right, boxed_r, &r, names, out);
+                                    format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                                 } else {
                                     format!("(int64_t)({lc} {c_op} {rc})")
                                 }
@@ -993,9 +1001,21 @@ impl Lowerer {
                 let i = self.emit_expr(index, names, out);
                 // Box a scalar index (ident/raw-arith) to a zz_value.
                 let i_boxed = self.box_index_arg(index, i, names);
+                // Hoist the read into a temp and check the error flag:
+                // OOB (and bad-receiver) reads trap instead of yielding
+                // unit (VM parity). The SROA path above only fires for
+                // statically in-bounds literals, so every dynamic read
+                // flows through this check.
                 let e = names.fresh("_idxe");
+                let tmp = names.fresh("_idxv");
                 out.push_str(&format!("    int {e} = 0;\n"));
-                format!("zz_index_get({o}, {i_boxed}, &{e})")
+                out.push_str(&format!(
+                    "    zz_value {tmp} = zz_index_get({o}, {i_boxed}, &{e});\n"
+                ));
+                out.push_str(&format!(
+                    "    if ({e}) {{ fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); }}\n"
+                ));
+                tmp
             }
             Expr::Slice {
                 obj, start, end, ..
@@ -1266,7 +1286,7 @@ impl Lowerer {
                     let key = box_scalar_operand(k, names, &raw_key);
                     let val = box_scalar_operand(v, names, &raw_val);
                     out.push_str(&format!(
-                        "    {{ int _de = 0; zz_index_set({dv}, {key}, {val}, &_de); }}\n"
+                        "    {{ int _de = 0; zz_index_set(&{dv}, {key}, {val}, &_de); }}\n"
                     ));
                 }
                 dv

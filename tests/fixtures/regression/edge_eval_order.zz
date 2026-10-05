@@ -1,0 +1,17 @@
+// features: arrays, func-call, int-arith, locals, print, string-literal, vec-push
+// E2E: evaluation order — operands left-to-right, call args left-to-right.
+// Both engines agree; pinned strict (spec records source order).
+log := []
+func rec(n: int) -> int {
+    log = vec.push(log, n)
+    n
+}
+x := rec(1) + rec(2) * rec(3)
+println("log={log}")
+println("x={x}")
+func add(a: int, b: int, c: int) -> int {
+    a + b + c
+}
+println("r={add(rec(1), rec(2), rec(3))}")
+println("log2={log}")
+println("edge_eval_order_ok")

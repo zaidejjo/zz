@@ -197,14 +197,28 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
                 fprintf(stderr, "zz error: integer division by zero\n");
                 exit(1);
             }
+            if (a.i == INT64_MIN && b.i == -1) {
+                fprintf(stderr, "zz error: integer overflow in division\n");
+                exit(1);
+            }
             return zz_int(a.i / b.i);
         case ZZOP_REM:
             if (b.i == 0) {
                 fprintf(stderr, "zz error: integer modulo by zero\n");
                 exit(1);
             }
+            if (a.i == INT64_MIN && b.i == -1) {
+                fprintf(stderr, "zz error: integer overflow in modulo\n");
+                exit(1);
+            }
             return zz_int(a.i % b.i);
         case ZZOP_POW:
+            // Integer power traps on negative exponents (VM parity);
+            // float pow handles them as reciprocals below.
+            if (b.i < 0) {
+                fprintf(stderr, "zz error: negative exponent for integer power\n");
+                exit(1);
+            }
             return zz_int((int64_t)dpow((double)a.i, (double)b.i));
         case ZZOP_EQ:
             return zz_bool(a.i == b.i);
@@ -3367,18 +3381,30 @@ int64_t zz_pg_exec_raw(uint64_t id, const char *sql, size_t len, const zz_value 
 zz_value zz_pg_query_raw(uint64_t id, const char *sql, size_t len, const zz_value *binds, size_t nbinds) ZZ_WEAK_IMPORT;
 void zz_pg_close_raw(uint64_t id) ZZ_WEAK_IMPORT;
 
-// `pg.connect(conninfo)` — URL or keyword form (the driver parses both);
-// `ZZ_DB`-NULL on failure, mirroring the SQLite open leniency.
+// `pg.connect(conninfo)` — URL or keyword form (the driver parses both).
+// Connection failures trap (VM parity: `pg.connect failed`), never a
+// NULL handle: a refused/unreachable server must fail loudly. The
+// conninfo is never printed (it may carry passwords).
 zz_value zz_pg_connect(zz_value info, int *err) {
     (void)err;
-    if (info.tag != ZZ_STR || !info.s) return (zz_value){ZZ_DB, {.db = NULL}};
-    if (!zz_pg_connect_raw) return (zz_value){ZZ_DB, {.db = NULL}};
+    if (info.tag != ZZ_STR || !info.s) {
+        fprintf(stderr, "zz error: pg.connect failed: expected a connection string\n");
+        exit(1);
+    }
+    if (!zz_pg_connect_raw) {
+        fprintf(stderr, "zz error: pg.connect failed: postgres support not linked in\n");
+        exit(1);
+    }
     uint64_t id = zz_pg_connect_raw(zz_str_cptr(info.s), info.s->len);
-    if (id == 0) return (zz_value){ZZ_DB, {.db = NULL}};
+    if (id == 0) {
+        fprintf(stderr, "zz error: pg.connect failed: connection refused or unreachable\n");
+        exit(1);
+    }
     zz_db_handle *h = (zz_db_handle *)malloc(sizeof(zz_db_handle));
     if (!h) {
         zz_pg_close_raw(id);
-        return (zz_value){ZZ_DB, {.db = NULL}};
+        fprintf(stderr, "zz: out of memory (pg handle)\n");
+        exit(1);
     }
     h->backend = ZZDB_PG;
     h->pg_id = id;
@@ -3393,11 +3419,20 @@ zz_value zz_db_open(zz_value path, int *err) {
     // handle enum below records the backend so query/exec/close
     // dispatch without re-sniffing.
     if (strncmp(p, "postgres://", 11) == 0 || strncmp(p, "postgresql://", 13) == 0) {
-        if (!zz_pg_connect_raw) return (zz_value){ZZ_DB, {.db = NULL}};
+        if (!zz_pg_connect_raw) {
+            fprintf(stderr, "zz error: pg.connect failed: postgres support not linked in\n");
+            exit(1);
+        }
         uint64_t id = zz_pg_connect_raw(p, path.s->len);
-        if (id == 0) return (zz_value){ZZ_DB, {.db = NULL}};
+        if (id == 0) {
+            fprintf(stderr, "zz error: pg.connect failed: connection refused or unreachable\n");
+            exit(1);
+        }
         zz_db_handle *h = (zz_db_handle *)malloc(sizeof(zz_db_handle));
-        if (!h) return (zz_value){ZZ_DB, {.db = NULL}};
+        if (!h) {
+            fprintf(stderr, "zz: out of memory (pg handle)\n");
+            exit(1);
+        }
         h->backend = ZZDB_PG;
         h->pg_id = id;
         return (zz_value){ZZ_DB, {.db = h}};
@@ -3586,13 +3621,13 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
                adopts the value (move convention), so the second
                insert needs its own reference. */
             zz_value alias_val = zz_clone(val);
-            zz_index_set(row, k, val, &derr);
+            zz_index_set(&row, k, val, &derr);
             char poskey[32];
             snprintf(poskey, sizeof poskey, "c%d", i);
             if (strcmp(poskey, cname) != 0) {
                 zz_value ka = zz_str_owned(copy_cstr(poskey, strlen(poskey)));
                 int aerr2 = 0;
-                zz_index_set(row, ka, alias_val, &aerr2);
+                zz_index_set(&row, ka, alias_val, &aerr2);
                 (void)aerr2;
             } else {
                 zz_release(&alias_val);
@@ -6037,6 +6072,19 @@ int zz_run(void) {
     return main_err;
 }
 
+// Map `main()`'s return value to a process exit code: `.err(e)` prints
+// `e` (Display form, like the VM) to stderr and exits 1; anything else
+// (`.ok(v)`, unit, …) exits 0.
+int zz_main_result_code(zz_value r) {
+    if (r.tag == ZZ_RESULT_ERR && r.payload) {
+        char *msg = zz_value_to_display_string(r.payload);
+        fprintf(stderr, "%s\n", msg ? msg : "<error>");
+        free(msg);
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     zz_g_argc = argc;
     zz_g_argv = argv;
@@ -6143,7 +6191,10 @@ zz_value zz_int_cast(zz_value v, int *err) {
         case ZZ_FLOAT: {
             double f = v.f;
             int64_t n;
-            if (f != f) n = 0; // NaN saturates to 0 (Rust `as` semantics)
+            // Explicit isnan: never folds, regardless of FP flags
+            // (-ffast-math is gone, but the guard must not depend on that).
+            // NaN saturates to 0, infinities to the ends (matches the VM).
+            if (isnan(f)) n = 0;
             else if (f >= (double)INT64_MAX) n = INT64_MAX;
             else if (f <= (double)INT64_MIN) n = INT64_MIN;
             else n = (int64_t)f;

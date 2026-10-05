@@ -1,0 +1,5 @@
+// features: float-arith, print
+// E2E: edge — NaN displays as `NaN` on all legs (canonical float
+// formatting via the Rust core, spec §4).
+println(0.0 / 0.0)
+println("edge_float_nan_display_ok")

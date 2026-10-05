@@ -1,3 +1,4 @@
+// features: arrays, imports, indexing, locals, print, std-str, string-literal, string-ops
 // tests/fixtures/stdlib/str_extended_test.zz — extended str E2E test
 import std.str
 

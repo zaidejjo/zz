@@ -1,3 +1,4 @@
+// features: closures, for-loop, func-call, imports, int-arith, locals, print, ranges, std-task, string-literal
 // E2E: join chain — 20 nested spawn+join links complete in order.
 // Guards worker helping (private-deque drain) without dependency
 // inversion: every parked wait stays broadcast-revisited or

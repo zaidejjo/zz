@@ -1,3 +1,4 @@
+// features: closures, for-loop, func-call, imports, int-arith, locals, print, ranges, std-chan, std-task, string-literal
 // E2E: variable loop bound — `0..n` trips exactly n times.
 import std.task
 import std.chan

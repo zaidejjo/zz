@@ -1,3 +1,4 @@
+// features: assert, bool-logic, comparison, float-arith, func-call, imports, int-arith, locals, print, std-math, string-literal, zz-test
 // E2E: Basic @test assertions — assert, assert_eq, assert_ne, assert_approx_eq
 import std.math
 

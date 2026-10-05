@@ -41,6 +41,13 @@ pub struct LoweredC {
     /// archive (`-u`), since the C dispatcher references them weakly and
     /// weak refs alone never pull archive members.
     pub needs_pg_link: bool,
+    /// True when any typed node in the program can hold a float: float
+    /// Display (`println`, interpolation, `str()`) routes through the
+    /// Rust core (`zz_float_format_raw`), so the link must force-extract
+    /// that object (`-u`). The type scan is sound — there is no `Any` /
+    /// dynamic type, and JSON values print through their own (already
+    /// agreeing) stringify path, never float Display.
+    pub needs_float_fmt: bool,
     /// True when reachable natives lower to curl-backed C client calls:
     /// the link must add `-lcurl`. Server/route-only programs skip it.
     pub needs_curl: bool,
@@ -49,6 +56,30 @@ pub struct LoweredC {
     /// (previously every binary carried the dependency via the
     /// single-TU archive + `--as-needed` ordering).
     pub needs_sqlite: bool,
+}
+
+/// True when a resolved type can carry an `f64` to a Display site.
+/// Recursive over every compound shape (no `Any` exists, so a whole-
+/// program scan of `TypedProgram` types is a sound float-format gate).
+fn type_has_float(t: &zz_checker::Type) -> bool {
+    match t {
+        zz_checker::Type::Float => true,
+        zz_checker::Type::Tuple(ts) | zz_checker::Type::Union(ts) => ts.iter().any(type_has_float),
+        zz_checker::Type::Option(b) | zz_checker::Type::Array(b) | zz_checker::Type::Range(b) => {
+            type_has_float(b)
+        }
+        zz_checker::Type::Result(a, b) | zz_checker::Type::Dict(a, b) => {
+            type_has_float(a) || type_has_float(b)
+        }
+        zz_checker::Type::Func(params, ret) => {
+            params.iter().any(type_has_float) || type_has_float(ret)
+        }
+        zz_checker::Type::Struct(_, args) | zz_checker::Type::Enum(_, args) => {
+            args.iter().any(type_has_float)
+        }
+        zz_checker::Type::Ptr { inner, .. } => type_has_float(inner),
+        _ => false,
+    }
 }
 
 /// Mangle a zz qualified name to a C identifier.
@@ -309,9 +340,16 @@ impl Lowerer {
                         }
                     }
                     let val = self.emit_expr(value, &mut names, &mut out);
+                    // Raw-scalar detection: cast-prefixed expressions plus
+                    // bare scalar globals (`zz_global_x` for int64_t /
+                    // double / bool globals emit raw — no cast prefix —
+                    // and must not gain a `.i` / `.f` / `.b` suffix).
                     let val_is_unboxed = val.starts_with("(int64_t)(")
                         || val.starts_with("(double)(")
-                        || val.starts_with("(bool)(");
+                        || val.starts_with("(bool)(")
+                        || names.globals.values().any(|(gid, gtype)| {
+                            val == *gid && matches!(gtype.as_str(), "int64_t" | "double" | "bool")
+                        });
                     let final_val = match gtype.as_str() {
                         "int64_t" if !val_is_unboxed => format!("({val}).i"),
                         "double" if !val_is_unboxed => format!("({val}).f"),
@@ -382,8 +420,9 @@ impl Lowerer {
         }
 
         let main_decl = if self.reachable_funcs.contains(&self.entry_main) {
-            // main exists: call its stub from zz_call_main.
-            "zz_call_into_main();".to_string()
+            // main exists: its return value decides the exit code
+            // (`zz_main_result_code`: `.err` prints + exits 1).
+            "return zz_call_into_main();".to_string()
         } else {
             String::new()
         };
@@ -509,8 +548,14 @@ impl Lowerer {
         } else {
             crate::RUNTIME_C
         };
+        let main_tail = if self.reachable_funcs.contains(&self.entry_main) {
+            // main() exists: its stub returns the exit code already.
+            String::new()
+        } else {
+            "    return 0;".to_string()
+        };
         let source = format!(
-            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals ----\n{globals_decl}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n{body}}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
+            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals ----\n{globals_decl}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n{body}}}\n\nint zz_call_main(void) {{\n    {main_decl}\n{main_tail}\n}}\n",
             runtime_h = crate::RUNTIME_H,
             runtime_c = runtime_c,
             struct_preamble = struct_preamble,
@@ -545,11 +590,11 @@ impl Lowerer {
                 .unwrap_or(false);
             if takes_argv {
                 format!(
-                    "\nstatic void zz_call_into_main(void);\nstatic void zz_call_into_main(void) {{ int _e = 0; zz_value _cli = zz_env_args(zz_unit(), &_e); zz_value _r = {m}(&_cli, 1); (void)_r; }}\n"
+                    "\nstatic int zz_call_into_main(void);\nstatic int zz_call_into_main(void) {{ int _e = 0; zz_value _cli = zz_env_args(zz_unit(), &_e); zz_value _r = {m}(&_cli, 1); return zz_main_result_code(_r); }}\n"
                 )
             } else {
                 format!(
-                    "\nstatic void zz_call_into_main(void);\nstatic void zz_call_into_main(void) {{ zz_value _r = {m}(NULL, 0); (void)_r; }}\n"
+                    "\nstatic int zz_call_into_main(void);\nstatic int zz_call_into_main(void) {{ zz_value _r = {m}(NULL, 0); return zz_main_result_code(_r); }}\n"
                 )
             }
         } else {
@@ -566,6 +611,11 @@ impl Lowerer {
             source,
             needs_native_rt,
             needs_pg_link: crate::ffi::needs_pg_link(&expanded_natives),
+            needs_float_fmt: self.tp.types.values().any(type_has_float)
+                || self.tp.bindings.values().any(type_has_float)
+                || self.tp.funcs.values().any(|s| {
+                    s.params.iter().any(|(_, ty)| type_has_float(ty)) || type_has_float(&s.ret)
+                }),
             needs_curl: crate::ffi::needs_curl_link(&expanded_natives),
             needs_sqlite: crate::ffi::needs_sqlite_link(&expanded_natives),
         }

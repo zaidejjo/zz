@@ -61,9 +61,24 @@ fn undefined_variable_errors() {
 }
 
 #[test]
-fn integer_overflow_errors() {
-    let err = eval_src("9223372036854775807 + 1").unwrap_err();
-    assert_eq!(err.message, "integer overflow in addition");
+fn integer_arithmetic_wraps() {
+    // IR spec: + - * wrap in every profile, never trap.
+    assert_eq!(
+        eval_src("9223372036854775807 + 1").unwrap(),
+        Value::Int(-9223372036854775808)
+    );
+    assert_eq!(eval_src("9223372036854775807 * 2").unwrap(), Value::Int(-2));
+    assert_eq!(
+        eval_src("-9223372036854775807 - 2").unwrap(),
+        Value::Int(9223372036854775807)
+    );
+    assert_eq!(
+        eval_src("0 - 9223372036854775807 - 2").unwrap(),
+        Value::Int(9223372036854775807)
+    );
+    let min = eval_src("-9223372036854775807 - 1").unwrap();
+    assert_eq!(min, Value::Int(-9223372036854775808));
+    assert_eq!(eval_src("-(-9223372036854775808)").unwrap(), min);
 }
 
 #[test]

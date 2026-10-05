@@ -1,3 +1,4 @@
+// features: comparison, if-else, locals, match, print, string-literal
 // Match guards
 x := 10
 match x {

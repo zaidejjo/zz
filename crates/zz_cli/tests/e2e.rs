@@ -388,6 +388,125 @@ e2e_success_test!(
     "regression",
     "fuzz_smoke_11.zz"
 );
+// v4 fuzzer shapes (fixed seeds; all strict on both engines).
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_12,
+    "regression",
+    "fuzz_smoke_12.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_13,
+    "regression",
+    "fuzz_smoke_13.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_14,
+    "regression",
+    "fuzz_smoke_14.zz"
+);
+// M0 edge corpus: strict-parity probes (both engines agree today).
+e2e_success_test!(
+    e2e_regression_edge_shift_mask,
+    "regression",
+    "edge_shift_mask.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_cast_float_int,
+    "regression",
+    "edge_cast_float_int.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_cast_str_int,
+    "regression",
+    "edge_cast_str_int.zz"
+);
+// M0 edge corpus: known-divergence probes (VM vs native differ; the
+// parity harness tracks them as known failures, see M0 report).
+e2e_success_test!(
+    e2e_regression_edge_chained_store,
+    "regression",
+    "edge_chained_store.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_float_nan_display,
+    "regression",
+    "edge_float_nan_display.zz"
+);
+// Canonical float formatting (spec §4): exact-string pins on both legs.
+e2e_success_test!(
+    e2e_regression_edge_float_format,
+    "regression",
+    "edge_float_format.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_slice_clamp,
+    "regression",
+    "edge_slice_clamp.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_cast_float_nan,
+    "regression",
+    "edge_cast_float_nan.zz"
+);
+// Wrap-spec PR: overflow now wraps on all legs (was VM-trap errors).
+e2e_success_test!(
+    e2e_regression_edge_overflow_add,
+    "regression",
+    "edge_int_overflow_add.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_overflow_mul,
+    "regression",
+    "edge_int_overflow_mul.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_neg_min,
+    "regression",
+    "edge_int_neg_min.zz"
+);
+// Write-through family (value semantics for stores through clones,
+// nested bases, temps, and struct paths).
+e2e_success_test!(
+    e2e_regression_edge_array_alias,
+    "regression",
+    "edge_array_alias.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_dict_alias,
+    "regression",
+    "edge_dict_alias.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_temp_index_drop,
+    "regression",
+    "edge_temp_index_drop.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_field_index_store,
+    "regression",
+    "edge_field_index_store.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_struct_path_store,
+    "regression",
+    "edge_struct_path_store.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_negative_index,
+    "regression",
+    "edge_negative_index.zz"
+);
+// Evaluation order probes (call-order audit close-out).
+e2e_success_test!(
+    e2e_regression_edge_eval_order,
+    "regression",
+    "edge_eval_order.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_compound_index_eval,
+    "regression",
+    "edge_compound_index_eval.zz"
+);
 e2e_success_test!(e2e_syntax_main_entrypoint, "syntax", "main_entrypoint.zz");
 e2e_success_test!(e2e_syntax_match_guards, "syntax", "match_guards.zz");
 e2e_success_test!(
@@ -732,6 +851,15 @@ e2e_error_test!(e2e_err_main_result_err, "main_result_err.zz");
 e2e_error_test!(e2e_err_try_double_unwrap, "try_double_unwrap.zz");
 e2e_error_test!(e2e_err_spawn_non_closure, "spawn_non_closure.zz");
 e2e_error_test!(e2e_err_chan_send_non_chan, "chan_send_non_chan.zz");
+// M0 edge corpus: both engines fail (messages differ; error parity only
+// requires failure on both sides).
+e2e_error_test!(e2e_err_edge_neg_shift, "edge_neg_shift_err.zz");
+e2e_error_test!(e2e_err_edge_rem_zero, "edge_rem_zero_err.zz");
+// Edge error probes whose fixes land in later PRs (still VM-fail).
+e2e_error_test!(e2e_err_edge_min_div_neg1, "edge_int_min_div_neg1.zz");
+e2e_error_test!(e2e_err_edge_min_rem_neg1, "edge_int_min_rem_neg1.zz");
+e2e_error_test!(e2e_err_edge_pow_neg, "edge_int_pow_neg.zz");
+e2e_error_test!(e2e_err_edge_index_oob, "edge_index_oob.zz");
 
 // ---------------------------------------------------------------------------
 // Eval tests: inline code via `zz eval`

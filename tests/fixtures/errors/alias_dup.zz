@@ -1,3 +1,4 @@
+// features: aliases, arrays, error-case, func-call, print, string-literal
 // ERROR: duplicate type alias definitions must report.
 type Tokens = [str]
 type Tokens = [int]

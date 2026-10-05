@@ -638,7 +638,7 @@ impl Vm {
                     let idx_src = base + *src as usize;
                     match (&self.stack[idx_dst], &self.stack[idx_src]) {
                         (Value::Int(a), Value::Int(b)) => {
-                            self.stack[idx_dst] = Value::Int(*a + *b);
+                            self.stack[idx_dst] = Value::Int(a.wrapping_add(*b));
                         }
                         // Slow path: fall back to generic add semantics.
                         _ => {
@@ -653,7 +653,7 @@ impl Vm {
                     let base = self.frames.last().unwrap().stack_base;
                     let idx = base + *slot as usize;
                     match &self.stack[idx] {
-                        Value::Int(a) => self.stack[idx] = Value::Int(*a + 1),
+                        Value::Int(a) => self.stack[idx] = Value::Int(a.wrapping_add(1)),
                         _ => {
                             let v = self.stack[idx].clone();
                             let span = Span::default();
@@ -667,7 +667,7 @@ impl Vm {
                     let base = self.frames.last().unwrap().stack_base;
                     let idx = base + *dst as usize;
                     match &self.stack[idx] {
-                        Value::Int(a) => self.stack[idx] = Value::Int(*a + *imm),
+                        Value::Int(a) => self.stack[idx] = Value::Int(a.wrapping_add(*imm)),
                         _ => {
                             let v = self.stack[idx].clone();
                             let span = Span::default();
@@ -849,18 +849,9 @@ impl Vm {
                     let r = self.stack.pop().unwrap();
                     let l = self.stack.pop().unwrap();
                     match (&l, &r) {
+                        // Wrapping add in every profile (IR spec).
                         (Value::Int(a), Value::Int(b)) => {
-                            #[cfg(not(debug_assertions))]
-                            {
-                                self.stack.push(Value::Int(a.wrapping_add(*b)));
-                            }
-                            #[cfg(debug_assertions)]
-                            {
-                                let v = a.checked_add(*b).ok_or_else(|| {
-                                    EvalError::new("integer overflow in addition", *span)
-                                })?;
-                                self.stack.push(Value::Int(v));
-                            }
+                            self.stack.push(Value::Int(a.wrapping_add(*b)));
                         }
                         _ => {
                             let v = eval_binary(zz_frontend::ast::BinOp::Add, l, r, *span)?;
@@ -872,18 +863,9 @@ impl Vm {
                     let r = self.stack.pop().unwrap();
                     let l = self.stack.pop().unwrap();
                     match (&l, &r) {
+                        // Wrapping sub in every profile (IR spec).
                         (Value::Int(a), Value::Int(b)) => {
-                            #[cfg(not(debug_assertions))]
-                            {
-                                self.stack.push(Value::Int(a.wrapping_sub(*b)));
-                            }
-                            #[cfg(debug_assertions)]
-                            {
-                                let v = a.checked_sub(*b).ok_or_else(|| {
-                                    EvalError::new("integer overflow in subtraction", *span)
-                                })?;
-                                self.stack.push(Value::Int(v));
-                            }
+                            self.stack.push(Value::Int(a.wrapping_sub(*b)));
                         }
                         _ => {
                             let v = eval_binary(zz_frontend::ast::BinOp::Sub, l, r, *span)?;
@@ -895,18 +877,9 @@ impl Vm {
                     let r = self.stack.pop().unwrap();
                     let l = self.stack.pop().unwrap();
                     match (&l, &r) {
+                        // Wrapping mul in every profile (IR spec).
                         (Value::Int(a), Value::Int(b)) => {
-                            #[cfg(not(debug_assertions))]
-                            {
-                                self.stack.push(Value::Int(a.wrapping_mul(*b)));
-                            }
-                            #[cfg(debug_assertions)]
-                            {
-                                let v = a.checked_mul(*b).ok_or_else(|| {
-                                    EvalError::new("integer overflow in multiplication", *span)
-                                })?;
-                                self.stack.push(Value::Int(v));
-                            }
+                            self.stack.push(Value::Int(a.wrapping_mul(*b)));
                         }
                         _ => {
                             let v = eval_binary(zz_frontend::ast::BinOp::Mul, l, r, *span)?;
@@ -922,17 +895,12 @@ impl Vm {
                             return Err(EvalError::new("division by zero", *span));
                         }
                         (Value::Int(a), Value::Int(b)) => {
-                            #[cfg(not(debug_assertions))]
-                            {
-                                self.stack.push(Value::Int(a.wrapping_div(*b)));
+                            // MIN/-1 traps in every profile (IR spec);
+                            // zero is rejected above.
+                            if *a == i64::MIN && *b == -1 {
+                                return Err(EvalError::new("integer overflow in division", *span));
                             }
-                            #[cfg(debug_assertions)]
-                            {
-                                let v = a.checked_div(*b).ok_or_else(|| {
-                                    EvalError::new("integer overflow in division", *span)
-                                })?;
-                                self.stack.push(Value::Int(v));
-                            }
+                            self.stack.push(Value::Int(a.wrapping_div(*b)));
                         }
                         _ => {
                             let v = eval_binary(zz_frontend::ast::BinOp::Div, l, r, *span)?;
@@ -948,17 +916,12 @@ impl Vm {
                             return Err(EvalError::new("modulo by zero", *span));
                         }
                         (Value::Int(a), Value::Int(b)) => {
-                            #[cfg(not(debug_assertions))]
-                            {
-                                self.stack.push(Value::Int(a.wrapping_rem(*b)));
+                            // MIN%-1 traps in every profile (IR spec);
+                            // zero is rejected above.
+                            if *a == i64::MIN && *b == -1 {
+                                return Err(EvalError::new("integer overflow in modulo", *span));
                             }
-                            #[cfg(debug_assertions)]
-                            {
-                                let v = a.checked_rem(*b).ok_or_else(|| {
-                                    EvalError::new("integer overflow in modulo", *span)
-                                })?;
-                                self.stack.push(Value::Int(v));
-                            }
+                            self.stack.push(Value::Int(a.wrapping_rem(*b)));
                         }
                         _ => {
                             let v = eval_binary(zz_frontend::ast::BinOp::Rem, l, r, *span)?;
@@ -969,18 +932,9 @@ impl Vm {
                 Op::IntNeg(span) => {
                     let v = self.stack.pop().unwrap();
                     match &v {
+                        // Wrapping negation in every profile (IR spec).
                         Value::Int(a) => {
-                            #[cfg(not(debug_assertions))]
-                            {
-                                self.stack.push(Value::Int(a.wrapping_neg()));
-                            }
-                            #[cfg(debug_assertions)]
-                            {
-                                let r = a.checked_neg().ok_or_else(|| {
-                                    EvalError::new("integer overflow in negation", *span)
-                                })?;
-                                self.stack.push(Value::Int(r));
-                            }
+                            self.stack.push(Value::Int(a.wrapping_neg()));
                         }
                         _ => {
                             let v = eval_unary(zz_frontend::ast::UnOp::Neg, v, *span)?;
@@ -1144,7 +1098,7 @@ impl Vm {
                                 let end = r.end;
                                 let finished = if step > 0 { i >= end } else { i <= end };
                                 iter_done = finished;
-                                next_idx = Value::Int(i + step);
+                                next_idx = Value::Int(i.wrapping_add(step));
                                 push_val = Value::Int(i);
                                 push_val2 = None;
                             }
@@ -1157,7 +1111,7 @@ impl Vm {
                                     push_val2 = None;
                                 } else {
                                     iter_done = false;
-                                    next_idx = Value::Int(i + 1);
+                                    next_idx = Value::Int(i.wrapping_add(1));
                                     let item = arr[i as usize].clone();
                                     if num_vars == 2 {
                                         // `for i, x in xs.enumerate()` —
@@ -1199,7 +1153,7 @@ impl Vm {
                                     push_val = Value::Unit;
                                 } else {
                                     iter_done = false;
-                                    next_idx = Value::Int(i + 1);
+                                    next_idx = Value::Int(i.wrapping_add(1));
                                     push_val = Value::Int(b.as_slice()[i as usize] as i64);
                                 }
                                 push_val2 = None;
@@ -1213,7 +1167,7 @@ impl Vm {
                                     push_val2 = None;
                                 } else {
                                     iter_done = false;
-                                    next_idx = Value::Int(i as i64 + 1);
+                                    next_idx = Value::Int((i as i64).wrapping_add(1));
                                     push_val = pairs[i].0.clone();
                                     if num_vars == 2 {
                                         push_val2 = Some(pairs[i].1.clone());

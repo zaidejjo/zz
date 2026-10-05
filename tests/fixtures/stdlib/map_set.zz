@@ -1,3 +1,4 @@
+// features: arrays, dicts, func-call, imports, locals, print, std-map, string-literal
 // E2E: std.map + std.set pure-ZZ helpers.
 import std.map
 import std.set

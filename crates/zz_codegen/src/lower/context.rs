@@ -1910,6 +1910,15 @@ pub(crate) fn emitted_is_raw_scalar(emitted: &str, names: &NameCtx, ident: Optio
     {
         return true;
     }
+    // Bare scalar globals emit raw (`zz_global_*` for int64_t / double /
+    // bool globals) with no cast prefix — and callers don't always pass
+    // the source ident (function-body values may arrive wrapped), so
+    // match the emitted C id against the globals table directly.
+    if names.globals.values().any(|(gid, gtype)| {
+        emitted == *gid && matches!(gtype.as_str(), "int64_t" | "double" | "bool")
+    }) {
+        return true;
+    }
     let mut candidates = Vec::new();
     if let Some(name) = ident {
         candidates.push(name);

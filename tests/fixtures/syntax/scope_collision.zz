@@ -1,3 +1,4 @@
+// features: bool-logic, import-alias, imports, locals, print, string-literal
 import support.scope_help as hxx
     v :=  true
 println(hxx.hval())

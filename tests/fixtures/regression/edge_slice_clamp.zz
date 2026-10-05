@@ -1,0 +1,6 @@
+// features: arrays, indexing, print, slicing, string-literal
+// E2E: edge — out-of-range slice end clamps (both engines).
+a := [1, 2, 3]
+println(a[1:10])
+println(a[0:3])
+println("edge_slice_clamp_ok")
