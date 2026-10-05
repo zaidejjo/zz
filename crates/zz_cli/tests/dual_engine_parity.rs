@@ -295,12 +295,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "struct_embedding" => {
             Some("C codegen: global unboxed struct passed raw (zz_struct_*) to display builtins (println/fmt/str_cast) instead of its debug_string; verified pre-existing on origin/dev without the method-dispatch fix")
         }
-        "local_wildcard" => {
-            Some("C codegen: imported scalar global unboxed twice (`(zz_global_PI).i` on int64_t)")
-        }
-        "scalar_global_copy" => {
-            Some("C codegen: top-level int global copied into another global unboxed twice (`(zz_global_v1).i` on int64_t)")
-        }
 
         // --- Output differences (native runs but output differs) ---
         "edge_float_nan_display" => Some(
@@ -727,7 +721,7 @@ parity_strict!(
     "syntax",
     "for_annotated_decl.zz"
 );
-parity_known_failure!(
+parity_strict!(
     parity_regression_scalar_global_copy,
     "regression",
     "scalar_global_copy.zz"
@@ -1621,29 +1615,6 @@ fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
                 );
             }
         }
-        // Alias-model divergences: VM legs agree with each other (value
-        // semantics); each native leg stays diverged — either by failing
-        // (scalar_global_copy does not even compile) or by printing
-        // different output. M1 value model must decide (copy vs reference).
-        "scalar_global_copy" => {
-            assert!(
-                parity_match(&q.vm_dbg, &q.vm_rel),
-                "VM legs differ (profile-dependent copy?):\n{}",
-                fmt_quad(file, q)
-            );
-            if natives {
-                for (name, leg) in [
-                    ("nat_dev", q.nat_dev.as_ref().unwrap()),
-                    ("nat_rel", q.nat_rel.as_ref().unwrap()),
-                ] {
-                    assert!(
-                        leg.0 != 0 || !parity_match(&q.vm_dbg, leg),
-                        "FIXED? {name} now matches VM:\n{}",
-                        fmt_quad(file, q)
-                    );
-                }
-            }
-        }
         other => panic!("quad has no documented split for {other} — add AllAgree or an arm"),
     }
 }
@@ -1651,10 +1622,7 @@ fn assert_quad_split(file: &Path, stem: &str, q: &QuadLegs) {
 /// Stems with a documented quad split (anything else in scope must agree
 /// on all legs, or fail on all legs for `errors/`).
 fn quad_split_stem(stem: &str) -> bool {
-    matches!(
-        stem,
-        "edge_float_nan_display" | "scalar_global_copy" | "move_append_struct_copy"
-    )
+    matches!(stem, "edge_float_nan_display")
 }
 
 /// Sorted `.zz` files directly under `dir` (non-recursive).

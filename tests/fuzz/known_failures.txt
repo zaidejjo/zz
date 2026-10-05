@@ -21,7 +21,7 @@
 # Status: pre-existing; covered by the `destructuring` known-failure entry
 # in dual_engine_parity.rs.
 
-## CLASS 2: scalar-global copy double-unbox
+## CLASS 2 (FIXED — must stay empty): scalar-global copy double-unbox
 # Signature: member reference base type 'int64_t' (aka 'long') is not a
 #   structure or union ... (zz_global_<file>__<var>).i
 # Copying one top-level int global into another emits a second `.i`
@@ -30,8 +30,10 @@
 #   v1 := 13
 #   v2 := v1
 #   println(v2)
-# Status: pre-existing; covered by the `scalar_global_copy`
-# known-failure entry in dual_engine_parity.rs.
+# Status: FIXED — raw scalar globals no longer gain a second `.i`
+# extraction (bare `zz_global_*` names with scalar types are recognized
+# as already-unboxed). Covered strict by `scalar_global_copy` and
+# `local_wildcard` parity tests; this class must stay empty.
 
 ## CLASS 3 (FIXED — must stay empty): block-scoped rebinding
 # Was: use of undeclared identifier 'vN' — a shadowing re-declaration

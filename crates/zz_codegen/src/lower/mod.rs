@@ -309,9 +309,16 @@ impl Lowerer {
                         }
                     }
                     let val = self.emit_expr(value, &mut names, &mut out);
+                    // Raw-scalar detection: cast-prefixed expressions plus
+                    // bare scalar globals (`zz_global_x` for int64_t /
+                    // double / bool globals emit raw — no cast prefix —
+                    // and must not gain a `.i` / `.f` / `.b` suffix).
                     let val_is_unboxed = val.starts_with("(int64_t)(")
                         || val.starts_with("(double)(")
-                        || val.starts_with("(bool)(");
+                        || val.starts_with("(bool)(")
+                        || names.globals.values().any(|(gid, gtype)| {
+                            val == *gid && matches!(gtype.as_str(), "int64_t" | "double" | "bool")
+                        });
                     let final_val = match gtype.as_str() {
                         "int64_t" if !val_is_unboxed => format!("({val}).i"),
                         "double" if !val_is_unboxed => format!("({val}).f"),

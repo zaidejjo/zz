@@ -1,4 +1,4 @@
-// features: imports, known-divergence, locals, print, selective-import, string-literal, wildcard-import
+// features: imports, locals, print, selective-import, string-literal, wildcard-import
 // E2E: wildcard import from local file — all pub symbols available directly
 import helpers.math_utils(*)
 

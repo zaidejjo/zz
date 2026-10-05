@@ -1,7 +1,6 @@
-// features: known-divergence, locals, print, string-literal
-// Known native limitation: copying one top-level int global into
-// another emits a second `.i` extraction on the already-unboxed global
-// (see tests/fuzz/known_failures.txt, class 2). VM prints 13.
+// features: locals, print, string-literal
+// Top-level int global copied into another: the use stays raw, no
+// second `.i` extraction (fixed native codegen bug).
 v1 := 13
 v2 := v1
 println(v2)
