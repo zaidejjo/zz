@@ -37,3 +37,5 @@ bench/performance_check/RESULTS.md
 # AUR render output (local only, CI regenerates per release)
 packaging/aur/out/
 packaging/aur/tmp/
+
+tests/fuzz/__pycache__/
