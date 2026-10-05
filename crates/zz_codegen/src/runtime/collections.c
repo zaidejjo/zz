@@ -778,8 +778,38 @@ static int zz_embedded_match(const char *fname, const zz_value *slot) {
     return strcmp(base, fname) == 0;
 }
 
+// Detach one owner's interest from a shared struct header: when
+// `o->refs > 1`, move this value onto a private header whose slots hold
+// fresh shares (`zz_clone` bumps each field buffer exactly once, making
+// the previously undercounted clone-shares exact). The old header keeps
+// its remaining owners untouched. Uniquely-owned headers (refs == 1)
+// are returned as-is; non-objects are ignored.
+static void zz_object_detach(zz_value *obj) {
+    if (!obj || obj->tag != ZZ_OBJECT || !obj->obj) return;
+    zz_object *o = obj->obj;
+    if (o->refs <= 1) return;
+    zz_object *fresh =
+        (zz_object *)malloc(sizeof(zz_object) + o->len * 2 * sizeof(zz_value));
+    if (!fresh) return; // OOM: keep sharing (old behavior) rather than crash
+    fresh->refs = 1;
+    fresh->type_name = o->type_name;
+    fresh->len = o->len;
+    for (size_t i = 0; i < o->len * 2; i++) {
+        fresh->fields[i] = zz_clone(o->fields[i]);
+    }
+    o->refs--;
+    obj->obj = fresh;
+}
+
 static int zz_object_set_depth(zz_value *obj, const char *name, zz_value val, int depth) {
     if (obj->tag != ZZ_OBJECT || !obj->obj) return 0;
+    // Value semantics: a field write through a shared header must not
+    // leak into co-owners (`t := s; t.f = v` leaves `s` untouched).
+    // Clones bump only the header, so detach first: transfer this
+    // owner's interest into a private header (fresh per-field shares),
+    // leaving co-owners with their own intact view. Descends after
+    // detaching, so embedded children detach level by level too.
+    zz_object_detach(obj);
     zz_object *o = obj->obj;
     for (size_t i = 0; i < o->len; i++) {
         zz_value *fname = &o->fields[i * 2];
@@ -1127,21 +1157,13 @@ void zz_object_push_field_take(zz_value *obj, const char *field, zz_value item, 
         for (size_t i = 0; i < o->len; i++) {
             zz_value *fname = &o->fields[i * 2];
             if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), field) == 0) {
-                // In place only when the field buffer is uniquely owned.
-                // Note: struct clones (`zz_clone`/`zz_retain_object`) bump
-                // only the object header, never field buffers, while
-                // `zz_release_object` frees them — so a cloned struct can
-                // share a field array at `refs == 1`. Every OTHER share
-                // path (field getters, dups, retaining stores) bumps the
-                // buffer itself, and the generic path below writes through
-                // the shared object either way, so gating on the buffer
-                // counter alone is observably equivalent to the generic
-                // path here while still covering the live-getter case.
-                // A deep-bump retain (or COW field write) would make the
-                // counter exact; tracked as a follow-up (see the
-                // move_append_struct_copy known-failure).
+                // In place only when uniquely owned end to end: the field
+                // buffer counter alone is NOT exact (struct clones share
+                // field buffers without bumping them), so the header must
+                // be unshared too. Otherwise the generic get+push+set path
+                // below runs, and the set detaches (copy-on-write header).
                 zz_value *slot = &o->fields[i * 2 + 1];
-                if (slot->tag == ZZ_ARRAY && slot->arr
+                if (o->refs == 1 && slot->tag == ZZ_ARRAY && slot->arr
                     && slot->arr->refs == 1) {
                     zz_array_push(slot->arr, item);
                     return;
@@ -1149,8 +1171,23 @@ void zz_object_push_field_take(zz_value *obj, const char *field, zz_value item, 
                 zz_value cur = zz_object_get_field(obj, field);
                 zz_value n = zz_vec_push(cur, item, err);
                 zz_release(&cur);
-                zz_release(slot);
-                *slot = n;
+                // The slot may sit in a shared header: detach first (this
+                // reseats obj->obj), then re-lookup, release, and adopt.
+                zz_object_detach(obj);
+                zz_object *fresh = obj->obj;
+                for (size_t j = 0; j < fresh->len; j++) {
+                    zz_value *fname2 = &fresh->fields[j * 2];
+                    if (fname2->tag == ZZ_STR
+                        && strcmp(zz_str_cptr(fname2->s), field) == 0) {
+                        zz_value *slot2 = &fresh->fields[j * 2 + 1];
+                        zz_release(slot2);
+                        *slot2 = n;
+                        return;
+                    }
+                }
+                // Unreachable: detach preserves shape. Generic set as the
+                // backstop (detaches again, harmlessly).
+                zz_object_set_field(obj, field, n);
                 return;
             }
         }
