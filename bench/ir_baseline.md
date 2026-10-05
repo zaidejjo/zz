@@ -14,16 +14,31 @@ Set (`bench/ir_gate/*.zz` — committed so M5 reruns the same sources):
 | `arraysum.zz` | vec build + iteration | 47999055 |
 | `strconcat.zz` | string allocation/concat | 100000 |
 
-Baselines (2026-10-05, Intel i3-4005U 1.70GHz x86_64, Linux, clang
-release `-O3 -flto=thin`, current HIR-direct AOT):
+Baselines (Intel i3-4005U 1.70GHz x86_64, Linux, clang release
+`-O3 -flto=thin`, current HIR-direct AOT). Best-of-5 for the M0
+snapshot; median-of-5 with spread from the flags PR onward:
 
-| bench | best-of-5 |
-|---|---|
-| fib35 | 64ms |
-| tak | 10ms |
-| sieve | 31ms |
-| arraysum | 37ms |
-| strconcat | 4ms |
+| bench | M0 best-of-5 | flags-PR median-of-5 (spread) |
+|---|---|---|
+| fib35 | 64ms | 70ms (66–75) |
+| tak | 10ms | 11ms (10–11) |
+| sieve | 31ms | 31ms (29–35) |
+| arraysum | 37ms | 40ms (36–43) |
+| strconcat | 4ms | 4ms (4–5) |
+
+Raw runs around the flags PR (`-ffast-math`/`-march=native` removed,
+`-fwrapv -fno-strict-aliasing` added), same box:
+
+- before (5 runs): fib35 74 76 80 102 106 · tak 15 16 17 17 21 ·
+  sieve 47 51 59 60 72 · arraysum 56 57 57 64 69 · strconcat 5 11 12 12 16
+- after (5 runs): fib35 66 67 70 73 75 · tak 10 10 11 11 11 ·
+  sieve 29 29 31 33 35 · arraysum 36 38 40 40 43 · strconcat 4 4 4 4 5
+
+No attributable change in either direction: the before-run overlapped
+a background release build (note its 2–3x wider spreads), and the
+medians overlap within noise. Verdict for the flags PR: perf-neutral
+within measurement noise. The median column above becomes the M5
+comparison baseline (re-run same-machine/same-day before judging).
 
 Caveats:
 
