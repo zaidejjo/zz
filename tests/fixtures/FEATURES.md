@@ -116,7 +116,9 @@ a divergence carry `known-divergence` (or land in `errors/` with a
   fail (messages differ; error parity only requires failure).
 - `edge_int_overflow_add`, `edge_int_overflow_mul`, `edge_int_neg_min`:
   wrap probes, strict on all legs (the debug-VM trap is retired).
-- `edge_index_oob` (`errors/` + known-failure): VM errors exit 1,
-  native prints empty and exits 0.
+- `edge_int_min_div_neg1`, `edge_int_min_rem_neg1`, `edge_int_pow_neg`
+  (`errors/`): trap on all legs (strict error parity).
+- `edge_index_oob` (`errors/`): OOB index traps on all legs (the native
+  silent-unit leniency is fixed).
 - `edge_float_nan_display` (`regression/` + known-failure): both exit 0
   with different stdout (`NaN` vs `nan`).
