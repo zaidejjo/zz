@@ -40,11 +40,19 @@ jobs:
       - name: 'test (PR: fast suite — VM legs only)'
         if: runner.os != 'Windows' && github.event_name == 'pull_request'
         # PR signal in minutes: unit + e2e (VM) + VM-only parity.
-        # Full native/plugin legs run on merge to dev/main below.
         run: ./scripts/test-fast.sh
-      - name: 'test (merge: full suite incl. native legs)'
+      - name: 'test (PR: batched native parity)'
+        if: runner.os != 'Windows' && github.event_name == 'pull_request'
+        # All batchable strict fixtures' native legs in ~4 clang builds
+        # (same programs, same flags, demuxed per file). Individuals run
+        # VM-only inside test-fast.sh above.
+        run: ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity
+      - name: 'test (merge: full suite, strict natives via batch)'
         if: runner.os != 'Windows' && github.event_name != 'pull_request'
-        run: cargo test --all
+        # `ZZ_BATCH_NATIVE=1`: strict-success natives run batched
+        # (same programs, same flags); quad, error, and known-failure
+        # natives stay individual. Full coverage, no duplicated builds.
+        run: ZZ_BATCH_NATIVE=1 cargo test --all
       - name: 'test (windows: VM-only, native backend unsupported)'
         if: runner.os == 'Windows'
         # The native backend is POSIX/Linux-only (epoll/fork AOT server, no
