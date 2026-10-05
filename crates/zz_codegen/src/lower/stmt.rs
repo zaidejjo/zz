@@ -6,6 +6,18 @@ use zz_frontend::ast::{Block, Expr, Pattern, Stmt};
 use super::*;
 
 impl Lowerer {
+    /// Root binding of a store target chain (`m` in `m[i][j]`, `s` in
+    /// `s[i].v`, base of a path). Stores invalidate its SROA forwarding
+    /// (plus dependents) — an element write may change any element.
+    fn store_root_ident(obj: &Expr) -> Option<&str> {
+        match obj {
+            Expr::Ident { name, .. } => Some(name),
+            Expr::Index { obj, .. } | Expr::Field { obj, .. } => Self::store_root_ident(obj),
+            Expr::Path { parts, .. } => parts.first().map(String::as_str),
+            _ => None,
+        }
+    }
+
     /// Addressable container home for an index store: a C lvalue holding
     /// the container, so `zz_index_set` can detach-and-reseat in place.
     /// Plain locals / module vars qualify; struct-field spellings and
@@ -671,9 +683,10 @@ impl Lowerer {
                     Expr::Index { obj, index, .. } => {
                         // `obj[idx] = v` — runtime-dispatched write (arrays/dicts).
                         // A store may change any element: drop index
-                        // forwarding for the base (plus dependents).
-                        if let Expr::Ident { name, .. } = obj.as_ref() {
-                            names.invalidate_stack_array_elems(name);
+                        // forwarding for the root binding (plus dependents).
+                        if let Some(root) = Self::store_root_ident(obj) {
+                            let root = root.to_string();
+                            names.invalidate_stack_array_elems(&root);
                         }
                         let boxed_val = self.box_index_store_value(value, val.clone(), names);
                         if let Some(home) = self.index_store_home(obj, names) {
@@ -716,6 +729,11 @@ impl Lowerer {
                         // above): temp + set + write back (VM shape).
                         // `zz_object_set_field` detaches shared headers
                         // internally; the write-back lands the result.
+                        // Like index stores, drop forwarding for the root.
+                        if let Some(root) = Self::store_root_ident(obj) {
+                            let root = root.to_string();
+                            names.invalidate_stack_array_elems(&root);
+                        }
                         let o = self.emit_expr(obj, names, out);
                         let boxed_val = self.box_index_store_value(value, val.clone(), names);
                         let tmp = names.fresh("_wbf");
@@ -758,9 +776,10 @@ impl Lowerer {
                         // Receiver first (same order as the tree-walker
                         // and VM): single evaluation, then read →
                         // boxed zz_binop → write. The store kills index
-                        // forwarding for the base (plus dependents).
-                        if let Expr::Ident { name, .. } = obj.as_ref() {
-                            names.invalidate_stack_array_elems(name);
+                        // forwarding for the root binding (plus dependents).
+                        if let Some(root) = Self::store_root_ident(obj) {
+                            let root = root.to_string();
+                            names.invalidate_stack_array_elems(&root);
                         }
                         let rhs = self.emit_expr(value, names, out);
                         let rhs_boxed = self.box_index_store_value(value, rhs, names);
