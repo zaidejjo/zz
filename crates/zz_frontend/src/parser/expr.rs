@@ -305,7 +305,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_unary();
+            let right = self.parse_power();
             let span = left.span().join(right.span());
             left = Expr::Binary {
                 op,

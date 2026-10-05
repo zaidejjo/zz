@@ -7,6 +7,9 @@ println(10 * 3)
 println(10 / 3)
 println(10 % 3)
 println(2 ** 10)
+println((300*2+1) * 4**2)
+println(2 * 3 ** 2)
+println(10 / 2 ** 2)
 
 // comparison
 println(10 > 5)
