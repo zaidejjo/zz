@@ -590,7 +590,7 @@ impl<'a> FmtCtx<'a> {
             Expr::Float { value, .. } => self.write_str(&value.to_string()),
             Expr::Str { value, .. } => {
                 self.write_str("\"");
-                self.write_str(value);
+                self.write_str(&escape_braces(value));
                 self.write_str("\"");
             }
             Expr::Bool { value, .. } => {
@@ -741,7 +741,7 @@ impl<'a> FmtCtx<'a> {
                 self.write_str("\"");
                 for part in parts {
                     match part {
-                        FmtPart::Text(t) => self.write_str(t),
+                        FmtPart::Text(t) => self.write_str(&escape_braces(t)),
                         FmtPart::Expr(e, spec) => {
                             self.write_str("{");
                             self.fmt_expr(e, source);
@@ -866,7 +866,7 @@ impl<'a> FmtCtx<'a> {
                 Lit::Float(v) => self.write_str(&v.to_string()),
                 Lit::Str(v) => {
                     self.write_str("\"");
-                    self.write_str(v);
+                    self.write_str(&escape_braces(v));
                     self.write_str("\"");
                 }
                 Lit::Bool(v) => {
@@ -945,6 +945,24 @@ fn binop_str(op: BinOp) -> &'static str {
         BinOp::Shl => "<<",
         BinOp::Shr => ">>",
     }
+}
+
+/// Escape literal braces for string output: a decoded `{` / `}` must print
+/// as `{{` / `}}` so the result re-parses to the same value instead of
+/// opening an interpolation.
+fn escape_braces(s: &str) -> String {
+    if !s.contains(['{', '}']) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '{' => out.push_str("{{"),
+            '}' => out.push_str("}}"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -1044,6 +1062,21 @@ mod tests {
         let out = fmt(src);
         assert!(out.contains("if x > 0 {"));
         assert!(out.contains("} else {"));
+    }
+
+    #[test]
+    fn format_brace_escapes_roundtrip() {
+        // Literal `{` / `}` must print doubled so re-parsing yields the
+        // same value instead of opening an interpolation.
+        let out = fmt("x := \"{{name}}\"\n");
+        assert!(out.contains("\"{{name}}\""), "got: {out}");
+        let out = fmt("x := \"{{{y}}}\"\n");
+        assert!(out.contains("\"{{{y}}}\""), "got: {out}");
+        // Re-parse stability: formatting twice is idempotent.
+        let once = fmt("x := \"a{{b}}c\"\n");
+        let parsed = parse(&once);
+        let twice = format_program(&parsed.program, &once, &FormatConfig::default());
+        assert_eq!(once, twice, "fmt not idempotent: {once:?} vs {twice:?}");
     }
 
     #[test]

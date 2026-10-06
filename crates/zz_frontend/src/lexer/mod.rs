@@ -656,6 +656,43 @@ impl<'a> Lexer<'a> {
                     );
                 }
             }
+            // Doubled-brace escapes: `{{` / `}}` emit a single literal
+            // brace and never open an interpolation. Checked before the
+            // interpolation arm so `{{name}}` stays literal text while
+            // `{{{name}}}` is literal `{` + interpolation + literal `}`.
+            // Uses byte-prefix checks (`starts_with`) for exact two-byte
+            // consumes; `peek_char_at` is byte-offset based and would be
+            // wrong for multi-byte lookahead.
+            Some('{') if self.src[self.pos..].starts_with("{{") => {
+                let mut value = value;
+                value.push('{');
+                self.bump_char();
+                self.bump_char();
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                    triple: false,
+                    segs: Vec::new(),
+                    // Rewritten text: never borrow afterwards.
+                    clean: false,
+                });
+            }
+            Some('}') if self.src[self.pos..].starts_with("}}") => {
+                let mut value = value;
+                value.push('}');
+                self.bump_char();
+                self.bump_char();
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                    triple: false,
+                    segs: Vec::new(),
+                    // Rewritten text: never borrow afterwards.
+                    clean: false,
+                });
+            }
             // String interpolation: `{ident...` starts an embedded expression.
             // Emit the accumulated text as StrFmt and enter interpolation
             // mode (leaving the string context underneath); the main loop
@@ -863,6 +900,39 @@ impl<'a> Lexer<'a> {
             return;
         }
         match self.peek_char() {
+            // Doubled-brace escapes: `{{` / `}}` emit a single literal
+            // brace and never open an interpolation. Same semantics as
+            // single-line strings; dedent sees only the collapsed value.
+            Some('{') if self.src[self.pos..].starts_with("{{") => {
+                let mut value = value;
+                value.push('{');
+                self.bump_char();
+                self.bump_char();
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                    triple: true,
+                    segs,
+                    // Triple strings never borrow (dedent rewrites).
+                    clean: false,
+                });
+            }
+            Some('}') if self.src[self.pos..].starts_with("}}") => {
+                let mut value = value;
+                value.push('}');
+                self.bump_char();
+                self.bump_char();
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                    triple: true,
+                    segs,
+                    // Triple strings never borrow (dedent rewrites).
+                    clean: false,
+                });
+            }
             // Interpolation: `{ident...`, `{1...`, `{(...` start an embedded
             // expression. `{{`, `{}` and `{"...` (JSON-like) stay literal.
             Some('{') if is_triple_interp_start(self.peek_char_at(1)) => {
@@ -1380,8 +1450,54 @@ mod tests {
 
     #[test]
     fn triple_double_brace_stays_literal() {
+        // `{{` collapses to a single literal `{` (escape, not two chars).
         let toks = sig("\"\"\"a {{ b\"\"\"");
-        assert_eq!(toks, vec![(TokenKind::Str, "a {{ b".to_string())]);
+        assert_eq!(toks, vec![(TokenKind::Str, "a { b".to_string())]);
+    }
+
+    #[test]
+    fn double_brace_escapes() {
+        // Single-line `{{` / `}}` collapse to single braces.
+        let toks = sig("\"a{{b}}c\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "a{b}c".to_string())]);
+        // `{{name}}` stays literal (no interpolation).
+        let toks = sig("\"{{name}}\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{name}".to_string())]);
+        // `{{{x}}}` is literal `{` + interpolation + literal `}`.
+        let toks = sig("\"{{{x}}}\"");
+        assert_eq!(
+            toks,
+            vec![
+                (TokenKind::StrFmt, "{".to_string()),
+                (TokenKind::LBrace, "{".to_string()),
+                (TokenKind::Ident, "x".to_string()),
+                (TokenKind::RBrace, "}".to_string()),
+                (TokenKind::Str, "}".to_string()),
+            ]
+        );
+        // Quadruple braces collapse pairwise.
+        let toks = sig("\"{{{{}}\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{{}".to_string())]);
+        // Lone braces stay literal.
+        let toks = sig("\"a}b\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "a}b".to_string())]);
+    }
+
+    #[test]
+    fn triple_double_brace_escapes() {
+        let toks = sig("\"\"\"a{{b}}c\"\"\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "a{b}c".to_string())]);
+        let toks = sig("\"\"\"{{{x}}}\"\"\"");
+        assert_eq!(
+            toks,
+            vec![
+                (TokenKind::StrFmt, "{".to_string()),
+                (TokenKind::LBrace, "{".to_string()),
+                (TokenKind::Ident, "x".to_string()),
+                (TokenKind::RBrace, "}".to_string()),
+                (TokenKind::Str, "}".to_string()),
+            ]
+        );
     }
 
     #[test]

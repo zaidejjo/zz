@@ -714,6 +714,12 @@ parity_strict!(
     "generic_structs.zz"
 );
 parity_strict!(parity_syntax_fstrings, "syntax", "fstrings.zz");
+parity_strict!(parity_syntax_brace_escapes, "syntax", "brace_escapes.zz");
+parity_strict!(
+    parity_syntax_brace_escapes_multiline,
+    "syntax",
+    "brace_escapes_multiline.zz"
+);
 parity_strict!(parity_syntax_dicts, "syntax", "dicts.zz");
 parity_strict!(parity_syntax_string_blocks, "syntax", "string_blocks.zz");
 parity_strict!(parity_syntax_pipe_elvis, "syntax", "pipe_elvis.zz");
@@ -1250,6 +1256,11 @@ parity_known_failure!(
 );
 parity_strict!(parity_stdlib_jsonmod, "stdlib", "jsonmod.zz");
 parity_strict!(parity_stdlib_json_test, "stdlib", "json_test.zz");
+parity_strict!(
+    parity_stdlib_json_extended_test,
+    "stdlib",
+    "json_extended_test.zz"
+);
 parity_known_failure!(parity_stdlib_encoding_test, "stdlib", "encoding_test.zz");
 parity_strict!(parity_stdlib_filesystem, "stdlib", "filesystem.zz");
 parity_strict!(parity_stdlib_fs_test, "stdlib", "fs_test.zz");

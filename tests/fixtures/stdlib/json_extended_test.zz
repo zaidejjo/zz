@@ -3,7 +3,7 @@
 import std.json
 
 // ── parse and build test data ──
-j := json.parse("{\"name\": \"test\", \"count\": 42, \"tags\": [\"a\", \"b\"], \"nested\": {\"x\": 1}}") ?? json.null()
+j := json.parse("{\"name\": \"test\", \"count\": 42, \"tags\": [\"a\", \"b\"], \"nested\": {\"x\": 1}}}}") ?? json.null()
 
 // ── json.type ──
 println("type obj: {json.type(j)}")
