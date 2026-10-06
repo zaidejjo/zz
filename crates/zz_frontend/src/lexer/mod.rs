@@ -14,7 +14,7 @@ pub mod cursor;
 
 use std::borrow::Cow;
 
-use crate::diag::{error_at, RawDiag};
+use crate::diag::{error_at, FixIt, RawDiag};
 use crate::span::Span;
 use crate::token::{Token, TokenKind, Trivia, TriviaKind};
 
@@ -96,6 +96,41 @@ impl<'a> Lexer<'a> {
             contexts: Vec::new(),
             pending_interp: false,
         }
+    }
+
+    /// Unterminated string/comment error with an add-the-closer fix.
+    /// `start` is the opening quote offset (the error points there, so the
+    /// user sees where the string began swallowing code).
+    /// Single-line strings close at end of their first line (the classic
+    /// forgotten-quote typo); triple-quoted strings and block comments
+    /// close at end of file.
+    fn unterminated(&mut self, start: usize, closer: &str, first_line: bool) {
+        let end = self.src.len() as u32;
+        let span = Span::new(start as u32, end);
+        let at = if first_line {
+            self.src[start..]
+                .find('\n')
+                .map(|i| start as u32 + i as u32)
+                .unwrap_or(end)
+        } else {
+            end
+        };
+        let place = if first_line {
+            "at end of line"
+        } else {
+            "at end of file"
+        };
+        self.errors.push(
+            error_at(
+                format!("unterminated string literal — add closing `{closer}` {place}"),
+                span,
+            )
+            .with_fixit(FixIt::safe(
+                Span::new(at, at),
+                closer,
+                format!("add closing `{closer}`"),
+            )),
+        );
     }
 
     fn run(mut self) -> Lexed<'a> {
@@ -286,9 +321,30 @@ impl<'a> Lexer<'a> {
         }
         if !self.contexts.is_empty() {
             // A string (or interpolation) was left open at end of input.
-            let span = Span::new(self.pos as u32, self.src.len() as u32);
-            self.errors
-                .push(error_at("unterminated string literal", span));
+            match self.contexts.last() {
+                Some(LexContext::Str { start, triple, .. }) => {
+                    let (closer, first_line) = if *triple {
+                        ("\"\"\"", false)
+                    } else {
+                        ("\"", true)
+                    };
+                    self.unterminated(*start, closer, first_line);
+                }
+                _ => {
+                    let end = self.src.len() as u32;
+                    self.errors.push(
+                        error_at(
+                            "unterminated string interpolation — add closing `}` at end of file",
+                            Span::new(self.pos as u32, end),
+                        )
+                        .with_fixit(FixIt::safe(
+                            Span::new(end, end),
+                            "}",
+                            "add closing `}`",
+                        )),
+                    );
+                }
+            }
         }
         self.tokens.push(Token {
             kind: TokenKind::Eof,
@@ -356,9 +412,19 @@ impl<'a> Lexer<'a> {
                     self.bump_char();
                 }
                 (None, _) => {
-                    let span = Span::new(start as u32, self.src.len() as u32);
-                    self.errors
-                        .push(error_at("unterminated block comment", span));
+                    let start = start as u32;
+                    let end = self.src.len() as u32;
+                    self.errors.push(
+                        error_at(
+                            "unterminated block comment — add closing `*/` at end of file",
+                            Span::new(start, end),
+                        )
+                        .with_fixit(FixIt::safe(
+                            Span::new(end, end),
+                            "*/",
+                            "add closing `*/`",
+                        )),
+                    );
                     return;
                 }
             }
@@ -798,9 +864,7 @@ impl<'a> Lexer<'a> {
                         self.bump_char();
                     }
                     None => {
-                        let span = Span::new(start as u32, self.src.len() as u32);
-                        self.errors
-                            .push(error_at("unterminated string literal", span));
+                        self.unterminated(start, "\"", true);
                         return;
                     }
                 }
@@ -829,9 +893,7 @@ impl<'a> Lexer<'a> {
                 });
             }
             None => {
-                let span = Span::new(start as u32, self.src.len() as u32);
-                self.errors
-                    .push(error_at("unterminated string literal", span));
+                self.unterminated(start, "\"", true);
             }
         }
     }
@@ -1025,9 +1087,7 @@ impl<'a> Lexer<'a> {
                         self.bump_char();
                     }
                     None => {
-                        let span = Span::new(start as u32, self.src.len() as u32);
-                        self.errors
-                            .push(error_at("unterminated string literal", span));
+                        self.unterminated(start, "\"\"\"", false);
                         return;
                     }
                 }
@@ -1056,9 +1116,7 @@ impl<'a> Lexer<'a> {
                 });
             }
             None => {
-                let span = Span::new(start as u32, self.src.len() as u32);
-                self.errors
-                    .push(error_at("unterminated string literal", span));
+                self.unterminated(start, "\"\"\"", false);
             }
         }
     }

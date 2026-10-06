@@ -385,7 +385,12 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
                 // Use blank padding matching the source line prefix width
                 let blank_pad = format!("{:>width$}", "", width = gutter);
                 if let Some(fixit) = raw.fixits.first() {
-                    let hint = format!(" help: replace with `{}`", fixit.replacement);
+                    // Deletions render as "remove this", not "replace with ``".
+                    let hint = if fixit.replacement.is_empty() {
+                        " help: remove this".to_string()
+                    } else {
+                        format!(" help: replace with `{}`", fixit.replacement)
+                    };
                     let _ = write!(
                         out,
                         "\n {blank_pad} | {spaces}{colored_carets}{}",

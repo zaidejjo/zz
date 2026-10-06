@@ -28,6 +28,12 @@ impl<'a> Parser<'a> {
             if self.at(term) || self.at(TokenKind::Eof) {
                 break;
             }
+            // Stray closing bracket with no opener in this list: tell the
+            // user to remove it and skip it so parsing continues.
+            if self.at_close() {
+                self.error_stray_close(self.peek_kind());
+                continue;
+            }
             let errors_before = self.errors.len();
             let pos_before = self.pos;
             let stmt = self.parse_stmt();
@@ -37,12 +43,18 @@ impl<'a> Parser<'a> {
                 // No progress and no error: force forward to avoid a loop.
                 self.advance();
             } else if !self.at(TokenKind::StmtEnd) && !self.at(term) && !self.at(TokenKind::Eof) {
-                // Two statements with no terminator between them.
-                self.error_here(format!(
-                    "expected end of statement, found {}",
-                    self.peek_kind().describe()
-                ));
-                self.skip_to_stmt_end();
+                // A stray closing bracket after a complete statement (e.g.
+                // the second `)` in `f(a))`): remove it, don't end the file.
+                if self.at_close() {
+                    self.error_stray_close(self.peek_kind());
+                } else {
+                    // Two statements with no terminator between them.
+                    self.error_here(format!(
+                        "expected end of statement, found {}",
+                        self.peek_kind().describe()
+                    ));
+                    self.skip_to_stmt_end();
+                }
             }
             stmts.push(stmt);
         }
@@ -299,7 +311,7 @@ impl<'a> Parser<'a> {
                 String::new()
             };
             if !self.eat(TokenKind::RParen) {
-                self.error_here("expected `)` to close `@link(...)`");
+                self.error_missing_close(")", "expected `)` to close `@link(...)`");
             }
             let _ = lib_tok;
             lib
@@ -370,7 +382,7 @@ impl<'a> Parser<'a> {
             }
             let params = self.parse_param_list();
             if !self.eat(TokenKind::RParen) {
-                self.error_here("expected `)` after extern parameters");
+                self.error_missing_close(")", "expected `)` after extern parameters");
             } else {
                 self.pop_delim(TokenKind::RParen, self.previous().span);
             }
@@ -418,7 +430,7 @@ impl<'a> Parser<'a> {
         let end = if self.eat(TokenKind::RBrace) {
             self.previous().span
         } else {
-            self.error_here("expected `}` to close extern block");
+            self.error_missing_close("}", "expected `}` to close extern block");
             self.peek().span
         };
         let span = extern_tok.span.join(end);
@@ -503,7 +515,7 @@ impl<'a> Parser<'a> {
         let end = if self.eat(TokenKind::RBrace) {
             self.previous().span
         } else {
-            self.error_here("expected `}` to close struct body");
+            self.error_missing_close("}", "expected `}` to close struct body");
             self.peek().span
         };
         let span = struct_tok.span.join(end);
@@ -601,7 +613,7 @@ impl<'a> Parser<'a> {
         let end = if self.eat(TokenKind::RBrace) {
             self.previous().span
         } else {
-            self.error_here("expected `}` to close impl body");
+            self.error_missing_close("}", "expected `}` to close impl body");
             self.peek().span
         };
         let span = impl_tok.span.join(end);
@@ -758,7 +770,7 @@ impl<'a> Parser<'a> {
         let rparen = if self.eat(TokenKind::RParen) {
             self.previous().span
         } else {
-            self.error_here("expected `)` to close destructuring pattern");
+            self.error_missing_close(")", "expected `)` to close destructuring pattern");
             self.peek().span
         };
         // Parse `:=`
@@ -953,7 +965,7 @@ impl<'a> Parser<'a> {
         let end = if self.eat(TokenKind::RBrace) {
             self.previous().span
         } else {
-            self.error_here("expected `}` to close enum body");
+            self.error_missing_close("}", "expected `}` to close enum body");
             self.peek().span
         };
         let span = enum_tok.span.join(end);
@@ -1081,7 +1093,7 @@ impl<'a> Parser<'a> {
         }
         let params = self.parse_param_list();
         if !self.eat(TokenKind::RParen) {
-            self.error_here("expected `)` after parameters");
+            self.error_missing_close(")", "expected `)` after parameters");
         } else {
             self.pop_delim(TokenKind::RParen, self.previous().span);
         }
@@ -1169,7 +1181,7 @@ impl<'a> Parser<'a> {
                 let end = if self.eat_close(TokenKind::RParen) {
                     self.previous().span
                 } else {
-                    self.error_here("expected `)` to close decorator arguments");
+                    self.error_missing_close(")", "expected `)` to close decorator arguments");
                     self.peek().span
                 };
                 (args, named, end)

@@ -1,6 +1,6 @@
 //! Error recovery and helper functions.
 
-use crate::diag::error_at;
+use crate::diag::{error_at, FixIt};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
@@ -31,6 +31,46 @@ impl<'a> Parser<'a> {
         span
     }
 
+    /// Missing-closer error with an insert fix at the current token
+    /// ("expected `)` to close call — add it here"). The message stays
+    /// byte-identical to the plain form; only the fix is added.
+    pub(crate) fn error_missing_close(&mut self, close: &str, msg: impl Into<String>) -> Span {
+        let span = self.peek().span;
+        let at = Span::new(span.start, span.start);
+        self.errors.push(error_at(msg, span).with_fixit(FixIt::safe(
+            at,
+            close,
+            format!("add `{close}` here"),
+        )));
+        span
+    }
+
+    /// Stray-closer error with a delete fix ("unexpected `}` ... — remove
+    /// it"). Consumes the bracket so parsing continues after it.
+    pub(crate) fn error_stray_close(&mut self, close: TokenKind) -> Span {
+        let span = self.peek().span;
+        self.errors.push(
+            error_at(
+                format!(
+                    "unexpected `{}` with no matching opening — remove it",
+                    close.describe()
+                ),
+                span,
+            )
+            .with_fixit(FixIt::safe(span, "", "remove this bracket")),
+        );
+        self.advance();
+        span
+    }
+
+    /// True when the current token is a closing bracket.
+    pub(crate) fn at_close(&self) -> bool {
+        matches!(
+            self.peek_kind(),
+            TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket
+        )
+    }
+
     pub(crate) fn skip_stmt_ends(&mut self) {
         while self.at(TokenKind::StmtEnd) {
             self.advance();
@@ -38,7 +78,11 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn skip_to_stmt_end(&mut self) {
-        while !self.at(TokenKind::StmtEnd) && !self.at(TokenKind::Eof) {
+        // Stop at closing brackets as well as statement ends: a `}` may
+        // close the enclosing block (swallowing it here orphans the block
+        // and cascades into a bogus "unclosed" error), and stray `)`/`]`
+        // get their own "remove it" diagnostic from the statement loop.
+        while !self.at(TokenKind::StmtEnd) && !self.at(TokenKind::Eof) && !self.at_close() {
             self.advance();
         }
     }
