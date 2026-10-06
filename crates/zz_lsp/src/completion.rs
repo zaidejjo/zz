@@ -57,6 +57,16 @@ pub fn completions_for_position(
     cenv: Option<&CompletionEnv>,
 ) -> Option<CompletionResponse> {
     let ctx = detect_context(source, offset, cenv)?;
+    // Plain-text guarantee: no item ever snippet-expands or carries
+    // parens — what you see is exactly what gets inserted. (Stray `()`
+    // some users see comes from client-side autopairs confirm hooks, not
+    // from these items.)
+    fn plain(mut items: Vec<CompletionItem>) -> Vec<CompletionItem> {
+        for item in &mut items {
+            item.insert_text_format = Some(tower_lsp::lsp_types::InsertTextFormat::PLAIN_TEXT);
+        }
+        items
+    }
     let items = match ctx {
         CompletionContext::DotAccess {
             obj_name,
@@ -90,7 +100,7 @@ pub fn completions_for_position(
             cenv,
         ),
     };
-    Some(CompletionResponse::Array(items))
+    Some(CompletionResponse::Array(plain(items)))
 }
 
 /// Resolve extra detail for a completion item.
@@ -2319,5 +2329,96 @@ mod workspace_audit_tests {
             items.iter().any(|i| i.label == "render"),
             "dep members serve"
         );
+    }
+}
+
+#[cfg(test)]
+mod paren_free_tests {
+    //! No completion item may insert parens: what you see is what you get.
+    //! (Stray `()` in editors comes from client autopairs hooks.)
+    use super::*;
+    use zz_checker::check_program;
+    use zz_frontend::parse;
+
+    fn all_items(src: &str, offset: u32) -> Vec<CompletionItem> {
+        let parsed = parse(src);
+        let state = crate::state::GlobalState::new();
+        let (ib, ifunc, is, ia, ie) = state.checker_seed_for(&parsed.program);
+        let cr = check_program(&parsed.program, ib, ifunc, is, ia, ie);
+        let cenv = CompletionEnv::default();
+        match completions_for_position(&parsed.program, src, offset, Some(&cr), Some(&cenv))
+            .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        }
+    }
+
+    fn assert_bare(items: &[CompletionItem], ctx: &str) {
+        for item in items {
+            assert_eq!(
+                item.insert_text_format,
+                Some(tower_lsp::lsp_types::InsertTextFormat::PLAIN_TEXT),
+                "{ctx}: {} must be plain text",
+                item.label
+            );
+            let texts: Vec<&str> = [
+                Some(item.label.as_str()),
+                item.insert_text.as_deref(),
+                item.filter_text.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            for t in texts {
+                assert!(
+                    !t.contains('(') && !t.contains(')'),
+                    "{ctx}: {} inserts parens via {t:?}",
+                    item.label
+                );
+            }
+            if let Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(e)) = &item.text_edit {
+                assert!(
+                    !e.new_text.contains('(') && !e.new_text.contains(')'),
+                    "{ctx}: {} inserts parens via textEdit {:?}",
+                    item.label,
+                    e.new_text
+                );
+            }
+        }
+        assert!(!items.is_empty(), "{ctx}: expected items to check");
+    }
+
+    #[test]
+    fn scope_items_bare() {
+        let src = "import std.math\nx := ma";
+        assert_bare(&all_items(src, src.len() as u32), "scope");
+    }
+
+    #[test]
+    fn member_items_bare() {
+        let src = "import std.math\nx := math.s";
+        assert_bare(&all_items(src, src.len() as u32), "member");
+    }
+
+    #[test]
+    fn import_path_items_bare() {
+        let src = "import std.ma";
+        assert_bare(&all_items(src, src.len() as u32), "import-path");
+    }
+
+    #[test]
+    fn selective_items_bare() {
+        let src = "import std.math(s";
+        assert_bare(&all_items(src, src.len() as u32), "selective");
+    }
+
+    #[test]
+    fn snippet_triggers_unaffected() {
+        // Snippet-source bodies legitimately contain parens (println("…"));
+        // this only guards the LSP path, which must stay bare.
+        let src = "import std.math\nprintln";
+        let items = all_items(src, src.len() as u32);
+        assert!(items.iter().any(|i| i.label == "println"));
     }
 }
