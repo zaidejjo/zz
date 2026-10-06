@@ -31,6 +31,7 @@ echo "== fast integration targets =="
 cargo test -p zz_cli \
 	--test bug_hunter \
 	--test build_e2e \
+	--test chunk_aot_diff \
 	--test concurrency_audit_regression \
 	--test native_build \
 	--test performance_check_regression

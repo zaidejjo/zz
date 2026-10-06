@@ -75,6 +75,10 @@ pub struct ReleaseOptions {
     /// directory (go-like). Excluded from the cache key: the same
     /// cached binary is published under any name.
     pub output: Option<PathBuf>,
+    /// `--chunk`: lower from the unified IR chunk instead of HIR.
+    /// Dual-codegen gate: both paths must agree until full coverage.
+    /// Carried into the cache filename so backends never share entries.
+    pub chunk: bool,
 }
 
 impl ReleaseOptions {
@@ -873,6 +877,80 @@ fn typed_program_for(
     Ok((pruned, reach, main_key))
 }
 
+/// Build the unified IR module for `path` (chunk-backend input): load,
+/// check, merge (pure-ZZ stdlib first, mirroring [`typed_program_for`]),
+/// VM-compile, then `lower_typed`. Returns the module + dotted main key.
+fn chunk_module_for(path: &Path) -> Result<(zz_ir::Module, String), String> {
+    let entry_ns = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let plugin_funcs = discover_plugin_manifests(path);
+    let loaded = if plugin_funcs.is_empty() {
+        loader::load_program(path)?
+    } else {
+        loader::load_program_with_plugins(path, &plugin_funcs)?
+    };
+    let mut has_errors = false;
+    for e in &loaded.errors {
+        let mut files = zz_frontend::diag::Files::new();
+        let id = files.add(e.name.clone(), e.source.clone());
+        eprint!(
+            "{}",
+            zz_frontend::diag::render_to_string(&files, id, &e.diags)
+        );
+        if e.diags
+            .iter()
+            .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+        {
+            has_errors = true;
+        }
+    }
+    if has_errors {
+        return Err("program failed to type-check".into());
+    }
+    // Merged user program. Pure-ZZ stdlib sources are deliberately NOT
+    // merged here: their bodies trip the VM compiler's join verifier
+    // when compiled outside their home module (latent gap — stdlib only
+    // ever runs through the tree-walker today). Calls to pure-ZZ
+    // helpers (e.g. `str.repeat`) therefore fail `coverage` with a clean
+    // "cannot resolve call target" error instead of miscompiling.
+    // Slice-2 (cross-module IR merge, #253) will include them.
+    let mut merged_stmts = Vec::new();
+    let merged_span = loaded
+        .programs
+        .last()
+        .map(|p| p.span)
+        .unwrap_or(Span::new(0, 0));
+    for p in &loaded.programs {
+        merged_stmts.extend(p.stmts.iter().cloned());
+    }
+    let merged = zz_frontend::ast::Program {
+        stmts: merged_stmts,
+        span: merged_span,
+    };
+    let typed = zz_hir::build_program(
+        &merged,
+        HashMap::new(),
+        loaded.funcs,
+        loaded.structs.clone(),
+        loaded.aliases,
+        loaded.enums.clone(),
+    );
+    let native_names: std::sync::Arc<std::collections::HashSet<String>> =
+        std::sync::Arc::new(loaded.natives.keys().cloned().collect());
+    let chunk = zz_runtime::vm::Compiler::compile_program_typed(
+        &merged,
+        std::sync::Arc::new(typed.program.types),
+        loaded.structs,
+        loaded.enums,
+        native_names,
+    );
+    let module = zz_ir::lower::lower_typed(&chunk, &typed.program.funcs)
+        .map_err(|e| format!("zz: ir lower failed: {e}"))?;
+    Ok((module, format!("{entry_ns}.main")))
+}
+
 /// Directory holding build artifacts: `bin/` next to the source file
 /// (or `<cwd>/bin` when the source has no parent).
 pub fn bin_dir_for(src: &Path) -> PathBuf {
@@ -1052,6 +1130,14 @@ pub fn build_release(
     // Captured before `opts` moves into the clang build below.
     let output = rel.output.clone();
     // Cache: reuse when the same source + build options + target were
+    // built before. The chunk backend carries its own slug so the two
+    // codegen paths never share entries (dual-codegen gate).
+    let kind_slug = if rel.chunk {
+        format!("{mode:?}-chunk")
+    } else {
+        format!("{mode:?}")
+    };
+    // Cache: reuse when the same source + build options + target were
     // built before.
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create cache: {e}"))?;
@@ -1061,9 +1147,9 @@ pub fn build_release(
     // The embed tree is content-fingerprinted separately (compact slug
     // addition — asset edits must never reuse a non-embed binary).
     let cached = if embed_slug.is_empty() {
-        dir.join(format!("{key}-{mode:?}-{target_slug}"))
+        dir.join(format!("{key}-{kind_slug}-{target_slug}"))
     } else {
-        dir.join(format!("{key}-{mode:?}-{target_slug}-{embed_slug}"))
+        dir.join(format!("{key}-{kind_slug}-{target_slug}-{embed_slug}"))
     };
 
     if is_usable_cache_binary(&cached) {
@@ -1083,11 +1169,33 @@ pub fn build_release(
     // observers never see a partially-written or non-executable binary.
     static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
     let tmp = dir.join(format!(
-        "{key}-{mode:?}-{target_slug}.{}.{}.tmp",
+        "{key}-{kind_slug}-{target_slug}.{}.{}.tmp",
         std::process::id(),
         TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
     ));
-    if let Err(e) =
+    // Chunk backend: lower from the unified IR, then compile the
+    // emitted source with the same option/flag flow as `build_native`.
+    if rel.chunk {
+        let (module, main_key) = chunk_module_for(path)?;
+        let lowered =
+            zz_codegen::build_chunk_module(&module, &main_key).map_err(|e| e.to_string())?;
+        opts.native_rt = opts.native_rt || lowered.needs_native_rt;
+        opts.pg_link = opts.pg_link || lowered.needs_pg_link;
+        opts.float_link = opts.float_link || lowered.needs_float_fmt;
+        opts.curl_link = opts.curl_link || lowered.needs_curl;
+        opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
+        if opts.static_link && (opts.native_rt || opts.float_link) && opts.allow_static_downgrade {
+            opts.static_link = false;
+            eprintln!(
+                "zz: note: static link unavailable (program needs the Rust native runtime); building dynamic"
+            );
+        }
+        if let Err(e) = zz_codegen::compile::build_with(&lowered.source, &tmp, opts, target, &clang)
+        {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
+    } else if let Err(e) =
         zz_codegen::build_native_with(&pruned, &reach, &main_key, opts, target, &clang, &tmp)
     {
         let _ = std::fs::remove_file(&tmp);

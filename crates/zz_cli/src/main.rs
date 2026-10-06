@@ -129,6 +129,8 @@ FLAGS:
     --pgo              with build, profile-guided optimization build (native host only)
     --target <triple>  with build, cross-compile via clang --target= (same flags as without -p, minus -march=native)
     --cc <clang|zig>   with build, select the Clang provider
+    --chunk            with build, lower from the unified IR chunk instead of
+                       HIR (dual-codegen gate; stdout+exit must match HIR)
     --allow-source-builds
                         with build/install, compile transitive native deps
                         from source when no prebuilt covers the host tag
@@ -1495,6 +1497,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         allow_hooks,
         allow_static_downgrade: allow_downgrade,
         output: output.clone(),
+        chunk: flag_args.iter().any(|a| a == "--chunk") || std::env::var("ZZ_CHUNK_C").is_ok(),
     };
     let mode_str = match mode {
         build::BuildMode::Dev => "dev",
