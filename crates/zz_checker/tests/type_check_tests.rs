@@ -77,7 +77,7 @@ fn func_wrong_return_type_errors() {
 fn wrong_arg_count_errors() {
     errors_contain(
         "func f(a: int) -> int { a }\nf(1, 2)",
-        "expected 1 to 1 arguments, found 2",
+        "takes 1 argument (a: int), found 2",
     );
 }
 
@@ -2245,5 +2245,79 @@ fn enum_generic_arity_reports() {
     errors_contain(
         "enum Box<T> { V(T) }\nfunc main() {\n    b: Box<int, str> = Box.V(1)\n}\n",
         "takes 1 type argument",
+    );
+}
+
+#[test]
+fn option_matched_with_ok_suggests_some() {
+    let r = check_src(
+        "func main() {\n    x := .some(1)\n    match x {\n        .ok(v) => v\n        .err(e) => e\n    }\n}",
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains("use `.some(x)`")),
+        "expected `.some` hint, got: {notes:?}"
+    );
+}
+
+#[test]
+fn result_matched_with_some_suggests_ok() {
+    let r = check_src(
+        "func f() -> Result<int, str> { .ok(1) }\nfunc main() {\n    r := f()\n    match r {\n        .some(v) => v\n        .none => 0\n    }\n}",
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains("use `.ok(x)`")),
+        "expected `.ok` hint, got: {notes:?}"
+    );
+}
+
+#[test]
+fn unwrapped_result_at_return_suggests_fixes() {
+    let r = check_src(
+        "func f() -> Result<int, str> { .ok(1) }\nfunc g() -> int {\n    t := f()\n    t\n}",
+    );
+    let msgs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("unwrapped `Result<int, str>`")),
+        "expected unwrap error, got: {msgs:?}"
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains('?')),
+        "expected `?` suggestion, got: {notes:?}"
+    );
+}
+
+#[test]
+fn match_mismatch_binds_no_cascade() {
+    // Root mismatch errors only: payload names bind as Error so their uses
+    // stay silent (#246).
+    let r = check_src(
+        "func div(a: int, b: int) -> int { a / b }\nfunc main() {\n    r := div(1, 1)\n    match r {\n        .ok(v) => v\n        .err(e) => e\n    }\n}",
+    );
+    let errs: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Error)
+        .map(|e| e.message.clone())
+        .collect();
+    assert_eq!(
+        errs.len(),
+        2,
+        "expected only the two mismatch errors, got: {errs:?}"
+    );
+}
+
+#[test]
+fn enum_variant_typo_suggests() {
+    let r = check_src(
+        "enum Color { Red, Green, Blue }\nfunc main() {\n    c := Color.Red\n    match c {\n        .Gren(v) => v\n        .Red => 1\n        .Blue => 2\n    }\n}",
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains(".Green")),
+        "expected `.Green` suggestion, got: {notes:?}",
     );
 }

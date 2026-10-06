@@ -838,6 +838,7 @@ e2e_error_test!(e2e_err_struct_init_assign, "struct_init_assign_error.zz");
 e2e_error_test!(e2e_err_int_float_cmp, "int_float_cmp.zz");
 e2e_error_test!(e2e_err_bare_import_std, "bare_import_std.zz");
 e2e_error_test!(e2e_err_assign_in_condition, "assign_in_condition.zz");
+e2e_error_test!(e2e_err_generic_bracket_params, "generic_bracket_params.zz");
 e2e_error_test!(e2e_err_bitwise_float, "bitwise_float.zz");
 e2e_error_test!(e2e_err_bitwise_neg_shift, "bitwise_neg_shift.zz");
 e2e_error_test!(e2e_err_tuple_index_oob, "tuple_index_oob.zz");

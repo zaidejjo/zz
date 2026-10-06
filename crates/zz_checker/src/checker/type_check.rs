@@ -251,7 +251,9 @@ impl Checker {
                     Some(v) => {
                         let vt = self.check_expr(v);
                         if let Err(e) = self.unifier.unify(&vt, &ret) {
-                            self.report_mismatch(e, v.span());
+                            if !self.report_result_return_hint(&vt, &ret, v.span()) {
+                                self.report_mismatch(e, v.span());
+                            }
                         }
                         // A `return` diverges: it never yields a value to the
                         // enclosing block. Its statement type is `Never`
@@ -1614,10 +1616,23 @@ impl Checker {
                     (&a, &b),
                     (Type::Error, _) | (_, Type::Error) | (Type::Never, _) | (_, Type::Never)
                 ) {
-                    self.errors.push(error_at(
+                    let mut diag = error_at(
                         format!("cannot apply `{}` to `{}` and `{}`", op.symbol(), a, b),
                         span,
-                    ));
+                    );
+                    // Suggest the conversion matching the other operand (#247).
+                    let conv = match (&a, &b) {
+                        (Type::Str, Type::Int) | (Type::Int, Type::Str) => Some("str"),
+                        (Type::Str, Type::Float) | (Type::Float, Type::Str) => Some("str"),
+                        (Type::Str, Type::Bool) | (Type::Bool, Type::Str) => Some("str"),
+                        (Type::Int, Type::Float) | (Type::Float, Type::Int) => Some("float"),
+                        _ => None,
+                    };
+                    if let Some(f) = conv {
+                        diag = diag
+                            .with_note(format!("use {f}(x) to convert, or \"{{x}}\"-format it"));
+                    }
+                    self.errors.push(diag);
                 }
                 Type::Error
             }
@@ -2530,13 +2545,37 @@ impl Checker {
         let allowed_min = total_params - has_default.iter().filter(|&&d| d).count();
 
         if total_provided < allowed_min || total_provided > total_params {
-            self.errors.push(error_at(
-                format!(
-                    "expected {} to {} arguments, found {}",
-                    allowed_min, total_params, total_provided
-                ),
-                span,
-            ));
+            let sig = param_names
+                .iter()
+                .zip(ps.iter())
+                .map(|(n, t)| format!("{n}: {t}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let count = if allowed_min == total_params {
+                if total_params == 1 {
+                    "takes 1 argument".to_string()
+                } else {
+                    format!("takes {total_params} arguments")
+                }
+            } else {
+                format!("takes {allowed_min} to {total_params} arguments")
+            };
+            let mut diag = error_at(format!("{count} ({sig}), found {total_provided}"), span);
+            // Name the first missing parameter onward when too few were given.
+            if total_provided < allowed_min {
+                let provided = total_provided;
+                let missing: Vec<String> = param_names
+                    .iter()
+                    .zip(ps.iter())
+                    .enumerate()
+                    .filter(|(i, _)| *i >= provided)
+                    .map(|(_, (n, t))| format!("{n}: {t}"))
+                    .collect();
+                if let Some(first) = missing.first() {
+                    diag = diag.with_note(format!("missing argument for `{first}`"));
+                }
+            }
+            self.errors.push(diag);
             return;
         }
 
@@ -3182,11 +3221,65 @@ impl Checker {
                     (Type::Var(_), _) => arg
                         .as_ref()
                         .map(|p| (p.as_ref().clone(), self.unifier.fresh_var())),
+                    (Type::Error, _) => {
+                        // Poisoned scrutinee: bind names as Error silently
+                        // so follow-on uses don't cascade (#246).
+                        if let Some(p) = arg {
+                            self.bind_pattern(p, &Type::Error);
+                        }
+                        None
+                    }
                     (other, vname) => {
-                        self.errors.push(error_at(
+                        let mut diag = error_at(
                             format!("pattern `.{vname}` does not match a value of type `{other}`"),
                             *span,
-                        ));
+                        );
+                        // Sherlock hints: point at the right variant family
+                        // for the scrutinee type (#247 follow-up).
+                        let hint: Option<String> = match (other, vname) {
+                            (Type::Option(_), "ok") => {
+                                Some("use `.some(x)` for the Option value".to_string())
+                            }
+                            (Type::Option(_), "err") => {
+                                Some("Option has no `.err`; use `.some(x)` / `.none`".to_string())
+                            }
+                            (Type::Option(_), _) => {
+                                Some("Option patterns are `.some(x)` / `.none`".to_string())
+                            }
+                            (Type::Result(_, _), "some") => {
+                                Some("use `.ok(x)` for the Result value".to_string())
+                            }
+                            (Type::Result(_, _), "none") => Some(
+                                "use `.err(e)` for the Result error; `.none` is an Option pattern"
+                                    .to_string(),
+                            ),
+                            (Type::Result(_, _), _) => {
+                                Some("Result patterns are `.ok(x)` / `.err(e)`".to_string())
+                            }
+                            (Type::Bool, _) => {
+                                Some("use `true` / `false` patterns for `bool`".to_string())
+                            }
+                            _ => None,
+                        };
+                        if let Some(h) = hint {
+                            diag = diag.with_note(h);
+                        }
+                        // Mismatch-first help when variant arms meet a plain
+                        // scalar scrutinee (user assumed Result/Option) (#247).
+                        if matches!(
+                            other,
+                            Type::Int | Type::Float | Type::Str | Type::Unit | Type::Bool
+                        ) {
+                            diag = diag.with_note(format!(
+                                "match on plain `{other}` needs no `.ok`/`.err` arms"
+                            ));
+                        }
+                        self.errors.push(diag);
+                        // Bind the payload names as Error so their uses
+                        // don't cascade into `undefined variable` noise (#246).
+                        if let Some(p) = arg {
+                            self.bind_pattern(p, &Type::Error);
+                        }
                         None
                     }
                 };
@@ -3289,6 +3382,11 @@ impl Checker {
         arms: &[zz_frontend::ast::MatchArm],
         span: Span,
     ) {
+        // Poisoned scrutinee: the root error is already reported; skip
+        // exhaustiveness noise (#246).
+        if matches!(self.unifier.resolve(st), Type::Error) {
+            return;
+        }
         fn pat_is_wildcard(pat: &Pattern) -> bool {
             match pat {
                 Pattern::Wildcard { .. } => true,
@@ -3336,10 +3434,25 @@ impl Checker {
             Type::Result(_, _) => Some(vec!["ok", "err"]),
             Type::Bool => Some(vec!["true", "false"]),
             Type::Int | Type::Float | Type::Str | Type::Unit => {
-                self.errors.push(error_at(
-                    format!("match on `{st}` requires a `_` wildcard arm"),
-                    span,
-                ));
+                // Mismatch-first: variant arms on a plain scalar get their
+                // mismatch errors from bind_pattern; skip the wildcard noise
+                // here so the real error leads (#247).
+                let has_variant = arms.iter().any(|a| {
+                    fn has_variant_pat(pat: &Pattern) -> bool {
+                        match pat {
+                            Pattern::Variant { .. } => true,
+                            Pattern::Or { pats, .. } => pats.iter().any(has_variant_pat),
+                            _ => false,
+                        }
+                    }
+                    has_variant_pat(&a.pat)
+                });
+                if !has_variant {
+                    self.errors.push(error_at(
+                        format!("match on `{st}` requires a `_` wildcard arm"),
+                        span,
+                    ));
+                }
                 return;
             }
             _ => return,
