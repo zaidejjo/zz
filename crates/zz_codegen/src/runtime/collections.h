@@ -161,6 +161,9 @@ zz_value zz_dict_dup_value(const zz_dict *d);
 // (`refs == 1`) write in place with zero copies.
 void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err);
 
+// Bounds-check trap with operands and enclosing function (#251).
+void zz_index_trap(zz_value obj, zz_value idx, const char *func);
+
 // Slice expression (`obj[a:b]`): arrays (items) and strings (bytes).
 zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err);
 

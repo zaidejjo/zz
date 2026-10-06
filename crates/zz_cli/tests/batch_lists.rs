@@ -83,6 +83,8 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "bytes.zz", true),
     ("syntax", "brace_escapes.zz", false),
     ("syntax", "brace_escapes_multiline.zz", false),
+    ("syntax", "destructuring.zz", false),
+    ("syntax", "short_circuit.zz", true),
     ("stdlib", "json_extended_test.zz", false),
 ];
 
@@ -126,6 +128,8 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     // processes would collide on (and pollute from) one scratch dir.
     ("stdlib/filesystem.zz", "sweep-token scratch fs"),
     ("stdlib/fs_test.zz", "sweep-token scratch fs"),
+    // Needs the helpers/ support dir sibling (batch sandbox is flat).
+    ("stdlib/generic_selective.zz", "needs helpers/ support dir"),
     ("stdlib/result_print.zz", "sweep-token scratch fs"),
     ("stdlib/fs_vfs.zz", "sweep-token scratch fs"),
     // `alias_import` and `enum_import` claim the same `shapes` alias

@@ -1030,6 +1030,9 @@ pub(crate) struct Checker {
     /// functions resolve — generics have no value type, so no binding
     /// is ever created for them.
     pub(crate) import_aliases: HashMap<String, String>,
+    /// Module-head aliases: `m` → `std.math` from `import std.math as m`.
+    /// Lets const/call diagnostics resolve aliased namespaces.
+    pub(crate) module_aliases: HashMap<String, String>,
     /// Resolved type per scoped expression key, recorded during the type walk.
     /// Used by the HIR builder to attach a resolved `Type` to every AST node.
     /// Keyed by [`SpanKey`] (function + span): bare spans collide across
@@ -1091,6 +1094,7 @@ impl Checker {
             had_undefined_var: false,
             imports: Vec::new(),
             import_aliases: HashMap::new(),
+            module_aliases: HashMap::new(),
             span_types: std::collections::HashMap::new(),
             scope: Vec::new(),
             link_libs: Vec::new(),

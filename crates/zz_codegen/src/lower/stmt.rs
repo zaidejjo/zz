@@ -116,13 +116,16 @@ impl Lowerer {
                 let idx_boxed = self.box_index_arg(index, idx, names);
                 let base_tmp = names.fresh("_wbb");
                 let e = names.fresh("_wbe");
+                let itrap = names.fresh("_wbi");
+                let func = names.current_scope.clone();
                 out.push_str(&format!("    zz_value {base_tmp} = zz_clone({base});\n"));
+                out.push_str(&format!("    zz_value {itrap} = {idx_boxed};\n"));
                 out.push_str(&format!("    int {e} = 0;\n"));
                 out.push_str(&format!(
-                    "    zz_index_set(&{base_tmp}, {idx_boxed}, {tmp}, &{e});\n"
+                    "    zz_index_set(&{base_tmp}, {itrap}, {tmp}, &{e});\n"
                 ));
                 out.push_str(&format!(
-                    "    if ({e}) {{ fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); }}\n"
+                    "    if ({e}) {{ zz_index_trap({base_tmp}, {itrap}, \"{func}\"); }}\n"
                 ));
                 let _ = span;
                 self.emit_store_writeback(obj, &base_tmp, names, out);
@@ -730,12 +733,13 @@ impl Lowerer {
                             // Direct home: detach-on-write inside
                             // zz_index_set handles sharing with zero
                             // copies in the unique case.
+                            let func = names.current_scope.clone();
                             out.push_str(&format!(
-                                "    {{ int _e = 0; zz_index_set(&{home}, {i_boxed}, {boxed_val}, &_e);\n"
+                                "    {{ int _e = 0; zz_value _si = {i_boxed}; zz_index_set(&{home}, _si, {boxed_val}, &_e);\n"
                             ));
-                            out.push_str(
-                                "      if (_e) { fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); } }\n",
-                            );
+                            out.push_str(&format!(
+                                "      if (_e) {{ zz_index_trap({home}, _si, \"{func}\"); }} }}\n"
+                            ));
                         } else {
                             // Computed base: owned temp, store, write back
                             // (VM shape — plain reads would alias).
@@ -744,15 +748,16 @@ impl Lowerer {
                             // Box a scalar index to a zz_value.
                             let i_boxed = self.box_index_arg(index, i, names);
                             let wb = names.fresh("_wbs");
+                            let func = names.current_scope.clone();
                             out.push_str(&format!(
-                                "    {{ int _e = 0; zz_value {wb} = zz_clone({o});\n"
+                                "    {{ int _e = 0; zz_value {wb} = zz_clone({o}); zz_value _si = {i_boxed};\n"
                             ));
                             out.push_str(&format!(
-                                "      zz_index_set(&{wb}, {i_boxed}, {boxed_val}, &_e);\n"
+                                "      zz_index_set(&{wb}, _si, {boxed_val}, &_e);\n"
                             ));
-                            out.push_str(
-                                "      if (_e) { fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); }\n",
-                            );
+                            out.push_str(&format!(
+                                "      if (_e) {{ zz_index_trap({wb}, _si, \"{func}\"); }}\n"
+                            ));
                             self.emit_store_writeback(obj, &wb, names, out);
                             out.push_str("    }\n");
                         }
@@ -829,37 +834,39 @@ impl Lowerer {
                             // below must not evaluate it twice (side
                             // effects would fire twice — observed as a
                             // double log in differential probes).
+                            let func = names.current_scope.clone();
                             out.push_str(&format!(
                                 "    {{ int _e = 0; zz_value _ci = {i_boxed}; zz_value _cc = zz_index_get({home}, _ci, &_e);\n"
                             ));
-                            out.push_str(
-                                "      if (_e) { fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); }\n",
-                            );
+                            out.push_str(&format!(
+                                "      if (_e) {{ zz_index_trap({home}, _ci, \"{func}\"); }}\n"
+                            ));
                             out.push_str(&format!(
                                 "      zz_value _cr = zz_binop({cop}, _cc, {rhs_boxed});\n"
                             ));
                             out.push_str(&format!("      zz_index_set(&{home}, _ci, _cr, &_e);\n"));
-                            out.push_str(
-                                "      if (_e) { fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); } }\n",
-                            );
+                            out.push_str(&format!(
+                                "      if (_e) {{ zz_index_trap({home}, _ci, \"{func}\"); }} }}\n"
+                            ));
                         } else {
                             let o = self.emit_expr(obj, names, out);
                             let i = self.emit_expr(index, names, out);
                             let i_boxed = self.box_index_arg(index, i, names);
+                            let func = names.current_scope.clone();
                             out.push_str(&format!(
                                 "    {{ int _e = 0; zz_value _co = zz_clone({o}); zz_value _ci = {i_boxed};\n"
                             ));
                             out.push_str("      zz_value _cc = zz_index_get(_co, _ci, &_e);\n");
-                            out.push_str(
-                                "      if (_e) { fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); }\n",
-                            );
+                            out.push_str(&format!(
+                                "      if (_e) {{ zz_index_trap(_co, _ci, \"{func}\"); }}\n"
+                            ));
                             out.push_str(&format!(
                                 "      zz_value _cr = zz_binop({cop}, _cc, {rhs_boxed});\n"
                             ));
                             out.push_str("      zz_index_set(&_co, _ci, _cr, &_e);\n");
-                            out.push_str(
-                                "      if (_e) { fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); }\n",
-                            );
+                            out.push_str(&format!(
+                                "      if (_e) {{ zz_index_trap(_co, _ci, \"{func}\"); }}\n"
+                            ));
                             self.emit_store_writeback(obj, "_co", names, out);
                             out.push_str("    }\n");
                         }

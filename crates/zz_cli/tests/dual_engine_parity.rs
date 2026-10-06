@@ -691,6 +691,7 @@ macro_rules! parity_known_error_failure {
 parity_strict!(parity_syntax_declarations, "syntax", "declarations.zz");
 parity_strict!(parity_syntax_pipelines, "syntax", "pipelines.zz");
 parity_strict!(parity_syntax_operators, "syntax", "operators.zz");
+parity_strict!(parity_syntax_short_circuit, "syntax", "short_circuit.zz");
 parity_strict!(parity_syntax_bitwise_ops, "syntax", "bitwise_ops.zz");
 parity_strict!(parity_syntax_tuple_ops, "syntax", "tuple_ops.zz");
 parity_strict!(parity_syntax_destructuring, "syntax", "destructuring.zz");

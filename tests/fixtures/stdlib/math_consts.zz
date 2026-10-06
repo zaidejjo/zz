@@ -1,6 +1,9 @@
 // features: comparison, float-arith, imports, int-arith, locals, print, std-math, string-literal
 // E2E: std.math numeric constants are true values (no `()` needed).
 import std.math
+import std.math(PI)
+import std.math(E as ee)
+import std.math as m
 
 println(math.PI)
 println(math.E)
@@ -8,4 +11,9 @@ println(math.TAU)
 x := math.PI + math.E
 println(x > 3.0)
 println(std.math.PI)
+// Selective, aliased, and namespace-aliased consts print the value on
+// every engine (bare selective bindings printed empty on native).
+println(PI)
+println(ee)
+println(m.TAU)
 println("math_consts_ok")

@@ -32,19 +32,33 @@ impl Checker {
     /// additionally require the name to be present in `funcs` so import
     /// gating still applies (using `math.PI` without the import stays an
     /// "undefined variable" error).
-    pub(crate) fn is_math_const(name: &str) -> bool {
+    pub(crate) fn is_math_const(&self, name: &str) -> bool {
         const LEAVES: &[&str] = &[
             "PI", "E", "TAU", "SQRT_2", "SQRT_1_2", "LN_2", "LN_10", "LOG10_E", "LOG2_E", "INF",
             "NAN",
         ];
-        let (prefix, leaf) = match name.rsplit_once('.') {
+        // Resolve selective-import aliases first (`pi` from
+        // `import std.math(PI as pi)` checks as `math.PI`).
+        let resolved = self
+            .import_aliases
+            .get(name)
+            .map(|s| s.as_str())
+            .unwrap_or(name);
+        let (prefix, leaf) = match resolved.rsplit_once('.') {
             Some((p, l)) => (p, l),
-            None => ("", name),
+            None => ("", resolved),
         };
         if !LEAVES.contains(&leaf) {
             return false;
         }
-        matches!(prefix, "" | "math" | "std.math")
+        if matches!(prefix, "" | "math" | "std.math") {
+            return true;
+        }
+        // Resolve module-head aliases (`m.TAU` from `import std.math as m`).
+        if let Some(module) = self.module_aliases.get(prefix) {
+            return matches!(module.as_str(), "math" | "std.math");
+        }
+        false
     }
 
     pub(crate) fn pop_scope(&mut self) {
@@ -336,8 +350,7 @@ impl Checker {
             // Math constants (`math.PI`, `std.math.PI`, bare `PI` via a
             // selective import) are true `Float` values, not function
             // values — `println(math.PI)` must not suggest `()`.
-            if sig.params.is_empty() && matches!(sig.ret, Type::Float) && Self::is_math_const(name)
-            {
+            if sig.params.is_empty() && matches!(sig.ret, Type::Float) && self.is_math_const(name) {
                 return Some(Type::Float);
             }
             // Function used as a value: give its (uninstantiated) type. Call

@@ -1433,4 +1433,38 @@ zz_value zz_result_expect(zz_value res, zz_value msg, int *err) {
     exit(1);
 }
 
+// Index-trap with operands and function name (#251): called from lowered
+// bounds-check failures instead of a bare "index out of bounds". Mirrors
+// the VM wording (`index {i} out of bounds for length {len}`) plus the
+// enclosing function, so native failures locate themselves without a
+// VM bisection run. `func` is a ZZ identifier (safe for %s).
+void zz_index_trap(zz_value obj, zz_value idx, const char *func) {
+    if (idx.tag == ZZ_INT) {
+        long long i = (long long)idx.i;
+        long long n = -1;
+        if (obj.tag == ZZ_ARRAY && obj.arr)
+            n = (long long)obj.arr->len;
+        else if (obj.tag == ZZ_BYTES && obj.bytes)
+            n = (long long)obj.bytes->len;
+        else if (obj.tag == ZZ_STR && obj.s)
+            n = (long long)obj.s->len;
+        if (n >= 0) {
+            fprintf(stderr, "zz error: index %lld out of bounds for length %lld in %s\n",
+                    i, n, func);
+            exit(1);
+        }
+        fprintf(stderr, "zz error: index %lld out of bounds in %s\n", i, func);
+        exit(1);
+    }
+    if (idx.tag == ZZ_STR && obj.tag == ZZ_DICT && idx.s) {
+        fprintf(stderr, "zz error: key `");
+        size_t klen = idx.s->len < 64 ? idx.s->len : 64;
+        fwrite(zz_str_cptr(idx.s), 1, klen, stderr);
+        fprintf(stderr, "` not found in dict in %s\n", func);
+        exit(1);
+    }
+    fprintf(stderr, "zz error: index out of bounds in %s\n", func);
+    exit(1);
+}
+
 // fs.read(path)
