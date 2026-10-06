@@ -320,6 +320,7 @@ pub(crate) fn spawn_hook(
     interp: &mut Interp,
     chunk: &Arc<zz_runtime::Chunk>,
     params: &[zz_frontend::ast::Param],
+    _chunk_defaults: &[Option<Arc<zz_runtime::Chunk>>],
     span: Span,
 ) -> Result<Value, EvalError> {
     let env = interp.env.clone();

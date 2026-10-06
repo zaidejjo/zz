@@ -76,6 +76,7 @@ impl Interp {
                     body: Expr::Block(body.clone()),
                     env: self.env.clone(),
                     chunk: None,
+                    chunk_defaults: Vec::new(),
                 };
                 self.funcs.insert(name.join("."), fv.clone());
                 self.funcs_version = self.funcs_version.wrapping_add(1);
@@ -133,6 +134,7 @@ impl Interp {
                             body: Expr::Block(body.clone()),
                             env: self.env.clone(),
                             chunk: None,
+                            chunk_defaults: Vec::new(),
                         };
                         self.funcs.insert(full_name.clone(), fv.clone());
                         self.funcs_version = self.funcs_version.wrapping_add(1);
@@ -286,6 +288,7 @@ impl Interp {
                     body: expr.as_ref().clone(),
                     env: self.env.clone(),
                     chunk: None,
+                    chunk_defaults: Vec::new(),
                 };
                 self.defer_stacks
                     .last_mut()
@@ -304,9 +307,34 @@ impl Interp {
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Assign { target, value, .. } => {
-                let v = self.eval(value)?.into_value()?;
-                self.assign_target(target, v)?;
-                Ok(Flow::Value(Value::Unit))
+                // Source order for stores (spec §7): the base/index
+                // evaluate BEFORE the value. Plain names and paths have
+                // no user code in the base, so they keep the shared
+                // `assign_target` path.
+                match target {
+                    Expr::Index { obj, index, span } => {
+                        let mut objv = self.eval(obj)?.into_value()?;
+                        let iv = self.eval(index)?.into_value()?;
+                        let v = self.eval(value)?.into_value()?;
+                        set_index(&mut objv, &iv, v, *span)?;
+                        self.write_back(obj, objv)?;
+                        Ok(Flow::Value(Value::Unit))
+                    }
+                    Expr::Field { obj, name, span } => {
+                        let mut objv = self.eval(obj)?.into_value()?;
+                        let v = self.eval(value)?.into_value()?;
+                        set_object_field(&mut objv, name, v, *span)?;
+                        if let Expr::Ident { name, .. } = &**obj {
+                            self.env.assign(name, objv);
+                        }
+                        Ok(Flow::Value(Value::Unit))
+                    }
+                    _ => {
+                        let v = self.eval(value)?.into_value()?;
+                        self.assign_target(target, v)?;
+                        Ok(Flow::Value(Value::Unit))
+                    }
+                }
             }
             Stmt::CompoundAssign {
                 target,
@@ -436,17 +464,21 @@ impl Interp {
             }
             Expr::Path { parts, span } => self.assign_path(parts, value, *span),
             Expr::Field { obj, name, span } => {
+                // Source order: base, then value (spec §7).
                 let mut objv = self.eval(obj)?.into_value()?;
-                set_object_field(&mut objv, name, value, *span)?;
+                let v = value;
+                set_object_field(&mut objv, name, v, *span)?;
                 if let Expr::Ident { name, .. } = &**obj {
                     self.env.assign(name, objv);
                 }
                 Ok(())
             }
             Expr::Index { obj, index, span } => {
-                let iv = self.eval(index)?.into_value()?;
+                // Source order: base, index, then value (spec §7).
                 let mut objv = self.eval(obj)?.into_value()?;
-                set_index(&mut objv, &iv, value, *span)?;
+                let iv = self.eval(index)?.into_value()?;
+                let v = value;
+                set_index(&mut objv, &iv, v, *span)?;
                 self.write_back(obj, objv)
             }
             other => Err(EvalError::new(
@@ -1208,6 +1240,7 @@ impl Interp {
                     body: (**body).clone(),
                     env: self.env.clone(),
                     chunk: None,
+                    chunk_defaults: Vec::new(),
                 }))))
             }
             Expr::If {

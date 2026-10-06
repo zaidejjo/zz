@@ -1859,6 +1859,7 @@ struct FuncSnapshot {
     params: Vec<Param>,
     body: Expr,
     chunk: Option<Arc<Chunk>>,
+    chunk_defaults: Vec<Option<Arc<Chunk>>>,
     env_snapshot: HashMap<String, Value>,
 }
 
@@ -1875,6 +1876,7 @@ impl FuncSnapshot {
             body: self.body.clone(),
             env,
             chunk: self.chunk.clone(),
+            chunk_defaults: self.chunk_defaults.clone(),
         }))
     }
 }
@@ -1956,6 +1958,7 @@ fn snapshot_func_scoped(v: &Value, interp: &Interp) -> Option<FuncSnapshot> {
                 params: fv.params.clone(),
                 body: fv.body.clone(),
                 chunk: fv.chunk.clone(),
+                chunk_defaults: fv.chunk_defaults.clone(),
                 env_snapshot,
             })
         }

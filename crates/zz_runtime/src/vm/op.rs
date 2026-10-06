@@ -21,6 +21,11 @@ pub enum Op {
     PushConst(u32),
     /// Discard the top of the stack.
     Pop,
+    /// Swap the top two stack values. Lets left-to-right evaluation
+    /// (base, then value) feed value-below op layouts (`SetField` pops
+    /// object-then-value): `obj, value, Swap, SetField`. Stack-neutral
+    /// and side-effect-free.
+    Swap,
     /// Replace the top of the stack with `Bool(v.is_truthy())`.
     Truthy,
 
@@ -122,6 +127,10 @@ pub enum Op {
         name: String,
         params: Vec<Param>,
         chunk: Arc<Chunk>,
+        /// Pre-compiled default-argument bodies, parallel to `params`.
+        /// Empty on the normal compile path (AST defaults apply); populated
+        /// by `.zzc` loads, which carry no AST.
+        defaults: Vec<Option<Arc<Chunk>>>,
     },
     /// Register a struct definition (name -> ordered field names).
     RegisterStruct { name: String, fields: Vec<String> },
@@ -275,6 +284,8 @@ pub enum Op {
     MakeClosure {
         params: Vec<Param>,
         chunk: Arc<Chunk>,
+        /// Pre-compiled default-argument bodies (see `MakeFunc`).
+        defaults: Vec<Option<Arc<Chunk>>>,
     },
     /// Fused `task.spawn(closure-literal)`: build the task directly from
     /// the pre-compiled body chunk, skipping the `FuncValue` box + native
@@ -285,6 +296,8 @@ pub enum Op {
         params: Vec<Param>,
         chunk: Arc<Chunk>,
         span: Span,
+        /// Pre-compiled default-argument bodies (see `MakeFunc`).
+        defaults: Vec<Option<Arc<Chunk>>>,
     },
     /// Pop an optional argument and push an Option/Result variant.
     MakeVariant {

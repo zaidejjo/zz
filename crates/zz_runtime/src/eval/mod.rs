@@ -83,6 +83,9 @@ pub type SpawnHook = fn(
     interp: &mut Interp,
     chunk: &Arc<crate::vm::Chunk>,
     params: &[zz_frontend::ast::Param],
+    // Pre-compiled default-argument bodies, parallel to `params`
+    // (`.zzc` loads; empty on the normal path — see `MakeFunc`).
+    chunk_defaults: &[Option<Arc<crate::vm::Chunk>>],
     span: Span,
 ) -> Result<Value, crate::runtime::EvalError>;
 
@@ -226,6 +229,26 @@ impl Interp {
         ));
         let mut vm = crate::vm::Vm::new();
         match vm.run_chunk(&chunk, self)? {
+            Flow::Value(v) => Ok(v),
+            Flow::Return(_) => Err(EvalError::new(
+                "`return` outside of a function",
+                Span::new(0, 0),
+            )),
+            Flow::Break(span) => Err(EvalError::new("`break` outside of a loop", span)),
+            Flow::Continue(span) => Err(EvalError::new("`continue` outside of a loop", span)),
+            Flow::Yield(_) => Err(EvalError::new(
+                "internal error: green-thread yield escaped its executor",
+                Span::new(0, 0),
+            )),
+        }
+    }
+
+    /// Execute a pre-compiled chunk with no AST involved (`.zzc` loads).
+    /// The chunk must come from raising verified `.zzc` bytes; spans
+    /// index the original sources for error rendering.
+    pub fn run_loaded_chunk(&mut self, chunk: &Arc<crate::vm::Chunk>) -> Result<Value, EvalError> {
+        let mut vm = crate::vm::Vm::new();
+        match vm.run_chunk(chunk, self)? {
             Flow::Value(v) => Ok(v),
             Flow::Return(_) => Err(EvalError::new(
                 "`return` outside of a function",

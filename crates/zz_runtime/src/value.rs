@@ -534,6 +534,7 @@ pub fn snapshot_funcs(funcs: &HashMap<String, FuncValue>) -> HashMap<String, Fun
                 body: fv.body.clone(),
                 env: new_env,
                 chunk: fv.chunk.clone(),
+                chunk_defaults: fv.chunk_defaults.clone(),
             },
         );
     }
@@ -565,6 +566,7 @@ pub fn detach_cached_funcs(cached: &HashMap<String, FuncValue>) -> HashMap<Strin
                 body: fv.body.clone(),
                 env: new_env,
                 chunk: fv.chunk.clone(),
+                chunk_defaults: fv.chunk_defaults.clone(),
             },
         );
     }
@@ -774,6 +776,7 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
                 body: fv.body.clone(),
                 env: EnvLink::new(),
                 chunk: fv.chunk.clone(),
+                chunk_defaults: fv.chunk_defaults.clone(),
             };
             let placeholder_val = Value::Func(Box::new(placeholder));
             seen.insert(key, placeholder_val.clone());
@@ -790,6 +793,7 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
                 body: fv.body,
                 env: new_env,
                 chunk: fv.chunk,
+                chunk_defaults: fv.chunk_defaults.clone(),
             }));
             seen.insert(key, cloned.clone());
             cloned
@@ -988,6 +992,11 @@ pub struct FuncValue {
     /// Pre-compiled bytecode body, when the function was defined through the
     /// Phase 6 compiler. `None` for tree-walker-created closures.
     pub chunk: Option<std::sync::Arc<crate::vm::Chunk>>,
+    /// Pre-compiled default-argument bodies, parallel to `params`. `Some`
+    /// entries come from `.zzc` loads (which carry no AST to evaluate);
+    /// the normal compile path leaves this empty and evaluates the AST
+    /// `Param::default` instead. Tree-walker values never set it.
+    pub chunk_defaults: Vec<Option<std::sync::Arc<crate::vm::Chunk>>>,
 }
 
 impl Value {
@@ -1463,6 +1472,7 @@ mod snapshot_tests {
             body: str_body(body),
             env: env.clone(),
             chunk: None,
+            chunk_defaults: Vec::new(),
         }))
     }
 

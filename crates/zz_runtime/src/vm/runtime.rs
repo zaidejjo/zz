@@ -437,6 +437,10 @@ impl Vm {
                 Op::Pop => {
                     self.stack.pop();
                 }
+                Op::Swap => {
+                    let len = self.stack.len();
+                    self.stack.swap(len - 1, len - 2);
+                }
                 Op::Truthy => {
                     let v = self.stack.pop().unwrap();
                     self.stack.push(Value::Bool(v.is_truthy()));
@@ -754,6 +758,7 @@ impl Vm {
                     name,
                     params,
                     chunk: fchunk,
+                    defaults,
                 } => {
                     let fv = FuncValue {
                         params: params.clone(),
@@ -763,6 +768,7 @@ impl Vm {
                         }),
                         env: interp.env.clone(),
                         chunk: Some(Arc::clone(fchunk)),
+                        chunk_defaults: defaults.clone(),
                     };
                     interp.funcs.insert(name.clone(), fv.clone());
                     interp.funcs_version = interp.funcs_version.wrapping_add(1);
@@ -1322,9 +1328,11 @@ impl Vm {
                     self.stack.push(v);
                 }
                 Op::StoreIndexOp(span) => {
-                    let mut ov = self.stack.pop().unwrap();
-                    let iv = self.stack.pop().unwrap();
+                    // Stack layout is evaluation order: [object, index,
+                    // value] (spec §7: base, index, value, left-to-right).
                     let value = self.stack.pop().unwrap();
+                    let iv = self.stack.pop().unwrap();
+                    let mut ov = self.stack.pop().unwrap();
                     set_index(&mut ov, &iv, value, *span)?;
                     self.stack.push(ov);
                 }
@@ -1473,7 +1481,11 @@ impl Vm {
                     }
                     self.stack.push(ov);
                 }
-                Op::MakeClosure { params, chunk } => {
+                Op::MakeClosure {
+                    params,
+                    chunk,
+                    defaults,
+                } => {
                     let fv = FuncValue {
                         params: params.clone(),
                         body: Expr::Block(Block {
@@ -1482,6 +1494,7 @@ impl Vm {
                         }),
                         env: interp.env.clone(),
                         chunk: Some(Arc::clone(chunk)),
+                        chunk_defaults: defaults.clone(),
                     };
                     self.stack.push(Value::Func(Box::new(fv)));
                 }
@@ -1489,6 +1502,7 @@ impl Vm {
                     params,
                     chunk,
                     span,
+                    defaults,
                 } => {
                     // Fused spawn (see `SpawnHook`): the chunk + params go
                     // straight to the task constructor — no FuncValue box,
@@ -1497,7 +1511,7 @@ impl Vm {
                     let hook = crate::eval::SPAWN_HOOK.get().copied().ok_or_else(|| {
                         self.error("`task.spawn` used without stdlib task support", *span)
                     })?;
-                    let v = hook(interp, chunk, params, *span)?;
+                    let v = hook(interp, chunk, params, defaults, *span)?;
                     self.stack.push(v);
                 }
                 Op::MakeVariant {
@@ -2166,14 +2180,37 @@ impl Vm {
                                 args.push(v);
                             }
                             None => {
-                                return Err(self.error(
-                                    format!(
-                                        "expected {} arguments, found {}",
-                                        fv.params.len(),
-                                        start
-                                    ),
-                                    span,
-                                ));
+                                // `.zzc` loads carry pre-compiled default
+                                // bodies instead of AST (no AST is
+                                // available on the load path). The chunk
+                                // runs against the caller's environment —
+                                // exactly where `interp.eval` above runs.
+                                if let Some(Some(dchunk)) = fv.chunk_defaults.get(start + i) {
+                                    let mut sub = Vm::new();
+                                    match sub.run_chunk(dchunk, interp)? {
+                                        Flow::Value(v) | Flow::Return(v) => args.push(v),
+                                        Flow::Break(span) | Flow::Continue(span) => {
+                                            return Err(
+                                                self.error("invalid default-argument body", span)
+                                            );
+                                        }
+                                        Flow::Yield(_) => {
+                                            return Err(self.error(
+                                                "invalid default-argument body",
+                                                Span::new(0, 0),
+                                            ));
+                                        }
+                                    }
+                                } else {
+                                    return Err(self.error(
+                                        format!(
+                                            "expected {} arguments, found {}",
+                                            fv.params.len(),
+                                            start
+                                        ),
+                                        span,
+                                    ));
+                                }
                             }
                         }
                     }
