@@ -434,6 +434,11 @@ e2e_success_test!(
     "edge_chained_store.zz"
 );
 e2e_success_test!(
+    e2e_regression_eval_order_store,
+    "regression",
+    "eval_order_store.zz"
+);
+e2e_success_test!(
     e2e_regression_edge_float_nan_display,
     "regression",
     "edge_float_nan_display.zz"

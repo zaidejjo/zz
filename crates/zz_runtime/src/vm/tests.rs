@@ -432,6 +432,7 @@ fn vm_method_call_and_cross_module() {
         }),
         env: interp.env.clone(),
         chunk: Some(Arc::new(chunk)),
+        chunk_defaults: Vec::new(),
     };
     interp.funcs.insert("shapes.dist".into(), fv);
     let v = interp.run(&parsed.program).unwrap();

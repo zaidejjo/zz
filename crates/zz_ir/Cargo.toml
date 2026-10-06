@@ -1,0 +1,13 @@
+[package]
+name = "zz_ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zz_runtime = { path = "../zz_runtime" }
+zz_frontend = { path = "../zz_frontend" }
+zz_checker = { path = "../zz_checker" }
+
+[dev-dependencies]
+zz_stdlib = { path = "../zz_stdlib" }

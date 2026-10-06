@@ -276,6 +276,18 @@ impl Compiler {
         c.chunk
     }
 
+    /// Compile a lone default-argument expression into a chunk for `.zzc`
+    /// lowering (which carries no AST). The fresh compiler has no locals,
+    /// so every name resolves through the environment — exactly where the
+    /// AST path (`interp.eval` in the caller's environment) resolves them.
+    /// The chunk leaves its value on the stack and takes no parameters.
+    pub fn compile_default_expr(expr: &zz_frontend::ast::Expr) -> Chunk {
+        let mut sub = Compiler::new();
+        sub.captured = super::capture::scan_closure_captured(expr, &[]);
+        sub.compile_expr(expr);
+        sub.chunk
+    }
+
     /// Compile a whole program with type information from the HIR.
     ///
     /// Behaves identically to [`compile_program`] but threads the resolved
@@ -440,6 +452,7 @@ impl Compiler {
         match op {
             Op::PushConst(_) => 1,
             Op::Pop => -1,
+            Op::Swap => 0,
             Op::Truthy => 0,
             Op::LoadVar(..) | Op::LoadPath(..) | Op::LoadSlot(_) => 1,
             Op::TakeSlot(_) | Op::TakeVar(..) => 1,
@@ -1534,6 +1547,13 @@ impl Compiler {
         pos
     }
 
+    /// Chained-store temp: stash slot for the value under rewrite while the
+    /// outer base/index evaluate (spec §7 left-to-right). Unutterable in
+    /// source (NUL), so user code can neither name nor capture it; the
+    /// temp scope keeps a nested chained store inside the base/index from
+    /// clobbering an in-flight outer value.
+    const WRITEBACK_TMP: &'static str = "\u{0}zz_wb";
+
     fn compile_write_back(&mut self, target: &Expr) {
         match target {
             Expr::Ident { name, span } => match self.resolve(name) {
@@ -1558,13 +1578,19 @@ impl Compiler {
             }
             Expr::Index { obj, index, span } => {
                 // Chained index store (`m[0][0] = v`): the mutated inner
-                // container sits on the stack; store it back into its own
-                // home and recurse so the write reaches the root binding.
+                // container sits on the stack; stash it so the outer
+                // base/index evaluate BEFORE the value (spec §7
+                // left-to-right), then store it back into its own home
+                // and recurse so the write reaches the root binding.
                 // Re-evaluates index/obj (same double-evaluation contract
-                // as the Field arm above — receivers with side effects
-                // evaluate twice).
-                self.compile_expr(index);
+                // as before — receivers with side effects evaluate twice).
+                self.emit(Op::EnterScope);
+                self.emit(Op::DefineVar(Self::WRITEBACK_TMP.to_string()));
+                self.emit(Op::Pop);
                 self.compile_expr(obj);
+                self.compile_expr(index);
+                self.emit(Op::LoadVar(Self::WRITEBACK_TMP.to_string(), *span));
+                self.emit(Op::ExitScope);
                 self.emit(Op::StoreIndexOp(*span));
                 self.compile_write_back(obj);
             }
@@ -1662,6 +1688,7 @@ impl Compiler {
                     name: fname,
                     params: params.clone(),
                     chunk,
+                    defaults: Vec::new(),
                 });
                 StmtValue::Discard
             }
@@ -1713,6 +1740,7 @@ impl Compiler {
                             name: full_name,
                             params: params.clone(),
                             chunk,
+                            defaults: Vec::new(),
                         });
                     }
                 }
@@ -1803,6 +1831,7 @@ impl Compiler {
                 self.emit(Op::MakeClosure {
                     params: vec![],
                     chunk,
+                    defaults: Vec::new(),
                 });
                 self.emit(Op::DeferRecord);
                 StmtValue::None
@@ -1879,9 +1908,12 @@ impl Compiler {
                     StmtValue::Discard
                 }
                 Expr::Index { obj, index, span } => {
-                    self.compile_expr(value);
-                    self.compile_expr(index);
+                    // Source order: base, index, value (spec §7). The
+                    // stack layout stays [base, index, value] for the new
+                    // StoreIndexOp pop order (value, index, object).
                     self.compile_expr(obj);
+                    self.compile_expr(index);
+                    self.compile_expr(value);
                     self.emit(Op::StoreIndexOp(*span));
                     self.compile_write_back(obj);
                     self.emit_const(Value::Unit);
@@ -1921,8 +1953,11 @@ impl Compiler {
                             }
                         }
                     }
-                    self.compile_expr(value);
+                    // Source order: base, then value (spec §7). `Swap`
+                    // feeds the value-below `SetField` layout.
                     self.compile_expr(obj);
+                    self.compile_expr(value);
+                    self.emit(Op::Swap);
                     // Type-driven fast path for field assignment.
                     if let Some(zz_checker::Type::Struct(struct_name, _)) = self.type_of(obj.span())
                     {
@@ -2787,6 +2822,7 @@ impl Compiler {
                                 params: params.clone(),
                                 chunk,
                                 span: *span,
+                                defaults: Vec::new(),
                             });
                             return;
                         }
@@ -3415,6 +3451,7 @@ impl Compiler {
                 self.emit(Op::MakeClosure {
                     params: params.clone(),
                     chunk,
+                    defaults: Vec::new(),
                 });
             }
             Expr::Match {

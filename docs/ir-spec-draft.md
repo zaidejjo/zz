@@ -183,10 +183,11 @@ its own number rendering on both engines; float→int saturation is §5.
   engines (`edge_eval_order` strict).
 - Stores evaluate source order: base, index, value — each side exactly
   once (compound stores read-then-write through one index evaluation,
-  `edge_compound_index_eval` strict). KNOWN DEVIATION: the VM's plain
-  index/field store evaluates value-first today (implementation
-  artifact, `edge_index_store_order` quad-split); the VM path changes
-  post-M1, no engine changes in M1.
+  `edge_compound_index_eval` strict). Chained plain stores re-evaluate
+  the outer base/index on write-back (documented double-evaluation
+  contract, pinned by `eval_order_store`); every individual store still
+  orders base, index, value. Both engines agree (`edge_index_store_order`
+  and `eval_order_store` strict).
 - Code is basic blocks with explicit `JMP`/`JMP_TRUE`/`JMP_FALSE`.
   Every block records its entry stack depth; every join MUST agree
   (verifier-enforced). Loops are blocks + back-edges with a `SAFEPOINT`
@@ -197,8 +198,8 @@ its own number rendering on both engines; float→int saturation is §5.
 ## 8. The `.zzc` format (M1 implementation target)
 
 - Little-endian. Magic `ZZC1`, `u32` version (this spec = 1),
-  section table: `TYPES`, `CONSTS` (value pool), `FUNCS` (name,
-  arity, signature, entry block), `CODE` (blocks + typed ops),
+  section table: `TYPES`, `STRINGS` (interned names), `CONSTS` (value pool),
+  `FUNCS` (name, arity, signature, entry block), `CODE` (blocks + typed ops),
   `SPANS` (op → source span), `ANNOT` (performance hints, §9).
 - Constants pool holds all literals (including string-literal
   markers for `print` — the M2 subset needs no string machinery
@@ -206,6 +207,9 @@ its own number rendering on both engines; float→int saturation is §5.
 - The format MUST make stack→register lowering possible later:
   single-assignment-friendly op stream, explicit block params instead
   of cross-block stack juggling, no implicit stack effects.
+  (v1 status: flat stack code with verifier-enforced join depths —
+  join agreement is checked, block params are future work for the
+  register-lowering slice.)
 - `zz dis` disassembles `.zzc` to stable text (golden-testable).
 - Serializer + deserializer round-trip bit-identically; the
   deserializer is fuzzed (malformed inputs MUST be rejected, never
@@ -241,7 +245,7 @@ stderr (VM shape today; AOT adopts it, replacing bare
 | OOB index | VM traps / native unit+exit 0 | trap `Bounds` | stays error; native gains check |
 | chained stores | VM dropped (fixed) / native through | through | `edge_chained_store` strict (done) |
 | field-of-index store | both drop (fixed this batch) | through | write-through family strict |
-| plain index-store order | VM value-first / native source-order | source order | `edge_index_store_order` quad-split; VM changes post-M1 |
+| plain index-store order | VM value-first / native source-order | source order | `edge_index_store_order` strict since zzc-codec; `eval_order_store` conformance |
 | compound index eval | VM once / native twice (regression) | exactly once | `edge_compound_index_eval` strict after AOT fix |
 | NaN display | `NaN` vs `nan` | `NaN` (+owned formatting) | `edge_float_nan_display` strict after C fix |
 | int(NaN) under -O3 | 0 or MIN (UB) | saturate → 0 | `edge_cast_float_nan` strict after `-ffast-math` removal |

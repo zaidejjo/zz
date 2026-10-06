@@ -54,11 +54,15 @@ USAGE:
     zz                            start the interactive REPL
     zz eval <source>              evaluate source and print the result
     zz run <file.zz>              type-check and run a file
+    zz run --bytecode <file>      run via .zzc bytecode (compiles .zz, or
+                                  loads .zzc directly with no frontend)
+    zz dis <file.zzc|file.zz>     disassemble bytecode to stable text
     zz test <file.zz | dir>       run @test-annotated functions
     zz check [FLAGS] [PATH]       scan for errors/warnings (file or directory)
     zz fix [FLAGS] [PATH]         apply auto-fixes (shortcut for check --fix)
     zz fmt [FLAGS] [PATH]         format ZZ source files in-place
     zz build [FLAGS] <file.zz>    compile a native binary (cached)
+    zz build --emit-ir -o <f.zzc> emit .zzc bytecode instead of a binary
 
 PACKAGE MANAGER:
     zz init [--template T]        initialize zz.toml + src/main.zz in cwd
@@ -219,14 +223,29 @@ fn main() -> ExitCode {
         }
         Some("run") => {
             let native = rest.iter().any(|a| a == "--native");
+            let bytecode = rest.iter().any(|a| a == "--bytecode");
             let embed = parse_flag_value(rest, "--embed").map(std::path::PathBuf::from);
-            // Strip `--embed <dir>` / `--embed=<dir>` (and `--native`) so
-            // neither the loader nor the script sees them as paths/args.
-            let args: Vec<String> = strip_flag_value(rest, "--embed", "--native");
+            // Strip `--embed <dir>` / `--embed=<dir>` (and `--native` /
+            // `--bytecode`) so neither the loader nor the script sees
+            // them as paths/args.
+            let mut args: Vec<String> = strip_flag_value(rest, "--embed", "--native");
+            args.retain(|a| a != "--bytecode");
             let script_args = args.get(1..).unwrap_or(&[]).to_vec();
             let file = args.iter().find(|a| !a.starts_with('-'));
+            if native && bytecode {
+                eprintln!("zz: cannot combine `--native` and `--bytecode`");
+                return ExitCode::FAILURE;
+            }
             if native {
                 match run_native(file, &script_args, embed) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(msg) => {
+                        eprintln!("zz: {msg}");
+                        ExitCode::FAILURE
+                    }
+                }
+            } else if bytecode {
+                match run_bytecode(file, &script_args, embed) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
                         eprintln!("zz: {msg}");
@@ -240,6 +259,16 @@ fn main() -> ExitCode {
                         eprintln!("zz: {msg}");
                         ExitCode::FAILURE
                     }
+                }
+            }
+        }
+        Some("dis") => {
+            let file = rest.iter().find(|a| !a.starts_with('-'));
+            match dis_file(file) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(msg) => {
+                    eprintln!("zz: {msg}");
+                    ExitCode::FAILURE
                 }
             }
         }
@@ -677,18 +706,138 @@ fn load_vm_plugins(
     Ok(0)
 }
 
-fn run_file(
-    path: Option<&String>,
+/// A `.zz` program ready to execute: loaded modules, HIR types, and a
+/// fully seeded interpreter (natives, consts, pure-ZZ stdlib, aliases).
+struct PreparedRun {
+    interp: Interp,
+    programs: Vec<zz_frontend::ast::Program>,
+    files: Vec<(String, String)>,
+    types: std::sync::Arc<std::collections::HashMap<zz_checker::SpanKey, zz_checker::Type>>,
+    structs: std::collections::HashMap<String, zz_checker::StructSig>,
+    enums: std::collections::HashMap<String, zz_checker::EnumSig>,
+    entry_path: String,
+}
+
+/// Seed an interpreter: native dispatch, math constants, pure-ZZ
+/// stdlib programs, and import-alias mirrors. Shared by `run` and the
+/// `.zzc` loader (which supplies stdlib natives and empty maps).
+#[allow(clippy::too_many_arguments)]
+fn setup_interp(
+    natives: std::collections::HashMap<String, zz_runtime::NativeEntry>,
+    loaded_consts: &std::collections::HashMap<String, f64>,
+    import_aliases: std::collections::HashMap<String, String>,
+    stdlib_aliases: &[(String, String)],
+    project_root: &std::path::Path,
+    plugin_funcs: &[(String, zz_checker::FuncSig)],
+    script_args: &[String],
+    embed: Option<&std::path::Path>,
+) -> Result<Interp, String> {
+    let mut natives = natives;
+    let first_try = match crate::load_vm_plugins(project_root, &mut natives, plugin_funcs) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("zz: warning: {e}");
+            0
+        }
+    };
+    if !plugin_funcs.is_empty() && first_try == 0 {
+        crate::build::ensure_native_hooks(project_root);
+        if let Err(e) = crate::load_vm_plugins(project_root, &mut natives, plugin_funcs) {
+            eprintln!("zz: warning: {e}");
+        }
+    }
+
+    let mut interp = Interp::with_natives(natives);
+    interp.args = script_args.to_vec();
+    // Selective-import aliases for bare generic-function calls (see
+    // LoadResult::import_aliases): the VM compiler emits no code for
+    // import statements, so the runtime map would otherwise stay empty.
+    interp.import_aliases = import_aliases;
+
+    // `--embed <dir>`: serve the asset tree to `fs.embedfs()` for this run.
+    if let Some(dir) = embed {
+        let files = build::collect_embed(dir)?;
+        zz_stdlib::natives::fs::vfs::set_embed(
+            files
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>(),
+        );
+    }
+
+    // Inject math constants as static float values in the runtime env.
+    // This avoids the zero-arg native function indirection — `PI` resolves
+    // directly to `Value::Float(3.14159…)` without a function call.
+    // Three forms are injected so all reference styles work:
+    //   - `std.math.PI`  — fully qualified
+    //   - `math.PI`      — module namespace (import std.math)
+    //   - `PI`           — bare (import std.math(PI))
+    // The checker gates which names are actually accessible per-module,
+    // so injecting all bare forms here is safe.
+    for (key, val) in zz_stdlib::stdlib_consts() {
+        interp.env.define(&key, Value::Float(val));
+        if let Some(rest) = key.strip_prefix("std.") {
+            interp.env.define(rest, Value::Float(val));
+        }
+        // Bare name: `std.math.PI` → `PI`
+        if let Some(bare) = key.rsplit('.').next() {
+            interp.env.define(bare, Value::Float(val));
+        }
+    }
+    // Also inject any aliased constants from selective imports
+    // (e.g. `import std.math(PI as pi)` → inject `pi`).
+    for (name, val) in loaded_consts {
+        interp.env.define(name, Value::Float(*val));
+    }
+
+    // Run compiled pure-ZZ stdlib programs. These populate the environment
+    // with functions written in ZZ (e.g. vec.map, math.sum) that extend
+    // the native stdlib. Must happen before user code so the functions are
+    // available when user modules reference them.
+    for zz_prog in zz_stdlib::zz_stdlib_programs() {
+        if let Err(e) = interp.run_typed(
+            &zz_prog.program,
+            std::sync::Arc::new(zz_prog.types.clone()),
+            zz_prog.structs.clone(),
+            zz_prog.enums.clone(),
+        ) {
+            eprintln!("zz: pure-ZZ stdlib error: {e:?}");
+            return Err("stdlib initialization failed".to_string());
+        }
+    }
+    // Canonical `std.*` aliases for pure-ZZ helpers: sources declare short
+    // names (`json.is_null`) while the checker advertises both spellings.
+    zz_stdlib::define_canonical_purezz_aliases(&mut interp.env, &mut interp.funcs);
+    // Mirror pure-ZZ Env bindings for `import std.X as alias` renames
+    // (e.g. `colors.red` → `cl.red`). Natives are already aliased via
+    // `loaded.natives`; pure-ZZ funcs live in Env and need the same.
+    {
+        let snap = interp.env.flatten();
+        for (module, ns) in stdlib_aliases {
+            let src_prefix = module.rsplit('.').next().unwrap_or(module);
+            if ns == src_prefix {
+                continue;
+            }
+            for (k, v) in &snap {
+                if k == src_prefix || k.starts_with(&format!("{src_prefix}.")) {
+                    let alias_key = if k == src_prefix {
+                        ns.clone()
+                    } else {
+                        format!("{ns}{}", &k[src_prefix.len()..])
+                    };
+                    interp.env.define(&alias_key, v.clone());
+                }
+            }
+        }
+    }
+    Ok(interp)
+}
+
+/// Load, check, and seed a `.zz` program for execution.
+fn prepare_run(
+    path: &str,
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
-) -> Result<(), String> {
-    let path = path.ok_or_else(|| {
-        "missing file argument\n\n\
-             usage: zz run <file.zz>\n\
-             hint: provide the path to a .zz file to execute"
-            .to_string()
-    })?;
-
+) -> Result<PreparedRun, String> {
     let script_path = std::path::Path::new(path);
     // Project root: walk up from the script (entry files usually live in
     // `src/`; `zz.lock` sits at the root). Falls back to the script dir.
@@ -727,24 +876,6 @@ fn run_file(
             .to_string());
     }
 
-    // Load plugin shared libraries for VM-based native dispatch.
-    // When manifests exist but nothing loaded, the hooks never ran
-    // (fresh resolve without install): build natively once, then retry.
-    let mut natives = loaded.natives.clone();
-    let first_try = match crate::load_vm_plugins(&project_root, &mut natives, &plugin_funcs) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("zz: warning: {e}");
-            0
-        }
-    };
-    if !plugin_funcs.is_empty() && first_try == 0 {
-        crate::build::ensure_native_hooks(&project_root);
-        if let Err(e) = crate::load_vm_plugins(&project_root, &mut natives, &plugin_funcs) {
-            eprintln!("zz: warning: {e}");
-        }
-    }
-
     // Build the typed program (HIR) to get the resolved type map.
     // The merged program is only used for type checking; execution still
     // runs each module's original program so top-level side effects
@@ -763,135 +894,99 @@ fn run_file(
         stmts: merged_stmts,
         span: merged_span,
     };
+    let crate::loader::LoadResult {
+        programs,
+        files,
+        funcs,
+        structs: _loaded_structs,
+        aliases,
+        enums: _loaded_enums,
+        natives,
+        consts,
+        errors: _,
+        stdlib_aliases,
+        import_aliases,
+        ..
+    } = loaded;
     let typed = zz_hir::build_program(
         &merged,
         std::collections::HashMap::new(),
-        loaded.funcs,
-        loaded.structs,
-        loaded.aliases,
-        loaded.enums,
+        funcs,
+        _loaded_structs,
+        aliases,
+        _loaded_enums,
     );
-    let types = std::sync::Arc::new(typed.program.types);
-    let structs = typed.program.structs;
-    let enums = typed.program.enums;
+    let interp = setup_interp(
+        natives,
+        &consts,
+        import_aliases,
+        &stdlib_aliases,
+        &project_root,
+        &plugin_funcs,
+        script_args,
+        embed.as_deref(),
+    )?;
+    Ok(PreparedRun {
+        interp,
+        programs,
+        files,
+        types: std::sync::Arc::new(typed.program.types),
+        structs: typed.program.structs,
+        enums: typed.program.enums,
+        entry_path: path.to_string(),
+    })
+}
 
-    let mut interp = Interp::with_natives(natives);
-    interp.args = script_args.to_vec();
-    // Selective-import aliases for bare generic-function calls (see
-    // LoadResult::import_aliases): the VM compiler emits no code for
-    // import statements, so the runtime map would otherwise stay empty.
-    interp.import_aliases = loaded.import_aliases.clone();
-
-    // `--embed <dir>`: serve the asset tree to `fs.embedfs()` for this run.
-    if let Some(dir) = embed.as_deref() {
-        let files = build::collect_embed(dir)?;
-        zz_stdlib::natives::fs::vfs::set_embed(
-            files
-                .into_iter()
-                .collect::<std::collections::HashMap<_, _>>(),
+/// Render an execution error against its source. Empty sources (`.zzc`
+/// loads carry none) render plainly — the span renderer would panic.
+fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &str) -> String {
+    if source.is_empty() {
+        eprintln!(
+            "error: {} (bytecode span {}..{})",
+            e.message, e.span.start, e.span.end
         );
-    }
-
-    // Inject math constants as static float values in the runtime env.
-    // This avoids the zero-arg native function indirection — `PI` resolves
-    // directly to `Value::Float(3.14159…)` without a function call.
-    // Three forms are injected so all reference styles work:
-    //   - `std.math.PI`  — fully qualified
-    //   - `math.PI`      — module namespace (import std.math)
-    //   - `PI`           — bare (import std.math(PI))
-    // The checker gates which names are actually accessible per-module,
-    // so injecting all bare forms here is safe.
-    for (key, val) in zz_stdlib::stdlib_consts() {
-        interp.env.define(&key, Value::Float(val));
-        if let Some(rest) = key.strip_prefix("std.") {
-            interp.env.define(rest, Value::Float(val));
-        }
-        // Bare name: `std.math.PI` → `PI`
-        if let Some(bare) = key.rsplit('.').next() {
-            interp.env.define(bare, Value::Float(val));
-        }
-    }
-    // Also inject any aliased constants from selective imports
-    // (e.g. `import std.math(PI as pi)` → inject `pi`).
-    for (name, val) in &loaded.consts {
-        interp.env.define(name, Value::Float(*val));
-    }
-
-    // Run compiled pure-ZZ stdlib programs. These populate the environment
-    // with functions written in ZZ (e.g. vec.map, math.sum) that extend
-    // the native stdlib. Must happen before user code so the functions are
-    // available when user modules reference them.
-    for zz_prog in zz_stdlib::zz_stdlib_programs() {
-        if let Err(e) = interp.run_typed(
-            &zz_prog.program,
-            std::sync::Arc::new(zz_prog.types.clone()),
-            zz_prog.structs.clone(),
-            zz_prog.enums.clone(),
-        ) {
-            eprintln!("zz: pure-ZZ stdlib error: {e:?}");
-            return Err("stdlib initialization failed".to_string());
-        }
-    }
-    // Canonical `std.*` aliases for pure-ZZ helpers: sources declare short
-    // names (`json.is_null`) while the checker advertises both spellings.
-    zz_stdlib::define_canonical_purezz_aliases(&mut interp.env, &mut interp.funcs);
-    // Mirror pure-ZZ Env bindings for `import std.X as alias` renames
-    // (e.g. `colors.red` → `cl.red`). Natives are already aliased via
-    // `loaded.natives`; pure-ZZ funcs live in Env and need the same.
-    {
-        let snap = interp.env.flatten();
-        for (module, ns) in &loaded.stdlib_aliases {
-            let src_prefix = module.rsplit('.').next().unwrap_or(module);
-            if ns == src_prefix {
-                continue;
-            }
-            for (k, v) in &snap {
-                if k == src_prefix || k.starts_with(&format!("{src_prefix}.")) {
-                    let alias_key = if k == src_prefix {
-                        ns.clone()
-                    } else {
-                        format!("{ns}{}", &k[src_prefix.len()..])
-                    };
-                    interp.env.define(&alias_key, v.clone());
-                }
+        for (fname, _) in &e.backtrace {
+            if !fname.is_empty() {
+                eprintln!("  at {fname}");
             }
         }
+        for note in &e.notes {
+            eprintln!("  note: {note}");
+        }
+        return "program failed".to_string();
     }
-
-    let mut last = Value::Unit;
-    for (i, program) in loaded.programs.iter().enumerate() {
-        match interp.run_typed(program, types.clone(), structs.clone(), enums.clone()) {
-            Ok(v) => last = v,
-            Err(e) => {
-                let (name, source) = loaded
-                    .files
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_else(|| (path.clone(), String::new()));
-                let mut files = Files::new();
-                let id = files.add(name, source);
-                let mut diag = error_at(e.message.clone(), e.span);
-                for (name, _span) in &e.backtrace {
-                    if !name.is_empty() {
-                        diag = diag.with_note(format!("  at {name}"));
-                    }
-                }
-                for note in &e.notes {
-                    diag = diag.with_note(note.clone());
-                }
-                let diags = vec![diag];
-                eprint!("{}", render_to_string(&files, id, &diags));
-                return Err("program failed".to_string());
-            }
+    let mut files = Files::new();
+    let id = files.add(name.to_string(), source.to_string());
+    let mut diag = error_at(e.message.clone(), e.span);
+    for (fname, _span) in &e.backtrace {
+        if !fname.is_empty() {
+            diag = diag.with_note(format!("  at {fname}"));
         }
     }
+    for note in &e.notes {
+        diag = diag.with_note(note.clone());
+    }
+    let diags = vec![diag];
+    eprint!("{}", render_to_string(&files, id, &diags));
+    "program failed".to_string()
+}
+
+/// Print a non-unit program result, then auto-call `main()` when the
+/// entry namespace defines it (with script args iff it takes params).
+fn run_entry_main(
+    interp: &mut Interp,
+    last: Value,
+    entry_path: &str,
+    script_args: &[String],
+    files: &[(String, String)],
+) -> Result<(), String> {
     if last != Value::Unit {
         println!("{last}");
     }
 
     // Auto-call `main()` if defined in the entry file.
     // The entry file's namespace is its file stem (e.g. `myapp.zz` → `myapp`).
-    let entry_ns = std::path::Path::new(path)
+    let entry_ns = std::path::Path::new(entry_path)
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -924,30 +1019,296 @@ fn run_file(
                 // Render against the entry file's real source (entry is
                 // last in load order). An empty source would panic the
                 // renderer on any non-empty error span.
-                let (name, source) = loaded
-                    .files
+                let (name, source) = files
                     .last()
                     .cloned()
-                    .unwrap_or_else(|| (path.clone(), String::new()));
-                let mut files = Files::new();
-                let id = files.add(name, source);
-                let mut diag = error_at(e.message.clone(), e.span);
-                for (name, _) in &e.backtrace {
-                    if !name.is_empty() {
-                        diag = diag.with_note(format!("  at {name}"));
-                    }
-                }
-                for note in &e.notes {
-                    diag = diag.with_note(note.clone());
-                }
-                let diags = vec![diag];
-                eprint!("{}", render_to_string(&files, id, &diags));
-                return Err("program failed".to_string());
+                    .unwrap_or_else(|| (entry_path.to_string(), String::new()));
+                return Err(render_eval_error(&e, &name, &source));
             }
         }
     }
 
     Ok(())
+}
+
+/// `zz run --bytecode <file>`: `.zz` compiles, round-trips through `.zzc`
+/// bytes (decode + verify + raise), and executes with no AST-derived
+/// structures on the execution path. `.zzc` loads straight from bytes
+/// with no frontend at all.
+fn run_bytecode(
+    path: Option<&String>,
+    script_args: &[String],
+    embed: Option<std::path::PathBuf>,
+) -> Result<(), String> {
+    let path = path
+        .ok_or_else(|| {
+            "missing file argument\n\n\
+             usage: zz run --bytecode <file.zz|file.zzc>\n\
+             hint: provide a .zz file (round-trips through bytecode) or a .zzc file (loads directly)"
+                .to_string()
+        })?
+        .clone();
+    if path.ends_with(".zzc") {
+        run_bytecode_file(&path, script_args)
+    } else {
+        run_bytecode_zz(&path, script_args, embed)
+    }
+}
+
+fn run_bytecode_zz(
+    path: &str,
+    script_args: &[String],
+    embed: Option<std::path::PathBuf>,
+) -> Result<(), String> {
+    let mut prep = prepare_run(path, script_args, embed)?;
+    let mut last = Value::Unit;
+    for (i, program) in prep.programs.iter().enumerate() {
+        let native_names: std::sync::Arc<std::collections::HashSet<String>> =
+            std::sync::Arc::new(prep.interp.natives.keys().cloned().collect());
+        let chunk = std::sync::Arc::new(zz_runtime::vm::Compiler::compile_program_typed(
+            program,
+            prep.types.clone(),
+            prep.structs.clone(),
+            prep.enums.clone(),
+            native_names,
+        ));
+        // Serialize, then drop every AST-derived structure: from here on
+        // only bytes-derived data may flow into execution.
+        let module =
+            zz_ir::lower::lower(&chunk).map_err(|e| format!("zz: ir lower failed: {e}"))?;
+        let bytes = zz_ir::codec::encode(&module);
+        drop(chunk);
+        drop(module);
+        let loaded = zz_ir::codec::decode(&bytes).map_err(|e| format!("zz: invalid .zzc: {e}"))?;
+        zz_ir::verify::verify(&loaded).map_err(|e| format!("zz: .zzc verify failed: {e}"))?;
+        let chunk =
+            zz_ir::raise::raise(&loaded).map_err(|e| format!("zz: ir raise failed: {e}"))?;
+        match prep.interp.run_loaded_chunk(&chunk) {
+            Ok(v) => last = v,
+            Err(e) => {
+                let (name, source) = prep
+                    .files
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| (path.to_string(), String::new()));
+                return Err(render_eval_error(&e, &name, &source));
+            }
+        }
+    }
+    run_entry_main(
+        &mut prep.interp,
+        last,
+        &prep.entry_path,
+        script_args,
+        &prep.files,
+    )
+}
+
+fn run_bytecode_file(path: &str, script_args: &[String]) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("zz: cannot read {path}: {e}"))?;
+    let loaded = zz_ir::codec::decode(&bytes).map_err(|e| format!("zz: invalid .zzc: {e}"))?;
+    zz_ir::verify::verify(&loaded).map_err(|e| format!("zz: .zzc verify failed: {e}"))?;
+    let chunk = zz_ir::raise::raise(&loaded).map_err(|e| format!("zz: ir raise failed: {e}"))?;
+    // Bare interpreter: stdlib natives, no project context. The module
+    // is self-contained; imports were resolved at compile time. Every
+    // stdlib module namespace is registered (the `.zz` path does this
+    // per import via the loader): over-approximation is safe here for
+    // the same reason injecting all bare const forms is — the checker
+    // already gated names at compile time.
+    let project_root = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    let mut natives = zz_stdlib::natives::stdlib_natives();
+    {
+        let mut funcs = std::collections::HashMap::new();
+        for module in zz_stdlib::STDLIB_MODULES {
+            let ns = module.rsplit('.').next().unwrap_or(module);
+            let _ = zz_stdlib::register_module_namespace(module, ns, &mut funcs, &mut natives);
+        }
+    }
+    let empty_map = std::collections::HashMap::new();
+    let mut interp = setup_interp(
+        natives,
+        &empty_map,
+        std::collections::HashMap::new(),
+        &[],
+        &project_root,
+        &[],
+        script_args,
+        None,
+    )?;
+    let last = match interp.run_loaded_chunk(&chunk) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(render_eval_error(&e, path, ""));
+        }
+    };
+    run_entry_main(
+        &mut interp,
+        last,
+        path,
+        script_args,
+        &[(path.to_string(), String::new())],
+    )
+}
+
+/// `zz dis <file>`: disassemble `.zzc` bytes (or a `.zz` program lowered
+/// in memory) to stable text.
+fn dis_file(path: Option<&String>) -> Result<(), String> {
+    let path = path
+        .ok_or_else(|| {
+            "missing file argument\n\n\
+             usage: zz dis <file.zzc|file.zz>\n\
+             hint: provide a .zzc file or a .zz file to disassemble"
+                .to_string()
+        })?
+        .clone();
+    if path.ends_with(".zzc") {
+        let bytes = std::fs::read(&path).map_err(|e| format!("zz: cannot read {path}: {e}"))?;
+        let module = zz_ir::codec::decode(&bytes).map_err(|e| format!("zz: invalid .zzc: {e}"))?;
+        print!("{}", zz_ir::dis::disassemble(&module));
+        return Ok(());
+    }
+    let prep = prepare_run(&path, &[], None)?;
+    for (i, program) in prep.programs.iter().enumerate() {
+        let native_names: std::sync::Arc<std::collections::HashSet<String>> =
+            std::sync::Arc::new(prep.interp.natives.keys().cloned().collect());
+        let chunk = zz_runtime::vm::Compiler::compile_program_typed(
+            program,
+            prep.types.clone(),
+            prep.structs.clone(),
+            prep.enums.clone(),
+            native_names,
+        );
+        let module =
+            zz_ir::lower::lower(&chunk).map_err(|e| format!("zz: ir lower failed: {e}"))?;
+        let name = prep
+            .files
+            .get(i)
+            .map(|(n, _)| n.clone())
+            .unwrap_or_default();
+        println!("; module {name}");
+        print!("{}", zz_ir::dis::disassemble(&module));
+    }
+    Ok(())
+}
+
+/// `zz build --emit-ir -o <file.zzc> <file.zz>`: type-check, lower one
+/// module to `.zzc`, and write it. Multi-module programs are rejected:
+/// one `.zzc` holds exactly one module (multi-entry is future work).
+fn emit_ir_cmd(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|a| a == "--") {
+        return Err("training args need `--full`\n\
+             usage: zz build --emit-ir -o <file.zzc> <file.zz>"
+            .to_string());
+    }
+    let output = parse_flag_value(args, "--output")
+        .or_else(|| parse_flag_value(args, "-o"))
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            "missing output\n\n\
+             usage: zz build --emit-ir -o <file.zzc> <file.zz>"
+                .to_string()
+        })?;
+    // Positional path: first non-flag arg, skipping values consumed by
+    // `--output` / `-o` / `--embed` / `--target` / `--cc` (space form).
+    let mut skip_next = false;
+    let path = args
+        .iter()
+        .find(|a| {
+            if skip_next {
+                skip_next = false;
+                return false;
+            }
+            if a.as_str() == "--output"
+                || a.as_str() == "-o"
+                || a.as_str() == "--embed"
+                || a.as_str() == "--target"
+                || a.as_str() == "--cc"
+                || a.as_str() == "--emit-ir"
+            {
+                if !a.starts_with("--emit-ir") {
+                    skip_next = true;
+                }
+                return false;
+            }
+            !a.starts_with('-')
+        })
+        .ok_or_else(|| {
+            "missing file argument\n\n\
+             usage: zz build --emit-ir -o <file.zzc> <file.zz>"
+                .to_string()
+        })?;
+    let prep = prepare_run(path, &[], None)?;
+    if prep.programs.len() != 1 {
+        return Err(format!(
+            "zz: --emit-ir needs a single-module program, found {} modules\n\
+             hint: multi-module .zzc is future work; run each module through --bytecode instead",
+            prep.programs.len()
+        ));
+    }
+    let native_names: std::sync::Arc<std::collections::HashSet<String>> =
+        std::sync::Arc::new(prep.interp.natives.keys().cloned().collect());
+    let chunk = zz_runtime::vm::Compiler::compile_program_typed(
+        &prep.programs[0],
+        prep.types.clone(),
+        prep.structs.clone(),
+        prep.enums.clone(),
+        native_names,
+    );
+    let module = zz_ir::lower::lower(&chunk).map_err(|e| format!("zz: ir lower failed: {e}"))?;
+    let bytes = zz_ir::codec::encode(&module);
+    std::fs::write(&output, &bytes)
+        .map_err(|e| format!("zz: cannot write {}: {e}", output.display()))?;
+    eprintln!(
+        "zz: wrote {} ({} bytes, {} funcs)",
+        output.display(),
+        bytes.len(),
+        module.funcs.len()
+    );
+    Ok(())
+}
+
+fn run_file(
+    path: Option<&String>,
+    script_args: &[String],
+    embed: Option<std::path::PathBuf>,
+) -> Result<(), String> {
+    let path = path.ok_or_else(|| {
+        "missing file argument\n\n\
+             usage: zz run <file.zz>\n\
+             hint: provide the path to a .zz file to execute"
+            .to_string()
+    })?;
+
+    let mut prep = prepare_run(path, script_args, embed)?;
+    let mut last = Value::Unit;
+    for (i, program) in prep.programs.iter().enumerate() {
+        match prep.interp.run_typed(
+            program,
+            prep.types.clone(),
+            prep.structs.clone(),
+            prep.enums.clone(),
+        ) {
+            Ok(v) => last = v,
+            Err(e) => {
+                let (name, source) = prep
+                    .files
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| (prep.entry_path.clone(), String::new()));
+                return Err(render_eval_error(&e, &name, &source));
+            }
+        }
+    }
+    run_entry_main(
+        &mut prep.interp,
+        last,
+        &prep.entry_path,
+        script_args,
+        &prep.files,
+    )
 }
 
 /// `zz run --native <file>`: compile to a temp location, execute, cleanup.
@@ -999,6 +1360,9 @@ fn run_native(
 /// Both paths are real binaries in `bin/` — never VM execution.
 /// (`zz run` is the only command that executes through the VM.)
 fn build_cmd(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|a| a == "--emit-ir") {
+        return emit_ir_cmd(args);
+    }
     // Training args for `--full -- <program args>`: everything after the
     // first `--` belongs to the training run, never to flag parsing —
     // so the split happens before any flag is read. A bare `--` still

@@ -1,0 +1,30 @@
+// features: arrays, field-store, func-call, indexing, locals, print, string-literal, struct-literal, vec-push
+// E2E: store evaluation-order conformance (spec §7). Every store form
+// evaluates base, index, value left-to-right; one shared log pins the
+// order on both engines: [1, 0, 9, 4, 5, 0, 1, 7, 0].
+// The trailing 0 is the documented chained-store double evaluation:
+// the outer write-back re-evaluates the inner index after the value.
+log := []
+func rec(n: int) -> int {
+    log = vec.push(log, n)
+    n
+}
+func mkarr() {
+    rec(1)
+    [10, 20, 30]
+}
+struct P { x: int }
+func mkp() {
+    rec(4)
+    P{x: 0}
+}
+// plain index store: base(1), index(0), value(9)
+mkarr()[rec(0)] = rec(9)
+// field store: base(4), value(5)
+mkp().x = rec(5)
+// chained index store: 0, 1, 7, then write-back re-evaluates 0
+m := [[1, 2], [3, 4]]
+m[rec(0)][rec(1)] = rec(7)
+println("log={log}")
+println("m={m}")
+println("eval_order_store_ok")
