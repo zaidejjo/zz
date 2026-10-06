@@ -214,3 +214,52 @@ fn dis_is_stable() {
     assert!(a.contains("func f0"), "missing func header:\n{a}");
     assert!(a.contains("binop Add"), "missing add op:\n{a}");
 }
+
+#[test]
+fn typed_signatures_populate() {
+    use std::collections::HashMap;
+    use zz_checker::{FuncSig as CheckerSig, Type as CheckerType};
+    // HIR-style signature for `add`: (int, int) -> int.
+    let sig = CheckerSig {
+        generics: vec![],
+        bounds: vec![],
+        params: vec![
+            ("a".to_string(), CheckerType::Int),
+            ("b".to_string(), CheckerType::Int),
+        ],
+        has_default: vec![false, false],
+        ret: CheckerType::Int,
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    let mut sigs = HashMap::new();
+    sigs.insert("add".to_string(), sig);
+    let parsed = zz_frontend::parse("func add(a: int, b: int) -> int {\n a + b\n}\nadd(40, 2)");
+    assert!(parsed.errors.is_empty());
+    let chunk = Compiler::compile_program(&parsed.program);
+    let module = lower::lower_typed(&chunk, &sigs).expect("lower_typed failed");
+    verify::verify(&module).expect("verify failed");
+    // Type table holds Int (Unknown may also appear for entry/closures).
+    assert!(module.types.contains(&zz_ir::IrType::Int));
+    let f = module
+        .funcs
+        .iter()
+        .find(|f| module.strings.get(f.name.0 as usize).map(String::as_str) == Some("add"))
+        .expect("add lifted");
+    let int = module
+        .types
+        .iter()
+        .position(|t| *t == zz_ir::IrType::Int)
+        .unwrap() as u32;
+    assert_eq!(
+        f.sig,
+        zz_ir::FuncSig {
+            params: vec![zz_ir::TypeId(int), zz_ir::TypeId(int)],
+            ret: zz_ir::TypeId(int),
+        }
+    );
+    // Round-trip determinism holds with real signatures too.
+    let bytes = codec::encode(&module);
+    let loaded = codec::decode(&bytes).expect("decode failed");
+    assert_eq!(codec::encode(&loaded), bytes);
+}

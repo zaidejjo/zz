@@ -84,9 +84,10 @@ pub struct Param {
     pub default: Option<FuncId>,
 }
 
-/// A function signature: parameter types plus return type. `v1` lowers
-/// every entry to [`IrType::Unknown`]; the AOT slice populates real
-/// signatures from HIR.
+/// A function signature: parameter types plus return type.
+/// [`lower_typed`](crate::lower::lower_typed) resolves entries from HIR;
+/// unknown slots (closures, entry, untyped compiles) stay
+/// [`IrType::Unknown`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct FuncSig {
     pub params: Vec<TypeId>,

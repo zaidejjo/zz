@@ -218,6 +218,101 @@ fn home_text(home_slot: &Option<u16>, home_var: &Option<crate::StrId>, module: &
     }
 }
 
+/// Render a function signature with resolved type names.
+fn sig_text(module: &Module, sig: &crate::FuncSig) -> String {
+    let ty = |id: crate::TypeId| {
+        module
+            .types
+            .get(id.0 as usize)
+            .map(|t| type_text(module, t))
+            .unwrap_or_else(|| format!("t{}?<missing>", id.0))
+    };
+    let params: Vec<String> = sig.params.iter().map(|id| ty(*id)).collect();
+    format!("({})->{}", params.join(", "), ty(sig.ret))
+}
+
+/// Render a type with names resolved where cheap; nested ids inline.
+fn type_text(module: &Module, t: &crate::IrType) -> String {
+    use crate::IrType as T;
+    match t {
+        T::Unknown => "unknown".to_string(),
+        T::Unit => "unit".to_string(),
+        T::Bool => "bool".to_string(),
+        T::Int => "int".to_string(),
+        T::Float => "float".to_string(),
+        T::Str => "str".to_string(),
+        T::Bytes => "bytes".to_string(),
+        T::Json => "json".to_string(),
+        T::Db => "db".to_string(),
+        T::HttpServer => "httpserver".to_string(),
+        T::TcpStream => "tcpstream".to_string(),
+        T::TcpListener => "tcplistener".to_string(),
+        T::Response => "response".to_string(),
+        T::HttpRequest => "httprequest".to_string(),
+        T::Chan => "chan".to_string(),
+        T::TaskJoin => "taskjoin".to_string(),
+        T::Error => "error".to_string(),
+        T::Void => "void".to_string(),
+        T::Tuple(items) => {
+            let inner: Vec<String> = items.iter().map(|id| short_type(module, *id)).collect();
+            format!("({})", inner.join(", "))
+        }
+        T::Option(inner) => format!("option({})", short_type(module, *inner)),
+        T::Result(a, b) => {
+            format!(
+                "result({}, {})",
+                short_type(module, *a),
+                short_type(module, *b)
+            )
+        }
+        T::Array(inner) => format!("[{}]", short_type(module, *inner)),
+        T::Dict(k, v) => {
+            format!("{{{}: {}}}", short_type(module, *k), short_type(module, *v))
+        }
+        T::Func(params, ret) => {
+            let ps: Vec<String> = params.iter().map(|id| short_type(module, *id)).collect();
+            format!("func({})->{}", ps.join(", "), short_type(module, *ret))
+        }
+        T::Range(inner) => format!("range({})", short_type(module, *inner)),
+        T::Opaque(id) => format!("opaque({})", str_text(module, *id)),
+        T::Struct(id, args) => {
+            let a: Vec<String> = args.iter().map(|x| short_type(module, *x)).collect();
+            if a.is_empty() {
+                str_text(module, *id)
+            } else {
+                format!("{}[{}]", str_text(module, *id), a.join(", "))
+            }
+        }
+        T::Enum(id, args) => {
+            let a: Vec<String> = args.iter().map(|x| short_type(module, *x)).collect();
+            if a.is_empty() {
+                str_text(module, *id)
+            } else {
+                format!("{}[{}]", str_text(module, *id), a.join(", "))
+            }
+        }
+        T::Union(items) => {
+            let inner: Vec<String> = items.iter().map(|id| short_type(module, *id)).collect();
+            format!("union({})", inner.join(" | "))
+        }
+        T::Named(id) => format!("named({})", str_text(module, *id)),
+        T::Var(n) => format!("var({n})"),
+        T::Ptr { mutable, inner } => format!(
+            "{}({})",
+            if *mutable { "*mut" } else { "*const" },
+            short_type(module, *inner)
+        ),
+    }
+}
+
+fn short_type(module: &Module, id: crate::TypeId) -> String {
+    module
+        .types
+        .get(id.0 as usize)
+        .map(|t| type_text(module, t))
+        .unwrap_or_else(|| "?".to_string())
+}
+
 /// Disassemble a module to stable text: one `func` block per table
 /// entry, indexed ops with resolved names.
 pub fn disassemble(module: &Module) -> String {
@@ -237,11 +332,12 @@ pub fn disassemble(module: &Module) -> String {
             ""
         };
         out.push_str(&format!(
-            "func f{i} {} arity={}{} max_stack={}\n",
+            "func f{i} {} arity={}{} max_stack={} sig={}\n",
             str_text(module, f.name),
             f.arity,
             entry,
-            f.max_stack
+            f.max_stack,
+            sig_text(module, &f.sig)
         ));
         for (pc, op) in f.code.iter().enumerate() {
             let span = f.spans.get(pc).copied().unwrap_or(crate::Span::new(0, 0));

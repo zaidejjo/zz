@@ -3627,6 +3627,7 @@ dependencies = [
  "zz_checker",
  "zz_frontend",
  "zz_hir",
+ "zz_ir",
  "zz_native_rt",
  "zz_runtime",
  "zz_stdlib",

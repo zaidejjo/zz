@@ -845,7 +845,7 @@ fn ty_to_ctype(ty: &zz_hir::Type) -> String {
 }
 
 /// Map a zz native qualified name to its C runtime implementation name.
-fn native_impl(name: &str) -> Option<&'static str> {
+pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
     match name {
         // Builtin console I/O (no import, no `std.io` module).
         "println" => Some("zz_io_println"),
