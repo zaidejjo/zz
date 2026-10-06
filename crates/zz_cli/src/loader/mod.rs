@@ -503,6 +503,15 @@ impl Loader {
                 // Dotted module key: `std.sqlz` -> "sqlz",
                 // `std.sqlz.postgres` -> "sqlz.postgres".
                 if imp.len() < 2 {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source: source.clone(),
+                        diags: vec![error_at(
+                            "`import std` names no module\n\
+                             hint: import a concrete module, e.g. `import std.str`",
+                            Span::new(0, 0),
+                        )],
+                    });
                     continue;
                 }
                 let module = imp[1..].join(".");
