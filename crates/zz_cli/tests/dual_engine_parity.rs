@@ -1115,6 +1115,11 @@ parity_strict!(
     "selective_calls.zz"
 );
 parity_strict!(
+    parity_stdlib_generic_selective,
+    "stdlib",
+    "generic_selective.zz"
+);
+parity_strict!(
     parity_stdlib_alias_module_calls,
     "stdlib",
     "alias_module_calls.zz"
