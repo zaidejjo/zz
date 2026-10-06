@@ -580,7 +580,15 @@ impl Lowerer {
                     }
                 }
                 let l = self.emit_expr(left, names, out);
-                let r = self.emit_expr(right, names, out);
+                // The right operand emits into a side buffer: `&&`/`||`
+                // short-circuit, so its statements (index traps, calls)
+                // must NOT run when the left side decides the result.
+                // Emitting inline (as other operators do) would hoist those
+                // statements before the `&&`/`||` and defeat C-level
+                // short-circuiting (#239: `len(t)>=8 && t[2]==":"` OOB'd
+                // natively on short tokens).
+                let mut r_stmts = String::new();
+                let r = self.emit_expr(right, names, &mut r_stmts);
                 match op {
                     zz_frontend::ast::BinOp::And => {
                         // `zz_truthy` takes `zz_value`: box raw-scalar
@@ -591,8 +599,17 @@ impl Lowerer {
                         let l = box_scalar_operand(left, names, &l);
                         let l = self.box_struct_operand(left, l, &raw_l, names, out);
                         let r = box_scalar_operand(right, names, &r);
-                        let r = self.box_struct_operand(right, r, &raw_r, names, out);
-                        format!("zz_bool(zz_truthy({l}) && zz_truthy({r}))")
+                        let r = self.box_struct_operand(right, r, &raw_r, names, &mut r_stmts);
+                        let tmp = names.fresh("_and");
+                        out.push_str(&format!("    zz_value {tmp};\n"));
+                        out.push_str(&format!(
+                            "    if (!zz_truthy({l})) {tmp} = zz_bool(false);\n"
+                        ));
+                        out.push_str("    else {\n");
+                        out.push_str(&r_stmts);
+                        out.push_str(&format!("    {tmp} = zz_bool(zz_truthy({r}));\n"));
+                        out.push_str("    }\n");
+                        tmp
                     }
                     zz_frontend::ast::BinOp::Or => {
                         let raw_l = l.clone();
@@ -600,14 +617,26 @@ impl Lowerer {
                         let l = box_scalar_operand(left, names, &l);
                         let l = self.box_struct_operand(left, l, &raw_l, names, out);
                         let r = box_scalar_operand(right, names, &r);
-                        let r = self.box_struct_operand(right, r, &raw_r, names, out);
-                        format!("zz_bool(zz_truthy({l}) || zz_truthy({r}))")
+                        let r = self.box_struct_operand(right, r, &raw_r, names, &mut r_stmts);
+                        let tmp = names.fresh("_or");
+                        out.push_str(&format!("    zz_value {tmp};\n"));
+                        out.push_str(&format!("    if (zz_truthy({l})) {tmp} = zz_bool(true);\n"));
+                        out.push_str("    else {\n");
+                        out.push_str(&r_stmts);
+                        out.push_str(&format!("    {tmp} = zz_bool(zz_truthy({r}));\n"));
+                        out.push_str("    }\n");
+                        tmp
                     }
                     zz_frontend::ast::BinOp::Elvis => {
                         // Evaluate the left side once and store in a temp to avoid
                         // double-evaluation (which would call side-effecting natives
                         // like `input()` twice). Box: the temp is `zz_value`
                         // but a raw-scalar operand lowers to its C type.
+                        // NOTE: the right side still evaluates unconditionally
+                        // (its statements were hoisted above); guarding it needs
+                        // a `zz_elvis_needs_right` runtime predicate — tracked
+                        // follow-up, same root-cause class as #239.
+                        out.push_str(&r_stmts);
                         let raw_l = l.clone();
                         let raw_r = r.clone();
                         let l = box_scalar_operand(left, names, &l);
@@ -619,6 +648,7 @@ impl Lowerer {
                         format!("zz_elvis({tmp}, {r})")
                     }
                     _ => {
+                        out.push_str(&r_stmts);
                         let cop = binop_runtime_op(op);
                         // Check if either operand is a scalar. We treat both scalar-typed locals
                         // AND Int/Float literals as scalar operands so that patterns like
