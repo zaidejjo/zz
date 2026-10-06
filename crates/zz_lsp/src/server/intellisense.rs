@@ -15,17 +15,28 @@ pub(crate) async fn handle_completion(
         None => return Ok(None),
     };
     let program = match &doc.program {
-        Some(p) => p,
+        Some(p) => p.clone(),
         None => return Ok(None),
     };
 
+    // Self-heal when the async recheck hasn't populated `check_result` yet
+    // (slow check, debounce skip, or a check that predates this edit):
+    // run a synchronous single-file check so member completion (`math.`)
+    // never returns zero items on a healthy document (#257). Scope
+    // completion already answers without a result, but dot-access needs one.
+    let owned_result;
+    let check_ref = match doc.check_result.as_ref() {
+        Some(cr) => Some(cr),
+        None => {
+            let (ib, ifunc, is, ia, ie) = backend.state.checker_seed_for(&program);
+            owned_result = zz_checker::check_program(&program, ib, ifunc, is, ia, ie);
+            Some(&owned_result)
+        }
+    };
+
     let offset = doc.line_index.position_to_offset(&doc.source, pos);
-    let resp = crate::completion::completions_for_position(
-        program,
-        &doc.source,
-        offset,
-        doc.check_result.as_ref(),
-    );
+    let resp =
+        crate::completion::completions_for_position(&program, &doc.source, offset, check_ref);
     Ok(resp)
 }
 

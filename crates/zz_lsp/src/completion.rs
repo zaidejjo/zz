@@ -76,7 +76,13 @@ enum CompletionContext {
 }
 
 fn detect_context(source: &str, offset: u32) -> Option<CompletionContext> {
-    let before = &source[..offset as usize];
+    // Defensive: clamp out-of-range offsets and floor to a char boundary
+    // so a stale client position can never panic the handler.
+    let mut offset = (offset as usize).min(source.len());
+    while offset > 0 && !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let before = &source[..offset];
 
     let partial = extract_partial_identifier(before);
     let partial_prefix = partial.clone().unwrap_or_default();

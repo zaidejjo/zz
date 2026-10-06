@@ -1153,3 +1153,155 @@ async fn unused_selective_import_warns_once() {
         messages[0]
     );
 }
+
+// ── Issue #257: completion serves bare and member positions ───────────────
+
+async fn completion_labels(
+    service: &tower_lsp::LspService<super::Backend>,
+    uri: Url,
+    line: u32,
+    character: u32,
+) -> Vec<(String, Option<CompletionItemKind>)> {
+    use tower_lsp::LanguageServer;
+    let resp = service
+        .inner()
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position { line, character },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap()
+        .expect("should have completions");
+    match resp {
+        CompletionResponse::Array(items) => items.into_iter().map(|i| (i.label, i.kind)).collect(),
+        CompletionResponse::List(_) => panic!("expected array"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completion_bare_position_serves_names_and_keywords() {
+    let (service, state) = setup();
+    let uri: Url = "file:///bare.zz".parse().unwrap();
+    let src = "import std.math\nfunc main() {\n\n}\n";
+    open_and_check(&state, &uri, src);
+
+    // Empty line inside main (line 2, char 4): at minimum the imported
+    // namespace plus keywords must appear, each with a kind.
+    let items = completion_labels(&service, uri, 2, 4).await;
+    assert!(!items.is_empty(), "bare position must not be empty");
+    assert!(
+        items.iter().any(|(l, _)| l == "math"),
+        "should offer imported namespace `math`"
+    );
+    assert!(
+        items.iter().any(|(l, _)| l == "return"),
+        "should offer keywords"
+    );
+    assert!(
+        items.iter().all(|(_, k)| k.is_some()),
+        "every item must carry a kind"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completion_math_member_lists_functions_with_detail() {
+    let (service, state) = setup();
+    let uri: Url = "file:///mathmem.zz".parse().unwrap();
+    let src = "import std.math\nfunc main() {\n    m := math.\n}\n";
+    open_and_check(&state, &uri, src);
+
+    // End of `    m := math.` on line 2: `    m := math.` is 14 chars.
+    let resp = service
+        .inner()
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 2,
+                    character: 14,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap()
+        .expect("member position must not be empty");
+    let items = match resp {
+        CompletionResponse::Array(v) => v,
+        CompletionResponse::List(_) => panic!("expected array"),
+    };
+    assert!(!items.is_empty(), "`math.` must list members");
+    let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"abs") && labels.contains(&"sin"),
+        "expected math members, got: {labels:?}"
+    );
+    assert!(
+        items
+            .iter()
+            .all(|i| i.kind == Some(CompletionItemKind::FUNCTION)),
+        "member items must be FUNCTION kind"
+    );
+    assert!(
+        items
+            .iter()
+            .all(|i| i.detail.as_deref().is_some_and(|d| d.starts_with("math."))),
+        "member items must carry `math.name` details"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completion_serves_selective_bare_name() {
+    let (service, state) = setup();
+    let uri: Url = "file:///selcomp.zz".parse().unwrap();
+    let src = "import std.math(PI)\nfunc main() {\n    println(P)\n}\n";
+    open_and_check(&state, &uri, src);
+
+    // After `P` on line 2 (`    println(P` is 13 chars): seeded `PI` appears.
+    let items = completion_labels(&service, uri, 2, 13).await;
+    assert!(
+        items.iter().any(|(l, _)| l == "PI"),
+        "selective `PI` should complete, got: {:?}",
+        items.iter().map(|(l, _)| l).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completion_without_check_result_still_serves() {
+    // No `open_and_check`: only the didOpen buffer exists, mimicking a
+    // completion that races ahead of the async recheck (#257 self-heal).
+    let (service, state) = setup();
+    let uri: Url = "file:///race.zz".parse().unwrap();
+    let src = "import std.math\nfunc main() {\n    m := math.\n}\n";
+    state.update_document(uri.clone(), 1, src.to_string());
+
+    let resp = service
+        .inner()
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 2,
+                    character: 14,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap()
+        .expect("racing completion must not be empty");
+    let n = match resp {
+        CompletionResponse::Array(v) => v.len(),
+        CompletionResponse::List(l) => l.items.len(),
+    };
+    assert!(n > 0, "on-demand check must serve member items");
+}
