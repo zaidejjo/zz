@@ -15,10 +15,10 @@ fn setup() -> (tower_lsp::LspService<Backend>, Arc<GlobalState>) {
 
 fn open_and_check(state: &GlobalState, uri: &Url, source: &str) {
     state.update_document(uri.clone(), 1, source.to_string());
-    let (ib, ifunc, is, ia, ie) = state.checker_seed();
     let cr = {
         let doc = state.documents.get(uri).unwrap();
         let program = doc.program.as_ref().unwrap().clone();
+        let (ib, ifunc, is, ia, ie) = state.checker_seed_for(&program);
         zz_checker::check_program(&program, ib, ifunc, is, ia, ie)
     };
     if let Some(mut doc) = state.documents.get_mut(uri) {
@@ -1082,5 +1082,74 @@ async fn module_path_for_file_unit() {
     assert_eq!(
         module_path_for_file(&std::path::PathBuf::from("/workspace/readme.md"), &root),
         None,
+    );
+}
+
+// ── Issue #256: selective-import diagnostics match `zz check` ─────────────
+
+fn check_errors_for(state: &GlobalState, uri: &Url) -> Vec<String> {
+    let doc = state.documents.get(uri).expect("doc should exist");
+    let program = doc.program.as_ref().expect("program should exist").clone();
+    let (ib, ifunc, is, ia, ie) = state.checker_seed_for(&program);
+    let cr = zz_checker::check_program(&program, ib, ifunc, is, ia, ie);
+    cr.errors.into_iter().map(|e| e.message).collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn selective_const_import_is_clean() {
+    let (_service, state) = setup();
+    let uri: Url = "file:///sel.zz".parse().unwrap();
+    let src = "import std.math(PI)\nfunc main() {\n    println(PI)\n}\n";
+    state.update_document(uri.clone(), 1, src.to_string());
+    let messages = check_errors_for(&state, &uri);
+    assert!(
+        messages.is_empty(),
+        "selective const should be clean, got: {messages:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn selective_fn_import_is_clean() {
+    let (_service, state) = setup();
+    let uri: Url = "file:///selfn.zz".parse().unwrap();
+    let src =
+        "import std.fs(read_dir)\nfunc main() {\n    d := read_dir(\".\")\n    println(d)\n}\n";
+    state.update_document(uri.clone(), 1, src.to_string());
+    let messages = check_errors_for(&state, &uri);
+    assert!(
+        messages.is_empty(),
+        "selective fn should be clean, got: {messages:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn selective_alias_import_is_clean() {
+    let (_service, state) = setup();
+    let uri: Url = "file:///selalias.zz".parse().unwrap();
+    let src = "import std.math(PI as pi)\nfunc main() {\n    println(pi)\n}\n";
+    state.update_document(uri.clone(), 1, src.to_string());
+    let messages = check_errors_for(&state, &uri);
+    assert!(
+        messages.is_empty(),
+        "aliased selective const should be clean, got: {messages:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unused_selective_import_warns_once() {
+    let (_service, state) = setup();
+    let uri: Url = "file:///selunused.zz".parse().unwrap();
+    let src = "import std.math(PI)\nfunc main() {\n    println(1)\n}\n";
+    state.update_document(uri.clone(), 1, src.to_string());
+    let messages = check_errors_for(&state, &uri);
+    assert_eq!(
+        messages.len(),
+        1,
+        "genuinely-unused selective should warn exactly once, got: {messages:?}"
+    );
+    assert!(
+        messages[0].contains("PI"),
+        "warning should name the import, got: {:?}",
+        messages[0]
     );
 }

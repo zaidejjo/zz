@@ -3,7 +3,8 @@ use zz_lsp::server::Backend;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const USAGE: &str = "usage: zz-lsp [--version] [--help]   (reads LSP on stdin, writes LSP on stdout)\n";
+const USAGE: &str =
+    "usage: zz-lsp [--version] [--help]   (reads LSP on stdin, writes LSP on stdout)\n";
 
 #[tokio::main]
 async fn main() {

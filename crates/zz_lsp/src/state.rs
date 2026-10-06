@@ -171,6 +171,11 @@ impl GlobalState {
     }
 
     /// Produce the checker seed from accumulated definitions.
+    ///
+    /// Funcs are extended with this program's own imports (full namespaces,
+    /// selective/wildcard bare names), mirroring the loader — without it a
+    /// document's selective names resolve nowhere (#256) and `math.` member
+    /// completion finds zero keys (#257).
     #[allow(clippy::type_complexity)]
     pub fn checker_seed(
         &self,
@@ -188,6 +193,24 @@ impl GlobalState {
             self.aliases.read().unwrap().clone(),
             self.enums.read().unwrap().clone(),
         )
+    }
+
+    /// Produce the checker seed for one program: the global seed with the
+    /// program's own std imports applied (see [`crate::import_seed`]).
+    #[allow(clippy::type_complexity)]
+    pub fn checker_seed_for(
+        &self,
+        program: &Program,
+    ) -> (
+        HashMap<String, Type>,
+        HashMap<String, FuncSig>,
+        HashMap<String, StructSig>,
+        HashMap<String, AliasSig>,
+        HashMap<String, EnumSig>,
+    ) {
+        let (bindings, funcs, structs, aliases, enums) = self.checker_seed();
+        let funcs = crate::import_seed::seeded_funcs_for_program(program, &funcs);
+        (bindings, funcs, structs, aliases, enums)
     }
 
     /// Remove a file's definitions from the global seed.

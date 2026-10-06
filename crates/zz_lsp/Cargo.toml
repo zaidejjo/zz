@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 zz_frontend = { path = "../zz_frontend" }
 zz_checker  = { path = "../zz_checker" }
+zz_runtime  = { path = "../zz_runtime" }
 zz_stdlib   = { path = "../zz_stdlib" }
 zz_fmt      = { path = "../zz_fmt" }
 tower-lsp   = "0.20"
