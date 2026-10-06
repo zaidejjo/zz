@@ -345,12 +345,21 @@ impl Lowerer {
                     // First-class reference to a named function
                     // (`f := add`): box the static function when it
                     // resolves (selective-import canonical first, then
-                    // the bare spelling). Anything else unknown stays
-                    // unit (the checker rejects it upstream).
+                    // the bare spelling). Bare selective-import consts
+                    // (`import std.math(PI)` then `PI`, or `PI as pi`)
+                    // lower to float literals — the checker only lets valid
+                    // consts reach here unresolved. Anything else unknown
+                    // stays unit (the checker rejects it upstream).
                     if let Some(v) = self.static_func_value_ident(name) {
                         return v;
                     }
-                    "zz_unit()".to_string()
+                    // Aliased consts resolve through the import map first.
+                    if let Some(canonical) = self.import_fn_aliases.get(name) {
+                        if let Some(v) = super::math_const_c_literal(canonical) {
+                            return v;
+                        }
+                    }
+                    super::math_const_c_literal(name).unwrap_or_else(|| "zz_unit()".to_string())
                 }
             },
             Expr::Path { parts, span } => {
@@ -524,6 +533,17 @@ impl Lowerer {
                     // unit (the checker rejects it upstream).
                     if let Some(v) = self.static_func_value_path(parts) {
                         return v;
+                    }
+                    // Module-head aliases (`m.PI` from `import std.math as m`)
+                    // rewrite to the canonical path before the const table.
+                    if parts.len() > 1 {
+                        if let Some(head) = self.import_ns_aliases.get(&parts[0]) {
+                            let mut fixed = parts.to_vec();
+                            fixed[0] = head.clone();
+                            if let Some(v) = super::math_const_c_literal(&fixed.join(".")) {
+                                return v;
+                            }
+                        }
                     }
                     super::math_const_c_literal(&joined).unwrap_or_else(|| "zz_unit()".to_string())
                 }

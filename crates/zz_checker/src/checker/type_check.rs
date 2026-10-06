@@ -146,7 +146,12 @@ impl Checker {
                         .cloned()
                         .or_else(|| path.last().cloned())
                         .unwrap_or_default();
-                    self.imports.push((ns, *span));
+                    self.imports.push((ns.clone(), *span));
+                    // Remember the module behind an aliased head (`m` →
+                    // `std.math`) for const/call diagnostics.
+                    self.module_aliases
+                        .entry(ns)
+                        .or_insert_with(|| path.join("."));
                 } else {
                     // Selective/wildcard import: track each imported name.
                     // Record bare→qualified aliases for call-site fallback
@@ -1914,7 +1919,7 @@ impl Checker {
         if let Some(name) = &direct_name {
             // Math constants are values, not functions: `math.PI()` is
             // always an error — use bare `math.PI`.
-            if Self::is_math_const(name) && self.funcs.contains_key(name) {
+            if self.is_math_const(name) && self.funcs.contains_key(name) {
                 self.used_names.insert(name.clone());
                 // Still check the args so nested errors inside them surface.
                 for arg in args {
@@ -2117,7 +2122,7 @@ impl Checker {
                                 arg_t.as_ref().map(|t| self.unifier.resolve(t)),
                                 Some(Type::Func(_, _))
                             ) || matches!(fname.as_deref(), Some(n)
-                            if self.funcs.contains_key(n) && !Self::is_math_const(n));
+                            if self.funcs.contains_key(n) && !self.is_math_const(n));
                             if is_func {
                                 if let Some(fname) = fname {
                                     let mut diag = error_at(

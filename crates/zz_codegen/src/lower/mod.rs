@@ -96,14 +96,23 @@ pub fn mangle(name: &str) -> String {
         .collect()
 }
 
-/// Lower a `std.math` numeric constant path (`std.math.PI`, `math.PI`) to a
-/// `zz_float(...)` literal. Constants are true values — the checker rejects
-/// calls like `math.PI()`, so value position is the only valid use.
+/// Lower a `std.math` numeric constant path (`std.math.PI`, `math.PI`,
+/// or bare `PI` from `import std.math(PI)`) to a `zz_float(...)` literal.
+/// Constants are true values — the checker rejects calls like `math.PI()`,
+/// so value position is the only valid use.
+/// Bare single-component names consult the same table because the checker
+/// only lets selective-import consts reach lowering unresolved this way
+/// (locals/globals resolve earlier; anything else errors upstream).
+/// Dotted non-`std.math` paths (user modules) never match.
 /// Returns `None` for anything that is not a known constant spelling.
 pub(crate) fn math_const_c_literal(joined: &str) -> Option<String> {
     let leaf = joined
         .strip_prefix("std.math.")
-        .or_else(|| joined.strip_prefix("math."))?;
+        .or_else(|| joined.strip_prefix("math."))
+        .unwrap_or(joined);
+    if leaf.contains('.') {
+        return None;
+    }
     // Shortest round-trip decimals, matching Rust's `to_string()` output.
     let num = match leaf {
         "PI" => std::f64::consts::PI.to_string(),
