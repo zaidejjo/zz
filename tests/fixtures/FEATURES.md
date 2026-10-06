@@ -34,7 +34,8 @@ Data:
 `string-literal` (any `"..."` literal — M2 includes these as const-pool
 entries for `print`), `string-ops` (concat / interpolation machinery),
 `fstrings`, `string-blocks`, `arrays`, `vec-push`, `dicts`,
-`tuples`, `ranges`, `indexing`, `slicing`, `bytes`
+`tuples`, `ranges`, `indexing`, `slicing`, `bytes`, `struct-literal`
+(struct value construction), `field-store` (`obj.field = v` stores)
 
 Types:
 `structs`, `struct-methods`, `methods`, `generics`, `aliases`, `enums`,

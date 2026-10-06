@@ -27,7 +27,8 @@ fn env_args_returns_script_args() {
     assert!(parsed.errors.is_empty());
     let mut funcs = stdlib_funcs();
     let mut natives = stdlib_natives();
-    register_module_namespace("env", "env", &mut funcs, &mut natives).expect("known module");
+    let _ =
+        register_module_namespace("env", "env", &mut funcs, &mut natives).expect("known module");
     let checked = check_program(
         &parsed.program,
         HashMap::new(),

@@ -332,8 +332,12 @@ impl Lowerer {
                     } = value
                     {
                         if self.is_unboxed_struct(struct_name) {
-                            let val = self.emit_expr(value, &mut names, &mut out);
-                            out.push_str(&format!("    {gid} = {val};\n"));
+                            // Globals are boxed (see collect_globals):
+                            // emit the literal directly as a boxed
+                            // object — no unboxed intermediate.
+                            let boxed =
+                                self.emit_boxed_value(struct_name, value, &mut names, &mut out);
+                            out.push_str(&format!("    {gid} = {boxed};\n"));
                             body.push_str(&out);
                             global_init_done.insert(zz_name.clone());
                             continue;

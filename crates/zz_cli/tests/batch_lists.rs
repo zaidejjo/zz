@@ -67,6 +67,23 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "jsonmod.zz", false),
     ("stdlib", "json_test.zz", false),
     ("stdlib", "option_interpolation.zz", false),
+    ("stdlib", "alias_module_calls.zz", false),
+    ("stdlib", "selective_calls.zz", false),
+    ("stdlib", "import_alias.zz", true),
+    ("syntax", "scope_collision.zz", false),
+    ("stdlib", "builders.zz", true),
+    ("stdlib", "csv_test.zz", true),
+    ("stdlib", "dec_ops.zz", true),
+    ("stdlib", "map_set.zz", true),
+    ("stdlib", "math_ops.zz", false),
+    ("stdlib", "path_join.zz", true),
+    ("stdlib", "time_date.zz", true),
+    ("stdlib", "math_consts.zz", false),
+    ("stdlib", "fs_path.zz", true),
+    ("stdlib", "bytes.zz", true),
+    ("syntax", "brace_escapes.zz", false),
+    ("syntax", "brace_escapes_multiline.zz", false),
+    ("stdlib", "json_extended_test.zz", false),
 ];
 
 /// (category/file, reason). Everything strict outside regression/errors
@@ -105,60 +122,21 @@ pub const EXCLUDED: &[(&str, &str)] = &[
         "binds ports (collide in batch)",
     ),
     ("stdlib/http_fetch_test.zz", "network access"),
-    // Import aliasing collides program-wide: the loader rejects one
-    // module under two namespaces (`std.path` as `fspath` vs `path`),
-    // so alias-users run individually. Verified by batch failure.
-    (
-        "stdlib/alias_module_calls.zz",
-        "import alias (namespace collision)",
-    ),
-    (
-        "stdlib/selective_calls.zz",
-        "import alias (namespace collision)",
-    ),
-    (
-        "stdlib/import_alias.zz",
-        "import alias (namespace collision)",
-    ),
-    (
-        "syntax/scope_collision.zz",
-        "import alias (namespace collision)",
-    ),
-    (
-        "types/alias_import.zz",
-        "import alias (namespace collision)",
-    ),
-    ("types/enum_import.zz", "import alias (namespace collision)"),
-    // Non-pub ZZ std items (e.g. math.abs, csv.parse) lose visibility
-    // when 2+ modules in one program use them (diamond-import loader
-    // bug: only the first importer resolves). These run individually.
-    ("stdlib/builders.zz", "non-pub ZZ std items"),
-    ("stdlib/csv_test.zz", "non-pub ZZ std items"),
-    ("stdlib/dec_ops.zz", "non-pub ZZ std items"),
-    ("stdlib/map_set.zz", "non-pub ZZ std items"),
-    ("stdlib/math_ops.zz", "non-pub ZZ std items"),
-    ("stdlib/path_join.zz", "non-pub ZZ std items"),
-    ("stdlib/time_date.zz", "non-pub ZZ std items"),
-    (
-        "stdlib/math_consts.zz",
-        "math constants (diamond-import loader bug)",
-    ),
-    (
-        "stdlib/fs_path.zz",
-        "fs.* items (diamond-import loader bug)",
-    ),
-    // bytes.zz also reads a repo-relative fixture data file: batch cwd
-    // would break it even past the loader bug.
-    ("stdlib/bytes.zz", "fs.* items + repo-relative data path"),
     // Scratch-filesystem fixtures keyed by sweep token: shared batch
     // processes would collide on (and pollute from) one scratch dir.
     ("stdlib/filesystem.zz", "sweep-token scratch fs"),
     ("stdlib/fs_test.zz", "sweep-token scratch fs"),
     ("stdlib/result_print.zz", "sweep-token scratch fs"),
     ("stdlib/fs_vfs.zz", "sweep-token scratch fs"),
+    // `alias_import` and `enum_import` claim the same `shapes` alias
+    // for different support modules: a genuine per-program collision,
+    // so they run individually (each passes alone).
     (
         "types/alias_import.zz",
-        "import alias (namespace collision)",
+        "alias `shapes` collides with enum_import's support module",
     ),
-    ("types/enum_import.zz", "import alias (namespace collision)"),
+    (
+        "types/enum_import.zz",
+        "alias `shapes` collides with alias_import's support module",
+    ),
 ];

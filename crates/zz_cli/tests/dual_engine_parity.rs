@@ -289,15 +289,15 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // NOTE: `frame_slots` was listed here (raw zz_value in scalar
         // comparison `(v0 > 0)`) but the unboxed-calls work now emits
         // verifiably-raw comparisons, so it runs as strict parity.
-        "struct_impl" => {
-            Some("DEFERRED to HIR->IR lowering (duplicated AOT-lowering bug): unboxed struct returned/fielded as zz_value and vice versa")
-        }
+        // NOTE: `struct_impl` was listed here (unboxed struct
+        // returned/fielded as zz_value and vice versa) but boxing
+        // struct globals (issue #215) fixed it — sweep reports FIXED.
         // NOTE: `destructuring` was listed here (top-level tuple values
         // printed empty natively) but the sweep now reports FIXED — native
         // matches the VM, so it runs as strict parity (verified 2026-10-03).
-        "struct_embedding" => {
-            Some("DEFERRED to HIR->IR lowering (duplicated AOT-lowering bug): global unboxed struct passed raw (zz_struct_*) to display builtins (println/fmt/str_cast) instead of its debug_string; verified pre-existing on origin/dev without the method-dispatch fix")
-        }
+        // NOTE: `struct_embedding` was listed here (global unboxed struct
+        // passed raw to display builtins) but boxing struct globals
+        // (issue #215) fixed it — sweep reports FIXED.
 
         // --- Output differences (native runs but output differs) ---
         "concurrency_panic_test" => Some("native: panic/fail inside task closures lowers to unit (no err plumbing through zz_call_closure); VM yields .err"),

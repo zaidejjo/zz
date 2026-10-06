@@ -109,7 +109,9 @@ pub fn canonical_module(module: &str) -> &str {
 ///
 /// Used by the loader and the REPL session so that `import std.str` makes
 /// `str.length` (and friends) available. Returns an error message if the
-/// module is unknown.
+/// module is unknown. On success returns the inserted `<ns>.*` keys, so
+/// the loader can mark them seed-owned (per-module check partitioning
+/// restores seed keys instead of consuming them — issue #214).
 /// Build a non-generic zero-arg FuncSig (for constants).
 fn const_sig(ret: zz_checker::Type) -> zz_checker::FuncSig {
     zz_checker::FuncSig {
@@ -128,7 +130,7 @@ pub fn register_module_namespace(
     ns: &str,
     funcs: &mut std::collections::HashMap<String, zz_checker::FuncSig>,
     natives: &mut std::collections::HashMap<String, zz_runtime::NativeEntry>,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
@@ -139,12 +141,15 @@ pub fn register_module_namespace(
     let prefix = format!("std.{source}.");
     let std_funcs = crate::funcs::stdlib_funcs_cached();
     let std_natives = crate::natives::stdlib_natives_cached();
+    let mut inserted = Vec::new();
     for (k, v) in std_funcs {
         // Direct members only: `import std.sqlz` must not leak the nested
         // `std.sqlz.postgres.*` keys (those belong to `sqlz.postgres`).
         if let Some(rest) = k.strip_prefix(&prefix) {
             if !rest.contains('.') {
-                funcs.insert(format!("{ns}.{rest}"), v.clone());
+                let key = format!("{ns}.{rest}");
+                funcs.insert(key.clone(), v.clone());
+                inserted.push(key);
             }
         }
     }
@@ -159,10 +164,12 @@ pub fn register_module_namespace(
     let std_consts = stdlib_consts_cached();
     for k in std_consts.keys() {
         if let Some(rest) = k.strip_prefix(&prefix) {
-            funcs.insert(format!("{ns}.{rest}"), const_sig(zz_checker::Type::Float));
+            let key = format!("{ns}.{rest}");
+            funcs.insert(key.clone(), const_sig(zz_checker::Type::Float));
+            inserted.push(key);
         }
     }
-    Ok(())
+    Ok(inserted)
 }
 
 /// Register specific symbols from a `std.*` module directly into the current
@@ -173,13 +180,14 @@ pub fn register_module_namespace(
 /// symbol is registered under the alias name; otherwise the original name is
 /// used.
 ///
-/// Returns a list of symbol names that were not found in the module.
+/// Returns `(missing, inserted)`: symbols not found in the module, plus
+/// the registered target names (for loader seed-ownership, issue #214).
 pub fn register_selective_namespace(
     module: &str,
     items: &[(String, Option<String>)],
     funcs: &mut std::collections::HashMap<String, zz_checker::FuncSig>,
     natives: &mut std::collections::HashMap<String, zz_runtime::NativeEntry>,
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<String>, Vec<String>), String> {
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
@@ -190,12 +198,14 @@ pub fn register_selective_namespace(
     let std_natives = crate::natives::stdlib_natives_cached();
     let std_consts = stdlib_consts_cached();
     let mut missing = Vec::new();
+    let mut inserted = Vec::new();
     for (name, alias) in items {
         let target = alias.as_ref().unwrap_or(name);
         let key = format!("{prefix}{name}");
         let mut found = false;
         if let Some(sig) = std_funcs.get(&key) {
             funcs.insert(target.clone(), sig.clone());
+            inserted.push(target.clone());
             found = true;
         }
         if let Some(entry) = std_natives.get(&key) {
@@ -204,23 +214,27 @@ pub fn register_selective_namespace(
         }
         if std_consts.contains_key(&key) {
             funcs.insert(target.clone(), const_sig(zz_checker::Type::Float));
+            if !found {
+                inserted.push(target.clone());
+            }
             found = true;
         }
         if !found {
             missing.push(name.clone());
         }
     }
-    Ok(missing)
+    Ok((missing, inserted))
 }
 
 /// Register all symbols from a `std.*` module directly into the current
 /// namespace (no module prefix). Used for wildcard imports like
-/// `import std.math(*)`.
+/// `import std.math(*)`. Returns the inserted bare names (for loader
+/// seed-ownership, issue #214).
 pub fn register_wildcard_namespace(
     module: &str,
     funcs: &mut std::collections::HashMap<String, zz_checker::FuncSig>,
     natives: &mut std::collections::HashMap<String, zz_runtime::NativeEntry>,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
@@ -230,11 +244,13 @@ pub fn register_wildcard_namespace(
     let std_funcs = crate::funcs::stdlib_funcs_cached();
     let std_natives = crate::natives::stdlib_natives_cached();
     let std_consts = stdlib_consts_cached();
+    let mut inserted = Vec::new();
     for (k, v) in std_funcs {
         // Direct members only (see `register_module_namespace`).
         if let Some(rest) = k.strip_prefix(&prefix) {
             if !rest.contains('.') {
                 funcs.insert(rest.to_string(), v.clone());
+                inserted.push(rest.to_string());
             }
         }
     }
@@ -249,10 +265,13 @@ pub fn register_wildcard_namespace(
         if let Some(rest) = k.strip_prefix(&prefix) {
             if !rest.contains('.') {
                 funcs.insert(rest.to_string(), const_sig(zz_checker::Type::Float));
+                inserted.push(rest.to_string());
             }
         }
     }
-    Ok(())
+    inserted.sort();
+    inserted.dedup();
+    Ok(inserted)
 }
 
 #[cfg(test)]

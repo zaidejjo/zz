@@ -3277,7 +3277,17 @@ impl Lowerer {
         // silent unit wedged programs — a retry loop matching on the
         // result never fires when the value is unit (http_tls_p3 spun
         // forever). The name is an internal dotted key (safe charset).
-        if is_native {
+        //
+        // A real ZZ body shadows the native classification: the
+        // `std.`-twin rule above admits std-qualified ghosts (e.g.
+        // `std.csv.len` reached via a conservative `.len` fallback)
+        // of genuinely defined functions. Emitting the shim for those
+        // would abort programs that work — fall through to the ZZ
+        // call below instead (issue #222).
+        let has_zz_body = self.reachable_funcs.contains(&cname_for_native)
+            && (self.tp.funcs.contains_key(&cname_for_native)
+                || self.is_impl_method(&cname_for_native));
+        if is_native && !has_zz_body {
             return format!("zz_unimplemented_native(\"{cname_for_native}\")");
         }
 
@@ -4127,7 +4137,7 @@ impl Lowerer {
     /// field. Nested unboxed structs recurse through a field temp. Only
     /// called for unboxed struct types (all fields scalar or nested
     /// unboxed), so every field has a known scalar extraction.
-    fn emit_unbox_struct(
+    pub(super) fn emit_unbox_struct(
         &self,
         sname: &str,
         boxed: &str,

@@ -532,21 +532,30 @@ impl Loader {
                     let ns = imp_alias
                         .clone()
                         .unwrap_or_else(|| imp.last().cloned().unwrap_or_else(|| module.clone()));
-                    if let Err(msg) =
-                        register_module_namespace(&module, &ns, &mut self.funcs, &mut self.natives)
-                    {
-                        self.errors.push(LoadError {
-                             name: path.display().to_string(),
-                             source: source.clone(),
-                             diags: vec![error_at(
-                                 format!("{msg}\n\
-                                          hint: this may occur if the stdlib module exports a conflicting name"),
-                                 Span::new(0, 0),
-                             )],
-                         });
-                        continue;
+                    match register_module_namespace(
+                        &module,
+                        &ns,
+                        &mut self.funcs,
+                        &mut self.natives,
+                    ) {
+                        Err(msg) => {
+                            self.errors.push(LoadError {
+                                 name: path.display().to_string(),
+                                 source: source.clone(),
+                                 diags: vec![error_at(
+                                     format!("{msg}\n\
+                                              hint: this may occur if the stdlib module exports a conflicting name"),
+                                     Span::new(0, 0),
+                                 )],
+                             });
+                            continue;
+                        }
+                        // Seed-owned: the per-module check partition
+                        // restores (rather than consumes) these keys,
+                        // so every importer resolves identically (#214).
+                        Ok(inserted) => self.seed_func_keys.extend(inserted),
                     }
-                    self.register_ns(&ns, &PathBuf::from(format!("std:{module}")), path, &source);
+                    self.register_std_ns(&ns, &module, path, &source);
                     self.stdlib_aliases.push((module.clone(), ns.clone()));
                 }
                 continue;
@@ -726,6 +735,9 @@ impl Loader {
         };
         for (name, sig) in &manifest.funcs {
             self.funcs.insert(name.clone(), sig.clone());
+            // Seed-owned: plugin deps shared by several modules must
+            // resolve identically in each (same consumption bug as #214).
+            self.seed_func_keys.insert(name.clone());
         }
         let ns = alias.unwrap_or(dep);
         if ns != dep {
@@ -737,7 +749,8 @@ impl Loader {
                 .map(|(n, s)| (format!("{ns}.{}", &n[prefix.len()..]), s.clone()))
                 .collect();
             for (name, sig) in aliased {
-                self.funcs.insert(name, sig);
+                self.funcs.insert(name.clone(), sig);
+                self.seed_func_keys.insert(name);
             }
         }
         // Ergonomic layer: a `<dep>.zz` entry file in the package root
@@ -757,6 +770,36 @@ impl Loader {
             // Namespace bookkeeping (re-import diagnostics stay consistent).
             self.register_ns(ns, &pkg_dir.join("plugin.zzi"), importer, source);
         }
+    }
+
+    /// Register a stdlib namespace without the one-namespace-per-module
+    /// rule that governs user files: the same std module may serve
+    /// several importers under different qualifiers (`import std.path
+    /// as fspath` in one module, plain `import std.path` in another),
+    /// since every qualifier gets its own copied entries (issue #216).
+    /// A namespace claimed by two DIFFERENT modules stays an error.
+    fn register_std_ns(&mut self, ns: &str, module: &str, display: &Path, source: &str) -> bool {
+        let canon = PathBuf::from(format!("std:{module}"));
+        if let Some(existing) = self.namespaces.get(ns) {
+            if *existing != canon {
+                self.errors.push(LoadError {
+                    name: display.display().to_string(),
+                    source: source.to_string(),
+                    diags: vec![error_at(
+                        format!(
+                            "namespace `{ns}` is claimed by both `{}` and `std.{module}`\n\
+                             hint: use an alias for one of the imports",
+                            existing.display()
+                        ),
+                        Span::new(0, 0),
+                    )],
+                });
+                return false;
+            }
+            return true;
+        }
+        self.namespaces.insert(ns.to_string(), canon);
+        true
     }
 
     /// Register a namespace → module mapping, detecting collisions. Returns
@@ -923,20 +966,24 @@ impl Loader {
                         .iter()
                         .any(|i| matches!(i, ImportItem::Wildcard { .. }));
                     if has_wildcard {
-                        if let Err(msg) = register_wildcard_namespace(
+                        match register_wildcard_namespace(
                             module.as_str(),
                             &mut self.funcs,
                             &mut self.natives,
                         ) {
-                            self.errors.push(LoadError {
-                                name: name.clone(),
-                                source: source.clone(),
-                                diags: vec![error_at(
-                                    format!("{msg}\n\
-                                             hint: this may occur if the stdlib module exports a conflicting name"),
-                                    Span::new(0, 0),
-                                )],
-                            });
+                            Err(msg) => {
+                                self.errors.push(LoadError {
+                                    name: name.clone(),
+                                    source: source.clone(),
+                                    diags: vec![error_at(
+                                        format!("{msg}\n\
+                                                 hint: this may occur if the stdlib module exports a conflicting name"),
+                                        Span::new(0, 0),
+                                    )],
+                                });
+                            }
+                            // Seed-owned like full-module copies (#214).
+                            Ok(inserted) => self.seed_func_keys.extend(inserted),
                         }
                     } else {
                         let name_aliases: Vec<(String, Option<String>)> = items
@@ -954,7 +1001,9 @@ impl Loader {
                             &mut self.funcs,
                             &mut self.natives,
                         ) {
-                            Ok(missing) => {
+                            Ok((missing, inserted)) => {
+                                // Seed-owned like full-module copies (#214).
+                                self.seed_func_keys.extend(inserted);
                                 for sym in &missing {
                                     self.errors.push(LoadError {
                                         name: name.clone(),
