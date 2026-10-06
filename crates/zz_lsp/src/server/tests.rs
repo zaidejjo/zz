@@ -15,12 +15,15 @@ fn setup() -> (tower_lsp::LspService<Backend>, Arc<GlobalState>) {
 
 fn open_and_check(state: &GlobalState, uri: &Url, source: &str) {
     state.update_document(uri.clone(), 1, source.to_string());
-    let cr = {
-        let doc = state.documents.get(uri).unwrap();
-        let program = doc.program.as_ref().unwrap().clone();
-        let (ib, ifunc, is, ia, ie) = state.checker_seed_for(&program);
-        zz_checker::check_program(&program, ib, ifunc, is, ia, ie)
-    };
+    // Clone the program first: holding the read guard across `get_mut`
+    // below deadlocks the backing DashMap shard.
+    let program = state.documents.get(uri).unwrap().program.clone().unwrap();
+    let doc_path = uri.to_file_path().ok();
+    let (ib, ifunc, is, ia, ie) = state.checker_seed_for_path(&program, doc_path.as_deref());
+    if let Some(mut doc) = state.documents.get_mut(uri) {
+        doc.seed_bindings = Some(ib.clone());
+    }
+    let cr = zz_checker::check_program(&program, ib, ifunc, is, ia, ie);
     if let Some(mut doc) = state.documents.get_mut(uri) {
         doc.check_result = Some(cr.clone());
     }
@@ -1304,4 +1307,71 @@ async fn completion_without_check_result_still_serves() {
         CompletionResponse::List(l) => l.items.len(),
     };
     assert!(n > 0, "on-demand check must serve member items");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn full_import_const_use_is_clean() {
+    // The reported screenshot: `import std.math` + `println(math.PI)`
+    // flagged BOTH `unused import 'math'` and `undefined variable`.
+    // Seeded std namespaces resolve the const, marking the import used.
+    let (_service, state) = setup();
+    let uri: Url = "file:///mathpi.zz".parse().unwrap();
+    let src = "import std.math\nfunc main() {\n    println(math.PI)\n}\n";
+    state.update_document(uri.clone(), 1, src.to_string());
+    let messages = check_errors_for(&state, &uri);
+    assert!(
+        messages.is_empty(),
+        "full-import const use clean: {messages:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completion_dep_member_through_service() {
+    // Live-shape regression: buffer-only probe inside a real project with
+    // a vendored dep. Skipped when the fixture project is absent (it is
+    // built by the packaging audit, not by cargo).
+    let probe_path = std::path::PathBuf::from("/tmp/zzpkgtest/probe_svc.zz");
+    if !probe_path.parent().unwrap().join("zz.toml").is_file() {
+        return;
+    }
+    let (service, state) = setup();
+    let uri = Url::from_file_path(&probe_path).unwrap();
+    let src = "import table\nfunc main() {\n    t := table.\n}\n";
+    open_and_check(&state, &uri, src);
+
+    let doc = state.documents.get(&uri).unwrap().clone();
+    assert!(doc.check_result.is_some(), "recheck must store a result");
+    let cr = doc.check_result.as_ref().unwrap();
+    assert!(
+        cr.funcs.keys().any(|k| k == "table.render"),
+        "seed must carry table.*"
+    );
+
+    let resp = service
+        .inner()
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                // `    t := table.` is 15 chars: the cursor sits AFTER the dot.
+                position: Position {
+                    line: 2,
+                    character: 15,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap()
+        .expect("member position must answer");
+    let items = match resp {
+        CompletionResponse::Array(v) => v,
+        CompletionResponse::List(_) => panic!("expected array"),
+    };
+    assert!(
+        items.iter().any(|i| i.label == "render"),
+        "table. serves render, got: {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
 }
