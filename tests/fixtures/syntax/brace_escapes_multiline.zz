@@ -1,0 +1,55 @@
+// features: comparison, locals, print, string-literal, string-ops, fstrings, string-blocks
+// E2E: Doubled-brace escapes `{{` / `}}` in triple-quoted strings.
+name := "ZZ"
+n := 21
+
+// 1: basic collapse on one line
+a := """a{{b}}c"""
+println(a == "a{{b}}c")
+
+// 2: literal name stays uninterpolated
+b := """{{name}}"""
+println(b == "{{name}}")
+
+// 3: mixed literal braces + interpolation
+x := 7
+c := """{{{x}}}"""
+println(c == "{{7}}")
+
+// 4: JSON braces via doubling
+j := """{{"k": 1}}"""
+println(j == "{{\"k\": 1}}")
+
+// 5: JSON-like without doubling still literal (legacy)
+j2 := """{"k": 1}"""
+println(j2 == "{{\"k\": 1}}")
+
+// 6: multiline CSS block with dedent
+css := """
+    .a{{color:red}}
+    .b{{color:blue}}
+    """
+println(css == ".a{{color:red}}\n.b{{color:blue}}")
+
+// 7: multiline with interpolation and escapes together
+msg := """
+    hello {name}, lit {{x}} val {n * 2}
+    """
+println(msg == "hello ZZ, lit {{x}} val 42")
+
+// 8: backslash escapes compose with doubled braces
+esc := """\\{{x\\}}"""
+println(esc == "\\{{x\\}}")
+
+// 9: format spec next to escape
+pi := 3.14159
+f := """{pi:.2f}{{c}}"""
+println(f == "3.14{{c}}")
+
+// 10: empty escaped pair across lines
+e := """
+    x{{}}y
+    """
+println(e == "x{{}}y")
+
+println("brace_escapes_multiline_ok")

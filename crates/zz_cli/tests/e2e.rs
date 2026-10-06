@@ -200,6 +200,12 @@ e2e_success_test!(
 e2e_success_test!(e2e_syntax_frame_slots, "syntax", "frame_slots.zz");
 e2e_success_test!(e2e_syntax_operators, "syntax", "operators.zz");
 e2e_success_test!(e2e_syntax_fstrings, "syntax", "fstrings.zz");
+e2e_success_test!(e2e_syntax_brace_escapes, "syntax", "brace_escapes.zz");
+e2e_success_test!(
+    e2e_syntax_brace_escapes_multiline,
+    "syntax",
+    "brace_escapes_multiline.zz"
+);
 e2e_success_test!(e2e_syntax_arrays, "syntax", "arrays.zz");
 e2e_success_test!(e2e_syntax_dicts, "syntax", "dicts.zz");
 e2e_success_test!(e2e_syntax_defer, "syntax", "defer.zz");

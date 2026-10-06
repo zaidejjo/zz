@@ -506,6 +506,37 @@ fn triple_escaped_braces_are_literal_text() {
 }
 
 #[test]
+fn double_brace_escapes_are_literal_text() {
+    // `"{{name}}"` is a plain string `{name}`, not an interpolation.
+    let p = parse_ok("\"{{name}}\"");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Str { value, .. }) => assert_eq!(value, "{name}"),
+        other => panic!("expected str expr, got {other:?}"),
+    }
+    // `"{{{x}}}"` is literal `{` + interpolation + literal `}`.
+    let parts = fmt_parts_of("\"{{{x}}}\"");
+    assert_eq!(parts.len(), 3);
+    assert!(matches!(&parts[0], FmtPart::Text(t) if t == "{"));
+    assert!(
+        matches!(&parts[1], FmtPart::Expr(e, None) if matches!(e.as_ref(), E::Ident { name, .. } if name == "x"))
+    );
+    assert!(matches!(&parts[2], FmtPart::Text(t) if t == "}"));
+}
+
+#[test]
+fn triple_double_brace_escapes_are_literal_text() {
+    let p = parse_ok("\"\"\"{{name}}\"\"\"");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Str { value, .. }) => assert_eq!(value, "{name}"),
+        other => panic!("expected str expr, got {other:?}"),
+    }
+    let parts = fmt_parts_of("\"\"\"{{{x}}}\"\"\"");
+    assert_eq!(parts.len(), 3);
+    assert!(matches!(&parts[0], FmtPart::Text(t) if t == "{"));
+    assert!(matches!(&parts[2], FmtPart::Text(t) if t == "}"));
+}
+
+#[test]
 fn triple_format_spec_parses() {
     let parts = fmt_parts_of("\"\"\"{pi:.2f}\"\"\"");
     assert_eq!(parts.len(), 3);

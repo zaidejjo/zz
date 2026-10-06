@@ -1,0 +1,49 @@
+// features: comparison, locals, print, string-literal, string-ops, fstrings
+// E2E: Doubled-brace escapes `{{` / `}}` in single-line strings.
+name := "ZZ"
+n := 42
+
+// 1-4: basic collapses
+println("{{" == "{")
+println("}}" == "}")
+println("{{}}" == "{}")
+println("a{{b}}c" == "a{{b}}c")
+
+// 5-6: doubled braces stay literal (no interpolation)
+println("{{name}}" == "{{name}}")
+println("{{name}}" != name)
+
+// 7-9: mixed literal braces + interpolation
+x := 7
+println("{{{x}}}" == "{{7}}")
+println("{{a}}{x}{{b}}" == "{{a}}7{{b}}")
+println("{{{name}}}" == "{{ZZ}}")
+
+// 10-11: escapes at string edges
+println("{{start" == "{{start")
+println("end}}" == "end}}")
+
+// 12-13: runs collapse pairwise
+println("{{{{}}" == "{{{{}}")
+println("{{{{}}}}" == "{{{{}}}}")
+
+// 14-15: lone braces stay literal
+println("a}b" == "a}b")
+println("a{{b" == "a{{b")
+
+// 16: JSON object stays literal
+println("{{ \"k\": 1 }}" == "{{ \"k\": 1 }}")
+
+// 17: CSS-like content
+println(".a{{color:red}}" == ".a{{color:red}}")
+
+// 18: escape adjacent to format spec
+println("{n:x}{{lit}}" == "2a{{lit}}")
+
+// 19: backslash escapes compose with doubled braces
+println("\\{{x\\}}" == "\\{{x\\}}")
+
+// 20: empty escaped pair inside text
+println("x{{}}y" == "x{{}}y")
+
+println("brace_escapes_ok")
