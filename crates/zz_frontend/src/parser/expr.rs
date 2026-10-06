@@ -1,7 +1,7 @@
 //! Expression parsing.
 
 use crate::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, Stmt, UnOp};
-use crate::diag::error_at;
+use crate::diag::{error_at, FixIt};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
@@ -800,6 +800,7 @@ impl<'a> Parser<'a> {
             TokenKind::While => {
                 let w = self.advance();
                 let cond = self.parse_expr();
+                self.check_assign_in_condition();
                 let body = self.parse_block();
                 let span = w.span.join(body.span);
                 Expr::While {
@@ -1176,6 +1177,7 @@ impl<'a> Parser<'a> {
             return self.parse_if_let(if_tok);
         }
         let cond = self.parse_expr();
+        self.check_assign_in_condition();
         let then = self.parse_block();
         let els = self.parse_else();
         let span = if_tok
@@ -1220,6 +1222,26 @@ impl<'a> Parser<'a> {
             let block = self.parse_block();
             Some(Box::new(Expr::Block(block)))
         }
+    }
+
+    /// `=` in `if`/`while` condition position is almost always a typo for
+    /// `==`. Emit one targeted error with a fix, consume `= RHS` for
+    /// recovery, and let checking continue so independent errors (e.g. a
+    /// typoed variable earlier in the file) are still reported (#244).
+    pub(crate) fn check_assign_in_condition(&mut self) {
+        if !self.at(TokenKind::Assign) {
+            return;
+        }
+        let span = self.peek().span;
+        self.errors.push(
+            error_at(
+                "`=` in condition does assignment; use `==` to compare",
+                span,
+            )
+            .with_fixit(FixIt::safe(span, "==", "replace with `==`")),
+        );
+        self.advance(); // consume `=`
+        let _ = self.parse_expr(); // RHS for recovery; condition keeps LHS
     }
 
     pub(crate) fn parse_match(&mut self) -> Expr {

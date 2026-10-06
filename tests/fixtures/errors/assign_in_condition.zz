@@ -1,0 +1,8 @@
+// features: comparison, error-case, conditionals, locals
+// E2E: `=` in condition suggests `==` with fix
+func main() {
+    countr := 5
+    if countr = 5 {
+        println("x")
+    }
+}
