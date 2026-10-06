@@ -1,7 +1,7 @@
 //! Expression parsing.
 
 use crate::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, Stmt, UnOp};
-use crate::diag::error_at;
+use crate::diag::{error_at, FixIt};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
@@ -375,7 +375,7 @@ impl<'a> Parser<'a> {
                     let end = if self.eat_close(TokenKind::RParen) {
                         self.previous().span
                     } else {
-                        self.error_here("expected `)` to close call");
+                        self.error_missing_close(")", "expected `)` to close call");
                         expr.span()
                     };
                     let span = expr.span().join(end);
@@ -436,7 +436,7 @@ impl<'a> Parser<'a> {
                     let close = if self.eat_close(TokenKind::RBracket) {
                         self.previous().span
                     } else {
-                        self.error_here("expected `]` to close index");
+                        self.error_missing_close("]", "expected `]` to close index");
                         expr.span()
                     };
                     let span = expr.span().join(close);
@@ -572,7 +572,7 @@ impl<'a> Parser<'a> {
                 None
             };
             if !self.eat(TokenKind::RBrace) {
-                self.error_here("expected `}` to close interpolation");
+                self.error_missing_close("}", "expected `}` to close interpolation");
             }
             parts.push(FmtPart::Expr(Box::new(expr), fmt_spec));
             // After `}`, the next token is either StrFmt (more interpolation
@@ -770,7 +770,7 @@ impl<'a> Parser<'a> {
                         self.pop_delim(TokenKind::RParen, rparen);
                         rparen
                     } else {
-                        self.error_here("expected `)` to close tuple expression");
+                        self.error_missing_close(")", "expected `)` to close tuple expression");
                         items.last().map(|e| e.span()).unwrap_or(first_span)
                     };
                     return Expr::Tuple {
@@ -784,7 +784,7 @@ impl<'a> Parser<'a> {
                     self.pop_delim(TokenKind::RParen, rparen);
                     rparen
                 } else {
-                    self.error_here("expected `)` to close parenthesized expression");
+                    self.error_missing_close(")", "expected `)` to close parenthesized expression");
                     first.span()
                 };
                 let span = tok.span.join(end);
@@ -800,6 +800,7 @@ impl<'a> Parser<'a> {
             TokenKind::While => {
                 let w = self.advance();
                 let cond = self.parse_expr();
+                self.check_assign_in_condition();
                 let body = self.parse_block();
                 let span = w.span.join(body.span);
                 Expr::While {
@@ -811,6 +812,15 @@ impl<'a> Parser<'a> {
             TokenKind::Match => self.parse_match(),
             TokenKind::Dot => self.parse_variant(),
             _ => {
+                // A stray closing bracket in expression position (e.g. the
+                // second `]` in `[1, 2]]`): remove it and continue.
+                if matches!(
+                    tok.kind,
+                    TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket
+                ) {
+                    self.error_stray_close(tok.kind);
+                    return dummy_expr(tok.span);
+                }
                 self.error_here(format!(
                     "expected expression, found {}",
                     tok.kind.describe()
@@ -878,7 +888,7 @@ impl<'a> Parser<'a> {
         let end = if self.eat(TokenKind::RBrace) {
             self.previous().span
         } else {
-            self.error_here("expected `}` to close struct literal");
+            self.error_missing_close("}", "expected `}` to close struct literal");
             self.peek().span
         };
         Expr::StructInit {
@@ -914,13 +924,13 @@ impl<'a> Parser<'a> {
             if self.eat_close(TokenKind::RBrace) {
                 self.previous().span
             } else {
-                self.error_here("expected `}` to close `sqlz!{...}`");
+                self.error_missing_close("}", "expected `}` to close `sqlz!{...}`");
                 sql_expr.span()
             }
         } else if self.eat_close(TokenKind::RParen) {
             self.previous().span
         } else {
-            self.error_here("expected `)` to close `sqlz!(...)`");
+            self.error_missing_close(")", "expected `)` to close `sqlz!(...)`");
             sql_expr.span()
         };
         let span = start.join(end);
@@ -1086,7 +1096,7 @@ impl<'a> Parser<'a> {
         let end = if self.eat_close(TokenKind::RBrace) {
             self.previous().span
         } else {
-            self.error_here("expected `}` to close dict literal");
+            self.error_missing_close("}", "expected `}` to close dict literal");
             lbrace.span
         };
         Some(Expr::Dict {
@@ -1127,7 +1137,7 @@ impl<'a> Parser<'a> {
             self.pop_delim(TokenKind::RBracket, rbracket);
             rbracket
         } else {
-            self.error_here("expected `]` to close array literal");
+            self.error_missing_close("]", "expected `]` to close array literal");
             lbracket.span
         };
         Expr::Array {
@@ -1158,7 +1168,7 @@ impl<'a> Parser<'a> {
             self.pop_delim(TokenKind::RBracket, rbracket);
             rbracket
         } else {
-            self.error_here("expected `]` to close list comprehension");
+            self.error_missing_close("]", "expected `]` to close list comprehension");
             lbracket.span
         };
         Expr::ListComp {
@@ -1176,6 +1186,7 @@ impl<'a> Parser<'a> {
             return self.parse_if_let(if_tok);
         }
         let cond = self.parse_expr();
+        self.check_assign_in_condition();
         let then = self.parse_block();
         let els = self.parse_else();
         let span = if_tok
@@ -1220,6 +1231,26 @@ impl<'a> Parser<'a> {
             let block = self.parse_block();
             Some(Box::new(Expr::Block(block)))
         }
+    }
+
+    /// `=` in `if`/`while` condition position is almost always a typo for
+    /// `==`. Emit one targeted error with a fix, consume `= RHS` for
+    /// recovery, and let checking continue so independent errors (e.g. a
+    /// typoed variable earlier in the file) are still reported (#244).
+    pub(crate) fn check_assign_in_condition(&mut self) {
+        if !self.at(TokenKind::Assign) {
+            return;
+        }
+        let span = self.peek().span;
+        self.errors.push(
+            error_at(
+                "`=` in condition does assignment; use `==` to compare",
+                span,
+            )
+            .with_fixit(FixIt::safe(span, "==", "replace with `==`")),
+        );
+        self.advance(); // consume `=`
+        let _ = self.parse_expr(); // RHS for recovery; condition keeps LHS
     }
 
     pub(crate) fn parse_match(&mut self) -> Expr {
@@ -1321,7 +1352,7 @@ impl<'a> Parser<'a> {
             let end = if self.eat_close(TokenKind::RParen) {
                 self.previous().span
             } else {
-                self.error_here("expected `)` to close variant argument");
+                self.error_missing_close(")", "expected `)` to close variant argument");
                 e.span()
             };
             Some((Box::new(e), end))
@@ -1425,7 +1456,7 @@ impl<'a> Parser<'a> {
                     let end = if self.eat_close(TokenKind::RParen) {
                         self.previous().span
                     } else {
-                        self.error_here("expected `)` to close pattern");
+                        self.error_missing_close(")", "expected `)` to close pattern");
                         p.span()
                     };
                     Some((Box::new(p), end))
@@ -1456,7 +1487,7 @@ impl<'a> Parser<'a> {
                 let end = if self.eat(TokenKind::RParen) {
                     self.previous().span
                 } else {
-                    self.error_here("expected `)` to close tuple pattern");
+                    self.error_missing_close(")", "expected `)` to close tuple pattern");
                     self.peek().span
                 };
                 let span = tok.span.join(end);

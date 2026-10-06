@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use zz_frontend::diag::error_at;
+use zz_frontend::levenshtein::suggest_all;
 use zz_frontend::span::Span;
 
 use super::Checker;
@@ -173,13 +174,19 @@ impl Checker {
             Some((_, payload)) => Some(payload.clone()),
             None => {
                 let known: Vec<&str> = sig.variants.iter().map(|(v, _)| v.as_str()).collect();
-                self.errors.push(error_at(
+                let mut diag = error_at(
                     format!(
                         "unknown variant `{variant}` for enum `{enum_name}` (expected one of: {})",
                         known.join(", "),
                     ),
                     span,
-                ));
+                );
+                // Sherlock: suggest the closest known variant (note only, no
+                // fixit — the payload binding shape may differ).
+                if let Some((suggestion, _)) = suggest_all(variant, &known).first() {
+                    diag = diag.with_note(format!("did you mean `.{suggestion}`?"));
+                }
+                self.errors.push(diag);
                 None
             }
         }

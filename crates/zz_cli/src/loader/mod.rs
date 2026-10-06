@@ -85,6 +85,8 @@ pub struct LoadResult {
     /// First registration wins (mirrors the loader seed, where an earlier
     /// import shadows a later one for the same bare name).
     pub import_aliases: HashMap<String, String>,
+    /// Check-pipeline counters for `zz check --stats`.
+    pub stats: LoadStats,
 }
 
 struct Loader {
@@ -149,6 +151,23 @@ struct Loader {
     selected_consts: HashMap<String, f64>,
     /// Mirrors LoadResult::stdlib_aliases while loading.
     stdlib_aliases: Vec<(String, String)>,
+    /// S1 check-cache outcomes for `--stats` observability (#248).
+    cache_hits: usize,
+    cache_misses: usize,
+}
+
+/// Check-pipeline observability for `zz check --stats` (#248): per-load
+/// module counts, cache outcomes, and seed size.
+#[derive(Debug, Clone, Default)]
+pub struct LoadStats {
+    /// Modules in the load closure (dependencies + entry).
+    pub modules: usize,
+    /// Modules served from the S1 content-addressed cache.
+    pub cache_hits: usize,
+    /// Modules freshly checked (cache disabled, unresolvable key, or miss).
+    pub cache_misses: usize,
+    /// Seed function entries shared by every module (stdlib + plugins).
+    pub seed_funcs: usize,
 }
 
 /// Load an entry file and all of its imports.
@@ -223,6 +242,8 @@ fn load_program_impl(
         selective_imports: Vec::new(),
         selected_consts: HashMap::new(),
         stdlib_aliases: Vec::new(),
+        cache_hits: 0,
+        cache_misses: 0,
     };
     // Merge plugin manifest function signatures into the checker's function table.
     for (name, sig) in plugin_funcs {
@@ -1483,6 +1504,7 @@ impl Loader {
                 match pending {
                     Some(key) => match cache::read_cached(&key) {
                         Some(cached) => {
+                            self.cache_hits += 1;
                             let mut funcs = std::mem::take(&mut self.funcs);
                             funcs.extend(cached.funcs.into_owned());
                             let mut structs = std::mem::take(&mut self.structs);
@@ -1512,7 +1534,26 @@ impl Loader {
                                 None,
                             )
                         }
-                        None => (
+                        None => {
+                            self.cache_misses += 1;
+                            (
+                                check_program(
+                                    &program,
+                                    self.bindings.clone(),
+                                    std::mem::take(&mut self.funcs),
+                                    std::mem::take(&mut self.structs),
+                                    std::mem::take(&mut self.aliases),
+                                    std::mem::take(&mut self.enums),
+                                ),
+                                Some(key),
+                            )
+                        }
+                    },
+                    // Unresolvable key (missing source, cycle): check without
+                    // storing (nothing to key the entry by).
+                    None => {
+                        self.cache_misses += 1;
+                        (
                             check_program(
                                 &program,
                                 self.bindings.clone(),
@@ -1521,24 +1562,12 @@ impl Loader {
                                 std::mem::take(&mut self.aliases),
                                 std::mem::take(&mut self.enums),
                             ),
-                            Some(key),
-                        ),
-                    },
-                    // Unresolvable key (missing source, cycle): check without
-                    // storing (nothing to key the entry by).
-                    None => (
-                        check_program(
-                            &program,
-                            self.bindings.clone(),
-                            std::mem::take(&mut self.funcs),
-                            std::mem::take(&mut self.structs),
-                            std::mem::take(&mut self.aliases),
-                            std::mem::take(&mut self.enums),
-                        ),
-                        None,
-                    ),
+                            None,
+                        )
+                    }
                 }
             } else {
+                self.cache_misses += 1;
                 (
                     check_program(
                         &program,
@@ -1765,6 +1794,12 @@ impl Loader {
             errors: self.errors,
             stdlib_aliases: self.stdlib_aliases,
             import_aliases,
+            stats: LoadStats {
+                modules: self.order.len(),
+                cache_hits: self.cache_hits,
+                cache_misses: self.cache_misses,
+                seed_funcs: self.seed_func_keys.len(),
+            },
         }
     }
 }

@@ -73,7 +73,7 @@ impl<'a> Parser<'a> {
                     ts
                 };
                 if !self.eat(TokenKind::RParen) {
-                    self.error_here("expected `)` to close function type parameters");
+                    self.error_missing_close(")", "expected `)` to close function type parameters");
                 } else {
                     self.pop_delim(TokenKind::RParen, self.previous().span);
                 }
@@ -216,7 +216,7 @@ impl<'a> Parser<'a> {
                 let end = if self.eat_close(TokenKind::RBracket) {
                     self.previous().span
                 } else {
-                    self.error_here("expected `]` to close array type");
+                    self.error_missing_close("]", "expected `]` to close array type");
                     tok.span
                 };
                 Ty {
@@ -234,7 +234,7 @@ impl<'a> Parser<'a> {
                 let end = if self.eat_close(TokenKind::RBrace) {
                     self.previous().span
                 } else {
-                    self.error_here("expected `}` to close dict type");
+                    self.error_missing_close("}", "expected `}` to close dict type");
                     tok.span
                 };
                 Ty {
@@ -280,7 +280,7 @@ impl<'a> Parser<'a> {
                             }
                         }
                     } else {
-                        self.error_here("expected `)` to close tuple type");
+                        self.error_missing_close(")", "expected `)` to close tuple type");
                         Ty {
                             kind: TyKind::Tuple(ts),
                             span: tok.span.join(first_span),
@@ -307,7 +307,7 @@ impl<'a> Parser<'a> {
                             }
                         }
                     } else {
-                        self.error_here("expected `)` to close type");
+                        self.error_missing_close(")", "expected `)` to close type");
                         Ty {
                             kind: first.kind,
                             span: tok.span.join(first_span),

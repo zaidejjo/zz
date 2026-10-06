@@ -4,7 +4,8 @@ use crate::ast::{
     BinOp, Block, Decorator, ExternFunc, Ident, ImportItem, Param, Pattern, Stmt, TraitBound,
     TypeParam,
 };
-use crate::diag::error_at;
+use crate::diag::{error_at, FixIt};
+use crate::levenshtein::suggest_all;
 use crate::span::Span;
 use crate::token::TokenKind;
 
@@ -28,6 +29,12 @@ impl<'a> Parser<'a> {
             if self.at(term) || self.at(TokenKind::Eof) {
                 break;
             }
+            // Stray closing bracket with no opener in this list: tell the
+            // user to remove it and skip it so parsing continues.
+            if self.at_close() {
+                self.error_stray_close(self.peek_kind());
+                continue;
+            }
             let errors_before = self.errors.len();
             let pos_before = self.pos;
             let stmt = self.parse_stmt();
@@ -37,12 +44,18 @@ impl<'a> Parser<'a> {
                 // No progress and no error: force forward to avoid a loop.
                 self.advance();
             } else if !self.at(TokenKind::StmtEnd) && !self.at(term) && !self.at(TokenKind::Eof) {
-                // Two statements with no terminator between them.
-                self.error_here(format!(
-                    "expected end of statement, found {}",
-                    self.peek_kind().describe()
-                ));
-                self.skip_to_stmt_end();
+                // A stray closing bracket after a complete statement (e.g.
+                // the second `)` in `f(a))`): remove it, don't end the file.
+                if self.at_close() {
+                    self.error_stray_close(self.peek_kind());
+                } else {
+                    // Two statements with no terminator between them.
+                    self.error_here(format!(
+                        "expected end of statement, found {}",
+                        self.peek_kind().describe()
+                    ));
+                    self.skip_to_stmt_end();
+                }
             }
             stmts.push(stmt);
         }
@@ -299,7 +312,7 @@ impl<'a> Parser<'a> {
                 String::new()
             };
             if !self.eat(TokenKind::RParen) {
-                self.error_here("expected `)` to close `@link(...)`");
+                self.error_missing_close(")", "expected `)` to close `@link(...)`");
             }
             let _ = lib_tok;
             lib
@@ -370,7 +383,7 @@ impl<'a> Parser<'a> {
             }
             let params = self.parse_param_list();
             if !self.eat(TokenKind::RParen) {
-                self.error_here("expected `)` after extern parameters");
+                self.error_missing_close(")", "expected `)` after extern parameters");
             } else {
                 self.pop_delim(TokenKind::RParen, self.previous().span);
             }
@@ -418,7 +431,7 @@ impl<'a> Parser<'a> {
         let end = if self.eat(TokenKind::RBrace) {
             self.previous().span
         } else {
-            self.error_here("expected `}` to close extern block");
+            self.error_missing_close("}", "expected `}` to close extern block");
             self.peek().span
         };
         let span = extern_tok.span.join(end);
@@ -503,7 +516,7 @@ impl<'a> Parser<'a> {
         let end = if self.eat(TokenKind::RBrace) {
             self.previous().span
         } else {
-            self.error_here("expected `}` to close struct body");
+            self.error_missing_close("}", "expected `}` to close struct body");
             self.peek().span
         };
         let span = struct_tok.span.join(end);
@@ -521,6 +534,11 @@ impl<'a> Parser<'a> {
     /// with a hint to bound at the function instead).
     pub(crate) fn parse_struct_generics(&mut self) -> Vec<crate::ast::Ident> {
         if !self.eat(TokenKind::Lt) {
+            // Rust-style `struct Box[T]`: ZZ declares type parameters with
+            // `<T>` (`[T]` applies a generic type or makes an array type).
+            if self.at(TokenKind::LBracket) {
+                return self.parse_misplaced_bracket_struct_generics();
+            }
             return Vec::new();
         }
         let mut gs = Vec::new();
@@ -601,7 +619,7 @@ impl<'a> Parser<'a> {
         let end = if self.eat(TokenKind::RBrace) {
             self.previous().span
         } else {
-            self.error_here("expected `}` to close impl body");
+            self.error_missing_close("}", "expected `}` to close impl body");
             self.peek().span
         };
         let span = impl_tok.span.join(end);
@@ -758,7 +776,7 @@ impl<'a> Parser<'a> {
         let rparen = if self.eat(TokenKind::RParen) {
             self.previous().span
         } else {
-            self.error_here("expected `)` to close destructuring pattern");
+            self.error_missing_close(")", "expected `)` to close destructuring pattern");
             self.peek().span
         };
         // Parse `:=`
@@ -953,7 +971,7 @@ impl<'a> Parser<'a> {
         let end = if self.eat(TokenKind::RBrace) {
             self.previous().span
         } else {
-            self.error_here("expected `}` to close enum body");
+            self.error_missing_close("}", "expected `}` to close enum body");
             self.peek().span
         };
         let span = enum_tok.span.join(end);
@@ -1031,34 +1049,14 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_func(&mut self, pub_: bool) -> Stmt {
         let func_tok = self.advance();
         let name = self.parse_dotted_ident();
-        let generics = if self.eat(TokenKind::Lt) {
+        let mut generics = if self.eat(TokenKind::Lt) {
             let mut gs = Vec::new();
             loop {
                 let name = self
                     .expect_ident()
                     .unwrap_or_else(|| dummy_ident(self.peek().span));
                 let start = name.span;
-                let mut bounds = Vec::new();
-                if self.eat(TokenKind::Colon) {
-                    loop {
-                        if let Some(id) = self.expect_ident() {
-                            match id.name.as_str() {
-                                "Num" => bounds.push(TraitBound::Num),
-                                "Ord" => bounds.push(TraitBound::Ord),
-                                "Eq" => bounds.push(TraitBound::Eq),
-                                "Display" => bounds.push(TraitBound::Display),
-                                other => self.errors.push(error_at(
-                                    format!("unknown trait bound `{other}` (expected `Num`, `Ord`, `Eq`, or `Display`)"),
-                                    id.span,
-                                )),
-                            }
-                        }
-                        if self.eat(TokenKind::Plus) {
-                            continue;
-                        }
-                        break;
-                    }
-                }
+                let bounds = self.parse_trait_bounds();
                 let end = self.previous().span;
                 let span = start.join(end);
                 gs.push(TypeParam { name, bounds, span });
@@ -1074,6 +1072,12 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
+        // Rust-style `func first[T](...)`: ZZ declares generics with `<T>`
+        // (`[T]` applies a generic type, e.g. `Box[T]`). Parse the bracketed
+        // list for recovery and show the right way with a fix.
+        if generics.is_empty() && self.at(TokenKind::LBracket) {
+            generics = self.parse_misplaced_bracket_generics();
+        }
         if !self.eat(TokenKind::LParen) {
             self.error_here("expected `(` after function name");
         } else {
@@ -1081,7 +1085,7 @@ impl<'a> Parser<'a> {
         }
         let params = self.parse_param_list();
         if !self.eat(TokenKind::RParen) {
-            self.error_here("expected `)` after parameters");
+            self.error_missing_close(")", "expected `)` after parameters");
         } else {
             self.pop_delim(TokenKind::RParen, self.previous().span);
         }
@@ -1102,6 +1106,196 @@ impl<'a> Parser<'a> {
             pub_,
             decorators: Vec::new(),
         }
+    }
+
+    /// Parse `: Bound(+Bound)*` after a type parameter name. Shared by the
+    /// `<T: Num>` path and the misplaced-`[T: Num]` recovery path.
+    pub(crate) fn parse_trait_bounds(&mut self) -> Vec<TraitBound> {
+        let mut bounds = Vec::new();
+        if self.eat(TokenKind::Colon) {
+            loop {
+                if let Some(id) = self.expect_ident() {
+                    match id.name.as_str() {
+                        "Num" => bounds.push(TraitBound::Num),
+                        "Ord" => bounds.push(TraitBound::Ord),
+                        "Eq" => bounds.push(TraitBound::Eq),
+                        "Display" => bounds.push(TraitBound::Display),
+                        other => {
+                            // Sherlock: suggest the closest known bound
+                            // (`Number` → `Num`) with a fix.
+                            let known = ["Num", "Ord", "Eq", "Display"];
+                            let mut diag = error_at(
+                                format!("unknown trait bound `{other}` (expected `Num`, `Ord`, `Eq`, or `Display`)"),
+                                id.span,
+                            );
+                            if let Some((suggestion, _)) = suggest_all(other, &known).first() {
+                                diag = diag
+                                    .with_note(format!("did you mean `{suggestion}`?"))
+                                    .with_fixit(FixIt::safe(
+                                        id.span,
+                                        suggestion.to_string(),
+                                        "replace bound",
+                                    ));
+                            } else {
+                                // Prefix fallback for longer typos beyond
+                                // edit-distance threshold (`Number` → `Num`).
+                                let lower = other.to_lowercase();
+                                if let Some(prefix) = known
+                                    .iter()
+                                    .filter(|k| {
+                                        lower.starts_with(&k.to_lowercase())
+                                            || k.to_lowercase().starts_with(&lower)
+                                    })
+                                    .copied()
+                                    .max_by_key(|k| k.len())
+                                {
+                                    diag = diag
+                                        .with_note(format!("did you mean `{prefix}`?"))
+                                        .with_fixit(FixIt::safe(
+                                            id.span,
+                                            prefix.to_string(),
+                                            "replace bound",
+                                        ));
+                                }
+                            }
+                            self.errors.push(diag);
+                        }
+                    }
+                }
+                if self.eat(TokenKind::Plus) {
+                    continue;
+                }
+                break;
+            }
+        }
+        bounds
+    }
+
+    /// Recover `func first[T](...)`: parse the bracketed names (with optional
+    /// bounds) into real type parameters, then report the right syntax with
+    /// an `<...>` fix. The body and call sites check normally afterwards,
+    /// so one typo never cascades.
+    pub(crate) fn parse_misplaced_bracket_generics(&mut self) -> Vec<TypeParam> {
+        let open = self.advance(); // `[`
+        let mut gs = Vec::new();
+        loop {
+            if self.at(TokenKind::RBracket) || self.at(TokenKind::Eof) {
+                break;
+            }
+            // Bail out of garbage (e.g. `func f[0]`) without looping forever.
+            if !matches!(self.peek_kind(), TokenKind::Ident) {
+                self.error_here(format!(
+                    "expected type parameter name, found {}",
+                    self.peek_kind().describe()
+                ));
+                self.skip_to_stmt_end();
+                break;
+            }
+            let name = self
+                .expect_ident()
+                .unwrap_or_else(|| dummy_ident(self.peek().span));
+            let start = name.span;
+            let bounds = self.parse_trait_bounds();
+            let end = self.previous().span;
+            let span = start.join(end);
+            gs.push(TypeParam { name, bounds, span });
+            if self.eat(TokenKind::Comma) {
+                continue;
+            }
+            break;
+        }
+        let end = if self.eat(TokenKind::RBracket) {
+            self.previous().span
+        } else {
+            self.error_missing_close("]", "expected `]` to close generic parameters");
+            self.peek().span
+        };
+        let bracket_span = open.span.join(end);
+        let fixed = format!(
+            "<{}>",
+            gs.iter()
+                .map(|p| {
+                    if p.bounds.is_empty() {
+                        p.name.name.clone()
+                    } else {
+                        format!(
+                            "{}: {}",
+                            p.name.name,
+                            p.bounds
+                                .iter()
+                                .map(|b| b.name())
+                                .collect::<Vec<_>>()
+                                .join(" + ")
+                        )
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        self.errors.push(
+            error_at(
+                "generic parameters are declared with `<T>`, not `[T]`",
+                bracket_span,
+            )
+            .with_note(format!(
+                "write `{fixed}` instead (`[T]` applies a generic type, e.g. `Box[T]`, or makes an array type)"
+            ))
+            .with_fixit(FixIt::safe(bracket_span, fixed, "use `<...>`")),
+        );
+        gs
+    }
+
+    /// Recover `struct Box[T]`: parse the bracketed names into real type
+    /// parameters, then report the right syntax with an `<...>` fix.
+    pub(crate) fn parse_misplaced_bracket_struct_generics(&mut self) -> Vec<crate::ast::Ident> {
+        let open = self.advance(); // `[`
+        let mut gs = Vec::new();
+        loop {
+            if self.at(TokenKind::RBracket) || self.at(TokenKind::Eof) {
+                break;
+            }
+            if !matches!(self.peek_kind(), TokenKind::Ident) {
+                self.error_here(format!(
+                    "expected type parameter name, found {}",
+                    self.peek_kind().describe()
+                ));
+                self.skip_to_stmt_end();
+                break;
+            }
+            gs.push(
+                self.expect_ident()
+                    .unwrap_or_else(|| dummy_ident(self.peek().span)),
+            );
+            if self.eat(TokenKind::Comma) {
+                continue;
+            }
+            break;
+        }
+        let end = if self.eat(TokenKind::RBracket) {
+            self.previous().span
+        } else {
+            self.error_missing_close("]", "expected `]` to close generic parameters");
+            self.peek().span
+        };
+        let bracket_span = open.span.join(end);
+        let fixed = format!(
+            "<{}>",
+            gs.iter()
+                .map(|i| i.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        self.errors.push(
+            error_at(
+                "type parameters are declared with `<T>`, not `[T]`",
+                bracket_span,
+            )
+            .with_note(format!(
+                "write `{fixed}` instead (`[T]` applies a generic type, e.g. `Box[T]`, or makes an array type)"
+            ))
+            .with_fixit(FixIt::safe(bracket_span, fixed, "use `<...>`")),
+        );
+        gs
     }
 
     /// Parse `@name` / `@name(args)` decorators followed by `func`.
@@ -1169,7 +1363,7 @@ impl<'a> Parser<'a> {
                 let end = if self.eat_close(TokenKind::RParen) {
                     self.previous().span
                 } else {
-                    self.error_here("expected `)` to close decorator arguments");
+                    self.error_missing_close(")", "expected `)` to close decorator arguments");
                     self.peek().span
                 };
                 (args, named, end)

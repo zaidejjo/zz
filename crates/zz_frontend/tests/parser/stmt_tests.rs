@@ -521,3 +521,106 @@ fn compound_assign_does_not_steal_plain_forms() {
         zz_frontend::ast::Stmt::Expr(E::Binary { .. })
     ));
 }
+
+#[test]
+fn bracket_generics_suggest_angle() {
+    // `func first[T]` (Rust-style): one targeted error showing `<T>`, and
+    // the recovered function still parses with its body.
+    let parsed = parse("func first[T](x: T) -> T {\n    x\n}");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("`<T>`, not `[T]`")),
+        "expected bracket-generics hint, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert!(
+        parsed.errors.iter().any(|e| !e.fixits.is_empty()),
+        "expected an auto-fix for bracket generics",
+    );
+    assert_eq!(parsed.program.stmts.len(), 1);
+}
+
+#[test]
+fn bracket_generics_keep_bounds() {
+    // Bounds survive recovery: `[T: Num]` suggests `<T: Num>`.
+    let parsed = parse("func first[T: Num](x: T) -> T {\n    x\n}");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.fixits.iter().any(|f| f.replacement == "<T: Num>")),
+        "expected `<T: Num>` fix, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn struct_bracket_generics_suggest_angle() {
+    let parsed = parse("struct Boxed[T] {\n    v: T,\n}");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("`<T>`, not `[T]`")),
+        "expected bracket-generics hint for structs, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn unknown_bound_suggests_known() {
+    // `Number` → `Num` with a fix, via prefix fallback.
+    let parsed = parse("func first<T: Number>(x: T) -> T {\n    x\n}");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("unknown trait bound")
+                && e.fixits.iter().any(|f| f.replacement == "Num")),
+        "expected `Num` suggestion, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn stray_closer_says_remove() {
+    let parsed = parse("func main() {\n    println(\"hi\")\n}\n}\n");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("remove it")),
+        "expected remove-it hint, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn missing_closer_has_insert_fix() {
+    let parsed = parse("func main() {\n    println(\"hi\"\n}\n");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.fixits.iter().any(|f| f.replacement == ")")),
+        "expected `)` insert fix, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn unterminated_string_points_at_start_with_fix() {
+    let parsed = parse("func main() {\n    x := \"hello\n}\n");
+    let unterminated: Vec<_> = parsed
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("unterminated"))
+        .collect();
+    assert_eq!(unterminated.len(), 1, "expected exactly one root error");
+    assert!(
+        unterminated[0].fixits.iter().any(|f| f.replacement == "\""),
+        "expected quote fix",
+    );
+}

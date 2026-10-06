@@ -1,4 +1,4 @@
-// features: error-case, import
+// features: error-case, imports
 // E2E: Bare `import std` names no module (hard error)
 import std
 func main() {

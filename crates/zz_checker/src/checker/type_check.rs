@@ -6,7 +6,7 @@ use crate::checker::inference::{contains_var, default_variant_vars};
 use crate::checker::Checker;
 use crate::type_::Type;
 use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Lit, Param, Pattern, Stmt, Ty, UnOp};
-use zz_frontend::diag::{error_at, FixIt};
+use zz_frontend::diag::{error_at, warning_at, FixIt};
 use zz_frontend::levenshtein::suggest_all;
 use zz_frontend::span::Span;
 
@@ -251,7 +251,9 @@ impl Checker {
                     Some(v) => {
                         let vt = self.check_expr(v);
                         if let Err(e) = self.unifier.unify(&vt, &ret) {
-                            self.report_mismatch(e, v.span());
+                            if !self.report_result_return_hint(&vt, &ret, v.span()) {
+                                self.report_mismatch(e, v.span());
+                            }
                         }
                         // A `return` diverges: it never yields a value to the
                         // enclosing block. Its statement type is `Never`
@@ -732,8 +734,39 @@ impl Checker {
     pub(crate) fn check_block(&mut self, block: &Block) -> Type {
         self.push_scope();
         let mut result = Type::Unit;
+        // Sherlock: code after a diverging statement (`return`/`break`/
+        // `continue`, or an if/match that diverges on every path) never
+        // runs — warn once per statement instead of checking dead code
+        // into confusing cascades.
+        let mut diverged: Option<&'static str> = None;
         for stmt in &block.stmts {
+            if let Some(how) = diverged {
+                self.errors.push(warning_at(
+                    format!("unreachable code after diverging {how}"),
+                    stmt.span(),
+                ));
+            }
             result = self.check_stmt(stmt);
+            // A bare `return` types as `unit` (not `Never`), so track
+            // syntactic divergence too — it still never falls through.
+            let syntactic = matches!(
+                stmt,
+                Stmt::Return { .. }
+                    | Stmt::Break { .. }
+                    | Stmt::Continue { .. }
+                    | Stmt::Expr(Expr::Break { .. })
+                    | Stmt::Expr(Expr::Continue { .. })
+            );
+            if syntactic || matches!(self.unifier.resolve(&result), Type::Never) {
+                diverged = Some(match stmt {
+                    Stmt::Return { .. } => "`return`",
+                    Stmt::Break { .. } => "`break`",
+                    Stmt::Continue { .. } => "`continue`",
+                    Stmt::Expr(Expr::Break { .. }) => "`break`",
+                    Stmt::Expr(Expr::Continue { .. }) => "`continue`",
+                    _ => "statement",
+                });
+            }
         }
         self.pop_scope();
         result
@@ -1547,7 +1580,26 @@ impl Checker {
         let rt = self.check_expr(right);
         let rt = self.unifier.resolve(&rt);
         match (&lt, &rt) {
-            (Type::Int, Type::Int) => Type::Int,
+            (Type::Int, Type::Int) => {
+                // Sherlock: a literal zero divisor always traps at runtime —
+                // fail at check time with the exact spot instead (#250-area).
+                // Float division is excluded (`1.0 / 0.0` is `inf`, not an error).
+                if matches!(op, BinOp::Div | BinOp::Rem) {
+                    if let Expr::Int { value: 0, .. } = right {
+                        let what = if op == BinOp::Div {
+                            "division"
+                        } else {
+                            "remainder"
+                        };
+                        self.errors.push(error_at(
+                            format!("integer {what} by zero (divisor is literal `0`)"),
+                            right.span(),
+                        ));
+                        return Type::Error;
+                    }
+                }
+                Type::Int
+            }
             (Type::Str, Type::Str) if op == BinOp::Add => Type::Str,
             (Type::Int, Type::Float) | (Type::Float, Type::Int) | (Type::Float, Type::Float) => {
                 Type::Float
@@ -1614,10 +1666,23 @@ impl Checker {
                     (&a, &b),
                     (Type::Error, _) | (_, Type::Error) | (Type::Never, _) | (_, Type::Never)
                 ) {
-                    self.errors.push(error_at(
+                    let mut diag = error_at(
                         format!("cannot apply `{}` to `{}` and `{}`", op.symbol(), a, b),
                         span,
-                    ));
+                    );
+                    // Suggest the conversion matching the other operand (#247).
+                    let conv = match (&a, &b) {
+                        (Type::Str, Type::Int) | (Type::Int, Type::Str) => Some("str"),
+                        (Type::Str, Type::Float) | (Type::Float, Type::Str) => Some("str"),
+                        (Type::Str, Type::Bool) | (Type::Bool, Type::Str) => Some("str"),
+                        (Type::Int, Type::Float) | (Type::Float, Type::Int) => Some("float"),
+                        _ => None,
+                    };
+                    if let Some(f) = conv {
+                        diag = diag
+                            .with_note(format!("use {f}(x) to convert, or \"{{x}}\"-format it"));
+                    }
+                    self.errors.push(diag);
                 }
                 Type::Error
             }
@@ -1926,7 +1991,15 @@ impl Checker {
                         let (ps, ret, subs) = self.instantiate(&sig);
                         let pnames: Vec<String> =
                             sig.params.iter().map(|(n, _)| n.clone()).collect();
-                        self.check_args_against(&pnames, &ps, &sig.has_default, args, named, span);
+                        self.check_args_against(
+                            Some(Self::short_name(name)),
+                            &pnames,
+                            &ps,
+                            &sig.has_default,
+                            args,
+                            named,
+                            span,
+                        );
                         // Explicit-receiver forms (`pg.query(db, sql)`,
                         // `sqlz.query(db, sql)`) carry the SQL second;
                         // the bare method-namespace form carries it first.
@@ -2010,7 +2083,15 @@ impl Checker {
                         return ret;
                     }
                     let pnames: Vec<String> = sig.params.iter().map(|(n, _)| n.clone()).collect();
-                    self.check_args_against(&pnames, &ps, &sig.has_default, args, named, span);
+                    self.check_args_against(
+                        Some(Self::short_name(name)),
+                        &pnames,
+                        &ps,
+                        &sig.has_default,
+                        args,
+                        named,
+                        span,
+                    );
                     self.validate_bounds(&sig, &subs, span);
                     // A bare function value as a print argument is always a
                     // missing `()` (`println(env.os)` would print the function
@@ -2196,6 +2277,7 @@ impl Checker {
                                 match callee_t {
                                     Type::Func(ps, ret) => {
                                         self.check_args_against(
+                                            None,
                                             &pnames,
                                             &ps,
                                             &[],
@@ -2211,6 +2293,7 @@ impl Checker {
                                             let pnames: Vec<String> =
                                                 sig.params.iter().map(|(n, _)| n.clone()).collect();
                                             self.check_args_against(
+                                                Some(Self::short_name(nname)),
                                                 &pnames,
                                                 &ps,
                                                 &sig.has_default,
@@ -2422,6 +2505,7 @@ impl Checker {
                         self.report_mismatch(e, *pspan);
                     }
                     self.check_args_against(
+                        None,
                         &sig.params[1..]
                             .iter()
                             .map(|(n, _)| n.clone())
@@ -2442,7 +2526,7 @@ impl Checker {
         match callee_t {
             Type::Func(ps, ret) => {
                 let pnames: Vec<String> = (0..ps.len()).map(|i| format!("_{i}")).collect();
-                self.check_args_against(&pnames, &ps, &[], args, named, span);
+                self.check_args_against(None, &pnames, &ps, &[], args, named, span);
                 *ret
             }
             Type::Named(name) => match self.funcs.get(&name).cloned() {
@@ -2450,13 +2534,42 @@ impl Checker {
                     let (ps, ret, subs) = self.instantiate(&sig);
                     let param_names: Vec<String> =
                         sig.params.iter().map(|(n, _)| n.clone()).collect();
-                    self.check_args_against(&param_names, &ps, &sig.has_default, args, named, span);
+                    self.check_args_against(
+                        Some(Self::short_name(&name)),
+                        &param_names,
+                        &ps,
+                        &sig.has_default,
+                        args,
+                        named,
+                        span,
+                    );
                     self.validate_bounds(&sig, &subs, span);
                     ret
                 }
                 None => {
-                    self.errors
-                        .push(error_at(format!("unknown function `{name}`"), span));
+                    // Sherlock: suggest the closest known function so a typo
+                    // (`lenght`) points at the fix instead of a dead end.
+                    let mut diag = error_at(format!("unknown function `{name}`"), span);
+                    let candidates: Vec<String> = self
+                        .funcs
+                        .keys()
+                        .flat_map(|k| {
+                            let mut v = vec![k.clone()];
+                            if let Some(bare) = k.rsplit('.').next() {
+                                if bare != k {
+                                    v.push(bare.to_string());
+                                }
+                            }
+                            v
+                        })
+                        .collect();
+                    let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+                    if let Some((suggestion, _)) = suggest_all(&name, &refs).first() {
+                        // Note only: the span covers the whole call, not
+                        // just the name, so a replace fix would eat the args.
+                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    }
+                    self.errors.push(diag);
                     Type::Unit
                 }
             },
@@ -2502,6 +2615,7 @@ impl Checker {
             self.report_mismatch(e, call.span);
         }
         self.check_args_against(
+            Some(call.method),
             &call.sig.params[1..]
                 .iter()
                 .map(|(n, _)| n.clone())
@@ -2516,8 +2630,17 @@ impl Checker {
         ret
     }
 
+    /// Short display name for call diagnostics: `math.sin` → `sin`.
+    pub(crate) fn short_name(name: &str) -> &str {
+        name.rsplit('.').next().unwrap_or(name)
+    }
+
+    // Eight args is the honest shape here (callee + params + args + span);
+    // a struct would churn every call site for no checking benefit.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_args_against(
         &mut self,
+        callee: Option<&str>,
         param_names: &[String],
         ps: &[Type],
         has_default: &[bool],
@@ -2530,13 +2653,42 @@ impl Checker {
         let allowed_min = total_params - has_default.iter().filter(|&&d| d).count();
 
         if total_provided < allowed_min || total_provided > total_params {
-            self.errors.push(error_at(
-                format!(
-                    "expected {} to {} arguments, found {}",
-                    allowed_min, total_params, total_provided
-                ),
-                span,
-            ));
+            let sig = param_names
+                .iter()
+                .zip(ps.iter())
+                .map(|(n, t)| format!("{n}: {t}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let count = if allowed_min == total_params {
+                if total_params == 1 {
+                    "takes 1 argument".to_string()
+                } else {
+                    format!("takes {total_params} arguments")
+                }
+            } else {
+                format!("takes {allowed_min} to {total_params} arguments")
+            };
+            let head = match callee.filter(|c| !c.is_empty()) {
+                Some(name) => format!("`{name}` {count}"),
+                None => count,
+            };
+            let mut diag = error_at(format!("{head} ({sig}), found {total_provided}"), span);
+            // Name the missing parameters when too few were given. A named
+            // argument covers its parameter wherever it sits, so only
+            // report slots filled by neither position nor name.
+            if total_provided < allowed_min {
+                let missing: Vec<String> = param_names
+                    .iter()
+                    .zip(ps.iter())
+                    .enumerate()
+                    .filter(|(i, (n, _))| *i >= args.len() && !named.iter().any(|(an, _)| an == *n))
+                    .map(|(_, (n, t))| format!("{n}: {t}"))
+                    .collect();
+                if let Some(first) = missing.first() {
+                    diag = diag.with_note(format!("missing argument for `{first}`"));
+                }
+            }
+            self.errors.push(diag);
             return;
         }
 
@@ -2574,8 +2726,14 @@ impl Checker {
                     slots[i] = Some(val);
                 }
                 None => {
-                    self.errors
-                        .push(error_at(format!("unknown parameter `{name}`"), val.span()));
+                    // Sherlock: typo'd named argument (`nmae:`) suggests the
+                    // real parameter instead of dying with just the name.
+                    let mut diag = error_at(format!("unknown parameter `{name}`"), val.span());
+                    let refs: Vec<&str> = param_names.iter().map(|s| s.as_str()).collect();
+                    if let Some((suggestion, _)) = suggest_all(name, &refs).first() {
+                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    }
+                    self.errors.push(diag);
                     return;
                 }
             }
@@ -2835,7 +2993,7 @@ impl Checker {
                     "`?`/`try` can only be used inside a function returning `Result` or `Option`",
                     span,
                 ));
-                return Type::Unit;
+                return Type::Error;
             }
         };
         match ot {
@@ -2850,10 +3008,15 @@ impl Checker {
                     *t
                 }
                 other => {
-                    self.errors.push(error_at(
-                        format!("`?` on `Option` cannot propagate through a function returning `{other}`"),
-                        span,
-                    ));
+                    self.errors.push(
+                        error_at(
+                            format!("`?` on `Option` cannot propagate through a function returning `{other}`"),
+                            span,
+                        )
+                        .with_note(format!(
+                            "to use `?` here, change the return type to `Option<{t}>`"
+                        )),
+                    );
                     *t
                 }
             },
@@ -2914,10 +3077,15 @@ impl Checker {
                     *t
                 }
                 other => {
-                    self.errors.push(error_at(
-                        format!("`?` on `Result` cannot propagate through a function returning `{other}`\nhelp: enclosing function must return `Result<T, E>` to use `try`"),
-                        span,
-                    ));
+                    self.errors.push(
+                        error_at(
+                            format!("`?` on `Result` cannot propagate through a function returning `{other}`"),
+                            span,
+                        )
+                        .with_note(format!(
+                            "to use `?` here, change the return type to `Result<{t}, {e}>`"
+                        )),
+                    );
                     *t
                 }
             },
@@ -2926,14 +3094,16 @@ impl Checker {
                     "cannot use `?` on a value whose type could not be inferred",
                     span,
                 ));
-                Type::Unit
+                Type::Error
             }
             other => {
-                self.errors.push(error_at(
-                    format!("cannot use `?` on a value of type `{other}`"),
-                    span,
-                ));
-                Type::Unit
+                self.errors.push(
+                    error_at(format!("cannot use `?` on a value of type `{other}`"), span)
+                        .with_note(format!(
+                            "`?` unwraps `Result`/`Option`; `{other}` is neither — remove the `?`"
+                        )),
+                );
+                Type::Error
             }
         }
     }
@@ -3182,11 +3352,65 @@ impl Checker {
                     (Type::Var(_), _) => arg
                         .as_ref()
                         .map(|p| (p.as_ref().clone(), self.unifier.fresh_var())),
+                    (Type::Error, _) => {
+                        // Poisoned scrutinee: bind names as Error silently
+                        // so follow-on uses don't cascade (#246).
+                        if let Some(p) = arg {
+                            self.bind_pattern(p, &Type::Error);
+                        }
+                        None
+                    }
                     (other, vname) => {
-                        self.errors.push(error_at(
+                        let mut diag = error_at(
                             format!("pattern `.{vname}` does not match a value of type `{other}`"),
                             *span,
-                        ));
+                        );
+                        // Sherlock hints: point at the right variant family
+                        // for the scrutinee type (#247 follow-up).
+                        let hint: Option<String> = match (other, vname) {
+                            (Type::Option(_), "ok") => {
+                                Some("use `.some(x)` for the Option value".to_string())
+                            }
+                            (Type::Option(_), "err") => {
+                                Some("Option has no `.err`; use `.some(x)` / `.none`".to_string())
+                            }
+                            (Type::Option(_), _) => {
+                                Some("Option patterns are `.some(x)` / `.none`".to_string())
+                            }
+                            (Type::Result(_, _), "some") => {
+                                Some("use `.ok(x)` for the Result value".to_string())
+                            }
+                            (Type::Result(_, _), "none") => Some(
+                                "use `.err(e)` for the Result error; `.none` is an Option pattern"
+                                    .to_string(),
+                            ),
+                            (Type::Result(_, _), _) => {
+                                Some("Result patterns are `.ok(x)` / `.err(e)`".to_string())
+                            }
+                            (Type::Bool, _) => {
+                                Some("use `true` / `false` patterns for `bool`".to_string())
+                            }
+                            _ => None,
+                        };
+                        if let Some(h) = hint {
+                            diag = diag.with_note(h);
+                        }
+                        // Mismatch-first help when variant arms meet a plain
+                        // scalar scrutinee (user assumed Result/Option) (#247).
+                        if matches!(
+                            other,
+                            Type::Int | Type::Float | Type::Str | Type::Unit | Type::Bool
+                        ) {
+                            diag = diag.with_note(format!(
+                                "match on plain `{other}` needs no `.ok`/`.err` arms"
+                            ));
+                        }
+                        self.errors.push(diag);
+                        // Bind the payload names as Error so their uses
+                        // don't cascade into `undefined variable` noise (#246).
+                        if let Some(p) = arg {
+                            self.bind_pattern(p, &Type::Error);
+                        }
                         None
                     }
                 };
@@ -3289,6 +3513,11 @@ impl Checker {
         arms: &[zz_frontend::ast::MatchArm],
         span: Span,
     ) {
+        // Poisoned scrutinee: the root error is already reported; skip
+        // exhaustiveness noise (#246).
+        if matches!(self.unifier.resolve(st), Type::Error) {
+            return;
+        }
         fn pat_is_wildcard(pat: &Pattern) -> bool {
             match pat {
                 Pattern::Wildcard { .. } => true,
@@ -3336,10 +3565,25 @@ impl Checker {
             Type::Result(_, _) => Some(vec!["ok", "err"]),
             Type::Bool => Some(vec!["true", "false"]),
             Type::Int | Type::Float | Type::Str | Type::Unit => {
-                self.errors.push(error_at(
-                    format!("match on `{st}` requires a `_` wildcard arm"),
-                    span,
-                ));
+                // Mismatch-first: variant arms on a plain scalar get their
+                // mismatch errors from bind_pattern; skip the wildcard noise
+                // here so the real error leads (#247).
+                let has_variant = arms.iter().any(|a| {
+                    fn has_variant_pat(pat: &Pattern) -> bool {
+                        match pat {
+                            Pattern::Variant { .. } => true,
+                            Pattern::Or { pats, .. } => pats.iter().any(has_variant_pat),
+                            _ => false,
+                        }
+                    }
+                    has_variant_pat(&a.pat)
+                });
+                if !has_variant {
+                    self.errors.push(error_at(
+                        format!("match on `{st}` requires a `_` wildcard arm"),
+                        span,
+                    ));
+                }
                 return;
             }
             _ => return,

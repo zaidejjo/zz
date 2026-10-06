@@ -293,9 +293,10 @@ fn main() -> ExitCode {
             let has_fix = flags.contains(&"--fix".to_string());
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
+            let has_stats = flags.contains(&"--stats".to_string());
 
             let interactive = has_fix && has_interactive && !has_hard;
-            match check_or_fix_path(&path, has_fix, interactive, has_hard) {
+            match check_or_fix_path(&path, has_fix, interactive, has_hard, has_stats) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(msg) => {
                     eprintln!("zz: {msg}");
@@ -308,7 +309,7 @@ fn main() -> ExitCode {
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
             let interactive = has_interactive && !has_hard;
-            match check_or_fix_path(&path, true, interactive, has_hard) {
+            match check_or_fix_path(&path, true, interactive, has_hard, false) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(msg) => {
                     eprintln!("zz: {msg}");
@@ -1966,6 +1967,7 @@ fn check_or_fix_path(
     do_fix: bool,
     interactive: bool,
     force: bool,
+    show_stats: bool,
 ) -> Result<(), String> {
     use zz_frontend::diag::{FixSafety, Severity};
 
@@ -1981,13 +1983,36 @@ fn check_or_fix_path(
     let mut total_fixes = 0u32;
     let mut any_safe_fixits = false;
     let mut any_ambiguous = false;
+    // --stats accumulators (#248).
+    let mut stat_files = 0usize;
+    let mut stat_modules = 0usize;
+    let mut stat_hits = 0usize;
+    let mut stat_misses = 0usize;
+    let mut stat_seed = 0usize;
+    let stats_start = std::time::Instant::now();
 
     for path in &files {
         let path_str = path.display().to_string();
         let source =
             std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path_str}`: {e}"))?;
 
+        let file_start = std::time::Instant::now();
         let loaded = loader::load_program_check(path)?;
+        let file_ms = file_start.elapsed().as_secs_f64() * 1000.0;
+        if show_stats {
+            stat_files += 1;
+            stat_modules += loaded.stats.modules;
+            stat_hits += loaded.stats.cache_hits;
+            stat_misses += loaded.stats.cache_misses;
+            stat_seed = stat_seed.max(loaded.stats.seed_funcs);
+            eprintln!(
+                "stats: {path_str}: {} modules ({} cached, {} checked), seed {} funcs, {file_ms:.1}ms",
+                loaded.stats.modules,
+                loaded.stats.cache_hits,
+                loaded.stats.cache_misses,
+                loaded.stats.seed_funcs,
+            );
+        }
 
         // Classify fixits by safety.
         let mut safe_fixits: Vec<zz_frontend::diag::FixIt> = Vec::new();
@@ -2164,6 +2189,13 @@ fn check_or_fix_path(
             eprintln!("help: run `zz check --fix --hard {raw}` to force-apply all fixes");
         }
     }
+    if show_stats {
+        let total_ms = stats_start.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "stats: {stat_files} files, {stat_modules} modules ({} cached, {} checked), seed {stat_seed} funcs, {total_ms:.1}ms total",
+            stat_hits, stat_misses,
+        );
+    }
     Ok(())
 }
 
@@ -2195,6 +2227,7 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
         assert!(result.is_ok(), "expected ok, got {result:?}");
         let _ = fs::remove_file(&path);
@@ -2207,6 +2240,7 @@ mod tests {
         );
         let result = check_or_fix_path(
             &Some(path.to_string_lossy().to_string()),
+            false,
             false,
             false,
             false,
@@ -2223,6 +2257,7 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
         assert!(result.is_err(), "expected type error");
         let _ = fs::remove_file(&path);
@@ -2233,6 +2268,7 @@ mod tests {
         let path = write_temp("x := 5\nx[0]\n");
         let result = check_or_fix_path(
             &Some(path.to_string_lossy().to_string()),
+            false,
             false,
             false,
             false,
@@ -2248,8 +2284,39 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
         assert!(result.is_err(), "expected error for missing file");
+    }
+    #[test]
+    fn check_400_fn_file_stays_fast() {
+        // Perf smoke guard (#248): 400 single-function definitions must
+        // check in seconds, not minutes. The bound is deliberately generous
+        // (100x the measured ~0.06s) — it catches catastrophic slowdowns
+        // (e.g. quadratic seed handling), not 20% wobbles.
+        let mut src = String::new();
+        for i in 0..400 {
+            src.push_str(&format!(
+                "func zz_perf_fn_{i}(x: int) -> int {{ x + {i} }}\n"
+            ));
+        }
+        src.push_str("func main() {\n    println(zz_perf_fn_0(1))\n}\n");
+        let path = write_temp(&src);
+        let start = std::time::Instant::now();
+        let result = check_or_fix_path(
+            &Some(path.to_string_lossy().to_string()),
+            false,
+            false,
+            false,
+            false,
+        );
+        let elapsed = start.elapsed();
+        let _ = fs::remove_file(&path);
+        assert!(result.is_ok(), "expected ok, got {result:?}");
+        assert!(
+            elapsed.as_secs() < 10,
+            "400-fn check took {elapsed:?}, expected < 10s"
+        );
     }
     #[test]
     fn check_no_arg_errors() {
@@ -2261,6 +2328,7 @@ mod tests {
         assert!(fixtures_dir.is_dir(), "tests/fixtures dir should exist");
         let result = check_or_fix_path(
             &Some(fixtures_dir.display().to_string()),
+            false,
             false,
             false,
             false,

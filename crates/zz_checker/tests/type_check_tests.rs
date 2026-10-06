@@ -77,7 +77,7 @@ fn func_wrong_return_type_errors() {
 fn wrong_arg_count_errors() {
     errors_contain(
         "func f(a: int) -> int { a }\nf(1, 2)",
-        "expected 1 to 1 arguments, found 2",
+        "takes 1 argument (a: int), found 2",
     );
 }
 
@@ -2245,5 +2245,132 @@ fn enum_generic_arity_reports() {
     errors_contain(
         "enum Box<T> { V(T) }\nfunc main() {\n    b: Box<int, str> = Box.V(1)\n}\n",
         "takes 1 type argument",
+    );
+}
+
+#[test]
+fn option_matched_with_ok_suggests_some() {
+    let r = check_src(
+        "func main() {\n    x := .some(1)\n    match x {\n        .ok(v) => v\n        .err(e) => e\n    }\n}",
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains("use `.some(x)`")),
+        "expected `.some` hint, got: {notes:?}"
+    );
+}
+
+#[test]
+fn result_matched_with_some_suggests_ok() {
+    let r = check_src(
+        "func f() -> Result<int, str> { .ok(1) }\nfunc main() {\n    r := f()\n    match r {\n        .some(v) => v\n        .none => 0\n    }\n}",
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains("use `.ok(x)`")),
+        "expected `.ok` hint, got: {notes:?}"
+    );
+}
+
+#[test]
+fn unwrapped_result_at_return_suggests_fixes() {
+    let r = check_src(
+        "func f() -> Result<int, str> { .ok(1) }\nfunc g() -> int {\n    t := f()\n    t\n}",
+    );
+    let msgs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("unwrapped `Result<int, str>`")),
+        "expected unwrap error, got: {msgs:?}"
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains('?')),
+        "expected `?` suggestion, got: {notes:?}"
+    );
+}
+
+#[test]
+fn match_mismatch_binds_no_cascade() {
+    // Root mismatch errors only: payload names bind as Error so their uses
+    // stay silent (#246).
+    let r = check_src(
+        "func div(a: int, b: int) -> int { a / b }\nfunc main() {\n    r := div(1, 1)\n    match r {\n        .ok(v) => v\n        .err(e) => e\n    }\n}",
+    );
+    let errs: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Error)
+        .map(|e| e.message.clone())
+        .collect();
+    assert_eq!(
+        errs.len(),
+        2,
+        "expected only the two mismatch errors, got: {errs:?}"
+    );
+}
+
+#[test]
+fn enum_variant_typo_suggests() {
+    let r = check_src(
+        "enum Color { Red, Green, Blue }\nfunc main() {\n    c := Color.Red\n    match c {\n        .Gren(v) => v\n        .Red => 1\n        .Blue => 2\n    }\n}",
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains(".Green")),
+        "expected `.Green` suggestion, got: {notes:?}",
+    );
+}
+
+#[test]
+fn literal_zero_divisor_is_check_error() {
+    let r = check_src_with_funcs(
+        "func main() {\n    x := 1 / 0\n    println(x)\n}",
+        print_test_funcs(),
+    );
+    let msgs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("division by zero")),
+        "expected div-zero error, got: {msgs:?}"
+    );
+}
+
+#[test]
+fn literal_zero_remainder_is_check_error() {
+    let r = check_src_with_funcs("func main() {\n    println(5 % 0)\n}", print_test_funcs());
+    let msgs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("remainder by zero")),
+        "expected rem-zero error, got: {msgs:?}"
+    );
+}
+
+#[test]
+fn float_division_by_zero_stays_legal() {
+    // No println: the point is float division itself stays legal.
+    let r = check_src("func main() {\n    _x := 1.0 / 0.0\n}");
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("zero")),
+        "float div-zero must stay legal, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn unreachable_after_return_warns() {
+    let r = check_src_with_funcs(
+        "func main() {\n    return\n    println(\"hi\")\n}",
+        print_test_funcs(),
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unreachable code")),
+        "expected unreachable warning, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert!(
+        !has_errors(&r),
+        "unreachable must be a warning, not an error"
     );
 }
