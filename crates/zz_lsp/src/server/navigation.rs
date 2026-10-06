@@ -41,6 +41,7 @@ pub(crate) async fn handle_goto_definition(
                             parse_errors: vec![],
                             program: entry.program.clone(),
                             check_result: None,
+                            seed_bindings: None,
                             file_defs: None,
                             line_index: LineIndex::new(&entry.source),
                         };

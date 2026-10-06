@@ -15,11 +15,21 @@
 
 use std::collections::HashMap;
 
-use zz_checker::FuncSig;
+use zz_checker::{AliasSig, EnumSig, FuncSig, StructSig, Type};
 use zz_frontend::ast::{ImportItem, Program, Stmt};
 use zz_stdlib::{
     register_module_namespace, register_selective_namespace, register_wildcard_namespace,
 };
+
+/// Seeded tables after applying one program's imports.
+#[derive(Debug, Clone, Default)]
+pub struct SeededTables {
+    pub funcs: HashMap<String, FuncSig>,
+    pub structs: HashMap<String, StructSig>,
+    pub aliases: HashMap<String, AliasSig>,
+    pub enums: HashMap<String, EnumSig>,
+    pub bindings: HashMap<String, Type>,
+}
 
 /// Copy import-visible signatures into a checker seed.
 ///
@@ -79,6 +89,97 @@ pub fn seeded_funcs_for_program(
         }
     }
     funcs
+}
+
+/// Copy import-visible signatures into a checker seed that already holds
+/// harvested project dependencies (`zz add` packages, see [`crate::deps`]).
+///
+/// Mirrors the loader's local-selective rules on top of the std handling:
+/// - `import table` needs nothing (dep seed already carries `table.*`).
+/// - `import table(new)` / `import table(new as n)` copies `table.new`
+///   to the bare target (non-generic functions only, like the loader).
+/// - `import table(*)` copies every direct `table.*` member bare.
+///
+/// Structs, aliases, enums and bindings follow the same rule.
+pub fn seeded_tables_with_deps(program: &Program, base: &SeededTables) -> SeededTables {
+    let mut out = SeededTables {
+        funcs: seeded_funcs_for_program(program, &base.funcs),
+        structs: base.structs.clone(),
+        aliases: base.aliases.clone(),
+        enums: base.enums.clone(),
+        bindings: base.bindings.clone(),
+    };
+    for stmt in &program.stmts {
+        let Stmt::Import {
+            path, alias, items, ..
+        } = stmt
+        else {
+            continue;
+        };
+        if path.first().map(String::as_str) == Some("std") || path.is_empty() || items.is_empty() {
+            continue;
+        }
+        // Effective namespace: alias wins (`import table as t` → `t.*`),
+        // matching the loader's selective recording.
+        let ns = alias
+            .clone()
+            .or_else(|| path.last().cloned())
+            .unwrap_or_default();
+        if ns.is_empty() {
+            continue;
+        }
+        let prefix = format!("{ns}.");
+        let has_wildcard = items
+            .iter()
+            .any(|i| matches!(i, ImportItem::Wildcard { .. }));
+        if has_wildcard {
+            for (k, v) in out.funcs.clone() {
+                if let Some(bare) = k.strip_prefix(&prefix) {
+                    if !bare.is_empty() && !bare.contains('.') {
+                        out.funcs.entry(bare.to_string()).or_insert(v);
+                    }
+                }
+            }
+            for (k, v) in out.structs.clone() {
+                if let Some(bare) = k.strip_prefix(&prefix) {
+                    if !bare.is_empty() && !bare.contains('.') {
+                        out.structs.entry(bare.to_string()).or_insert(v);
+                    }
+                }
+            }
+            continue;
+        }
+        for item in items {
+            let ImportItem::Named {
+                name, alias: ia, ..
+            } = item
+            else {
+                continue;
+            };
+            let target = ia.clone().unwrap_or_else(|| name.clone());
+            let full = format!("{prefix}{name}");
+            // Non-generic functions only: generic bare calls resolve
+            // through the checker's import-alias maps (loader parity).
+            if let Some(sig) = out.funcs.get(&full).cloned() {
+                if sig.generics.is_empty() {
+                    out.funcs.entry(target.clone()).or_insert(sig);
+                }
+            }
+            if let Some(sig) = out.structs.get(&full).cloned() {
+                out.structs.entry(target.clone()).or_insert(sig);
+            }
+            if let Some(sig) = out.aliases.get(&full).cloned() {
+                out.aliases.entry(target.clone()).or_insert(sig);
+            }
+            if let Some(sig) = out.enums.get(&full).cloned() {
+                out.enums.entry(target.clone()).or_insert(sig);
+            }
+            if let Some(ty) = out.bindings.get(&full).cloned() {
+                out.bindings.entry(target.clone()).or_insert(ty);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

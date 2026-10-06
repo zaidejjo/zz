@@ -65,6 +65,10 @@ pub struct DocumentState {
     pub program: Option<Program>,
     /// Checker output from the last successful type-check of this file.
     pub check_result: Option<CheckResult>,
+    /// Seed bindings visible to the last check (dep + workspace globals).
+    /// `CheckResult.bindings` carries only the file's own lets by design,
+    /// so hover/completion read seeded globals from here instead.
+    pub seed_bindings: Option<HashMap<String, Type>>,
     /// Top-level definitions this file contributes to the global seed.
     pub file_defs: Option<FileDefs>,
     /// Precomputed line-start index for O(log n) position conversion.
@@ -98,6 +102,17 @@ pub struct GlobalState {
     /// Files that need re-checking after a dependency changes.
     /// Maps file URI → list of dependent URIs that import it.
     pub dependents: DashMap<Url, Vec<Url>>,
+    /// Harvested project-dependency signatures per project root
+    /// (`zz add` packages: `import table` + `table.` members). Refreshed
+    /// when dep sources change; see [`crate::deps`].
+    pub dep_cache:
+        std::sync::RwLock<std::collections::HashMap<std::path::PathBuf, crate::deps::CachedDeps>>,
+    /// Harvested workspace-file signatures per (file, namespace).
+    /// Covers relative/project imports (`import math_utils.lib`);
+    /// see [`crate::deps::ws_seed_for_file`].
+    pub ws_cache: std::sync::RwLock<
+        std::collections::HashMap<(std::path::PathBuf, String), crate::deps::WsCacheEntry>,
+    >,
 }
 
 impl Default for GlobalState {
@@ -121,6 +136,8 @@ impl GlobalState {
             module_index: std::sync::RwLock::new(ModuleIndex::default()),
             workspace_scanned: AtomicBool::new(false),
             dependents: DashMap::new(),
+            dep_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
+            ws_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -154,6 +171,7 @@ impl GlobalState {
             parse_errors: parsed.errors,
             program: Some(parsed.program),
             check_result: None,
+            seed_bindings: None,
             file_defs: None,
             line_index,
         };
@@ -208,9 +226,96 @@ impl GlobalState {
         HashMap<String, AliasSig>,
         HashMap<String, EnumSig>,
     ) {
-        let (bindings, funcs, structs, aliases, enums) = self.checker_seed();
-        let funcs = crate::import_seed::seeded_funcs_for_program(program, &funcs);
-        (bindings, funcs, structs, aliases, enums)
+        self.checker_seed_for_path(program, None)
+    }
+
+    /// Produce the checker seed for one program living at `doc_path`: the
+    /// global seed plus harvested project dependencies (`zz add` packages,
+    /// see [`crate::deps`]) plus the program's own imports.
+    #[allow(clippy::type_complexity)]
+    pub fn checker_seed_for_path(
+        &self,
+        program: &Program,
+        doc_path: Option<&std::path::Path>,
+    ) -> (
+        HashMap<String, Type>,
+        HashMap<String, FuncSig>,
+        HashMap<String, StructSig>,
+        HashMap<String, AliasSig>,
+        HashMap<String, EnumSig>,
+    ) {
+        let (mut bindings, mut funcs, mut structs, mut aliases, mut enums) = self.checker_seed();
+        if let Some(path) = doc_path {
+            if let Some(root) = crate::deps::find_project_root(path) {
+                let base = self.funcs.read().unwrap().clone();
+                let mut cache = self.dep_cache.write().unwrap();
+                let dep = crate::deps::dep_seed_for_root(&root, &base, &mut cache);
+                if !dep.is_empty() {
+                    funcs.extend(dep.funcs);
+                    structs.extend(dep.structs);
+                    aliases.extend(dep.aliases);
+                    enums.extend(dep.enums);
+                    bindings.extend(dep.bindings);
+                }
+            }
+        }
+        // Workspace files: every non-`std` import resolves importer-
+        // relative like the loader (`import math_utils.lib` beside
+        // `main.zz` → `math_utils/lib.zz`), and its `pub` items seed
+        // the namespace — so `lib.` members, selective lists and
+        // diagnostics all agree with `zz check`.
+        if let Some(path) = doc_path {
+            if let Some(dir) = path.parent() {
+                let root = crate::deps::find_project_root(path);
+                let base = self.funcs.read().unwrap().clone();
+                for stmt in &program.stmts {
+                    let zz_frontend::ast::Stmt::Import {
+                        path: ip, alias, ..
+                    } = stmt
+                    else {
+                        continue;
+                    };
+                    if ip.first().map(String::as_str) == Some("std") || ip.is_empty() {
+                        continue;
+                    }
+                    let Some(file) = crate::deps::resolve_local_import(dir, ip) else {
+                        continue;
+                    };
+                    let ns = alias
+                        .clone()
+                        .or_else(|| file.file_stem().map(|x| x.to_string_lossy().into_owned()))
+                        .unwrap_or_default();
+                    if ns.is_empty() {
+                        continue;
+                    }
+                    let mut ws = self.ws_cache.write().unwrap();
+                    let harvested =
+                        crate::deps::ws_seed_for_file(&file, &ns, root.as_deref(), &base, &mut ws);
+                    funcs.extend(harvested.funcs);
+                    structs.extend(harvested.structs);
+                    aliases.extend(harvested.aliases);
+                    enums.extend(harvested.enums);
+                    bindings.extend(harvested.bindings);
+                }
+            }
+        }
+        let seeded = crate::import_seed::seeded_tables_with_deps(
+            program,
+            &crate::import_seed::SeededTables {
+                funcs,
+                structs,
+                aliases,
+                enums,
+                bindings: bindings.clone(),
+            },
+        );
+        (
+            seeded.bindings,
+            seeded.funcs,
+            seeded.structs,
+            seeded.aliases,
+            seeded.enums,
+        )
     }
 
     /// Remove a file's definitions from the global seed.
