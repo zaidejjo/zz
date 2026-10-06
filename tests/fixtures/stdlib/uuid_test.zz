@@ -5,8 +5,8 @@ import std.uuid
 import std.regexp
 
 // NOTE: top-level bindings only (VM scope limitation).
-v4pat := "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-v7pat := "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+v4pat := "^[0-9a-f]{{8}}-[0-9a-f]{{4}}-4[0-9a-f]{{3}}-[89ab][0-9a-f]{{3}}-[0-9a-f]{{12}}$"
+v7pat := "^[0-9a-f]{{8}}-[0-9a-f]{{4}}-7[0-9a-f]{{3}}-[89ab][0-9a-f]{{3}}-[0-9a-f]{{12}}$"
 canon := "550e8400-e29b-41d4-a716-446655440000"
 upper := "550E8400-E29B-41D4-A716-446655440000"
 junk := "not-a-uuid"

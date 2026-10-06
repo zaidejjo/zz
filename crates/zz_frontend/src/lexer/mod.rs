@@ -759,12 +759,15 @@ impl<'a> Lexer<'a> {
                     clean: false,
                 });
             }
-            // String interpolation: `{ident...` starts an embedded expression.
+            // String interpolation: `{ident...`, `{1...`, `{(...` start an
+            // embedded expression — the same trigger set as triple-quoted
+            // strings, so `{1 + 2}` prints `3`. `{{`, `{}`, and JSON-like
+            // `{"key"...` stay literal text (checked above/below).
             // Emit the accumulated text as StrFmt and enter interpolation
             // mode (leaving the string context underneath); the main loop
             // lexes `{` as LBrace, the expression, and `}` as RBrace, popping
             // back into string mode for the continuation.
-            Some('{') if self.peek_char_at(1).is_some_and(is_ident_start) => {
+            Some('{') if is_interp_start(self.peek_char_at(1)) => {
                 let span = Span::new(start as u32, self.pos as u32);
                 // Clean prefix (unbroken from the opening quote, no escapes)
                 // borrows `src[start+1..pos]`; anything else keeps the
@@ -997,7 +1000,7 @@ impl<'a> Lexer<'a> {
             }
             // Interpolation: `{ident...`, `{1...`, `{(...` start an embedded
             // expression. `{{`, `{}` and `{"...` (JSON-like) stay literal.
-            Some('{') if is_triple_interp_start(self.peek_char_at(1)) => {
+            Some('{') if is_interp_start(self.peek_char_at(1)) => {
                 let span = Span::new(start as u32, self.pos as u32);
                 let idx = self.tokens.len();
                 self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
@@ -1288,14 +1291,14 @@ impl<'a> Lexer<'a> {
     }
 }
 
-fn is_ident_start(c: char) -> bool {
+pub(crate) fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }
 
-/// Interpolation trigger inside triple-quoted strings: `{` opens an embedded
-/// expression when followed by an identifier start, a digit, or `(`.
-/// `{{`, `{}` and JSON-like `{"key"...` stay literal text.
-fn is_triple_interp_start(c: Option<char>) -> bool {
+/// Interpolation trigger for both single-line and triple-quoted strings:
+/// `{` opens an embedded expression when followed by an identifier start,
+/// a digit, or `(`. `{{`, `{}` and JSON-like `{"key"...` stay literal text.
+pub(crate) fn is_interp_start(c: Option<char>) -> bool {
     match c {
         Some(ch) if is_ident_start(ch) => true,
         Some(ch) if ch.is_ascii_digit() => true,
@@ -1568,6 +1571,44 @@ mod tests {
     fn single_line_escaped_braces() {
         let toks = sig("\"\\{x\\}\"");
         assert_eq!(toks, vec![(TokenKind::Str, "{x}".to_string())]);
+    }
+
+    #[test]
+    fn single_line_digit_led_interpolation() {
+        // `{1 + 2}` interpolates in single-line strings, like triple-quoted.
+        let toks = sig("\"{1 + 2}\"");
+        assert_eq!(
+            toks,
+            vec![
+                (TokenKind::StrFmt, String::new()),
+                (TokenKind::LBrace, "{".to_string()),
+                (TokenKind::Int, "1".to_string()),
+                (TokenKind::Plus, "+".to_string()),
+                (TokenKind::Int, "2".to_string()),
+                (TokenKind::RBrace, "}".to_string()),
+                (TokenKind::Str, String::new()),
+            ]
+        );
+        // `{{7}}` stays literal (escape precedence over digit trigger).
+        let toks = sig("\"{{7}}\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{7}".to_string())]);
+    }
+
+    #[test]
+    fn single_line_paren_led_interpolation() {
+        let toks = sig("\"{(a)}\"");
+        assert_eq!(
+            toks,
+            vec![
+                (TokenKind::StrFmt, String::new()),
+                (TokenKind::LBrace, "{".to_string()),
+                (TokenKind::LParen, "(".to_string()),
+                (TokenKind::Ident, "a".to_string()),
+                (TokenKind::RParen, ")".to_string()),
+                (TokenKind::RBrace, "}".to_string()),
+                (TokenKind::Str, String::new()),
+            ]
+        );
     }
 
     #[test]

@@ -624,3 +624,35 @@ fn unterminated_string_points_at_start_with_fix() {
         "expected quote fix",
     );
 }
+
+#[test]
+fn dead_brace_in_template_warns() {
+    // `{!}` cannot expand: warn once with the rule (warning, not error).
+    let parsed = parse("func main() {\n    x := 1\n    println(\"{x} {!}\")\n}");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("will NOT interpolate")),
+        "expected dead-brace warning, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .all(|e| e.severity != zz_frontend::diag::Severity::Error),
+        "dead braces must warn, not error",
+    );
+}
+
+#[test]
+fn digit_braces_interpolate_without_warning() {
+    // `{1 + 2}` expands now: no dead-brace warning.
+    let parsed = parse("func main() {\n    println(\"{1 + 2}\")\n}");
+    assert!(
+        parsed.errors.is_empty(),
+        "expected clean parse, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}

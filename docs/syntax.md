@@ -303,6 +303,14 @@ func process() {
 2 ** 10     // 1024 (power, right-associative)
 ```
 
+Signed integer overflow on `+`, `-`, `*` wraps two's-complement
+(`9223372036854775807 + 1` is `-9223372036854775808`) on both engines —
+it never traps. Guard manually at the boundary when wrapping would
+corrupt the result (counters, timestamps, money math); the `toml`
+package's exact `i64::MIN`/`MAX` checks are the reference pattern.
+Integer division by zero (including literal `1 / 0`, which fails at
+check time) and `INT64_MIN / -1` are runtime errors, not wraps.
+
 ### Comparison and Logic
 
 ```zz
@@ -370,6 +378,33 @@ css := """
 
 `\{` / `\}` remain accepted for backwards compatibility and mean
 the same as `{{` / `}}`, but prefer the doubled form.
+
+#### What `{...}` expands
+
+Both `"..."` and `"""..."""` strings open an interpolation when `{` is
+followed by an identifier, a digit, or `(`:
+
+```zz
+println("{1 + 2}")   // 3
+println("{(a)}")     // value of (a)
+```
+
+`{{`, `{}`, and JSON-like `{"key"` stay literal text in both forms —
+double the braces for a literal `{`:
+
+```zz
+println("{{1 + 2}}") // {1 + 2} (no interpolation)
+```
+
+The same rule covers regular-expression quantifiers, which must be
+doubled like in Python f-strings or Rust `format!`:
+
+```zz
+pat := "^[0-9a-f]{{8}}$"   // matches 8 hex digits
+```
+
+When a string DOES interpolate elsewhere, a bare `{` that cannot expand
+(e.g. `"{x} of {!done}"`) warns at check time naming the exact rule.
 
 ### Array Literals
 

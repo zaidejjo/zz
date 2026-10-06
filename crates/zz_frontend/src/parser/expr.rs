@@ -1,7 +1,7 @@
 //! Expression parsing.
 
 use crate::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, Stmt, UnOp};
-use crate::diag::{error_at, FixIt};
+use crate::diag::{error_at, warning_at, FixIt};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
@@ -532,7 +532,11 @@ impl<'a> Parser<'a> {
     /// Assemble an interpolated string from the token sequence produced by
     /// the lexer: `StrFmt (LBrace expr [: fmt_spec] RBrace StrFmt)* [Str]`.
     pub(crate) fn parse_fmt_string(&mut self, first: Token) -> Expr {
-        let mut parts = vec![FmtPart::Text(first.text.into_owned())];
+        let first_text = first.text.into_owned();
+        let mut parts = vec![FmtPart::Text(first_text.clone())];
+        // Raw text chunks with their token spans, for the literal-brace
+        // lint below (FmtPart::Text carries no span).
+        let mut chunks = vec![(first_text, first.span)];
         let mut end = first.span;
         loop {
             if !self.at(TokenKind::LBrace) {
@@ -580,12 +584,16 @@ impl<'a> Parser<'a> {
             match self.peek_kind() {
                 TokenKind::StrFmt => {
                     let t = self.advance();
-                    parts.push(FmtPart::Text(t.text.into_owned()));
+                    let text = t.text.into_owned();
+                    parts.push(FmtPart::Text(text.clone()));
+                    chunks.push((text, t.span));
                     end = t.span;
                 }
                 TokenKind::Str => {
                     let t = self.advance();
-                    parts.push(FmtPart::Text(t.text.into_owned()));
+                    let text = t.text.into_owned();
+                    parts.push(FmtPart::Text(text.clone()));
+                    chunks.push((text, t.span));
                     end = t.span;
                     break;
                 }
@@ -595,9 +603,65 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        let string_span = first.span.join(end);
+        self.check_literal_braces(&chunks, &parts, string_span);
         Expr::Fmt {
             parts,
-            span: first.span.join(end),
+            span: string_span,
+        }
+    }
+
+    /// Sherlock for #249: `{ident`, `{1`, and `{(…` open interpolations —
+    /// every other `{...}` stays literal text. Inside a string that DOES
+    /// interpolate elsewhere (template mode), a bare `{` that cannot expand
+    /// is almost certainly a mistake: warn once with the exact rule.
+    /// Mirrors the triple-quoted rule: `{{`, `{}`, and JSON-like `{"key"`
+    /// stay silent.
+    pub(crate) fn check_literal_braces(
+        &mut self,
+        chunks: &[(String, Span)],
+        parts: &[FmtPart],
+        string_span: Span,
+    ) {
+        use crate::lexer::is_interp_start;
+        if !parts.iter().any(|p| matches!(p, FmtPart::Expr(..))) {
+            return; // No interpolation: presumably intentional literals.
+        }
+        for (text, _span) in chunks {
+            let mut chars = text.char_indices().peekable();
+            while let Some((idx, c)) = chars.next() {
+                if c != '{' {
+                    continue;
+                }
+                match chars.peek() {
+                    // `{{` escape, or `{` at chunk end (escape boundary).
+                    Some((_, '{')) | None => {
+                        chars.next();
+                        continue;
+                    }
+                    // Expands, or is a deliberate literal (`{}`, `{"key"`).
+                    Some((_, next))
+                        if is_interp_start(Some(*next)) || *next == '"' || *next == '}' =>
+                    {
+                        continue;
+                    }
+                    _ => {
+                        let snippet: String = text[idx..].chars().take(14).collect();
+                        self.errors.push(
+                            warning_at(
+                                format!(
+                                    "this string also contains `{snippet}`, which will NOT interpolate"
+                                ),
+                                string_span,
+                            )
+                            .with_note(
+                                "single-line strings expand `{name}`, `{1 + 2}`, `{(x)}` — `{{`, `{}`, and `{\"key\"` stay literal; use `{{` for a literal `{`",
+                            ),
+                        );
+                        return; // One warning per string.
+                    }
+                }
+            }
         }
     }
 
