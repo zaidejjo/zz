@@ -1055,15 +1055,22 @@ impl Lowerer {
                 // OOB (and bad-receiver) reads trap instead of yielding
                 // unit (VM parity). The SROA path above only fires for
                 // statically in-bounds literals, so every dynamic read
-                // flows through this check.
+                // flows through this check. Bound once into owned temps
+                // (borrow-safe synchronous use) so the trap below reports
+                // the exact operands without re-evaluating them (#251).
                 let e = names.fresh("_idxe");
                 let tmp = names.fresh("_idxv");
+                let otmp = names.fresh("_idxo");
+                let itmp = names.fresh("_idxi");
+                let func = names.current_scope.clone();
+                out.push_str(&format!("    zz_value {otmp} = {o};\n"));
+                out.push_str(&format!("    zz_value {itmp} = {i_boxed};\n"));
                 out.push_str(&format!("    int {e} = 0;\n"));
                 out.push_str(&format!(
-                    "    zz_value {tmp} = zz_index_get({o}, {i_boxed}, &{e});\n"
+                    "    zz_value {tmp} = zz_index_get({otmp}, {itmp}, &{e});\n"
                 ));
                 out.push_str(&format!(
-                    "    if ({e}) {{ fprintf(stderr, \"zz error: index out of bounds\\n\"); exit(1); }}\n"
+                    "    if ({e}) {{ zz_index_trap({otmp}, {itmp}, \"{func}\"); }}\n"
                 ));
                 tmp
             }
