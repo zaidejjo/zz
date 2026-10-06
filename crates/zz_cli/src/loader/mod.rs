@@ -1644,10 +1644,9 @@ impl Loader {
                 // this module, copy the re-exported namespace's pub functions
                 // and bindings into the current module's namespace in the
                 // cross-module seed.
-                // NOTE: struct re-exports are not yet supported because struct
-                // types are identity-based (Type::Struct("a.X") ≠
-                // Type::Struct("b.X")). Struct re-exports require type aliasing
-                // support (future work).
+                // Structs cannot be re-exported (identity-based types:
+                // Type::Struct("a.X") != Type::Struct("b.X")). Fail loudly
+                // at the re-export site instead of silently dropping (#230).
                 if let Some(module_ns) = self.ns_of.get(path).cloned() {
                     for stmt in &program.stmts {
                         if let Stmt::Import {
@@ -1661,9 +1660,27 @@ impl Loader {
                                 .as_deref()
                                 .or_else(|| imp_path.last().map(|s| s.as_str()))
                                 .unwrap_or("");
-                            // Copy items from seed `reexport_ns.*` to
-                            // `module_ns.reexport_ns.*`
                             let prefix = format!("{}.", reexport_ns);
+                            if let Some(offender) = self
+                                .structs
+                                .keys()
+                                .chain(self.all_structs.keys())
+                                .find(|k| k.starts_with(&prefix))
+                                .map(|k| k[prefix.len()..].to_string())
+                            {
+                                self.errors.push(LoadError {
+                                    name: name.clone(),
+                                    source: source.clone(),
+                                    diags: vec![error_at(
+                                        format!(
+                                            "`pub import {reexport_ns}` cannot re-export struct `{offender}` (struct re-exports unsupported)\n\
+                                             hint: import `{reexport_ns}` directly instead of through `{module_ns}`"
+                                        ),
+                                        Span::new(0, 0),
+                                    )],
+                                });
+                                continue;
+                            }
                             let new_prefix = format!("{}.{reexport_ns}.", module_ns);
                             let seed_b = self.bindings.clone();
                             for (k, v) in &seed_b {
