@@ -5,6 +5,7 @@ pub mod cross_file;
 pub mod diagnostics;
 pub mod folding;
 pub mod formatting;
+pub mod import_seed;
 pub mod inlay_hints;
 pub mod lookup;
 pub mod semantic_tokens;

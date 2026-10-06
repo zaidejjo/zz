@@ -27,7 +27,16 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
         ),
         None => return,
     };
-    let (init_bindings, init_funcs, init_structs, init_aliases, init_enums) = state.checker_seed();
+    // Seed from this document's own imports (full namespaces plus
+    // selective/wildcard bare names), mirroring the loader — raw
+    // `stdlib_funcs()` only carries `std.*` keys, so unseeded checks
+    // reported `undefined variable 'PI'` + `unused import 'PI'` on valid
+    // selective files (#256) and starved `math.` completion (#257).
+    let seed = program
+        .as_ref()
+        .map(|p| state.checker_seed_for(p))
+        .unwrap_or_else(|| state.checker_seed());
+    let (init_bindings, init_funcs, init_structs, init_aliases, init_enums) = seed;
 
     let client_clone = client.clone();
     let state_clone = state.clone();
