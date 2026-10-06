@@ -56,7 +56,44 @@ pub(crate) async fn handle_semantic_tokens_full(
         None => return Ok(None),
     };
 
-    let tokens = crate::semantic_tokens::collect_semantic_tokens(program, &doc.source);
+    // Known function names drive call-callee classification (`pow(2, 3)`
+    // colors as a call, not a variable): every resolved signature plus
+    // selectively-imported bare targets (generics have no value binding
+    // but are still calls).
+    let mut known: std::collections::HashSet<String> = doc
+        .check_result
+        .as_ref()
+        .map(|cr| cr.funcs.keys().cloned().collect())
+        .unwrap_or_default();
+    for stmt in &program.stmts {
+        if let zz_frontend::ast::Stmt::Import {
+            path, alias, items, ..
+        } = stmt
+        {
+            let ns = alias
+                .as_ref()
+                .cloned()
+                .or_else(|| path.last().cloned())
+                .unwrap_or_default();
+            for item in items {
+                if let zz_frontend::ast::ImportItem::Named {
+                    name, alias: ia, ..
+                } = item
+                {
+                    let target = ia.clone().unwrap_or_else(|| name.clone());
+                    if doc
+                        .check_result
+                        .as_ref()
+                        .is_some_and(|cr| cr.funcs.contains_key(&format!("{ns}.{name}")))
+                    {
+                        known.insert(target);
+                    }
+                }
+            }
+        }
+    }
+
+    let tokens = crate::semantic_tokens::collect_semantic_tokens_with(program, &doc.source, &known);
     let encoded = crate::semantic_tokens::encode_tokens(&tokens, &doc.source);
     Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
         result_id: None,
