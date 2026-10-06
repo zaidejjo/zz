@@ -193,6 +193,24 @@ zz check src/
 | `--hard` | Apply all fixes including ambiguous (no prompts) |
 | `--interactive` / `-i` | Prompt for ambiguous fixes |
 | `--check` / `-c` | Check formatting without writing |
+| `--stats` | Print per-file and total check stats (modules, cache hits/misses, seed size, wall time) |
+
+#### Check Performance Budget
+
+`zz check` stays fast by construction (per-module seed key-set restore
+instead of O(seed) clones, plus the S1 content-addressed check cache):
+
+- Cold `zz check` on a single file: well under 0.5s (measured ~40ms).
+- Warm (no edits): served from cache — `0 checked` in `--stats` output.
+- Budget: p50 ≤ 0.5s on a 10k-line project cold, ≤ 50ms warm per file.
+  Verify with `zz check --stats <path>` (run twice: the second run
+  should show `cached` instead of `checked`).
+
+```bash
+$ zz check --stats src/main.zz
+stats: src/main.zz: 1 modules (0 cached, 1 checked), seed 878 funcs, 38.1ms
+stats: 1 files, 1 modules (0 cached, 1 checked), seed 878 funcs, 39.0ms total
+```
 
 ### `zz fix [FLAGS] [PATH]`
 

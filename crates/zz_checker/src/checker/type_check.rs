@@ -6,7 +6,7 @@ use crate::checker::inference::{contains_var, default_variant_vars};
 use crate::checker::Checker;
 use crate::type_::Type;
 use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Lit, Param, Pattern, Stmt, Ty, UnOp};
-use zz_frontend::diag::{error_at, FixIt};
+use zz_frontend::diag::{error_at, warning_at, FixIt};
 use zz_frontend::levenshtein::suggest_all;
 use zz_frontend::span::Span;
 
@@ -734,8 +734,39 @@ impl Checker {
     pub(crate) fn check_block(&mut self, block: &Block) -> Type {
         self.push_scope();
         let mut result = Type::Unit;
+        // Sherlock: code after a diverging statement (`return`/`break`/
+        // `continue`, or an if/match that diverges on every path) never
+        // runs — warn once per statement instead of checking dead code
+        // into confusing cascades.
+        let mut diverged: Option<&'static str> = None;
         for stmt in &block.stmts {
+            if let Some(how) = diverged {
+                self.errors.push(warning_at(
+                    format!("unreachable code after diverging {how}"),
+                    stmt.span(),
+                ));
+            }
             result = self.check_stmt(stmt);
+            // A bare `return` types as `unit` (not `Never`), so track
+            // syntactic divergence too — it still never falls through.
+            let syntactic = matches!(
+                stmt,
+                Stmt::Return { .. }
+                    | Stmt::Break { .. }
+                    | Stmt::Continue { .. }
+                    | Stmt::Expr(Expr::Break { .. })
+                    | Stmt::Expr(Expr::Continue { .. })
+            );
+            if syntactic || matches!(self.unifier.resolve(&result), Type::Never) {
+                diverged = Some(match stmt {
+                    Stmt::Return { .. } => "`return`",
+                    Stmt::Break { .. } => "`break`",
+                    Stmt::Continue { .. } => "`continue`",
+                    Stmt::Expr(Expr::Break { .. }) => "`break`",
+                    Stmt::Expr(Expr::Continue { .. }) => "`continue`",
+                    _ => "statement",
+                });
+            }
         }
         self.pop_scope();
         result
@@ -1549,7 +1580,26 @@ impl Checker {
         let rt = self.check_expr(right);
         let rt = self.unifier.resolve(&rt);
         match (&lt, &rt) {
-            (Type::Int, Type::Int) => Type::Int,
+            (Type::Int, Type::Int) => {
+                // Sherlock: a literal zero divisor always traps at runtime —
+                // fail at check time with the exact spot instead (#250-area).
+                // Float division is excluded (`1.0 / 0.0` is `inf`, not an error).
+                if matches!(op, BinOp::Div | BinOp::Rem) {
+                    if let Expr::Int { value: 0, .. } = right {
+                        let what = if op == BinOp::Div {
+                            "division"
+                        } else {
+                            "remainder"
+                        };
+                        self.errors.push(error_at(
+                            format!("integer {what} by zero (divisor is literal `0`)"),
+                            right.span(),
+                        ));
+                        return Type::Error;
+                    }
+                }
+                Type::Int
+            }
             (Type::Str, Type::Str) if op == BinOp::Add => Type::Str,
             (Type::Int, Type::Float) | (Type::Float, Type::Int) | (Type::Float, Type::Float) => {
                 Type::Float
@@ -2470,8 +2520,29 @@ impl Checker {
                     ret
                 }
                 None => {
-                    self.errors
-                        .push(error_at(format!("unknown function `{name}`"), span));
+                    // Sherlock: suggest the closest known function so a typo
+                    // (`lenght`) points at the fix instead of a dead end.
+                    let mut diag = error_at(format!("unknown function `{name}`"), span);
+                    let candidates: Vec<String> = self
+                        .funcs
+                        .keys()
+                        .flat_map(|k| {
+                            let mut v = vec![k.clone()];
+                            if let Some(bare) = k.rsplit('.').next() {
+                                if bare != k {
+                                    v.push(bare.to_string());
+                                }
+                            }
+                            v
+                        })
+                        .collect();
+                    let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+                    if let Some((suggestion, _)) = suggest_all(&name, &refs).first() {
+                        // Note only: the span covers the whole call, not
+                        // just the name, so a replace fix would eat the args.
+                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    }
+                    self.errors.push(diag);
                     Type::Unit
                 }
             },

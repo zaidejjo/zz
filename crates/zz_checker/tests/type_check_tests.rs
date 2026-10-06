@@ -2321,3 +2321,56 @@ fn enum_variant_typo_suggests() {
         "expected `.Green` suggestion, got: {notes:?}",
     );
 }
+
+#[test]
+fn literal_zero_divisor_is_check_error() {
+    let r = check_src_with_funcs(
+        "func main() {\n    x := 1 / 0\n    println(x)\n}",
+        print_test_funcs(),
+    );
+    let msgs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("division by zero")),
+        "expected div-zero error, got: {msgs:?}"
+    );
+}
+
+#[test]
+fn literal_zero_remainder_is_check_error() {
+    let r = check_src_with_funcs("func main() {\n    println(5 % 0)\n}", print_test_funcs());
+    let msgs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("remainder by zero")),
+        "expected rem-zero error, got: {msgs:?}"
+    );
+}
+
+#[test]
+fn float_division_by_zero_stays_legal() {
+    // No println: the point is float division itself stays legal.
+    let r = check_src("func main() {\n    _x := 1.0 / 0.0\n}");
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("zero")),
+        "float div-zero must stay legal, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn unreachable_after_return_warns() {
+    let r = check_src_with_funcs(
+        "func main() {\n    return\n    println(\"hi\")\n}",
+        print_test_funcs(),
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unreachable code")),
+        "expected unreachable warning, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert!(
+        !has_errors(&r),
+        "unreachable must be a warning, not an error"
+    );
+}

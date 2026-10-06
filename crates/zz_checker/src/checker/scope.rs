@@ -253,8 +253,14 @@ impl Checker {
                 if let Some((module, _func)) = name.split_once('.') {
                     let std_module = match module {
                         "io" | "str" | "vec" | "json" | "http" | "fs" | "env" | "math" | "time"
-                        | "sqlz" | "db" => Some(module),
-                        _ => None,
+                        | "sqlz" | "db" => Some(module.to_string()),
+                        // Generalized: any other std module present in the
+                        // seed (`std.M.*` keys), not just the hardcoded list.
+                        _ => self
+                            .funcs
+                            .keys()
+                            .any(|k| k.starts_with(&format!("std.{module}.")))
+                            .then(|| module.to_string()),
                     };
                     if let Some(mod_name) = std_module {
                         let import_stmt = format!("import std.{mod_name}");
@@ -267,6 +273,43 @@ impl Checker {
                             format!("{import_stmt}\n"),
                             "add import",
                         ));
+                    }
+                } else {
+                    // Bare name matching exactly one std export (`sin` →
+                    // `std.math.sin`): point at the import that provides it.
+                    // Capped at 3 modules; more than that is a common word,
+                    // not a missed import.
+                    let mut providers: Vec<String> = Vec::new();
+                    for key in self.funcs.keys().chain(self.structs.keys()) {
+                        if let Some(rest) = key.strip_prefix("std.") {
+                            if let Some((module, bare)) = rest.split_once('.') {
+                                if bare == name && !bare.contains('.') {
+                                    let m = module.to_string();
+                                    if !providers.contains(&m) {
+                                        providers.push(m);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    providers.sort();
+                    providers.truncate(3);
+                    if !providers.is_empty() {
+                        let imports = providers
+                            .iter()
+                            .map(|m| format!("`import std.{m}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        diag = diag.with_note(format!(
+                            "to use `{name}`, add {imports} at the top of the file"
+                        ));
+                        if providers.len() == 1 {
+                            diag = diag.with_fixit(FixIt::safe(
+                                Span::new(0, 0),
+                                format!("import std.{}\n", providers[0]),
+                                "add import",
+                            ));
+                        }
                     }
                 }
                 self.errors.push(diag);
