@@ -939,7 +939,7 @@ fn native_json_extended_matches_vm() {
     // json.* natives that have C runtime impls (type, len, keys, has,
     // pretty, merge, deep_get, array_push).
     let src = r#"
-j := json.parse("{\"name\": \"test\", \"count\": 42, \"tags\": [\"a\", \"b\"], \"nested\": {\"x\": 1}}") ?? json.null()
+j := json.parse("{\"name\": \"test\", \"count\": 42, \"tags\": [\"a\", \"b\"], \"nested\": {\"x\": 1}}}}") ?? json.null()
 println(json.type(j))
 arr := json.get(j, "tags") ?? json.null()
 println(json.type(arr))

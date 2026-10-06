@@ -1196,10 +1196,22 @@ impl Lowerer {
             .into_iter()
             .map(|n| {
                 let checker_ty = self.tp.bindings.get(&n).cloned();
-                let ctype = checker_ty
-                    .as_ref()
-                    .map(|t| self.type_to_c(t))
-                    .unwrap_or_else(|| "zz_value".to_string());
+                // Unboxed structs work for locals (conversions at every
+                // use), but globals lack the store/load conversions — a
+                // struct-typed global miscompiles (boxed value into an
+                // unboxed decl, issue #215). Declare struct globals boxed
+                // like every other composite, but KEEP the checker type:
+                // field-store/read arms key struct layout off it while
+                // branching raw-vs-boxed on the (boxed) C type.
+                let ctype = match &checker_ty {
+                    Some(zz_checker::Type::Struct(name, _)) if self.is_unboxed_struct(name) => {
+                        "zz_value".to_string()
+                    }
+                    _ => checker_ty
+                        .as_ref()
+                        .map(|t| self.type_to_c(t))
+                        .unwrap_or_else(|| "zz_value".to_string()),
+                };
                 let cid = Self::global_cid(&n);
                 (n, cid, ctype, checker_ty)
             })

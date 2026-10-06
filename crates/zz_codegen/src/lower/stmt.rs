@@ -410,6 +410,40 @@ impl Lowerer {
                                              memcpy(&{cid}, &{tmp}, sizeof({ct}));\n"
                                         ));
                                     }
+                                    ct if ct.starts_with("zz_struct_") => {
+                                        // Raw unboxed local, non-cell (#188.2):
+                                        // same-type raw values assign
+                                        // directly; boxed values unbox
+                                        // into place (`zz_assign` only
+                                        // takes `zz_value *`).
+                                        if let Some(root) = self.unmangled_struct_name(ct) {
+                                            let val_is_raw = match value {
+                                                Expr::StructInit { name: s, .. } => s == &root,
+                                                Expr::Ident { name: v, .. } => {
+                                                    names.lookup_type(v.as_str()) == Some(ct)
+                                                }
+                                                Expr::Path { parts, .. } => {
+                                                    names.lookup_type(&parts.join(".")) == Some(ct)
+                                                }
+                                                _ => false,
+                                            };
+                                            if val_is_raw {
+                                                out.push_str(&format!("    {cid} = {val};\n"));
+                                            } else {
+                                                let tmp = names.fresh("_unbox");
+                                                out.push_str(&format!(
+                                                    "    zz_value {tmp} = {val};\n"
+                                                ));
+                                                self.emit_unbox_struct(
+                                                    &root, &tmp, &cid, names, out,
+                                                );
+                                            }
+                                        } else {
+                                            out.push_str(&format!(
+                                                "    zz_assign(&{cid}, {val});\n"
+                                            ));
+                                        }
+                                    }
                                     _ => {
                                         out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
                                     }
@@ -778,9 +812,9 @@ impl Lowerer {
                         // `_ci`, never evaluated twice). The store kills
                         // index forwarding for the root binding (plus
                         // dependents). NOTE: side-effect order here is
-                        // source order (index, then value); the VM's
-                        // plain-store order differs (value first) — an
-                        // open spec item pinned by edge_index_store_order.
+                        // source order (base, index, value), matching
+                        // the VM since the zzc-codec slice (spec §7,
+                        // pinned by edge_index_store_order).
                         if let Some(root) = Self::store_root_ident(obj) {
                             let root = root.to_string();
                             names.invalidate_stack_array_elems(&root);

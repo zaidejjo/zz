@@ -65,14 +65,52 @@ pub struct CachedModule<'a> {
 /// Genesis material: anything that changes checker semantics globally.
 /// Bumped automatically with the CLI version; extend if the checker gains
 /// flags or the stdlib versions independently.
+///
+/// The git commit disambiguates same-version binaries (dev-loop rebuilds
+/// share a version string but not semantics — issue #221). Resolved once
+/// per process from the build tree; absent outside git checkouts
+/// (tarballs fall back to version-only, as before).
 fn genesis(plugin_names: &[String]) -> String {
     let mut names = plugin_names.to_vec();
     names.sort();
     format!(
-        "zz-check-cache-v3|cli={}|plugins={}",
+        "zz-check-cache-v4|cli={}|git={}|plugins={}",
         env!("CARGO_PKG_VERSION"),
+        git_hash().as_deref().unwrap_or("nogit"),
         names.join(","),
     )
+}
+
+/// Commit hash of the tree this binary was built from (dev-loop cache
+/// correctness). `None` outside a git checkout.
+fn git_hash() -> Option<String> {
+    static HASH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| {
+        let mut dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            if dir.join(".git").exists() {
+                let out = std::process::Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(dir)
+                    .output();
+                match out {
+                    Ok(o) if o.status.success() => {
+                        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        if s.is_empty() {
+                            return None;
+                        }
+                        return Some(s);
+                    }
+                    _ => return None,
+                }
+            }
+            match dir.parent() {
+                Some(p) => dir = p,
+                None => return None,
+            }
+        }
+    })
+    .clone()
 }
 
 /// Dependency-aware key for one module: `H(genesis, source, dep_keys...)`

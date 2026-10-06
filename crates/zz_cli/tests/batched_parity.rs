@@ -266,6 +266,36 @@ fn batched_native_parity() {
             (modname, *has_main, cat.to_string(), file.to_string())
         })
         .collect();
+    // Merge every category's `support/` helpers into one sandbox dir so
+    // flat-staged cases keep their local imports (`support.x` resolves
+    // relative to the importing file, i.e. the sandbox root). Filenames
+    // must not collide across categories (asserted).
+    {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let support_dst = sandbox.join("support");
+        let mut categories: Vec<&str> = cases.iter().map(|(c, _, _)| *c).collect();
+        categories.sort();
+        categories.dedup();
+        for cat in categories {
+            let dir = fixtures.join(cat).join("support");
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let from = entry.path();
+                if from.extension().and_then(|s| s.to_str()) != Some("zz") {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                assert!(
+                    seen.insert(name.clone()),
+                    "support helper collision across categories: {name}"
+                );
+                std::fs::create_dir_all(&support_dst).expect("mkdir support");
+                std::fs::copy(&from, support_dst.join(&name)).expect("copy support helper");
+            }
+        }
+    }
     let mut failures: Vec<String> = Vec::new();
     let per_batch_idx: Vec<Vec<usize>> = cases
         .iter()
