@@ -571,28 +571,73 @@ impl Loader {
             }
             // Plugin dependency import (`import zimg`): the dep ships a
             // `plugin.zzi` manifest. Merge its signatures under their
-            // declared ZZ names and register the namespace. Unlike std,
-            // no bare aliases are created — two plugins must never
-            // collide on short names.
+            // declared ZZ names and register the namespace. Selective
+            // (`import zimg(resize)` / `as rz` / `(*)`) registers bare
+            // names first-wins, mirroring std selective imports (#229).
             if imp.len() == 1 {
                 if let Some(root) = find_project_root(&canon) {
                     if let Some(pkg_dir) = resolve_plugin_pkg(&root, &imp[0]) {
-                        if !imp_items.is_empty() {
-                            self.errors.push(LoadError {
-                                name: path.display().to_string(),
-                                source: source.clone(),
-                                diags: vec![error_at(
-                                    format!(
-                                        "selective imports from plugin `{}` are not supported\n\
-                                         hint: `import {0}` imports the full module; call `{}.*` qualified",
-                                        imp[0], imp[0]
-                                    ),
-                                    Span::new(0, 0),
-                                )],
-                            });
-                            continue;
-                        }
                         self.import_plugin(&imp[0], imp_alias.as_deref(), &pkg_dir, path, &source);
+                        if !imp_items.is_empty() {
+                            let ns = imp_alias.as_deref().unwrap_or(&imp[0]);
+                            let prefix = format!("{ns}.");
+                            for item in &imp_items {
+                                match item {
+                                    ImportItem::Named { name, alias, .. } => {
+                                        let target = alias.as_ref().unwrap_or(name).clone();
+                                        let qualified = format!("{prefix}{name}");
+                                        if let Some(sig) = self.funcs.get(&qualified).cloned() {
+                                            // First registration wins: two
+                                            // plugins must never collide
+                                            // silently on short names.
+                                            self.funcs.entry(target.clone()).or_insert(sig.clone());
+                                            self.all_funcs.entry(target).or_insert(sig);
+                                        } else if let Some(sig) = self.funcs.get(name).cloned() {
+                                            // Manifest declared a bare name
+                                            // (no ns prefix); still honor it.
+                                            self.funcs.entry(target.clone()).or_insert(sig.clone());
+                                            self.all_funcs.entry(target).or_insert(sig);
+                                        } else {
+                                            self.errors.push(LoadError {
+                                                name: path.display().to_string(),
+                                                source: source.clone(),
+                                                diags: vec![error_at(
+                                                    format!(
+                                                        "symbol `{name}` not found in plugin `{}`\n\
+                                                         hint: check the plugin's `plugin.zzi` exports",
+                                                        imp[0]
+                                                    ),
+                                                    Span::new(0, 0),
+                                                )],
+                                            });
+                                        }
+                                    }
+                                    ImportItem::Wildcard { .. } => {
+                                        let keys: Vec<String> = self
+                                            .funcs
+                                            .keys()
+                                            .filter(|k| k.starts_with(&prefix))
+                                            .cloned()
+                                            .collect();
+                                        for key in keys {
+                                            if let Some(bare) = key.strip_prefix(&prefix) {
+                                                if bare.is_empty() || bare.contains('.') {
+                                                    continue;
+                                                }
+                                                if let Some(sig) = self.funcs.get(&key).cloned() {
+                                                    self.funcs
+                                                        .entry(bare.to_string())
+                                                        .or_insert(sig.clone());
+                                                    self.all_funcs
+                                                        .entry(bare.to_string())
+                                                        .or_insert(sig);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         continue;
                     }
                 }
