@@ -1991,7 +1991,15 @@ impl Checker {
                         let (ps, ret, subs) = self.instantiate(&sig);
                         let pnames: Vec<String> =
                             sig.params.iter().map(|(n, _)| n.clone()).collect();
-                        self.check_args_against(&pnames, &ps, &sig.has_default, args, named, span);
+                        self.check_args_against(
+                            Some(Self::short_name(name)),
+                            &pnames,
+                            &ps,
+                            &sig.has_default,
+                            args,
+                            named,
+                            span,
+                        );
                         // Explicit-receiver forms (`pg.query(db, sql)`,
                         // `sqlz.query(db, sql)`) carry the SQL second;
                         // the bare method-namespace form carries it first.
@@ -2075,7 +2083,15 @@ impl Checker {
                         return ret;
                     }
                     let pnames: Vec<String> = sig.params.iter().map(|(n, _)| n.clone()).collect();
-                    self.check_args_against(&pnames, &ps, &sig.has_default, args, named, span);
+                    self.check_args_against(
+                        Some(Self::short_name(name)),
+                        &pnames,
+                        &ps,
+                        &sig.has_default,
+                        args,
+                        named,
+                        span,
+                    );
                     self.validate_bounds(&sig, &subs, span);
                     // A bare function value as a print argument is always a
                     // missing `()` (`println(env.os)` would print the function
@@ -2261,6 +2277,7 @@ impl Checker {
                                 match callee_t {
                                     Type::Func(ps, ret) => {
                                         self.check_args_against(
+                                            None,
                                             &pnames,
                                             &ps,
                                             &[],
@@ -2276,6 +2293,7 @@ impl Checker {
                                             let pnames: Vec<String> =
                                                 sig.params.iter().map(|(n, _)| n.clone()).collect();
                                             self.check_args_against(
+                                                Some(Self::short_name(nname)),
                                                 &pnames,
                                                 &ps,
                                                 &sig.has_default,
@@ -2487,6 +2505,7 @@ impl Checker {
                         self.report_mismatch(e, *pspan);
                     }
                     self.check_args_against(
+                        None,
                         &sig.params[1..]
                             .iter()
                             .map(|(n, _)| n.clone())
@@ -2507,7 +2526,7 @@ impl Checker {
         match callee_t {
             Type::Func(ps, ret) => {
                 let pnames: Vec<String> = (0..ps.len()).map(|i| format!("_{i}")).collect();
-                self.check_args_against(&pnames, &ps, &[], args, named, span);
+                self.check_args_against(None, &pnames, &ps, &[], args, named, span);
                 *ret
             }
             Type::Named(name) => match self.funcs.get(&name).cloned() {
@@ -2515,7 +2534,15 @@ impl Checker {
                     let (ps, ret, subs) = self.instantiate(&sig);
                     let param_names: Vec<String> =
                         sig.params.iter().map(|(n, _)| n.clone()).collect();
-                    self.check_args_against(&param_names, &ps, &sig.has_default, args, named, span);
+                    self.check_args_against(
+                        Some(Self::short_name(&name)),
+                        &param_names,
+                        &ps,
+                        &sig.has_default,
+                        args,
+                        named,
+                        span,
+                    );
                     self.validate_bounds(&sig, &subs, span);
                     ret
                 }
@@ -2588,6 +2615,7 @@ impl Checker {
             self.report_mismatch(e, call.span);
         }
         self.check_args_against(
+            Some(call.method),
             &call.sig.params[1..]
                 .iter()
                 .map(|(n, _)| n.clone())
@@ -2602,8 +2630,17 @@ impl Checker {
         ret
     }
 
+    /// Short display name for call diagnostics: `math.sin` → `sin`.
+    pub(crate) fn short_name(name: &str) -> &str {
+        name.rsplit('.').next().unwrap_or(name)
+    }
+
+    // Eight args is the honest shape here (callee + params + args + span);
+    // a struct would churn every call site for no checking benefit.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_args_against(
         &mut self,
+        callee: Option<&str>,
         param_names: &[String],
         ps: &[Type],
         has_default: &[bool],
@@ -2631,15 +2668,20 @@ impl Checker {
             } else {
                 format!("takes {allowed_min} to {total_params} arguments")
             };
-            let mut diag = error_at(format!("{count} ({sig}), found {total_provided}"), span);
-            // Name the first missing parameter onward when too few were given.
+            let head = match callee.filter(|c| !c.is_empty()) {
+                Some(name) => format!("`{name}` {count}"),
+                None => count,
+            };
+            let mut diag = error_at(format!("{head} ({sig}), found {total_provided}"), span);
+            // Name the missing parameters when too few were given. A named
+            // argument covers its parameter wherever it sits, so only
+            // report slots filled by neither position nor name.
             if total_provided < allowed_min {
-                let provided = total_provided;
                 let missing: Vec<String> = param_names
                     .iter()
                     .zip(ps.iter())
                     .enumerate()
-                    .filter(|(i, _)| *i >= provided)
+                    .filter(|(i, (n, _))| *i >= args.len() && !named.iter().any(|(an, _)| an == *n))
                     .map(|(_, (n, t))| format!("{n}: {t}"))
                     .collect();
                 if let Some(first) = missing.first() {
@@ -2684,8 +2726,14 @@ impl Checker {
                     slots[i] = Some(val);
                 }
                 None => {
-                    self.errors
-                        .push(error_at(format!("unknown parameter `{name}`"), val.span()));
+                    // Sherlock: typo'd named argument (`nmae:`) suggests the
+                    // real parameter instead of dying with just the name.
+                    let mut diag = error_at(format!("unknown parameter `{name}`"), val.span());
+                    let refs: Vec<&str> = param_names.iter().map(|s| s.as_str()).collect();
+                    if let Some((suggestion, _)) = suggest_all(name, &refs).first() {
+                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    }
+                    self.errors.push(diag);
                     return;
                 }
             }
@@ -2945,7 +2993,7 @@ impl Checker {
                     "`?`/`try` can only be used inside a function returning `Result` or `Option`",
                     span,
                 ));
-                return Type::Unit;
+                return Type::Error;
             }
         };
         match ot {
@@ -2960,10 +3008,15 @@ impl Checker {
                     *t
                 }
                 other => {
-                    self.errors.push(error_at(
-                        format!("`?` on `Option` cannot propagate through a function returning `{other}`"),
-                        span,
-                    ));
+                    self.errors.push(
+                        error_at(
+                            format!("`?` on `Option` cannot propagate through a function returning `{other}`"),
+                            span,
+                        )
+                        .with_note(format!(
+                            "to use `?` here, change the return type to `Option<{t}>`"
+                        )),
+                    );
                     *t
                 }
             },
@@ -3024,10 +3077,15 @@ impl Checker {
                     *t
                 }
                 other => {
-                    self.errors.push(error_at(
-                        format!("`?` on `Result` cannot propagate through a function returning `{other}`\nhelp: enclosing function must return `Result<T, E>` to use `try`"),
-                        span,
-                    ));
+                    self.errors.push(
+                        error_at(
+                            format!("`?` on `Result` cannot propagate through a function returning `{other}`"),
+                            span,
+                        )
+                        .with_note(format!(
+                            "to use `?` here, change the return type to `Result<{t}, {e}>`"
+                        )),
+                    );
                     *t
                 }
             },
@@ -3036,14 +3094,16 @@ impl Checker {
                     "cannot use `?` on a value whose type could not be inferred",
                     span,
                 ));
-                Type::Unit
+                Type::Error
             }
             other => {
-                self.errors.push(error_at(
-                    format!("cannot use `?` on a value of type `{other}`"),
-                    span,
-                ));
-                Type::Unit
+                self.errors.push(
+                    error_at(format!("cannot use `?` on a value of type `{other}`"), span)
+                        .with_note(format!(
+                            "`?` unwraps `Result`/`Option`; `{other}` is neither — remove the `?`"
+                        )),
+                );
+                Type::Error
             }
         }
     }

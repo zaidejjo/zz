@@ -2289,6 +2289,36 @@ mod tests {
         assert!(result.is_err(), "expected error for missing file");
     }
     #[test]
+    fn check_400_fn_file_stays_fast() {
+        // Perf smoke guard (#248): 400 single-function definitions must
+        // check in seconds, not minutes. The bound is deliberately generous
+        // (100x the measured ~0.06s) — it catches catastrophic slowdowns
+        // (e.g. quadratic seed handling), not 20% wobbles.
+        let mut src = String::new();
+        for i in 0..400 {
+            src.push_str(&format!(
+                "func zz_perf_fn_{i}(x: int) -> int {{ x + {i} }}\n"
+            ));
+        }
+        src.push_str("func main() {\n    println(zz_perf_fn_0(1))\n}\n");
+        let path = write_temp(&src);
+        let start = std::time::Instant::now();
+        let result = check_or_fix_path(
+            &Some(path.to_string_lossy().to_string()),
+            false,
+            false,
+            false,
+            false,
+        );
+        let elapsed = start.elapsed();
+        let _ = fs::remove_file(&path);
+        assert!(result.is_ok(), "expected ok, got {result:?}");
+        assert!(
+            elapsed.as_secs() < 10,
+            "400-fn check took {elapsed:?}, expected < 10s"
+        );
+    }
+    #[test]
     fn check_no_arg_errors() {
         // NOTE: `examples/` is gitignored (personal scratch dir, absent in
         // CI checkouts) — scan the tracked fixtures instead. The point is

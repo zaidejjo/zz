@@ -1,4 +1,4 @@
-// features: comparison, error-case, conditionals, locals
+// features: comparison, error-case, func-call, locals
 // E2E: `=` in condition suggests `==` with fix
 func main() {
     countr := 5
