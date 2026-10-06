@@ -715,6 +715,7 @@ struct PreparedRun {
     types: std::sync::Arc<std::collections::HashMap<zz_checker::SpanKey, zz_checker::Type>>,
     structs: std::collections::HashMap<String, zz_checker::StructSig>,
     enums: std::collections::HashMap<String, zz_checker::EnumSig>,
+    funcs: std::collections::HashMap<String, zz_checker::FuncSig>,
     entry_path: String,
 }
 
@@ -933,6 +934,7 @@ fn prepare_run(
         types: std::sync::Arc::new(typed.program.types),
         structs: typed.program.structs,
         enums: typed.program.enums,
+        funcs: typed.program.funcs,
         entry_path: path.to_string(),
     })
 }
@@ -1074,8 +1076,8 @@ fn run_bytecode_zz(
         ));
         // Serialize, then drop every AST-derived structure: from here on
         // only bytes-derived data may flow into execution.
-        let module =
-            zz_ir::lower::lower(&chunk).map_err(|e| format!("zz: ir lower failed: {e}"))?;
+        let module = zz_ir::lower::lower_typed(&chunk, &prep.funcs)
+            .map_err(|e| format!("zz: ir lower failed: {e}"))?;
         let bytes = zz_ir::codec::encode(&module);
         drop(chunk);
         drop(module);
@@ -1181,8 +1183,8 @@ fn dis_file(path: Option<&String>) -> Result<(), String> {
             prep.enums.clone(),
             native_names,
         );
-        let module =
-            zz_ir::lower::lower(&chunk).map_err(|e| format!("zz: ir lower failed: {e}"))?;
+        let module = zz_ir::lower::lower_typed(&chunk, &prep.funcs)
+            .map_err(|e| format!("zz: ir lower failed: {e}"))?;
         let name = prep
             .files
             .get(i)
@@ -1257,7 +1259,8 @@ fn emit_ir_cmd(args: &[String]) -> Result<(), String> {
         prep.enums.clone(),
         native_names,
     );
-    let module = zz_ir::lower::lower(&chunk).map_err(|e| format!("zz: ir lower failed: {e}"))?;
+    let module = zz_ir::lower::lower_typed(&chunk, &prep.funcs)
+        .map_err(|e| format!("zz: ir lower failed: {e}"))?;
     let bytes = zz_ir::codec::encode(&module);
     std::fs::write(&output, &bytes)
         .map_err(|e| format!("zz: cannot write {}: {e}", output.display()))?;

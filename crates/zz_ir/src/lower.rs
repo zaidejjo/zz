@@ -26,6 +26,7 @@
 
 use std::collections::HashMap;
 
+use zz_checker::{FuncSig as CheckerSig, Type as CheckerType};
 use zz_frontend::ast::{
     BinOp as AstBinOp, Lit, Param as AstParam, Pattern as AstPattern, UnOp as AstUnOp,
 };
@@ -38,20 +39,26 @@ use crate::{
     StrId, TypeId,
 };
 
-struct Lowerer {
+struct Lowerer<'a> {
     strings: Vec<String>,
     str_ids: HashMap<String, StrId>,
     consts: Vec<Const>,
+    types: Vec<IrType>,
     funcs: Vec<FuncDef>,
+    /// HIR function signatures by dotted name (guest for lookups;
+    /// missing names lower to `Unknown`).
+    func_sigs: &'a HashMap<String, CheckerSig>,
 }
 
-impl Lowerer {
-    fn new() -> Self {
+impl<'a> Lowerer<'a> {
+    fn new(func_sigs: &'a HashMap<String, CheckerSig>) -> Self {
         Lowerer {
             strings: Vec::new(),
             str_ids: HashMap::new(),
             consts: Vec::new(),
+            types: Vec::new(),
             funcs: Vec::new(),
+            func_sigs,
         }
     }
 
@@ -63,6 +70,74 @@ impl Lowerer {
         self.strings.push(s.to_string());
         self.str_ids.insert(s.to_string(), id);
         id
+    }
+
+    /// Intern a checker type into the type table (deduplicated).
+    fn intern_type(&mut self, ty: &CheckerType) -> TypeId {
+        let t = match ty {
+            CheckerType::Int => IrType::Int,
+            CheckerType::Float => IrType::Float,
+            CheckerType::Bool => IrType::Bool,
+            CheckerType::Str => IrType::Str,
+            CheckerType::Unit => IrType::Unit,
+            CheckerType::Void => IrType::Void,
+            CheckerType::Bytes => IrType::Bytes,
+            CheckerType::Json => IrType::Json,
+            CheckerType::Db => IrType::Db,
+            CheckerType::HttpServer => IrType::HttpServer,
+            CheckerType::TcpStream => IrType::TcpStream,
+            CheckerType::TcpListener => IrType::TcpListener,
+            CheckerType::Response => IrType::Response,
+            CheckerType::HttpRequest => IrType::HttpRequest,
+            CheckerType::Chan => IrType::Chan,
+            CheckerType::TaskJoin => IrType::TaskJoin,
+            CheckerType::Error => IrType::Error,
+            CheckerType::Tuple(items) => {
+                IrType::Tuple(items.iter().map(|t| self.intern_type(t)).collect())
+            }
+            CheckerType::Option(inner) => IrType::Option(self.intern_type(inner)),
+            CheckerType::Result(ok, err) => {
+                IrType::Result(self.intern_type(ok), self.intern_type(err))
+            }
+            CheckerType::Func(params, ret) => IrType::Func(
+                params.iter().map(|t| self.intern_type(t)).collect(),
+                self.intern_type(ret),
+            ),
+            CheckerType::Array(inner) => IrType::Array(self.intern_type(inner)),
+            CheckerType::Dict(k, v) => IrType::Dict(self.intern_type(k), self.intern_type(v)),
+            CheckerType::Union(items) => {
+                IrType::Union(items.iter().map(|t| self.intern_type(t)).collect())
+            }
+            CheckerType::Range(inner) => IrType::Range(self.intern_type(inner)),
+            CheckerType::Opaque(tag) => IrType::Opaque(self.intern(tag)),
+            CheckerType::Named(name) => IrType::Named(self.intern(name)),
+            CheckerType::Var(n) => IrType::Var(*n),
+            CheckerType::Struct(name, args) => IrType::Struct(
+                self.intern(name),
+                args.iter().map(|t| self.intern_type(t)).collect(),
+            ),
+            CheckerType::Enum(name, args) => IrType::Enum(
+                self.intern(name),
+                args.iter().map(|t| self.intern_type(t)).collect(),
+            ),
+            CheckerType::Ptr { mutable, inner } => IrType::Ptr {
+                mutable: *mutable,
+                inner: self.intern_type(inner),
+            },
+            // Inference leftovers and the bottom type carry no layout:
+            // backends treat them as opaque (same as `Unknown`).
+            CheckerType::Never => IrType::Unknown,
+        };
+        if let Some(i) = self.types.iter().position(|e| *e == t) {
+            return TypeId(i as u32);
+        }
+        let id = TypeId(self.types.len() as u32);
+        self.types.push(t);
+        id
+    }
+
+    fn unknown(&mut self) -> TypeId {
+        self.intern_type(&CheckerType::Never)
     }
 
     fn intern_const(&mut self, c: Const) -> ConstId {
@@ -213,13 +288,31 @@ impl Lowerer {
     }
 
     /// Lift a params list, compiling AST defaults to tabled chunks.
-    fn lower_params(&mut self, params: &[AstParam]) -> Result<Vec<Param>, IrError> {
+    /// Lift a params list, compiling AST defaults to tabled chunks. A
+    /// default chunk takes no params and evaluates to its parameter's
+    /// type when the owner signature provides one.
+    fn lower_params(
+        &mut self,
+        params: &[AstParam],
+        owner: Option<&CheckerSig>,
+    ) -> Result<Vec<Param>, IrError> {
         let mut out = Vec::with_capacity(params.len());
-        for p in params {
+        for (i, p) in params.iter().enumerate() {
             let default = match &p.default {
                 Some(expr) => {
                     let chunk = zz_runtime::vm::Compiler::compile_default_expr(expr);
-                    Some(self.lift_chunk(&chunk, &p.name.name, 0)?)
+                    let id = self.lift_chunk(&chunk, &p.name.name, 0)?;
+                    // Stamp the default's return type from the owner.
+                    let ret = owner
+                        .and_then(|s| s.params.get(i))
+                        .map(|(_, t)| self.intern_type(t))
+                        .unwrap_or_else(|| self.unknown());
+                    let f = &mut self.funcs[id.0 as usize];
+                    f.sig = FuncSig {
+                        params: vec![],
+                        ret,
+                    };
+                    Some(id)
                 }
                 None => None,
             };
@@ -231,8 +324,32 @@ impl Lowerer {
         Ok(out)
     }
 
+    /// Signature for a lifted function: HIR lookup by dotted name,
+    /// `Unknown` when absent (closures, entry, untyped compiles).
+    fn seal_sig(&mut self, id: FuncId, name: Option<&str>) {
+        let arity = self.funcs[id.0 as usize].params.len();
+        let found = name.and_then(|n| self.func_sigs.get(n).cloned());
+        let sig = match found {
+            Some(s) => FuncSig {
+                params: s.params.iter().map(|(_, t)| self.intern_type(t)).collect(),
+                ret: self.intern_type(&s.ret),
+            },
+            None => {
+                let u = self.unknown();
+                FuncSig {
+                    params: vec![u; arity],
+                    ret: u,
+                }
+            }
+        };
+        let f = &mut self.funcs[id.0 as usize];
+        f.sig = sig;
+        f.arity = arity as u32;
+    }
+
     /// Lift one VM chunk (plus everything nested inside it) into the
-    /// function table. Returns the new function's id.
+    /// function table. Returns the new function's id. The caller seals
+    /// params and signature afterwards (except defaults, sealed inline).
     fn lift_chunk(&mut self, chunk: &VmChunk, name: &str, arity: u32) -> Result<FuncId, IrError> {
         // Index reservation first so recursive lifts nest in order.
         let id = FuncId(self.funcs.len() as u32);
@@ -242,7 +359,7 @@ impl Lowerer {
             params: Vec::new(),
             sig: FuncSig {
                 params: Vec::new(),
-                ret: TypeId(0),
+                ret: TypeId(u32::MAX),
             },
             toplevel_slots: Vec::new(),
             code: Vec::new(),
@@ -411,8 +528,10 @@ impl Lowerer {
                 ..
             } => {
                 let id = self.lift_chunk(chunk, name, params.len() as u32)?;
-                let lowered = self.lower_params(params)?;
+                let owner = self.func_sigs.get(name).cloned();
+                let lowered = self.lower_params(params, owner.as_ref())?;
                 self.funcs[id.0 as usize].params = lowered;
+                self.seal_sig(id, Some(name));
                 Ok(vec![Op::MakeFunc { func: id }])
             }
             VmOp::RegisterStruct { name, fields } => Ok(vec![Op::RegisterStruct {
@@ -499,14 +618,16 @@ impl Lowerer {
             }]),
             VmOp::MakeClosure { params, chunk, .. } => {
                 let id = self.lift_chunk(chunk, "closure", params.len() as u32)?;
-                let lowered = self.lower_params(params)?;
+                let lowered = self.lower_params(params, None)?;
                 self.funcs[id.0 as usize].params = lowered;
+                self.seal_sig(id, None);
                 Ok(vec![Op::MakeClosure { func: id }])
             }
             VmOp::SpawnClosure { params, chunk, .. } => {
                 let id = self.lift_chunk(chunk, "spawn", params.len() as u32)?;
-                let lowered = self.lower_params(params)?;
+                let lowered = self.lower_params(params, None)?;
                 self.funcs[id.0 as usize].params = lowered;
+                self.seal_sig(id, None);
                 Ok(vec![Op::SpawnClosure { func: id }])
             }
             VmOp::MakeVariant { name, has_arg, .. } => Ok(vec![Op::MakeVariant {
@@ -674,30 +795,33 @@ impl Lowerer {
     }
 }
 
-/// Lower a compiled VM chunk to a verified IR module.
+/// Lower a compiled VM chunk to a verified IR module (untyped:
+/// every signature slot is `Unknown`).
 pub fn lower(chunk: &VmChunk) -> Result<Module, IrError> {
-    let mut l = Lowerer::new();
-    // Reserve the Unknown type up front (v1 signatures reference it).
+    lower_typed(chunk, &HashMap::new())
+}
+
+/// Lower with HIR signatures: each lifted function resolves its
+/// signature by dotted name, falling back to `Unknown` per slot.
+/// Default-argument chunks take their return type from the owner.
+pub fn lower_typed(
+    chunk: &VmChunk,
+    func_sigs: &HashMap<String, CheckerSig>,
+) -> Result<Module, IrError> {
+    let mut l = Lowerer::new(func_sigs);
     l.funcs.reserve(16);
     let entry = l.lift_chunk(chunk, "main", 0)?;
     debug_assert_eq!(entry, FuncId(0));
-    // Top-level chunk params (always empty) become the entry signature.
-    let mut module = Module {
-        types: vec![IrType::Unknown],
+    // The entry chunk is the program top level (never a function
+    // body): Unknown signature even if a user `main` exists.
+    l.seal_sig(entry, None);
+    let module = Module {
+        types: std::mem::take(&mut l.types),
         strings: std::mem::take(&mut l.strings),
         consts: std::mem::take(&mut l.consts),
         funcs: std::mem::take(&mut l.funcs),
         entry,
     };
-    // Seal signatures: v1 references Unknown everywhere.
-    for f in &mut module.funcs {
-        let arity_params = vec![TypeId(0); f.params.len()];
-        f.sig = FuncSig {
-            params: arity_params,
-            ret: TypeId(0),
-        };
-        f.arity = f.params.len() as u32;
-    }
     crate::verify::verify(&module)?;
     Ok(module)
 }
