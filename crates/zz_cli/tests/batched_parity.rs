@@ -353,7 +353,11 @@ fn batched_native_parity() {
             }
         }
         if norm_err(&vm_err) != norm_err(&nat_err) {
-            failures.push(format!("driver {b}: stderr differs"));
+            failures.push(format!(
+                "driver {b}: stderr differs:\nVM stderr:\n{}\n---\nnative stderr:\n{}",
+                norm_err(&vm_err).join("\n"),
+                norm_err(&nat_err).join("\n")
+            ));
         }
     }
     if failures.is_empty() {

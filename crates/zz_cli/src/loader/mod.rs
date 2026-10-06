@@ -1059,7 +1059,20 @@ impl Loader {
                                 });
                             }
                             // Seed-owned like full-module copies (#214).
-                            Ok(inserted) => self.seed_func_keys.extend(inserted),
+                            Ok(inserted) => {
+                                self.seed_func_keys.extend(inserted.clone());
+                                // Mirror into the all-universe (the
+                                // first-success snapshot below misses later
+                                // modules' selectives): skip generic bare
+                                // values like the local branch.
+                                for target in &inserted {
+                                    if let Some(sig) = self.funcs.get(target).cloned() {
+                                        if sig.generics.is_empty() {
+                                            self.all_funcs.entry(target.clone()).or_insert(sig);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     } else {
                         let name_aliases: Vec<(String, Option<String>)> = items
@@ -1079,7 +1092,18 @@ impl Loader {
                         ) {
                             Ok((missing, inserted)) => {
                                 // Seed-owned like full-module copies (#214).
-                                self.seed_func_keys.extend(inserted);
+                                self.seed_func_keys.extend(inserted.clone());
+                                // Mirror into the all-universe (the
+                                // first-success snapshot below misses later
+                                // modules' selectives): skip generic bare
+                                // values like the local branch.
+                                for target in &inserted {
+                                    if let Some(sig) = self.funcs.get(target).cloned() {
+                                        if sig.generics.is_empty() {
+                                            self.all_funcs.entry(target.clone()).or_insert(sig);
+                                        }
+                                    }
+                                }
                                 for sym in &missing {
                                     self.errors.push(LoadError {
                                         name: name.clone(),

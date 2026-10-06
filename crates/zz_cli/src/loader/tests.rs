@@ -1479,3 +1479,29 @@ fn selective_std_unused_still_warns() {
         diag_texts(&result)
     );
 }
+
+#[test]
+fn later_module_selective_reaches_all_funcs() {
+    // Regression (batched parity): std-selective seeds of later modules
+    // never reached `all_funcs` (only the first-success snapshot did),
+    // so the native HIR re-check reported `undefined variable` for them
+    // while the VM stayed clean.
+    let dir = temp_project(&[
+        ("cA.zz", "import std.math(PI)\nprintln(PI)\n"),
+        ("cB.zz", "import std.math(E as ee)\nprintln(ee)\n"),
+        (
+            "drv.zz",
+            "import cA as c0\nimport cB as c1\nfunc main() {\n    println(\"ok\")\n}\n",
+        ),
+    ]);
+    let result = load_program(&dir.join("drv.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert!(
+        result.funcs.contains_key("ee"),
+        "aliased selective const must survive into all_funcs"
+    );
+    assert!(
+        result.funcs.contains_key("PI"),
+        "plain selective const must survive into all_funcs"
+    );
+}

@@ -99,6 +99,21 @@ pub fn completions_for_position(
             check_result,
             cenv,
         ),
+        CompletionContext::StructLiteral {
+            struct_name,
+            partial_prefix,
+        } => {
+            // Unknown or ambiguous struct (an ordinary block, a call):
+            // fall back to scope so blocks never go dark.
+            match check_result.and_then(|cr| resolve_struct_key(cr, &struct_name)) {
+                Some(key) => struct_items(
+                    check_result.expect("key resolved from check_result"),
+                    &key,
+                    &partial_prefix,
+                ),
+                None => scope_completions(program, check_result, &partial_prefix, cenv),
+            }
+        }
     };
     Some(CompletionResponse::Array(plain(items)))
 }
@@ -138,6 +153,10 @@ enum CompletionContext {
         path: String,
         partial_prefix: String,
         replace_start: usize,
+    },
+    StructLiteral {
+        struct_name: String,
+        partial_prefix: String,
     },
 }
 
@@ -201,6 +220,16 @@ fn detect_context(
                 });
             }
         }
+    }
+
+    // Struct literals (`User{na`, `User{id: 12, na`): field names with
+    // types. Ordinary blocks fall through to scope via the unknown-struct
+    // fallback in the match arm.
+    if let Some((struct_name, field_prefix)) = struct_literal_at(before) {
+        return Some(CompletionContext::StructLiteral {
+            struct_name,
+            partial_prefix: field_prefix,
+        });
     }
 
     Some(CompletionContext::Scope { partial_prefix })
@@ -334,6 +363,62 @@ fn import_completion_at(
         });
     }
     None
+}
+
+/// Detect struct-literal field context: `User{`, `User{id: 12, na`,
+/// `lib.Point{x:` — an identifier glued to `{` with no braces after.
+/// Returns (struct name, field partial). Value positions (`name:` done,
+/// digit-led values) and closed literals return None so scope applies.
+fn struct_literal_at(before: &str) -> Option<(String, String)> {
+    let open = before.rfind('{')?;
+    // A closed brace after it means the literal is over.
+    if before[open..].contains('}') {
+        return None;
+    }
+    let head = before[..open].trim_end();
+    // Identifier (possibly dotted) glued to the brace.
+    let mut start = head.len();
+    let bytes = head.as_bytes();
+    while start > 0 {
+        let ch = bytes[start - 1];
+        if ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'.' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    let name = &head[start..];
+    if name.is_empty()
+        || !name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        || name.starts_with('.')
+        || name.ends_with('.')
+        || name.contains("..")
+    {
+        return None;
+    }
+    let segment = before[open + 1..].trim_start();
+    let after_comma = segment.rsplit(',').next().unwrap_or("");
+    let field_part = after_comma.trim_start();
+    // Digit-led values (`id: 12`) are not field names.
+    if field_part
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let partial: String = field_part
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    // Trailing junk past the identifier (`name:`) means value position.
+    if !field_part[partial.len()..].trim_start().is_empty() {
+        return None;
+    }
+    Some((name.to_string(), partial))
 }
 
 fn inside_string_literal(text: &str) -> bool {
@@ -749,6 +834,25 @@ fn env_bindings(cenv: Option<&CompletionEnv>) -> &HashMap<String, Type> {
     cenv.map(|e| &e.seed_bindings).unwrap_or(&EMPTY)
 }
 
+/// Resolve a struct name as written at a literal site (`User`,
+/// `lib.Point`) to its seed key: exact match first, then any
+/// `something.User` suffix (imported namespaces).
+fn resolve_struct_key(cr: &CheckResult, name: &str) -> Option<String> {
+    if cr.structs.contains_key(name) {
+        return Some(name.to_string());
+    }
+    let mut hit: Option<String> = None;
+    for key in cr.structs.keys() {
+        if key != name && key.rsplit('.').next() == Some(name) {
+            if hit.is_some() {
+                return None; // ambiguous — let scope handle it
+            }
+            hit = Some(key.clone());
+        }
+    }
+    hit
+}
+
 // ── Dot access completions ───────────────────────────────────────────────
 
 fn dot_access_completions(
@@ -824,7 +928,13 @@ fn dot_access_completions(
         }
     };
 
-    let sig = match cr.structs.get(&struct_name) {
+    struct_items(cr, &struct_name, partial_prefix)
+}
+
+/// Field + method items for a resolved struct name. Shared by dot-access
+/// (`p.` on a struct value) and struct literals (`User{na|`).
+fn struct_items(cr: &CheckResult, struct_name: &str, partial_prefix: &str) -> Vec<CompletionItem> {
+    let sig = match cr.structs.get(struct_name) {
         Some(s) => s,
         None => return Vec::new(),
     };
@@ -1736,7 +1846,7 @@ mod audit_tests {
         let state = test_state();
         let parsed = parse(source);
         let (ib, ifunc, is, ia, ie) = state.checker_seed_for(&parsed.program);
-        let cr = check_program(&parsed.program, ib, ifunc, is, ia, ie);
+        let cr = check_program(&parsed.program, ib.clone(), ifunc, is, ia, ie);
         (parsed.program, Some(cr))
     }
 
@@ -2024,7 +2134,7 @@ mod workspace_audit_tests {
         let src = std::fs::read_to_string(file).unwrap();
         let parsed = parse(&src);
         let (ib, ifunc, is, ia, ie) = state.checker_seed_for_path(&parsed.program, Some(file));
-        let cr = check_program(&parsed.program, ib, ifunc, is, ia, ie);
+        let cr = check_program(&parsed.program, ib.clone(), ifunc, is, ia, ie);
         cr.errors.into_iter().map(|e| e.message).collect()
     }
 
@@ -2344,7 +2454,7 @@ mod paren_free_tests {
         let parsed = parse(src);
         let state = crate::state::GlobalState::new();
         let (ib, ifunc, is, ia, ie) = state.checker_seed_for(&parsed.program);
-        let cr = check_program(&parsed.program, ib, ifunc, is, ia, ie);
+        let cr = check_program(&parsed.program, ib.clone(), ifunc, is, ia, ie);
         let cenv = CompletionEnv::default();
         match completions_for_position(&parsed.program, src, offset, Some(&cr), Some(&cenv))
             .expect("some")
@@ -2420,5 +2530,160 @@ mod paren_free_tests {
         let src = "import std.math\nprintln";
         let items = all_items(src, src.len() as u32);
         assert!(items.iter().any(|i| i.label == "println"));
+    }
+}
+
+#[cfg(test)]
+mod struct_literal_audit_tests {
+    //! Struct literals: `User{na`, `User{id: 12, na`, `lib.Point{x`.
+    use super::*;
+    use zz_checker::check_program;
+    use zz_frontend::parse;
+
+    const STRUCT_SRC: &str = "struct User {\n    id: int,\n    name: str,\n    age: int,\n}\n";
+
+    fn setup(src: &str) -> (Program, CheckResult, CompletionEnv) {
+        let state = crate::state::GlobalState::new();
+        let parsed = parse(src);
+        let (ib, ifunc, is, ia, ie) = state.checker_seed_for(&parsed.program);
+        let cr = check_program(&parsed.program, ib.clone(), ifunc, is, ia, ie);
+        let env = CompletionEnv {
+            doc_dir: None,
+            seed_bindings: ib,
+        };
+        (parsed.program, cr, env)
+    }
+
+    fn complete_at(
+        program: &Program,
+        src: &str,
+        offset: u32,
+        cr: &CheckResult,
+        env: &CompletionEnv,
+    ) -> Vec<CompletionItem> {
+        match completions_for_position(program, src, offset, Some(cr), Some(env)).expect("some") {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn audit_struct_literal_partial() {
+        let src = format!("{STRUCT_SRC}u := User{{na");
+        let (program, cr, env) = setup(&src);
+        let items = complete_at(&program, &src, src.len() as u32, &cr, &env);
+        assert_eq!(items.len(), 1, "only name matches: {items:?}");
+        assert_eq!(items[0].label, "name");
+        assert_eq!(items[0].kind, Some(CompletionItemKind::FIELD));
+        assert!(items[0].detail.as_deref().unwrap().contains("str"));
+    }
+
+    #[test]
+    fn audit_struct_literal_all_fields() {
+        let src = format!("{STRUCT_SRC}u := User{{");
+        let (program, cr, env) = setup(&src);
+        let items = complete_at(&program, &src, src.len() as u32, &cr, &env);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"id") && labels.contains(&"name") && labels.contains(&"age"));
+    }
+
+    #[test]
+    fn audit_struct_literal_after_comma() {
+        let src = format!("{STRUCT_SRC}u := User{{id: 12, na");
+        let (program, cr, env) = setup(&src);
+        let items = complete_at(&program, &src, src.len() as u32, &cr, &env);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "name");
+    }
+
+    #[test]
+    fn audit_struct_literal_value_position_falls_back() {
+        // `User{name:` — past the field name: must not offer fields.
+        let src = format!("{STRUCT_SRC}u := User{{name:");
+        let (program, cr, env) = setup(&src);
+        let items = complete_at(&program, &src, src.len() as u32, &cr, &env);
+        assert!(!items
+            .iter()
+            .any(|i| i.kind == Some(CompletionItemKind::FIELD)));
+    }
+
+    #[test]
+    fn audit_block_brace_falls_back_to_scope() {
+        // Ordinary blocks keep scope completion (keywords survive).
+        let src = "func main() {\n    x := 1\n    y := ";
+        let (program, cr, env) = setup(src);
+        let items = complete_at(&program, src, src.len() as u32, &cr, &env);
+        assert!(
+            items.iter().any(|i| i.label == "return"),
+            "scope intact: {items:?}"
+        );
+    }
+
+    #[test]
+    fn audit_unknown_brace_name_falls_back() {
+        // `if cond {` style: not a struct → scope, never empty.
+        let src = "func main() {\n    if x {";
+        let (program, cr, env) = setup(src);
+        let items = complete_at(&program, src, src.len() as u32, &cr, &env);
+        assert!(!items.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod struct_literal_dep_tests {
+    //! Dotted struct literals (`lib.Point{x`) resolve through the seed.
+    use super::*;
+    use zz_checker::check_program;
+    use zz_frontend::parse;
+
+    #[test]
+    fn audit_struct_literal_dep_member() {
+        let root = std::env::temp_dir().join(format!("zz-lsp-ws-depstruct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let lib = root.join("math_utils/lib.zz");
+        std::fs::create_dir_all(lib.parent().unwrap()).unwrap();
+        std::fs::write(
+            &lib,
+            "pub struct Point {\n    x: float,\n    y: float,\n}\n",
+        )
+        .unwrap();
+        let main = root.join("main.zz");
+        std::fs::write(&main, "import math_utils.lib\nfunc main() {\n}\n").unwrap();
+
+        let state = crate::state::GlobalState::new();
+        let src = "import math_utils.lib\nfunc main() {\n    p := lib.Point{";
+        let parsed = parse(src);
+        let (ib, ifunc, is, ia, ie) = state.checker_seed_for_path(&parsed.program, Some(&main));
+        let cr = check_program(&parsed.program, ib.clone(), ifunc, is, ia, ie);
+        assert!(
+            cr.funcs.keys().any(|k| k == "lib.Point")
+                || cr.structs.keys().any(|k| k == "lib.Point"),
+            "seed carries lib.Point"
+        );
+        let env = CompletionEnv {
+            doc_dir: Some(root.clone()),
+            seed_bindings: ib,
+        };
+        let items = match completions_for_position(
+            &parsed.program,
+            src,
+            src.len() as u32,
+            Some(&cr),
+            Some(&env),
+        )
+        .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"x") && labels.contains(&"y"),
+            "dep struct fields serve: {labels:?}"
+        );
+        assert!(items
+            .iter()
+            .all(|i| i.kind == Some(CompletionItemKind::FIELD)));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
