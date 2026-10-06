@@ -1442,3 +1442,40 @@ fn check_cache_disabled_via_env() {
         assert!(no_errors(&result), "errors: {:?}", result.errors);
     });
 }
+
+#[test]
+fn selective_std_call_marks_import_used() {
+    // Regression: the loader rewrites `pow(2, 3)` to the canonical
+    // `std.math.pow(2, 3)`, while the census only knew the short
+    // `math.pow` form — every selectively-imported std call warned
+    // `unused import` falsely.
+    let dir = temp_project(&[(
+        "main.zz",
+        "import std.math(pow)\nfunc main() {\n    println(pow(2, 3))\n}\n",
+    )]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert!(
+        !diag_texts(&result)
+            .iter()
+            .any(|m| m.contains("unused import")),
+        "selective call must not warn: {:?}",
+        diag_texts(&result)
+    );
+}
+
+#[test]
+fn selective_std_unused_still_warns() {
+    let dir = temp_project(&[(
+        "main.zz",
+        "import std.math(pow)\nfunc main() {\n    println(1)\n}\n",
+    )]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(
+        diag_texts(&result)
+            .iter()
+            .any(|m| m.contains("unused import `pow`")),
+        "genuinely-unused selective must warn: {:?}",
+        diag_texts(&result)
+    );
+}

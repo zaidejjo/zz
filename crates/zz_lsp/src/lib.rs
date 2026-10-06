@@ -2,6 +2,7 @@ pub mod code_action;
 pub mod completion;
 pub mod convert;
 pub mod cross_file;
+pub mod deps;
 pub mod diagnostics;
 pub mod folding;
 pub mod formatting;

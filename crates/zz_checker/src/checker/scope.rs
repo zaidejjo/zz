@@ -190,11 +190,18 @@ impl Checker {
                 .any(|n| n == alias || n.starts_with(&prefix))
                 // Selective imports rewritten to canonical paths
                 // (`join(...)` → `path.join(...)` by the loader): the
-                // import is used when its qualified form was used.
-                || self
-                    .import_aliases
-                    .get(alias)
-                    .is_some_and(|q| self.used_names.contains(q));
+                // import is used when its qualified form was used. The
+                // loader canonicalizes `std.*` calls to the `std.`-rooted
+                // spelling (`pow(...)` → `std.math.pow(...)`), which never
+                // matches the short alias form (`math.pow`) — so the
+                // `std.`-rooted spelling counts too, or every selectively
+                // imported std call warns falsely.
+                || self.import_aliases.get(alias).is_some_and(|q| {
+                    self.used_names.contains(q)
+                        || self
+                            .used_names
+                            .contains(format!("std.{q}").as_str())
+                });
             if !used {
                 self.errors.push(
                     warning_at(format!("unused import `{alias}`"), *span)
