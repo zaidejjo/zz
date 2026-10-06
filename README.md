@@ -22,6 +22,27 @@
 - Diagnostics that suggest fixes, plus `zz fix` and `zz fmt`.
 - Batteries included: HTTP, JSON, fs, math, SQL.
 
+## How is ZZ different from Rust?
+
+ZZ is not syntactic sugar on top of Rust. It is an independent language
+with its own frontend, type checker, tree-walk VM, and AOT backend
+(ZZ → C → native binary), plus its own standard library.
+
+- **Memory without a borrow checker.** ZZ has value semantics: functions
+  receive copies from the programmer's perspective, there are no
+  references, no lifetimes, no `&`/`&mut`. The compiler/runtime may elide
+  copies internally (copy-on-write, in-place slots), but aliasing is never
+  observable. Rust gives you control via ownership/borrows; ZZ trades that
+  control for simpler reasoning.
+- **Concurrency model.** ZZ ships green threads and channels as the default
+  pipeline primitive. No `async`/executors to wire up for the common case.
+- **Scope.** ZZ targets services, CLIs, and data pipelines with batteries
+  included (HTTP, JSON, fs, SQL). It cannot do everything Rust can: no
+  `unsafe`, no zero-cost abstractions, no `no_std`/embedded, no manual
+  layout control. For those, use Rust (including as a ZZ native plugin).
+- **Interop.** ZZ plugins speak C ABI (`plugin.zzi`); Rust crates can back
+  plugins, but the ZZ side never exposes Rust semantics.
+
 ## Quick start
 
 Install (main way, latest GitHub release). Re-run to update:

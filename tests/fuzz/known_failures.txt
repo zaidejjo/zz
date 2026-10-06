@@ -10,16 +10,18 @@
 # Format per class: signature (substring of the C compiler diagnostic),
 # minimal reproducer, status.
 
-## CLASS 1: tuple-literal boxing
-# Signature: passing 'int64_t' (aka 'long') to parameter of incompatible
+## CLASS 1 (FIXED — must stay empty): tuple-literal boxing
+# Was: passing 'int64_t' (aka 'long') to parameter of incompatible
 #   type 'zz_value' (aka 'struct zz_value') ... zz_vec_append
-# Tuple literals with computed (unboxed int) elements are appended raw.
-# Reproducer (VM prints 5, 56; native fails C compile):
+# Tuple literals with computed (unboxed int) elements were appended raw.
+# Fixed by boxing computed tuple elements before container append.
+# Reproducer (now passes on both engines):
 #   (a, b) := (2 + 3, 7 * 8)
 #   println(a)
 #   println(b)
-# Status: pre-existing; covered by the `destructuring` known-failure entry
-# in dual_engine_parity.rs.
+# Status: FIXED — covered strict by `parity_syntax_destructuring`
+# (tests/fixtures/syntax/destructuring.zz exercises this shape);
+# this class must stay empty.
 
 ## CLASS 2 (FIXED — must stay empty): scalar-global copy double-unbox
 # Signature: member reference base type 'int64_t' (aka 'long') is not a

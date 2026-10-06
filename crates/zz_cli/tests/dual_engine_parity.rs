@@ -693,6 +693,7 @@ parity_strict!(parity_syntax_pipelines, "syntax", "pipelines.zz");
 parity_strict!(parity_syntax_operators, "syntax", "operators.zz");
 parity_strict!(parity_syntax_bitwise_ops, "syntax", "bitwise_ops.zz");
 parity_strict!(parity_syntax_tuple_ops, "syntax", "tuple_ops.zz");
+parity_strict!(parity_syntax_destructuring, "syntax", "destructuring.zz");
 parity_strict!(
     parity_syntax_tuple_unboxed_struct,
     "syntax",
