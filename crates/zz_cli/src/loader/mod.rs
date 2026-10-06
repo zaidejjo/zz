@@ -503,6 +503,15 @@ impl Loader {
                 // Dotted module key: `std.sqlz` -> "sqlz",
                 // `std.sqlz.postgres` -> "sqlz.postgres".
                 if imp.len() < 2 {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source: source.clone(),
+                        diags: vec![error_at(
+                            "`import std` names no module\n\
+                             hint: import a concrete module, e.g. `import std.str`",
+                            Span::new(0, 0),
+                        )],
+                    });
                     continue;
                 }
                 let module = imp[1..].join(".");
@@ -562,28 +571,73 @@ impl Loader {
             }
             // Plugin dependency import (`import zimg`): the dep ships a
             // `plugin.zzi` manifest. Merge its signatures under their
-            // declared ZZ names and register the namespace. Unlike std,
-            // no bare aliases are created — two plugins must never
-            // collide on short names.
+            // declared ZZ names and register the namespace. Selective
+            // (`import zimg(resize)` / `as rz` / `(*)`) registers bare
+            // names first-wins, mirroring std selective imports (#229).
             if imp.len() == 1 {
                 if let Some(root) = find_project_root(&canon) {
                     if let Some(pkg_dir) = resolve_plugin_pkg(&root, &imp[0]) {
-                        if !imp_items.is_empty() {
-                            self.errors.push(LoadError {
-                                name: path.display().to_string(),
-                                source: source.clone(),
-                                diags: vec![error_at(
-                                    format!(
-                                        "selective imports from plugin `{}` are not supported\n\
-                                         hint: `import {0}` imports the full module; call `{}.*` qualified",
-                                        imp[0], imp[0]
-                                    ),
-                                    Span::new(0, 0),
-                                )],
-                            });
-                            continue;
-                        }
                         self.import_plugin(&imp[0], imp_alias.as_deref(), &pkg_dir, path, &source);
+                        if !imp_items.is_empty() {
+                            let ns = imp_alias.as_deref().unwrap_or(&imp[0]);
+                            let prefix = format!("{ns}.");
+                            for item in &imp_items {
+                                match item {
+                                    ImportItem::Named { name, alias, .. } => {
+                                        let target = alias.as_ref().unwrap_or(name).clone();
+                                        let qualified = format!("{prefix}{name}");
+                                        if let Some(sig) = self.funcs.get(&qualified).cloned() {
+                                            // First registration wins: two
+                                            // plugins must never collide
+                                            // silently on short names.
+                                            self.funcs.entry(target.clone()).or_insert(sig.clone());
+                                            self.all_funcs.entry(target).or_insert(sig);
+                                        } else if let Some(sig) = self.funcs.get(name).cloned() {
+                                            // Manifest declared a bare name
+                                            // (no ns prefix); still honor it.
+                                            self.funcs.entry(target.clone()).or_insert(sig.clone());
+                                            self.all_funcs.entry(target).or_insert(sig);
+                                        } else {
+                                            self.errors.push(LoadError {
+                                                name: path.display().to_string(),
+                                                source: source.clone(),
+                                                diags: vec![error_at(
+                                                    format!(
+                                                        "symbol `{name}` not found in plugin `{}`\n\
+                                                         hint: check the plugin's `plugin.zzi` exports",
+                                                        imp[0]
+                                                    ),
+                                                    Span::new(0, 0),
+                                                )],
+                                            });
+                                        }
+                                    }
+                                    ImportItem::Wildcard { .. } => {
+                                        let keys: Vec<String> = self
+                                            .funcs
+                                            .keys()
+                                            .filter(|k| k.starts_with(&prefix))
+                                            .cloned()
+                                            .collect();
+                                        for key in keys {
+                                            if let Some(bare) = key.strip_prefix(&prefix) {
+                                                if bare.is_empty() || bare.contains('.') {
+                                                    continue;
+                                                }
+                                                if let Some(sig) = self.funcs.get(&key).cloned() {
+                                                    self.funcs
+                                                        .entry(bare.to_string())
+                                                        .or_insert(sig.clone());
+                                                    self.all_funcs
+                                                        .entry(bare.to_string())
+                                                        .or_insert(sig);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         continue;
                     }
                 }
@@ -814,7 +868,8 @@ impl Loader {
                     diags: vec![error_at(
                         format!(
                             "module `{}` is imported under two namespaces: `{existing}` and `{ns}`\n\
-                             hint: this can happen when the same file is imported via different paths",
+                             hint: each file can only be imported under one namespace; \
+                             have both importers use the same name, or import the file directly without alias",
                             display.display()
                         ),
                         Span::new(0, 0),
@@ -1635,10 +1690,9 @@ impl Loader {
                 // this module, copy the re-exported namespace's pub functions
                 // and bindings into the current module's namespace in the
                 // cross-module seed.
-                // NOTE: struct re-exports are not yet supported because struct
-                // types are identity-based (Type::Struct("a.X") ≠
-                // Type::Struct("b.X")). Struct re-exports require type aliasing
-                // support (future work).
+                // Structs cannot be re-exported (identity-based types:
+                // Type::Struct("a.X") != Type::Struct("b.X")). Fail loudly
+                // at the re-export site instead of silently dropping (#230).
                 if let Some(module_ns) = self.ns_of.get(path).cloned() {
                     for stmt in &program.stmts {
                         if let Stmt::Import {
@@ -1652,9 +1706,27 @@ impl Loader {
                                 .as_deref()
                                 .or_else(|| imp_path.last().map(|s| s.as_str()))
                                 .unwrap_or("");
-                            // Copy items from seed `reexport_ns.*` to
-                            // `module_ns.reexport_ns.*`
                             let prefix = format!("{}.", reexport_ns);
+                            if let Some(offender) = self
+                                .structs
+                                .keys()
+                                .chain(self.all_structs.keys())
+                                .find(|k| k.starts_with(&prefix))
+                                .map(|k| k[prefix.len()..].to_string())
+                            {
+                                self.errors.push(LoadError {
+                                    name: name.clone(),
+                                    source: source.clone(),
+                                    diags: vec![error_at(
+                                        format!(
+                                            "`pub import {reexport_ns}` cannot re-export struct `{offender}` (struct re-exports unsupported)\n\
+                                             hint: import `{reexport_ns}` directly instead of through `{module_ns}`"
+                                        ),
+                                        Span::new(0, 0),
+                                    )],
+                                });
+                                continue;
+                            }
                             let new_prefix = format!("{}.{reexport_ns}.", module_ns);
                             let seed_b = self.bindings.clone();
                             for (k, v) in &seed_b {

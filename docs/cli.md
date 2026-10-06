@@ -302,6 +302,28 @@ project/
 - `import .name` loads from the current directory
 - `import utils.helper` loads `utils/helper.zz` relative to the source file
 
+### Circular imports
+
+Circular imports are rejected (`a` imports `b`, `b` imports `a`):
+
+```text
+circular import: `a.zz` imports `b.zz`, which (transitively) imports `a.zz`
+hint: circular imports are not allowed; consider restructuring your code to break the cycle
+```
+
+Restructure by extracting shared types into `c.zz`, then both `a` and `b`
+import `c` with no cycle. Tracking full cycle support in #232.
+
+### One file, one namespace
+
+One file cannot be imported under two different aliases in the same
+program (`import a as x` in one file, `import a as y` in another is an
+error). Struct identity is namespace-qualified (`x.T` vs `y.T` would
+diverge), so the loader keeps a single canonical namespace per file.
+Workaround: have both importers use the same name (or no alias), and
+import the shared file directly. Tracking per-importer alias copies
+in #228.
+
 ## REPL Commands
 
 In the REPL, these special commands are available:
