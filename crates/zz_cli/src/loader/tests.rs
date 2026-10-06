@@ -1480,7 +1480,6 @@ fn selective_std_unused_still_warns() {
     );
 }
 
-
 #[test]
 fn later_module_selective_reaches_all_funcs() {
     // Regression (batched parity): std-selective seeds of later modules
