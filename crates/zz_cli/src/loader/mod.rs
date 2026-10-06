@@ -823,7 +823,8 @@ impl Loader {
                     diags: vec![error_at(
                         format!(
                             "module `{}` is imported under two namespaces: `{existing}` and `{ns}`\n\
-                             hint: this can happen when the same file is imported via different paths",
+                             hint: each file can only be imported under one namespace; \
+                             have both importers use the same name, or import the file directly without alias",
                             display.display()
                         ),
                         Span::new(0, 0),
