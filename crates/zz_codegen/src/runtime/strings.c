@@ -1599,13 +1599,13 @@ static size_t ws_width_bwd(const unsigned char *d, size_t s, size_t end) {
     if (end <= s) return 0;
     unsigned char c = d[end - 1];
     if (c == ' ' || c == '\t' || c == '\n' || c == '\x0b' || c == '\x0c' || c == '\r') return 1;
-    if (end - 2 >= s && d[end - 2] == 0xC2 && (c == 0x85 || c == 0xA0)) return 2;
-    if (end - 3 >= s && d[end - 3] == 0xE1 && d[end - 2] == 0x9A && c == 0x80) return 3;
-    if (end - 3 >= s && d[end - 3] == 0xE2 && d[end - 2] == 0x80) {
+    if (end - s >= 2 && d[end - 2] == 0xC2 && (c == 0x85 || c == 0xA0)) return 2;
+    if (end - s >= 3 && d[end - 3] == 0xE1 && d[end - 2] == 0x9A && c == 0x80) return 3;
+    if (end - s >= 3 && d[end - 3] == 0xE2 && d[end - 2] == 0x80) {
         if ((c >= 0x80 && c <= 0x8A) || c == 0xA8 || c == 0xA9 || c == 0xAF) return 3;
     }
-    if (end - 3 >= s && d[end - 3] == 0xE2 && d[end - 2] == 0x81 && c == 0x9F) return 3;
-    if (end - 3 >= s && d[end - 3] == 0xE3 && d[end - 2] == 0x80 && c == 0x80) return 3;
+    if (end - s >= 3 && d[end - 3] == 0xE2 && d[end - 2] == 0x81 && c == 0x9F) return 3;
+    if (end - s >= 3 && d[end - 3] == 0xE3 && d[end - 2] == 0x80 && c == 0x80) return 3;
     return 0;
 }
 

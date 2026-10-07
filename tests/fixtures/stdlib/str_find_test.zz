@@ -41,6 +41,8 @@ func main() {
     nbsp_str := "  X  "
     nsp := str.trim_span(nbsp_str, 0, 99)
     println("nbspan={nsp[0]},{nsp[1]}")
+    nb1 := str.trim_span(nbsp_str, 0, 1)
+    println("nb1={nb1[0]},{nb1[1]}")
     println("overlap={str.find(aaa_str, aa_pat, 0)}")
     println("stdspell={std.str.find(hay, moon_pat, 0)}")
     aaa3 := "aaa"

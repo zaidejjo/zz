@@ -326,23 +326,23 @@ fn ws_width_back(b: &[u8], s: usize, end: usize) -> usize {
     if c == 32 || c == 9 || c == 10 || c == 11 || c == 12 || c == 13 {
         return 1;
     }
-    if end - 2 >= s && b[end - 2] == 0xC2 && (c == 0x85 || c == 0xA0) {
+    if end - s >= 2 && b[end - 2] == 0xC2 && (c == 0x85 || c == 0xA0) {
         return 2;
     }
-    if end - 3 >= s && b[end - 3] == 0xE1 && b[end - 2] == 0x9A && c == 0x80 {
+    if end - s >= 3 && b[end - 3] == 0xE1 && b[end - 2] == 0x9A && c == 0x80 {
         return 3;
     }
-    if end - 3 >= s
+    if end - s >= 3
         && b[end - 3] == 0xE2
         && b[end - 2] == 0x80
         && ((0x80..=0x8A).contains(&c) || c == 0xA8 || c == 0xA9 || c == 0xAF)
     {
         return 3;
     }
-    if end - 3 >= s && b[end - 3] == 0xE2 && b[end - 2] == 0x81 && c == 0x9F {
+    if end - s >= 3 && b[end - 3] == 0xE2 && b[end - 2] == 0x81 && c == 0x9F {
         return 3;
     }
-    if end - 3 >= s && b[end - 3] == 0xE3 && b[end - 2] == 0x80 && c == 0x80 {
+    if end - s >= 3 && b[end - 3] == 0xE3 && b[end - 2] == 0x80 && c == 0x80 {
         return 3;
     }
     0
