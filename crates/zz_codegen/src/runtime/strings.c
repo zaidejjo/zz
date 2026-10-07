@@ -1547,7 +1547,88 @@ zz_value zz_str_rfind(zz_value s, zz_value sub, zz_value from, int *err) {
     return (zz_value){ZZ_INT, {.i = rfind_from(s, sub, f)}};
 }
 
-// str.starts_with_at(s, sub, pos) — match at byte offset, else false.
+// Bounded scans: never read past `end`, so per-line use stays O(line).
+// Empty patterns: find/rfind return the clamped start, count returns 0.
+static void clamp_span_c(int64_t len, int64_t start, int64_t end, size_t *s, size_t *e) {
+    int64_t a = start < 0 ? 0 : start;
+    int64_t b = end < 0 ? 0 : end;
+    if (a > len) a = len;
+    if (b > len) b = len;
+    if (b < a) b = a;
+    *s = (size_t)a;
+    *e = (size_t)b;
+}
+
+zz_value zz_str_find_in(zz_value s, zz_value sub, zz_value start, zz_value end, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR || start.tag != ZZ_INT || end.tag != ZZ_INT)
+        return (zz_value){ZZ_INT, {.i = -1}};
+    const char *src = zz_str_ptr(s.s);
+    const char *needle = zz_str_ptr(sub.s);
+    size_t needle_len = sub.s->len;
+    size_t lo, hi;
+    clamp_span_c((int64_t)s.s->len, start.i, end.i, &lo, &hi);
+    if (needle_len == 0) return (zz_value){ZZ_INT, {.i = (int64_t)lo}};
+    const char *fin = src + hi;
+    const char *p = src + lo;
+    while (p + needle_len <= fin) {
+        p = scan_skip(p, fin, needle[0]);
+        if (p + needle_len > fin) break;
+        if (memcmp(p, needle, needle_len) == 0) return (zz_value){ZZ_INT, {.i = (int64_t)(p - src)}};
+        p++;
+    }
+    return (zz_value){ZZ_INT, {.i = -1}};
+}
+
+zz_value zz_str_rfind_in(zz_value s, zz_value sub, zz_value start, zz_value end, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR || start.tag != ZZ_INT || end.tag != ZZ_INT)
+        return (zz_value){ZZ_INT, {.i = -1}};
+    const char *src = zz_str_ptr(s.s);
+    const char *needle = zz_str_ptr(sub.s);
+    size_t needle_len = sub.s->len;
+    size_t lo, hi;
+    clamp_span_c((int64_t)s.s->len, start.i, end.i, &lo, &hi);
+    if (needle_len == 0) return (zz_value){ZZ_INT, {.i = (int64_t)lo}};
+    const char *fin = src + hi;
+    const char *p = src + lo;
+    int64_t best = -1;
+    while (p + needle_len <= fin) {
+        p = scan_skip(p, fin, needle[0]);
+        if (p + needle_len > fin) break;
+        if (memcmp(p, needle, needle_len) == 0) best = (int64_t)(p - src);
+        p++;
+    }
+    return (zz_value){ZZ_INT, {.i = best}};
+}
+
+zz_value zz_str_count_in(zz_value s, zz_value sub, zz_value start, zz_value end, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR || start.tag != ZZ_INT || end.tag != ZZ_INT)
+        return (zz_value){ZZ_INT, {.i = 0}};
+    const char *src = zz_str_ptr(s.s);
+    const char *needle = zz_str_ptr(sub.s);
+    size_t needle_len = sub.s->len;
+    size_t lo, hi;
+    clamp_span_c((int64_t)s.s->len, start.i, end.i, &lo, &hi);
+    if (needle_len == 0) return (zz_value){ZZ_INT, {.i = 0}};
+    const char *fin = src + hi;
+    const char *p = src + lo;
+    int64_t n = 0;
+    while (p + needle_len <= fin) {
+        p = scan_skip(p, fin, needle[0]);
+        if (p + needle_len > fin) break;
+        if (memcmp(p, needle, needle_len) == 0) {
+            n++;
+            p += needle_len;
+        } else {
+            p++;
+        }
+    }
+    return (zz_value){ZZ_INT, {.i = n}};
+}
+
+// str.starts_with_at(s, sub, pos)// str.starts_with_at(s, sub, pos) — match at byte offset, else false.
 // Both window edges must sit on char boundaries (a partial char can
 // never equal a valid pattern's bytes).
 zz_value zz_str_starts_with_at(zz_value s, zz_value sub, zz_value pos, int *err) {
