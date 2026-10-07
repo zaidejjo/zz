@@ -1589,7 +1589,7 @@ zz_value zz_str_rfind_in(zz_value s, zz_value sub, zz_value start, zz_value end,
     size_t needle_len = sub.s->len;
     size_t lo, hi;
     clamp_span_c((int64_t)s.s->len, start.i, end.i, &lo, &hi);
-    if (needle_len == 0) return (zz_value){ZZ_INT, {.i = (int64_t)lo}};
+    if (needle_len == 0) return (zz_value){ZZ_INT, {.i = (int64_t)hi}};
     const char *fin = src + hi;
     const char *p = src + lo;
     int64_t best = -1;

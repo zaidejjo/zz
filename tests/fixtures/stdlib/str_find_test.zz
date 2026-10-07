@@ -49,6 +49,7 @@ func main() {
     println("in13={str.find_in(hay, hello_pat, 1, 12)}")
     println("inmiss={str.find_in(hay, hello_pat, 14, 24)}")
     println("inempty={str.find_in(hay, empty_pat, 3, 9)}")
+    println("rinemptyin={str.rfind_in(hay, empty_pat, 3, 9)}")
     println("rin0={str.rfind_in(hay, hello_pat, 0, 24)}")
     println("rin13={str.rfind_in(hay, hello_pat, 0, 12)}")
     println("rinmiss={str.rfind_in(hay, hello_pat, 14, 24)}")

@@ -261,7 +261,7 @@ fn find_in(hay: &[u8], needle: &[u8], start: i64, end: i64) -> i64 {
 fn rfind_in(hay: &[u8], needle: &[u8], start: i64, end: i64) -> i64 {
     let (s, e) = clamp_span(hay.len() as i64, start, end);
     if needle.is_empty() {
-        return s as i64;
+        return e as i64;
     }
     match memchr::memmem::rfind(&hay[s..e], needle) {
         Some(rel) => s as i64 + rel as i64,

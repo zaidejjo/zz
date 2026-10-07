@@ -93,7 +93,9 @@ import std.str
 | `bytes.to_ints` | `bytes.to_ints(b: bytes) -> [int]` | Opaque byte buffer as plain ints |
 
 Offsets are bytes (O(1) per call, O(n) streaming total; matches Rust
-`str::find` semantics). `length`/slicing stay char-oriented — convert
+`str::find` semantics). Empty `sub`: `find`/`rfind` return the clamped
+`from`, `find_in` the clamped start, `rfind_in` the clamped end,
+`count_in` returns 0; `_at` never matches empty. `length`/slicing stay char-oriented — convert
 explicitly when mixing. Negative inputs clamp to 0; empty `sub` returns
 the clamped position for `find`/`rfind` and never matches for `_at`.
 `trim_span` strips Unicode White_Space identically on VM and AOT.
