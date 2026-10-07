@@ -199,6 +199,11 @@ zz_value zz_str_trim_start(zz_value s, int *err);
 zz_value zz_str_trim_end(zz_value s, int *err);
 zz_value zz_str_join(zz_value items, zz_value sep, int *err);
 zz_value zz_str_split(zz_value s, zz_value sep, int *err);
+zz_value zz_str_find(zz_value s, zz_value sub, zz_value from, int *err);
+zz_value zz_str_rfind(zz_value s, zz_value sub, zz_value from, int *err);
+zz_value zz_str_starts_with_at(zz_value s, zz_value sub, zz_value pos, int *err);
+zz_value zz_str_ends_with_at(zz_value s, zz_value sub, zz_value pos, int *err);
+zz_value zz_str_trim_span(zz_value s, zz_value start, zz_value end, int *err);
 
 // ---- string casts ------------------------------------------------------
 zz_value zz_str_from_int(int64_t n);

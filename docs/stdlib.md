@@ -79,6 +79,17 @@ import std.str
 | `str.replace` | `str.replace(s: str, old: str, new: str) -> str` | Replace substring |
 | `str.starts_with` | `str.starts_with(s: str, prefix: str) -> bool` | Check prefix |
 | `str.ends_with` | `str.ends_with(s: str, suffix: str) -> bool` | Check suffix |
+| `str.find` | `str.find(s: str, sub: str, from: int) -> int` | First match at/after byte offset `from` (-1 on miss) |
+| `str.rfind` | `str.rfind(s: str, sub: str, from: int) -> int` | Last match starting at/before `from` (-1 on miss) |
+| `str.starts_with_at` | `str.starts_with_at(s: str, sub: str, pos: int) -> bool` | Match at byte offset (empty never matches) |
+| `str.ends_with_at` | `str.ends_with_at(s: str, sub: str, pos: int) -> bool` | Match ending at byte offset `pos` |
+| `str.trim_span` | `str.trim_span(s: str, start: int, end: int) -> [int]` | Trimmed `[lo, hi]` byte offsets (Unicode ws, both backends) |
+
+Offsets are bytes (O(1) per call, O(n) streaming total; matches Rust
+`str::find` semantics). `length`/slicing stay char-oriented — convert
+explicitly when mixing. Negative inputs clamp to 0; empty `sub` returns
+the clamped position for `find`/`rfind` and never matches for `_at`.
+`trim_span` strips Unicode White_Space identically on VM and AOT.
 
 ```zz
 import std.str
@@ -91,6 +102,12 @@ str.split("a,b,c", ",")   // ["a", "b", "c"]
 str.replace("foo bar", "bar", "baz")  // "foo baz"
 str.starts_with("hello", "he")  // true
 str.ends_with("hello", "lo")    // true
+str.find("hello world", "o", 0) // 4
+str.find("hello world", "o", 5) // 7
+str.rfind("hello world", "o", 10) // 7
+str.starts_with_at("hello", "ell", 1) // true
+str.ends_with_at("hello", "ell", 4)   // true
+str.trim_span("  hi  ", 0, 6)          // [2, 4]
 ```
 
 ### Method Call Syntax

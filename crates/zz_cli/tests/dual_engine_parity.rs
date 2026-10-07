@@ -1135,6 +1135,7 @@ parity_strict!(
     "stdlib",
     "vec_nested_str_parity.zz"
 );
+parity_strict!(parity_stdlib_str_find_test, "stdlib", "str_find_test.zz");
 parity_strict!(parity_stdlib_console, "stdlib", "console.zz");
 parity_strict!(parity_stdlib_envmod, "stdlib", "envmod.zz");
 parity_strict!(parity_stdlib_env_test, "stdlib", "env_test.zz");
