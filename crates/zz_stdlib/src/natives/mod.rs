@@ -176,6 +176,20 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "str.classify".into(),
+        NativeEntry {
+            arity: 6,
+            f: str_mod::str_classify,
+        },
+    );
+    m.insert(
+        "str.classify".into(),
+        NativeEntry {
+            arity: 6,
+            f: str_mod::str_classify,
+        },
+    );
+    m.insert(
         "bytes.to_str".into(),
         NativeEntry {
             arity: 1,
@@ -201,6 +215,13 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: str_mod::str_bytes,
+        },
+    );
+    m.insert(
+        "std.str.classify".into(),
+        NativeEntry {
+            arity: 6,
+            f: str_mod::str_classify,
         },
     );
     m.insert(
