@@ -1,4 +1,4 @@
-// features: casts, float-arith, imports, known-divergence, locals, print, selective-import, std-math, std-str, string-literal
+// features: casts, float-arith, imports, locals, print, selective-import, std-math, std-str, string-literal
 // E2E: multiple selective imports from different stdlib modules
 import std.math(PI, sqrt)
 import std.str(length)

@@ -2221,20 +2221,31 @@ impl Lowerer {
                             }
                             // Fallback: generic namespace search (untyped
                             // receivers, e.g. variables without type annotations).
+                            // Arity-aware: among reachable candidates prefer
+                            // the one matching the call's value count
+                            // (receiver + args) — the checker approved exactly
+                            // that many, so a mismatching first hit (e.g.
+                            // 3-value `str.find` for 2-value `ph.find(x)`)
+                            // could never have compiled.
                             if found_ns.is_empty() {
                                 let namespaces = [
                                     "vec", "str", "dict", "option", "result", "http", "sqlz", "db",
                                     "file",
                                 ];
-                                for ns in &namespaces {
-                                    let candidate = format!("{ns}.{method}");
-                                    let std_candidate = format!("std.{ns}.{method}");
-                                    if self.reachable_natives.contains(&candidate)
-                                        || self.reachable_natives.contains(&std_candidate)
-                                    {
-                                        found_ns = ns;
-                                        break;
-                                    }
+                                let nvalues = args.len() + 1; // method receiver always prepends here (match-arm dispatch on a local);
+                                let reachable_ns: Vec<&str> = namespaces
+                                    .into_iter()
+                                    .filter(|ns| {
+                                        let candidate = format!("{ns}.{method}");
+                                        let std_candidate = format!("std.{ns}.{method}");
+                                        self.reachable_natives.contains(&candidate)
+                                            || self.reachable_natives.contains(&std_candidate)
+                                    })
+                                    .collect();
+                                if let Some(ns) =
+                                    crate::lower::pick_arity(reachable_ns, method, nvalues)
+                                {
+                                    found_ns = ns;
                                 }
                             }
                             if found_ns.is_empty() {
@@ -2258,24 +2269,33 @@ impl Lowerer {
                                     .collect();
                                 cands.sort_unstable();
                                 cands.dedup();
-                                if let Some(ns) = cands.into_iter().next() {
+                                // Prefer the arity-matching candidate; else
+                                // the first with unknown arity; else empty
+                                // (every candidate provably wrong — fall
+                                // through to the last-resort site below).
+                                let nvalues = args.len() + 1; // method receiver always prepends here (match-arm dispatch on a local);
+                                if let Some(ns) = crate::lower::pick_arity(cands, method, nvalues) {
                                     found_ns = ns;
                                 }
                                 // Last resort: match by native_impl — checks if
                                 // there's a C runtime function registered for
                                 // this method under any namespace, even when
-                                // reachability missed it.
+                                // reachability missed it. Arity-preferring
+                                // (see pick_method_ns); "regexp" covers
+                                // opaque-handle receivers whose match-bound
+                                // type never reached the callgraph.
                                 if found_ns.is_empty() {
                                     let namespaces = [
                                         "vec", "str", "dict", "option", "result", "http", "sqlz",
-                                        "db", "file",
+                                        "db", "file", "regexp",
                                     ];
-                                    for ns in &namespaces {
-                                        let candidate = format!("{ns}.{method}");
-                                        if native_supported(&candidate) {
-                                            found_ns = ns;
-                                            break;
-                                        }
+                                    let nvalues = args.len() + 1; // method receiver always prepends here (match-arm dispatch on a local);
+                                    if let Some(ns) =
+                                        crate::lower::pick_method_ns(namespaces, method, nvalues)
+                                    {
+                                        // Same once-per-process leak pattern
+                                        // as opaque-tag namespaces above.
+                                        found_ns = Box::leak(ns.into_boxed_str());
                                     }
                                 }
                                 if found_ns.is_empty() {

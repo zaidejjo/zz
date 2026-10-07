@@ -1,4 +1,4 @@
-// features: float-arith, imports, known-divergence, locals, print, selective-import, std-math, string-literal
+// features: float-arith, imports, locals, print, selective-import, std-math, string-literal
 // E2E: selective import from stdlib — no module prefix needed.
 import std.math(PI, sqrt, abs)
 
